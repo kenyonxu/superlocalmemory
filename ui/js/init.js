@@ -33,3 +33,13 @@ if (agentsTab) agentsTab.addEventListener('shown.bs.tab', loadAgents);
 // v2.7 learning tab (graceful)
 var learningTab = document.getElementById('learning-tab');
 if (learningTab) learningTab.addEventListener('shown.bs.tab', loadLearning);
+
+// v2.8 tabs (graceful — elements may not exist on older installs)
+var lifecycleTab = document.getElementById('lifecycle-tab');
+if (lifecycleTab) lifecycleTab.addEventListener('shown.bs.tab', loadLifecycle);
+
+var behavioralTab = document.getElementById('behavioral-tab');
+if (behavioralTab) behavioralTab.addEventListener('shown.bs.tab', loadBehavioral);
+
+var complianceTab = document.getElementById('compliance-tab');
+if (complianceTab) complianceTab.addEventListener('shown.bs.tab', loadCompliance);

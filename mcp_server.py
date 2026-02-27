@@ -561,6 +561,36 @@ def _maybe_passive_decay() -> None:
 
 
 # ============================================================================
+# Eager initialization — ensure schema migration runs at startup (v2.8)
+# ============================================================================
+
+def _eager_init():
+    """Initialize all engines at startup. Ensures schema migration runs."""
+    try:
+        get_store()  # Triggers MemoryStoreV2._init_db() which creates v2.8 columns
+    except Exception:
+        pass  # Don't block server startup
+    try:
+        from lifecycle.lifecycle_engine import LifecycleEngine
+        LifecycleEngine()  # Triggers _ensure_columns()
+    except Exception:
+        pass
+    try:
+        from behavioral.outcome_tracker import OutcomeTracker
+        OutcomeTracker(str(Path.home() / ".claude-memory" / "learning.db"))
+    except Exception:
+        pass
+    try:
+        from compliance.audit_db import AuditDB
+        AuditDB(str(Path.home() / ".claude-memory" / "audit.db"))
+    except Exception:
+        pass
+
+# Run once at module load
+_eager_init()
+
+
+# ============================================================================
 # MCP TOOLS (Functions callable by AI)
 # ============================================================================
 
@@ -585,7 +615,7 @@ async def remember(
     Args:
         content: The content to remember (required)
         tags: Comma-separated tags (optional, e.g. "python,api,backend")
-        project: Project name (optional, groups related memories)
+        project: Project name to scope the memory
         importance: Importance score 1-10 (default 5)
 
     Returns:
@@ -1394,7 +1424,12 @@ try:
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     async def compact_memories(dry_run: bool = True, profile: str = None) -> dict:
-        """Evaluate and compact stale memories through lifecycle transitions. dry_run=True by default."""
+        """Evaluate and compact stale memories through lifecycle transitions. dry_run=True by default.
+
+        Args:
+            dry_run: If True (default), show what would happen without changes.
+            profile: Profile name to filter.
+        """
         return await _compact_memories(dry_run, profile)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
@@ -1649,7 +1684,7 @@ if __name__ == "__main__":
     print("  - list_recent(limit)", file=sys.stderr)
     print("  - get_status()", file=sys.stderr)
     print("  - build_graph()", file=sys.stderr)
-    print("  - switch_profile(name)", file=sys.stderr)
+    print("  - switch_profile(name)   [Project/Profile switch]", file=sys.stderr)
     print("  - backup_status()        [Auto-Backup]", file=sys.stderr)
     if LEARNING_AVAILABLE:
         print("  - memory_used(memory_id, query, usefulness)  [v2.7 Learning]", file=sys.stderr)

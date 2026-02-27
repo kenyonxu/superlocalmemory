@@ -139,12 +139,18 @@ class HNSWIndex:
             with open(self.metadata_path, 'r') as f:
                 metadata = json.load(f)
 
-            # Validate metadata
+            # Validate metadata — auto-rebuild on dimension mismatch
             if metadata.get('dimension') != self.dimension:
-                logger.warning(
-                    f"Index dimension mismatch: {metadata.get('dimension')} != {self.dimension}. "
-                    "Will rebuild index."
+                logger.info(
+                    "Index dimension changed: %s -> %s. "
+                    "Deleting old index files and rebuilding.",
+                    metadata.get('dimension'), self.dimension,
                 )
+                try:
+                    self.index_path.unlink(missing_ok=True)
+                    self.metadata_path.unlink(missing_ok=True)
+                except OSError as del_err:
+                    logger.warning("Could not delete old index files: %s", del_err)
                 return
 
             # Load HNSW index

@@ -338,6 +338,21 @@ print('Database ready')
 " && echo "✓ Database initialized (fallback)"
 fi
 
+# Run v2.8 schema migration (adds lifecycle columns to existing databases)
+echo ""
+echo "Running schema migration..."
+cd "$INSTALL_DIR"
+python3 -c "
+import sys
+sys.path.insert(0, '.')
+try:
+    from memory_store_v2 import MemoryStoreV2
+    MemoryStoreV2()
+    print('  Schema migration complete')
+except Exception as e:
+    print(f'  Migration note: {e}')
+" 2>/dev/null || echo "  Migration will run on first use"
+
 # Install core dependencies (required for graph & dashboard)
 echo ""
 echo "Installing core dependencies..."

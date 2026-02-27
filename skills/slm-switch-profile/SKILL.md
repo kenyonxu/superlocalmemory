@@ -1,6 +1,6 @@
 ---
 name: slm-switch-profile
-description: Switch between memory profiles for project isolation and context management. Use when the user wants to change project context, separate work/personal memories, or manage multiple independent memory spaces. Each profile has its own database, graph, and patterns.
+description: Switch between memory profiles for context isolation and management. Use when the user wants to change profile context, separate work/personal memories, or manage multiple independent memory spaces. Each profile has its own database, graph, and patterns.
 version: "2.1.0"
 license: MIT
 compatibility: "Requires SuperLocalMemory V2 installed at ~/.claude-memory/"
@@ -26,8 +26,8 @@ slm switch-profile <name> [--create]
 
 Each profile has its own:
 - ✅ **Separate database** - Zero context bleeding
-- ✅ **Independent knowledge graph** - Project-specific relationships
-- ✅ **Unique patterns** - Different coding preferences per project
+- ✅ **Independent knowledge graph** - Profile-specific relationships
+- ✅ **Unique patterns** - Different coding preferences per profile
 - ✅ **Isolated history** - No cross-contamination
 
 **Think of profiles as workspaces:**

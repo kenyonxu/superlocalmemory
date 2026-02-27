@@ -336,7 +336,7 @@ date
 - `slm remember` - Save a new memory
 - `slm recall` - Search memories by relevance
 - `slm status` - Check memory count and stats
-- `slm switch-profile` - View different project's memories
+- `slm switch-profile` - View different profile's memories
 
 ---
 

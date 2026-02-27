@@ -234,7 +234,7 @@
             vertical-align: middle;
         }
 
-        /* Profile select in navbar */
+        /* Project select in navbar */
         .profile-select {
             background: rgba(255,255,255,0.15);
             border: 1px solid rgba(255,255,255,0.3);
@@ -316,7 +316,7 @@
             text-transform: uppercase;
         }
 
-        /* Profile delete button */
+        /* Project delete button */
         .btn-delete-profile {
             padding: 2px 8px;
             font-size: 0.75rem;
@@ -546,7 +546,7 @@
                 padding: 4px 8px;
             }
 
-            /* Profile select - smaller */
+            /* Project select - smaller */
             .profile-select {
                 min-width: 90px;
                 font-size: 0.75rem;
@@ -641,7 +641,7 @@
             <div class="d-flex align-items-center gap-3">
                 <div class="d-flex align-items-center gap-2">
                     <i class="bi bi-person-circle text-white-50"></i>
-                    <select class="form-select form-select-sm profile-select" id="profile-select" title="Switch memory profile">
+                    <select class="form-select form-select-sm profile-select" id="profile-select" title="Switch profile">
                         <option value="default">default</option>
                     </select>
                     <button class="btn btn-sm theme-toggle" id="add-profile-btn" title="Create new profile" style="padding:2px 8px;font-size:1rem;line-height:1;">
@@ -736,6 +736,21 @@
             <li class="nav-item">
                 <button class="nav-link" id="agents-tab" data-bs-toggle="tab" data-bs-target="#agents-pane">
                     <i class="bi bi-robot"></i> Agents
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="lifecycle-tab" data-bs-toggle="tab" data-bs-target="#lifecycle-pane" type="button" role="tab">
+                    <i class="bi bi-hourglass-split"></i> Lifecycle <span class="badge bg-success ms-1">v2.8</span>
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="behavioral-tab" data-bs-toggle="tab" data-bs-target="#behavioral-pane" type="button" role="tab">
+                    <i class="bi bi-lightbulb"></i> Behavioral <span class="badge bg-success ms-1">v2.8</span>
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="compliance-tab" data-bs-toggle="tab" data-bs-target="#compliance-pane" type="button" role="tab">
+                    <i class="bi bi-shield-lock"></i> Compliance <span class="badge bg-success ms-1">v2.8</span>
                 </button>
             </li>
             <li class="nav-item">
@@ -1193,6 +1208,136 @@
                 </div>
             </div>
 
+            <!-- Lifecycle (v2.8) -->
+            <div class="tab-pane fade" id="lifecycle-pane" role="tabpanel">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="mb-0"><i class="bi bi-hourglass-split text-warning"></i> Memory Lifecycle</h5>
+                    <div>
+                        <span class="badge bg-secondary me-2" id="lifecycle-profile-badge">default</span>
+                        <button class="btn btn-sm btn-outline-info" onclick="compactDryRun()"><i class="bi bi-funnel"></i> Preview Compaction</button>
+                        <button class="btn btn-sm btn-outline-warning ms-1" onclick="compactExecute()"><i class="bi bi-lightning"></i> Compact Now</button>
+                    </div>
+                </div>
+                <!-- State Distribution -->
+                <div class="row g-3 mb-4" id="lifecycle-states-row">
+                    <div class="col-md-2"><div class="card p-3 text-center"><div class="text-success fw-bold fs-3" id="lc-active-count">-</div><small class="text-muted">Active</small></div></div>
+                    <div class="col-md-2"><div class="card p-3 text-center"><div class="text-warning fw-bold fs-3" id="lc-warm-count">-</div><small class="text-muted">Warm</small></div></div>
+                    <div class="col-md-2"><div class="card p-3 text-center"><div class="text-info fw-bold fs-3" id="lc-cold-count">-</div><small class="text-muted">Cold</small></div></div>
+                    <div class="col-md-2"><div class="card p-3 text-center"><div class="text-secondary fw-bold fs-3" id="lc-archived-count">-</div><small class="text-muted">Archived</small></div></div>
+                    <div class="col-md-2"><div class="card p-3 text-center"><div class="text-danger fw-bold fs-3" id="lc-tombstoned-count">-</div><small class="text-muted">Tombstoned</small></div></div>
+                    <div class="col-md-2"><div class="card p-3 text-center"><div class="fw-bold fs-3" id="lc-total-count">-</div><small class="text-muted">Total</small></div></div>
+                </div>
+                <!-- State Progress Bar -->
+                <div class="card p-3 mb-4">
+                    <h6 class="mb-2">State Distribution</h6>
+                    <div class="progress" style="height: 24px;" id="lifecycle-progress-bar"></div>
+                </div>
+                <!-- Age Stats -->
+                <div class="card p-3 mb-4" id="lifecycle-age-stats">
+                    <h6 class="mb-2">Average Memory Age by State</h6>
+                    <div id="lifecycle-age-content"><span class="text-muted">Loading...</span></div>
+                </div>
+                <!-- Recent Transitions -->
+                <div class="card p-3">
+                    <h6 class="mb-2">Recent Transitions</h6>
+                    <div id="lifecycle-transitions-content"><span class="text-muted">Loading...</span></div>
+                </div>
+                <!-- Compaction Results Modal -->
+                <div id="compaction-results" class="card p-3 mt-3 d-none">
+                    <h6 class="mb-2" id="compaction-results-title">Compaction Preview</h6>
+                    <div id="compaction-results-content"></div>
+                </div>
+            </div>
+
+            <!-- Behavioral Learning (v2.8) -->
+            <div class="tab-pane fade" id="behavioral-pane" role="tabpanel">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="mb-0"><i class="bi bi-lightbulb text-info"></i> Behavioral Learning</h5>
+                    <span class="badge bg-secondary" id="behavioral-profile-badge">default</span>
+                </div>
+                <!-- Stats Row -->
+                <div class="row g-3 mb-4">
+                    <div class="col-md-3"><div class="card p-3 text-center"><div class="fw-bold fs-3 text-success" id="bh-success-count">-</div><small class="text-muted">Successes</small></div></div>
+                    <div class="col-md-3"><div class="card p-3 text-center"><div class="fw-bold fs-3 text-danger" id="bh-failure-count">-</div><small class="text-muted">Failures</small></div></div>
+                    <div class="col-md-3"><div class="card p-3 text-center"><div class="fw-bold fs-3 text-warning" id="bh-partial-count">-</div><small class="text-muted">Partial</small></div></div>
+                    <div class="col-md-3"><div class="card p-3 text-center"><div class="fw-bold fs-3 text-info" id="bh-patterns-count">-</div><small class="text-muted">Patterns Learned</small></div></div>
+                </div>
+                <!-- Report Outcome Form -->
+                <div class="card p-3 mb-4">
+                    <h6 class="mb-2"><i class="bi bi-plus-circle"></i> Report Outcome</h6>
+                    <div class="row g-2">
+                        <div class="col-md-3"><input type="text" class="form-control form-control-sm" id="bh-memory-ids" placeholder="Memory IDs (comma-separated)"></div>
+                        <div class="col-md-2"><select class="form-select form-select-sm" id="bh-outcome"><option value="success">Success</option><option value="failure">Failure</option><option value="partial">Partial</option></select></div>
+                        <div class="col-md-3"><select class="form-select form-select-sm" id="bh-action-type"><option value="code_written">Code Written</option><option value="decision_made">Decision Made</option><option value="debug_resolved">Debug Resolved</option><option value="architecture_chosen">Architecture Chosen</option><option value="other">Other</option></select></div>
+                        <div class="col-md-3"><input type="text" class="form-control form-control-sm" id="bh-context" placeholder="Context (optional)"></div>
+                        <div class="col-md-1"><button class="btn btn-sm btn-info w-100" onclick="reportOutcome()"><i class="bi bi-send"></i></button></div>
+                    </div>
+                </div>
+                <!-- Learned Patterns -->
+                <div class="card p-3 mb-4">
+                    <h6 class="mb-2">Learned Patterns</h6>
+                    <div id="behavioral-patterns-content"><span class="text-muted">Loading...</span></div>
+                </div>
+                <!-- Cross-Project Transfers -->
+                <div class="card p-3 mb-4">
+                    <h6 class="mb-2">Cross-Project Transfers</h6>
+                    <div id="behavioral-transfers-content"><span class="text-muted">Loading...</span></div>
+                </div>
+                <!-- Recent Outcomes -->
+                <div class="card p-3">
+                    <h6 class="mb-2">Recent Outcomes</h6>
+                    <div id="behavioral-outcomes-content"><span class="text-muted">Loading...</span></div>
+                </div>
+            </div>
+
+            <!-- Compliance & Audit (v2.8) -->
+            <div class="tab-pane fade" id="compliance-pane" role="tabpanel">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="mb-0"><i class="bi bi-shield-lock text-success"></i> Compliance &amp; Audit</h5>
+                    <span class="badge bg-secondary" id="compliance-profile-badge">default</span>
+                </div>
+                <!-- Stats Row -->
+                <div class="row g-3 mb-4">
+                    <div class="col-md-4"><div class="card p-3 text-center"><div class="fw-bold fs-3" id="cp-audit-count">-</div><small class="text-muted">Audit Events</small></div></div>
+                    <div class="col-md-4"><div class="card p-3 text-center"><div class="fw-bold fs-3" id="cp-retention-count">-</div><small class="text-muted">Retention Policies</small></div></div>
+                    <div class="col-md-4"><div class="card p-3 text-center"><div class="fw-bold fs-3" id="cp-abac-count">-</div><small class="text-muted">Access Policies</small></div></div>
+                </div>
+                <!-- Set Retention Policy Form -->
+                <div class="card p-3 mb-4">
+                    <h6 class="mb-2"><i class="bi bi-plus-circle"></i> Create Retention Policy</h6>
+                    <div class="row g-2">
+                        <div class="col-md-3"><input type="text" class="form-control form-control-sm" id="cp-policy-name" placeholder="Policy name"></div>
+                        <div class="col-md-2"><input type="number" class="form-control form-control-sm" id="cp-retention-days" placeholder="Days" value="90"></div>
+                        <div class="col-md-2"><input type="text" class="form-control form-control-sm" id="cp-category" placeholder="Category (optional)"></div>
+                        <div class="col-md-2"><select class="form-select form-select-sm" id="cp-action"><option value="archive">Archive</option><option value="tombstone">Tombstone</option><option value="notify">Notify Only</option></select></div>
+                        <div class="col-md-2"><button class="btn btn-sm btn-success w-100" onclick="createRetentionPolicy()"><i class="bi bi-shield-plus"></i> Create</button></div>
+                    </div>
+                </div>
+                <!-- Retention Policies List -->
+                <div class="card p-3 mb-4">
+                    <h6 class="mb-2">Active Retention Policies</h6>
+                    <div id="compliance-policies-content"><span class="text-muted">Loading...</span></div>
+                </div>
+                <!-- Audit Trail -->
+                <div class="card p-3">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h6 class="mb-0">Audit Trail</h6>
+                        <div class="d-flex gap-2">
+                            <select class="form-select form-select-sm" id="cp-audit-filter" style="width: auto;" onchange="loadCompliance()">
+                                <option value="">All Events</option>
+                                <option value="recall">Recall</option>
+                                <option value="remember">Remember</option>
+                                <option value="delete">Delete</option>
+                                <option value="lifecycle_transition">Lifecycle</option>
+                                <option value="access_denied">Access Denied</option>
+                                <option value="retention_enforced">Retention</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="compliance-audit-content"><span class="text-muted">Loading...</span></div>
+                </div>
+            </div>
+
             <!-- Settings & Backup -->
             <div class="tab-pane fade" id="settings-pane">
                 <!-- Profile Management -->
@@ -1360,6 +1505,9 @@
     <script src="static/js/agents.js"></script>
     <script src="static/js/learning.js"></script>
     <script src="static/js/feedback.js"></script>
+    <script src="static/js/lifecycle.js"></script>
+    <script src="static/js/behavioral.js"></script>
+    <script src="static/js/compliance.js"></script>
     <script src="static/js/init.js"></script>
 
     <footer>

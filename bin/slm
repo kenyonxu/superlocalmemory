@@ -55,6 +55,23 @@ case "$1" in
         "$SLM_DIR/bin/superlocalmemoryv2:profile" "$@"
         ;;
 
+    switch-profile)
+        shift
+        # Convenience alias: "slm switch-profile <name>" -> "slm profile switch <name>"
+        "$SLM_DIR/bin/superlocalmemoryv2:profile" switch "$@"
+        ;;
+
+    list-profiles)
+        # Convenience alias: "slm list-profiles" -> "slm profile list"
+        "$SLM_DIR/bin/superlocalmemoryv2:profile" list
+        ;;
+
+    create-profile)
+        shift
+        # Convenience alias: "slm create-profile <name>" -> "slm profile create <name>"
+        "$SLM_DIR/bin/superlocalmemoryv2:profile" create "$@"
+        ;;
+
     reset)
         shift
         # Calls existing command - no duplicate logic
@@ -310,6 +327,9 @@ PROFILE MANAGEMENT:
   slm profile switch <name> Switch to profile
   slm profile delete <name> Delete profile
   slm profile current      Show current profile
+  slm switch-profile <name> Shortcut for profile switch
+  slm list-profiles         Shortcut for profile list
+  slm create-profile <name> Shortcut for profile create
 
 KNOWLEDGE GRAPH:
   slm graph build          Build/rebuild knowledge graph

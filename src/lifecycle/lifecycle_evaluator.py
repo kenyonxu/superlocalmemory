@@ -59,6 +59,15 @@ class LifecycleEvaluator:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def _ensure_lifecycle_columns(self) -> None:
+        """Ensure v2.8 lifecycle columns exist via LifecycleEngine."""
+        try:
+            from lifecycle.lifecycle_engine import LifecycleEngine
+            engine = LifecycleEngine(db_path=self._db_path)
+            engine._ensure_columns()
+        except Exception:
+            pass  # Best effort — don't block evaluation
+
     def evaluate_memories(
         self,
         profile: Optional[str] = None,
@@ -87,7 +96,17 @@ class LifecycleEvaluator:
                 query += " AND profile = ?"
                 params.append(profile)
 
-            rows = conn.execute(query, params).fetchall()
+            try:
+                rows = conn.execute(query, params).fetchall()
+            except sqlite3.OperationalError as e:
+                if "no such column" in str(e):
+                    conn.close()
+                    self._ensure_lifecycle_columns()
+                    conn = self._get_connection()
+                    rows = conn.execute(query, params).fetchall()
+                else:
+                    raise
+
             recommendations = []
             now = datetime.now()
 
@@ -123,11 +142,24 @@ class LifecycleEvaluator:
         config = self._load_config()
         conn = self._get_connection()
         try:
-            row = conn.execute(
-                "SELECT id, lifecycle_state, importance, last_accessed, created_at "
-                "FROM memories WHERE id = ?",
-                (memory_id,),
-            ).fetchone()
+            try:
+                row = conn.execute(
+                    "SELECT id, lifecycle_state, importance, last_accessed, created_at "
+                    "FROM memories WHERE id = ?",
+                    (memory_id,),
+                ).fetchone()
+            except sqlite3.OperationalError as e:
+                if "no such column" in str(e):
+                    conn.close()
+                    self._ensure_lifecycle_columns()
+                    conn = self._get_connection()
+                    row = conn.execute(
+                        "SELECT id, lifecycle_state, importance, last_accessed, created_at "
+                        "FROM memories WHERE id = ?",
+                        (memory_id,),
+                    ).fetchone()
+                else:
+                    raise
             if row is None:
                 return None
             return self._evaluate_row(row, config, datetime.now())

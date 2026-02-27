@@ -148,6 +148,25 @@ app.include_router(ws_router)
 if LEARNING_ROUTES:
     app.include_router(learning_router)
 
+# v2.8 routes (graceful — don't fail if engines unavailable)
+try:
+    from routes.lifecycle import router as lifecycle_router
+    app.include_router(lifecycle_router)
+except ImportError:
+    pass
+
+try:
+    from routes.behavioral import router as behavioral_router
+    app.include_router(behavioral_router)
+except ImportError:
+    pass
+
+try:
+    from routes.compliance import router as compliance_router
+    app.include_router(compliance_router)
+except ImportError:
+    pass
+
 # Wire WebSocket manager into routes that need broadcast capability
 import routes.profiles as _profiles_mod
 import routes.data_io as _data_io_mod

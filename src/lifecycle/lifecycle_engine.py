@@ -38,12 +38,41 @@ class LifecycleEngine:
         self._db_path = str(db_path)
         self._config_path = config_path
         self._lock = threading.Lock()
+        self._ensure_columns()
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get a SQLite connection to memory.db."""
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _ensure_columns(self) -> None:
+        """Ensure v2.8 lifecycle columns exist in memories table."""
+        try:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(memories)")
+                existing = {row[1] for row in cursor.fetchall()}
+                v28_cols = [
+                    ("lifecycle_state", "TEXT DEFAULT 'active'"),
+                    ("lifecycle_updated_at", "TIMESTAMP"),
+                    ("lifecycle_history", "TEXT DEFAULT '[]'"),
+                    ("access_level", "TEXT DEFAULT 'public'"),
+                ]
+                for col_name, col_type in v28_cols:
+                    if col_name not in existing:
+                        try:
+                            cursor.execute(
+                                f"ALTER TABLE memories ADD COLUMN {col_name} {col_type}"
+                            )
+                        except sqlite3.OperationalError:
+                            pass
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            pass  # Graceful degradation — don't block engine init
 
     def is_valid_transition(self, from_state: str, to_state: str) -> bool:
         """Check if a state transition is valid per the state machine.
@@ -70,10 +99,22 @@ class LifecycleEngine:
         """
         conn = self._get_connection()
         try:
-            row = conn.execute(
-                "SELECT lifecycle_state FROM memories WHERE id = ?",
-                (memory_id,),
-            ).fetchone()
+            try:
+                row = conn.execute(
+                    "SELECT lifecycle_state FROM memories WHERE id = ?",
+                    (memory_id,),
+                ).fetchone()
+            except sqlite3.OperationalError as e:
+                if "no such column" in str(e):
+                    conn.close()
+                    self._ensure_columns()
+                    conn = self._get_connection()
+                    row = conn.execute(
+                        "SELECT lifecycle_state FROM memories WHERE id = ?",
+                        (memory_id,),
+                    ).fetchone()
+                else:
+                    raise
             if row is None:
                 return None
             return row["lifecycle_state"] or "active"
@@ -278,10 +319,22 @@ class LifecycleEngine:
         conn = self._get_connection()
         try:
             dist = {state: 0 for state in self.STATES}
-            rows = conn.execute(
-                "SELECT lifecycle_state, COUNT(*) as cnt "
-                "FROM memories GROUP BY lifecycle_state"
-            ).fetchall()
+            try:
+                rows = conn.execute(
+                    "SELECT lifecycle_state, COUNT(*) as cnt "
+                    "FROM memories GROUP BY lifecycle_state"
+                ).fetchall()
+            except sqlite3.OperationalError as e:
+                if "no such column" in str(e):
+                    conn.close()
+                    self._ensure_columns()
+                    conn = self._get_connection()
+                    rows = conn.execute(
+                        "SELECT lifecycle_state, COUNT(*) as cnt "
+                        "FROM memories GROUP BY lifecycle_state"
+                    ).fetchall()
+                else:
+                    raise
             for row in rows:
                 state = row["lifecycle_state"] if row["lifecycle_state"] else "active"
                 if state in dist:

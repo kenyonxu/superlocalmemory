@@ -220,6 +220,10 @@ async function switchProfile(profileName) {
             if (typeof loadMemories === 'function') loadMemories();
             if (typeof loadTimeline === 'function') loadTimeline();
             if (typeof loadEvents === 'function') loadEvents();
+            // v2.8 tabs
+            if (typeof loadLifecycle === 'function') loadLifecycle();
+            if (typeof loadBehavioral === 'function') loadBehavioral();
+            if (typeof loadCompliance === 'function') loadCompliance();
             var activeTab = document.querySelector('#mainTabs .nav-link.active');
             if (activeTab) activeTab.click();
         } else {

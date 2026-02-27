@@ -157,7 +157,7 @@ slm remember "Commit: $commit_msg (${commit_hash:0:7})" \
 - **Cross-tool sync:** All AI tools access same database (Cursor, ChatGPT, Claude, etc.)
 - **Unlimited:** No memory limits, no quotas
 - **Privacy:** Your data stays on your computer
-- **Profiles:** Use `slm switch-profile` for project isolation
+- **Profiles:** Use `slm switch-profile` for profile isolation
 
 ## Related Commands
 

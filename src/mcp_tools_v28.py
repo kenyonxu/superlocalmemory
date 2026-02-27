@@ -46,7 +46,7 @@ async def report_outcome(
         action_type: Category (code_written, decision_made, debug_resolved, etc.).
         context: Optional JSON string with additional context metadata.
         agent_id: Identifier for the reporting agent.
-        project: Project name for scoping.
+        project: Project name for scoping outcomes.
 
     Returns:
         Dict with success status and outcome_id on success.
@@ -170,17 +170,18 @@ async def compact_memories(
 
     Args:
         dry_run: If True (default), show what would happen without changes.
-        profile: Optional profile filter.
+        profile: Optional profile filter to scope compaction.
 
     Returns:
         Dict with recommendations (dry_run=True) or transition counts (dry_run=False).
     """
+    active_profile = profile
     try:
         from lifecycle.lifecycle_evaluator import LifecycleEvaluator
         from lifecycle.lifecycle_engine import LifecycleEngine
 
         evaluator = LifecycleEvaluator(DEFAULT_MEMORY_DB)
-        recommendations = evaluator.evaluate_memories(profile=profile)
+        recommendations = evaluator.evaluate_memories(profile=active_profile)
 
         if dry_run:
             return {

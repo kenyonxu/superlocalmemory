@@ -672,6 +672,29 @@ async def get_tree():
 
 
 # ============================================================================
+# v2.8 Routes (graceful — don't fail if engines unavailable)
+# ============================================================================
+
+try:
+    from routes.lifecycle import router as lifecycle_router
+    app.include_router(lifecycle_router)
+except ImportError:
+    pass
+
+try:
+    from routes.behavioral import router as behavioral_router
+    app.include_router(behavioral_router)
+except ImportError:
+    pass
+
+try:
+    from routes.compliance import router as compliance_router
+    app.include_router(compliance_router)
+except ImportError:
+    pass
+
+
+# ============================================================================
 # Server Startup
 # ============================================================================
 

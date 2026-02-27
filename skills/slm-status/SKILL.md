@@ -155,7 +155,7 @@ Corrupted Entries:       0 found
 - **Last Used:** Last access timestamp
 
 **Profiles allow:**
-- Project isolation
+- Profile isolation
 - Context switching
 - Separate memory spaces
 
