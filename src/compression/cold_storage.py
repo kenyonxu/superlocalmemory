@@ -62,55 +62,54 @@ class ColdStorageManager:
             memories = cursor.fetchall()
 
             if not memories:
+                return 0
+
+            # Build JSON export
+            export_data = []
+
+            for memory in memories:
+                mem_id, content, summary, tags, project_name, created_at, full_content = memory
+
+                export_data.append({
+                    'id': mem_id,
+                    'tier3_content': self._safe_json_load(content),
+                    'summary': summary,
+                    'tags': self._safe_json_load(tags) if tags else [],
+                    'project': project_name,
+                    'created_at': created_at,
+                    'full_content': full_content  # May be None if not archived
+                })
+
+            # Write to gzipped file
+            filename = f"archive-{datetime.now().strftime('%Y-%m')}.json.gz"
+            filepath = self.storage_path / filename
+
+            # If file exists, append to it
+            existing_data = []
+            if filepath.exists():
+                try:
+                    with gzip.open(filepath, 'rt', encoding='utf-8') as f:
+                        existing_data = json.load(f)
+                except Exception:
+                    pass  # File might be corrupted, start fresh
+
+            # Merge with existing data (avoid duplicates)
+            existing_ids = {item['id'] for item in existing_data}
+            for item in export_data:
+                if item['id'] not in existing_ids:
+                    existing_data.append(item)
+
+            # Write combined data
+            with gzip.open(filepath, 'wt', encoding='utf-8') as f:
+                json.dump(existing_data, f, indent=2)
+
+            # Delete from archive table (keep Tier 3 version in main table)
+            cursor.executemany('DELETE FROM memory_archive WHERE memory_id = ?',
+                              [(mid,) for mid in memory_ids])
+
+            conn.commit()
         finally:
             conn.close()
-            return 0
-
-        # Build JSON export
-        export_data = []
-
-        for memory in memories:
-            mem_id, content, summary, tags, project_name, created_at, full_content = memory
-
-            export_data.append({
-                'id': mem_id,
-                'tier3_content': self._safe_json_load(content),
-                'summary': summary,
-                'tags': self._safe_json_load(tags) if tags else [],
-                'project': project_name,
-                'created_at': created_at,
-                'full_content': full_content  # May be None if not archived
-            })
-
-        # Write to gzipped file
-        filename = f"archive-{datetime.now().strftime('%Y-%m')}.json.gz"
-        filepath = self.storage_path / filename
-
-        # If file exists, append to it
-        existing_data = []
-        if filepath.exists():
-            try:
-                with gzip.open(filepath, 'rt', encoding='utf-8') as f:
-                    existing_data = json.load(f)
-            except Exception:
-                pass  # File might be corrupted, start fresh
-
-        # Merge with existing data (avoid duplicates)
-        existing_ids = {item['id'] for item in existing_data}
-        for item in export_data:
-            if item['id'] not in existing_ids:
-                existing_data.append(item)
-
-        # Write combined data
-        with gzip.open(filepath, 'wt', encoding='utf-8') as f:
-            json.dump(existing_data, f, indent=2)
-
-        # Delete from archive table (keep Tier 3 version in main table)
-        cursor.executemany('DELETE FROM memory_archive WHERE memory_id = ?',
-                          [(mid,) for mid in memory_ids])
-
-        conn.commit()
-        conn.close()
 
         return len(export_data)
 

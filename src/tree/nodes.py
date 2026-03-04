@@ -102,19 +102,18 @@ class TreeNodesMixin:
             result = cursor.fetchone()
 
             if not result:
+                return False
+
+            tree_path, parent_id = result
+
+            # Delete node and all descendants (CASCADE handles children)
+            cursor.execute('DELETE FROM memory_tree WHERE id = ? OR tree_path LIKE ?',
+                          (node_id, f"{tree_path}.%"))
+
+            deleted = cursor.rowcount > 0
+            conn.commit()
         finally:
             conn.close()
-            return False
-
-        tree_path, parent_id = result
-
-        # Delete node and all descendants (CASCADE handles children)
-        cursor.execute('DELETE FROM memory_tree WHERE id = ? OR tree_path LIKE ?',
-                      (node_id, f"{tree_path}.%"))
-
-        deleted = cursor.rowcount > 0
-        conn.commit()
-        conn.close()
 
         # Update parent counts
         if deleted and parent_id:
@@ -139,36 +138,35 @@ class TreeNodesMixin:
             result = cursor.fetchone()
 
             if not result:
+                return
+
+            tree_path = result[0]
+
+            # Count memories in subtree
+            cursor.execute('''
+                SELECT COUNT(*), COALESCE(SUM(LENGTH(m.content)), 0)
+                FROM memory_tree t
+                LEFT JOIN memories m ON t.memory_id = m.id
+                WHERE t.tree_path LIKE ? AND t.memory_id IS NOT NULL
+            ''', (f"{tree_path}%",))
+
+            memory_count, total_size = cursor.fetchone()
+
+            # Update node
+            cursor.execute('''
+                UPDATE memory_tree
+                SET memory_count = ?, total_size = ?, last_updated = ?
+                WHERE id = ?
+            ''', (memory_count, total_size, datetime.now().isoformat(), node_id))
+
+            # Update all ancestors
+            path_ids = [int(x) for x in tree_path.split('.')]
+            for ancestor_id in path_ids[:-1]:  # Exclude current node
+                self.update_counts(ancestor_id)
+
+            conn.commit()
         finally:
             conn.close()
-            return
-
-        tree_path = result[0]
-
-        # Count memories in subtree
-        cursor.execute('''
-            SELECT COUNT(*), COALESCE(SUM(LENGTH(m.content)), 0)
-            FROM memory_tree t
-            LEFT JOIN memories m ON t.memory_id = m.id
-            WHERE t.tree_path LIKE ? AND t.memory_id IS NOT NULL
-        ''', (f"{tree_path}%",))
-
-        memory_count, total_size = cursor.fetchone()
-
-        # Update node
-        cursor.execute('''
-            UPDATE memory_tree
-            SET memory_count = ?, total_size = ?, last_updated = ?
-            WHERE id = ?
-        ''', (memory_count, total_size, datetime.now().isoformat(), node_id))
-
-        # Update all ancestors
-        path_ids = [int(x) for x in tree_path.split('.')]
-        for ancestor_id in path_ids[:-1]:  # Exclude current node
-            self.update_counts(ancestor_id)
-
-        conn.commit()
-        conn.close()
 
     def _update_all_counts(self):
         """Update counts for all nodes (used after build_tree)."""

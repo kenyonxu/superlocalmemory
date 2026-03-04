@@ -146,58 +146,56 @@ class ProfileManager:
             available_cols = [c for c in select_cols if c in old_columns]
 
             if 'content' not in available_cols:
+                return
+
+            old_cursor.execute(f"SELECT {', '.join(available_cols)} FROM memories")
+            rows = old_cursor.fetchall()
+
+            imported = 0
+            for row in rows:
+                row_dict = dict(zip(available_cols, row))
+                content = row_dict.get('content', '')
+                content_hash = row_dict.get('content_hash')
+
+                if not content:
+                    continue
+
+                # Generate hash if missing
+                if not content_hash:
+                    content_hash = hashlib.sha256(content.encode()).hexdigest()[:32]
+
+                if content_hash in existing_hashes:
+                    continue
+
+                try:
+                    main_cursor.execute('''
+                        INSERT INTO memories (content, summary, project_path, project_name, tags,
+                                              category, memory_type, importance, created_at, updated_at,
+                                              content_hash, profile)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        content,
+                        row_dict.get('summary'),
+                        row_dict.get('project_path'),
+                        row_dict.get('project_name'),
+                        row_dict.get('tags'),
+                        row_dict.get('category'),
+                        row_dict.get('memory_type', 'session'),
+                        row_dict.get('importance', 5),
+                        row_dict.get('created_at'),
+                        row_dict.get('updated_at'),
+                        content_hash,
+                        profile_name
+                    ))
+                    imported += 1
+                    existing_hashes.add(content_hash)
+                except sqlite3.IntegrityError:
+                    pass
+
+            main_conn.commit()
         finally:
             old_conn.close()
             main_conn.close()
-            return
-
-        old_cursor.execute(f"SELECT {', '.join(available_cols)} FROM memories")
-        rows = old_cursor.fetchall()
-
-        imported = 0
-        for row in rows:
-            row_dict = dict(zip(available_cols, row))
-            content = row_dict.get('content', '')
-            content_hash = row_dict.get('content_hash')
-
-            if not content:
-                continue
-
-            # Generate hash if missing
-            if not content_hash:
-                content_hash = hashlib.sha256(content.encode()).hexdigest()[:32]
-
-            if content_hash in existing_hashes:
-                continue
-
-            try:
-                main_cursor.execute('''
-                    INSERT INTO memories (content, summary, project_path, project_name, tags,
-                                          category, memory_type, importance, created_at, updated_at,
-                                          content_hash, profile)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    content,
-                    row_dict.get('summary'),
-                    row_dict.get('project_path'),
-                    row_dict.get('project_name'),
-                    row_dict.get('tags'),
-                    row_dict.get('category'),
-                    row_dict.get('memory_type', 'session'),
-                    row_dict.get('importance', 5),
-                    row_dict.get('created_at'),
-                    row_dict.get('updated_at'),
-                    content_hash,
-                    profile_name
-                ))
-                imported += 1
-                existing_hashes.add(content_hash)
-            except sqlite3.IntegrityError:
-                pass
-
-        main_conn.commit()
-        old_conn.close()
-        main_conn.close()
 
         if imported > 0:
             # Add profile to config if not present

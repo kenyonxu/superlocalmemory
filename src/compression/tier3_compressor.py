@@ -45,63 +45,60 @@ class Tier3Compressor:
             result = cursor.fetchone()
 
             if not result:
-        finally:
-            conn.close()
-            return False
+                return False
 
-        content, current_tier = result
+            content, current_tier = result
 
-        # Skip if in wrong tier
-        if current_tier != 3:
-            conn.close()
-            return False
+            # Skip if in wrong tier
+            if current_tier != 3:
+                return False
 
-        # Try to parse as Tier 2 compressed content
-        try:
-            compressed_content = json.loads(content)
+            # Try to parse as Tier 2 compressed content
+            try:
+                compressed_content = json.loads(content)
 
-            # Check if already Tier 3
-            if isinstance(compressed_content, dict) and 'bullets' in compressed_content:
-                conn.close()
-                return True  # Already Tier 3
+                # Check if already Tier 3
+                if isinstance(compressed_content, dict) and 'bullets' in compressed_content:
+                    return True  # Already Tier 3
 
-            # Get summary from Tier 2
-            if isinstance(compressed_content, dict) and 'summary' in compressed_content:
-                summary = compressed_content.get('summary', '')
-                tier2_archived_at = compressed_content.get('compressed_at')
-                original_length = compressed_content.get('original_length', 0)
-            else:
-                # Not Tier 2 format, treat as plain text
+                # Get summary from Tier 2
+                if isinstance(compressed_content, dict) and 'summary' in compressed_content:
+                    summary = compressed_content.get('summary', '')
+                    tier2_archived_at = compressed_content.get('compressed_at')
+                    original_length = compressed_content.get('original_length', 0)
+                else:
+                    # Not Tier 2 format, treat as plain text
+                    summary = content
+                    tier2_archived_at = None
+                    original_length = len(content)
+
+            except (json.JSONDecodeError, TypeError):
+                # Not JSON, treat as plain text
                 summary = content
                 tier2_archived_at = None
                 original_length = len(content)
 
-        except (json.JSONDecodeError, TypeError):
-            # Not JSON, treat as plain text
-            summary = content
-            tier2_archived_at = None
-            original_length = len(content)
+            # Convert summary to bullet points (max 5)
+            bullet_points = self._summarize_to_bullets(summary)
 
-        # Convert summary to bullet points (max 5)
-        bullet_points = self._summarize_to_bullets(summary)
+            # Ultra-compressed version
+            ultra_compressed = {
+                'bullets': bullet_points,
+                'tier2_archived_at': tier2_archived_at,
+                'original_length': original_length,
+                'compressed_to_tier3_at': datetime.now().isoformat()
+            }
 
-        # Ultra-compressed version
-        ultra_compressed = {
-            'bullets': bullet_points,
-            'tier2_archived_at': tier2_archived_at,
-            'original_length': original_length,
-            'compressed_to_tier3_at': datetime.now().isoformat()
-        }
+            # Update memory
+            cursor.execute('''
+                UPDATE memories
+                SET content = ?, tier = 3, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (json.dumps(ultra_compressed), memory_id))
 
-        # Update memory
-        cursor.execute('''
-            UPDATE memories
-            SET content = ?, tier = 3, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-        ''', (json.dumps(ultra_compressed), memory_id))
-
-        conn.commit()
-        conn.close()
+            conn.commit()
+        finally:
+            conn.close()
         return True
 
     def _summarize_to_bullets(self, summary: str, max_bullets: int = 5) -> List[str]:
