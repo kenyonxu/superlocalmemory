@@ -1,7 +1,7 @@
 {
   "name": "superlocalmemory",
-  "version": "2.8.6",
-  "description": "Your AI Finally Remembers You - Local-first intelligent memory system for AI assistants. Works with Claude, Cursor, Windsurf, VS Code/Copilot, Codex, and 17+ AI tools. 100% local, zero cloud dependencies.",
+  "version": "3.0.0",
+  "description": "Information-geometric agent memory with mathematical guarantees. 4-channel retrieval, Fisher-Rao similarity, zero-LLM mode, EU AI Act compliant. Works with Claude, Cursor, Windsurf, and 17+ AI tools.",
   "keywords": [
     "ai-memory",
     "claude-ai",
@@ -29,17 +29,17 @@
   "author": {
     "name": "Varun Pratap Bhardwaj",
     "email": "admin@superlocalmemory.com",
-    "url": "https://github.com/varun369"
+    "url": "https://varunpratap.com"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/varun369/SuperLocalMemoryV2.git"
+    "url": "https://github.com/qualixar/superlocalmemory.git"
   },
   "homepage": "https://superlocalmemory.com",
-  "mcpName": "io.github.varun369/superlocalmemory",
+  "mcpName": "io.github.qualixar/superlocalmemory",
   "bugs": {
-    "url": "https://github.com/varun369/SuperLocalMemoryV2/issues"
+    "url": "https://github.com/qualixar/superlocalmemory/issues"
   },
   "bin": {
     "slm": "./bin/slm-npm",

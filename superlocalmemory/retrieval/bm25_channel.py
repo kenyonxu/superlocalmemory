@@ -1,0 +1,185 @@
+# Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
+# Licensed under the MIT License - see LICENSE file
+# Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
+
+"""SuperLocalMemory V3 — BM25 Keyword Search Channel.
+
+Persistent BM25Plus index over fact content. Catches exact name/date
+matches that embedding similarity misses.
+
+V1 bug fix: V1 kept BM25 tokens in-memory only — a restart lost
+the entire index. This version persists tokens to the DB via
+store_bm25_tokens / get_all_bm25_tokens and cold-loads on init.
+
+Part of Qualixar | Author: Varun Pratap Bhardwaj
+License: MIT
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import TYPE_CHECKING
+
+from rank_bm25 import BM25Plus
+
+if TYPE_CHECKING:
+    from superlocalmemory.storage.database import DatabaseManager
+
+logger = logging.getLogger(__name__)
+
+# Minimal stopwords — small set to avoid stripping important terms
+_STOPWORDS: frozenset[str] = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "shall",
+    "should", "may", "might", "must", "can", "could", "of", "in", "to",
+    "for", "with", "on", "at", "from", "by", "as", "into", "through",
+    "and", "but", "or", "nor", "not", "so", "yet", "if", "then", "than",
+    "that", "this", "it", "its", "i", "me", "my", "we", "our", "you",
+    "your", "he", "him", "his", "she", "her", "they", "them", "their",
+})
+
+# Token pattern: words with letters/digits, keeps hyphens and apostrophes
+_TOKEN_RE = re.compile(r"[a-zA-Z0-9][\w'-]*[a-zA-Z0-9]|[a-zA-Z0-9]")
+
+
+def tokenize(text: str) -> list[str]:
+    """Tokenize text: lowercase, split, remove stopwords.
+
+    Exported so encoding pipeline can persist tokens at ingest time.
+    """
+    tokens = _TOKEN_RE.findall(text.lower())
+    return [t for t in tokens if t not in _STOPWORDS]
+
+
+class BM25Channel:
+    """Persistent BM25Plus index for keyword retrieval.
+
+    On cold start, loads all tokens from the DB. After that, new facts
+    are added incrementally. The BM25Plus model is rebuilt lazily
+    before each search when the corpus has changed.
+
+    Attributes:
+        document_count: Number of indexed documents.
+    """
+
+    def __init__(self, db: DatabaseManager) -> None:
+        self._db = db
+        self._corpus: list[list[str]] = []
+        self._fact_ids: list[str] = []
+        self._fact_id_set: set[str] = set()
+        self._bm25: BM25Plus | None = None
+        self._dirty: bool = False
+        self._loaded_profiles: set[str] = set()
+
+    @property
+    def document_count(self) -> int:
+        return len(self._corpus)
+
+    def ensure_loaded(self, profile_id: str) -> None:
+        """Cold-load BM25 tokens from DB for a profile (once).
+
+        Idempotent: subsequent calls for the same profile are no-ops.
+        """
+        if profile_id in self._loaded_profiles:
+            return
+
+        token_map = self._db.get_all_bm25_tokens(profile_id)
+        if not token_map:
+            # Fallback: tokenize facts directly if no pre-stored tokens
+            facts = self._db.get_all_facts(profile_id)
+            for fact in facts:
+                if fact.fact_id in self._fact_id_set:
+                    continue
+                tokens = tokenize(fact.content)
+                if tokens:
+                    self._corpus.append(tokens)
+                    self._fact_ids.append(fact.fact_id)
+                    self._fact_id_set.add(fact.fact_id)
+                    # Persist for next cold start
+                    self._db.store_bm25_tokens(fact.fact_id, profile_id, tokens)
+        else:
+            for fid, tokens in token_map.items():
+                if fid in self._fact_id_set:
+                    continue
+                self._corpus.append(tokens)
+                self._fact_ids.append(fid)
+                self._fact_id_set.add(fid)
+
+        self._dirty = True
+        self._loaded_profiles.add(profile_id)
+        logger.debug(
+            "BM25 cold-loaded %d documents for profile=%s",
+            len(token_map) if token_map else 0, profile_id,
+        )
+
+    def add(self, fact_id: str, content: str, profile_id: str) -> None:
+        """Add a single fact to the index and persist tokens.
+
+        Args:
+            fact_id: Unique fact identifier.
+            content: Raw text content to index.
+            profile_id: Owner profile.
+        """
+        tokens = tokenize(content)
+        if not tokens:
+            return
+
+        self._corpus.append(tokens)
+        self._fact_ids.append(fact_id)
+        self._fact_id_set.add(fact_id)
+        self._dirty = True
+
+        # Persist for cold start
+        self._db.store_bm25_tokens(fact_id, profile_id, tokens)
+
+    def search(
+        self,
+        query: str,
+        profile_id: str,
+        top_k: int = 30,
+    ) -> list[tuple[str, float]]:
+        """Search BM25 index for matching facts.
+
+        Auto-loads from DB on first call for this profile.
+
+        Args:
+            query: Search query text.
+            profile_id: Scope to this profile.
+            top_k: Maximum results.
+
+        Returns:
+            List of (fact_id, bm25_score) sorted by score descending.
+        """
+        self.ensure_loaded(profile_id)
+
+        if not self._corpus:
+            return []
+
+        query_tokens = tokenize(query)
+        if not query_tokens:
+            return []
+
+        # Rebuild BM25 model if corpus changed
+        if self._dirty or self._bm25 is None:
+            self._bm25 = BM25Plus(self._corpus, k1=1.2, b=0.75)
+            self._dirty = False
+
+        scores = self._bm25.get_scores(query_tokens)
+
+        scored: list[tuple[str, float]] = []
+        for i, score in enumerate(scores):
+            if score > 0.0:
+                scored.append((self._fact_ids[i], float(score)))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:top_k]
+
+    def clear(self) -> None:
+        """Clear the in-memory index (does NOT delete DB tokens)."""
+        self._corpus = []
+        self._fact_ids = []
+        self._fact_id_set = set()
+        self._bm25 = None
+        self._dirty = False
+        self._loaded_profiles = set()

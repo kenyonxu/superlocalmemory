@@ -1,0 +1,63 @@
+SuperLocalMemory V3
+Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
+https://qualixar.com | https://varunpratap.com
+
+This product includes novel algorithms first described in peer-reviewed
+publications by the author:
+
+MATHEMATICAL FOUNDATIONS (Novel — Zero Prior Work)
+===================================================
+
+1. Fisher-Rao Information Geometry for Agent Memory Retrieval
+   - Geodesic similarity metric on statistical manifolds
+   - Graduated ramp from cosine to Fisher-Rao distance
+   - O(d) computational complexity
+   - First application to agent memory systems
+
+2. Sheaf Cohomology for Memory Consistency Verification
+   - Čech cohomology on knowledge graphs
+   - H¹(G,F) ≠ 0 detects contradictions algebraically
+   - First application to agent memory consistency
+
+3. Riemannian Langevin Dynamics for Memory Lifecycle
+   - Gradient flow on information-geometric manifolds
+   - Provably convergent to stationary distribution
+   - Self-organizing Active→Warm→Cold→Archived lifecycle
+   - First application to agent memory systems
+
+ARCHITECTURAL INNOVATIONS
+=========================
+
+4. Four-Channel Hybrid Retrieval with Weighted RRF Fusion
+5. Scene Clustering via Temporal-Semantic Coherence
+6. Bridge Discovery via Steiner Tree Approximation
+7. Cross-Encoder Energy-Weighted Blended Reranking
+8. Eleven-Step Structured Ingestion Pipeline
+9. Three Operating Modes (Zero-LLM / Local-LLM / Cloud-Augmented)
+10. Mathematical DNA — Coupled-Parameter Integrity Verification
+
+PUBLICATIONS
+============
+
+- V3 Paper: "SuperLocalMemory V3: Information-Geometric Foundations for
+  Zero-LLM Enterprise Agent Memory"
+  Zenodo DOI: 10.5281/zenodo.19038659
+  arXiv: Submitted March 2026 (cs.AI, cs.IR, cs.LG)
+
+- V2 Paper: "SuperLocalMemory: Privacy-Preserving Multi-Agent Memory with
+  Bayesian Trust Defense Against Memory Poisoning"
+  arXiv: 2603.02240
+
+PRIOR ART TIMESTAMPS
+=====================
+
+All algorithms are timestamped via:
+1. Zenodo DOI (CERN) — permanent citable artifact
+2. arXiv preprint — public timestamp
+3. GitHub commit history — Microsoft-backed timestamps
+4. npm registry — public package timestamps
+
+Academic use MUST cite the relevant paper.
+Commercial use MUST retain this notice and visible attribution.
+
+Part of Qualixar — The Complete Agent Development Platform

@@ -26,7 +26,7 @@
   <a href="#"><img src="https://img.shields.io/badge/local--first-100%25-brightgreen?style=flat-square" alt="100% Local"/></a>
   <a href="#"><img src="https://img.shields.io/badge/setup-5%20min-orange?style=flat-square" alt="5 Min Setup"/></a>
   <a href="#"><img src="https://img.shields.io/badge/platform-Mac%20%7C%20Linux%20%7C%20Windows-blue?style=flat-square" alt="Cross Platform"/></a>
-  <a href="https://github.com/varun369/SuperLocalMemoryV2/wiki"><img src="https://img.shields.io/badge/📚_Wiki-Documentation-blue?style=flat-square" alt="Wiki"/></a>
+  <a href="https://github.com/qualixar/superlocalmemory/wiki"><img src="https://img.shields.io/badge/📚_Wiki-Documentation-blue?style=flat-square" alt="Wiki"/></a>
 </p>
 
 <p align="center">
@@ -35,18 +35,67 @@
   <a href="#-why-superlocalmemory">Why This?</a> •
   <a href="#-features">Features</a> •
   <a href="#-documentation">Docs</a> •
-  <a href="https://github.com/varun369/SuperLocalMemoryV2/issues">Issues</a>
+  <a href="https://github.com/qualixar/superlocalmemory/issues">Issues</a>
 </p>
 
 <p align="center">
-  <b>A <a href="https://github.com/varun369">Qualixar</a> Product</b> · Created by <a href="https://github.com/varun369">Varun Pratap Bhardwaj</a> •
+  <b>A <a href="https://github.com/qualixar">Qualixar</a> Product</b> · Created by <a href="https://varunpratap.com">Varun Pratap Bhardwaj</a> •
   <a href="https://github.com/sponsors/varun369">💖 Sponsor</a> •
   <a href="LICENSE">📜 MIT License</a>
 </p>
 
 ---
 
-## Research Paper
+> ### V3 Mathematical Engine — Now Available
+>
+> SuperLocalMemory V3 introduces **information-geometric foundations** — the first agent memory system built on Fisher-Rao similarity, sheaf cohomology, and Riemannian Langevin dynamics. Three mathematical pillars, each a world first in agent memory.
+>
+> **Zero-LLM Mode A** achieves 62.3% on the LoCoMo benchmark — without a single cloud API call. EU AI Act compliant by architecture.
+>
+> The V3 mathematical engine is available in the [`superlocalmemory/`](superlocalmemory/) directory. Full product integration with `slm migrate` is coming in the next release. Current V2.8.x features continue to work exactly as before.
+>
+> **V3 Paper:** [SuperLocalMemory V3: Information-Geometric Foundations for Zero-LLM Enterprise Agent Memory](https://zenodo.org/records/19038659) (Zenodo DOI: 10.5281/zenodo.19038659)
+>
+> | Benchmark (LoCoMo) | Mode A (Zero-LLM) | Mode C (Cloud) |
+> |:--------------------|:------------------:|:--------------:|
+> | Overall (MICRO) | **62.3%** | **~78%** |
+> | Multi-hop | 50% | — |
+> | Open-domain | 78% | — |
+>
+> | Mathematical Layer | What It Does | Impact |
+> |:-------------------|:-------------|:------:|
+> | Fisher-Rao Geometry | Geodesic similarity on statistical manifolds | +25pp |
+> | Sheaf Cohomology | Algebraic contradiction detection (H¹ ≠ 0) | Consistency |
+> | Riemannian Langevin | Self-organizing memory lifecycle | Convergence |
+>
+> Read more: [V3 Mathematical Foundations (Wiki)](https://github.com/qualixar/superlocalmemory/wiki/V3-Mathematical-Foundations) · [V3 Architecture (Wiki)](https://github.com/qualixar/superlocalmemory/wiki/V3-Architecture)
+
+---
+
+## Research Papers
+
+### V3 Paper (2026) — NEW
+
+**SuperLocalMemory V3: Information-Geometric Foundations for Zero-LLM Enterprise Agent Memory**
+
+*Varun Pratap Bhardwaj, Independent Researcher*
+
+| Platform | Link |
+|----------|------|
+| **Zenodo** (CERN) | [DOI: 10.5281/zenodo.19038659](https://zenodo.org/records/19038659) |
+
+```bibtex
+@software{bhardwaj2026slmv3,
+  author    = {Bhardwaj, Varun Pratap},
+  title     = {{SuperLocalMemory V3: Information-Geometric Foundations
+               for Zero-LLM Enterprise Agent Memory}},
+  year      = {2026},
+  doi       = {10.5281/zenodo.19038659},
+  url       = {https://github.com/qualixar/superlocalmemory}
+}
+```
+
+### V2 Paper (2026)
 
 **SuperLocalMemory: Privacy-Preserving Multi-Agent Memory with Bayesian Trust Defense Against Memory Poisoning**
 
@@ -130,7 +179,7 @@ Built for regulated environments:
 
 **Upgrade:** `npm install -g superlocalmemory@latest` — All v2.7 behavior preserved, zero breaking changes.
 
-[Upgrading to v2.8](https://github.com/varun369/SuperLocalMemoryV2/wiki/Upgrading-to-v2.8) | [Full Changelog](CHANGELOG.md)
+[Upgrading to v2.8](https://github.com/qualixar/superlocalmemory/wiki/Upgrading-to-v2.8) | [Full Changelog](CHANGELOG.md)
 
 ---
 
@@ -224,7 +273,7 @@ npm install -g superlocalmemory
 
 Or clone manually:
 ```bash
-git clone https://github.com/varun369/SuperLocalMemoryV2.git && cd SuperLocalMemoryV2 && ./install.sh
+git clone https://github.com/qualixar/superlocalmemory.git && cd SuperLocalMemoryV2 && ./install.sh
 ```
 
 Both methods auto-detect and configure **17+ IDEs and AI tools** — Cursor, VS Code/Copilot, Codex, Claude, Windsurf, Gemini CLI, JetBrains, and more.
@@ -323,17 +372,17 @@ Not another simple key-value store. SuperLocalMemory implements **cutting-edge m
 
 ### Key Capabilities
 
-- **[Adaptive Learning System](https://github.com/varun369/SuperLocalMemoryV2/wiki/Learning-System)** — Learns your tech preferences, workflow patterns, and project context. Personalizes recall ranking using local ML. Zero cloud dependency. *New in v2.7*
-- **[Knowledge Graphs](https://github.com/varun369/SuperLocalMemoryV2/wiki/Knowledge-Graph-Guide)** — Automatic relationship discovery. Interactive visualization with zoom, pan, click.
-- **[Pattern Learning](https://github.com/varun369/SuperLocalMemoryV2/wiki/Pattern-Learning-Explained)** — Learns your coding preferences and style automatically.
-- **[Multi-Profile Support](https://github.com/varun369/SuperLocalMemoryV2/wiki/Multi-Profile-Workflows)** — Isolated contexts for work, personal, clients. Zero context bleeding.
-- **[Hybrid Search](https://github.com/varun369/SuperLocalMemoryV2/wiki/Advanced-Search)** — Semantic + FTS5 + Graph retrieval combined for maximum accuracy.
-- **[Visualization Dashboard](https://github.com/varun369/SuperLocalMemoryV2/wiki/Visualization-Dashboard)** — Web UI for timeline, search, graph exploration, analytics.
+- **[Adaptive Learning System](https://github.com/qualixar/superlocalmemory/wiki/Learning-System)** — Learns your tech preferences, workflow patterns, and project context. Personalizes recall ranking using local ML. Zero cloud dependency. *New in v2.7*
+- **[Knowledge Graphs](https://github.com/qualixar/superlocalmemory/wiki/Knowledge-Graph-Guide)** — Automatic relationship discovery. Interactive visualization with zoom, pan, click.
+- **[Pattern Learning](https://github.com/qualixar/superlocalmemory/wiki/Pattern-Learning-Explained)** — Learns your coding preferences and style automatically.
+- **[Multi-Profile Support](https://github.com/qualixar/superlocalmemory/wiki/Multi-Profile-Workflows)** — Isolated contexts for work, personal, clients. Zero context bleeding.
+- **[Hybrid Search](https://github.com/qualixar/superlocalmemory/wiki/Advanced-Search)** — Semantic + FTS5 + Graph retrieval combined for maximum accuracy.
+- **[Visualization Dashboard](https://github.com/qualixar/superlocalmemory/wiki/Visualization-Dashboard)** — Web UI for timeline, search, graph exploration, analytics.
 - **[Framework Integrations](docs/FRAMEWORK-INTEGRATIONS.md)** — Use with LangChain and LlamaIndex applications.
-- **[Real-Time Events](https://github.com/varun369/SuperLocalMemoryV2/wiki/Real-Time-Event-System)** — Live notifications via SSE/WebSocket/Webhooks when memories change.
-- **[Memory Lifecycle](https://github.com/varun369/SuperLocalMemoryV2/wiki/Memory-Lifecycle)** — Automatic state transitions (Active → Warm → Cold → Archived) with bounded growth guarantees. *New in v2.8*
-- **[Behavioral Learning](https://github.com/varun369/SuperLocalMemoryV2/wiki/Behavioral-Learning)** — Learns from action outcomes, extracts success/failure patterns, transfers knowledge across projects. *New in v2.8*
-- **[Enterprise Compliance](https://github.com/varun369/SuperLocalMemoryV2/wiki/Enterprise-Compliance)** — ABAC access control, tamper-evident audit trail, GDPR/HIPAA/EU AI Act retention policies. *New in v2.8*
+- **[Real-Time Events](https://github.com/qualixar/superlocalmemory/wiki/Real-Time-Event-System)** — Live notifications via SSE/WebSocket/Webhooks when memories change.
+- **[Memory Lifecycle](https://github.com/qualixar/superlocalmemory/wiki/Memory-Lifecycle)** — Automatic state transitions (Active → Warm → Cold → Archived) with bounded growth guarantees. *New in v2.8*
+- **[Behavioral Learning](https://github.com/qualixar/superlocalmemory/wiki/Behavioral-Learning)** — Learns from action outcomes, extracts success/failure patterns, transfers knowledge across projects. *New in v2.8*
+- **[Enterprise Compliance](https://github.com/qualixar/superlocalmemory/wiki/Enterprise-Compliance)** — ABAC access control, tamper-evident audit trail, GDPR/HIPAA/EU AI Act retention policies. *New in v2.8*
 
 ---
 
@@ -460,7 +509,7 @@ Concurrent-safe architecture = zero "database is locked" errors, ever.
 
 Auto-clustering discovers 6-7 natural topic communities from your memories.
 
-[Full benchmark details →](https://github.com/varun369/SuperLocalMemoryV2/wiki/Performance-Benchmarks)
+[Full benchmark details →](https://github.com/qualixar/superlocalmemory/wiki/Performance-Benchmarks)
 
 ---
 
@@ -498,17 +547,17 @@ python ~/.claude-memory/ui_server.py                     # Launch web UI
 
 | Guide | Description |
 |-------|-------------|
-| [Quick Start](https://github.com/varun369/SuperLocalMemoryV2/wiki/Quick-Start-Tutorial) | Get running in 5 minutes |
-| [Installation](https://github.com/varun369/SuperLocalMemoryV2/wiki/Installation) | Detailed setup instructions |
-| [Visualization Dashboard](https://github.com/varun369/SuperLocalMemoryV2/wiki/Visualization-Dashboard) | Interactive web UI guide |
-| [Interactive Graph](https://github.com/varun369/SuperLocalMemoryV2/wiki/Using-Interactive-Graph) | Graph exploration guide (NEW v2.6.5) |
+| [Quick Start](https://github.com/qualixar/superlocalmemory/wiki/Quick-Start-Tutorial) | Get running in 5 minutes |
+| [Installation](https://github.com/qualixar/superlocalmemory/wiki/Installation) | Detailed setup instructions |
+| [Visualization Dashboard](https://github.com/qualixar/superlocalmemory/wiki/Visualization-Dashboard) | Interactive web UI guide |
+| [Interactive Graph](https://github.com/qualixar/superlocalmemory/wiki/Using-Interactive-Graph) | Graph exploration guide (NEW v2.6.5) |
 | [Framework Integrations](docs/FRAMEWORK-INTEGRATIONS.md) | LangChain & LlamaIndex setup |
-| [Knowledge Graph](https://github.com/varun369/SuperLocalMemoryV2/wiki/Knowledge-Graph-Guide) | How clustering works |
+| [Knowledge Graph](https://github.com/qualixar/superlocalmemory/wiki/Knowledge-Graph-Guide) | How clustering works |
 | [Pattern Learning](docs/PATTERN-LEARNING.md) | Identity extraction |
-| [Memory Lifecycle](https://github.com/varun369/SuperLocalMemoryV2/wiki/Memory-Lifecycle) | Lifecycle states, compaction, bounded growth (v2.8) |
-| [Behavioral Learning](https://github.com/varun369/SuperLocalMemoryV2/wiki/Behavioral-Learning) | Action outcomes, pattern extraction (v2.8) |
-| [Enterprise Compliance](https://github.com/varun369/SuperLocalMemoryV2/wiki/Enterprise-Compliance) | ABAC, audit trail, retention policies (v2.8) |
-| [Upgrading to v2.8](https://github.com/varun369/SuperLocalMemoryV2/wiki/Upgrading-to-v2.8) | Migration guide from v2.7 |
+| [Memory Lifecycle](https://github.com/qualixar/superlocalmemory/wiki/Memory-Lifecycle) | Lifecycle states, compaction, bounded growth (v2.8) |
+| [Behavioral Learning](https://github.com/qualixar/superlocalmemory/wiki/Behavioral-Learning) | Action outcomes, pattern extraction (v2.8) |
+| [Enterprise Compliance](https://github.com/qualixar/superlocalmemory/wiki/Enterprise-Compliance) | ABAC, audit trail, retention policies (v2.8) |
+| [Upgrading to v2.8](https://github.com/qualixar/superlocalmemory/wiki/Upgrading-to-v2.8) | Migration guide from v2.7 |
 | [API Reference](docs/API-REFERENCE.md) | Python API documentation |
 
 ---
@@ -530,8 +579,8 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 If SuperLocalMemory saves you time, consider supporting its development:
 
 - ⭐ **Star this repo** — helps others discover it
-- 🐛 **Report bugs** — [open an issue](https://github.com/varun369/SuperLocalMemoryV2/issues)
-- 💡 **Suggest features** — [start a discussion](https://github.com/varun369/SuperLocalMemoryV2/discussions)
+- 🐛 **Report bugs** — [open an issue](https://github.com/qualixar/superlocalmemory/issues)
+- 💡 **Suggest features** — [start a discussion](https://github.com/qualixar/superlocalmemory/discussions)
 - ☕ **Buy me a coffee** — [buymeacoffee.com/varunpratah](https://buymeacoffee.com/varunpratah)
 - 💸 **PayPal** — [paypal.me/varunpratapbhardwaj](https://paypal.me/varunpratapbhardwaj)
 - 💖 **Sponsor** — [GitHub Sponsors](https://github.com/sponsors/varun369)
@@ -548,7 +597,7 @@ MIT License — use freely, even commercially. Just include the license.
 
 **Varun Pratap Bhardwaj** — Founder, Qualixar · Solution Architect
 
-[![GitHub](https://img.shields.io/badge/GitHub-@varun369-181717?style=flat-square&logo=github)](https://github.com/varun369)
+[![GitHub](https://img.shields.io/badge/GitHub-@varun369-181717?style=flat-square&logo=github)](https://github.com/qualixar)
 
 Building the complete agent development platform at Qualixar — memory, testing, contracts, and security for AI agents.
 
@@ -568,7 +617,7 @@ SuperLocalMemory is part of **Qualixar**, a suite of open-source tools for build
 </p>
 
 <p align="center">
-  <a href="https://github.com/varun369/SuperLocalMemoryV2">
+  <a href="https://github.com/qualixar/superlocalmemory">
     <img src="https://img.shields.io/badge/⭐_Star_on_GitHub-black?style=for-the-badge&logo=github" alt="Star on GitHub"/>
   </a>
 </p>

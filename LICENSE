@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 Varun Pratap Bhardwaj
+Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -11,6 +11,14 @@ furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
+
+ATTRIBUTION NOTICE:
+This software contains novel mathematical methods described in:
+- arXiv:2603.02240 (SuperLocalMemory V2 — Bayesian Trust Defense)
+- Zenodo DOI: 10.5281/zenodo.19038659 (SuperLocalMemory V3 — Information-Geometric Foundations)
+
+Academic use MUST cite the relevant paper.
+Commercial use MUST retain this notice, the NOTICE file, and visible attribution.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
