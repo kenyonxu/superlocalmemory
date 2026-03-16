@@ -240,8 +240,28 @@ class V2Migrator:
             shutil.copy2(str(self._v2_db), str(self._v3_db))
             stats["steps"].append("Copied database to V3 location")
 
-            # Step 4: Extend schema
+            # Step 4: Extend schema + alter V2 tables for V3 compatibility
             conn = sqlite3.connect(str(self._v3_db))
+
+            # Add missing V3 columns to V2 memories table
+            existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(memories)").fetchall()}
+            v3_columns = [
+                ("profile_id", 'TEXT DEFAULT "default"'),
+                ("memory_id", "TEXT"),
+                ("session_id", 'TEXT DEFAULT ""'),
+                ("speaker", 'TEXT DEFAULT ""'),
+                ("role", 'TEXT DEFAULT "user"'),
+                ("session_date", "TEXT"),
+                ("metadata_json", 'TEXT DEFAULT "{}"'),
+            ]
+            for col, coltype in v3_columns:
+                if col not in existing_cols:
+                    conn.execute(f"ALTER TABLE memories ADD COLUMN {col} {coltype}")
+            # Backfill V3 columns from V2 data
+            conn.execute('UPDATE memories SET profile_id = COALESCE(profile, "default") WHERE profile_id IS NULL')
+            conn.execute("UPDATE memories SET memory_id = 'v2_' || CAST(id AS TEXT) WHERE memory_id IS NULL")
+            conn.commit()
+
             for sql in V3_TABLES_SQL:
                 conn.execute(sql)
             for sql in V3_INDEXES_SQL:
