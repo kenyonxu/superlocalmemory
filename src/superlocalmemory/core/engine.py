@@ -414,7 +414,8 @@ class MemoryEngine:
             }
             # Bayesian variance narrowing after 3+ accesses
             if (q_var_arr is not None
-                    and r.fact.fisher_variance is not None
+                    and r.fact.fisher_variance
+                    and len(r.fact.fisher_variance) == len(q_var_arr)
                     and r.fact.access_count >= 3):
                 import numpy as _np
                 f_var = _np.array(r.fact.fisher_variance, dtype=_np.float64)
