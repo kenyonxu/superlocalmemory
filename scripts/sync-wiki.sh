@@ -9,8 +9,8 @@ set -e
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 WIKI_CONTENT_DIR="${REPO_DIR}/wiki-content"
-WIKI_REPO_DIR="/tmp/SuperLocalMemoryV2.wiki"
-WIKI_REPO_URL="https://github.com/varun369/SuperLocalMemoryV2.wiki.git"
+WIKI_REPO_DIR="/tmp/superlocalmemory.wiki"
+WIKI_REPO_URL="https://github.com/qualixar/superlocalmemory.wiki.git"
 
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  SuperLocalMemory V2 - Wiki Sync Tool                        ║"
@@ -78,5 +78,5 @@ git push origin "${DEFAULT_BRANCH:-master}"
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  ✅ Wiki synced successfully!                                 ║"
-echo "║  View at: https://github.com/varun369/SuperLocalMemoryV2/wiki║"
+echo "║  View at: https://github.com/qualixar/superlocalmemory/wiki║"
 echo "╚══════════════════════════════════════════════════════════════╝"

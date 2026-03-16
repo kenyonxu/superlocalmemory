@@ -169,7 +169,7 @@ Continue's AI can also call memory tools directly.
 slashCommands:
   - name: "slm-remember"
     description: "Save to SuperLocalMemory"
-    run: "~/.claude-memory/bin/superlocalmemoryv2-remember \"{{input}}\""
+    run: "~/.superlocalmemory/bin/superlocalmemoryv2-remember \"{{input}}\""
 
 # For MCP tools
 contextProviders:
@@ -431,12 +431,12 @@ source ~/.zshrc  # or ~/.bashrc
 
 **Start MCP server manually:**
 ```bash
-python3 ~/.claude-memory/mcp_server.py
+python3 ~/.superlocalmemory/mcp_server.py
 ```
 
 **Start with HTTP transport:**
 ```bash
-python3 ~/.claude-memory/mcp_server.py --transport http --port 8001
+python3 ~/.superlocalmemory/mcp_server.py --transport http --port 8001
 ```
 
 **Check MCP server tools:**

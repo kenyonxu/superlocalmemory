@@ -47,7 +47,7 @@ WORKFLOW PATTERNS:
   #8  review_sequence: list -> recall -> remember     frequency: 12
 
 PROJECT CONTEXT:
-  #9  active_project: SuperLocalMemoryV2    last_seen: 2 hours ago
+  #9  active_project: superlocalmemory    last_seen: 2 hours ago
   #10 active_project: client-dashboard      last_seen: 1 day ago
 
 Total: 10 patterns (7 high confidence)

@@ -7,7 +7,7 @@ Every message stays on your machine in a SQLite database. No API keys, no subscr
 ## Prerequisites
 
 - Python 3.10+
-- [SuperLocalMemory V2](https://github.com/qualixar/superlocalmemory) installed (`~/.claude-memory/` must exist)
+- [SuperLocalMemory V2](https://github.com/qualixar/superlocalmemory) installed (`~/.superlocalmemory/` must exist)
 - `langchain-core >= 1.0.0`
 
 ## Installation
@@ -48,7 +48,7 @@ history.clear()
 
 ## Features
 
-- **Local-first storage** -- all data stays in `~/.claude-memory/memory.db`
+- **Local-first storage** -- all data stays in `~/.superlocalmemory/memory.db`
 - **Session isolation** -- each `session_id` is completely independent
 - **Full LangChain compatibility** -- implements `BaseChatMessageHistory`
 - **Persistent across restarts** -- SQLite-backed, survives process exit
@@ -75,7 +75,7 @@ assert len(coding.messages) == 1
 
 ## Custom Database Path
 
-By default the package uses `~/.claude-memory/memory.db`. You can point to a different database:
+By default the package uses `~/.superlocalmemory/memory.db`. You can point to a different database:
 
 ```python
 history = SuperLocalMemoryChatMessageHistory(

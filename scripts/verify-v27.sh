@@ -3,13 +3,13 @@
 # SuperLocalMemory V2.7 — Quick Verification Script
 # Copyright (c) 2026 Varun Pratap Bhardwaj
 # Licensed under MIT License
-# Repository: https://github.com/varun369/SuperLocalMemoryV2
+# Repository: https://github.com/qualixar/superlocalmemory
 #
 # Run this after installation to verify everything works:
 #   bash scripts/verify-v27.sh
 # ============================================================================
 
-INSTALL_DIR="${HOME}/.claude-memory"
+INSTALL_DIR="${HOME}/.superlocalmemory"
 PASS=0
 WARN=0
 FAIL=0
@@ -140,7 +140,7 @@ if command -v slm &> /dev/null; then
 else
     if [ -f "$INSTALL_DIR/bin/slm" ]; then
         echo "  [WARN] slm exists at $INSTALL_DIR/bin/slm but not in PATH"
-        echo "         Add to PATH: export PATH=\"\$HOME/.claude-memory/bin:\$PATH\""
+        echo "         Add to PATH: export PATH=\"\$HOME/.superlocalmemory/bin:\$PATH\""
         WARN=$((WARN + 1))
     else
         echo "  [FAIL] slm command not found"

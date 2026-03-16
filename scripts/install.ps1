@@ -2,7 +2,7 @@
 # SuperLocalMemory V2.8.3 - Windows Installation Script (PowerShell)
 # Copyright (c) 2026 Varun Pratap Bhardwaj
 # Licensed under MIT License
-# Repository: https://github.com/varun369/SuperLocalMemoryV2
+# Repository: https://github.com/qualixar/superlocalmemory
 # ============================================================================
 
 # IMPORTANT: param() must be the FIRST executable statement in PowerShell
@@ -15,7 +15,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$INSTALL_DIR = if ($env:SL_MEMORY_PATH) { $env:SL_MEMORY_PATH } else { Join-Path $env:USERPROFILE ".claude-memory" }
+$INSTALL_DIR = if ($env:SL_MEMORY_PATH) { $env:SL_MEMORY_PATH } else { Join-Path $env:USERPROFILE ".superlocalmemory" }
 $REPO_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Auto-detect non-interactive environment
@@ -33,7 +33,7 @@ Write-Host ""
 Write-Host "=================================================================="
 Write-Host "  SuperLocalMemory V2.8.3 - Windows Installation                 "
 Write-Host "  by Varun Pratap Bhardwaj                                       "
-Write-Host "  https://github.com/varun369/SuperLocalMemoryV2                 "
+Write-Host "  https://github.com/qualixar/superlocalmemory                 "
 Write-Host "=================================================================="
 Write-Host ""
 
@@ -200,7 +200,7 @@ if (Test-Path $setupValidatorPath) {
 import sqlite3
 import os
 from pathlib import Path
-db_path = Path(os.environ.get('SL_MEMORY_PATH') or str(Path.home() / '.claude-memory')) / 'memory.db'
+db_path = Path(os.environ.get('SL_MEMORY_PATH') or str(Path.home() / '.superlocalmemory')) / 'memory.db'
 conn = sqlite3.connect(db_path)
 cursor = conn.cursor()
 cursor.execute('''CREATE TABLE IF NOT EXISTS memories (
@@ -260,7 +260,7 @@ $memoryCount = & python -c @"
 import sqlite3
 import os
 from pathlib import Path
-db_path = Path(os.environ.get('SL_MEMORY_PATH') or str(Path.home() / '.claude-memory')) / 'memory.db'
+db_path = Path(os.environ.get('SL_MEMORY_PATH') or str(Path.home() / '.superlocalmemory')) / 'memory.db'
 conn = sqlite3.connect(db_path)
 cursor = conn.cursor()
 cursor.execute('SELECT COUNT(*) FROM memories')
@@ -294,7 +294,7 @@ try {
 import sqlite3
 import os
 from pathlib import Path
-db_path = Path(os.environ.get('SL_MEMORY_PATH') or str(Path.home() / '.claude-memory')) / 'memory.db'
+db_path = Path(os.environ.get('SL_MEMORY_PATH') or str(Path.home() / '.superlocalmemory')) / 'memory.db'
 conn = sqlite3.connect(db_path)
 cursor = conn.cursor()
 cursor.execute('SELECT COUNT(*) FROM identity_patterns')
@@ -669,7 +669,7 @@ Write-Host "  ATTRIBUTION NOTICE (REQUIRED BY MIT LICENSE)                   "
 Write-Host "=================================================================="
 Write-Host "  Created by: Varun Pratap Bhardwaj                              "
 Write-Host "  Role: Solution Architect & Original Creator                    "
-Write-Host "  Repository: github.com/varun369/SuperLocalMemoryV2             "
+Write-Host "  Repository: github.com/qualixar/superlocalmemory             "
 Write-Host "  License: MIT (attribution must be preserved)                   "
 Write-Host "=================================================================="
 Write-Host ""

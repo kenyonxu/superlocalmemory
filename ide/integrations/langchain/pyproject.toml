@@ -30,9 +30,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/varun369/SuperLocalMemoryV2"
+Homepage = "https://github.com/qualixar/superlocalmemory"
 Documentation = "https://superlocalmemory.com/"
-Repository = "https://github.com/varun369/SuperLocalMemoryV2"
+Repository = "https://github.com/qualixar/superlocalmemory"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

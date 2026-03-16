@@ -14,7 +14,7 @@ Upgrade from SuperLocalMemory V2 to V3. Zero data loss, one command, rollback av
 | **Modes** | One mode (cloud required for smart features) | Three modes: A (zero-cloud), B (local LLM), C (cloud LLM) |
 | **Math layer** | None | Fisher-Rao similarity, Sheaf consistency, Langevin lifecycle |
 | **Ingestion** | Basic text storage | 11-step pipeline: entities, facts, emotions, beliefs, graph, and more |
-| **Data directory** | `~/.claude-memory/` | `~/.superlocalmemory/` (symlink preserves old path) |
+| **Data directory** | `~/.superlocalmemory/` | `~/.superlocalmemory/` (symlink preserves old path) |
 | **Consistency** | Manual | Automatic contradiction detection |
 | **Recall quality** | Good | Significantly better on complex queries (multi-hop, temporal) |
 
@@ -52,8 +52,8 @@ slm migrate
 The migration:
 
 1. Creates a full backup of your V2 database
-2. Moves data from `~/.claude-memory/` to `~/.superlocalmemory/`
-3. Creates a symlink (`~/.claude-memory/ -> ~/.superlocalmemory/`) so old IDE configs still work
+2. Moves data from `~/.superlocalmemory/` to `~/.superlocalmemory/`
+3. Creates a symlink (`~/.superlocalmemory/ -> ~/.superlocalmemory/`) so old IDE configs still work
 4. Extends the database schema with V3 tables (15 new tables)
 5. Re-indexes existing memories for 4-channel retrieval
 6. Sets Mode A as default (zero breaking changes)
@@ -125,7 +125,7 @@ If anything goes wrong, roll back within 30 days:
 slm migrate --rollback
 ```
 
-This restores your V2 database from the backup created during migration. The symlink is removed and the original `~/.claude-memory/` directory is restored.
+This restores your V2 database from the backup created during migration. The symlink is removed and the original `~/.superlocalmemory/` directory is restored.
 
 **After 30 days:** The backup is automatically cleaned up. If you need to roll back after 30 days, restore from your own backups.
 

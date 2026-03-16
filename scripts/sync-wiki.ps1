@@ -11,8 +11,8 @@ $ErrorActionPreference = "Stop"
 # Configuration
 $REPO_DIR = $PSScriptRoot
 $WIKI_CONTENT_DIR = Join-Path $REPO_DIR "wiki-content"
-$WIKI_REPO_DIR = Join-Path $env:TEMP "SuperLocalMemoryV2.wiki"
-$WIKI_REPO_URL = "https://github.com/varun369/SuperLocalMemoryV2.wiki.git"
+$WIKI_REPO_DIR = Join-Path $env:TEMP "superlocalmemory.wiki"
+$WIKI_REPO_URL = "https://github.com/qualixar/superlocalmemory.wiki.git"
 
 Write-Host "╔══════════════════════════════════════════════════════════════╗"
 Write-Host "║  SuperLocalMemory V2 - Wiki Sync Tool                        ║"
@@ -119,7 +119,7 @@ Created by: Varun Pratap Bhardwaj
     Write-Host ""
     Write-Host "╔══════════════════════════════════════════════════════════════╗"
     Write-Host "║  ✅ Wiki synced successfully!                                 ║"
-    Write-Host "║  View at: https://github.com/varun369/SuperLocalMemoryV2/wiki║"
+    Write-Host "║  View at: https://github.com/qualixar/superlocalmemory/wiki║"
     Write-Host "╚══════════════════════════════════════════════════════════════╝"
 
 } finally {

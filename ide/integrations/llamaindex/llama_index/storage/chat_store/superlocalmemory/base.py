@@ -25,7 +25,7 @@ from llama_index.core.storage.chat_store.base import BaseChatStore
 # ---------------------------------------------------------------------------
 # Locate and import SuperLocalMemory V2's MemoryStoreV2
 # ---------------------------------------------------------------------------
-_SLM_PATH = Path.home() / ".claude-memory"
+_SLM_PATH = Path.home() / ".superlocalmemory"
 if str(_SLM_PATH) not in sys.path:
     sys.path.insert(0, str(_SLM_PATH))
 
@@ -139,7 +139,7 @@ class SuperLocalMemoryChatStore(BaseChatStore):
 
     Args:
         db_path: Optional path to the SQLite database file.
-                 Defaults to ``~/.claude-memory/memory.db``.
+                 Defaults to ``~/.superlocalmemory/memory.db``.
     """
 
     # Pydantic fields ---------------------------------------------------
@@ -154,7 +154,7 @@ class SuperLocalMemoryChatStore(BaseChatStore):
 
         Args:
             db_path: Optional path to the SLM SQLite database.
-                     If None, uses the default ``~/.claude-memory/memory.db``.
+                     If None, uses the default ``~/.superlocalmemory/memory.db``.
         """
         super().__init__(**kwargs)
         self._db_path = db_path

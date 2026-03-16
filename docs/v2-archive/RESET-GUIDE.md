@@ -19,7 +19,7 @@ The reset utility provides safe ways to clear and restart your memory system.
 **Use when:** You want to start fresh but keep the system installed
 
 ```bash
-python ~/.claude-memory/memory-reset.py soft
+python ~/.superlocalmemory/memory-reset.py soft
 ```
 
 ---
@@ -34,7 +34,7 @@ python ~/.claude-memory/memory-reset.py soft
 **Use when:** You want completely fresh V2 database
 
 ```bash
-python ~/.claude-memory/memory-reset.py hard --confirm
+python ~/.superlocalmemory/memory-reset.py hard --confirm
 ```
 
 **⚠️ Requires `--confirm` flag for safety**
@@ -54,10 +54,10 @@ python ~/.claude-memory/memory-reset.py hard --confirm
 
 ```bash
 # Clear only graph and patterns
-python ~/.claude-memory/memory-reset.py layer --layers graph patterns
+python ~/.superlocalmemory/memory-reset.py layer --layers graph patterns
 
 # Clear only graph
-python ~/.claude-memory/memory-reset.py layer --layers graph
+python ~/.superlocalmemory/memory-reset.py layer --layers graph
 ```
 
 ---
@@ -68,7 +68,7 @@ python ~/.claude-memory/memory-reset.py layer --layers graph
 - View row counts and database size
 
 ```bash
-python ~/.claude-memory/memory-reset.py status
+python ~/.superlocalmemory/memory-reset.py status
 ```
 
 ---
@@ -78,12 +78,12 @@ python ~/.claude-memory/memory-reset.py status
 ### Automatic Backups
 Every reset operation creates a timestamped backup:
 ```
-~/.claude-memory/backups/pre-reset-YYYYMMDD-HHMMSS.db
+~/.superlocalmemory/backups/pre-reset-YYYYMMDD-HHMMSS.db
 ```
 
 **Skip backup** (not recommended):
 ```bash
-python ~/.claude-memory/memory-reset.py soft --no-backup
+python ~/.superlocalmemory/memory-reset.py soft --no-backup
 ```
 
 ### Confirmation Prompts
@@ -95,11 +95,11 @@ python ~/.claude-memory/memory-reset.py soft --no-backup
 If you reset by mistake:
 ```bash
 # Find latest backup
-ls -lt ~/.claude-memory/backups/
+ls -lt ~/.superlocalmemory/backups/
 
 # Restore backup
-cp ~/.claude-memory/backups/pre-reset-20260205-143000.db \
-   ~/.claude-memory/memory.db
+cp ~/.superlocalmemory/backups/pre-reset-20260205-143000.db \
+   ~/.superlocalmemory/memory.db
 ```
 
 ---
@@ -109,15 +109,15 @@ cp ~/.claude-memory/backups/pre-reset-20260205-143000.db \
 ### Scenario 1: "I want to start completely fresh"
 ```bash
 # Check current state
-python ~/.claude-memory/memory-reset.py status
+python ~/.superlocalmemory/memory-reset.py status
 
 # Hard reset (creates backup automatically)
-python ~/.claude-memory/memory-reset.py hard --confirm
+python ~/.superlocalmemory/memory-reset.py hard --confirm
 
 # Type: DELETE EVERYTHING
 
 # Verify clean state
-python ~/.claude-memory/memory-reset.py status
+python ~/.superlocalmemory/memory-reset.py status
 ```
 
 **Result:** Fresh V2 database, ready for new memories
@@ -127,12 +127,12 @@ python ~/.claude-memory/memory-reset.py status
 ### Scenario 2: "I want to clear memories but keep structure"
 ```bash
 # Soft reset
-python ~/.claude-memory/memory-reset.py soft
+python ~/.superlocalmemory/memory-reset.py soft
 
 # Type: yes
 
 # Add new memories
-python ~/.claude-memory/memory_store.py add "First new memory"
+python ~/.superlocalmemory/memory_store.py add "First new memory"
 ```
 
 **Result:** Empty database with V2 schema intact
@@ -142,10 +142,10 @@ python ~/.claude-memory/memory_store.py add "First new memory"
 ### Scenario 3: "My graph is corrupted, rebuild it"
 ```bash
 # Clear only graph layer
-python ~/.claude-memory/memory-reset.py layer --layers graph
+python ~/.superlocalmemory/memory-reset.py layer --layers graph
 
 # Rebuild graph from existing memories
-~/.claude-memory/venv/bin/python ~/.claude-memory/graph_engine.py build
+~/.superlocalmemory/venv/bin/python ~/.superlocalmemory/graph_engine.py build
 ```
 
 **Result:** Graph rebuilt, memories and patterns untouched
@@ -155,10 +155,10 @@ python ~/.claude-memory/memory-reset.py layer --layers graph
 ### Scenario 4: "Patterns learned wrong, reset them"
 ```bash
 # Clear only patterns layer
-python ~/.claude-memory/memory-reset.py layer --layers patterns
+python ~/.superlocalmemory/memory-reset.py layer --layers patterns
 
 # Re-learn patterns
-~/.claude-memory/venv/bin/python ~/.claude-memory/pattern_learner.py update
+~/.superlocalmemory/venv/bin/python ~/.superlocalmemory/pattern_learner.py update
 ```
 
 **Result:** Patterns re-learned, memories and graph untouched
@@ -203,7 +203,7 @@ python ~/.claude-memory/memory-reset.py layer --layers patterns
 To completely remove SuperLocalMemory V2:
 ```bash
 # Manual uninstall (use with caution)
-rm -rf ~/.claude-memory/
+rm -rf ~/.superlocalmemory/
 ```
 
 **⚠️ This deletes everything including backups!**
@@ -211,8 +211,8 @@ rm -rf ~/.claude-memory/
 Better approach - keep documentation:
 ```bash
 # Keep docs, delete data
-rm ~/.claude-memory/memory.db
-rm -rf ~/.claude-memory/venv/
+rm ~/.superlocalmemory/memory.db
+rm -rf ~/.superlocalmemory/venv/
 ```
 
 ---
@@ -222,7 +222,7 @@ rm -rf ~/.claude-memory/venv/
 ### After Soft Reset:
 ```bash
 # Check tables exist but are empty
-python ~/.claude-memory/memory-reset.py status
+python ~/.superlocalmemory/memory-reset.py status
 
 # Should show:
 # Memories: 0 rows
@@ -234,7 +234,7 @@ python ~/.claude-memory/memory-reset.py status
 ### After Hard Reset:
 ```bash
 # Check fresh V2 schema
-python ~/.claude-memory/memory-reset.py status
+python ~/.superlocalmemory/memory-reset.py status
 
 # Should show:
 # All tables present
@@ -245,7 +245,7 @@ python ~/.claude-memory/memory-reset.py status
 ### After Layer Reset:
 ```bash
 # Check specific layer cleared
-python ~/.claude-memory/memory-reset.py status
+python ~/.superlocalmemory/memory-reset.py status
 
 # Example after clearing graph:
 # Graph Nodes: 0 rows
@@ -260,7 +260,7 @@ python ~/.claude-memory/memory-reset.py status
 
 1. **Always check status first:**
    ```bash
-   python ~/.claude-memory/memory-reset.py status
+   python ~/.superlocalmemory/memory-reset.py status
    ```
 
 2. **Use layer reset when possible:**
@@ -289,24 +289,24 @@ python ~/.claude-memory/memory-reset.py status
 - Run hard reset again to reinitialize
 
 **Before any reset:**
-- Check: `ls -la ~/.claude-memory/memory.db`
+- Check: `ls -la ~/.superlocalmemory/memory.db`
 - Database may have been moved/deleted
 
 ### "Permission denied"
 ```bash
 # Make script executable
-chmod +x ~/.claude-memory/memory-reset.py
+chmod +x ~/.superlocalmemory/memory-reset.py
 
 # Or run with python
-python ~/.claude-memory/memory-reset.py status
+python ~/.superlocalmemory/memory-reset.py status
 ```
 
 ### "Backup failed"
 - Check disk space: `df -h`
-- Check permissions: `ls -la ~/.claude-memory/`
+- Check permissions: `ls -la ~/.superlocalmemory/`
 - Manually create backup:
   ```bash
-  cp ~/.claude-memory/memory.db ~/.claude-memory/backups/manual-backup.db
+  cp ~/.superlocalmemory/memory.db ~/.superlocalmemory/backups/manual-backup.db
   ```
 
 ### "Hard reset didn't reinitialize"
@@ -314,7 +314,7 @@ python ~/.claude-memory/memory-reset.py status
 - Check for errors in output
 - Manually verify schema:
   ```bash
-  sqlite3 ~/.claude-memory/memory.db ".tables"
+  sqlite3 ~/.superlocalmemory/memory.db ".tables"
   ```
 
 ---
@@ -325,16 +325,16 @@ python ~/.claude-memory/memory-reset.py status
 1. **Stop immediately** - Don't run more commands
 2. **Check backups:**
    ```bash
-   ls -lt ~/.claude-memory/backups/
+   ls -lt ~/.superlocalmemory/backups/
    ```
 3. **Restore latest backup:**
    ```bash
-   cp ~/.claude-memory/backups/pre-reset-<timestamp>.db \
-      ~/.claude-memory/memory.db
+   cp ~/.superlocalmemory/backups/pre-reset-<timestamp>.db \
+      ~/.superlocalmemory/memory.db
    ```
 4. **Verify restoration:**
    ```bash
-   python ~/.claude-memory/memory-reset.py status
+   python ~/.superlocalmemory/memory-reset.py status
    ```
 
 ---

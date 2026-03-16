@@ -58,7 +58,7 @@ For tools marked ⚠️, follow the manual setup instructions below.
 
 4. **Know your install directory:**
    ```bash
-   echo ~/.claude-memory
+   echo ~/.superlocalmemory
    # Default: /Users/yourusername/.claude-memory
    ```
 
@@ -417,7 +417,7 @@ PYTHONPATH = "/Users/yourusername/.claude-memory"
    # or with streamable-http transport (ChatGPT 2026+):
    slm serve --port 8417 --transport streamable-http
    # or using Python directly:
-   python3 ~/.claude-memory/mcp_server.py --transport http --port 8417
+   python3 ~/.superlocalmemory/mcp_server.py --transport http --port 8417
    ```
 
 2. **Expose via cloudflared tunnel** (in another terminal):
@@ -542,7 +542,7 @@ For any MCP client that requires HTTP transport (ChatGPT, remote access, web-bas
 slm serve --port 8001
 
 # Using Python directly
-python3 ~/.claude-memory/mcp_server.py --transport http --port 8001
+python3 ~/.superlocalmemory/mcp_server.py --transport http --port 8001
 ```
 
 **For local access:**
@@ -593,7 +593,7 @@ print(response)
 
 Start MCP server in HTTP mode:
 ```bash
-python3 ~/.claude-memory/mcp_server.py --transport http --port 8001
+python3 ~/.superlocalmemory/mcp_server.py --transport http --port 8001
 ```
 
 Then connect via HTTP:
@@ -610,11 +610,11 @@ http://localhost:8001
 **Solution:**
 1. Verify file exists:
    ```bash
-   ls -la ~/.claude-memory/mcp_server.py
+   ls -la ~/.superlocalmemory/mcp_server.py
    ```
 2. Check permissions:
    ```bash
-   chmod +x ~/.claude-memory/mcp_server.py
+   chmod +x ~/.superlocalmemory/mcp_server.py
    ```
 
 ### Issue 2: "ModuleNotFoundError: No module named 'mcp'"
@@ -644,7 +644,7 @@ conda install -c conda-forge mcp
 1. Verify `cwd` and `PYTHONPATH` are set in config
 2. Check modules exist:
    ```bash
-   ls ~/.claude-memory/memory_store_v2.py
+   ls ~/.superlocalmemory/memory_store_v2.py
    ```
 
 ### Issue 5: IDE doesn't show MCP tools
@@ -654,7 +654,7 @@ conda install -c conda-forge mcp
 2. Check IDE's MCP settings/logs
 3. Test MCP server manually:
    ```bash
-   python3 ~/.claude-memory/mcp_server.py
+   python3 ~/.superlocalmemory/mcp_server.py
    # Should start without errors
    ```
 
@@ -676,7 +676,7 @@ After setup, verify MCP integration works:
 ### 1. Check MCP Server Status
 
 ```bash
-python3 ~/.claude-memory/mcp_server.py
+python3 ~/.superlocalmemory/mcp_server.py
 ```
 
 **Expected output:**
@@ -763,7 +763,7 @@ Plus **2 MCP prompts** and **6 MCP resources** for advanced use.
 ## Need Help?
 
 1. **Check logs:** Most IDEs have MCP server logs in their developer tools
-2. **Test manually:** Run `python3 ~/.claude-memory/mcp_server.py` to see errors
+2. **Test manually:** Run `python3 ~/.superlocalmemory/mcp_server.py` to see errors
 3. **GitHub Issues:** https://github.com/qualixar/superlocalmemory/issues
 4. **Documentation:** https://github.com/qualixar/superlocalmemory
 

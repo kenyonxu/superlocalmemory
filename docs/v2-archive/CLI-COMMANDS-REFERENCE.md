@@ -107,7 +107,7 @@ All original commands continue to work unchanged. Use these if you prefer explic
 ```bash
 superlocalmemoryv2-status
 # OR
-~/.claude-memory/bin/superlocalmemoryv2-status
+~/.superlocalmemory/bin/superlocalmemoryv2-status
 ```
 Shows: total memories, graph stats, clusters, patterns, database size
 
@@ -121,7 +121,7 @@ Shows: total memories, graph stats, clusters, patterns, database size
 ```bash
 superlocalmemoryv2-profile list
 # OR
-~/.claude-memory/bin/superlocalmemoryv2-profile list
+~/.superlocalmemory/bin/superlocalmemoryv2-profile list
 ```
 Shows all profiles with active marker (→)
 
@@ -129,7 +129,7 @@ Shows all profiles with active marker (→)
 ```bash
 superlocalmemoryv2-profile current
 # OR
-~/.claude-memory/bin/superlocalmemoryv2-profile current
+~/.superlocalmemory/bin/superlocalmemoryv2-profile current
 ```
 Shows current profile details and memory count
 
@@ -173,7 +173,7 @@ superlocalmemoryv2-status
 ```bash
 superlocalmemoryv2-reset soft
 # OR
-~/.claude-memory/bin/superlocalmemoryv2-reset soft
+~/.superlocalmemory/bin/superlocalmemoryv2-reset soft
 ```
 - Clears all memories from current profile
 - Clears graph, patterns, tree structure
@@ -185,7 +185,7 @@ superlocalmemoryv2-reset soft
 ```bash
 superlocalmemoryv2-reset hard --confirm
 # OR
-~/.claude-memory/bin/superlocalmemoryv2-reset hard --confirm
+~/.superlocalmemory/bin/superlocalmemoryv2-reset hard --confirm
 ```
 - ⚠️ **NUCLEAR OPTION** ⚠️
 - Deletes entire database file
@@ -197,7 +197,7 @@ superlocalmemoryv2-reset hard --confirm
 ```bash
 superlocalmemoryv2-reset layer --layers graph patterns
 # OR
-~/.claude-memory/bin/superlocalmemoryv2-reset layer --layers graph patterns
+~/.superlocalmemory/bin/superlocalmemoryv2-reset layer --layers graph patterns
 ```
 Available layers:
 - `graph` - Clear graph nodes, edges, clusters
@@ -213,25 +213,25 @@ Prompt: "Proceed with layer reset? (yes/no)"
 
 ### Build Knowledge Graph
 ```bash
-~/.claude-memory/venv/bin/python ~/.claude-memory/graph_engine.py build
+~/.superlocalmemory/venv/bin/python ~/.superlocalmemory/graph_engine.py build
 ```
 Builds graph from all memories using TF-IDF + Leiden clustering
 
 ### Show Graph Statistics
 ```bash
-~/.claude-memory/venv/bin/python ~/.claude-memory/graph_engine.py stats
+~/.superlocalmemory/venv/bin/python ~/.superlocalmemory/graph_engine.py stats
 ```
 Shows: nodes, edges, clusters with names and member counts
 
 ### Find Related Memories
 ```bash
-~/.claude-memory/venv/bin/python ~/.claude-memory/graph_engine.py related --memory-id 5
+~/.superlocalmemory/venv/bin/python ~/.superlocalmemory/graph_engine.py related --memory-id 5
 ```
 Shows memories connected in the knowledge graph
 
 ### View Cluster Members
 ```bash
-~/.claude-memory/venv/bin/python ~/.claude-memory/graph_engine.py cluster --cluster-id 1
+~/.superlocalmemory/venv/bin/python ~/.superlocalmemory/graph_engine.py cluster --cluster-id 1
 ```
 Lists all memories in a specific cluster
 
@@ -241,25 +241,25 @@ Lists all memories in a specific cluster
 
 ### Update Patterns
 ```bash
-~/.claude-memory/venv/bin/python ~/.claude-memory/pattern_learner.py update
+~/.superlocalmemory/venv/bin/python ~/.superlocalmemory/pattern_learner.py update
 ```
 Analyzes all memories and learns new identity patterns
 
 ### List Learned Patterns
 ```bash
-~/.claude-memory/venv/bin/python ~/.claude-memory/pattern_learner.py list 0.1
+~/.superlocalmemory/venv/bin/python ~/.superlocalmemory/pattern_learner.py list 0.1
 ```
 Shows patterns with confidence >= 0.1 (10%)
 
 ### Get Claude Context
 ```bash
-~/.claude-memory/venv/bin/python ~/.claude-memory/pattern_learner.py context 0.7
+~/.superlocalmemory/venv/bin/python ~/.superlocalmemory/pattern_learner.py context 0.7
 ```
 Outputs patterns formatted for Claude with confidence >= 0.7 (70%)
 
 ### Show Pattern Statistics
 ```bash
-~/.claude-memory/venv/bin/python ~/.claude-memory/pattern_learner.py stats
+~/.superlocalmemory/venv/bin/python ~/.superlocalmemory/pattern_learner.py stats
 ```
 Shows pattern count, avg confidence, types, categories
 
@@ -269,22 +269,22 @@ Shows pattern count, avg confidence, types, categories
 
 ### Add Memory
 ```bash
-python ~/.claude-memory/memory_store_v2.py add "content" --tags tag1,tag2
+python ~/.superlocalmemory/memory_store_v2.py add "content" --tags tag1,tag2
 ```
 
 ### Search Memories
 ```bash
-python ~/.claude-memory/memory_store_v2.py search "query"
+python ~/.superlocalmemory/memory_store_v2.py search "query"
 ```
 
 ### List Recent Memories
 ```bash
-python ~/.claude-memory/memory_store_v2.py list 20
+python ~/.superlocalmemory/memory_store_v2.py list 20
 ```
 
 ### Get Stats
 ```bash
-python ~/.claude-memory/memory_store_v2.py stats
+python ~/.superlocalmemory/memory_store_v2.py stats
 ```
 
 ---
@@ -296,11 +296,11 @@ Add to `~/.bashrc` or `~/.zshrc`:
 
 ```bash
 # SuperLocalMemory V2 aliases
-alias memory-status='~/.claude-memory/bin/memory-status'
-alias memory-reset='~/.claude-memory/bin/memory-reset'
-alias memory-profile='~/.claude-memory/bin/memory-profile'
-alias memory-graph='~/.claude-memory/venv/bin/python ~/.claude-memory/graph_engine.py'
-alias memory-patterns='~/.claude-memory/venv/bin/python ~/.claude-memory/pattern_learner.py'
+alias memory-status='~/.superlocalmemory/bin/memory-status'
+alias memory-reset='~/.superlocalmemory/bin/memory-reset'
+alias memory-profile='~/.superlocalmemory/bin/memory-profile'
+alias memory-graph='~/.superlocalmemory/venv/bin/python ~/.superlocalmemory/graph_engine.py'
+alias memory-patterns='~/.superlocalmemory/venv/bin/python ~/.superlocalmemory/pattern_learner.py'
 ```
 
 Then reload: `source ~/.bashrc` or `source ~/.zshrc`
@@ -332,15 +332,15 @@ All destructive commands include:
 
 ### Backup Location
 ```bash
-~/.claude-memory/backups/
+~/.superlocalmemory/backups/
 ```
 
 Format: `pre-reset-YYYYMMDD-HHMMSS.db`
 
 ### Restore from Backup
 ```bash
-cp ~/.claude-memory/backups/pre-reset-20260205-143000.db \
-   ~/.claude-memory/memory.db
+cp ~/.superlocalmemory/backups/pre-reset-20260205-143000.db \
+   ~/.superlocalmemory/memory.db
 ```
 
 ---
@@ -349,18 +349,18 @@ cp ~/.claude-memory/backups/pre-reset-20260205-143000.db \
 
 ### Memory Status
 ```bash
-~/.claude-memory/bin/memory-status
+~/.superlocalmemory/bin/memory-status
 # No --help flag, just shows status
 ```
 
 ### Memory Reset
 ```bash
-~/.claude-memory/bin/memory-reset --help
+~/.superlocalmemory/bin/memory-reset --help
 ```
 
 ### Memory Profile
 ```bash
-~/.claude-memory/bin/memory-profile --help
+~/.superlocalmemory/bin/memory-profile --help
 ```
 
 ---
@@ -370,7 +370,7 @@ cp ~/.claude-memory/backups/pre-reset-20260205-143000.db \
 ### Daily Usage
 ```bash
 # Standalone: Use Python commands directly
-python ~/.claude-memory/memory_store_v2.py add "content" --tags tag1
+python ~/.superlocalmemory/memory_store_v2.py add "content" --tags tag1
 
 # Optional Claude CLI: Use /remember skill
 # /remember "content"
@@ -379,10 +379,10 @@ python ~/.claude-memory/memory_store_v2.py add "content" --tags tag1
 ### Weekly Maintenance
 ```bash
 # Rebuild graph (as memories grow)
-~/.claude-memory/venv/bin/python ~/.claude-memory/graph_engine.py build
+~/.superlocalmemory/venv/bin/python ~/.superlocalmemory/graph_engine.py build
 
 # Update patterns
-~/.claude-memory/venv/bin/python ~/.claude-memory/pattern_learner.py update
+~/.superlocalmemory/venv/bin/python ~/.superlocalmemory/pattern_learner.py update
 ```
 
 ### Switching Contexts
@@ -419,7 +419,7 @@ memory-profile switch fresh
 **All commands are safe by default with warnings and confirmations for destructive operations.**
 
 For complete documentation, see:
-- `~/.claude-memory/docs/README.md` - Main documentation
-- `~/.claude-memory/RESET-GUIDE.md` - Reset procedures
-- `~/.claude-memory/PROFILES-GUIDE.md` - Profile management
+- `~/.superlocalmemory/docs/README.md` - Main documentation
+- `~/.superlocalmemory/RESET-GUIDE.md` - Reset procedures
+- `~/.superlocalmemory/PROFILES-GUIDE.md` - Profile management
 - `docs/ARCHITECTURE.md` - All features

@@ -37,7 +37,7 @@ def _handle_v2_upgrade(migrator):
     stats = migrator.get_v2_stats()
 
     print("Existing V2 installation detected!")
-    print(f"  Database: {stats.get('db_path', '~/.claude-memory/memory.db')}")
+    print(f"  Database: {stats.get('db_path', '~/.superlocalmemory/memory.db')}")
     print(f"  Memories: {stats.get('memory_count', 'unknown')}")
     print(f"  Profiles: {stats.get('profile_count', 1)}")
     print()

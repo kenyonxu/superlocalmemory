@@ -9,7 +9,7 @@ Use SuperLocalMemory programmatically from Python. This is for developers buildi
 ## Installation
 
 ```bash
-pip install superlocalmemory
+npm install -g superlocalmemory
 ```
 
 Or, if you installed via npm, the Python package is available at:

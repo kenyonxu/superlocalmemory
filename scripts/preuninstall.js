@@ -19,7 +19,7 @@ console.log('\n═════════════════════�
 console.log('  SuperLocalMemory V2 - Uninstalling');
 console.log('════════════════════════════════════════════════════════════\n');
 
-const SLM_DIR = path.join(os.homedir(), '.claude-memory');
+const SLM_DIR = path.join(os.homedir(), '.superlocalmemory');
 
 if (fs.existsSync(SLM_DIR)) {
     console.log('⚠️  Your data is preserved at: ' + SLM_DIR);

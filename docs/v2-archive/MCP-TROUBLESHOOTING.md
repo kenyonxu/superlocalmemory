@@ -8,7 +8,7 @@
 
 ### Step 1: Verify MCP Server Works Standalone
 ```bash
-python3 ~/.claude-memory/mcp_server.py
+python3 ~/.superlocalmemory/mcp_server.py
 ```
 
 **Expected output:**
@@ -90,7 +90,7 @@ python3 -c "import mcp"
 # Should complete without error
 
 python3 -c "import sys; print('\n'.join(sys.path))"
-# Should show paths including ~/.claude-memory
+# Should show paths including ~/.superlocalmemory
 ```
 
 **If Python issues, see Issue 2 or 4 below.**
@@ -103,17 +103,17 @@ python3 -c "import sys; print('\n'.join(sys.path))"
 
 **Symptoms:**
 ```bash
-$ python3 ~/.claude-memory/mcp_server.py
+$ python3 ~/.superlocalmemory/mcp_server.py
 Error: Could not import SuperLocalMemory modules
 ```
 
 **Diagnosis:**
 ```bash
 # Check if files exist
-ls -la ~/.claude-memory/mcp_server.py
-ls -la ~/.claude-memory/memory_store_v2.py
-ls -la ~/.claude-memory/graph_engine.py
-ls -la ~/.claude-memory/pattern_learner.py
+ls -la ~/.superlocalmemory/mcp_server.py
+ls -la ~/.superlocalmemory/memory_store_v2.py
+ls -la ~/.superlocalmemory/graph_engine.py
+ls -la ~/.superlocalmemory/pattern_learner.py
 ```
 
 **Fix:**
@@ -125,13 +125,13 @@ ls -la ~/.claude-memory/pattern_learner.py
 
 2. Check permissions:
    ```bash
-   chmod +x ~/.claude-memory/mcp_server.py
-   chmod +x ~/.claude-memory/*.py
+   chmod +x ~/.superlocalmemory/mcp_server.py
+   chmod +x ~/.superlocalmemory/*.py
    ```
 
 3. Test imports:
    ```bash
-   cd ~/.claude-memory
+   cd ~/.superlocalmemory
    python3 -c "from memory_store_v2 import MemoryStoreV2"
    ```
 
@@ -286,12 +286,12 @@ Most common mistake - missing `cwd` or `PYTHONPATH`:
 
 **Diagnosis:**
 ```bash
-cd ~/.claude-memory
+cd ~/.superlocalmemory
 python3 -c "from memory_store_v2 import MemoryStoreV2"
 # Should work without error
 
 # Check if files exist
-ls -la ~/.claude-memory/*.py
+ls -la ~/.superlocalmemory/*.py
 ```
 
 **Fix:**
@@ -316,8 +316,8 @@ Add `PYTHONPATH` to config (if missing):
 
 **Verify with test:**
 ```bash
-cd ~/.claude-memory
-PYTHONPATH=~/.claude-memory python3 -c "from memory_store_v2 import MemoryStoreV2; print('OK')"
+cd ~/.superlocalmemory
+PYTHONPATH=~/.superlocalmemory python3 -c "from memory_store_v2 import MemoryStoreV2; print('OK')"
 ```
 
 ---
@@ -367,10 +367,10 @@ cp ~/.cursor/mcp_settings.json ~/.cursor/mcp_settings.json.custom
 **Diagnosis:**
 ```bash
 # Check database exists and is writable
-ls -la ~/.claude-memory/memory.db
+ls -la ~/.superlocalmemory/memory.db
 
 # Check it's not empty
-sqlite3 ~/.claude-memory/memory.db "SELECT COUNT(*) FROM memories;"
+sqlite3 ~/.superlocalmemory/memory.db "SELECT COUNT(*) FROM memories;"
 
 # Check multiple tools use same database
 # (They all should point to same file)
@@ -381,7 +381,7 @@ sqlite3 ~/.claude-memory/memory.db "SELECT COUNT(*) FROM memories;"
 **1. Verify database location:**
 ```bash
 # All tools should use this path
-~/.claude-memory/memory.db
+~/.superlocalmemory/memory.db
 
 # NOT multiple databases like:
 # ~/.cursor/memory.db  ❌
@@ -390,11 +390,11 @@ sqlite3 ~/.claude-memory/memory.db "SELECT COUNT(*) FROM memories;"
 
 **2. Check write permissions:**
 ```bash
-ls -ld ~/.claude-memory/
+ls -ld ~/.superlocalmemory/
 # Should NOT be read-only
 
-chmod 755 ~/.claude-memory/
-chmod 644 ~/.claude-memory/memory.db
+chmod 755 ~/.superlocalmemory/
+chmod 644 ~/.superlocalmemory/memory.db
 ```
 
 **3. Check database not locked:**
@@ -404,7 +404,7 @@ ps aux | grep mcp_server
 kill <PID>  # If any found
 
 # Test database access
-sqlite3 ~/.claude-memory/memory.db "PRAGMA integrity_check;"
+sqlite3 ~/.superlocalmemory/memory.db "PRAGMA integrity_check;"
 # Should output: ok
 ```
 
@@ -420,7 +420,7 @@ sqlite3 ~/.claude-memory/memory.db "PRAGMA integrity_check;"
 **Diagnosis:**
 ```bash
 # Start server with debug output
-python3 ~/.claude-memory/mcp_server.py 2>&1 | tee /tmp/mcp-debug.log
+python3 ~/.superlocalmemory/mcp_server.py 2>&1 | tee /tmp/mcp-debug.log
 
 # In another terminal, try to trigger crash
 # Then check log:
@@ -448,7 +448,7 @@ cat /tmp/mcp-debug.log
 **3. Database locked:**
 ```bash
 # Check for other processes
-lsof ~/.claude-memory/memory.db
+lsof ~/.superlocalmemory/memory.db
 
 # Kill if needed
 kill <PID>
@@ -457,10 +457,10 @@ kill <PID>
 **4. Corrupted database:**
 ```bash
 # Check integrity
-sqlite3 ~/.claude-memory/memory.db "PRAGMA integrity_check;"
+sqlite3 ~/.superlocalmemory/memory.db "PRAGMA integrity_check;"
 
 # If corrupted, restore from backup
-cp ~/.claude-memory/backups/memory.db.backup.* ~/.claude-memory/memory.db
+cp ~/.superlocalmemory/backups/memory.db.backup.* ~/.superlocalmemory/memory.db
 ```
 
 ---
@@ -698,7 +698,7 @@ If auto-configuration fails completely, manually add to your IDE's config:
 
 **Steps:**
 1. Find Python: `which python3`
-2. Find install dir: `echo ~/.claude-memory`
+2. Find install dir: `echo ~/.superlocalmemory`
 3. Replace paths above with YOUR actual paths
 4. Validate JSON: `cat config.json | python3 -m json.tool`
 5. Restart IDE completely
@@ -711,7 +711,7 @@ If auto-configuration fails completely, manually add to your IDE's config:
 ### Before Opening an Issue
 
 1. ✅ **Check logs** (see IDE-specific sections)
-2. ✅ **Test server manually:** `python3 ~/.claude-memory/mcp_server.py`
+2. ✅ **Test server manually:** `python3 ~/.superlocalmemory/mcp_server.py`
 3. ✅ **Verify config is valid JSON**
 4. ✅ **Try manual configuration** (see above)
 5. ✅ **Search existing issues:** https://github.com/qualixar/superlocalmemory/issues
@@ -724,7 +724,7 @@ If auto-configuration fails completely, manually add to your IDE's config:
 - **Python:** Output of `python3 --version`
 - **Config file:** Contents (redact sensitive paths if needed)
 - **Error message:** Exact error from logs
-- **Manual test:** Output of `python3 ~/.claude-memory/mcp_server.py`
+- **Manual test:** Output of `python3 ~/.superlocalmemory/mcp_server.py`
 - **What you tried:** List troubleshooting steps already attempted
 
 **Template:**
@@ -739,7 +739,7 @@ If auto-configuration fails completely, manually add to your IDE's config:
 [paste config here]
 
 **Manual test:**
-$ python3 ~/.claude-memory/mcp_server.py
+$ python3 ~/.superlocalmemory/mcp_server.py
 [paste output here]
 
 **What I tried:**

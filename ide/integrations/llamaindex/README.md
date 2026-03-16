@@ -5,7 +5,7 @@ A LlamaIndex `BaseChatStore` implementation backed by [SuperLocalMemory V2](http
 ## Prerequisites
 
 - Python 3.9+
-- SuperLocalMemory V2 installed (`~/.claude-memory/` must exist)
+- SuperLocalMemory V2 installed (`~/.superlocalmemory/` must exist)
 
 ```bash
 # Install SuperLocalMemory V2 (one-time)
@@ -51,7 +51,7 @@ chat_store.delete_messages("session-1")
 
 ## Features
 
-- **100% Local** — All data stored in SQLite at `~/.claude-memory/memory.db`
+- **100% Local** — All data stored in SQLite at `~/.superlocalmemory/memory.db`
 - **Zero Cloud** — No API keys, no subscriptions, no data leaves your machine
 - **Shared Memory** — Chat history is accessible from Claude, Cursor, Windsurf, and 16+ other AI tools via SuperLocalMemory
 - **Session Isolation** — Each chat key is cleanly isolated using SLM tags

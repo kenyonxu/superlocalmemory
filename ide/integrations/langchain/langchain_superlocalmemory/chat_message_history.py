@@ -33,13 +33,13 @@ from langchain_core.messages import (
 # ---------------------------------------------------------------------------
 # MemoryStoreV2 import strategy
 # ---------------------------------------------------------------------------
-# SuperLocalMemory V2 installs to ~/.claude-memory/. We add that path so
+# SuperLocalMemory V2 installs to ~/.superlocalmemory/. We add that path so
 # the MemoryStoreV2 class can be imported. If SLM is not installed, we
 # raise a clear error at construction time (not import time) so the package
 # itself can still be imported for introspection.
 # ---------------------------------------------------------------------------
 
-_SLM_PATH = Path.home() / ".claude-memory"
+_SLM_PATH = Path.home() / ".superlocalmemory"
 _MemoryStoreV2 = None
 
 
@@ -62,7 +62,7 @@ def _ensure_slm_imported():
         raise ImportError(
             "SuperLocalMemory V2 is not installed. "
             "Run the installer from https://github.com/qualixar/superlocalmemory "
-            "or ensure ~/.claude-memory/memory_store_v2.py exists."
+            "or ensure ~/.superlocalmemory/memory_store_v2.py exists."
         ) from exc
 
 
@@ -117,7 +117,7 @@ class SuperLocalMemoryChatMessageHistory(BaseChatMessageHistory):
         different session IDs are completely isolated.
     db_path : str or None
         Path to the SQLite database file.  Defaults to
-        ``~/.claude-memory/memory.db``.
+        ``~/.superlocalmemory/memory.db``.
     """
 
     # Tag prefix used to isolate LangChain session messages inside SLM.

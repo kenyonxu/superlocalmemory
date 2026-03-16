@@ -82,7 +82,7 @@ history.clear()
 
 ### Storage Details
 
-- Messages persist in `~/.claude-memory/memory.db`
+- Messages persist in `~/.superlocalmemory/memory.db`
 - Each message stored as a memory with tags: `langchain`, `chat`, `session:<session_id>`
 - Supports all LangChain message types (HumanMessage, AIMessage, SystemMessage)
 - Automatic timestamp and metadata tracking
@@ -176,7 +176,7 @@ all_chats = chat_store.get_keys()
 
 ### Storage Details
 
-- Messages persist in `~/.claude-memory/memory.db`
+- Messages persist in `~/.superlocalmemory/memory.db`
 - Each message stored as a memory with tags: `llamaindex`, `chat`, `key:<chat_store_key>`
 - Supports all LlamaIndex ChatMessage roles (user, assistant, system)
 - Automatic timestamp tracking

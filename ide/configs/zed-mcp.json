@@ -2,11 +2,10 @@
   "context_servers": {
     "superlocalmemory": {
       "source": "custom",
-      "command": "python3",
-      "args": ["-m", "superlocalmemory.mcp.server"],
-      "env": {
-        "PYTHONPATH": "{{INSTALL_DIR}}"
-      }
+      "command": "slm",
+      "args": [
+        "mcp"
+      ]
     }
   }
 }

@@ -2,7 +2,7 @@
 # SuperLocalMemory V2.7 — Quick Verification Script (PowerShell)
 # Copyright (c) 2026 Varun Pratap Bhardwaj
 # Licensed under MIT License
-# Repository: https://github.com/varun369/SuperLocalMemoryV2
+# Repository: https://github.com/qualixar/superlocalmemory
 #
 # Run this after installation to verify everything works:
 #   .\scripts\verify-v27.ps1
@@ -12,7 +12,7 @@ param()
 
 $ErrorActionPreference = "Stop"
 
-$INSTALL_DIR = Join-Path $env:USERPROFILE ".claude-memory"
+$INSTALL_DIR = Join-Path $env:USERPROFILE ".superlocalmemory"
 $PASS = 0
 $WARN = 0
 $FAIL = 0
@@ -200,7 +200,7 @@ if ($slmCommand) {
     $slmBin = Join-Path $INSTALL_DIR "bin\slm"
     if (Test-Path $slmBin) {
         Write-Host "  [WARN] slm exists at $slmBin but not in PATH" -ForegroundColor Yellow
-        Write-Host "         Add to PATH: `$env:PATH = `"`$env:USERPROFILE\.claude-memory\bin;`$env:PATH`""
+        Write-Host "         Add to PATH: `$env:PATH = `"`$env:USERPROFILE\.superlocalmemory\bin;`$env:PATH`""
         $WARN++
     } else {
         Write-Host "  [FAIL] slm command not found" -ForegroundColor Red

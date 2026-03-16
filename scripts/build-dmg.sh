@@ -6,7 +6,7 @@
 # Solution Architect & Original Creator
 #
 # Licensed under MIT License (see LICENSE file)
-# Repository: https://github.com/varun369/SuperLocalMemoryV2
+# Repository: https://github.com/qualixar/superlocalmemory
 #
 # ATTRIBUTION REQUIRED: This notice must be preserved in all copies.
 #
@@ -158,7 +158,7 @@ QUICK START (2 minutes):
 
 WHAT GETS INSTALLED:
 -------------------
-• Core memory system → ~/.claude-memory/
+• Core memory system → ~/.superlocalmemory/
 • MCP server auto-configured for 11+ IDEs
 • 6 universal skills (Claude Code, Continue.dev, Cody, etc.)
 • CLI command: slm
@@ -173,19 +173,19 @@ NEED HELP?
 ---------
 • Documentation: README.md
 • Quick Start: docs/CLI-COMMANDS-REFERENCE.md
-• GitHub Wiki: https://github.com/varun369/SuperLocalMemoryV2/wiki
-• Issues: https://github.com/varun369/SuperLocalMemoryV2/issues
+• GitHub Wiki: https://github.com/qualixar/superlocalmemory/wiki
+• Issues: https://github.com/qualixar/superlocalmemory/issues
 
 UNINSTALL:
 ---------
 To uninstall:
-  rm -rf ~/.claude-memory
+  rm -rf ~/.superlocalmemory
   rm -f /usr/local/bin/slm
 
 ================================================================================
 Created by: Varun Pratap Bhardwaj
 License: MIT (Attribution Required)
-Repository: https://github.com/varun369/SuperLocalMemoryV2
+Repository: https://github.com/qualixar/superlocalmemory
 ================================================================================
 READMEEOF
 }
@@ -373,7 +373,7 @@ show_summary() {
     echo "       --notes \"See CHANGELOG.md for details\""
     echo ""
     echo "  3. Or upload manually:"
-    echo "     https://github.com/varun369/SuperLocalMemoryV2/releases/new"
+    echo "     https://github.com/qualixar/superlocalmemory/releases/new"
     echo ""
     echo "============================================================================"
 }
@@ -388,7 +388,7 @@ main() {
     
     # Check we're in the right directory
     if [ ! -f "install.sh" ]; then
-        log_error "Must run from SuperLocalMemoryV2 repository root"
+        log_error "Must run from superlocalmemory repository root"
         exit 1
     fi
     

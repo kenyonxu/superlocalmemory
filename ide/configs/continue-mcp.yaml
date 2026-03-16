@@ -5,10 +5,9 @@ contextProviders:
   - name: mcp
     params:
       serverName: "superlocalmemory"
-      command: "python3"
+      command: "slm"
       args:
-        - "-m"
-        - "superlocalmemory.mcp.server"
+        - "mcp"
       description: "SuperLocalMemory V3 - Search your memory system"
 
 # You can also use Continue's slash commands with SuperLocalMemory

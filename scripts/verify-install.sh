@@ -3,12 +3,12 @@
 # SuperLocalMemory - Installation Verification Script
 # Copyright (c) 2026 Varun Pratap Bhardwaj
 # Licensed under MIT License
-# Repository: https://github.com/varun369/SuperLocalMemoryV2
+# Repository: https://github.com/qualixar/superlocalmemory
 # ============================================================================
 
 set -e
 
-INSTALL_DIR="${HOME}/.claude-memory"
+INSTALL_DIR="${HOME}/.superlocalmemory"
 
 # Print banner
 echo ""
@@ -88,7 +88,7 @@ fi
 echo -n "PATH configuration        "
 if command -v slm &>/dev/null; then
     echo "✓ OK (commands globally available)"
-elif grep -q ".claude-memory/bin" "${HOME}/.zshrc" 2>/dev/null || grep -q ".claude-memory/bin" "${HOME}/.bashrc" 2>/dev/null || grep -q ".claude-memory/bin" "${HOME}/.bash_profile" 2>/dev/null; then
+elif grep -q ".superlocalmemory/bin" "${HOME}/.zshrc" 2>/dev/null || grep -q ".superlocalmemory/bin" "${HOME}/.bashrc" 2>/dev/null || grep -q ".superlocalmemory/bin" "${HOME}/.bash_profile" 2>/dev/null; then
     echo "○ PARTIAL (configured but needs shell restart)"
 else
     echo "⚠️  WARNING (not in PATH)"
@@ -139,7 +139,7 @@ if python3 -c "import fastapi; import uvicorn" 2>/dev/null; then
     echo "✓ ENABLED"
     UI_OK=true
     if [ -f "${INSTALL_DIR}/api_server.py" ]; then
-        echo "  Start: python3 ~/.claude-memory/api_server.py"
+        echo "  Start: python3 ~/.superlocalmemory/api_server.py"
         echo "  URL:   http://127.0.0.1:8000"
     fi
 else

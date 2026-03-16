@@ -55,7 +55,7 @@ Write-Host "=========================================="
 Write-Host ""
 
 # Check if SuperLocalMemory V2 is installed
-$memoryDir = Join-Path $env:USERPROFILE ".claude-memory"
+$memoryDir = Join-Path $env:USERPROFILE ".superlocalmemory"
 if (-not (Test-Path $memoryDir)) {
     Write-Host "Warning: SuperLocalMemory V2 not found at $memoryDir" -ForegroundColor Yellow
     Write-Host "Skills require SuperLocalMemory V2 to be installed first."
@@ -75,7 +75,7 @@ if (-not (Test-Path $memoryDir)) {
 # Check if skills source directory exists
 if (-not (Test-Path $SKILLS_SOURCE)) {
     Write-Host "Error: Skills directory not found: $SKILLS_SOURCE" -ForegroundColor Red
-    Write-Host "Please run this script from the SuperLocalMemoryV2-repo directory."
+    Write-Host "Please run this script from the superlocalmemory-repo directory."
     exit 1
 }
 

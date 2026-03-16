@@ -87,7 +87,7 @@ Main controller that runs full compression cycle:
 
 ## Configuration
 
-Located in `~/.claude-memory/config.json`:
+Located in `~/.superlocalmemory/config.json`:
 
 ```json
 {
@@ -117,28 +117,28 @@ Located in `~/.claude-memory/config.json`:
 
 ```bash
 # Initialize compression configuration
-~/.claude-memory/memory-compress init-config
+~/.superlocalmemory/memory-compress init-config
 
 # Classify memories into tiers
-~/.claude-memory/memory-compress classify
+~/.superlocalmemory/memory-compress classify
 
 # Run full compression cycle
-~/.claude-memory/memory-compress compress
+~/.superlocalmemory/memory-compress compress
 
 # Show compression statistics
-~/.claude-memory/memory-compress stats
+~/.superlocalmemory/memory-compress stats
 
 # Compress specific memory to Tier 2
-~/.claude-memory/memory-compress tier2 <id>
+~/.superlocalmemory/memory-compress tier2 <id>
 
 # Compress specific memory to Tier 3
-~/.claude-memory/memory-compress tier3 <id>
+~/.superlocalmemory/memory-compress tier3 <id>
 
 # Move old memories to cold storage
-~/.claude-memory/memory-compress cold-storage
+~/.superlocalmemory/memory-compress cold-storage
 
 # Restore memory from cold storage
-~/.claude-memory/memory-compress restore <id>
+~/.superlocalmemory/memory-compress restore <id>
 ```
 
 ### Python API
@@ -161,7 +161,7 @@ print(f"Space savings: {stats['space_savings']['savings_percent']}%")
 
 The system includes a daily cron job script at:
 ```
-~/.claude-memory/jobs/compress-memories.sh
+~/.superlocalmemory/jobs/compress-memories.sh
 ```
 
 #### Setup Cron Job
@@ -173,7 +173,7 @@ crontab -e
 
 2. Add this line (runs daily at 3 AM):
 ```
-0 3 * * * ~/.claude-memory/jobs/compress-memories.sh >> ~/.claude-memory/logs/compression.log 2>&1
+0 3 * * * ~/.superlocalmemory/jobs/compress-memories.sh >> ~/.superlocalmemory/logs/compression.log 2>&1
 ```
 
 3. Save and exit
@@ -185,7 +185,7 @@ crontab -e
 3. Compresses Tier 2 memories
 4. Compresses Tier 3 memories
 5. Moves old memories to cold storage
-6. Logs results to `~/.claude-memory/logs/compression.log`
+6. Logs results to `~/.superlocalmemory/logs/compression.log`
 7. Cleans up backups older than 7 days
 
 ## Database Schema
@@ -274,22 +274,22 @@ content = cold_storage.restore_from_cold_storage(memory_id)
 #### Manual Restore from Backup
 ```bash
 # List backups
-ls ~/.claude-memory/backups/
+ls ~/.superlocalmemory/backups/
 
 # Restore from backup
-cp ~/.claude-memory/backups/memory-20260205.db ~/.claude-memory/memory.db
+cp ~/.superlocalmemory/backups/memory-20260205.db ~/.superlocalmemory/memory.db
 ```
 
 ## Monitoring
 
 ### Check Compression Stats
 ```bash
-~/.claude-memory/memory-compress stats
+~/.superlocalmemory/memory-compress stats
 ```
 
 ### View Compression Logs
 ```bash
-tail -f ~/.claude-memory/logs/compression.log
+tail -f ~/.superlocalmemory/logs/compression.log
 ```
 
 ### Check Cron Job Status
@@ -298,7 +298,7 @@ tail -f ~/.claude-memory/logs/compression.log
 crontab -l
 
 # Check last run
-ls -lt ~/.claude-memory/logs/compression.log
+ls -lt ~/.superlocalmemory/logs/compression.log
 ```
 
 ## Troubleshooting
@@ -307,7 +307,7 @@ ls -lt ~/.claude-memory/logs/compression.log
 
 1. Check if enabled in config:
 ```bash
-cat ~/.claude-memory/config.json | grep -A 6 compression
+cat ~/.superlocalmemory/config.json | grep -A 6 compression
 ```
 
 2. Check cron job is set:
@@ -317,14 +317,14 @@ crontab -l | grep compress
 
 3. Check logs for errors:
 ```bash
-tail -50 ~/.claude-memory/logs/compression.log
+tail -50 ~/.superlocalmemory/logs/compression.log
 ```
 
 ### Memory Not Being Compressed
 
 Check tier classification:
 ```bash
-sqlite3 ~/.claude-memory/memory.db "SELECT id, tier, importance, created_at FROM memories WHERE id = <id>;"
+sqlite3 ~/.superlocalmemory/memory.db "SELECT id, tier, importance, created_at FROM memories WHERE id = <id>;"
 ```
 
 Possible reasons:
@@ -336,13 +336,13 @@ Possible reasons:
 
 1. Check if in archive table:
 ```bash
-sqlite3 ~/.claude-memory/memory.db "SELECT memory_id FROM memory_archive WHERE memory_id = <id>;"
+sqlite3 ~/.superlocalmemory/memory.db "SELECT memory_id FROM memory_archive WHERE memory_id = <id>;"
 ```
 
 2. Check cold storage:
 ```bash
-ls ~/.claude-memory/cold-storage/
-zgrep '"id": <id>' ~/.claude-memory/cold-storage/archive-*.json.gz
+ls ~/.superlocalmemory/cold-storage/
+zgrep '"id": <id>' ~/.superlocalmemory/cold-storage/archive-*.json.gz
 ```
 
 ## Files

@@ -49,7 +49,7 @@ The UI server requires an existing memory database. If you haven't created one y
 # Create demo database with sample data
 python create_demo_db.py
 
-# OR use your existing ~/.claude-memory/memory.db
+# OR use your existing ~/.superlocalmemory/memory.db
 ```
 
 ### 3. Start the Server
@@ -136,7 +136,7 @@ curl "http://localhost:8765/api/stats"
 
 By default, the server uses:
 - Demo mode: `demo-memory.db` in the repo
-- Production: `~/.claude-memory/memory.db`
+- Production: `~/.superlocalmemory/memory.db`
 
 To change the database path, modify `DB_PATH` in `ui_server.py`.
 

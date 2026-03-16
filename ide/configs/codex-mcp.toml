@@ -6,8 +6,6 @@
 # Manual: Copy this to ~/.codex/config.toml
 
 [mcp_servers.superlocalmemory]
-command = "python3"
-args = ["-m", "superlocalmemory.mcp.server"]
+command = "slm"
+args = ["mcp"]
 
-[mcp_servers.superlocalmemory.env]
-PYTHONPATH = "{{INSTALL_DIR}}"

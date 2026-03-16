@@ -221,7 +221,7 @@ SuperLocalMemory V2 uses a hierarchical, additive architecture where each layer 
 ┌─────────────────────────────────────────────────────────────────┐
 │ Layer 7: Universal Access                                      │
 │  Three access methods: MCP Protocol, Skills, CLI               │
-│  All share one database (~/.claude-memory/memory.db)           │
+│  All share one database (~/.superlocalmemory/memory.db)           │
 │  Output: Unified access across 16+ IDEs and tools              │
 └─────────────────────────────────────────────────────────────────┘
                             ↑

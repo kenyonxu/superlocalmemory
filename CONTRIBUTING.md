@@ -85,11 +85,11 @@ Look for issues labeled:
 # Fork the repository on GitHub (click "Fork" button)
 
 # Clone your fork
-git clone https://github.com/YOUR_USERNAME/SuperLocalMemoryV2.git
-cd SuperLocalMemoryV2-repo
+git clone https://github.com/YOUR_USERNAME/superlocalmemory.git
+cd superlocalmemory-repo
 
 # Add upstream remote
-git remote add upstream https://github.com/ORIGINAL_OWNER/SuperLocalMemoryV2.git
+git remote add upstream https://github.com/qualixar/superlocalmemory.git
 ```
 
 ### Step 2: Create Virtual Environment
@@ -150,7 +150,7 @@ git checkout -b feature/your-feature-name
 ## Project Structure
 
 ```
-SuperLocalMemoryV2-repo/
+superlocalmemory-repo/
 │
 ├── src/                          # Core source code
 │   ├── memory_store_v2.py        # Main storage layer

@@ -80,8 +80,8 @@ echo "=========================================="
 echo ""
 
 # Check if SuperLocalMemory V2 is installed
-if [ ! -d "$HOME/.claude-memory" ]; then
-    echo -e "${YELLOW}Warning:${NC} SuperLocalMemory V2 not found at ~/.claude-memory/"
+if [ ! -d "$HOME/.superlocalmemory" ]; then
+    echo -e "${YELLOW}Warning:${NC} SuperLocalMemory V2 not found at ~/.superlocalmemory/"
     echo "Skills require SuperLocalMemory V2 to be installed first."
     echo ""
     if [ "$AUTO_MODE" = true ]; then
@@ -100,7 +100,7 @@ fi
 # Check if skills source directory exists
 if [ ! -d "$SKILLS_SOURCE" ]; then
     echo -e "${RED}Error:${NC} Skills directory not found: $SKILLS_SOURCE"
-    echo "Please run this script from the SuperLocalMemoryV2-repo directory."
+    echo "Please run this script from the superlocalmemory-repo directory."
     exit 1
 fi
 

@@ -123,7 +123,7 @@ The system is designed to be conservative. Low confidence with small datasets is
 - Recommended cron job:
   ```bash
   # Every Sunday at 2 AM
-  0 2 * * 0 cd ~/.claude-memory && python3 pattern_learner.py update >> pattern_updates.log 2>&1
+  0 2 * * 0 cd ~/.superlocalmemory && python3 pattern_learner.py update >> pattern_updates.log 2>&1
   ```
 
 ---
@@ -159,7 +159,7 @@ prompt = f"""
 ## Privacy & Security
 
 - **No external API calls** — all processing is local
-- **All data stays local** — stored in `~/.claude-memory/`
+- **All data stays local** — stored in `~/.superlocalmemory/`
 - **SQL injection protected** — parameterized queries throughout
 - **No credentials stored**
 - **No network access required**

@@ -3,7 +3,7 @@
 # SuperLocalMemory V2 - NPM Package Testing Script
 # Copyright (c) 2026 Varun Pratap Bhardwaj
 # Licensed under MIT License
-# Repository: https://github.com/varun369/SuperLocalMemoryV2
+# Repository: https://github.com/qualixar/superlocalmemory
 # ============================================================================
 #
 # Tests the NPM package locally before publishing

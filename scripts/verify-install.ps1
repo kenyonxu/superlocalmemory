@@ -6,7 +6,7 @@
 
 $ErrorActionPreference = "Continue"
 
-$INSTALL_DIR = Join-Path $env:USERPROFILE ".claude-memory"
+$INSTALL_DIR = Join-Path $env:USERPROFILE ".superlocalmemory"
 
 # Print banner
 Write-Host ""

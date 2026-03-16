@@ -3,12 +3,12 @@
 # SuperLocalMemory V2 Installation Script
 # Copyright (c) 2026 Varun Pratap Bhardwaj
 # Licensed under MIT License
-# Repository: https://github.com/varun369/SuperLocalMemoryV2
+# Repository: https://github.com/qualixar/superlocalmemory
 # ============================================================================
 
 set -e
 
-INSTALL_DIR="${SL_MEMORY_PATH:-${HOME}/.claude-memory}"
+INSTALL_DIR="${SL_MEMORY_PATH:-${HOME}/.superlocalmemory}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 # Parse command line arguments
@@ -46,7 +46,7 @@ echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  SuperLocalMemory V2 - Installation                          ║"
 echo "║  by Varun Pratap Bhardwaj                                    ║"
-echo "║  https://github.com/varun369/SuperLocalMemoryV2              ║"
+echo "║  https://github.com/qualixar/superlocalmemory              ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -148,7 +148,7 @@ echo "✓ Directory: ${INSTALL_DIR}"
 UNIVERSAL_LINK="${HOME}/.superlocalmemory"
 if [ ! -e "${UNIVERSAL_LINK}" ]; then
     ln -s "${INSTALL_DIR}" "${UNIVERSAL_LINK}" 2>/dev/null && \
-        echo "✓ Universal link created: ~/.superlocalmemory → ~/.claude-memory" || true
+        echo "✓ Universal link created: ~/.superlocalmemory → ~/.superlocalmemory" || true
 fi
 
 # Copy source files
@@ -334,7 +334,7 @@ cursor.execute('CREATE TABLE IF NOT EXISTS pattern_examples (id INTEGER PRIMARY 
 cursor.execute('CREATE TABLE IF NOT EXISTS memory_tree (id INTEGER PRIMARY KEY, node_type TEXT, name TEXT, parent_id INTEGER, tree_path TEXT DEFAULT \"/\", depth INTEGER DEFAULT 0, memory_count INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
 cursor.execute('CREATE TABLE IF NOT EXISTS memory_archive (id INTEGER PRIMARY KEY, original_memory_id INTEGER, compressed_content TEXT, compression_type TEXT DEFAULT \"tier2\", original_size INTEGER, compressed_size INTEGER, archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
 cursor.execute('CREATE TABLE IF NOT EXISTS system_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
-cursor.execute(\"INSERT OR REPLACE INTO system_metadata (key, value) VALUES ('product', 'SuperLocalMemory V2'), ('author', 'Varun Pratap Bhardwaj'), ('repository', 'https://github.com/varun369/SuperLocalMemoryV2'), ('license', 'MIT'), ('schema_version', '2.0.0')\")
+cursor.execute(\"INSERT OR REPLACE INTO system_metadata (key, value) VALUES ('product', 'SuperLocalMemory V2'), ('author', 'Varun Pratap Bhardwaj'), ('repository', 'https://github.com/qualixar/superlocalmemory'), ('license', 'MIT'), ('schema_version', '2.0.0')\")
 conn.commit()
 conn.close()
 print('Database ready')
@@ -833,7 +833,7 @@ echo "  • Custom tools - See integration guide"
 echo ""
 echo "Full manual setup guide:"
 echo "  docs/MCP-MANUAL-SETUP.md"
-echo "  https://github.com/varun369/SuperLocalMemoryV2/blob/main/docs/MCP-MANUAL-SETUP.md"
+echo "  https://github.com/qualixar/superlocalmemory/blob/main/docs/MCP-MANUAL-SETUP.md"
 echo ""
 
 # Summary
@@ -944,7 +944,7 @@ echo "║  ATTRIBUTION NOTICE (REQUIRED BY MIT LICENSE)                ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
 echo "║  Created by: Varun Pratap Bhardwaj                           ║"
 echo "║  Role: Solution Architect & Original Creator                 ║"
-echo "║  Repository: github.com/varun369/SuperLocalMemoryV2          ║"
+echo "║  Repository: github.com/qualixar/superlocalmemory          ║"
 echo "║  License: MIT (attribution must be preserved)                ║"
 echo "║                                                              ║"
 echo "║  See ATTRIBUTION.md for full attribution requirements        ║"

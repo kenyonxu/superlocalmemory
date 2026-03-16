@@ -16,35 +16,35 @@
 
 ### List Profiles
 ```bash
-python ~/.claude-memory/memory-profiles.py list
+python ~/.superlocalmemory/memory-profiles.py list
 ```
 
 ### Show Current Profile
 ```bash
-python ~/.claude-memory/memory-profiles.py current
+python ~/.superlocalmemory/memory-profiles.py current
 ```
 
 ### Create New Profile
 ```bash
 # Empty profile
-python ~/.claude-memory/memory-profiles.py create work \
+python ~/.superlocalmemory/memory-profiles.py create work \
   --description "Work projects"
 
 # Copy current memories to new profile
-python ~/.claude-memory/memory-profiles.py create personal \
+python ~/.superlocalmemory/memory-profiles.py create personal \
   --from-current
 ```
 
 ### Switch Profile
 ```bash
-python ~/.claude-memory/memory-profiles.py switch work
+python ~/.superlocalmemory/memory-profiles.py switch work
 
 # ⚠️ IMPORTANT: Restart Claude CLI after switching!
 ```
 
 ### Delete Profile
 ```bash
-python ~/.claude-memory/memory-profiles.py delete old-profile
+python ~/.superlocalmemory/memory-profiles.py delete old-profile
 ```
 
 ---
@@ -72,16 +72,16 @@ Each profile has its own:
 
 ```bash
 # Create work profile
-python ~/.claude-memory/memory-profiles.py create work \
+python ~/.superlocalmemory/memory-profiles.py create work \
   --description "Professional coding projects"
 
 # Create personal profile from current
-python ~/.claude-memory/memory-profiles.py create personal \
+python ~/.superlocalmemory/memory-profiles.py create personal \
   --from-current --description "Personal learning and experiments"
 
 # Switch based on context
-python ~/.claude-memory/memory-profiles.py switch work   # During work hours
-python ~/.claude-memory/memory-profiles.py switch personal  # Personal time
+python ~/.superlocalmemory/memory-profiles.py switch work   # During work hours
+python ~/.superlocalmemory/memory-profiles.py switch personal  # Personal time
 ```
 
 **Result:**
@@ -94,14 +94,14 @@ python ~/.claude-memory/memory-profiles.py switch personal  # Personal time
 
 ```bash
 # Create profile per client
-python ~/.claude-memory/memory-profiles.py create client-acme \
+python ~/.superlocalmemory/memory-profiles.py create client-acme \
   --description "Acme Corp project"
 
-python ~/.claude-memory/memory-profiles.py create client-contoso \
+python ~/.superlocalmemory/memory-profiles.py create client-contoso \
   --description "Contoso Inc project"
 
 # Switch when working on different clients
-python ~/.claude-memory/memory-profiles.py switch client-acme
+python ~/.superlocalmemory/memory-profiles.py switch client-acme
 ```
 
 **Benefits:**
@@ -115,17 +115,17 @@ python ~/.claude-memory/memory-profiles.py switch client-acme
 
 ```bash
 # Create test profile
-python ~/.claude-memory/memory-profiles.py create experimental \
+python ~/.superlocalmemory/memory-profiles.py create experimental \
   --description "Testing new features"
 
 # Switch to test profile
-python ~/.claude-memory/memory-profiles.py switch experimental
+python ~/.superlocalmemory/memory-profiles.py switch experimental
 
 # Try new things without polluting main profile
 # ...test features...
 
 # Switch back when done
-python ~/.claude-memory/memory-profiles.py switch default
+python ~/.superlocalmemory/memory-profiles.py switch default
 ```
 
 ---
@@ -134,16 +134,16 @@ python ~/.claude-memory/memory-profiles.py switch default
 
 ```bash
 # Strict architect profile
-python ~/.claude-memory/memory-profiles.py create architect \
+python ~/.superlocalmemory/memory-profiles.py create architect \
   --description "Rigorous architecture-first approach"
 
 # Rapid prototyper profile
-python ~/.claude-memory/memory-profiles.py create prototyper \
+python ~/.superlocalmemory/memory-profiles.py create prototyper \
   --description "Fast iteration, MVP-first approach"
 
 # Use based on project phase
-python ~/.claude-memory/memory-profiles.py switch architect  # Planning
-python ~/.claude-memory/memory-profiles.py switch prototyper  # MVP development
+python ~/.superlocalmemory/memory-profiles.py switch architect  # Planning
+python ~/.superlocalmemory/memory-profiles.py switch prototyper  # MVP development
 ```
 
 **Result:** Each profile learns different patterns:
@@ -159,7 +159,7 @@ python ~/.claude-memory/memory-profiles.py switch prototyper  # MVP development
 Creates fresh V2 database with no memories:
 
 ```bash
-python ~/.claude-memory/memory-profiles.py create new-profile
+python ~/.superlocalmemory/memory-profiles.py create new-profile
 ```
 
 **When to use:**
@@ -174,7 +174,7 @@ python ~/.claude-memory/memory-profiles.py create new-profile
 Copies current memory system to new profile:
 
 ```bash
-python ~/.claude-memory/memory-profiles.py create backup --from-current
+python ~/.superlocalmemory/memory-profiles.py create backup --from-current
 ```
 
 **When to use:**
@@ -189,14 +189,14 @@ python ~/.claude-memory/memory-profiles.py create backup --from-current
 Changes active profile (requires Claude CLI restart):
 
 ```bash
-python ~/.claude-memory/memory-profiles.py switch work
+python ~/.superlocalmemory/memory-profiles.py switch work
 
 # Output:
 # Switching from 'default' to 'work'...
 #   Saving current state to profile 'default'...
-#     ✓ Saved to ~/.claude-memory/profiles/default
+#     ✓ Saved to ~/.superlocalmemory/profiles/default
 #   Loading profile 'work'...
-#     ✓ Loaded from ~/.claude-memory/profiles/work
+#     ✓ Loaded from ~/.superlocalmemory/profiles/work
 # ✅ Switched to profile: work
 #
 # ⚠️  IMPORTANT: Restart Claude CLI to use new profile!
@@ -211,7 +211,7 @@ python ~/.claude-memory/memory-profiles.py switch work
 Permanently removes a profile:
 
 ```bash
-python ~/.claude-memory/memory-profiles.py delete old-profile
+python ~/.superlocalmemory/memory-profiles.py delete old-profile
 
 # Prompts: Type profile name 'old-profile' to confirm:
 ```
@@ -227,7 +227,7 @@ python ~/.claude-memory/memory-profiles.py delete old-profile
 ### Rename Profile
 
 ```bash
-python ~/.claude-memory/memory-profiles.py rename old-name new-name
+python ~/.superlocalmemory/memory-profiles.py rename old-name new-name
 ```
 
 **Cannot rename:**
@@ -240,7 +240,7 @@ python ~/.claude-memory/memory-profiles.py rename old-name new-name
 
 Profiles stored in:
 ```
-~/.claude-memory/profiles/
+~/.superlocalmemory/profiles/
 ├── work/
 │   ├── memory.db
 │   ├── config.json
@@ -257,7 +257,7 @@ Profiles stored in:
 
 **Active profile** stored in main location:
 ```
-~/.claude-memory/
+~/.superlocalmemory/
 ├── memory.db          ← Currently active profile
 ├── config.json
 └── vectors/
@@ -267,7 +267,7 @@ Profiles stored in:
 
 ## Profile Configuration
 
-Stored in `~/.claude-memory/profiles.json`:
+Stored in `~/.superlocalmemory/profiles.json`:
 
 ```json
 {
@@ -298,50 +298,50 @@ Stored in `~/.claude-memory/profiles.json`:
 ### 1. Use Descriptive Names
 ```bash
 # Good
-python ~/.claude-memory/memory-profiles.py create client-acme-api
-python ~/.claude-memory/memory-profiles.py create personal-learning
+python ~/.superlocalmemory/memory-profiles.py create client-acme-api
+python ~/.superlocalmemory/memory-profiles.py create personal-learning
 
 # Avoid
-python ~/.claude-memory/memory-profiles.py create profile1
-python ~/.claude-memory/memory-profiles.py create temp
+python ~/.superlocalmemory/memory-profiles.py create profile1
+python ~/.superlocalmemory/memory-profiles.py create temp
 ```
 
 ### 2. Document Profile Purpose
 ```bash
-python ~/.claude-memory/memory-profiles.py create project-x \
+python ~/.superlocalmemory/memory-profiles.py create project-x \
   --description "Confidential client X - Next.js + PostgreSQL"
 ```
 
 ### 3. Switch Profiles at Context Boundaries
 ```bash
 # Start of work day
-python ~/.claude-memory/memory-profiles.py switch work
+python ~/.superlocalmemory/memory-profiles.py switch work
 
 # End of work day
-python ~/.claude-memory/memory-profiles.py switch personal
+python ~/.superlocalmemory/memory-profiles.py switch personal
 ```
 
 ### 4. Backup Before Major Changes
 ```bash
 # Create backup profile
-python ~/.claude-memory/memory-profiles.py create backup-$(date +%Y%m%d) \
+python ~/.superlocalmemory/memory-profiles.py create backup-$(date +%Y%m%d) \
   --from-current
 
 # Make changes in main profile
 # ...
 
 # If needed, switch to backup
-python ~/.claude-memory/memory-profiles.py switch backup-20260205
+python ~/.superlocalmemory/memory-profiles.py switch backup-20260205
 ```
 
 ### 5. Archive Completed Projects
 ```bash
 # Rename completed project
-python ~/.claude-memory/memory-profiles.py rename client-acme \
+python ~/.superlocalmemory/memory-profiles.py rename client-acme \
   archived-client-acme-202602
 
 # Create fresh profile for new project
-python ~/.claude-memory/memory-profiles.py create client-newco
+python ~/.superlocalmemory/memory-profiles.py create client-newco
 ```
 
 ---
@@ -353,7 +353,7 @@ python ~/.claude-memory/memory-profiles.py create client-newco
 ### Reset Current Profile Only
 ```bash
 # Soft reset active profile
-python ~/.claude-memory/memory-reset.py soft
+python ~/.superlocalmemory/memory-reset.py soft
 
 # Active profile cleared, others untouched
 ```
@@ -361,22 +361,22 @@ python ~/.claude-memory/memory-reset.py soft
 ### Reset Specific Profile
 ```bash
 # Switch to profile
-python ~/.claude-memory/memory-profiles.py switch old-project
+python ~/.superlocalmemory/memory-profiles.py switch old-project
 
 # Reset it
-python ~/.claude-memory/memory-reset.py soft
+python ~/.superlocalmemory/memory-reset.py soft
 
 # Switch back
-python ~/.claude-memory/memory-profiles.py switch default
+python ~/.superlocalmemory/memory-profiles.py switch default
 ```
 
 ### Create Clean Profile
 ```bash
 # Create empty profile
-python ~/.claude-memory/memory-profiles.py create clean-slate
+python ~/.superlocalmemory/memory-profiles.py create clean-slate
 
 # Switch to it
-python ~/.claude-memory/memory-profiles.py switch clean-slate
+python ~/.superlocalmemory/memory-profiles.py switch clean-slate
 
 # Now work in completely clean environment
 ```
@@ -388,7 +388,7 @@ python ~/.claude-memory/memory-profiles.py switch clean-slate
 ### "Profile not found"
 Check available profiles:
 ```bash
-python ~/.claude-memory/memory-profiles.py list
+python ~/.superlocalmemory/memory-profiles.py list
 ```
 
 ### "Changes not reflecting"
@@ -401,14 +401,14 @@ Restart Claude CLI after switching profiles:
 ### "Cannot delete active profile"
 Switch to different profile first:
 ```bash
-python ~/.claude-memory/memory-profiles.py switch default
-python ~/.claude-memory/memory-profiles.py delete unwanted
+python ~/.superlocalmemory/memory-profiles.py switch default
+python ~/.superlocalmemory/memory-profiles.py delete unwanted
 ```
 
 ### "Profile directory not found"
 Profile will be created on first switch:
 ```bash
-python ~/.claude-memory/memory-profiles.py switch new-profile
+python ~/.superlocalmemory/memory-profiles.py switch new-profile
 # Creates directory automatically
 ```
 
@@ -432,7 +432,7 @@ A: Yes. Each profile has its own `config.json`.
 A: ~5MB per profile with 100 memories (before compression).
 
 **Q: Can I backup all profiles at once?**
-A: Yes, backup `~/.claude-memory/profiles/` directory.
+A: Yes, backup `~/.superlocalmemory/profiles/` directory.
 
 ---
 
