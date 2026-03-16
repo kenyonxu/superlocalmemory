@@ -1,0 +1,15 @@
+# Continue.dev MCP Configuration
+# Add this to ~/.continue/config.yaml
+
+contextProviders:
+  - name: mcp
+    params:
+      serverName: "superlocalmemory"
+      command: "python3"
+      args:
+        - "-m"
+        - "superlocalmemory.mcp.server"
+      description: "SuperLocalMemory V3 - Search your memory system"
+
+# You can also use Continue's slash commands with SuperLocalMemory
+# See continue-skills.yaml for slash command configuration

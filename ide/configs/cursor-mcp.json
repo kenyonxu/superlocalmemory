@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "superlocalmemory": {
+      "command": "python3",
+      "args": [
+        "-m", "superlocalmemory.mcp.server"
+      ],
+      "cwd": "{{INSTALL_DIR}}",
+      "env": {
+        "PYTHONPATH": "{{INSTALL_DIR}}"
+      },
+      "description": "SuperLocalMemory V3 - Local memory system with mathematical foundations and knowledge graphs"
+    }
+  }
+}

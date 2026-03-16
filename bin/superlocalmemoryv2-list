@@ -1,3 +1,0 @@
-#!/bin/bash
-# SuperLocalMemory V2 - List Recent Memories Command Wrapper
-node ~/.claude-memory/hooks/memory-list-skill.js "$@"

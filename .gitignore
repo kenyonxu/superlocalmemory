@@ -45,6 +45,10 @@ add_attribution.py
 /*.jpg
 /*.jpeg
 
+# ==== PACKAGING ====
+*.egg-info/
+*.egg
+
 # ==== BUILD ARTIFACTS ====
 build/
 dist/
@@ -66,6 +70,7 @@ venv/
 .venv/
 env/
 ENV/
+uv.lock
 
 # ==== SECRETS & TOKENS (Never commit) ====
 .mcpregistry_github_token
@@ -141,3 +146,4 @@ website/VERIFICATION-CHECKLIST.md
 # ==== TEST OUTPUTS ====
 test-output/
 test-results/
+<superlocalmemory.*

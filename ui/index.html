@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SuperLocalMemory V2 - Knowledge Graph Explorer</title>
+    <title>SuperLocalMemory V3 — Dashboard</title>
 
     <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
@@ -636,7 +636,8 @@
     <nav class="navbar navbar-dark mb-4">
         <div class="container-fluid">
             <span class="navbar-brand mb-0 h1">
-                <i class="bi bi-diagram-3"></i> SuperLocalMemory V2
+                <i class="bi bi-diagram-3"></i> SuperLocalMemory V3
+                <span id="mode-badge" class="badge bg-light text-dark ms-2">Mode A</span>
             </span>
             <div class="d-flex align-items-center gap-3">
                 <div class="d-flex align-items-center gap-2">
@@ -699,13 +700,23 @@
         <!-- Main Content Tabs -->
         <ul class="nav nav-tabs mb-3" id="mainTabs" role="tablist">
             <li class="nav-item">
-                <button class="nav-link active" id="graph-tab" data-bs-toggle="tab" data-bs-target="#graph-pane">
+                <button class="nav-link active" id="dashboard-tab" data-bs-toggle="tab" data-bs-target="#dashboard-pane">
+                    <i class="bi bi-speedometer2"></i> Dashboard
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link" id="graph-tab" data-bs-toggle="tab" data-bs-target="#graph-pane">
                     <i class="bi bi-diagram-3"></i> Knowledge Graph
                 </button>
             </li>
             <li class="nav-item">
                 <button class="nav-link" id="memories-tab" data-bs-toggle="tab" data-bs-target="#memories-pane">
                     <i class="bi bi-list-ul"></i> Memories
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link" id="recall-lab-tab" data-bs-toggle="tab" data-bs-target="#recall-lab-pane">
+                    <i class="bi bi-search-heart"></i> Recall Lab
                 </button>
             </li>
             <li class="nav-item">
@@ -738,6 +749,11 @@
                     <i class="bi bi-robot"></i> Agents
                 </button>
             </li>
+            <li class="nav-item">
+                <button class="nav-link" id="trust-tab" data-bs-toggle="tab" data-bs-target="#trust-pane">
+                    <i class="bi bi-shield-check"></i> Trust
+                </button>
+            </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" id="lifecycle-tab" data-bs-toggle="tab" data-bs-target="#lifecycle-pane" type="button" role="tab">
                     <i class="bi bi-hourglass-split"></i> Lifecycle <span class="badge bg-success ms-1">v2.8</span>
@@ -754,6 +770,16 @@
                 </button>
             </li>
             <li class="nav-item">
+                <button class="nav-link" id="math-health-tab" data-bs-toggle="tab" data-bs-target="#math-health-pane">
+                    <i class="bi bi-calculator"></i> Math Health
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link" id="ide-tab" data-bs-toggle="tab" data-bs-target="#ide-pane">
+                    <i class="bi bi-plug"></i> IDEs
+                </button>
+            </li>
+            <li class="nav-item">
                 <button class="nav-link" id="settings-tab" data-bs-toggle="tab" data-bs-target="#settings-pane">
                     <i class="bi bi-gear"></i> Settings
                 </button>
@@ -766,7 +792,100 @@
 
         <div class="tab-content">
             <!-- Graph Visualization -->
-            <div class="tab-pane fade show active" id="graph-pane">
+            <!-- V3 Dashboard -->
+            <div class="tab-pane fade show active" id="dashboard-pane">
+                <div class="row g-3 mb-4">
+                    <!-- Mode Card -->
+                    <div class="col-md-4">
+                        <div class="card stat-card h-100">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-center mb-3">
+                                    <h6 class="card-subtitle text-muted">Operating Mode</h6>
+                                    <i class="bi bi-shield-check stat-icon text-primary"></i>
+                                </div>
+                                <h3 id="dashboard-mode" class="stat-value">Mode A</h3>
+                                <p id="dashboard-mode-desc" class="text-muted small mb-2">Local Guardian — Zero Cloud</p>
+                                <div class="btn-group btn-group-sm" role="group">
+                                    <button class="btn btn-outline-primary mode-btn" data-mode="a">A</button>
+                                    <button class="btn btn-outline-primary mode-btn" data-mode="b">B</button>
+                                    <button class="btn btn-outline-primary mode-btn" data-mode="c">C</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Stats Card -->
+                    <div class="col-md-4">
+                        <div class="card stat-card h-100">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-center mb-3">
+                                    <h6 class="card-subtitle text-muted">Memories</h6>
+                                    <i class="bi bi-database stat-icon text-success"></i>
+                                </div>
+                                <h3 id="dashboard-memory-count" class="stat-value">0</h3>
+                                <p class="text-muted small mb-0">facts stored</p>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Provider Card -->
+                    <div class="col-md-4">
+                        <div class="card stat-card h-100">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-center mb-3">
+                                    <h6 class="card-subtitle text-muted">LLM Provider</h6>
+                                    <i class="bi bi-cloud stat-icon text-info"></i>
+                                </div>
+                                <h3 id="dashboard-provider" class="stat-value">None</h3>
+                                <p id="dashboard-model" class="text-muted small mb-0"></p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- Quick Actions -->
+                <div class="row g-3 mb-4">
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-body">
+                                <h6><i class="bi bi-plus-circle"></i> Quick Store</h6>
+                                <div class="input-group">
+                                    <input type="text" id="quick-store-input" class="form-control" placeholder="Type something to remember...">
+                                    <button class="btn btn-primary" id="quick-store-btn">Store</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-body">
+                                <h6><i class="bi bi-search"></i> Quick Recall</h6>
+                                <div class="input-group">
+                                    <input type="text" id="quick-recall-input" class="form-control" placeholder="Search your memories...">
+                                    <button class="btn btn-success" id="quick-recall-btn">Recall</button>
+                                </div>
+                                <div id="quick-recall-results" class="mt-2 small"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- System Info -->
+                <div class="row g-3">
+                    <div class="col-md-12">
+                        <div class="card">
+                            <div class="card-body">
+                                <h6><i class="bi bi-info-circle"></i> System</h6>
+                                <div class="row text-muted small">
+                                    <div class="col-md-3">Version: <strong>3.0.0</strong></div>
+                                    <div class="col-md-3">Profile: <strong id="dashboard-profile">default</strong></div>
+                                    <div class="col-md-3">Base: <strong id="dashboard-basedir">~/.superlocalmemory</strong></div>
+                                    <div class="col-md-3">Math Layers: <strong class="text-success">Active</strong></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Graph Visualization -->
+            <div class="tab-pane fade" id="graph-pane">
                 <div class="card p-3 mb-3">
                     <div class="row align-items-center mb-2">
                         <div class="col-md-8">
@@ -892,6 +1011,20 @@
                         </div>
                     </div>
                 </div>
+            </div>
+
+            <!-- V3 Recall Lab -->
+            <div class="tab-pane fade" id="recall-lab-pane">
+                <h5>Recall Lab — Search with Channel Breakdown</h5>
+                <p class="text-muted">See how each retrieval channel contributes to results.</p>
+                <div class="input-group mb-3">
+                    <input type="text" id="recall-lab-query" class="form-control form-control-lg" placeholder="Enter your query...">
+                    <button class="btn btn-primary btn-lg" id="recall-lab-search">
+                        <i class="bi bi-search"></i> Search with Trace
+                    </button>
+                </div>
+                <div id="recall-lab-meta" class="mb-3 text-muted small"></div>
+                <div id="recall-lab-results"></div>
             </div>
 
             <!-- Clusters -->
@@ -1208,6 +1341,44 @@
                 </div>
             </div>
 
+            <!-- Trust Dashboard (V3) -->
+            <div class="tab-pane fade" id="trust-pane">
+                <h5><i class="bi bi-shield-check"></i> Trust Dashboard</h5>
+                <p class="text-muted">Bayesian trust scoring per agent and per fact.</p>
+                <div class="row g-3 mb-3">
+                    <div class="col-md-4">
+                        <div class="card text-center">
+                            <div class="card-body">
+                                <h6>Total Agents</h6>
+                                <h3 id="trust-agent-count">0</h3>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card text-center">
+                            <div class="card-body">
+                                <h6>Avg Trust Score</h6>
+                                <h3 id="trust-avg-score">&mdash;</h3>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card text-center">
+                            <div class="card-body">
+                                <h6>Burst Alerts</h6>
+                                <h3 id="trust-burst-count" class="text-danger">0</h3>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div id="trust-agents-table" class="table-responsive">
+                    <table class="table table-sm table-striped">
+                        <thead><tr><th>Agent/Fact</th><th>Type</th><th>Trust Score</th><th>Evidence</th><th>Status</th></tr></thead>
+                        <tbody id="trust-agents-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
             <!-- Lifecycle (v2.8) -->
             <div class="tab-pane fade" id="lifecycle-pane" role="tabpanel">
                 <div class="d-flex justify-content-between align-items-center mb-3">
@@ -1338,8 +1509,103 @@
                 </div>
             </div>
 
+            <!-- Math Health (V3) -->
+            <div class="tab-pane fade" id="math-health-pane">
+                <h5><i class="bi bi-calculator"></i> Mathematical Layer Health</h5>
+                <p class="text-muted">Status of Fisher-Rao, sheaf cohomology, and Langevin dynamics.</p>
+                <div class="row g-3" id="math-health-cards"></div>
+            </div>
+
+            <!-- IDE Connections (V3) -->
+            <div class="tab-pane fade" id="ide-pane">
+                <h5><i class="bi bi-plug"></i> IDE Connections</h5>
+                <p class="text-muted">Manage IDE integrations. Connect new IDEs or check connection status.</p>
+                <button class="btn btn-primary mb-3" id="ide-connect-all-btn"><i class="bi bi-link-45deg"></i> Connect All Detected IDEs</button>
+                <div id="ide-list" class="table-responsive">
+                    <table class="table table-sm">
+                        <thead><tr><th>IDE</th><th>Installed</th><th>Config Path</th><th>Action</th></tr></thead>
+                        <tbody id="ide-list-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
             <!-- Settings & Backup -->
             <div class="tab-pane fade" id="settings-pane">
+                <!-- V3 Configuration -->
+                <div class="card mb-3">
+                    <div class="card-header bg-primary text-white">
+                        <h6 class="mb-0"><i class="bi bi-gear-wide-connected"></i> V3 Configuration</h6>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <label class="form-label fw-bold">Operating Mode</label>
+                                <select id="settings-mode" class="form-select">
+                                    <option value="a">Mode A — Local Guardian (Zero Cloud)</option>
+                                    <option value="b">Mode B — Smart Local (Ollama)</option>
+                                    <option value="c">Mode C — Full Power (Cloud LLM)</option>
+                                </select>
+                                <button class="btn btn-sm btn-primary mt-2" id="settings-mode-save">Save Mode</button>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label fw-bold">LLM Provider</label>
+                                <select id="settings-provider" class="form-select">
+                                    <option value="none">None (Mode A)</option>
+                                    <option value="openai">OpenAI</option>
+                                    <option value="anthropic">Anthropic</option>
+                                    <option value="ollama">Ollama (Local)</option>
+                                    <option value="openrouter">OpenRouter</option>
+                                </select>
+                                <div class="mt-2">
+                                    <input type="password" id="settings-api-key" class="form-control form-control-sm" placeholder="API Key">
+                                </div>
+                                <button class="btn btn-sm btn-primary mt-2" id="settings-provider-save">Save Provider</button>
+                            </div>
+                        </div>
+                        <hr>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <h6>Auto-Capture</h6>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="auto-capture-toggle" checked>
+                                    <label class="form-check-label">Enable auto-capture</label>
+                                </div>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="auto-capture-decisions" checked>
+                                    <label class="form-check-label">Capture decisions</label>
+                                </div>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="auto-capture-bugs" checked>
+                                    <label class="form-check-label">Capture bug fixes</label>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <h6>Auto-Recall</h6>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="auto-recall-toggle" checked>
+                                    <label class="form-check-label">Enable auto-recall</label>
+                                </div>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="auto-recall-session" checked>
+                                    <label class="form-check-label">Recall on session start</label>
+                                </div>
+                            </div>
+                        </div>
+                        <hr>
+                        <h6>Migration &amp; Database</h6>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <p class="small text-muted">Database: <strong id="settings-db-path">~/.superlocalmemory/memory.db</strong></p>
+                                <p class="small text-muted">Backup: <span id="settings-backup-status">Check with <code>slm migrate --rollback</code></span></p>
+                            </div>
+                            <div class="col-md-6">
+                                <p class="small text-muted">Version: <strong>3.0.0</strong></p>
+                                <p class="small text-muted">Engine: <strong class="text-success">V3 Active</strong></p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Profile Management -->
                 <div class="card p-3 mb-3">
                     <h5 class="mb-3"><i class="bi bi-people"></i> Profile Management</h5>
@@ -1509,9 +1775,16 @@
     <script src="static/js/behavioral.js"></script>
     <script src="static/js/compliance.js"></script>
     <script src="static/js/init.js"></script>
+    <script src="static/js/dashboard.js"></script>
+    <script src="static/js/recall-lab.js"></script>
+    <script src="static/js/trust-dashboard.js"></script>
+    <script src="static/js/math-health.js"></script>
+    <script src="static/js/auto-settings.js"></script>
+    <script src="static/js/ide-status.js"></script>
+    <script src="static/js/fact-detail.js"></script>
 
     <footer>
-        <p>SuperLocalMemory V2 by <a href="https://github.com/varun369">Varun Pratap Bhardwaj</a></p>
+        <p>SuperLocalMemory V3 by <a href="https://github.com/varun369">Varun Pratap Bhardwaj</a></p>
         <p><a href="https://github.com/varun369/SuperLocalMemoryV2">GitHub Repository</a> | MIT License</p>
     </footer>
 </body>

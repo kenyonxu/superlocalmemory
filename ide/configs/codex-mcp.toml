@@ -1,0 +1,13 @@
+# SuperLocalMemory V3 - Codex CLI MCP Configuration
+# Copyright (c) 2026 Varun Pratap Bhardwaj
+# Licensed under MIT License
+#
+# Auto-configured by install.sh or use: codex mcp add
+# Manual: Copy this to ~/.codex/config.toml
+
+[mcp_servers.superlocalmemory]
+command = "python3"
+args = ["-m", "superlocalmemory.mcp.server"]
+
+[mcp_servers.superlocalmemory.env]
+PYTHONPATH = "{{INSTALL_DIR}}"

@@ -54,11 +54,11 @@ async function backupLearningDb() {
         if (data.success) {
             showToast('Learning DB backed up: ' + (data.filename || 'learning.db.bak'));
         } else {
-            showToast('Backup created at ~/.claude-memory/learning.db.bak');
+            showToast('Backup created at ~/.superlocalmemory/learning.db.bak');
         }
     } catch (error) {
         // Fallback: just tell user the manual path
-        showToast('Manual backup: cp ~/.claude-memory/learning.db ~/.claude-memory/learning.db.bak');
+        showToast('Manual backup: cp ~/.superlocalmemory/learning.db ~/.superlocalmemory/learning.db.bak');
     }
 }
 

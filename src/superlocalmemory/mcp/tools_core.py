@@ -1,0 +1,305 @@
+# Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
+# Licensed under the MIT License - see LICENSE file
+# Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
+
+"""SuperLocalMemory V3 — Core MCP Tools (13 tools).
+
+remember, recall, search, fetch, list_recent, get_status, build_graph,
+switch_profile, backup_status, memory_used, get_learned_patterns,
+correct_pattern, get_attribution.
+
+Part of Qualixar | Author: Varun Pratap Bhardwaj
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
+
+
+def register_core_tools(server, get_engine: Callable) -> None:
+    """Register the 13 core MCP tools on *server*."""
+
+    @server.tool()
+    async def remember(
+        content: str, tags: str = "", project: str = "",
+        importance: int = 5, session_id: str = "",
+        agent_id: str = "mcp_client",
+    ) -> dict:
+        """Store content to memory with intelligent indexing.
+
+        Extracts atomic facts, resolves entities, builds graph edges,
+        and indexes for 4-channel retrieval.
+        """
+        try:
+            engine = get_engine()
+            metadata: dict[str, Any] = {"tags": tags, "project": project, "importance": importance, "agent_id": agent_id}
+            fact_ids = engine.store(content, session_id=session_id, metadata=metadata)
+            return {"success": True, "fact_ids": fact_ids, "count": len(fact_ids)}
+        except Exception as exc:
+            logger.exception("remember failed")
+            return {"success": False, "error": str(exc)}
+
+    @server.tool()
+    async def recall(query: str, limit: int = 10, agent_id: str = "mcp_client") -> dict:
+        """Search memories by semantic query with 4-channel retrieval, RRF fusion, and reranking."""
+        try:
+            engine = get_engine()
+            response = engine.recall(query, limit=limit)
+            results = _format_results(response.results[:limit])
+            return {"success": True, "results": results, "count": len(results), "query_type": response.query_type}
+        except Exception as exc:
+            logger.exception("recall failed")
+            return {"success": False, "error": str(exc)}
+
+    @server.tool()
+    async def search(query: str, limit: int = 10, profile_id: str = "") -> dict:
+        """Full-text search across memories using FTS5 with BM25 ranking."""
+        try:
+            engine = get_engine()
+            pid = profile_id or engine.profile_id
+            facts = engine._db.search_facts_fts(query, pid, limit=limit)
+            items = []
+            for f in facts:
+                items.append({
+                    "fact_id": f.fact_id,
+                    "content": f.content,
+                    "fact_type": f.fact_type.value,
+                    "confidence": round(f.confidence, 3),
+                    "date": f.observation_date,
+                })
+            return {"success": True, "results": items, "count": len(items)}
+        except Exception as exc:
+            logger.exception("search failed")
+            return {"success": False, "error": str(exc)}
+
+    @server.tool()
+    async def fetch(fact_ids: str) -> dict:
+        """Fetch full details for specific fact IDs (comma-separated)."""
+        try:
+            engine = get_engine()
+            ids = [fid.strip() for fid in fact_ids.split(",") if fid.strip()]
+            facts = engine._db.get_facts_by_ids(ids, engine.profile_id)
+            items = []
+            for f in facts:
+                items.append({
+                    "fact_id": f.fact_id,
+                    "content": f.content,
+                    "fact_type": f.fact_type.value,
+                    "entities": f.canonical_entities,
+                    "confidence": round(f.confidence, 3),
+                    "importance": round(f.importance, 3),
+                    "observation_date": f.observation_date,
+                    "referenced_date": f.referenced_date,
+                    "lifecycle": f.lifecycle.value,
+                    "access_count": f.access_count,
+                })
+            return {"success": True, "results": items, "count": len(items)}
+        except Exception as exc:
+            logger.exception("fetch failed")
+            return {"success": False, "error": str(exc)}
+
+    @server.tool()
+    async def list_recent(limit: int = 20, profile_id: str = "") -> dict:
+        """List most recently stored memories, newest first."""
+        try:
+            engine = get_engine()
+            pid = profile_id or engine.profile_id
+            facts = engine._db.get_all_facts(pid)[:limit]
+            items = []
+            for f in facts:
+                items.append({
+                    "fact_id": f.fact_id,
+                    "content": f.content[:120],
+                    "fact_type": f.fact_type.value,
+                    "created_at": f.created_at,
+                    "session_id": f.session_id,
+                })
+            return {"success": True, "results": items, "count": len(items)}
+        except Exception as exc:
+            logger.exception("list_recent failed")
+            return {"success": False, "error": str(exc)}
+
+    @server.tool()
+    async def get_status() -> dict:
+        """Get memory system status: fact count, entity count, mode, profile, db size."""
+        try:
+            engine = get_engine()
+            pid = engine.profile_id
+            fact_count = engine._db.get_fact_count(pid)
+            entities = engine._db.execute(
+                "SELECT COUNT(*) AS c FROM canonical_entities WHERE profile_id = ?",
+                (pid,),
+            )
+            entity_count = int(dict(entities[0])["c"]) if entities else 0
+            edges = engine._db.execute(
+                "SELECT COUNT(*) AS c FROM graph_edges WHERE profile_id = ?",
+                (pid,),
+            )
+            edge_count = int(dict(edges[0])["c"]) if edges else 0
+
+            import os
+            db_size_mb = 0.0
+            db_path = engine._db.db_path
+            if db_path.exists():
+                db_size_mb = round(os.path.getsize(db_path) / (1024 * 1024), 2)
+
+            return {
+                "success": True,
+                "mode": engine._config.mode.value,
+                "profile": pid,
+                "fact_count": fact_count,
+                "entity_count": entity_count,
+                "edge_count": edge_count,
+                "db_size_mb": db_size_mb,
+            }
+        except Exception as exc:
+            logger.exception("get_status failed")
+            return {"success": False, "error": str(exc)}
+
+    @server.tool()
+    async def build_graph(profile_id: str = "") -> dict:
+        """Rebuild knowledge graph edges for all facts in the active profile."""
+        try:
+            engine = get_engine()
+            pid = profile_id or engine.profile_id
+            facts = engine._db.get_all_facts(pid)
+            edge_count = 0
+            for fact in facts:
+                if engine._graph_builder:
+                    engine._graph_builder.build_edges(fact, pid)
+                    edge_count += 1
+            return {
+                "success": True,
+                "facts_processed": len(facts),
+                "edges_built": edge_count,
+            }
+        except Exception as exc:
+            logger.exception("build_graph failed")
+            return {"success": False, "error": str(exc)}
+
+    @server.tool()
+    async def switch_profile(profile_id: str) -> dict:
+        """Switch the active memory profile. All operations scope to this profile."""
+        try:
+            engine = get_engine()
+            old = engine.profile_id
+            engine.profile_id = profile_id
+            return {
+                "success": True,
+                "previous_profile": old,
+                "current_profile": profile_id,
+            }
+        except Exception as exc:
+            logger.exception("switch_profile failed")
+            return {"success": False, "error": str(exc)}
+
+    @server.tool()
+    async def backup_status() -> dict:
+        """Get backup system status, last backup time, and available backup files."""
+        try:
+            engine = get_engine()
+            from superlocalmemory.infra.backup import BackupManager
+            bm = BackupManager(engine._config.base_dir, engine._db.db_path)
+            return {"success": True, **bm.get_status()}
+        except Exception as exc:
+            logger.exception("backup_status failed")
+            return {"success": False, "error": str(exc)}
+
+    @server.tool()
+    async def memory_used() -> dict:
+        """Get memory usage breakdown by fact type and lifecycle state."""
+        try:
+            engine = get_engine()
+            pid = engine.profile_id
+            facts = engine._db.get_all_facts(pid)
+            by_type: dict[str, int] = {}
+            by_lifecycle: dict[str, int] = {}
+            for f in facts:
+                by_type[f.fact_type.value] = by_type.get(f.fact_type.value, 0) + 1
+                by_lifecycle[f.lifecycle.value] = (
+                    by_lifecycle.get(f.lifecycle.value, 0) + 1
+                )
+            return {
+                "success": True,
+                "total_facts": len(facts),
+                "by_type": by_type,
+                "by_lifecycle": by_lifecycle,
+                "profile": pid,
+            }
+        except Exception as exc:
+            logger.exception("memory_used failed")
+            return {"success": False, "error": str(exc)}
+
+    @server.tool()
+    async def get_learned_patterns(pattern_type: str = "", limit: int = 20) -> dict:
+        """Get learned behavioral patterns (interests, refinements, archival habits)."""
+        try:
+            engine = get_engine()
+            from superlocalmemory.learning.behavioral import BehavioralStore
+            store = BehavioralStore(engine._db.db_path)
+            ptype = pattern_type if pattern_type else None
+            patterns = store.get_patterns(
+                engine.profile_id, pattern_type=ptype, limit=limit,
+            )
+            return {"success": True, "patterns": patterns, "count": len(patterns)}
+        except Exception as exc:
+            logger.exception("get_learned_patterns failed")
+            return {"success": False, "error": str(exc)}
+
+    @server.tool()
+    async def correct_pattern(pattern_id: str, correction: str) -> dict:
+        """Correct or annotate a learned behavioral pattern to improve retrieval."""
+        try:
+            engine = get_engine()
+            from superlocalmemory.learning.behavioral import BehavioralStore
+            store = BehavioralStore(engine._db.db_path)
+            store.record(
+                engine.profile_id,
+                pattern_type="correction",
+                pattern_key=pattern_id,
+                metadata={"correction": correction},
+            )
+            return {"success": True, "pattern_id": pattern_id}
+        except Exception as exc:
+            logger.exception("correct_pattern failed")
+            return {"success": False, "error": str(exc)}
+
+    @server.tool()
+    async def get_attribution() -> dict:
+        """Get system attribution: author, version, license, and provenance metadata."""
+        return {
+            "success": True,
+            "product": "SuperLocalMemory V3",
+            "author": "Varun Pratap Bhardwaj",
+            "organization": "Qualixar",
+            "license": "MIT",
+            "urls": {
+                "product": "https://superlocalmemory.com",
+                "author": "https://varunpratap.com",
+                "organization": "https://qualixar.com",
+            },
+        }
+
+
+# -- Helpers ------------------------------------------------------------------
+
+def _format_results(results) -> list[dict]:
+    """Convert RetrievalResult list to serialisable dicts."""
+    items: list[dict] = []
+    for r in results:
+        items.append({
+            "fact_id": r.fact.fact_id,
+            "content": r.fact.content,
+            "score": round(r.score, 3),
+            "confidence": round(r.confidence, 3),
+            "trust_score": round(r.trust_score, 3),
+            "fact_type": r.fact.fact_type.value,
+            "channel_scores": {
+                k: round(v, 3) for k, v in r.channel_scores.items()
+            },
+        })
+    return items

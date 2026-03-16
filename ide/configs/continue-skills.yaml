@@ -1,0 +1,26 @@
+# Continue.dev Slash Commands for SuperLocalMemory V3
+# These map to the V3 CLI commands
+# Add this to ~/.continue/config.yaml
+
+slashCommands:
+  - name: "slm-remember"
+    description: "Save to SuperLocalMemory"
+    run: "slm remember \"{{input}}\""
+
+  - name: "slm-recall"
+    description: "Search SuperLocalMemory"
+    run: "slm recall \"{{input}}\""
+
+  - name: "slm-list"
+    description: "List recent memories"
+    run: "slm list"
+
+  - name: "slm-status"
+    description: "SuperLocalMemory system status"
+    run: "slm status"
+
+# Usage in Continue.dev:
+#   /slm-remember Use FastAPI for REST APIs
+#   /slm-recall authentication patterns
+#   /slm-list
+#   /slm-status

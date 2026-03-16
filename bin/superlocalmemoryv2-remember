@@ -1,3 +1,0 @@
-#!/bin/bash
-# SuperLocalMemory V2 - Remember (Save Memory) Command Wrapper
-node ~/.claude-memory/hooks/memory-remember-skill.js "$@"

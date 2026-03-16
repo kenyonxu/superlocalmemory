@@ -302,10 +302,10 @@ function showPrivacyDetails() {
         '- Time spent viewing memory details\n' +
         '- Search patterns (queries are hashed, never stored as raw text)\n\n' +
         'Where it is stored:\n' +
-        '~/.claude-memory/learning.db (local SQLite file)\n\n' +
+        '~/.superlocalmemory/learning.db (local SQLite file)\n\n' +
         'How to delete it:\n' +
         'Use "Reset Learning Data" in Settings, or run:\n' +
-        'rm ~/.claude-memory/learning.db';
+        'rm ~/.superlocalmemory/learning.db';
     alert(info);
 }
 

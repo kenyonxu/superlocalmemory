@@ -1,0 +1,148 @@
+# Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
+# Licensed under the MIT License - see LICENSE file
+# Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
+
+"""Background scheduler that periodically enforces retention rules.
+
+Runs on a configurable interval (default: 1 hour) using daemon threads
+so the scheduler does not prevent process exit.
+"""
+
+from __future__ import annotations
+
+import logging
+import sqlite3
+import threading
+from typing import Any, Optional
+
+from .retention import RetentionEngine
+
+logger = logging.getLogger(__name__)
+
+# Default: run every hour
+DEFAULT_INTERVAL_SECONDS = 3600
+
+
+class RetentionScheduler:
+    """Background scheduler that periodically enforces retention rules.
+
+    Uses daemon threading — does not prevent process exit. The scheduler
+    runs RetentionEngine.enforce() on all profiles at each interval.
+    """
+
+    def __init__(
+        self,
+        retention_engine: RetentionEngine,
+        interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
+    ) -> None:
+        self._engine = retention_engine
+        self._interval = interval_seconds
+        self._timer: Optional[threading.Timer] = None
+        self._running = False
+        self._lock = threading.Lock()
+
+    @property
+    def is_running(self) -> bool:
+        """Whether the scheduler is currently running."""
+        return self._running
+
+    # ------------------------------------------------------------------
+    # Start / Stop
+    # ------------------------------------------------------------------
+
+    def start(self) -> None:
+        """Start the background scheduler.
+
+        Does nothing if already running. Schedules the first enforcement
+        cycle after interval_seconds.
+        """
+        with self._lock:
+            if self._running:
+                return
+            self._running = True
+            self._schedule_next()
+            logger.info(
+                "Retention scheduler started (interval=%ds)",
+                self._interval,
+            )
+
+    def stop(self) -> None:
+        """Stop the background scheduler.
+
+        Cancels the pending timer. Safe to call even if not running.
+        """
+        with self._lock:
+            self._running = False
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            logger.info("Retention scheduler stopped")
+
+    # ------------------------------------------------------------------
+    # Execution
+    # ------------------------------------------------------------------
+
+    def run_once(self) -> dict[str, Any]:
+        """Run retention enforcement once (for testing / manual trigger).
+
+        Returns:
+            Dict with enforcement results across all profiles.
+        """
+        return self._execute_cycle()
+
+    # ------------------------------------------------------------------
+    # Internal scheduling
+    # ------------------------------------------------------------------
+
+    def _schedule_next(self) -> None:
+        """Schedule the next enforcement cycle."""
+        self._timer = threading.Timer(self._interval, self._run_cycle)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _run_cycle(self) -> None:
+        """Run one enforcement cycle, then schedule the next."""
+        try:
+            self._execute_cycle()
+        except Exception as exc:
+            # Scheduler must not crash — log and continue
+            logger.error("Retention scheduler cycle failed: %s", exc)
+        finally:
+            with self._lock:
+                if self._running:
+                    self._schedule_next()
+
+    def _execute_cycle(self) -> dict[str, Any]:
+        """Core retention enforcement logic.
+
+        Discovers all profiles with retention rules and enforces each.
+        """
+        results: list[dict[str, Any]] = []
+
+        try:
+            db = self._engine._db
+            rows = db.execute(
+                "SELECT DISTINCT profile_id FROM retention_rules"
+            ).fetchall()
+            profile_ids = [r[0] for r in rows]
+        except sqlite3.OperationalError:
+            profile_ids = []
+
+        for profile_id in profile_ids:
+            try:
+                result = self._engine.enforce(profile_id)
+                results.append(result)
+            except Exception as exc:
+                logger.error(
+                    "Retention enforcement failed for profile '%s': %s",
+                    profile_id, exc,
+                )
+                results.append({
+                    "profile_id": profile_id,
+                    "error": str(exc),
+                })
+
+        return {
+            "profiles_processed": len(profile_ids),
+            "results": results,
+        }
