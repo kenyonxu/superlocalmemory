@@ -12,32 +12,35 @@ SuperLocalMemory V3 introduces three mathematical pillars — each a **world fir
 
 **What this means in practice:**
 - A high-confidence memory and a low-confidence memory about the same topic are distinguished
-- Retrieval improves as the system learns — variance shrinks with repeated access (graduated ramp)
-- After 10 accesses, the system transitions from cosine similarity to full Fisher-Rao distance
+- Retrieval improves as the system learns — variance shrinks with repeated access (Bayesian conjugate update after 3+ accesses)
+- Graduated ramp from cosine to full Fisher-Rao distance over the first 10 accesses per memory
+- Computation complexity: Theta(d) time — same order as cosine similarity
 
-**Benchmark impact:** +10.8 percentage points when Fisher-Rao is removed in ablation. Across six conversations, the three mathematical layers collectively contribute +12.7pp average improvement over the engineering baseline.
+**Benchmark impact:** Removing the Fisher metric causes **-10.8pp** on conv-30 ablation. Across 6 conversations (n=832 questions), the three mathematical layers collectively contribute **+12.7pp average improvement**, reaching **+19.9pp on the most challenging dialogues** (conv-44).
 
-**Code:** [`superlocalmemory/math/fisher.py`](../blob/main/superlocalmemory/math/fisher.py)
+**Code:** `src/superlocalmemory/math/fisher.py`
 
 ---
 
 ## 2. Sheaf Cohomology for Memory Consistency
 
-**The problem:** As memories accumulate, contradictions emerge. "Alice moved to London in March" vs "Alice lives in Paris as of April." Pairwise checking doesn't scale and misses transitive contradictions.
+**The problem:** As memories accumulate, contradictions emerge. "Alice moved to London in March" vs "Alice lives in Paris as of April." Pairwise checking is O(n²) and misses transitive contradictions.
 
 **Our solution:** We model the knowledge graph as a cellular sheaf — an algebraic structure from topology. Each edge carries a restriction map that relates adjacent memories. Computing the first cohomology group H¹(G,F) reveals global inconsistencies:
 
 - **H¹ = 0** — All memories are globally consistent
 - **H¹ ≠ 0** — Contradictions exist, even if every local pair looks fine
 
-This catches contradictions that no pairwise method can detect.
+This catches contradictions that no pairwise method can detect. Runs in **O(|E| * d)** time — subquadratic in N when the context graph is sparse.
 
 **What this means in practice:**
 - The system detects when new information contradicts existing knowledge
-- Contradictions are flagged and can be resolved automatically (newer supersedes older) or surfaced to the user
-- Knowledge graph maintains algebraic consistency at all times
+- Contradictions are flagged with severity scores (>0.45 threshold triggers a SUPERSEDES edge)
+- Knowledge graph maintains algebraic consistency as memories accumulate
 
-**Code:** [`superlocalmemory/math/sheaf.py`](../blob/main/superlocalmemory/math/sheaf.py)
+**Benchmark impact:** Removing sheaf consistency causes **-1.7pp** on single-conversation ablation. The effect is subtle on individual conversations but becomes critical at scale (at N=100,000 memories, expected contradiction count exceeds ~5,000).
+
+**Code:** `src/superlocalmemory/math/sheaf.py`
 
 ---
 
@@ -59,26 +62,44 @@ This catches contradictions that no pairwise method can detect.
 - Low-trust memories decay faster (coupled with Fisher-Rao via information geometry)
 - Mathematically guaranteed convergence — not heuristic
 
-**Code:** [`superlocalmemory/dynamics/fisher_langevin_coupling.py`](../blob/main/superlocalmemory/dynamics/fisher_langevin_coupling.py)
+**Code:** `src/superlocalmemory/dynamics/fisher_langevin_coupling.py`
 
 ---
 
 ## Ablation Results
 
-Each row disables one component of the full system. Delta denotes the change in accuracy relative to the full system.
+Evaluated on LoCoMo conv-30 (81 scored questions). Each row removes one component.
 
-| Configuration | Micro Avg (%) | Multi-Hop | Open Domain | Delta (pp) |
-|:-------------|:-----:|:-----:|:-----:|:------:|
-| **Full system (all layers)** | **62.3** | **50%** | **78%** | — |
-| − Math layers off | 59.3 | 38% | 70% | −3.0 |
-| − Entity channel off | 56.8 | 38% | 73% | −5.5 |
-| − BM25 channel off | 53.2 | 23% | 71% | −9.1 |
-| − Cross-encoder off | 31.8 | 17% | — | −30.5 |
+| Configuration | Aggregate (%) | Delta (pp) |
+|:-------------|:-----:|:------:|
+| **Full system** | **60.4** | — |
+| − Fisher metric | 49.6 | **−10.8** |
+| − Sheaf consistency | 58.7 | −1.7 |
+| − All math layers | 52.8 | **−7.6** |
+| − BM25 channel | 53.9 | −6.5 |
+| − Entity graph | 59.4 | −1.0 |
+| − Temporal channel | 60.2 | −0.2 |
+| − Cross-encoder | 29.7 | **−30.7** |
 
 **Key findings:**
-- Cross-encoder reranking is the single largest contributor (−30.5pp when removed)
-- Math layers contribute +3.0pp aggregate; the effect is strongest on multi-hop (+12pp: 50% vs 38%)
-- Across six conversations, mathematical layers average +12.7pp improvement over the engineering baseline, reaching +19.9pp on the most challenging dialogues
+- Cross-encoder reranking is the single largest contributor (**−30.7pp** when removed)
+- Fisher-Rao metric alone: **−10.8pp** — the largest single mathematical layer effect
+- All three math layers collectively: **−7.6pp**
+- Bootstrap 95% CI for full system: [53.4, 74.0]; for cross-encoder removed: [17.1, 45.7] — non-overlapping, confirming statistical significance
+
+### Fisher-Rao vs Cosine (6 Conversations, n=832)
+
+| Conversation | With Math (%) | Without Math (%) | Delta (pp) |
+|:-------------|:-----:|:-------:|:-----:|
+| Easiest (conv-26) | 78.5 | 71.2 | +7.3 |
+| conv-30 | 77.5 | 66.7 | +10.8 |
+| conv-42 | 60.8 | 47.3 | +13.5 |
+| conv-43 | 64.3 | 58.3 | +6.0 |
+| Hardest (conv-44) | 64.2 | 44.3 | **+19.9** |
+| conv-49 | 84.7 | 65.9 | +18.8 |
+| **Average** | **71.7** | **58.9** | **+12.7** |
+
+Mathematical layers provide the greatest benefit precisely where heuristic methods struggle — the harder the conversation, the bigger the improvement.
 
 ---
 
@@ -101,6 +122,16 @@ For the full mathematical treatment including proofs, theorems, and detailed exp
 *Varun Pratap Bhardwaj, Independent Researcher, 2026*
 
 [arXiv:2603.14588](https://arxiv.org/abs/2603.14588) | [Zenodo DOI: 10.5281/zenodo.19038659](https://zenodo.org/records/19038659)
+
+```bibtex
+@article{bhardwaj2026slmv3,
+  title={Information-Geometric Foundations for Zero-LLM Enterprise Agent Memory},
+  author={Bhardwaj, Varun Pratap},
+  journal={arXiv preprint arXiv:2603.14588},
+  year={2026},
+  url={https://arxiv.org/abs/2603.14588}
+}
+```
 
 ---
 

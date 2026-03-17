@@ -1,14 +1,15 @@
 # SuperLocalMemory V3
 
-**Your AI Finally Remembers You.** 100% local. Zero setup. Completely free.
+**The first local-only AI memory to break 74% retrieval on LoCoMo.** No cloud. No APIs. No data leaves your machine.
 
 SuperLocalMemory gives AI assistants persistent memory across sessions. Install once, and your AI remembers your projects, preferences, decisions, and debugging history — forever.
 
 ## Quick Start
 
 ```bash
-npm install -g superlocalmemory
-slm setup
+npm install -g superlocalmemory    # or: pip install superlocalmemory
+slm setup                          # Choose mode A/B/C
+slm warmup                        # Pre-download embedding model (optional)
 ```
 
 That's it. Your AI now remembers you.
@@ -17,9 +18,9 @@ That's it. Your AI now remembers you.
 
 | Mode | What It Does | Cloud Required |
 |:----:|:------------|:-:|
-| **A: Local Guardian** | Zero cloud. Your data never leaves your machine. EU AI Act compliant. | No |
+| **A: Local Guardian** | Zero cloud. Your data never leaves your machine. EU AI Act compliant. 74.8% on LoCoMo. | No |
 | **B: Smart Local** | Local LLM via Ollama for answer synthesis. Still fully private. | No |
-| **C: Full Power** | Cloud LLM for maximum accuracy (87.7% on LoCoMo benchmark). | Yes |
+| **C: Full Power** | Cloud LLM for maximum accuracy (87.7% on LoCoMo). | Yes |
 
 ## Dashboard
 
@@ -39,21 +40,23 @@ That's it. Your AI now remembers you.
 ## Key Features
 
 - **Works in 17+ IDEs** — Claude Code, Cursor, VS Code, Windsurf, Gemini CLI, JetBrains, and more
-- **Auto-capture** — Decisions, bug fixes, and preferences stored automatically
-- **Auto-recall** — Relevant context injected before your AI responds
 - **4-channel retrieval** — Semantic + keyword + entity graph + temporal for maximum accuracy
-- **Mathematical foundations** — Information-geometric similarity, consistency checking, self-organizing lifecycle
+- **Mathematical foundations** — Fisher-Rao similarity, sheaf consistency, Langevin lifecycle
 - **Trust scoring** — Bayesian trust per agent and per fact
 - **EU AI Act compliant** — Mode A satisfies data sovereignty by architecture
-- **Multi-profile** — Isolated memory contexts for work, personal, clients
+- **85% open-domain** — highest of any system evaluated, including cloud-powered ones
+- **1400+ tests** — production-grade reliability
+- **Multi-profile** — isolated memory contexts for work, personal, clients
 
 ## Documentation
 
 | Page | What You'll Learn |
 |------|-------------------|
+| [Installation](Installation) | Full install guide — npm, pip, git clone |
+| [Quick Start Tutorial](Quick-Start-Tutorial) | Step-by-step for new users and V2 upgraders |
 | [Getting Started](Getting-Started) | Install + first memory in 5 minutes |
 | [Modes Explained](Modes-Explained) | A vs B vs C — which is right for you |
-| [CLI Reference](CLI-Reference) | All `slm` commands with examples |
+| [CLI Reference](CLI-Reference) | All 15 `slm` commands with examples |
 | [MCP Tools](MCP-Tools) | All 24 MCP tools for IDE integration |
 | [IDE Setup](IDE-Setup) | Per-IDE configuration guide |
 | [Migration from V2](Migration-from-V2) | Upgrade guide for existing users |

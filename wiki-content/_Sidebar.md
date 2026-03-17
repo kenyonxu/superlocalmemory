@@ -3,7 +3,9 @@
 * [Home](Home)
 
 **Getting Started**
-* [Quick Start](Getting-Started)
+* [Installation](Installation)
+* [Quick Start Tutorial](Quick-Start-Tutorial)
+* [Getting Started](Getting-Started)
 * [Modes Explained](Modes-Explained)
 * [IDE Setup](IDE-Setup)
 * [Migration from V2](Migration-from-V2)

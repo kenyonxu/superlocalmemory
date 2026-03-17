@@ -8,15 +8,28 @@ Thread-safe, dimension-validated embedding with Fisher variance computation.
 Supports local (768-dim nomic) and cloud (3072-dim) models with EXPLICIT errors
 on dimension mismatch — NEVER silently falls back to a different dimension.
 
+Memory management: Forces CPU-only inference to prevent GPU memory accumulation.
+Auto-unloads model after idle timeout to keep long-running MCP servers lean.
+
 Part of Qualixar | Author: Varun Pratap Bhardwaj
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from typing import TYPE_CHECKING
+
+# Force CPU before any torch/sentence-transformers import.
+# On Apple Silicon, PyTorch defaults to Metal (MPS) which allocates 4-6 GB
+# of GPU shader buffers that grow over time and never get released.
+# On Windows/Linux with CUDA, similar GPU memory issues occur.
+# CPU-only keeps footprint under 1 GB (vs 6+ GB with GPU).
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import numpy as np
 
@@ -44,11 +57,16 @@ class DimensionMismatchError(RuntimeError):
     """
 
 
+_IDLE_TIMEOUT_SECONDS = 300  # 5 minutes — unload model after idle
+
+
 class EmbeddingService:
     """Thread-safe embedding service with strict dimension validation.
 
     Lazy-loads the underlying model on first embed call.
     Validates every output dimension against the configured expectation.
+    Auto-unloads after 5 minutes idle to keep MCP server memory low.
+    Forces CPU-only inference to prevent GPU memory accumulation.
     """
 
     def __init__(self, config: EmbeddingConfig) -> None:
@@ -57,6 +75,8 @@ class EmbeddingService:
         self._lock = threading.Lock()
         self._loaded = False
         self._available = True  # Set False if model can't load
+        self._last_used: float = 0.0
+        self._idle_timer: threading.Timer | None = None
 
     @property
     def is_available(self) -> bool:
@@ -64,6 +84,32 @@ class EmbeddingService:
         if not self._loaded:
             self._ensure_loaded()
         return self._available and self._model is not None
+
+    def unload(self) -> None:
+        """Explicitly unload the model to free memory.
+
+        Called automatically after idle timeout, or manually for cleanup.
+        The model will lazy-reload on next embed call.
+        """
+        with self._lock:
+            if self._model is not None:
+                del self._model
+                self._model = None
+                self._loaded = False
+                import gc
+                gc.collect()
+                logger.info("EmbeddingService: model unloaded (idle timeout)")
+
+    def _reset_idle_timer(self) -> None:
+        """Reset the idle unload timer after each use."""
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+        self._idle_timer = threading.Timer(
+            _IDLE_TIMEOUT_SECONDS, self.unload,
+        )
+        self._idle_timer.daemon = True
+        self._idle_timer.start()
+        self._last_used = time.time()
 
     # ------------------------------------------------------------------
     # Public API
@@ -91,6 +137,7 @@ class EmbeddingService:
             return None
         vec = self._encode_single(text)
         self._validate_dimension(vec)
+        self._reset_idle_timer()
         return vec.tolist()
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
@@ -115,6 +162,7 @@ class EmbeddingService:
         vectors = self._encode_batch(texts)
         for vec in vectors:
             self._validate_dimension(vec)
+        self._reset_idle_timer()
         return [v.tolist() for v in vectors]
 
     def compute_fisher_params(
@@ -185,7 +233,13 @@ class EmbeddingService:
             self._loaded = True
 
     def _load_local_model(self) -> None:
-        """Load sentence-transformers model for local embedding."""
+        """Load sentence-transformers model for local embedding.
+
+        Forces CPU device to prevent GPU memory accumulation:
+        - Apple Silicon MPS: allocates 4-6 GB Metal shader buffers
+        - NVIDIA CUDA: allocates GPU VRAM that never releases
+        - CPU-only: stable ~880 MB footprint, no growth over time
+        """
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError:
@@ -199,6 +253,7 @@ class EmbeddingService:
             return
         model = SentenceTransformer(
             self._config.model_name, trust_remote_code=True,
+            device="cpu",
         )
         actual_dim = model.get_sentence_embedding_dimension()
         if actual_dim != self._config.dimension:
@@ -208,7 +263,7 @@ class EmbeddingService:
             )
         self._model = model
         logger.info(
-            "EmbeddingService: local model loaded (%s, %d-dim)",
+            "EmbeddingService: local model loaded (%s, %d-dim, device=cpu)",
             self._config.model_name,
             actual_dim,
         )

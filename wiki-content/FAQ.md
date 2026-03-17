@@ -28,8 +28,8 @@ Mode A and Mode B work fully offline. Mode C requires internet for the cloud LLM
 
 ### What are the requirements?
 
-- Node.js 18 or later
-- npm (comes with Node.js)
+- **Python** 3.11+ (required for V3 engine)
+- **Node.js** 14+ (if installing via npm)
 - Any supported IDE
 - For Mode B: Ollama with a pulled model
 - For Mode C: API key for your cloud LLM provider
@@ -37,7 +37,13 @@ Mode A and Mode B work fully offline. Mode C requires internet for the cloud LLM
 ### How do I install it?
 
 ```bash
+# npm (recommended)
 npm install -g superlocalmemory
+slm setup
+slm warmup    # Optional — pre-download embedding model
+
+# or pip
+pip install superlocalmemory
 slm setup
 ```
 
@@ -45,36 +51,43 @@ slm setup
 
 ```bash
 npm install -g superlocalmemory@latest
+# or: pip install --upgrade superlocalmemory
 ```
 
 ### I am upgrading from V2. Will I lose my data?
 
-No. Run `slm migrate` after updating. All memories, profiles, trust scores, and settings are preserved. See [Migration from V2](Migration-from-V2) for details.
+No. Run `slm migrate` after updating. All memories, profiles, and settings are preserved. A backup is created automatically. See [Migration from V2](Migration-from-V2) for details.
 
 ## Usage
 
 ### How does auto-recall work?
 
-When you start a conversation in your IDE, SuperLocalMemory automatically retrieves relevant memories and injects them into your AI's context. You do not need to call "recall" explicitly — it happens in the background.
+When you start a conversation in your IDE, SuperLocalMemory automatically retrieves relevant memories and injects them into your AI's context. You do not need to call "recall" explicitly — it happens in the background via the MCP server.
 
-### How does auto-capture work?
+### How do I store a memory?
 
-SuperLocalMemory monitors your IDE conversations and stores important information automatically — decisions, bug fixes, configurations, preferences. An entropy gate filters out low-information messages so only useful content is stored.
+```bash
+slm remember "The deploy script needs AWS_REGION set to us-east-1"
+```
 
-### Can I disable auto-capture?
+### How do I search memories?
 
-Yes: `slm config set auto_capture false`
+```bash
+slm recall "deploy configuration"
+```
 
-### What is the difference between `recall` and `search`?
+### How do I see which retrieval channels found what?
 
-`recall` uses all 4 retrieval channels and returns the most relevant memories for a specific query. `search` is broader and returns partial matches and related content. Use `recall` when you know what you are looking for, and `search` when you are exploring.
+```bash
+slm trace "deploy configuration"
+```
+
+This shows per-channel scores (Semantic, BM25, Entity Graph, Temporal) for each result.
 
 ### How do I delete a memory?
 
 ```bash
-slm forget --id <memory-id>     # Delete by ID
-slm forget "search query"       # Delete matching memories
-slm forget --all                # Delete everything (requires confirmation)
+slm forget "search query"     # Delete matching memories (with confirmation)
 ```
 
 ## Modes
@@ -91,7 +104,10 @@ Yes: `slm mode a`, `slm mode b`, or `slm mode c`. Your memories are shared acros
 
 ### What are the accuracy differences?
 
-On the LoCoMo benchmark: Mode A achieves 62.3% (highest zero-LLM score), Mode C achieves approximately 78%. Higher modes add LLM synthesis and reranking.
+On the LoCoMo benchmark:
+- **Mode A:** 74.8% retrieval accuracy (zero cloud, highest local-first score reported)
+- **Mode C:** 87.7% (cloud LLM, competitive with funded systems)
+- Mathematical layers contribute +12.7pp average improvement
 
 ## Privacy and Security
 
@@ -101,32 +117,28 @@ No. Your database is a local file on your machine. It is not synced, uploaded, o
 
 ### Is it EU AI Act compliant?
 
-Mode A and Mode B are compliant by architecture — data never leaves your device. Mode C requires additional consideration since data is sent to a cloud provider.
+Mode A and Mode B are compliant by architecture — data never leaves your device during any memory operation. Mode C requires a Data Processing Agreement with your cloud provider.
 
 ### Can I export my data?
 
-Yes: `slm export > my-data.json`
+The database is a standard SQLite file at `~/.superlocalmemory/memory.db`. You can copy it, back it up, or query it directly.
 
 ### Can I delete all my data?
 
-Yes: `slm forget --all` deletes all memories. `slm erasure --user <id>` performs a GDPR-compliant erasure.
+`slm forget "query"` deletes matching memories. To delete everything, remove the database: `rm ~/.superlocalmemory/memory.db`.
 
 ## Troubleshooting
 
 ### My AI does not seem to remember anything.
 
 1. Check that SuperLocalMemory is running: `slm status`
-2. Check that you have stored memories: `slm list`
+2. Check that you have stored memories: `slm recall "test"`
 3. Verify your IDE connection: restart the IDE after configuring MCP
-4. Check the active profile: `slm profile`
+4. Check the active profile: `slm profile list`
 
 ### Recall returns irrelevant results.
 
-Try using more specific queries. If the issue persists, rebuild the index:
-
-```bash
-slm compact_memories
-```
+Try more specific queries. Use `slm trace "query"` to see which channels contribute — this helps diagnose whether the issue is semantic, keyword, or entity matching.
 
 ### The setup wizard does not detect my IDE.
 

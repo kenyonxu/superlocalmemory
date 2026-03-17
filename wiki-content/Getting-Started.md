@@ -4,29 +4,37 @@ Get SuperLocalMemory running in under 5 minutes.
 
 ## Prerequisites
 
-- **Node.js** 18 or later
-- **npm** (comes with Node.js)
+- **Python** 3.11+ (`python3 --version`)
+- **Node.js** 14+ (only if installing via npm)
 - Any supported IDE (Claude Code, Cursor, VS Code, Windsurf, etc.)
 
 ## Install
 
+**npm (recommended):**
 ```bash
 npm install -g superlocalmemory
 ```
 
-## Setup Wizard
-
-Run the setup wizard to configure your IDE connections:
-
+**pip:**
 ```bash
-slm setup
+pip install superlocalmemory
 ```
 
-The wizard will:
-1. Detect your installed IDEs
-2. Configure MCP connections for each one
-3. Create your default memory profile
-4. Verify everything works
+See [Installation](Installation) for git clone, platform-specific notes, and troubleshooting.
+
+## Setup
+
+```bash
+slm setup     # Choose mode A/B/C, configure provider
+slm warmup    # Pre-download embedding model (~500MB, optional)
+```
+
+**Modes:**
+- **A** — Zero cloud. Data never leaves your machine. EU AI Act compliant. **(default)**
+- **B** — Local LLM via Ollama. Still fully private.
+- **C** — Cloud LLM for maximum accuracy (87.7% on LoCoMo).
+
+Switch anytime: `slm mode a`, `slm mode b`, `slm mode c`.
 
 ## Your First Memory
 
@@ -44,40 +52,54 @@ slm recall "JWT token expiry"
 
 You should see the stored memory returned with a relevance score.
 
-## Your First Search
-
-Search is more flexible than recall — it finds partial matches and related memories:
-
-```bash
-slm search "authentication"
-```
-
-This returns all memories related to authentication, even if the word "authentication" was never used.
-
 ## Verify Installation
 
-Check that everything is running correctly:
-
 ```bash
-slm status
+slm status    # System info — mode, DB path, size
+slm health    # Math layer health — Fisher-Rao, Sheaf, Langevin stats
 ```
 
-You should see:
-- Database: connected
-- Memories: count of stored memories
-- Profile: your active profile name
-- Mode: current operating mode (A, B, or C)
+## Connect Your IDE
 
-## Try Auto-Recall in Your IDE
+Auto-configure all detected IDEs:
 
-Open your IDE (e.g., Claude Code) and start a conversation. SuperLocalMemory automatically injects relevant context before your AI responds. Try asking about something you stored — your AI will know about it without you re-explaining.
+```bash
+slm connect        # Configure all detected IDEs
+slm connect --list # See which IDEs are configured
+```
+
+Or add manually to your IDE's MCP config:
+
+```json
+{
+  "mcpServers": {
+    "superlocalmemory": {
+      "command": "slm",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+See [IDE Setup](IDE-Setup) for per-IDE instructions.
+
+## Web Dashboard
+
+```bash
+slm dashboard    # Opens at http://localhost:8765
+```
+
+17 tabs: memory browser, knowledge graph, recall lab, trust scores, math health, compliance, and more. Runs locally — no data leaves your machine.
 
 ## Next Steps
 
+- [Quick Start Tutorial](Quick-Start-Tutorial) — Step-by-step for new users and V2 upgraders
+- [Installation](Installation) — Full guide with platform notes and troubleshooting
 - [Modes Explained](Modes-Explained) — Understand the three operating modes
 - [CLI Reference](CLI-Reference) — Full command reference
 - [IDE Setup](IDE-Setup) — Configure additional IDEs
 - [Auto-Memory](Auto-Memory) — How auto-capture works
+- [Migration from V2](Migration-from-V2) — Upgrade guide for existing V2 users
 
 ---
 *Part of [Qualixar](https://qualixar.com) | Created by [Varun Pratap Bhardwaj](https://varunpratap.com)*

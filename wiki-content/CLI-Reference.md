@@ -1,17 +1,19 @@
 # CLI Reference
 
-All `slm` commands grouped by function.
+All `slm` commands — V3 has 15 commands grouped by function.
 
-## Setup
+## Setup & Status
 
 | Command | Description |
 |---------|-------------|
-| `slm setup` | Run the setup wizard (IDE detection, MCP config) |
-| `slm status` | Show system status (database, profile, mode, memory count) |
-| `slm connect` | Auto-detect and connect to installed IDEs |
+| `slm setup` | Run the interactive setup wizard (mode selection, provider config) |
+| `slm status` | Show system status (mode, database path, DB size) |
 | `slm mode` | Show current operating mode |
 | `slm mode a\|b\|c` | Switch operating mode |
-| `slm health` | Show system health (consistency scores, lifecycle state) |
+| `slm provider` | Show current LLM provider |
+| `slm provider set` | Configure LLM provider (Mode B/C) |
+| `slm health` | Show math layer health (Fisher-Rao, Sheaf, Langevin stats) |
+| `slm warmup` | Pre-download embedding model (~500MB, one-time) |
 
 ## Memory Operations
 
@@ -21,12 +23,10 @@ All `slm` commands grouped by function.
 slm remember "Fixed the auth bug — JWT expiry was set to 1 hour instead of 24"
 ```
 
-Store a memory. The system automatically extracts entities, facts, emotions, temporal markers, and builds graph connections.
+Store a memory. The system automatically extracts entities, facts, emotional signals, temporal markers, and builds graph connections.
 
 Options:
 - `--tags "tag1,tag2"` — Add tags
-- `--importance high` — Set importance (low, medium, high)
-- `--profile work` — Store to a specific profile
 
 ### Recall
 
@@ -34,24 +34,18 @@ Options:
 slm recall "JWT token configuration"
 ```
 
-Retrieve memories relevant to a query. Uses 4-channel retrieval (semantic, keyword, entity graph, temporal).
+Retrieve memories relevant to a query. Uses 4-channel retrieval (semantic, keyword, entity graph, temporal) with RRF fusion and cross-encoder reranking.
 
 Options:
-- `--limit 10` — Number of results (default: 5)
-- `--mode a|b|c` — Override mode for this query
-- `--trace` — Show channel breakdown (which retrieval channels contributed)
+- `--limit 10` — Number of results (default: 20)
 
-### Search
+### Trace
 
 ```bash
-slm search "authentication"
+slm trace "JWT token configuration"
 ```
 
-Broader search across all memories. Returns partial matches and related content.
-
-Options:
-- `--limit 20` — Number of results
-- `--type semantic|keyword|graph` — Restrict to one search type
+Same as recall, but shows per-channel score breakdown — which retrieval channel (semantic, BM25, entity, temporal) contributed to each result. Useful for debugging retrieval quality.
 
 ### Forget
 
@@ -59,102 +53,96 @@ Options:
 slm forget "JWT token configuration"
 ```
 
-Delete memories matching the query. Supports targeted deletion.
+Delete memories matching a query. Shows matching memories and asks for confirmation before deleting.
 
-Options:
-- `--id <memory-id>` — Delete a specific memory by ID
-- `--all` — Delete all memories (requires confirmation)
-- `--before "2026-01-01"` — Delete memories before a date
-
-### List
+## IDE Integration
 
 ```bash
-slm list
+slm connect        # Auto-detect and configure all installed IDEs
+slm connect --list # Show which IDEs are configured
+slm mcp            # Start MCP server (stdio transport — used by IDEs)
 ```
 
-Show recent memories.
+The `slm mcp` command is what your IDE calls internally. You typically don't run it directly — your IDE's MCP config handles it:
 
-Options:
-- `--limit 20` — Number to show
-- `--sort date|importance|trust` — Sort order
+```json
+{
+  "mcpServers": {
+    "superlocalmemory": {
+      "command": "slm",
+      "args": ["mcp"]
+    }
+  }
+}
+```
 
 ## Profiles
 
 ```bash
-slm profile                     # Show active profile
-slm profile list                # List all profiles
-slm profile create <name>       # Create a new profile
-slm profile switch <name>       # Switch active profile
-slm profile delete <name>       # Delete a profile (with confirmation)
+slm profile list              # List all profiles
+slm profile create <name>     # Create a new profile
+slm profile switch <name>     # Switch active profile
 ```
 
 Profiles provide complete memory isolation. Work, personal, and client memories never mix.
 
-## Diagnostics
-
-```bash
-slm status                      # System overview
-slm health                      # Consistency and lifecycle health
-slm consistency                 # Run contradiction detection
-slm benchmark locomo --mode c   # Run LoCoMo benchmark
-slm stats                       # Memory statistics (count, size, age distribution)
-```
-
 ## Migration
 
 ```bash
-slm migrate                     # Upgrade V2 database to V3
-slm migrate --rollback          # Undo migration (within 30 days)
-slm migrate --status            # Check migration status
-```
-
-## Compliance
-
-```bash
-slm retention                   # Show retention policy
-slm retention set --days 365    # Set retention period
-slm audit                       # Show audit trail
-slm export                      # Export all memories (JSON)
-slm erasure --user <id>         # GDPR right-to-erasure
+slm migrate                   # Upgrade V2 database to V3
+slm migrate --rollback        # Undo migration
 ```
 
 ## Dashboard
 
 ```bash
-slm dashboard                   # Open the web dashboard in your browser
+slm dashboard                 # Open web dashboard at http://localhost:8765
+slm dashboard --port 9000     # Use a custom port
 ```
 
-The dashboard provides a visual interface for browsing memories, viewing the knowledge graph, monitoring events, and managing profiles.
-
-## Global Options
-
-These options work with any command:
-
-| Option | Description |
-|--------|-------------|
-| `--profile <name>` | Override active profile for this command |
-| `--json` | Output in JSON format |
-| `--verbose` | Show detailed output |
-| `--help` | Show help for any command |
+17-tab dashboard: memory browser, knowledge graph, recall lab, trust scores, math health, compliance, learning, IDE connections, settings, and more.
 
 ## Examples
 
 ```bash
-# Store a decision with context
-slm remember "Chose PostgreSQL over MongoDB for the user service. Reason: ACID transactions needed for billing." --tags "architecture,database" --importance high
+# Store a decision with tags
+slm remember "Chose PostgreSQL over MongoDB for the user service. Reason: ACID transactions needed for billing." --tags "architecture,database"
 
-# Recall with trace to see which channels found what
-slm recall "database decision for user service" --trace
+# Recall with channel breakdown
+slm trace "database decision for user service"
 
-# Search across all memories for a topic
-slm search "billing" --limit 10
+# Check system status
+slm status
 
-# Export for backup
-slm export > backup-2026-03-16.json
+# Check math layer health
+slm health
 
-# Check what mode you're in
-slm mode
+# Switch to full power mode
+slm mode c
+
+# Open the dashboard
+slm dashboard
 ```
+
+## Complete Command List
+
+| # | Command | What It Does |
+|:-:|---------|-------------|
+| 1 | `slm setup` | Interactive first-time wizard |
+| 2 | `slm mode [a\|b\|c]` | Get or set operating mode |
+| 3 | `slm provider [set]` | Get or set LLM provider |
+| 4 | `slm connect [--list]` | Configure IDE integrations |
+| 5 | `slm migrate [--rollback]` | V2 to V3 migration |
+| 6 | `slm remember "..."` | Store a memory |
+| 7 | `slm recall "..." [--limit N]` | Search memories |
+| 8 | `slm forget "..."` | Delete matching memories |
+| 9 | `slm status` | System status |
+| 10 | `slm health` | Math layer health |
+| 11 | `slm trace "..."` | Recall with channel breakdown |
+| 12 | `slm mcp` | Start MCP server (for IDE) |
+| 13 | `slm warmup` | Pre-download embedding model |
+| 14 | `slm dashboard [--port N]` | Launch web dashboard |
+| 15 | `slm profile list\|create\|switch` | Profile management |
 
 ---
 *Part of [Qualixar](https://qualixar.com) | Created by [Varun Pratap Bhardwaj](https://varunpratap.com)*

@@ -2,47 +2,57 @@
 
 SuperLocalMemory works with 17+ IDEs via the Model Context Protocol (MCP). The fastest way to connect is auto-detection.
 
-## Auto-Detection
+## Auto-Detection (Recommended)
 
 ```bash
-slm connect
+slm connect        # Auto-detect and configure all installed IDEs
+slm connect --list # See which IDEs are configured
 ```
-
-This scans your system for installed IDEs and configures MCP connections automatically. It supports Claude Code, Cursor, VS Code, Windsurf, and more.
 
 After running, restart your IDE to activate the connection.
 
 ## Manual Setup by IDE
 
-If auto-detection does not find your IDE, configure it manually.
-
-### Claude Code
-
-Claude Code reads MCP config from `~/.claude.json`:
+If auto-detection does not find your IDE, configure it manually. All IDEs use the same MCP server command:
 
 ```json
 {
   "mcpServers": {
     "superlocalmemory": {
-      "command": "superlocalmemory",
-      "args": ["--mcp"]
+      "command": "slm",
+      "args": ["mcp"]
     }
   }
 }
 ```
 
-Restart Claude Code after adding this.
+Below are the config file paths for each IDE.
 
-### Cursor
+### Claude Code
 
-Cursor reads MCP config from `~/.cursor/mcp.json`:
+Config file: `~/.claude.json` (or project-level `.mcp.json`)
 
 ```json
 {
   "mcpServers": {
     "superlocalmemory": {
-      "command": "superlocalmemory",
-      "args": ["--mcp"]
+      "command": "slm",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Cursor
+
+Config file: `~/.cursor/mcp.json`
+
+```json
+{
+  "mcpServers": {
+    "superlocalmemory": {
+      "command": "slm",
+      "args": ["mcp"]
     }
   }
 }
@@ -50,31 +60,29 @@ Cursor reads MCP config from `~/.cursor/mcp.json`:
 
 ### VS Code (with Copilot MCP extension)
 
-VS Code reads MCP config from `~/.vscode/mcp.json`:
+Config file: `~/.vscode/mcp.json`
 
 ```json
 {
   "mcpServers": {
     "superlocalmemory": {
-      "command": "superlocalmemory",
-      "args": ["--mcp"]
+      "command": "slm",
+      "args": ["mcp"]
     }
   }
 }
 ```
 
-Requires the MCP-compatible Copilot extension or similar MCP client.
-
 ### Windsurf
 
-Windsurf reads MCP config from `~/.codeium/windsurf/mcp_config.json`:
+Config file: `~/.codeium/windsurf/mcp_config.json`
 
 ```json
 {
   "mcpServers": {
     "superlocalmemory": {
-      "command": "superlocalmemory",
-      "args": ["--mcp"]
+      "command": "slm",
+      "args": ["mcp"]
     }
   }
 }
@@ -82,14 +90,14 @@ Windsurf reads MCP config from `~/.codeium/windsurf/mcp_config.json`:
 
 ### Gemini CLI
 
-Gemini CLI reads MCP config from `~/.gemini/settings.json`:
+Config file: `~/.gemini/settings.json`
 
 ```json
 {
   "mcpServers": {
     "superlocalmemory": {
-      "command": "superlocalmemory",
-      "args": ["--mcp"]
+      "command": "slm",
+      "args": ["mcp"]
     }
   }
 }
@@ -97,26 +105,22 @@ Gemini CLI reads MCP config from `~/.gemini/settings.json`:
 
 ### JetBrains IDEs (IntelliJ, PyCharm, WebStorm, etc.)
 
-JetBrains IDEs with AI Assistant read MCP config from the IDE settings:
-
-1. Open Settings > Tools > AI Assistant > MCP Servers
-2. Add a new server:
-   - Name: `superlocalmemory`
-   - Command: `superlocalmemory`
-   - Args: `--mcp`
-3. Apply and restart
+Settings > Tools > AI Assistant > MCP Servers:
+- Name: `superlocalmemory`
+- Command: `slm`
+- Args: `mcp`
 
 ### Continue.dev
 
-Continue reads MCP config from `~/.continue/config.json`. Add to the `mcpServers` section:
+Config file: `~/.continue/config.json`
 
 ```json
 {
   "mcpServers": [
     {
       "name": "superlocalmemory",
-      "command": "superlocalmemory",
-      "args": ["--mcp"]
+      "command": "slm",
+      "args": ["mcp"]
     }
   ]
 }
@@ -124,15 +128,15 @@ Continue reads MCP config from `~/.continue/config.json`. Add to the `mcpServers
 
 ### Zed
 
-Zed reads MCP config from `~/.config/zed/settings.json`:
+Config file: `~/.config/zed/settings.json`
 
 ```json
 {
   "language_models": {
     "mcp_servers": {
       "superlocalmemory": {
-        "command": "superlocalmemory",
-        "args": ["--mcp"]
+        "command": "slm",
+        "args": ["mcp"]
       }
     }
   }
@@ -141,26 +145,25 @@ Zed reads MCP config from `~/.config/zed/settings.json`:
 
 ## Verifying the Connection
 
-After configuring your IDE, verify the connection:
+After configuring your IDE:
 
 ```bash
-slm status
+slm status        # Check SLM is running
+slm connect --list # See which IDEs are configured
 ```
-
-You should see your IDE listed under active connections.
 
 In your IDE, try asking your AI: "What do you know about my recent work?" If SuperLocalMemory is connected and has stored memories, the AI will reference them.
 
 ## Troubleshooting
 
 **IDE does not detect SuperLocalMemory:**
-- Verify installation: `which superlocalmemory` should return a path
-- Verify MCP server starts: `superlocalmemory --mcp --test`
+- Verify installation: `which slm` should return a path
+- Verify the MCP server starts: `slm mcp` (should hang waiting for stdio input — Ctrl+C to stop)
 - Check your IDE's MCP config file path is correct
 
 **Memories not appearing in AI responses:**
-- Check that you have stored memories: `slm list`
-- Check the active profile: `slm profile`
+- Check that you have stored memories: `slm recall "test"`
+- Check the active profile: `slm profile list`
 - Restart your IDE after config changes
 
 **Multiple IDEs:**

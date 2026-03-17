@@ -7,7 +7,7 @@ SuperLocalMemory can automatically capture and recall memories without explicit 
 **What it does:** When you start a conversation in your IDE, SuperLocalMemory automatically retrieves relevant memories and injects them into the AI's context.
 
 **How it works:**
-1. Your IDE sends the conversation context to the MCP server
+1. Your IDE sends the conversation context to the MCP server (`slm mcp`)
 2. SuperLocalMemory extracts key terms and entities from your message
 3. It runs a 4-channel retrieval (semantic, keyword, entity graph, temporal)
 4. The top results are returned to your IDE
@@ -51,48 +51,27 @@ The AI referenced memories you stored days or weeks ago — automatically.
 
 ## Configuration
 
-### Enable/Disable Auto-Recall
+Auto-capture and auto-recall behavior is configured through your IDE's MCP integration. The MCP server (`slm mcp`) handles both automatically when connected.
 
-Auto-recall is enabled by default. To disable:
-
-```bash
-slm config set auto_recall false
-```
-
-To re-enable:
+**To check what's stored:**
 
 ```bash
-slm config set auto_recall true
+slm recall "recent"          # See recent memories
+slm trace "recent"           # See with channel breakdown
+slm health                   # Check overall system state
 ```
 
-### Enable/Disable Auto-Capture
-
-Auto-capture is enabled by default. To disable:
+**To manually store something the auto-capture missed:**
 
 ```bash
-slm config set auto_capture false
+slm remember "The critical detail that was missed"
 ```
 
-### Adjust Auto-Recall Depth
-
-Control how many memories are injected per conversation turn:
+**To delete something auto-captured incorrectly:**
 
 ```bash
-slm config set recall_limit 5    # Default: 5 memories per turn
-slm config set recall_limit 10   # More context (uses more tokens)
-slm config set recall_limit 3    # Less context (faster, fewer tokens)
+slm forget "the incorrect memory"
 ```
-
-### Exclude Profiles from Auto-Capture
-
-If you have a profile where you do not want auto-capture:
-
-```bash
-slm profile switch scratch
-slm config set auto_capture false
-```
-
-This only affects the `scratch` profile. Other profiles keep their settings.
 
 ## How Auto-Capture Decides What to Store
 
@@ -103,32 +82,6 @@ The entropy gate uses several signals:
 3. **Entity presence** — Messages mentioning people, projects, tools, or services score higher
 4. **Temporal markers** — Messages with dates, deadlines, or time references are captured
 5. **Decision language** — Phrases like "we decided," "the fix was," "going with" trigger capture
-
-You can see what was auto-captured:
-
-```bash
-slm list --source auto --limit 10
-```
-
-## Reviewing Auto-Captured Memories
-
-It is good practice to periodically review what was captured:
-
-```bash
-slm list --source auto --limit 20
-```
-
-If something was captured incorrectly, delete it:
-
-```bash
-slm forget --id <memory-id>
-```
-
-If something important was missed, store it manually:
-
-```bash
-slm remember "The critical detail that was missed"
-```
 
 ## Privacy Note
 
