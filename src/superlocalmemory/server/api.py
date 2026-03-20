@@ -23,6 +23,7 @@ from pydantic import BaseModel
 import uvicorn
 
 from superlocalmemory.server.security_middleware import SecurityHeadersMiddleware
+from superlocalmemory.server.ui import SLM_VERSION
 
 logger = logging.getLogger("superlocalmemory.api_server")
 
@@ -84,7 +85,7 @@ def create_app() -> FastAPI:
     application = FastAPI(
         title="SuperLocalMemory V3 API",
         description="V3 Memory Engine REST API",
-        version="3.0.0",
+        version=SLM_VERSION,
         lifespan=lifespan,
     )
 
@@ -212,7 +213,7 @@ def create_app() -> FastAPI:
         engine = application.state.engine
         return {
             "status": "healthy",
-            "version": "3.0.0",
+            "version": SLM_VERSION,
             "engine": "initialized" if engine else "unavailable",
             "database": "connected" if DB_PATH.exists() else "missing",
             "timestamp": datetime.now().isoformat(),

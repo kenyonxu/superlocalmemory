@@ -24,6 +24,27 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+
+def _get_version() -> str:
+    """Read version from package metadata, falling back to pyproject.toml."""
+    try:
+        from importlib.metadata import version
+        return version("superlocalmemory")
+    except Exception:
+        pass
+    try:
+        import tomllib
+        toml_path = Path(__file__).resolve().parent.parent.parent.parent / "pyproject.toml"
+        if toml_path.exists():
+            with open(toml_path, "rb") as f:
+                return tomllib.load(f)["project"]["version"]
+    except Exception:
+        pass
+    return "3.0.0"
+
+
+SLM_VERSION = _get_version()
+
 _script_dir = str(Path(__file__).parent.resolve())
 sys.path = [p for p in sys.path if p not in ("", _script_dir)]
 
@@ -54,7 +75,7 @@ def create_app() -> FastAPI:
     application = FastAPI(
         title="SuperLocalMemory V3 UI Server",
         description="Memory Dashboard with V3 Engine, Trust, Learning, and Compliance",
-        version="3.0.0",
+        version=SLM_VERSION,
         docs_url="/api/docs",
         redoc_url="/api/redoc",
     )
@@ -185,7 +206,7 @@ def create_app() -> FastAPI:
         """Health check endpoint."""
         return {
             "status": "healthy",
-            "version": "3.0.0",
+            "version": SLM_VERSION,
             "database": "connected" if DB_PATH.exists() else "missing",
             "timestamp": datetime.now().isoformat(),
         }

@@ -1,6 +1,21 @@
 // SuperLocalMemory V3 — Dashboard
 // Part of Qualixar | https://superlocalmemory.com
 
+// Auto-refresh dashboard when tab becomes visible (fixes stale data after settings change)
+document.addEventListener('visibilitychange', function() {
+    if (!document.hidden) loadDashboard();
+});
+
+// Also refresh when navigating back to dashboard tab in SPA
+window.addEventListener('hashchange', function() {
+    if (window.location.hash === '' || window.location.hash === '#dashboard') {
+        loadDashboard();
+    }
+});
+
+// Refresh on focus (covers alt-tab back to browser)
+window.addEventListener('focus', function() { loadDashboard(); });
+
 async function loadDashboard() {
     try {
         var response = await fetch('/api/v3/dashboard');

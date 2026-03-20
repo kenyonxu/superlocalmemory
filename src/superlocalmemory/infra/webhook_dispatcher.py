@@ -33,7 +33,15 @@ MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 2        # seconds: 2, 4, 8
 REQUEST_TIMEOUT = 10           # seconds
 MAX_QUEUE_SIZE = 1000
-VERSION = "3.0.0"
+def _get_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("superlocalmemory")
+    except Exception:
+        return "3.0.0"
+
+
+VERSION = _get_version()
 
 # stdlib HTTP -- always available
 from urllib.request import Request, urlopen  # noqa: E402
