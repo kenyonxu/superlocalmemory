@@ -237,8 +237,59 @@ These options work with any command:
 | `--help` | Show help for a command |
 | `--version` | Show SLM version |
 | `--verbose` | Show detailed output |
-| `--json` | Output in JSON format (for scripting) |
+| `--json` | Output structured JSON with agent-native envelope (for AI agents, scripts, CI/CD) |
 | `--profile name` | Override the active profile for this command |
+
+## Agent-Native JSON Output
+
+All data-returning commands support `--json` for structured output. The envelope follows the 2026 agent-native CLI standard:
+
+```json
+{
+  "success": true,
+  "command": "recall",
+  "version": "3.0.22",
+  "data": {
+    "results": [
+      {"fact_id": "abc123", "score": 0.87, "content": "Database uses PostgreSQL 16"}
+    ],
+    "count": 1,
+    "query_type": "semantic"
+  },
+  "next_actions": [
+    {"command": "slm list --json", "description": "List recent memories"}
+  ]
+}
+```
+
+### Supported Commands
+
+`recall`, `remember`, `list`, `status`, `health`, `trace`, `forget`, `delete`, `update`, `mode`, `profile`, `connect`
+
+### Usage with jq
+
+```bash
+# Get first result content
+slm recall "auth" --json | jq '.data.results[0].content'
+
+# Get all fact IDs
+slm list --json | jq '.data.results[].fact_id'
+
+# Check current mode
+slm status --json | jq '.data.mode'
+```
+
+### In CI/CD (GitHub Actions)
+
+```yaml
+- name: Store deployment info
+  run: slm remember "Deployed ${{ github.sha }} to production" --json
+
+- name: Check memory health
+  run: slm status --json | jq -e '.success'
+```
+
+---
 
 ## Examples
 

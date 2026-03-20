@@ -40,6 +40,7 @@ That's it. Your AI now remembers you.
 ## Key Features
 
 - **Works in 17+ IDEs** — Claude Code, Cursor, VS Code, Windsurf, Gemini CLI, JetBrains, and more
+- **Dual Interface: MCP + CLI** — MCP for IDEs, agent-native CLI (`--json`) for scripts, CI/CD, agent frameworks
 - **4-channel retrieval** — Semantic + keyword + entity graph + temporal for maximum accuracy
 - **Mathematical foundations** — Fisher-Rao similarity, sheaf consistency, Langevin lifecycle
 - **Trust scoring** — Bayesian trust per agent and per fact
@@ -56,7 +57,7 @@ That's it. Your AI now remembers you.
 | [Quick Start Tutorial](Quick-Start-Tutorial) | Step-by-step for new users and V2 upgraders |
 | [Getting Started](Getting-Started) | Install + first memory in 5 minutes |
 | [Modes Explained](Modes-Explained) | A vs B vs C — which is right for you |
-| [CLI Reference](CLI-Reference) | All 15 `slm` commands with examples |
+| [CLI Reference](CLI-Reference) | All 18 `slm` commands with `--json` docs |
 | [MCP Tools](MCP-Tools) | All 24 MCP tools for IDE integration |
 | [IDE Setup](IDE-Setup) | Per-IDE configuration guide |
 | [Migration from V2](Migration-from-V2) | Upgrade guide for existing users |

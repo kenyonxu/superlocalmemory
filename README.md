@@ -16,6 +16,8 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT License"/></a>
   <a href="#eu-ai-act-compliance"><img src="https://img.shields.io/badge/EU_AI_Act-Compliant-brightgreen?style=for-the-badge" alt="EU AI Act"/></a>
   <a href="https://superlocalmemory.com"><img src="https://img.shields.io/badge/Web-superlocalmemory.com-ff6b35?style=for-the-badge" alt="Website"/></a>
+  <a href="#dual-interface-mcp--cli"><img src="https://img.shields.io/badge/MCP-Native-blue?style=for-the-badge" alt="MCP Native"/></a>
+  <a href="#dual-interface-mcp--cli"><img src="https://img.shields.io/badge/CLI-Agent--Native-green?style=for-the-badge" alt="CLI Agent-Native"/></a>
 </p>
 
 ---
@@ -83,6 +85,32 @@ slm status
 ```
 
 24 MCP tools available. Works with Claude Code, Cursor, Windsurf, VS Code Copilot, Continue, Cody, ChatGPT Desktop, Gemini CLI, JetBrains, Zed, and 17+ AI tools.
+
+### Dual Interface: MCP + CLI
+
+SLM works everywhere -- from IDEs to CI pipelines to Docker containers. The only AI memory system with both MCP and agent-native CLI.
+
+| Need | Use | Example |
+|------|-----|---------|
+| IDE integration | MCP | Auto-configured for 17+ IDEs via `slm connect` |
+| Shell scripts | CLI + `--json` | `slm recall "auth" --json \| jq '.data.results[0]'` |
+| CI/CD pipelines | CLI + `--json` | `slm remember "deployed v2.1" --json` in GitHub Actions |
+| Agent frameworks | CLI + `--json` | OpenClaw, Codex, Goose, nanobot |
+| Human use | CLI | `slm recall "auth"` (readable text output) |
+
+**Agent-native JSON output** on every command:
+
+```bash
+# Human-readable (default)
+slm recall "database schema"
+#   1. [0.87] Database uses PostgreSQL 16 on port 5432...
+
+# Agent-native JSON
+slm recall "database schema" --json
+# {"success": true, "command": "recall", "version": "3.0.22", "data": {"results": [...]}}
+```
+
+All `--json` responses follow a consistent envelope with `success`, `command`, `version`, `data`, and `next_actions` for agent guidance.
 
 ---
 

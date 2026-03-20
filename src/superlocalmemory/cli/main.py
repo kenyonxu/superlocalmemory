@@ -59,6 +59,7 @@ examples:
   slm trace "auth flow"       Recall with per-channel score breakdown
   slm health                  Check math layer status
   slm dashboard --port 9000   Dashboard on custom port
+  slm recall "query" --json   Agent-native JSON output (for scripts, CI/CD)
 
 documentation:
   Website:    https://superlocalmemory.com
@@ -93,6 +94,7 @@ def main() -> None:
     mode_p.add_argument(
         "value", nargs="?", choices=["a", "b", "c"], help="Mode to set",
     )
+    mode_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     provider_p = sub.add_parser("provider", help="Get or set LLM provider for Mode B/C")
     provider_p.add_argument(
@@ -104,6 +106,7 @@ def main() -> None:
     connect_p.add_argument(
         "--list", action="store_true", help="List all supported IDEs",
     )
+    connect_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     migrate_p = sub.add_parser("migrate", help="Migrate data from V2 to V3 schema")
     migrate_p.add_argument(
@@ -114,33 +117,44 @@ def main() -> None:
     remember_p = sub.add_parser("remember", help="Store a memory (extracts facts, builds graph)")
     remember_p.add_argument("content", help="Content to remember")
     remember_p.add_argument("--tags", default="", help="Comma-separated tags")
+    remember_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     recall_p = sub.add_parser("recall", help="Semantic search with 4-channel retrieval")
     recall_p.add_argument("query", help="Search query")
     recall_p.add_argument("--limit", type=int, default=10, help="Max results (default 10)")
+    recall_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     forget_p = sub.add_parser("forget", help="Delete memories matching a query (fuzzy)")
     forget_p.add_argument("query", help="Query to match for deletion")
+    forget_p.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
+    forget_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     delete_p = sub.add_parser("delete", help="Delete a specific memory by ID (precise)")
     delete_p.add_argument("fact_id", help="Exact fact ID to delete")
     delete_p.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+    delete_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     update_p = sub.add_parser("update", help="Edit the content of a specific memory by ID")
     update_p.add_argument("fact_id", help="Exact fact ID to update")
     update_p.add_argument("content", help="New content for the memory")
+    update_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     list_p = sub.add_parser("list", help="List recent memories chronologically (shows IDs for delete/update)")
     list_p.add_argument(
         "--limit", "-n", type=int, default=20, help="Number of entries (default 20)",
     )
+    list_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     # -- Diagnostics ---------------------------------------------------
-    sub.add_parser("status", help="System status (mode, profile, DB size)")
-    sub.add_parser("health", help="Math layer health (Fisher-Rao, Sheaf, Langevin)")
+    status_p = sub.add_parser("status", help="System status (mode, profile, DB size)")
+    status_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
+
+    health_p = sub.add_parser("health", help="Math layer health (Fisher-Rao, Sheaf, Langevin)")
+    health_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     trace_p = sub.add_parser("trace", help="Recall with per-channel score breakdown")
     trace_p.add_argument("query", help="Search query")
+    trace_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     # -- Services ------------------------------------------------------
     sub.add_parser("mcp", help="Start MCP server (stdio transport for IDE integration)")
@@ -157,6 +171,7 @@ def main() -> None:
         "action", choices=["list", "switch", "create"], help="Action",
     )
     profile_p.add_argument("name", nargs="?", help="Profile name")
+    profile_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     args = parser.parse_args()
 
