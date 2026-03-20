@@ -26,21 +26,33 @@ logger = logging.getLogger(__name__)
 
 
 def _get_version() -> str:
-    """Read version from package metadata, falling back to pyproject.toml."""
+    """Read version from package metadata, package.json, or pyproject.toml."""
+    import json as _json
+    # 1. Try importlib.metadata (works when pip-installed)
     try:
         from importlib.metadata import version
         return version("superlocalmemory")
     except Exception:
         pass
+    # 2. Try package.json (works when npm-installed)
+    pkg_root = Path(__file__).resolve().parent.parent.parent.parent
+    try:
+        pkg_json = pkg_root / "package.json"
+        if pkg_json.exists():
+            with open(pkg_json) as f:
+                return _json.load(f).get("version", "")
+    except Exception:
+        pass
+    # 3. Try pyproject.toml
     try:
         import tomllib
-        toml_path = Path(__file__).resolve().parent.parent.parent.parent / "pyproject.toml"
+        toml_path = pkg_root / "pyproject.toml"
         if toml_path.exists():
             with open(toml_path, "rb") as f:
                 return tomllib.load(f)["project"]["version"]
     except Exception:
         pass
-    return "3.0.0"
+    return "unknown"
 
 
 SLM_VERSION = _get_version()
@@ -111,7 +123,7 @@ def create_app() -> FastAPI:
                 return JSONResponse(
                     status_code=429,
                     content={"error": "Too many requests. Please slow down."},
-                    headers={"Retry-After": str(limiter.window_seconds)},
+                    headers={"Retry-After": str(limiter.window)},
                 )
             response = await call_next(request)
             response.headers["X-RateLimit-Remaining"] = str(remaining)

@@ -29,6 +29,11 @@ async function loadDashboard() {
         document.getElementById('dashboard-model').textContent = data.model || '';
         document.getElementById('dashboard-profile').textContent = data.profile || 'default';
         document.getElementById('dashboard-basedir').textContent = data.base_dir || '~/.superlocalmemory';
+        var ver = data.version || '';
+        var dashVer = document.getElementById('dashboard-version');
+        var settVer = document.getElementById('settings-version');
+        if (dashVer) dashVer.textContent = ver;
+        if (settVer) settVer.textContent = ver;
 
         // Update mode badge in navbar
         var badge = document.getElementById('mode-badge');

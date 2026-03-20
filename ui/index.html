@@ -641,7 +641,7 @@
         <div class="container-fluid">
             <span class="navbar-brand mb-0 h1">
                 <i class="bi bi-diagram-3"></i> SuperLocalMemory V3
-                <span id="mode-badge" class="badge bg-light text-dark ms-2">Mode A</span>
+                <span id="mode-badge" class="badge bg-light text-dark ms-2">...</span>
             </span>
             <div class="d-flex align-items-center gap-3">
                 <div class="d-flex align-items-center gap-2">
@@ -807,8 +807,8 @@
                                     <h6 class="card-subtitle text-muted">Operating Mode</h6>
                                     <i class="bi bi-shield-check stat-icon text-primary"></i>
                                 </div>
-                                <h3 id="dashboard-mode" class="stat-value">Mode A</h3>
-                                <p id="dashboard-mode-desc" class="text-muted small mb-2">Local Guardian — Zero Cloud</p>
+                                <h3 id="dashboard-mode" class="stat-value">Loading...</h3>
+                                <p id="dashboard-mode-desc" class="text-muted small mb-2">Connecting...</p>
                                 <div class="btn-group btn-group-sm" role="group">
                                     <button class="btn btn-outline-primary mode-btn" data-mode="a">A</button>
                                     <button class="btn btn-outline-primary mode-btn" data-mode="b">B</button>
@@ -838,7 +838,7 @@
                                     <h6 class="card-subtitle text-muted">LLM Provider</h6>
                                     <i class="bi bi-cloud stat-icon text-info"></i>
                                 </div>
-                                <h3 id="dashboard-provider" class="stat-value">None</h3>
+                                <h3 id="dashboard-provider" class="stat-value">Loading...</h3>
                                 <p id="dashboard-model" class="text-muted small mb-0"></p>
                             </div>
                         </div>
@@ -877,7 +877,7 @@
                             <div class="card-body">
                                 <h6><i class="bi bi-info-circle"></i> System</h6>
                                 <div class="row text-muted small">
-                                    <div class="col-md-3">Version: <strong>3.0.0</strong></div>
+                                    <div class="col-md-3">Version: <strong id="dashboard-version">...</strong></div>
                                     <div class="col-md-3">Profile: <strong id="dashboard-profile">default</strong></div>
                                     <div class="col-md-3">Base: <strong id="dashboard-basedir">~/.superlocalmemory</strong></div>
                                     <div class="col-md-3">Math Layers: <strong class="text-success">Active</strong></div>
@@ -1687,7 +1687,7 @@
                                 <p class="small text-muted">Backup: <span id="settings-backup-status">Check with <code>slm migrate --rollback</code></span></p>
                             </div>
                             <div class="col-md-6">
-                                <p class="small text-muted">Version: <strong>3.0.0</strong></p>
+                                <p class="small text-muted">Version: <strong id="settings-version">...</strong></p>
                                 <p class="small text-muted">Engine: <strong class="text-success">V3 Active</strong></p>
                             </div>
                         </div>
