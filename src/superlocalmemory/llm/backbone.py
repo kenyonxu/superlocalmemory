@@ -127,12 +127,33 @@ class LLMBackbone:
     # -- Properties ---------------------------------------------------------
 
     def is_available(self) -> bool:
-        """True when the provider is ready for requests."""
+        """True when the provider is ready for requests.
+
+        For Ollama: only returns True if the model is already loaded in
+        memory. Prevents cold-load memory spikes (5+ GB) during recall.
+        """
         if not self._provider:
             return False
         if self._provider == "ollama":
-            return True
+            return self._is_ollama_model_warm()
         return bool(self._api_key)
+
+    def _is_ollama_model_warm(self) -> bool:
+        """Check if the LLM model is already loaded in Ollama."""
+        try:
+            model_base = self._model.split(":")[0]
+            resp = httpx.get(
+                f"{_OLLAMA_DEFAULT_BASE}/api/ps",
+                timeout=httpx.Timeout(2.0),
+            )
+            if resp.status_code != 200:
+                return False
+            for m in resp.json().get("models", []):
+                if model_base in m.get("name", ""):
+                    return True
+            return False
+        except Exception:
+            return False
 
     @property
     def provider(self) -> str:
@@ -250,6 +271,8 @@ class LLMBackbone:
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
+            "keep_alive": "30s",
+            "options": {"num_ctx": 4096},
         }
         return self._base_url, headers, payload
 

@@ -22,26 +22,32 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 def _get_version() -> str:
-    """Read version from package.json / pyproject.toml / importlib."""
-    try:
-        import json as _json
-        pkg_root = Path(__file__).resolve().parent.parent.parent.parent
-        pkg_json = pkg_root / "package.json"
-        if pkg_json.exists():
-            with open(pkg_json) as f:
-                v = _json.load(f).get("version", "")
-                if v:
-                    return v
-    except Exception:
-        pass
-    try:
-        import tomllib
-        toml_path = Path(__file__).resolve().parent.parent.parent.parent / "pyproject.toml"
-        if toml_path.exists():
-            with open(toml_path, "rb") as f:
-                return tomllib.load(f)["project"]["version"]
-    except Exception:
-        pass
+    """Read version from package.json / pyproject.toml / importlib.
+
+    Walks up from this file to find the project root. In the src layout
+    (running from source tree), package.json is 5 parents up; for an
+    installed package it won't exist, so we fall through to importlib.
+    """
+    here = Path(__file__).resolve()
+    for depth in (5, 4):
+        try:
+            import json as _json
+            root = here
+            for _ in range(depth):
+                root = root.parent
+            pkg_json = root / "package.json"
+            if pkg_json.exists():
+                with open(pkg_json) as f:
+                    v = _json.load(f).get("version", "")
+                    if v:
+                        return v
+            toml_path = root / "pyproject.toml"
+            if toml_path.exists():
+                import tomllib
+                with open(toml_path, "rb") as f:
+                    return tomllib.load(f)["project"]["version"]
+        except Exception:
+            continue
     try:
         from importlib.metadata import version
         return version("superlocalmemory")

@@ -94,15 +94,41 @@ class Summarizer:
     # ------------------------------------------------------------------
 
     def _has_llm(self) -> bool:
-        """Check if LLM is available."""
+        """Check if LLM is available (AND warm for Ollama).
+
+        For Mode B (Ollama): only returns True if the model is already
+        loaded in memory. NEVER triggers a cold model load — that would
+        spike 5+ GB of RAM on every recall, unacceptable on ≤32 GB machines.
+        """
         if self._mode == "b":
-            return True  # Ollama assumed running
+            return self._is_ollama_model_warm()
         if self._mode == "c":
             return bool(
                 os.environ.get("OPENROUTER_API_KEY")
                 or getattr(self._config.llm, 'api_key', None)
             )
         return False
+
+    def _is_ollama_model_warm(self) -> bool:
+        """Check if the LLM model is already loaded in Ollama memory.
+
+        Queries Ollama /api/ps. Returns True only if our model is loaded,
+        preventing cold-load memory spikes during recall.
+        """
+        try:
+            import httpx
+            model = getattr(self._config.llm, 'model', None) or "llama3.1:8b"
+            model_base = model.split(":")[0]
+            with httpx.Client(timeout=httpx.Timeout(2.0)) as client:
+                resp = client.get("http://localhost:11434/api/ps")
+                if resp.status_code != 200:
+                    return False
+                for m in resp.json().get("models", []):
+                    if model_base in m.get("name", ""):
+                        return True
+            return False
+        except Exception:
+            return False
 
     def _call_llm(self, prompt: str, max_tokens: int = 200) -> str:
         """Route to Ollama (B) or OpenRouter (C)."""
@@ -111,15 +137,26 @@ class Summarizer:
         return self._call_openrouter(prompt, max_tokens)
 
     def _call_ollama(self, prompt: str, max_tokens: int = 200) -> str:
-        """Call local Ollama for summary generation."""
+        """Call local Ollama for summary generation.
+
+        CRITICAL: num_ctx MUST be set. Without it, Ollama defaults to the
+        model's native context (128K for llama3.1) which allocates ~30 GB
+        of KV cache — fatal on machines with ≤32 GB RAM.
+        SLM prompts are <500 tokens; 4096 context is more than enough.
+        """
         import httpx
         model = getattr(self._config.llm, 'model', None) or "llama3.1:8b"
-        with httpx.Client(timeout=httpx.Timeout(20.0)) as client:
+        with httpx.Client(timeout=httpx.Timeout(30.0)) as client:
             resp = client.post("http://localhost:11434/api/generate", json={
                 "model": model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"num_predict": max_tokens, "temperature": 0.3},
+                "keep_alive": "30s",
+                "options": {
+                    "num_predict": max_tokens,
+                    "temperature": 0.3,
+                    "num_ctx": 4096,
+                },
             })
             resp.raise_for_status()
             return resp.json().get("response", "").strip()
