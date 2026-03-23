@@ -109,7 +109,7 @@ class LLMBackbone:
             host = config.api_base or os.environ.get(
                 "OLLAMA_HOST", _OLLAMA_DEFAULT_BASE,
             )
-            self._base_url = f"{host.rstrip('/')}/v1/chat/completions"
+            self._base_url = f"{host.rstrip('/')}/api/chat"
         elif self._provider == "openrouter":
             self._api_key = config.api_key or os.environ.get(
                 _ENV_KEYS.get(self._provider, ""), "",
@@ -251,13 +251,19 @@ class LLMBackbone:
     ) -> tuple[str, dict[str, str], dict]:
         messages = self._make_messages(system, prompt)
         headers = {"Content-Type": "application/json"}
+        # Native /api/chat format — NOT /v1/chat/completions.
+        # The OpenAI-compatible endpoint silently ignores options.num_ctx,
+        # causing Ollama to use the model's default (131K for llama3.1 = 30 GB).
         payload = {
             "model": self._model,
             "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
+            "stream": False,
             "keep_alive": "30s",
-            "options": {"num_ctx": 4096},
+            "options": {
+                "num_predict": max_tokens,
+                "temperature": temperature,
+                "num_ctx": 4096,
+            },
         }
         return self._base_url, headers, payload
 
@@ -308,7 +314,10 @@ class LLMBackbone:
         """Extract text from provider-specific JSON response."""
         if self._provider == "anthropic":
             return data.get("content", [{}])[0].get("text", "").strip()
-        # OpenAI / Azure / Ollama share response format.
+        if self._provider == "ollama":
+            # Native /api/chat: {"message": {"content": "..."}}
+            return data.get("message", {}).get("content", "").strip()
+        # OpenAI / Azure share response format.
         choices = data.get("choices", [{}])
         return choices[0].get("message", {}).get("content", "").strip()
 
