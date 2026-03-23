@@ -291,11 +291,37 @@ def cmd_recall(args: Namespace) -> None:
         ])
         return
 
+    # Record learning signals (CLI path — works without MCP)
+    try:
+        _cli_record_signals(config, args.query, response.results)
+    except Exception:
+        pass
+
     if not response.results:
         print("No memories found.")
         return
     for i, r in enumerate(response.results, 1):
         print(f"  {i}. [{r.score:.2f}] {r.fact.content[:120]}")
+
+
+def _cli_record_signals(config, query, results):
+    """Record learning signals from CLI recall (no MCP dependency)."""
+    from pathlib import Path
+    from superlocalmemory.learning.feedback import FeedbackCollector
+    from superlocalmemory.learning.signals import LearningSignals
+    slm_dir = Path.home() / ".superlocalmemory"
+    pid = config.active_profile
+    fact_ids = [r.fact.fact_id for r in results[:10]]
+    if not fact_ids:
+        return
+    FeedbackCollector(slm_dir / "learning.db").record_implicit(
+        profile_id=pid, query=query,
+        fact_ids_returned=fact_ids, fact_ids_available=fact_ids,
+    )
+    signals = LearningSignals(slm_dir / "learning.db")
+    signals.record_co_retrieval(pid, fact_ids)
+    for fid in fact_ids[:5]:
+        LearningSignals.boost_confidence(str(slm_dir / "memory.db"), fid)
 
 
 def cmd_forget(args: Namespace) -> None:
