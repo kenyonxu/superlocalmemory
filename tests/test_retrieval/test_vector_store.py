@@ -136,11 +136,16 @@ class TestFallback:
 # ---------------------------------------------------------------------------
 
 def _skip_if_no_sqlite_vec():
-    """Skip test if sqlite-vec is not installed."""
+    """Skip test if sqlite-vec can't load at runtime (not just import)."""
     try:
-        import sqlite_vec  # noqa: F401
+        import sqlite3
+        import sqlite_vec
+        conn = sqlite3.connect(":memory:")
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.close()
         return False
-    except ImportError:
+    except Exception:
         return True
 
 
