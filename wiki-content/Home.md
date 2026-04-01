@@ -1,21 +1,28 @@
 # SuperLocalMemory V3
 
-**The first local-only AI memory to break 74% retrieval on LoCoMo.** No cloud. No APIs. No data leaves your machine.
+> **Every other AI forgets. Yours won't.**
+> *Infinite memory for Claude Code, Cursor, Windsurf & 17+ AI tools.*
 
-SuperLocalMemory gives AI assistants persistent memory across sessions. Install once, and your AI remembers your projects, preferences, decisions, and debugging history — forever.
+SuperLocalMemory gives AI assistants persistent memory across sessions. **v3.3.6** — install once, every session remembers the last, automatically. No cloud. No APIs. No data leaves your machine.
+
+### V3.3.6: Zero-Friction Hooks — Install Once, Forget Forever
+One `npm install` and your AI memory is fully automatic:
+- **Auto-recall** at session start — your context is there before you ask
+- **Auto-observe** during coding — decisions and changes captured silently
+- **Auto-save** at session end — full summary with git context
+- **Zero setup** — hooks install themselves, no config needed
+- **Zero risk** — every hook fails silently, never blocks your workflow
 
 ### V3.1: Active Memory — Memory That Learns
-SLM now **learns from your usage patterns** and gets smarter over time — at zero token cost. Every recall generates learning signals. After 20+ signals, the system starts optimizing retrieval for YOUR specific patterns. After 200+, a full ML model trains on your data. No other memory system learns without spending LLM tokens. [Read more →](Active-Memory)
+SLM **learns from your usage patterns** and gets smarter over time — at zero token cost. Every recall generates learning signals. After 20+ signals, the system starts optimizing retrieval for YOUR specific patterns. After 200+, a full ML model trains on your data. No other memory system learns without spending LLM tokens. [Read more →](Active-Memory)
 
 ## Quick Start
 
 ```bash
-npm install -g superlocalmemory    # or: pip install superlocalmemory
-slm setup                          # Choose mode A/B/C
-slm warmup                        # Pre-download embedding model (optional)
+npm install -g superlocalmemory    # That's it. Hooks auto-install. Memory just works.
 ```
 
-That's it. Your AI now remembers you.
+Your AI now remembers you — automatically, across every session.
 
 ## Three Operating Modes
 

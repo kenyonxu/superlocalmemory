@@ -27,9 +27,12 @@ This automatically:
 - Installs the V3 engine and CLI (`slm` command)
 - Auto-installs Python dependencies (numpy, scipy, networkx, sentence-transformers, torch)
 - Creates data directory at `~/.superlocalmemory/`
+- **Auto-installs Claude Code hooks** (v3.3.6+) — memory lifecycle is fully automatic
 - Detects V2 installations and guides migration
 
-Then set up:
+**That's it.** Open Claude Code and memory just works. No `slm setup` or `slm init` needed for auto-memory.
+
+For optional configuration:
 
 ```bash
 slm setup     # Interactive wizard — choose Mode A/B/C, configure provider
@@ -37,6 +40,8 @@ slm warmup    # Pre-download embedding model (~500MB, one-time)
 ```
 
 > **`slm warmup` is optional.** If you skip it, the model downloads automatically on your first `slm remember` or `slm recall`.
+
+> **Don't want auto-hooks?** Run `slm hooks remove` to opt out. Re-enable anytime with `slm hooks install`.
 
 ### Verify
 

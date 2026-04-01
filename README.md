@@ -3,7 +3,8 @@
 </p>
 
 <h1 align="center">SuperLocalMemory V3.3</h1>
-<p align="center"><strong>The first local-only AI memory to break 74% retrieval on LoCoMo.<br/>No cloud. No APIs. No data leaves your machine.</strong></p>
+<p align="center"><strong>Every other AI forgets. Yours won't.</strong><br/><em>Infinite memory for Claude Code, Cursor, Windsurf & 17+ AI tools.</em></p>
+<p align="center"><code>v3.3.6</code> — Install once. Every session remembers the last. Automatically.</p>
 
 <p align="center">
   <code>+16pp vs Mem0 (zero cloud)</code> &nbsp;·&nbsp; <code>85% Open-Domain (best of any system)</code> &nbsp;·&nbsp; <code>EU AI Act Ready</code>
