@@ -68,7 +68,7 @@ MODE_A = ModeCapabilities(
     description=(
         "Local Guardian — Zero LLM, zero cloud. "
         "Uses nomic-embed-text-v1.5 encoder (768d, 8K context) for embeddings. "
-        "spaCy + rules for extraction. Cross-encoder for reranking. "
+        "spaCy + rules for extraction. ONNX cross-encoder reranking (~200MB). "
         "Full EU AI Act compliance. Target: 65%+"
     ),
 )
@@ -89,6 +89,7 @@ MODE_B = ModeCapabilities(
     description=(
         "Smart Local — Local Ollama LLM (Phi-3, Llama 3.2). "
         "LLM-quality extraction and classification, fully local. "
+        "ONNX cross-encoder reranking (~200MB). "
         "No cloud, no data export. EU AI Act compliant. Target: 75-80%"
     ),
 )

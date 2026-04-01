@@ -112,20 +112,27 @@ if (pipInstall(coreDeps, 'core')) {
     console.log('  Run manually: pip install ' + coreDeps.join(' '));
 }
 
-// Search dependencies (IMPORTANT — enables semantic search, 4-channel retrieval)
-const searchDeps = ['sentence-transformers>=2.5.0', 'einops>=0.7.0', 'geoopt>=0.5.0'];
+// Search + ONNX reranking (V3.3.2 — enables 6-channel retrieval + cross-encoder)
+const searchDeps = [
+    'sentence-transformers[onnx]>=4.0.0',
+    'einops>=0.7.0', 'geoopt>=0.5.0',
+    'onnxruntime>=1.17.0',
+];
 
-console.log('\nInstalling semantic search engine (downloads ~500MB on first use)...');
+console.log('\nInstalling semantic search + ONNX reranking engine...');
+console.log('  (sentence-transformers 4+, ONNX Runtime, Fisher-Rao geometry)');
 if (pipInstall(searchDeps, 'search')) {
-    console.log('✓ Semantic search engine installed (sentence-transformers + einops + Fisher-Rao)');
+    console.log('✓ Search engine installed (sentence-transformers + ONNX + Fisher-Rao)');
+    console.log('  Cross-encoder reranking enabled for ALL modes (+30pp quality)');
     console.log('');
-    console.log('  Note: The embedding model (nomic-ai/nomic-embed-text-v1.5, ~500MB)');
-    console.log('  will download automatically on first use (slm remember / slm recall).');
+    console.log('  Models auto-download on first use:');
+    console.log('    - Embedding: nomic-ai/nomic-embed-text-v1.5 (~500MB)');
+    console.log('    - Reranker: cross-encoder/ms-marco-MiniLM-L-6-v2 (~90MB)');
     console.log('  To pre-download now, run: slm warmup');
 } else {
-    console.log('⚠ Semantic search installation failed (BM25 keyword search still works).');
-    console.log('  For full 4-channel retrieval, run:');
-    console.log('  pip install sentence-transformers einops geoopt');
+    console.log('⚠ Search engine installation failed (BM25 keyword search still works).');
+    console.log('  For full 6-channel retrieval + reranking, run:');
+    console.log('  pip install "sentence-transformers[onnx]>=4.0.0" einops geoopt onnxruntime');
 }
 
 // Dashboard dependencies (IMPORTANT — enables web dashboard + MCP server)

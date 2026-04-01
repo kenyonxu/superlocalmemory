@@ -311,7 +311,9 @@ class TestModeConfigDefaults:
 
         cfg = SLMConfig.for_mode(Mode.A, base_dir=tmp_path)
         assert cfg.embedding.provider == "sentence-transformers"
-        assert cfg.retrieval.use_cross_encoder is False
+        # V3.3.2: ONNX cross-encoder enabled for all modes
+        assert cfg.retrieval.use_cross_encoder is True
+        assert cfg.retrieval.cross_encoder_backend == "onnx"
 
     def test_mode_b_uses_ollama(self, tmp_path):
         from superlocalmemory.core.config import SLMConfig
@@ -319,7 +321,9 @@ class TestModeConfigDefaults:
 
         cfg = SLMConfig.for_mode(Mode.B, base_dir=tmp_path)
         assert cfg.embedding.provider == "ollama"
-        assert cfg.retrieval.use_cross_encoder is False
+        # V3.3.2: ONNX cross-encoder enabled for all modes
+        assert cfg.retrieval.use_cross_encoder is True
+        assert cfg.retrieval.cross_encoder_backend == "onnx"
 
     def test_mode_c_keeps_cross_encoder(self, tmp_path):
         from superlocalmemory.core.config import SLMConfig

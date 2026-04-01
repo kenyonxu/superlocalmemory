@@ -4,6 +4,7 @@
     "args": [
       "mcp"
     ],
-    "env": {}
+    "env": {},
+    "type": "stdio"
   }
 }

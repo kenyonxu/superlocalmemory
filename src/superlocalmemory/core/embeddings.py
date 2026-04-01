@@ -45,7 +45,8 @@ class DimensionMismatchError(RuntimeError):
 
 
 _IDLE_TIMEOUT_SECONDS = 120  # 2 minutes — kill worker after idle
-_SUBPROCESS_RESPONSE_TIMEOUT = 60  # seconds — max wait for worker response
+_SUBPROCESS_RESPONSE_TIMEOUT = 120  # V3.3.2: 120s for ONNX cold start
+_WORKER_RECYCLE_AFTER = 1000  # Recycle worker after N requests (C++ fragmentation prevention)
 
 
 class EmbeddingService:
@@ -66,6 +67,7 @@ class EmbeddingService:
         self._last_used: float = 0.0
         self._idle_timer: threading.Timer | None = None
         self._worker_ready = False
+        self._request_count: int = 0
 
     @property
     def is_available(self) -> bool:
@@ -144,6 +146,13 @@ class EmbeddingService:
         never hangs indefinitely on cold model loads or network issues.
         """
         with self._lock:
+            # Worker recycling: restart after N requests to prevent
+            # C++ allocator fragmentation over long-running sessions.
+            if self._request_count >= _WORKER_RECYCLE_AFTER and self._worker_proc is not None:
+                logger.info("Recycling embedding worker after %d requests", self._request_count)
+                self._kill_worker()
+                self._request_count = 0
+
             self._ensure_worker()
             if self._worker_proc is None:
                 return None
@@ -176,6 +185,7 @@ class EmbeddingService:
                     logger.warning("Worker error: %s", resp.get("error"))
                     return None
                 self._reset_idle_timer()
+                self._request_count += 1
                 return resp["vectors"]
             except (BrokenPipeError, OSError, json.JSONDecodeError) as exc:
                 logger.warning(
@@ -235,6 +245,7 @@ class EmbeddingService:
                 text=True,
                 bufsize=1,
                 env=env,
+                start_new_session=True,  # Prevent terminal signals bleeding to worker
             )
             logger.info("Embedding worker spawned (PID %d)", self._worker_proc.pid)
             self._worker_ready = True

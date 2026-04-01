@@ -194,6 +194,7 @@ class IDEConnector:
             data["mcpServers"] = {}
 
         data["mcpServers"]["superlocalmemory"] = {
+            "type": "stdio",
             "command": "slm",
             "args": ["mcp"],
             "enabled": True,

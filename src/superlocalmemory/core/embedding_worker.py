@@ -23,6 +23,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import json
+import signal
 import sys
 import os
 
@@ -33,6 +34,11 @@ os.environ["PYTORCH_MPS_MEM_LIMIT"] = "0"
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["TORCH_DEVICE"] = "cpu"
+
+# SIGTERM bridge: Docker/systemd send SIGTERM to stop processes.
+# Without this, the worker ignores SIGTERM and becomes a zombie.
+if sys.platform != "win32":
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
 
 def _worker_main() -> None:
@@ -97,7 +103,14 @@ def _worker_main() -> None:
                     _respond({"ok": False, "error": f"Model load failed: {exc}"})
                     continue
             try:
-                vecs = model.encode(texts, normalize_embeddings=True)
+                # torch.inference_mode prevents autograd graph accumulation
+                # which causes silent memory leaks over long-running sessions.
+                try:
+                    import torch
+                    with torch.inference_mode():
+                        vecs = model.encode(texts, normalize_embeddings=True)
+                except ImportError:
+                    vecs = model.encode(texts, normalize_embeddings=True)
                 if isinstance(vecs, np.ndarray) and vecs.ndim == 2:
                     result = [vecs[i].tolist() for i in range(vecs.shape[0])]
                 else:

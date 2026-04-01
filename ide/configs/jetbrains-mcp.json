@@ -5,7 +5,8 @@
       "args": [
         "mcp"
       ],
-      "description": "SuperLocalMemory V3"
+      "description": "SuperLocalMemory V3",
+      "type": "stdio"
     }
   }
 }

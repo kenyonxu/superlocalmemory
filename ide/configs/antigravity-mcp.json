@@ -5,7 +5,8 @@
       "args": [
         "mcp"
       ],
-      "description": "SuperLocalMemory V3 - 100% local memory system"
+      "description": "SuperLocalMemory V3 - 100% local memory system",
+      "type": "stdio"
     }
   }
 }

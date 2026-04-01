@@ -6,11 +6,13 @@
 
 Covers:
   - Lazy model loading (mocked sentence_transformers import)
+  - V3.3.2: ONNX backend loading + fallback to PyTorch
   - rerank() with model available -> scored and sorted
   - rerank() with model unavailable -> fallback to existing order
   - rerank() with empty candidates
   - score_pair() with and without model
   - is_available property
+  - active_backend tracking
   - Thread-safe double-check loading pattern
   - ImportError handling (sentence-transformers not installed)
   - OSError handling (model download failure)
@@ -54,6 +56,12 @@ class TestModelLoading:
         assert reranker._loaded is False
         assert reranker._model is None
 
+    def test_default_model_is_minilm(self) -> None:
+        """V3.3.2: Default model is the lighter MiniLM-L-6."""
+        reranker = CrossEncoderReranker()
+        assert reranker._model_name == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        assert reranker._backend == "onnx"
+
     @patch("superlocalmemory.retrieval.reranker.CrossEncoder", create=True)
     def test_lazy_load_success(self, mock_ce_class: MagicMock) -> None:
         mock_model = MagicMock()
@@ -64,16 +72,16 @@ class TestModelLoading:
             {"sentence_transformers": MagicMock(CrossEncoder=mock_ce_class)},
         ):
             reranker = CrossEncoderReranker("test-model")
-            reranker._ensure_model()
+            # Use blocking load for test determinism
+            reranker._ensure_model_blocking()
 
         assert reranker._loaded is True
 
     def test_import_error_graceful(self) -> None:
         """When sentence_transformers is not installed, model stays None."""
         reranker = CrossEncoderReranker("fake-model")
-        # Force _ensure_model with import failure
         with patch.dict("sys.modules", {"sentence_transformers": None}):
-            reranker._ensure_model()
+            reranker._load_model()
         assert reranker._loaded is True
         assert reranker._model is None
 
@@ -83,9 +91,80 @@ class TestModelLoading:
         mock_st = MagicMock()
         mock_st.CrossEncoder.side_effect = OSError("Download failed")
         with patch.dict("sys.modules", {"sentence_transformers": mock_st}):
-            reranker._ensure_model()
+            reranker._load_model()
         assert reranker._loaded is True
         assert reranker._model is None
+
+
+# ---------------------------------------------------------------------------
+# V3.3.2: ONNX backend loading
+# ---------------------------------------------------------------------------
+
+class TestONNXBackend:
+    def test_onnx_backend_success(self) -> None:
+        """When ONNX runtime is available, loads with backend='onnx' + platform variant."""
+        mock_st = MagicMock()
+        mock_model = MagicMock()
+        mock_st.CrossEncoder.return_value = mock_model
+
+        with patch.dict("sys.modules", {"sentence_transformers": mock_st}):
+            reranker = CrossEncoderReranker("test-model", backend="onnx")
+            reranker._load_model()
+
+        assert reranker._model is mock_model
+        assert reranker._active_backend == "onnx"
+        call_kwargs = mock_st.CrossEncoder.call_args
+        assert call_kwargs[1]["backend"] == "onnx"
+        assert "file_name" in call_kwargs[1]["model_kwargs"]
+
+    def test_onnx_fallback_to_pytorch(self) -> None:
+        """When ONNX fails, falls back to PyTorch backend."""
+        mock_st = MagicMock()
+        mock_model = MagicMock()
+        call_count = 0
+
+        def _side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if kwargs.get("backend") == "onnx":
+                raise ImportError("onnxruntime not installed")
+            return mock_model
+
+        mock_st.CrossEncoder.side_effect = _side_effect
+
+        with patch.dict("sys.modules", {"sentence_transformers": mock_st}):
+            reranker = CrossEncoderReranker("test-model", backend="onnx")
+            reranker._load_model()
+
+        assert reranker._model is mock_model
+        assert reranker._active_backend == "pytorch"
+        assert call_count == 2
+
+    def test_no_backend_uses_pytorch(self) -> None:
+        """When backend is empty, uses PyTorch directly."""
+        mock_st = MagicMock()
+        mock_model = MagicMock()
+        mock_st.CrossEncoder.return_value = mock_model
+
+        with patch.dict("sys.modules", {"sentence_transformers": mock_st}):
+            reranker = CrossEncoderReranker("test-model", backend="")
+            reranker._load_model()
+
+        assert reranker._model is mock_model
+        assert reranker._active_backend == "pytorch"
+        mock_st.CrossEncoder.assert_called_once_with("test-model")
+
+    def test_both_backends_fail_graceful(self) -> None:
+        """When both ONNX and PyTorch fail, model stays None."""
+        mock_st = MagicMock()
+        mock_st.CrossEncoder.side_effect = OSError("All backends failed")
+
+        with patch.dict("sys.modules", {"sentence_transformers": mock_st}):
+            reranker = CrossEncoderReranker("test-model", backend="onnx")
+            reranker._load_model()
+
+        assert reranker._model is None
+        assert reranker._loaded is True
 
 
 # ---------------------------------------------------------------------------

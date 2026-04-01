@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 
 # Force CPU BEFORE any torch import
@@ -27,6 +28,11 @@ os.environ["PYTORCH_MPS_MEM_LIMIT"] = "0"
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["TORCH_DEVICE"] = "cpu"
+
+# SIGTERM bridge: Docker/systemd send SIGTERM to stop processes.
+# Without this, the worker ignores SIGTERM and becomes a zombie.
+if sys.platform != "win32":
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
 _engine = None
 
@@ -223,14 +229,14 @@ def _worker_main() -> None:
             continue
 
         if cmd == "warmup":
-            # Pre-load engine + all models (embedding, reranker, BM25, LLM)
-            # Called at dashboard/MCP startup so first real request is fast.
-            # A dummy recall triggers lazy-loaded components (cross-encoder, BM25 index).
+            # Pre-load engine + database + embeddings only.
+            # V3.3.2: Do NOT run a dummy recall — it triggers the ONNX
+            # cross-encoder export (~30s) which combined with engine init
+            # exceeds the worker timeout. The cross-encoder loads lazily
+            # in a background thread on the first real recall instead.
             try:
                 engine = _get_engine()
                 fact_count = engine._db.get_fact_count(engine._profile_id) if engine._db else 0
-                if fact_count > 0:
-                    engine.recall("warmup", limit=1)
                 _respond({"ok": True, "message": "Engine warm", "facts": fact_count})
             except Exception as exc:
                 _respond({"ok": False, "error": f"Warmup failed: {exc}"})

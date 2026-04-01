@@ -437,7 +437,10 @@ def init_retrieval(
 
     reranker = None
     if config.retrieval.use_cross_encoder:
-        reranker = CrossEncoderReranker(config.retrieval.cross_encoder_model)
+        reranker = CrossEncoderReranker(
+            config.retrieval.cross_encoder_model,
+            backend=config.retrieval.cross_encoder_backend,
+        )
 
     profile_ch = ProfileChannel(db)
     bridge = BridgeDiscovery(db)

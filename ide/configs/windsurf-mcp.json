@@ -5,7 +5,8 @@
       "args": [
         "mcp"
       ],
-      "description": "SuperLocalMemory V3 - 100% local memory system for AI assistants"
+      "description": "SuperLocalMemory V3 - 100% local memory system for AI assistants",
+      "type": "stdio"
     }
   }
 }

@@ -29,8 +29,9 @@ import time
 logger = logging.getLogger(__name__)
 
 _IDLE_TIMEOUT = 120   # 2 min — kill worker after idle
-_REQUEST_TIMEOUT = 60  # 60 sec max per request
-_WARMUP_TIMEOUT = 120  # 2 min — first cold start loads PyTorch + models
+_REQUEST_TIMEOUT = 120  # 120 sec per request (V3.3.2: ONNX cold start can take 30-60s)
+_WARMUP_TIMEOUT = 180  # 3 min — first cold start: engine + ONNX export + models
+_WORKER_RECYCLE_AFTER = 1000  # Recycle worker after N requests (C++ fragmentation prevention)
 
 
 class WorkerPool:
@@ -49,6 +50,7 @@ class WorkerPool:
         self._proc: subprocess.Popen | None = None
         self._idle_timer: threading.Timer | None = None
         self._last_used: float = 0.0
+        self._request_count: int = 0
 
     @classmethod
     def shared(cls) -> WorkerPool:
@@ -146,6 +148,13 @@ class WorkerPool:
     def _send_with_timeout(self, request: dict, timeout: float) -> dict:
         """Send request with configurable timeout. Thread-safe."""
         with self._lock:
+            # Worker recycling: restart after N requests to prevent
+            # C++ allocator fragmentation over long-running sessions.
+            if self._request_count >= _WORKER_RECYCLE_AFTER and self._proc is not None:
+                logger.info("Recycling recall worker after %d requests", self._request_count)
+                self._kill()
+                self._request_count = 0
+
             self._ensure_worker()
             if self._proc is None:
                 return {"ok": False, "error": "Worker failed to start"}
@@ -168,6 +177,7 @@ class WorkerPool:
                     return {"ok": False, "error": "Worker died"}
 
                 self._reset_idle_timer()
+                self._request_count += 1
                 return json.loads(resp_line)
 
             except (BrokenPipeError, OSError, json.JSONDecodeError) as exc:
@@ -227,6 +237,7 @@ class WorkerPool:
                 text=True,
                 bufsize=1,
                 env=env,
+                start_new_session=True,  # Prevent terminal signals bleeding to worker
             )
             logger.info("Recall worker spawned (PID %d)", self._proc.pid)
         except Exception as exc:

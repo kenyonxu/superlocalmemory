@@ -125,6 +125,8 @@ class TestSubConfigs:
         assert rc.rrf_k == 60
         assert rc.top_k == 20
         assert rc.use_cross_encoder is True
+        assert rc.cross_encoder_model == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        assert rc.cross_encoder_backend == "onnx"
         assert rc.agentic_max_rounds == 3
 
     def test_math_defaults(self) -> None:
@@ -209,3 +211,84 @@ class TestDbPathComputation:
     def test_for_mode_uses_custom_base_dir(self, tmp_path: Path) -> None:
         cfg = SLMConfig.for_mode(Mode.A, base_dir=tmp_path)
         assert cfg.base_dir == tmp_path
+
+
+# ---------------------------------------------------------------------------
+# V3.3.2: ONNX cross-encoder config + migration
+# ---------------------------------------------------------------------------
+
+class TestV332OnnxCrossEncoderConfig:
+    """V3.3.2: ONNX cross-encoder enabled for all modes."""
+
+    def test_mode_a_cross_encoder_enabled(self) -> None:
+        cfg = SLMConfig.for_mode(Mode.A)
+        assert cfg.retrieval.use_cross_encoder is True
+        assert cfg.retrieval.cross_encoder_backend == "onnx"
+        assert cfg.retrieval.cross_encoder_model == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    def test_mode_b_cross_encoder_enabled(self) -> None:
+        cfg = SLMConfig.for_mode(Mode.B)
+        assert cfg.retrieval.use_cross_encoder is True
+        assert cfg.retrieval.cross_encoder_backend == "onnx"
+
+    def test_mode_c_cross_encoder_unchanged(self) -> None:
+        cfg = SLMConfig.for_mode(Mode.C)
+        assert cfg.retrieval.use_cross_encoder is True
+
+    def test_save_persists_onnx_fields(self, tmp_path: Path) -> None:
+        import json
+        cfg = SLMConfig.for_mode(Mode.A, base_dir=tmp_path)
+        cfg_path = tmp_path / "config.json"
+        cfg.save(cfg_path)
+        data = json.loads(cfg_path.read_text())
+        assert data["retrieval"]["cross_encoder_model"] == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        assert data["retrieval"]["cross_encoder_backend"] == "onnx"
+
+    def test_load_migrates_pre_332_config(self, tmp_path: Path) -> None:
+        """Pre-3.3.2 configs (no cross_encoder_backend) auto-upgrade."""
+        import json
+        cfg_path = tmp_path / "config.json"
+        # Simulate a pre-3.3.2 config with cross-encoder disabled
+        old_config = {
+            "mode": "a",
+            "active_profile": "default",
+            "llm": {"provider": "", "model": ""},
+            "embedding": {
+                "model_name": "nomic-ai/nomic-embed-text-v1.5",
+                "dimension": 768,
+                "provider": "sentence-transformers",
+            },
+            "retrieval": {
+                "use_cross_encoder": False,
+            },
+        }
+        cfg_path.write_text(json.dumps(old_config))
+        loaded = SLMConfig.load(cfg_path)
+        # Should be auto-upgraded to ONNX cross-encoder
+        assert loaded.retrieval.use_cross_encoder is True
+        assert loaded.retrieval.cross_encoder_backend == "onnx"
+        assert loaded.retrieval.cross_encoder_model == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    def test_load_respects_post_332_config(self, tmp_path: Path) -> None:
+        """Post-3.3.2 configs with explicit backend are respected."""
+        import json
+        cfg_path = tmp_path / "config.json"
+        post_config = {
+            "mode": "a",
+            "active_profile": "default",
+            "llm": {"provider": "", "model": ""},
+            "embedding": {
+                "model_name": "nomic-ai/nomic-embed-text-v1.5",
+                "dimension": 768,
+                "provider": "sentence-transformers",
+            },
+            "retrieval": {
+                "use_cross_encoder": False,  # User explicitly disabled
+                "cross_encoder_backend": "onnx",
+                "cross_encoder_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+            },
+        }
+        cfg_path.write_text(json.dumps(post_config))
+        loaded = SLMConfig.load(cfg_path)
+        # Should respect user's explicit choice
+        assert loaded.retrieval.use_cross_encoder is False

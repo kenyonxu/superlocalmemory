@@ -152,9 +152,10 @@ class RetrievalConfig:
     entity_graph_max_hops: int = 3
     temporal_proximity_days: int = 30
 
-    # Reranking
+    # Reranking (V3.3.2: ONNX backend enabled for all modes)
     use_cross_encoder: bool = True
-    cross_encoder_model: str = "BAAI/bge-reranker-v2-m3"
+    cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    cross_encoder_backend: str = "onnx"  # "onnx" (~200MB) or "" (PyTorch, ~1.5GB)
 
     # Agentic (Mode C only)
     agentic_max_rounds: int = 3
@@ -611,6 +612,15 @@ class SLMConfig:
 
         rt = data.get("retrieval", {})
         if rt:
+            # V3.3.2 migration: auto-enable ONNX cross-encoder.
+            # Pre-3.3.2 configs had use_cross_encoder=False because the
+            # PyTorch cross-encoder used ~1.5GB RAM. With ONNX backend
+            # (~200MB), it's now safe for all modes. Detect old configs
+            # by the absence of cross_encoder_backend field.
+            if "cross_encoder_backend" not in rt:
+                rt["use_cross_encoder"] = True
+                rt["cross_encoder_model"] = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+                rt["cross_encoder_backend"] = "onnx"
             config.retrieval = RetrievalConfig(**{
                 k: v for k, v in rt.items()
                 if k in RetrievalConfig.__dataclass_fields__
@@ -650,6 +660,8 @@ class SLMConfig:
             },
             "retrieval": {
                 "use_cross_encoder": self.retrieval.use_cross_encoder,
+                "cross_encoder_model": self.retrieval.cross_encoder_model,
+                "cross_encoder_backend": self.retrieval.cross_encoder_backend,
             },
         }
 
@@ -725,8 +737,8 @@ class SLMConfig:
                 ),
                 llm=LLMConfig(),  # No LLM
                 retrieval=RetrievalConfig(
-                    # Mode A: no cross-encoder (saves ~1.5GB PyTorch RAM)
-                    use_cross_encoder=False,
+                    # V3.3.2: ONNX cross-encoder enabled for all modes (~200MB)
+                    use_cross_encoder=True,
                 ),
                 math=MathConfig(
                     sheaf_contradiction_threshold=0.45,  # 768d threshold
@@ -750,8 +762,8 @@ class SLMConfig:
                     api_key=llm_api_key or "",
                 ),
                 retrieval=RetrievalConfig(
-                    # Mode B: no cross-encoder (saves ~1.5GB PyTorch RAM)
-                    use_cross_encoder=False,
+                    # V3.3.2: ONNX cross-encoder enabled for all modes (~200MB)
+                    use_cross_encoder=True,
                 ),
             )
 

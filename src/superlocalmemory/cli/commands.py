@@ -993,35 +993,64 @@ def cmd_dashboard(args: Namespace) -> None:
         print("Or install manually: pip install 'fastapi[all]' uvicorn")
         sys.exit(1)
 
+    import os
+    import signal
     import socket
 
     port = getattr(args, "port", 8765)
 
-    def _find_port(preferred: int) -> int:
-        for p in [preferred] + list(range(preferred + 1, preferred + 20)):
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(("127.0.0.1", p))
-                    return p
-            except OSError:
-                continue
-        return preferred
+    def _kill_existing_on_port(target_port: int) -> None:
+        """Kill any existing SLM dashboard on the target port.
 
-    ui_port = _find_port(port)
-    if ui_port != port:
-        print(f"  Port {port} in use — using {ui_port} instead")
+        V3.3.2: ONE port, no auto-increment. If port is busy with
+        another SLM instance, kill it. If busy with a non-SLM process,
+        warn and exit — never silently shift to a different port.
+        """
+        if sys.platform == "win32":
+            return  # Windows: user must close manually
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["lsof", "-ti", f":{target_port}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                pids = result.stdout.strip().split("\n")
+                for pid_str in pids:
+                    pid = int(pid_str.strip())
+                    if pid == os.getpid():
+                        continue
+                    # Check if it's an SLM/Python process
+                    ps_result = subprocess.run(
+                        ["ps", "-p", str(pid), "-o", "command="],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    cmd = ps_result.stdout.strip().lower()
+                    if "superlocalmemory" in cmd or "slm" in cmd or "uvicorn" in cmd:
+                        os.kill(pid, signal.SIGTERM)
+                        print(f"  Stopped previous dashboard (PID {pid})")
+                        import time
+                        time.sleep(1)
+        except Exception:
+            pass  # Best-effort
+
+    _kill_existing_on_port(port)
+
+    # Brief wait for port to fully release after killing old process
+    import time
+    time.sleep(1)
 
     print("=" * 60)
     print("  SuperLocalMemory V3 — Web Dashboard")
     print("=" * 60)
-    print(f"  Dashboard:  http://localhost:{ui_port}")
-    print(f"  API Docs:   http://localhost:{ui_port}/api/docs")
+    print(f"  Dashboard:  http://localhost:{port}")
+    print(f"  API Docs:   http://localhost:{port}/api/docs")
     print("  Press Ctrl+C to stop\n")
 
     from superlocalmemory.server.ui import create_app
 
     app = create_app()
-    uvicorn.run(app, host="127.0.0.1", port=ui_port, log_level="info")
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
 
 
 # -- Profiles (supports --json) -------------------------------------------
