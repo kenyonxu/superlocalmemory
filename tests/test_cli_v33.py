@@ -52,6 +52,7 @@ def _mock_config(profile_id: str = "test-profile"):
 @dataclass
 class _MockCCQResult:
     clusters_found: int = 3
+    clusters_processed: int = 3
     blocks_created: int = 2
     facts_archived: int = 15
     compression_ratio: float = 0.45
@@ -344,7 +345,7 @@ class TestCmdConsolidate:
             cmd_consolidate(Namespace(cognitive=True, profile="", json=False))
 
         captured = capsys.readouterr()
-        assert "Clusters found" in captured.out
+        assert "Clusters processed" in captured.out
         assert "3" in captured.out
 
     def test_consolidate_cognitive_json(self, capsys):
