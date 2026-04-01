@@ -213,17 +213,48 @@ if (fs.existsSync(V2_HOME) && fs.existsSync(path.join(V2_HOME, 'memory.db'))) {
     console.log('');
 }
 
+// --- Step 5: Auto-install Claude Code hooks ---
+// "Install once, forget forever" — hooks enable automatic memory lifecycle
+const hooksDisabledFile = path.join(SLM_HOME, 'hooks', '.hooks-disabled');
+if (fs.existsSync(hooksDisabledFile)) {
+    console.log('⊘ Claude Code hooks: skipped (user opted out via slm hooks remove)');
+} else {
+    console.log('\nInstalling Claude Code hooks (auto-memory lifecycle)...');
+    const hookResult = spawnSync(pythonParts[0], [
+        ...pythonParts.slice(1), '-m', 'superlocalmemory.cli.main', 'hooks', 'install',
+    ], {
+        stdio: 'pipe', timeout: 15000,
+        env: {
+            ...process.env,
+            PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:' + (process.env.PATH || ''),
+            PYTHONPATH: path.join(__dirname, '..', 'src') + ':' + (process.env.PYTHONPATH || ''),
+        },
+    });
+
+    if (hookResult.status === 0) {
+        console.log('✓ Claude Code hooks installed (auto-recall, auto-observe, auto-save)');
+        console.log('  SLM: Hooks installed into Claude Code (slm hooks remove to undo)');
+    } else {
+        console.log('⚠ Claude Code hooks not installed (run: slm hooks install)');
+        // Non-fatal — don't block npm install
+    }
+}
+
 // --- Done ---
 console.log('════════════════════════════════════════════════════════════');
 console.log('  ✓ SuperLocalMemory V3 installed successfully!');
 console.log('');
 console.log('  Quick start:');
-console.log('    slm setup          # First-time configuration');
+console.log('    Just open Claude Code — memory works automatically!');
+console.log('');
+console.log('  Other commands:');
 console.log('    slm doctor         # Pre-flight check (verify everything works)');
 console.log('    slm warmup         # Pre-download embedding model (~500MB)');
 console.log('    slm remember "..." # Store a memory');
 console.log('    slm recall "..."   # Search memories');
 console.log('    slm dashboard      # Open 17-tab web dashboard');
+console.log('    slm hooks status   # Check hook installation');
+console.log('    slm hooks remove   # Opt out of auto-memory hooks');
 console.log('');
 console.log('  Prerequisites satisfied:');
 console.log('    ✓ Python 3.11+');

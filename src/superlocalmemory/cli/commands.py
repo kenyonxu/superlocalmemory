@@ -18,7 +18,16 @@ from argparse import Namespace
 
 def dispatch(args: Namespace) -> None:
     """Route CLI command to the appropriate handler."""
+    # Auto-install/upgrade hooks on version change (single file read, ~0.1ms)
+    if args.command not in ("hooks", "init", "mcp"):
+        try:
+            from superlocalmemory.hooks.claude_code_hooks import auto_install_if_needed
+            auto_install_if_needed()
+        except Exception:
+            pass
+
     handlers = {
+        "init": cmd_init,
         "setup": cmd_setup,
         "mode": cmd_mode,
         "provider": cmd_provider,
@@ -923,6 +932,14 @@ def cmd_trace(args: Namespace) -> None:
 
 def cmd_mcp(_args: Namespace) -> None:
     """Start the V3 MCP server (stdio transport for IDE integration)."""
+    # Auto-install hooks on MCP startup (fast path: ~0.1ms if already current)
+    # CRITICAL: No stdout — MCP uses stdio transport, any print corrupts protocol
+    try:
+        from superlocalmemory.hooks.claude_code_hooks import auto_install_if_needed
+        auto_install_if_needed()
+    except Exception:
+        pass
+
     from superlocalmemory.mcp.server import server
 
     server.run(transport="stdio")
@@ -1142,6 +1159,99 @@ def cmd_profile(args: Namespace) -> None:
 # -- Active Memory commands (V3.1) ------------------------------------------
 
 
+def cmd_init(args: Namespace) -> None:
+    """One-command setup: mode + hooks + IDE connect + warmup."""
+    from pathlib import Path
+    from superlocalmemory.core.config import SLMConfig
+
+    force = getattr(args, "force", False)
+
+    config_exists = (Path.home() / ".superlocalmemory" / "config.json").exists()
+
+    print()
+    print("SuperLocalMemory — One-Time Setup")
+    print("=" * 40)
+
+    # Step 1: Mode selection (interactive)
+    if force or not config_exists:
+        print()
+        from superlocalmemory.cli.setup_wizard import run_wizard
+        run_wizard()
+    else:
+        config = SLMConfig.load()
+        print(f"\n  Already configured: Mode {config.mode.value.upper()}")
+        print(f"  Profile: {config.active_profile}")
+
+    # Step 2: Install hooks (gate always OFF by default)
+    print()
+    print("Installing Claude Code hooks...")
+    from superlocalmemory.hooks.claude_code_hooks import install_hooks, check_status
+
+    status = check_status()
+
+    if status["installed"] and not force:
+        if status["needs_upgrade"]:
+            from superlocalmemory.hooks.claude_code_hooks import upgrade_hooks
+            result = upgrade_hooks()
+            if result.get("upgraded"):
+                print(f"  Hooks upgraded: {result['from_version']} -> {result['to_version']}")
+            else:
+                print(f"  Upgrade issue: {result.get('reason', result.get('errors', ''))}")
+        else:
+            print(f"  Hooks already installed (v{status['version']})")
+    else:
+        result = install_hooks(include_gate=False)
+        if result["success"]:
+            print(f"  Hooks installed: {', '.join(result['hooks_added'])}")
+            print("  SLM: Hooks installed into Claude Code (slm hooks remove to undo)")
+        else:
+            print(f"  Hook install failed: {result['errors']}")
+
+    # Step 3: IDE connection
+    print()
+    print("Detecting IDEs...")
+    try:
+        from superlocalmemory.hooks.ide_connector import IDEConnector
+        connector = IDEConnector()
+        results = connector.connect_all()
+        for ide_id, ide_status in results.items():
+            print(f"  {ide_id}: {ide_status}")
+    except Exception as exc:
+        print(f"  IDE detection skipped: {exc}")
+
+    # Step 4: Warmup (embedding model)
+    print()
+    print("Checking embedding model...")
+    try:
+        from superlocalmemory.core.config import SLMConfig as _Cfg
+        cfg = _Cfg.load()
+        model_name = cfg.embedding.model_name
+        print(f"  Model: {model_name}")
+        # Quick check: try creating embedding service (auto-downloads if needed)
+        from superlocalmemory.core.embeddings import EmbeddingService
+        svc = EmbeddingService(cfg.embedding)
+        test_result = svc.embed_text("test")
+        if test_result is not None and len(test_result) > 0:
+            print("  Status: ready")
+        else:
+            print("  Status: model not available (run: slm warmup)")
+    except Exception as exc:
+        print(f"  Warmup skipped: {exc}")
+        print("  Run 'slm warmup' later to download the embedding model.")
+
+    # Done
+    print()
+    print("=" * 40)
+    print("SLM is active. Your AI now remembers you.")
+    print()
+    print("What happens next:")
+    print("  - Open Claude Code in any project")
+    print("  - SLM auto-injects your memory context")
+    print("  - Decisions, bugs, preferences are captured automatically")
+    print("  - Session summaries saved when you close")
+    print()
+
+
 def cmd_hooks(args: Namespace) -> None:
     """Manage Claude Code hooks for invisible memory injection."""
     from superlocalmemory.hooks.claude_code_hooks import (
@@ -1149,28 +1259,38 @@ def cmd_hooks(args: Namespace) -> None:
     )
 
     action = getattr(args, "action", "status")
+    # Gate is OFF by default. --gate opts in (for brave users).
+    include_gate = getattr(args, "gate", False)
+
     if action == "install":
-        result = install_hooks()
-        if result["scripts"] and result["settings"]:
+        result = install_hooks(include_gate=include_gate)
+        if result["success"]:
             print("SLM hooks installed in Claude Code.")
-            print("Memory context will auto-inject on every new session.")
+            print(f"  Hook types: {', '.join(result['hooks_added'])}")
+            if include_gate:
+                print("  Gate: ON (enforces session_init — experimental)")
+            print("  SLM: Hooks installed into Claude Code (slm hooks remove to undo)")
         else:
-            print(f"Installation incomplete: {result['errors']}")
+            print(f"Installation failed: {result['errors']}")
     elif action == "remove":
         result = remove_hooks()
-        if result["scripts"] and result["settings"]:
+        if result["success"]:
             print("SLM hooks removed from Claude Code.")
         else:
-            print(f"Removal incomplete: {result['errors']}")
+            print(f"Removal failed: {result['errors']}")
     else:
         result = check_status()
         if result["installed"]:
-            print("SLM hooks: INSTALLED")
-            print(f"  Scripts: {result['hooks_dir']}")
-            print("  Claude Code settings: configured")
+            print(f"SLM hooks: INSTALLED (v{result['version']})")
+            print(f"  Hook types: {', '.join(result['hook_types'])}")
+            print(f"  Gate: {'ON' if result['gate_enabled'] else 'OFF'}")
+            if result["needs_upgrade"]:
+                print(f"  Update available: {result['version']} -> {result['latest_version']}")
+                print("  Run: slm hooks install")
         else:
             print("SLM hooks: NOT INSTALLED")
             print("  Run: slm hooks install")
+            print("  Or:  slm init  (full setup)")
 
 
 def cmd_session_context(args: Namespace) -> None:

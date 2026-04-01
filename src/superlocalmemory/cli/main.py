@@ -70,6 +70,12 @@ documentation:
 
 def main() -> None:
     """Parse CLI arguments and dispatch to command handlers."""
+    # Fast path: hook invocations bypass argparse entirely (stdlib only, ~30ms)
+    if len(sys.argv) >= 3 and sys.argv[1] == "hook":
+        from superlocalmemory.hooks.hook_handlers import handle_hook
+        handle_hook(sys.argv[2])
+        return
+
     from superlocalmemory.cli.json_output import _get_version
     _ver = _get_version()
 
@@ -85,6 +91,15 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", title="commands")
 
     # -- Setup & Config ------------------------------------------------
+    init_p = sub.add_parser("init", help="One-command setup: mode + hooks + IDE + warmup")
+    init_p.add_argument(
+        "--force", action="store_true", help="Re-run full setup even if already configured",
+    )
+    init_p.add_argument(
+        "--gate", action="store_true",
+        help="Enable PreToolUse gate (experimental — blocks tools until session_init)",
+    )
+
     sub.add_parser("setup", help="Interactive first-time setup wizard")
 
     mode_p = sub.add_parser("mode", help="Get or set operating mode (a/b/c)")
@@ -181,6 +196,10 @@ def main() -> None:
     hooks_p.add_argument(
         "action", nargs="?", default="status",
         choices=["install", "remove", "status"], help="Action (default: status)",
+    )
+    hooks_p.add_argument(
+        "--gate", action="store_true",
+        help="Enable PreToolUse gate (experimental — blocks tools until session_init)",
     )
 
     ctx_p = sub.add_parser("session-context", help="Print session context (for hooks)")

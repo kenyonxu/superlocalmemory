@@ -2,15 +2,17 @@
 # Licensed under the MIT License - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
-"""Claude Code Hook Integration — invisible memory injection.
+"""Claude Code hook integration — hybrid approach (v3.3.6).
 
-Installs hooks into Claude Code's settings.json that auto-inject
-SLM context on session start and auto-capture on tool use.
+CRITICAL PATH (gate + init-done): Shell built-ins only. Cannot crash.
+VALUE-ADD (start, checkpoint, stop): Python via `slm hook <name>`,
+  wrapped with `2>/dev/null || true` so errors are invisible.
 
 Usage:
-    slm hooks install    Install hooks into Claude Code settings
-    slm hooks status     Check if hooks are installed
-    slm hooks remove     Remove SLM hooks from settings
+    slm hooks install       Install all hooks into Claude Code
+    slm hooks remove        Remove SLM hooks from Claude Code
+    slm hooks status        Check installation status
+    slm init                Full setup including hooks
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
 """
@@ -19,157 +21,384 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
+import sys
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
-HOOKS_DIR = Path.home() / ".superlocalmemory" / "hooks"
+VERSION_DIR = Path.home() / ".superlocalmemory" / "hooks"
+VERSION_FILE = VERSION_DIR / ".version"
+DISABLED_FILE = VERSION_DIR / ".hooks-disabled"
+HOOKS_VERSION = "3.3.6"
 
-# The hook scripts that Claude Code will execute
-HOOK_SCRIPTS = {
-    "slm-session-start.sh": """\
-#!/bin/bash
-# SLM Active Memory — Session Start Hook
-# Auto-recalls relevant context at session start
-slm session-context 2>/dev/null || true
-""",
-    "slm-auto-capture.sh": """\
-#!/bin/bash
-# SLM Active Memory — Auto-Capture Hook
-# Evaluates tool output for decisions/bugs/preferences
-# Input comes via stdin from Claude Code PostToolUse event
-INPUT=$(cat)
-if [ -n "$INPUT" ]; then
-    echo "$INPUT" | slm observe 2>/dev/null || true
-fi
-""",
-}
+# Cross-platform temp dir and marker paths
+_TMP = tempfile.gettempdir()
+_MARKER = f"{_TMP}/slm-session-initialized"
+_START_MARKER = f"{_TMP}/slm-session-start-time"
 
-# Hook definitions for Claude Code settings.json
-HOOK_DEFINITIONS = {
-    "hooks": {
+# Tools that the gate should block (everything except SLM/ToolSearch)
+_GATED_TOOLS = "Bash|Read|Write|Edit|Glob|Grep|Agent|WebFetch|WebSearch|NotebookEdit"
+
+# ---------------------------------------------------------------------------
+# Platform-specific gate commands (shell built-ins only — CANNOT crash)
+# ---------------------------------------------------------------------------
+
+def _gate_cmd() -> str:
+    """Gate command: pure shell, no Python, ~1ms.
+
+    Logic: if initialized → allow. If no session started → allow. Else → block.
+    Uses specific matcher to exclude SLM tools, so no stdin parsing needed.
+    """
+    if sys.platform == "win32":
+        marker_win = _MARKER.replace("/", "\\")
+        start_win = _START_MARKER.replace("/", "\\")
+        return (
+            f'cmd /c "if exist {marker_win} (exit /b 0)'
+            f' else if not exist {start_win} (exit /b 0)'
+            f' else (echo [SLM] Call mcp__superlocalmemory__session_init first & exit /b 2)"'
+        )
+    return (
+        f"test -f {_MARKER}"
+        f" || test ! -f {_START_MARKER}"
+        " || { echo '[SLM] Call mcp__superlocalmemory__session_init first'; exit 2; }"
+    )
+
+
+def _init_done_cmd() -> str:
+    """Init-done command: pure shell touch, ~1ms."""
+    if sys.platform == "win32":
+        return f'cmd /c "echo.>{_MARKER.replace("/", chr(92))}"'
+    return f"touch {_MARKER}"
+
+
+def _wrap_python_cmd(hook_name: str) -> str:
+    """Wrap a Python hook with error absorption. Any crash → invisible."""
+    if sys.platform == "win32":
+        return f'cmd /c "slm hook {hook_name} 2>NUL || exit /b 0"'
+    return f"slm hook {hook_name} 2>/dev/null || true"
+
+
+# ---------------------------------------------------------------------------
+# Hook definitions for settings.json
+# ---------------------------------------------------------------------------
+
+def _hook_definitions(include_gate: bool = False) -> dict[str, list]:
+    """Build Claude Code hook entries.
+
+    Critical path (gate, init-done): Shell built-ins. Cannot crash.
+    Value-add (start, checkpoint, stop): Python with error wrapper.
+    """
+    defs: dict[str, list] = {
         "SessionStart": [
             {
-                "type": "command",
-                "command": str(HOOKS_DIR / "slm-session-start.sh"),
-                "timeout": 10000,
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": _wrap_python_cmd("start"),
+                        "timeout": 15000,
+                    }
+                ]
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": "Write|Edit",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": _wrap_python_cmd("checkpoint"),
+                        "timeout": 5000,
+                    }
+                ],
+            }
+        ],
+        "Stop": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": _wrap_python_cmd("stop"),
+                        "timeout": 10000,
+                    }
+                ]
             }
         ],
     }
-}
+
+    if include_gate:
+        defs["PreToolUse"] = [
+            {
+                "matcher": _GATED_TOOLS,
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": _gate_cmd(),
+                        "timeout": 500,
+                    }
+                ],
+            }
+        ]
+        defs["PostToolUse"].insert(0, {
+            "matcher": "mcp__superlocalmemory__session_init",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": _init_done_cmd(),
+                    "timeout": 500,
+                }
+            ],
+        })
+
+    return defs
 
 
-def install_hooks() -> dict:
-    """Install SLM hooks into Claude Code settings."""
-    results = {"scripts": False, "settings": False, "errors": []}
+# ---------------------------------------------------------------------------
+# Identify SLM hooks in existing settings
+# ---------------------------------------------------------------------------
 
-    # 1. Create hook scripts
+def _is_slm_hook_entry(entry: dict) -> bool:
+    """Check if a hook entry belongs to SLM."""
+    for hook in entry.get("hooks", []):
+        cmd = hook.get("command", "")
+        if ("slm hook" in cmd
+                or "slm-session" in cmd
+                or ".superlocalmemory/hooks/" in cmd
+                or "slm-session-initialized" in cmd):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Safe settings.json merge / removal
+# ---------------------------------------------------------------------------
+
+def _merge_hooks(settings: dict, hook_defs: dict) -> dict:
+    """Merge SLM hooks into settings, preserving all non-SLM hooks."""
+    if "hooks" not in settings:
+        settings["hooks"] = {}
+
+    for hook_type, slm_entries in hook_defs.items():
+        existing = settings["hooks"].get(hook_type, [])
+        cleaned = [e for e in existing if not _is_slm_hook_entry(e)]
+        cleaned.extend(slm_entries)
+        settings["hooks"][hook_type] = cleaned
+
+    return settings
+
+
+def _remove_slm_hooks(settings: dict) -> dict:
+    """Remove all SLM hook entries, preserve non-SLM hooks."""
+    hooks = settings.get("hooks", {})
+    for hook_type in list(hooks.keys()):
+        cleaned = [e for e in hooks[hook_type] if not _is_slm_hook_entry(e)]
+        if cleaned:
+            hooks[hook_type] = cleaned
+        else:
+            del hooks[hook_type]
+    if not hooks and "hooks" in settings:
+        del settings["hooks"]
+    return settings
+
+
+def _read_settings() -> dict:
+    """Read Claude Code settings.json, return empty dict if missing."""
+    if CLAUDE_SETTINGS.exists():
+        return json.loads(CLAUDE_SETTINGS.read_text())
+    return {}
+
+
+def _write_settings(settings: dict) -> None:
+    """Write settings.json with pretty formatting."""
+    CLAUDE_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    CLAUDE_SETTINGS.write_text(json.dumps(settings, indent=2) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def install_hooks(include_gate: bool = False) -> dict:
+    """Install SLM hooks into Claude Code settings.json.
+
+    Critical path uses shell built-ins (cannot crash).
+    Value-add uses Python with error wrappers (crashes invisible).
+    Never overwrites non-SLM hooks.
+    Clears .hooks-disabled marker (explicit install = user wants hooks).
+    """
+    result = {
+        "success": False, "errors": [],
+        "hooks_added": [], "gate_enabled": include_gate,
+    }
+
     try:
-        HOOKS_DIR.mkdir(parents=True, exist_ok=True)
-        for name, content in HOOK_SCRIPTS.items():
-            path = HOOKS_DIR / name
-            path.write_text(content)
-            path.chmod(0o755)
-        results["scripts"] = True
+        settings = _read_settings()
+        hook_defs = _hook_definitions(include_gate=include_gate)
+        settings = _merge_hooks(settings, hook_defs)
+        _write_settings(settings)
+        result["hooks_added"] = list(hook_defs.keys())
+        result["success"] = True
     except Exception as exc:
-        results["errors"].append(f"Script creation failed: {exc}")
+        result["errors"].append(f"Settings update failed: {exc}")
 
-    # 2. Update Claude Code settings.json
     try:
-        if not CLAUDE_SETTINGS.parent.exists():
-            CLAUDE_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-
-        settings = {}
-        if CLAUDE_SETTINGS.exists():
-            settings = json.loads(CLAUDE_SETTINGS.read_text())
-
-        # Merge hooks without overwriting existing ones
-        if "hooks" not in settings:
-            settings["hooks"] = {}
-
-        # Add SessionStart hook if not present
-        session_hooks = settings["hooks"].get("SessionStart", [])
-        slm_hook_cmd = str(HOOKS_DIR / "slm-session-start.sh")
-        already_installed = any(
-            h.get("command", "") == slm_hook_cmd
-            for h in session_hooks if isinstance(h, dict)
-        )
-
-        if not already_installed:
-            session_hooks.append({
-                "type": "command",
-                "command": slm_hook_cmd,
-                "timeout": 10000,
-            })
-            settings["hooks"]["SessionStart"] = session_hooks
-
-        CLAUDE_SETTINGS.write_text(json.dumps(settings, indent=2))
-        results["settings"] = True
+        VERSION_DIR.mkdir(parents=True, exist_ok=True)
+        VERSION_FILE.write_text(HOOKS_VERSION)
+        # Clear disabled marker — explicit install means user wants hooks
+        if DISABLED_FILE.exists():
+            DISABLED_FILE.unlink()
     except Exception as exc:
-        results["errors"].append(f"Settings update failed: {exc}")
+        result["errors"].append(f"Version file failed: {exc}")
 
-    return results
+    return result
 
 
 def remove_hooks() -> dict:
-    """Remove SLM hooks from Claude Code settings."""
-    results = {"scripts": False, "settings": False, "errors": []}
+    """Remove all SLM hooks from Claude Code settings.json.
 
-    # 1. Remove hook scripts
+    Writes a .hooks-disabled marker so auto-install paths respect
+    the user's explicit choice. Cleared by explicit `install_hooks()`.
+    """
+    result = {"success": False, "errors": []}
+
     try:
-        if HOOKS_DIR.exists():
-            shutil.rmtree(HOOKS_DIR)
-        results["scripts"] = True
+        settings = _read_settings()
+        settings = _remove_slm_hooks(settings)
+        _write_settings(settings)
+        result["success"] = True
     except Exception as exc:
-        results["errors"].append(f"Script removal failed: {exc}")
+        result["errors"].append(f"Settings cleanup failed: {exc}")
 
-    # 2. Remove from Claude Code settings
     try:
-        if CLAUDE_SETTINGS.exists():
-            settings = json.loads(CLAUDE_SETTINGS.read_text())
-            if "hooks" in settings and "SessionStart" in settings["hooks"]:
-                slm_hook_cmd = str(HOOKS_DIR / "slm-session-start.sh")
-                settings["hooks"]["SessionStart"] = [
-                    h for h in settings["hooks"]["SessionStart"]
-                    if not (isinstance(h, dict) and h.get("command", "") == slm_hook_cmd)
-                ]
-                if not settings["hooks"]["SessionStart"]:
-                    del settings["hooks"]["SessionStart"]
-                if not settings["hooks"]:
-                    del settings["hooks"]
-                CLAUDE_SETTINGS.write_text(json.dumps(settings, indent=2))
-            results["settings"] = True
-    except Exception as exc:
-        results["errors"].append(f"Settings cleanup failed: {exc}")
-
-    return results
-
-
-def check_status() -> dict:
-    """Check if SLM hooks are installed."""
-    scripts_ok = all(
-        (HOOKS_DIR / name).exists()
-        for name in HOOK_SCRIPTS
-    )
-
-    settings_ok = False
-    try:
-        if CLAUDE_SETTINGS.exists():
-            settings = json.loads(CLAUDE_SETTINGS.read_text())
-            session_hooks = settings.get("hooks", {}).get("SessionStart", [])
-            slm_hook_cmd = str(HOOKS_DIR / "slm-session-start.sh")
-            settings_ok = any(
-                h.get("command", "") == slm_hook_cmd
-                for h in session_hooks if isinstance(h, dict)
-            )
+        if VERSION_FILE.exists():
+            VERSION_FILE.unlink()
+        # Mark as explicitly disabled — auto-install will respect this
+        VERSION_DIR.mkdir(parents=True, exist_ok=True)
+        DISABLED_FILE.write_text("removed by user\n")
     except Exception:
         pass
 
+    return result
+
+
+def check_status() -> dict:
+    """Check SLM hook installation status."""
+    installed_version = ""
+    if VERSION_FILE.exists():
+        try:
+            installed_version = VERSION_FILE.read_text().strip()
+        except Exception:
+            pass
+
+    hook_types_found: list[str] = []
+    has_gate = False
+    try:
+        settings = _read_settings()
+        for hook_type, entries in settings.get("hooks", {}).items():
+            if any(_is_slm_hook_entry(e) for e in entries):
+                hook_types_found.append(hook_type)
+        has_gate = "PreToolUse" in hook_types_found
+    except Exception:
+        pass
+
+    installed = len(hook_types_found) >= 3
+
     return {
-        "installed": scripts_ok and settings_ok,
-        "scripts": scripts_ok,
-        "settings": settings_ok,
-        "hooks_dir": str(HOOKS_DIR),
+        "installed": installed,
+        "version": installed_version,
+        "latest_version": HOOKS_VERSION,
+        "needs_upgrade": bool(installed_version and installed_version != HOOKS_VERSION),
+        "hook_types": hook_types_found,
+        "gate_enabled": has_gate,
     }
+
+
+def upgrade_hooks() -> dict:
+    """Upgrade existing hooks to current version. Non-interactive."""
+    status = check_status()
+
+    if not status["installed"] and not status["version"]:
+        return {"upgraded": False, "reason": "No hooks installed"}
+
+    include_gate = status["gate_enabled"]
+    result = install_hooks(include_gate=include_gate)
+    result["upgraded"] = result["success"]
+    result["from_version"] = status["version"]
+    result["to_version"] = HOOKS_VERSION
+    return result
+
+
+def auto_install_if_needed() -> dict | None:
+    """Auto-install hooks if not present and not explicitly disabled.
+
+    Called from MCP server startup and npm postinstall.
+    Returns install result, or None if skipped.
+
+    Fast path: version file exists and matches → ~0.1ms, returns None.
+    """
+    try:
+        # Respect explicit opt-out
+        if DISABLED_FILE.exists():
+            return None
+
+        # Already installed and current → skip
+        if VERSION_FILE.exists():
+            installed = VERSION_FILE.read_text().strip()
+            if installed == HOOKS_VERSION:
+                return None
+
+        # Install with clear message
+        result = install_hooks(include_gate=False)
+        if result["success"]:
+            logger.info(
+                "SLM: Hooks installed into Claude Code (slm hooks remove to undo)"
+            )
+        return result
+    except Exception as exc:
+        logger.debug("Auto-install check failed: %s", exc)
+        return None
+
+
+def auto_upgrade_check() -> None:
+    """Silent auto-upgrade on version mismatch. ~0.1ms when current."""
+    try:
+        if not VERSION_FILE.exists():
+            legacy_script = VERSION_DIR / "slm-session-start.sh"
+            if legacy_script.exists():
+                _migrate_legacy_hooks()
+            return
+
+        installed = VERSION_FILE.read_text().strip()
+        if installed == HOOKS_VERSION:
+            return
+
+        result = upgrade_hooks()
+        if result.get("upgraded"):
+            logger.info("SLM hooks upgraded %s -> %s", installed, HOOKS_VERSION)
+    except Exception as exc:
+        logger.debug("Hook auto-upgrade failed: %s", exc)
+
+
+def _migrate_legacy_hooks() -> None:
+    """Migrate from bash-script hooks (pre-3.3.6) to hybrid hooks."""
+    try:
+        settings = _read_settings()
+        has_legacy = False
+        for entries in settings.get("hooks", {}).values():
+            for e in entries:
+                for h in e.get("hooks", []):
+                    if ".superlocalmemory/hooks/" in h.get("command", ""):
+                        has_legacy = True
+                        break
+
+        if has_legacy:
+            settings = _remove_slm_hooks(settings)
+            hook_defs = _hook_definitions(include_gate=False)
+            settings = _merge_hooks(settings, hook_defs)
+            _write_settings(settings)
+            VERSION_DIR.mkdir(parents=True, exist_ok=True)
+            VERSION_FILE.write_text(HOOKS_VERSION)
+            logger.info("Migrated legacy bash hooks to hybrid hooks (v%s)", HOOKS_VERSION)
+    except Exception as exc:
+        logger.debug("Legacy hook migration failed: %s", exc)
