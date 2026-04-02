@@ -63,8 +63,14 @@ def _std_normal_cdf(x: float) -> float:
 def _compute_lloyd_max_gaussian(
     sigma: float, n_levels: int, max_iter: int = 100, tol: float = 1e-10,
 ) -> NDArray:
-    """Lloyd-Max optimal codebook for N(0, sigma^2). Deterministic (HR-CB-01)."""
-    lo, hi = -5.0 * sigma, 5.0 * sigma
+    """Lloyd-Max optimal codebook for N(0, sigma^2) on [-1, 1]. Deterministic (HR-CB-01).
+
+    The codebook boundaries extend to [-1, 1] (full unit-sphere coordinate range)
+    rather than [-5*sigma, 5*sigma], because after rotation, unit vector coordinates
+    CAN have extreme values (up to ±1). The Gaussian distribution determines
+    centroid placement, but the boundary range must cover all possible values.
+    """
+    lo, hi = -1.0, 1.0  # Full unit-sphere coordinate range
     boundaries = np.linspace(lo, hi, n_levels + 1)
     centroids = np.zeros(n_levels)
     for k in range(n_levels):
@@ -78,6 +84,9 @@ def _compute_lloyd_max_gaussian(
             denom = _std_normal_cdf(b_k) - _std_normal_cdf(a_k)
             if denom > 1e-15:
                 centroids[k] = sigma * (_std_normal_pdf(a_k) - _std_normal_pdf(b_k)) / denom
+            else:
+                # Tail region: use midpoint (values here are rare but must be handled)
+                centroids[k] = 0.5 * (boundaries[k] + boundaries[k + 1])
         for k in range(1, n_levels):
             boundaries[k] = 0.5 * (centroids[k - 1] + centroids[k])
         if float(np.max(np.abs(centroids - old))) < tol:
