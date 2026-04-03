@@ -263,16 +263,32 @@ def run_recall(
         for r in response.results:
             trust_scorer.update_on_access("fact", r.fact.fact_id, profile_id)
 
-    # V3.3.16: Access count update only — no redundant embedding call.
-    # Fisher Bayesian variance update moved to store_pipeline (write-time)
-    # to avoid per-recall memory pressure from numpy array creation.
-    # Previously: embedder.embed(query) here duplicated the embed call
-    # already done in retrieval engine, creating 768-dim numpy arrays
-    # 304 times during benchmark → pymalloc arena fragmentation → 25GB.
+    # Fisher Bayesian update on recall — narrows variance on accessed facts
+    # so they score higher on subsequent recalls (critical for benchmark: +24pp).
+    # V3.3.16: Reuse query embedding from retrieval engine cache instead of
+    # calling embedder.embed() again (which was the memory leak source).
+    q_var_arr = None
+    if embedder and hasattr(retrieval_engine, '_query_embedding_cache'):
+        cached_emb = retrieval_engine._query_embedding_cache.get(query)
+        if cached_emb is not None:
+            import numpy as _np
+            _, q_var_list = embedder.compute_fisher_params(cached_emb)
+            q_var_arr = _np.array(q_var_list, dtype=_np.float64)
+
     for r in response.results:
-        db.update_fact(r.fact.fact_id, {
+        updates: dict[str, object] = {
             "access_count": r.fact.access_count + 1,
-        })
+        }
+        if (q_var_arr is not None
+                and r.fact.fisher_variance
+                and len(r.fact.fisher_variance) == len(q_var_arr)
+                and r.fact.access_count >= 3):
+            import numpy as _np
+            f_var = _np.array(r.fact.fisher_variance, dtype=_np.float64)
+            new_var = 1.0 / (1.0 / _np.maximum(f_var, 0.05) + 1.0 / _np.maximum(q_var_arr, 0.05))
+            new_var = _np.clip(new_var, 0.05, 2.0)
+            updates["fisher_variance"] = new_var.tolist()
+        db.update_fact(r.fact.fact_id, updates)
 
     # Post-operation hooks (audit, trust signal, learning)
     hook_ctx["result_count"] = len(response.results)
