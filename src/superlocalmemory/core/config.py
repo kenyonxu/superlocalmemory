@@ -155,7 +155,7 @@ class RetrievalConfig:
     # Reranking (V3.3.2: ONNX backend enabled for all modes)
     use_cross_encoder: bool = True
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"
-    cross_encoder_backend: str = "onnx"  # "onnx" (~200MB) or "" (PyTorch, ~1.5GB)
+    cross_encoder_backend: str = ""  # "" = PyTorch (~500MB stable), "onnx" = ONNX (leaks on ARM64 CoreML)
 
     # Agentic (Mode C only)
     agentic_max_rounds: int = 3
