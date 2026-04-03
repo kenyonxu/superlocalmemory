@@ -124,10 +124,12 @@ def _worker_main() -> None:
             warmup_ok = False
             if model is not None:
                 try:
+                    # Use 60 pairs (realistic batch size) to trigger CoreML
+                    # compilation for the actual workload. 3 pairs compiled a
+                    # different execution plan that got recompiled on 60 pairs.
                     dummy_pairs = [
-                        ("What is the capital of France?", "Paris is the capital of France."),
-                        ("Who wrote Hamlet?", "Shakespeare wrote many plays."),
-                        ("What color is the sky?", "The sky is blue on a clear day."),
+                        (f"What happened to person {i}?", f"Person {i} went to location {i} and did activity {i} last summer with friends.")
+                        for i in range(60)
                     ]
                     try:
                         import torch
