@@ -114,6 +114,7 @@ from superlocalmemory.mcp.tools_v3 import register_v3_tools
 from superlocalmemory.mcp.tools_active import register_active_tools
 from superlocalmemory.mcp.tools_v33 import register_v33_tools
 from superlocalmemory.mcp.resources import register_resources
+from superlocalmemory.mcp.tools_code_graph import register_code_graph_tools
 
 register_core_tools(_target, get_engine)
 register_v28_tools(_target, get_engine)
@@ -121,6 +122,28 @@ register_v3_tools(_target, get_engine)
 register_active_tools(_target, get_engine)
 register_v33_tools(_target, get_engine)
 register_resources(server, get_engine)  # Resources always registered (not tools)
+register_code_graph_tools(server, get_engine)  # CodeGraph: registered on `server` (always visible when installed)
+
+
+# V3.3.21: Eager engine warmup — start initializing BEFORE first tool call.
+# The MCP server process starts when the IDE launches. Previously, the engine
+# was lazy-loaded on first tool call → 23s cold start for the user.
+# Now: engine starts warming in a background thread immediately. By the time
+# the first tool call arrives (1-2s later), the engine is already warm.
+# This applies to ALL IDEs: Claude Code, Cursor, Antigravity, Gemini CLI, etc.
+def _eager_warmup() -> None:
+    """Pre-warm engine in background thread."""
+    import logging
+    _logger = logging.getLogger(__name__)
+    try:
+        get_engine()
+        _logger.info("MCP engine pre-warmed successfully")
+    except Exception as exc:
+        _logger.debug("MCP engine pre-warmup failed (non-fatal): %s", exc)
+
+import threading
+_warmup_thread = threading.Thread(target=_eager_warmup, daemon=True, name="mcp-warmup")
+_warmup_thread.start()
 
 
 if __name__ == "__main__":

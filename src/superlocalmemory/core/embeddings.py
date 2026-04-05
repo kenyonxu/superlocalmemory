@@ -52,8 +52,14 @@ class DimensionMismatchError(RuntimeError):
 _IDLE_TIMEOUT_SECONDS = 120  # 2 minutes — kill worker after idle
 # V3.3.12: Configurable via SLM_EMBED_IDLE_TIMEOUT env var (seconds)
 _IDLE_TIMEOUT_SECONDS = int(os.environ.get("SLM_EMBED_IDLE_TIMEOUT", _IDLE_TIMEOUT_SECONDS))
-_SUBPROCESS_RESPONSE_TIMEOUT = 180  # V3.3.12: 180s (was 120s) — respawns on stressed systems need more time
-_WORKER_RECYCLE_AFTER = 1000  # Recycle worker after N requests (C++ fragmentation prevention)
+# V3.3.21: Configurable response timeout — 180s default, but batch ingestion
+# (2-turn chunks across 10 conversations) needs 600s+ to survive cold-start
+# model downloads and ARM64 ONNX compilation pauses.
+_SUBPROCESS_RESPONSE_TIMEOUT = int(os.environ.get("SLM_EMBED_RESPONSE_TIMEOUT", 180))
+# V3.3.21: Increase recycle threshold to 5000 (was 1000). With 2-turn chunks,
+# a single conversation produces ~50-80 store calls. 10 conversations = 500-800.
+# Recycling at 1000 caused mid-ingestion worker death → timeout cascade.
+_WORKER_RECYCLE_AFTER = int(os.environ.get("SLM_EMBED_RECYCLE_AFTER", 5000))
 
 
 class EmbeddingService:

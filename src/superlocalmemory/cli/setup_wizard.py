@@ -265,7 +265,7 @@ def run_wizard(auto: bool = False) -> None:
     print()
 
     # -- Step 1: System check --
-    print("─── Step 1/5: System Check ───")
+    print("─── Step 1/6: System Check ───")
     print()
     py_ver = platform.python_version()
     py_ok = sys.version_info >= (3, 11)
@@ -293,7 +293,7 @@ def run_wizard(auto: bool = False) -> None:
 
     # -- Step 2: Mode selection --
     print()
-    print("─── Step 2/5: Choose Operating Mode ───")
+    print("─── Step 2/6: Choose Operating Mode ───")
     print()
     print("  [A] Local Guardian (recommended)")
     print("      Zero cloud. Zero LLM. Full privacy.")
@@ -340,9 +340,42 @@ def run_wizard(auto: bool = False) -> None:
     mode_names = {"a": "Local Guardian", "b": "Smart Local", "c": "Full Power"}
     print(f"\n  ✓ Mode {choice.upper()} ({mode_names[choice]}) configured")
 
-    # -- Step 3: Download embedding model --
+    # -- Step 3: Code Knowledge Graph --
     print()
-    print("─── Step 3/5: Download Embedding Model ───")
+    print("─── Step 3/6: Code Knowledge Graph ───")
+    print()
+    print("  CodeGraph builds a structural map of your codebase using Tree-sitter.")
+    print("  It gives your AI assistant blast-radius analysis, call graphs,")
+    print("  and connects code structure to your session memories.")
+    print()
+    print("  [Y] Enable CodeGraph (recommended for developers)")
+    print("  [N] Disable CodeGraph (can enable later via config)")
+    print()
+
+    if interactive:
+        cg_choice = _prompt("  Enable Code Knowledge Graph? [Y/n] (default: Y): ", "y").lower()
+    else:
+        cg_choice = "y"
+        print("  Auto-enabling CodeGraph (non-interactive)")
+
+    code_graph_enabled = cg_choice in ("", "y", "yes")
+
+    # Write code graph config
+    _SLM_HOME.mkdir(parents=True, exist_ok=True)
+    cg_config_path = _SLM_HOME / "code_graph_config.json"
+    import json
+    cg_config_data = {"enabled": code_graph_enabled, "bridge_enabled": code_graph_enabled}
+    cg_config_path.write_text(json.dumps(cg_config_data, indent=2))
+
+    if code_graph_enabled:
+        print(f"\n  ✓ CodeGraph enabled")
+        print(f"    Run `slm code-graph build` in any repo to index it")
+    else:
+        print(f"\n  ✓ CodeGraph disabled (enable later in {cg_config_path})")
+
+    # -- Step 4: Download embedding model --
+    print()
+    print("─── Step 4/6: Download Embedding Model ───")
 
     if not st_ok:
         print("  ⚠ Skipped (sentence-transformers not installed)")
@@ -354,7 +387,7 @@ def run_wizard(auto: bool = False) -> None:
 
     # -- Step 4: Download reranker model --
     print()
-    print("─── Step 4/5: Download Reranker Model ───")
+    print("─── Step 5/6: Download Reranker Model ───")
 
     if not st_ok:
         print("  ⚠ Skipped (sentence-transformers not installed)")
@@ -363,7 +396,7 @@ def run_wizard(auto: bool = False) -> None:
 
     # -- Step 5: Verification --
     print()
-    print("─── Step 5/5: Verification ───")
+    print("─── Step 6/6: Verification ───")
 
     if st_ok:
         verified = _verify_installation()

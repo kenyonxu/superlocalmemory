@@ -212,6 +212,38 @@ class MemoryEngine:
             self._config.mode.value, self._profile_id,
         )
 
+        # V3.3.21: Process any pending memories from failed async remember.
+        # Zero cost if no pending.db exists. Backward compatible.
+        self._process_pending_memories()
+
+    def _process_pending_memories(self) -> None:
+        """Process pending memories from store-first async pattern.
+
+        Called on initialize(). If pending.db doesn't exist or has no items,
+        returns immediately (~0ms). If items exist, processes them through the
+        normal store() pipeline and marks them done/failed.
+        """
+        try:
+            from superlocalmemory.cli.pending_store import (
+                get_pending, mark_done, mark_failed,
+            )
+        except ImportError:
+            return
+
+        base_dir = self._config.base_dir
+        pending = get_pending(base_dir, limit=20)
+        if not pending:
+            return
+
+        logger.info("Processing %d pending memories from async store", len(pending))
+        for item in pending:
+            try:
+                self.store(item["content"])
+                mark_done(item["id"], base_dir)
+            except Exception as exc:
+                logger.warning("Pending memory %d failed: %s", item["id"], exc)
+                mark_failed(item["id"], str(exc), base_dir)
+
     # -- Store operations ---------------------------------------------------
 
     def store(

@@ -134,7 +134,7 @@ class RetrievalEngine:
             profile_hits = []
 
         # Dynamic top-k for aggregation queries
-        effective_limit = 50 if strat.query_type == "aggregation" else limit
+        effective_limit = 100 if strat.query_type == "aggregation" else limit
 
         # 3. Run 4 channels
         ch_results = self._run_channels(query, profile_id, strat)
@@ -144,6 +144,14 @@ class RetrievalEngine:
 
         # 3. Single-pass RRF fusion
         fused = weighted_rrf(ch_results, strat.weights, k=self._config.rrf_k)
+
+        # V3.3.21: Cross-channel intersection boost for multi-hop/temporal queries.
+        # Problem: channels work in ISOLATION. "When did Caroline go to X?" needs
+        # entity(Caroline) ∩ temporal(date). RRF averages scores but doesn't enforce
+        # the intersection constraint. Fix: boost facts that appear in 2+ signal-type
+        # channels (entity+temporal, entity+semantic, temporal+semantic).
+        if strat.query_type == "multi_hop" and len(ch_results) >= 2:
+            fused = self._apply_cross_channel_intersection(fused, ch_results, strat)
 
         # Bridge discovery for multi-hop queries
         # V3.3.19: Only bridge.discover() (86ms). Removed bridge.spreading_activation()
@@ -184,9 +192,23 @@ class RetrievalEngine:
         top = fused[:pool]
         facts = self._load_facts(top, profile_id)
 
+        # V3.3.21: Session diversity for aggregation queries.
+        # Cat 1 (single-hop/aggregation) needs facts from MULTIPLE sessions.
+        # Without diversity enforcement, top-20 may all come from 1-2 sessions,
+        # missing scattered mentions across 19+ sessions.
+        if strat.query_type == "aggregation" and facts:
+            top = self._enforce_session_diversity(top, facts, min_sessions=3, top_k=20)
+
         # 5. Cross-encoder rerank (optional)
         # Bug 4 fix: reduced alpha for multi-hop/temporal to preserve diversity
-        if self._reranker is not None and facts:
+        # V3.3.21: Skip reranker if worker isn't ready yet (cold start).
+        # Returns results without CE reranking (~5-10pp lower quality) but instant
+        # instead of blocking 15-19s on first recall. Worker warms up in background.
+        reranker_ready = (
+            self._reranker is not None
+            and getattr(self._reranker, '_worker_ready', False)
+        )
+        if reranker_ready and facts:
             ce_alpha = 0.5 if strat.query_type in ("multi_hop", "temporal") else 0.75
             top = self._apply_reranker(query, top, facts, alpha=ce_alpha)
 
@@ -198,6 +220,119 @@ class RetrievalEngine:
             query_type=strat.query_type, channel_weights=strat.weights,
             total_candidates=total, retrieval_time_ms=ms,
         )
+
+    # -- Cross-channel intersection boost -----------------------------------
+
+    @staticmethod
+    def _apply_cross_channel_intersection(
+        fused: list[FusionResult],
+        ch_results: dict[str, list[tuple[str, float]]],
+        strat: QueryStrategy,
+    ) -> list[FusionResult]:
+        """Boost facts that appear across multiple signal-type channels.
+
+        V3.3.21: Solves the channel isolation problem. When a query has both
+        entity and temporal signals (e.g., "When did Caroline go to X?"), facts
+        matching BOTH dimensions should rank higher than facts matching only one.
+
+        Channel groups:
+          - content: semantic, bm25 (text similarity)
+          - structure: entity_graph, spreading_activation (graph structure)
+          - temporal: temporal (date proximity)
+          - associative: hopfield (pattern completion)
+
+        Boost: facts in 2+ groups get 1.5x, facts in 3+ groups get 2.0x.
+        """
+        # Map channels to signal groups
+        _CHANNEL_GROUPS = {
+            "semantic": "content", "bm25": "content",
+            "entity_graph": "structure", "spreading_activation": "structure",
+            "temporal": "temporal",
+            "hopfield": "associative",
+            "profile": "content",
+        }
+
+        # Build fact_id -> set of signal groups it appears in
+        fact_groups: dict[str, set[str]] = {}
+        for ch_name, results in ch_results.items():
+            group = _CHANNEL_GROUPS.get(ch_name, ch_name)
+            for fid, _score in results:
+                if fid not in fact_groups:
+                    fact_groups[fid] = set()
+                fact_groups[fid].add(group)
+
+        # Apply boost based on cross-group coverage
+        boosted: list[FusionResult] = []
+        for fr in fused:
+            groups = fact_groups.get(fr.fact_id, set())
+            n_groups = len(groups)
+            if n_groups >= 3:
+                boost = 2.0
+            elif n_groups >= 2:
+                # Extra boost for temporal+structure intersection (the exact gap)
+                if "temporal" in groups and "structure" in groups:
+                    boost = 1.8
+                else:
+                    boost = 1.5
+            else:
+                boost = 1.0
+            boosted.append(FusionResult(
+                fact_id=fr.fact_id,
+                fused_score=fr.fused_score * boost,
+                channel_ranks=fr.channel_ranks,
+                channel_scores=fr.channel_scores,
+            ))
+        boosted.sort(key=lambda r: r.fused_score, reverse=True)
+        return boosted
+
+    # -- Session diversity enforcement ----------------------------------------
+
+    @staticmethod
+    def _enforce_session_diversity(
+        fused: list[FusionResult],
+        fact_map: dict[str, AtomicFact],
+        min_sessions: int = 3,
+        top_k: int = 20,
+    ) -> list[FusionResult]:
+        """Ensure top-k results span at least min_sessions different session_ids.
+
+        V3.3.21: Category 1 (aggregation) needs facts from MULTIPLE sessions —
+        95.7% of cat 1 questions require cross-session evidence. Without this,
+        top-20 may cluster around 1-2 sessions, missing scattered mentions.
+
+        Algorithm: if top-k has < min_sessions, promote the highest-scored facts
+        from underrepresented sessions into the top-k window.
+        """
+        if len(fused) <= top_k:
+            return fused
+
+        top = fused[:top_k]
+        rest = fused[top_k:]
+
+        sessions_in_top: set[str] = set()
+        for fr in top:
+            fact = fact_map.get(fr.fact_id)
+            if fact and fact.session_id:
+                sessions_in_top.add(fact.session_id)
+
+        if len(sessions_in_top) >= min_sessions:
+            return fused
+
+        promoted: list[FusionResult] = []
+        for fr in rest:
+            fact = fact_map.get(fr.fact_id)
+            if fact and fact.session_id and fact.session_id not in sessions_in_top:
+                sessions_in_top.add(fact.session_id)
+                promoted.append(fr)
+                if len(sessions_in_top) >= min_sessions:
+                    break
+
+        if not promoted:
+            return fused
+
+        promoted_ids = {fr.fact_id for fr in promoted}
+        remaining = [fr for fr in rest if fr.fact_id not in promoted_ids]
+        return top + promoted + remaining
 
     # -- Channel execution --------------------------------------------------
 

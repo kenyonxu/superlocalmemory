@@ -466,8 +466,8 @@ class TestE2EV32:
             engine._embedder = _DeterministicEmbedder(768)
 
         # Store some facts
-        engine.store("DataPipe project uses Python.", session_id="s1")
-        engine.store("DataPipe connects to MongoDB.", session_id="s1")
+        engine.store("DataPipe project uses Python for the backend data processing pipeline.", session_id="s1")
+        engine.store("DataPipe connects to MongoDB for persistent storage of event streams.", session_id="s1")
         engine.store(
             "Carol is the lead architect on DataPipe.",
             session_id="s1",
@@ -566,7 +566,7 @@ class TestE2EV32:
 
         # Store base facts
         ids_1 = engine.store(
-            "The server runs Ubuntu 22.04.",
+            "The production server runs Ubuntu 22.04 LTS with the latest security patches installed.",
             session_id="s1",
         )
         assert len(ids_1) > 0

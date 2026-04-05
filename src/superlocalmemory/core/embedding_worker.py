@@ -164,13 +164,15 @@ def _worker_main() -> None:
             except Exception as exc:
                 _respond({"ok": False, "error": str(exc)})
 
-            # V3.3.16: RSS watchdog — self-terminate if memory exceeds 1.5GB.
+            # V3.3.16: RSS watchdog — self-terminate if memory exceeds limit.
             # PyTorch on ARM64 Mac never returns memory to OS. After ~200 embeds
             # a worker that started at 300MB grows to 17GB+. Parent auto-respawns
             # a fresh worker on next request (existing mechanism in embeddings.py).
+            # V3.3.21: Configurable via SLM_EMBED_WORKER_RSS_LIMIT_MB (default 2500MB).
             import resource
+            _rss_limit = int(os.environ.get("SLM_EMBED_WORKER_RSS_LIMIT_MB", 2500))
             rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
-            if rss_mb > 2500:
+            if rss_mb > _rss_limit:
                 sys.exit(0)
 
             continue

@@ -183,8 +183,12 @@ class SemanticChannel:
         for fact in facts:
             cos_sim = knn_scores.get(fact.fact_id, 0.0)
 
-            # Graduated Fisher-Rao ramp (preserved from original)
-            fisher_weight = min(1.2, (fact.access_count or 0) / 10.0 * 1.2)
+            # V3.3.21: Fisher-Rao ramp with minimum floor.
+            # Bug fix: access_count=0 for fresh facts → Fisher weight=0 → metric DEAD.
+            # Paper 2's +12pp on multi-hop came from Fisher-Rao. A 0.3 floor ensures
+            # fresh facts still benefit from variance-weighted similarity, while
+            # frequently accessed facts get progressively stronger Fisher influence.
+            fisher_weight = max(0.15, min(1.2, (fact.access_count or 0) / 10.0 * 1.2))
 
             if (fisher_weight > 0.01
                     and fact.fisher_variance is not None

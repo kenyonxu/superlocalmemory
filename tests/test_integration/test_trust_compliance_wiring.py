@@ -305,7 +305,7 @@ class TestOutcomeTrackerWiring:
 class TestGDPRComplianceWiring:
 
     def test_export_includes_all_tables(self, engine: MemoryEngine) -> None:
-        engine.store("Alice works at Google.", session_id="s1")
+        engine.store("Alice works at Google as a senior software engineer in Mountain View.", session_id="s1")
         from superlocalmemory.compliance.gdpr import GDPRCompliance
         gdpr = GDPRCompliance(engine._db)
         export = gdpr.export_profile_data("default")
@@ -320,7 +320,7 @@ class TestGDPRComplianceWiring:
             ("deleteme", "DeleteMe"),
         )
         engine.profile_id = "deleteme"
-        engine.store("Secret fact about user.", session_id="s1")
+        engine.store("Secret fact about user that should be handled with care and privacy.", session_id="s1")
         from superlocalmemory.compliance.gdpr import GDPRCompliance
         gdpr = GDPRCompliance(engine._db)
         gdpr.forget_profile("deleteme")
@@ -336,7 +336,7 @@ class TestGDPRComplianceWiring:
             ("auditee", "Auditee"),
         )
         engine.profile_id = "auditee"
-        engine.store("Data for audit trail test.", session_id="s1")
+        engine.store("Data for audit trail test to verify compliance logging works correctly.", session_id="s1")
         from superlocalmemory.compliance.gdpr import GDPRCompliance
         gdpr = GDPRCompliance(engine._db)
         gdpr.export_profile_data("auditee")
@@ -351,7 +351,7 @@ class TestGDPRComplianceWiring:
             ("auditee2", "Auditee2"),
         )
         engine.profile_id = "auditee2"
-        engine.store("Data for delete audit test.", session_id="s1")
+        engine.store("Data for delete audit test to verify deletion compliance tracking.", session_id="s1")
         from superlocalmemory.compliance.gdpr import GDPRCompliance
         gdpr = GDPRCompliance(engine._db)
         # forget_profile audits THEN deletes — the audit entry is also deleted
@@ -483,9 +483,9 @@ class TestProfileSecurityWiring:
         self._create_profile(engine, "work")
         self._create_profile(engine, "personal")
         engine.profile_id = "work"
-        engine.store("Q1 revenue target is $10M.", session_id="s1")
+        engine.store("Q1 revenue target is $10M for the enterprise sales division this year.", session_id="s1")
         engine.profile_id = "personal"
-        engine.store("I love pizza.", session_id="s2")
+        engine.store("I love eating pepperoni pizza at the Italian restaurant downtown on weekends.", session_id="s2")
         response = engine.recall("revenue", profile_id="personal")
         revenue_facts = [r for r in response.results if "revenue" in r.fact.content.lower()]
         assert len(revenue_facts) == 0
@@ -494,7 +494,7 @@ class TestProfileSecurityWiring:
         self._create_profile(engine, "alpha")
         self._create_profile(engine, "beta")
         engine.profile_id = "alpha"
-        engine.store("Alice met Bob at the park.", session_id="s1")
+        engine.store("Alice met Bob at the central park near downtown during the annual festival.", session_id="s1")
         engine.profile_id = "beta"
         engine.store("Charlie met Diana at the beach.", session_id="s2")
         alpha_edges = engine._db.execute(
@@ -541,9 +541,9 @@ class TestProfileSecurityWiring:
         self._create_profile(engine, "p1")
         self._create_profile(engine, "p2")
         engine.profile_id = "p1"
-        engine.store("Unique P1 keyword xylophone.", session_id="s1")
+        engine.store("Unique P1 keyword xylophone was mentioned during the music class session.", session_id="s1")
         engine.profile_id = "p2"
-        engine.store("Unique P2 keyword harmonica.", session_id="s2")
+        engine.store("Unique P2 keyword harmonica was discussed in the band rehearsal meeting.", session_id="s2")
         p1_tokens = engine._db.get_all_bm25_tokens("p1")
         p2_tokens = engine._db.get_all_bm25_tokens("p2")
         # p1 tokens should not contain p2 fact IDs and vice versa
@@ -558,7 +558,7 @@ class TestPoisoningResistanceWiring:
 
     def test_contradiction_detected_on_supersede(self, engine: MemoryEngine) -> None:
         engine.store("Alice works at Google.", session_id="s1")
-        engine.store("Alice works at EvilCorp.", session_id="s2")
+        engine.store("Alice works at EvilCorp as a data analyst in the analytics department.", session_id="s2")
         # Check consolidation log for a supersede action
         rows = engine._db.execute(
             "SELECT action_type FROM consolidation_log WHERE profile_id = ?",
@@ -684,7 +684,7 @@ class TestAccessControlWiring:
 class TestComplianceAuditTrailWiring:
 
     def test_store_creates_audit_trail_via_consolidation(self, engine: MemoryEngine) -> None:
-        engine.store("Bob graduated from MIT.", session_id="s1")
+        engine.store("Bob graduated from MIT with a degree in computer science in the year 2020.", session_id="s1")
         # Consolidation log should have entries
         rows = engine._db.execute(
             "SELECT COUNT(*) AS c FROM consolidation_log WHERE profile_id = ?",
@@ -698,7 +698,7 @@ class TestComplianceAuditTrailWiring:
             ("audit_del", "AuditDel"),
         )
         engine.profile_id = "audit_del"
-        engine.store("Sensitive information.", session_id="s1")
+        engine.store("Sensitive information about the quarterly financial report and projections.", session_id="s1")
         from superlocalmemory.compliance.gdpr import GDPRCompliance
         gdpr = GDPRCompliance(engine._db)
         # forget_profile returns counts of deleted rows per table
@@ -714,7 +714,7 @@ class TestComplianceAuditTrailWiring:
         assert int(dict(remaining[0])["c"]) == 0
 
     def test_gdpr_export_creates_audit_entry(self, engine: MemoryEngine) -> None:
-        engine.store("Regular fact for export test.", session_id="s1")
+        engine.store("Regular fact for export test to verify data export pipeline works correctly.", session_id="s1")
         from superlocalmemory.compliance.gdpr import GDPRCompliance
         gdpr = GDPRCompliance(engine._db)
         gdpr.export_profile_data("default")

@@ -202,6 +202,23 @@ def run_store(
         if verbatim.content.strip().lower() not in extracted_texts:
             facts.append(verbatim)
 
+    # V3.3.21: If fact extraction produced nothing (short input like "this is test"),
+    # store the raw content as a minimal fact. User explicitly called `slm remember` —
+    # their data should NEVER be silently dropped. The min-length and min-word filters
+    # are designed for automatic conversation extraction, not explicit user storage.
+    if not facts and content.strip():
+        import uuid
+        facts = [AtomicFact(
+            fact_id=uuid.uuid4().hex[:16],
+            content=content.strip(),
+            fact_type=FactType.SEMANTIC,
+            entities=[],
+            session_id=session_id,
+            observation_date=parsed_date,
+            confidence=0.7,
+            importance=0.3,
+        )]
+
     if not facts:
         return []
 

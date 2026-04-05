@@ -1,6 +1,6 @@
 [project]
 name = "superlocalmemory"
-version = "3.3.20"
+version = "3.3.21"
 description = "Information-geometric agent memory with mathematical guarantees"
 readme = "README.md"
 license = {text = "MIT"}
@@ -44,6 +44,11 @@ dependencies = [
     "lightgbm>=4.0.0",
     "diskcache>=5.6.0",
     "orjson>=3.9.0",
+    # CodeGraph — code knowledge graph (v3.4)
+    "tree-sitter>=0.23.0,<1",
+    "tree-sitter-language-pack>=0.3,<2",
+    "rustworkx>=0.15,<1",
+    "watchdog>=4.0,<6",
 ]
 
 [project.optional-dependencies]
@@ -91,6 +96,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+superlocalmemory = ["ui/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

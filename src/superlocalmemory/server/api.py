@@ -30,8 +30,10 @@ logger = logging.getLogger("superlocalmemory.api_server")
 # V3 paths
 MEMORY_DIR = Path.home() / ".superlocalmemory"
 DB_PATH = MEMORY_DIR / "memory.db"
-# ui/ is at repo root, 4 levels up from src/superlocalmemory/server/api.py
-UI_DIR = Path(__file__).resolve().parent.parent.parent.parent / "ui"
+# V3.3.21: UI shipped inside the package for pip/npm installs.
+_PKG_UI = Path(__file__).resolve().parent.parent / "ui"
+_REPO_UI = Path(__file__).resolve().parent.parent.parent.parent / "ui"
+UI_DIR = _PKG_UI if (_PKG_UI / "index.html").exists() else _REPO_UI
 
 
 # ============================================================================

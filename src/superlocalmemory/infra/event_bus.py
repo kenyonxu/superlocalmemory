@@ -39,6 +39,11 @@ VALID_EVENT_TYPES = frozenset([
     "trust.signal",         # V3: trust score change
     "compliance.audit",     # V3: compliance event logged
     "learning.feedback",    # V3: learning feedback received
+    # CodeGraph events (v3.4) — NOTE: "graph.updated" is SLM entity graph, "code_graph.*" is AST code graph
+    "code_graph.built",          # Full code graph build completed
+    "code_graph.updated",        # Incremental code graph update completed
+    "code_graph.node_changed",   # Function/class signature or body changed
+    "code_graph.node_deleted",   # Function/class/file removed from codebase
 ])
 
 

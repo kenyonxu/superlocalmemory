@@ -212,7 +212,40 @@ def _try_parse_date(raw: str, reference_date: str | None = None) -> str | None:
     except Exception:
         pass
 
-    # dateparser for relative dates (yesterday, last week, next Friday)
+    # V3.3.21: Rule-based relative date resolution (no dateparser dependency).
+    # Handles the 90% case: yesterday, today, tomorrow, last X, next X.
+    raw_lower = raw.strip().lower()
+    if reference_date:
+        try:
+            from datetime import datetime, timedelta
+            ref_dt = du_parser.parse(reference_date)
+            _RELATIVE_MAP: dict[str, int] = {
+                "yesterday": -1, "today": 0, "tomorrow": 1,
+                "the day before": -2, "the other day": -2,
+                "day before yesterday": -2,
+            }
+            if raw_lower in _RELATIVE_MAP:
+                resolved = ref_dt + timedelta(days=_RELATIVE_MAP[raw_lower])
+                return resolved.date().isoformat()
+            # "last week" = -7, "last month" ≈ -30, "last year" = -365
+            if raw_lower == "last week":
+                return (ref_dt - timedelta(days=7)).date().isoformat()
+            if raw_lower == "last month":
+                month = ref_dt.month - 1 or 12
+                year = ref_dt.year if ref_dt.month > 1 else ref_dt.year - 1
+                return f"{year}-{month:02d}-{ref_dt.day:02d}"
+            if raw_lower == "last year":
+                return f"{ref_dt.year - 1}-{ref_dt.month:02d}-{ref_dt.day:02d}"
+            if raw_lower == "next week":
+                return (ref_dt + timedelta(days=7)).date().isoformat()
+            if raw_lower == "next month":
+                month = ref_dt.month + 1 if ref_dt.month < 12 else 1
+                year = ref_dt.year if ref_dt.month < 12 else ref_dt.year + 1
+                return f"{year}-{month:02d}-{ref_dt.day:02d}"
+        except Exception:
+            pass
+
+    # dateparser for complex relative dates (optional dependency)
     try:
         import dateparser
         settings: dict[str, Any] = {"PREFER_DATES_FROM": "past"}
@@ -223,6 +256,8 @@ def _try_parse_date(raw: str, reference_date: str | None = None) -> str | None:
         result = dateparser.parse(raw, settings=settings)
         if result:
             return result.date().isoformat()
+    except ImportError:
+        pass
     except Exception:
         pass
 
@@ -521,19 +556,45 @@ class FactExtractor:
             if _is_filler(sent):
                 continue
             normalized = sent.strip()
-            if normalized in seen_texts or len(normalized) < 10:
+            if normalized in seen_texts or len(normalized) < 20:
                 continue
             seen_texts.add(normalized)
 
-            # Resolve [Speaker]: prefix to "Speaker" in content
-            # "[Caroline]: I went to..." → "Caroline: I went to..."
+            # V3.3.21: Resolve [Speaker]: prefix AND first-person pronouns.
+            # "[Caroline]: I went to the gym" → "Caroline went to the gym"
+            # This makes facts self-contained and entity-rich for retrieval.
+            # Previous: just prepended "Caroline: I went..." which left pronouns.
             import re as _re
-            _spk_match = _re.match(r"^\[([A-Za-z ]+)\]:\s*", normalized)
+            _resolved_speaker: str | None = None
+            _spk_match = _re.match(r"^\[([A-Za-z ]+)\]:?\s*", normalized)
             if _spk_match:
-                speaker_name = _spk_match.group(1)
-                normalized = f"{speaker_name}: {normalized[_spk_match.end():]}"
+                _resolved_speaker = _spk_match.group(1)
+                rest = normalized[_spk_match.end():]
+                # Replace first-person pronouns with speaker name
+                rest = _re.sub(r"\bI'm\b", f"{_resolved_speaker} is", rest)
+                rest = _re.sub(r"\bI've\b", f"{_resolved_speaker} has", rest)
+                rest = _re.sub(r"\bI'll\b", f"{_resolved_speaker} will", rest)
+                rest = _re.sub(r"\bI'd\b", f"{_resolved_speaker} would", rest)
+                rest = _re.sub(r"\bI was\b", f"{_resolved_speaker} was", rest)
+                rest = _re.sub(r"\bI am\b", f"{_resolved_speaker} is", rest)
+                rest = _re.sub(r"\bI\b", _resolved_speaker, rest)
+                rest = _re.sub(r"\bmy\b", f"{_resolved_speaker}'s", rest, flags=_re.IGNORECASE)
+                rest = _re.sub(r"\bme\b", _resolved_speaker, rest)
+                rest = _re.sub(r"\bmyself\b", _resolved_speaker, rest, flags=_re.IGNORECASE)
+                normalized = rest
+
+            # V3.3.21 R4: Post-resolution filler + length check.
+            # After stripping [Speaker]: prefix, the remaining text may be
+            # just "Hey!", "Yeah totally!", "Thanks Mel!" — pure noise.
+            # These passed the pre-resolution filler check because the prefix
+            # was still attached. Re-check after resolution.
+            if _is_filler(normalized) or len(normalized.strip()) < 20:
+                continue
 
             entities = _extract_entities(normalized)
+            # Ensure resolved speaker is in entities list
+            if _resolved_speaker and _resolved_speaker not in entities:
+                entities = [_resolved_speaker] + entities
             fact_type = _classify_sentence(normalized)
 
             # Three-date model: extract and resolve relative dates

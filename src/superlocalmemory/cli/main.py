@@ -191,6 +191,14 @@ def main() -> None:
         "--port", type=int, default=8765, help="Port (default 8765)",
     )
 
+    # V3.3.21: Daemon serve mode
+    serve_p = sub.add_parser("serve", help="Start/stop daemon for instant CLI response (~600MB RAM)")
+    serve_p.add_argument(
+        "action", nargs="?", default="start",
+        choices=["start", "stop", "status"],
+        help="start (default), stop, or status",
+    )
+
     # -- Profiles ------------------------------------------------------
     profile_p = sub.add_parser("profile", help="Profile management (list/switch/create)")
     profile_p.add_argument(

@@ -177,13 +177,13 @@ class TestEngineLifecycle:
 
 class TestStoreFlow:
     def test_store_returns_fact_ids(self, engine: MemoryEngine) -> None:
-        ids = engine.store("Alice is a software engineer.", session_id="s1")
+        ids = engine.store("Alice is a senior software engineer at Google in California.", session_id="s1")
         assert isinstance(ids, list)
         assert len(ids) > 0
         assert all(isinstance(fid, str) for fid in ids)
 
     def test_store_increments_fact_count(self, engine: MemoryEngine) -> None:
-        engine.store("Alice is a software engineer.", session_id="s1")
+        engine.store("Alice is a senior software engineer at Google in California.", session_id="s1")
         assert engine.fact_count > 0
 
     def test_store_multiple_sessions(self, engine: MemoryEngine) -> None:
@@ -203,7 +203,7 @@ class TestStoreFlow:
 
     def test_store_with_session_date(self, engine: MemoryEngine) -> None:
         ids = engine.store(
-            "Meeting happened on March 5.",
+            "The engineering team meeting happened on March 5 to discuss the product roadmap.",
             session_id="s1",
             session_date="3:00 pm on 5 March, 2026",
         )
@@ -288,10 +288,10 @@ class TestProfileIsolation:
         self._create_profile(engine, "personal")
 
         engine.profile_id = "work"
-        engine.store("Work fact: Q1 revenue was $10M", session_id="s1")
+        engine.store("Work fact: Q1 revenue was $10M for the enterprise division", session_id="s1")
 
         engine.profile_id = "personal"
-        engine.store("Personal fact: I love pizza", session_id="s1")
+        engine.store("Personal fact: I love eating pepperoni pizza on weekends", session_id="s1")
 
         # Recall from personal profile — should NOT see work facts
         response = engine.recall("revenue", profile_id="personal")
@@ -305,7 +305,7 @@ class TestProfileIsolation:
         self._create_profile(engine, "work")
 
         engine.profile_id = "work"
-        engine.store("Q1 revenue target is $10M", session_id="s1")
+        engine.store("Q1 revenue target is $10M for the enterprise sales division", session_id="s1")
 
         response = engine.recall("revenue", profile_id="work")
         # Should find the work fact

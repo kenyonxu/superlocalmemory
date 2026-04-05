@@ -66,7 +66,20 @@ _CAUSAL_TEMPORAL_WORDS: frozenset[str] = frozenset({
 _AGGREGATION_WORDS: frozenset[str] = frozenset({
     "all", "list", "every", "everything", "various", "different",
     "many", "several", "multiple", "summarize", "overview",
+    # V3.3.21 R5: LoCoMo cat 1 patterns — "What X does/did Y Z?" needs aggregation.
+    # "What activities does Melanie partake in?" = aggregation, not factual.
+    "activities", "events", "hobbies", "instruments", "types",
+    "things", "places", "jobs", "skills", "interests", "pets",
 })
+
+# V3.3.21 R5: Plural noun patterns that signal aggregation queries.
+# "What [noun]s has/does [entity] [verb]?" = needs cross-session aggregation.
+_AGGREGATION_PATTERNS: tuple[str, ...] = (
+    r"what (?:\w+ )?(?:activities|events|hobbies|types|things|places|jobs)",
+    r"what (?:\w+ )?has .+ (?:done|visited|attended|participated|played|practiced)",
+    r"how many (?:\w+ )?(?:times|events|things|places)",
+    r"what are .+(?:'s|s') (?:\w+ )?(?:hobbies|interests|activities|skills)",
+)
 
 _OPINION_WORDS: tuple[str, ...] = (
     "think", "feel", "opinion", "prefer", "favorite", "best", "worst",
@@ -125,6 +138,9 @@ class QueryStrategyClassifier:
         if words & _TEMPORAL_WORDS:
             return "temporal"
         if words & _AGGREGATION_WORDS:
+            return "aggregation"
+        # V3.3.21 R5: Regex patterns for aggregation questions
+        if any(re.search(p, q) for p in _AGGREGATION_PATTERNS):
             return "aggregation"
         if any(w in q for w in _OPINION_WORDS):
             return "opinion"

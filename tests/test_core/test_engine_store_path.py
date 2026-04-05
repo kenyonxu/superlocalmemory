@@ -87,7 +87,7 @@ class TestStoreBasicFlow:
     ) -> None:
         """store() returns a list of string fact IDs."""
         result = engine_with_mock_deps.store(
-            "Alice is an engineer", session_id="s1",
+            "Alice is a senior software engineer at SpaceX in California", session_id="s1",
         )
         assert isinstance(result, list)
         for fid in result:
@@ -97,14 +97,14 @@ class TestStoreBasicFlow:
         self, engine_with_mock_deps: MemoryEngine,
     ) -> None:
         """store() creates a row in the memories table."""
-        engine_with_mock_deps.store("Bob likes tea", session_id="s1")
+        engine_with_mock_deps.store("Bob likes drinking Earl Grey tea every morning before work", session_id="s1")
         # Verify via raw SQL — memories table should have at least one row
         rows = engine_with_mock_deps._db.execute(
             "SELECT content FROM memories WHERE profile_id = ?",
             (engine_with_mock_deps._profile_id,),
         )
         assert len(rows) >= 1
-        found = any("Bob likes tea" in dict(r)["content"] for r in rows)
+        found = any("Bob likes drinking Earl Grey tea" in dict(r)["content"] for r in rows)
         assert found, "Memory record not found in DB"
 
     def test_store_extracts_and_stores_facts(
@@ -112,7 +112,7 @@ class TestStoreBasicFlow:
     ) -> None:
         """store() extracts atomic facts and persists them."""
         ids = engine_with_mock_deps.store(
-            "Carol works at CERN in Geneva", session_id="s1",
+            "Carol works at CERN in Geneva as a particle physicist", session_id="s1",
         )
         # Should have extracted at least one fact
         assert len(ids) >= 1
@@ -136,7 +136,7 @@ class TestStoreBasicFlow:
     ) -> None:
         """store() calls embedder.embed() to enrich facts with embeddings."""
         engine_with_mock_deps.store(
-            "Dave moved to Berlin in 2025", session_id="s1",
+            "Dave moved to Berlin in 2025 to work at a startup as a data scientist", session_id="s1",
         )
         # The mock embedder's embed method should have been called
         assert mock_embedder.embed.called
@@ -148,7 +148,7 @@ class TestStoreBasicFlow:
         gb = engine_with_mock_deps._graph_builder
         with patch.object(gb, 'build_edges', wraps=gb.build_edges) as spy:
             ids = engine_with_mock_deps.store(
-                "Eve is a researcher at MIT", session_id="s1",
+                "Eve is a quantum computing researcher at MIT in the physics department", session_id="s1",
             )
             if ids:
                 assert spy.called
@@ -170,7 +170,7 @@ class TestStoreConsolidation:
             consolidator, 'consolidate', return_value=_noop_action(),
         ):
             ids = engine_with_mock_deps.store(
-                "Duplicate content here", session_id="s1",
+                "Duplicate content here about something previously stored in the system", session_id="s1",
             )
             assert ids == []
 
@@ -180,7 +180,7 @@ class TestStoreConsolidation:
         """When consolidator returns UPDATE, the updated fact ID is in result."""
         # First store a fact to have something to "update"
         original_ids = engine_with_mock_deps.store(
-            "Frank likes pizza", session_id="s1",
+            "Frank likes eating pepperoni pizza from the Italian restaurant downtown", session_id="s1",
         )
         if not original_ids:
             pytest.skip("No facts extracted from initial store")
@@ -192,7 +192,7 @@ class TestStoreConsolidation:
             consolidator, 'consolidate', return_value=mock_action,
         ):
             ids = engine_with_mock_deps.store(
-                "Frank really loves pizza", session_id="s2",
+                "Frank really loves eating margherita pizza with fresh basil and mozzarella", session_id="s2",
             )
             assert existing_id in ids
 
@@ -205,7 +205,7 @@ class TestStoreConsolidation:
             consolidator, 'consolidate', return_value=_add_action("new-f1"),
         ):
             ids = engine_with_mock_deps.store(
-                "Grace is learning Rust", session_id="s1",
+                "Grace is learning Rust programming language for systems development at work", session_id="s1",
             )
             assert len(ids) >= 1
 
@@ -223,7 +223,7 @@ class TestStoreHooks:
         """store() calls _hooks.run_pre('store', ...) before processing."""
         spy = MagicMock()
         engine_with_mock_deps._hooks.register_pre("store", spy)
-        engine_with_mock_deps.store("Hook test content", session_id="s1")
+        engine_with_mock_deps.store("Hook test content for verifying pre-store hooks are invoked correctly", session_id="s1")
         spy.assert_called_once()
         ctx = spy.call_args[0][0]
         assert ctx["operation"] == "store"
@@ -234,7 +234,7 @@ class TestStoreHooks:
         """store() calls _hooks.run_post('store', ...) with fact_ids."""
         spy = MagicMock()
         engine_with_mock_deps._hooks.register_post("store", spy)
-        engine_with_mock_deps.store("Post hook test", session_id="s1")
+        engine_with_mock_deps.store("Post hook test for verifying post-store hooks are invoked correctly", session_id="s1")
         spy.assert_called_once()
         ctx = spy.call_args[0][0]
         assert "fact_ids" in ctx

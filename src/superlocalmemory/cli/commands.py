@@ -56,6 +56,8 @@ def dispatch(args: Namespace) -> None:
         "consolidate": cmd_consolidate,
         "soft-prompts": cmd_soft_prompts,
         "reap": cmd_reap,
+        # V3.3.21 daemon
+        "serve": cmd_serve,
     }
     handler = handlers.get(args.command)
     if handler:
@@ -63,6 +65,49 @@ def dispatch(args: Namespace) -> None:
     else:
         print(f"Unknown command: {args.command}")
         sys.exit(1)
+
+
+# -- Daemon serve mode (V3.3.21) ------------------------------------------
+
+def cmd_serve(args: Namespace) -> None:
+    """Start/stop the SLM daemon for instant CLI response."""
+    from superlocalmemory.cli.daemon import is_daemon_running, ensure_daemon, stop_daemon
+
+    action = getattr(args, 'action', 'start')
+
+    if action == 'stop':
+        if stop_daemon():
+            print("Daemon stopped.")
+        else:
+            print("Daemon was not running.")
+        return
+
+    if action == 'status':
+        if is_daemon_running():
+            from superlocalmemory.cli.daemon import daemon_request
+            status = daemon_request("GET", "/status")
+            if status:
+                print(f"Daemon: RUNNING (PID {status['pid']}, "
+                      f"mode={status['mode']}, facts={status['fact_count']}, "
+                      f"uptime={status['uptime_s']}s, idle={status['idle_s']}s)")
+            else:
+                print("Daemon: RUNNING (could not get status)")
+        else:
+            print("Daemon: NOT RUNNING")
+        return
+
+    # Default: start
+    if is_daemon_running():
+        print("Daemon already running.")
+        return
+
+    print("Starting SLM daemon (engine warming up)...")
+    if ensure_daemon():
+        print("Daemon started \u2713 — CLI commands are now instant.")
+        print("  slm serve status  — check daemon status")
+        print("  slm serve stop    — stop daemon and free RAM")
+    else:
+        print("Failed to start daemon. Check ~/.superlocalmemory/logs/daemon.log")
 
 
 # -- Setup & Config (no --json — interactive commands) ---------------------
@@ -236,15 +281,26 @@ def cmd_list(args: Namespace) -> None:
 
     if not facts:
         print("No memories stored yet.")
-        return
+    else:
+        print(f"Recent memories ({len(facts)}):\n")
+        for i, f in enumerate(facts, 1):
+            date = (f.created_at or "")[:19]
+            ftype_raw = getattr(f, "fact_type", "")
+            ftype = ftype_raw.value if hasattr(ftype_raw, "value") else str(ftype_raw)
+            content = f.content[:100] + ("..." if len(f.content) > 100 else "")
+            print(f"  {i:3d}. [{date}] ({ftype}) {content}")
 
-    print(f"Recent memories ({len(facts)}):\n")
-    for i, f in enumerate(facts, 1):
-        date = (f.created_at or "")[:19]
-        ftype_raw = getattr(f, "fact_type", "")
-        ftype = ftype_raw.value if hasattr(ftype_raw, "value") else str(ftype_raw)
-        content = f.content[:100] + ("..." if len(f.content) > 100 else "")
-        print(f"  {i:3d}. [{date}] ({ftype}) {content}")
+    # V3.3.21: Show pending memories (store-first pattern)
+    try:
+        from superlocalmemory.cli.pending_store import get_pending
+        pending = get_pending(limit=10)
+        if pending:
+            print(f"\nPending (processing in background): {len(pending)}")
+            for p in pending:
+                content = p["content"][:80] + ("..." if len(p["content"]) > 80 else "")
+                print(f"  \u23f3 [{p['created_at'][:19]}] {content}")
+    except Exception:
+        pass
 
 
 def cmd_remember(args: Namespace) -> None:
@@ -254,25 +310,56 @@ def cmd_remember(args: Namespace) -> None:
     use_json = getattr(args, 'json', False)
     sync_mode = getattr(args, 'sync_mode', False)
 
-    # V3.3.19: Async by default — return instantly, process in background.
-    # Use --sync to wait for completion (e.g., when you need fact_ids back).
+    # V3.3.21: Route through daemon for instant remember (no cold start).
+    # If daemon is running, send request directly (~0.1s).
+    # If not, use store-first pattern (pending.db) as fallback.
     if not sync_mode:
+        # Try daemon first
+        try:
+            from superlocalmemory.cli.daemon import is_daemon_running, daemon_request, ensure_daemon
+            if is_daemon_running() or ensure_daemon():
+                result = daemon_request("POST", "/remember", {
+                    "content": args.content,
+                    "tags": args.tags or "",
+                })
+                if result and "fact_ids" in result:
+                    if use_json:
+                        from superlocalmemory.cli.json_output import json_print
+                        json_print("remember", data=result)
+                    else:
+                        print(f"Stored \u2713 {result['count']} facts (via daemon).")
+                    return
+        except Exception:
+            pass  # Fall through to pending store
+
+        # Fallback: store-first pattern (Option C — zero data loss)
         import subprocess
-        cmd = [sys.executable, "-m", "superlocalmemory.cli.main", "remember", args.content]
+        from superlocalmemory.cli.pending_store import store_pending
+
+        row_id = store_pending(
+            content=args.content,
+            tags=args.tags or "",
+        )
+
+        cmd = [sys.executable, "-m", "superlocalmemory.cli.main",
+               "remember", args.content, "--sync"]
         if args.tags:
             cmd.extend(["--tags", args.tags])
-        if use_json:
-            cmd.append("--json")
-        # Spawn detached subprocess — parent exits immediately
-        subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        log_dir = __import__("pathlib").Path.home() / ".superlocalmemory" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "async-remember.log"
+        with open(log_file, "a") as lf:
+            subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=lf,
+                start_new_session=True,
+            )
+
         if use_json:
             from superlocalmemory.cli.json_output import json_print
-            json_print("remember", data={"queued": True, "async": True})
+            json_print("remember", data={"queued": True, "async": True,
+                                         "pending_id": row_id, "safe": True})
         else:
-            print("Queued for background processing.")
+            print(f"Stored \u2713 (pending_id={row_id}) \u2014 processing in background.")
         return
 
     from superlocalmemory.core.engine import MemoryEngine
@@ -304,11 +391,40 @@ def cmd_remember(args: Namespace) -> None:
 
 
 def cmd_recall(args: Namespace) -> None:
-    """Search memories via the engine."""
+    """Search memories via the engine — routes through daemon if available."""
+    use_json = getattr(args, 'json', False)
+
+    # V3.3.21: Route through daemon for instant response (no cold start).
+    # Falls back to direct engine if daemon not running.
+    try:
+        from superlocalmemory.cli.daemon import is_daemon_running, daemon_request, ensure_daemon
+        if is_daemon_running() or ensure_daemon():
+            from urllib.parse import quote
+            result = daemon_request(
+                "GET", f"/recall?q={quote(args.query)}&limit={args.limit}",
+            )
+            if result and "results" in result:
+                # Format daemon response same as engine response
+                if use_json:
+                    from superlocalmemory.cli.json_output import json_print
+                    json_print("recall", data=result, next_actions=[
+                        {"command": "slm list --json", "description": "List recent memories"},
+                    ])
+                    return
+                if not result["results"]:
+                    print("No matching memories found.")
+                    return
+                # Text output
+                print(f"SpreadingActivation.search completed via daemon ({result.get('retrieval_time_ms', 0):.0f}ms)")
+                for i, r in enumerate(result["results"], 1):
+                    print(f"  {i}. [{r['score']:.2f}] {r['content']}")
+                return
+    except Exception:
+        pass  # Fall through to direct engine
+
     from superlocalmemory.core.config import SLMConfig
     from superlocalmemory.core.engine import MemoryEngine
 
-    use_json = getattr(args, 'json', False)
     try:
         config = SLMConfig.load()
         engine = MemoryEngine(config)

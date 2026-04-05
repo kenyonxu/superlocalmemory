@@ -184,7 +184,7 @@ class TestEntityResolutionWiring:
         assert any("Alice" in a for a in aliases) or any("Bob" in a for a in aliases)
 
     def test_facts_linked_to_entities(self, engine: MemoryEngine) -> None:
-        engine.store("Alice met Bob at the park.",
+        engine.store("Alice met Bob at the central park near downtown during the summer festival.",
                       session_id="s1")
         rows = _query(engine,
             "SELECT canonical_entities_json FROM atomic_facts WHERE profile_id = 'default'")
@@ -212,7 +212,7 @@ class TestTemporalParsingWiring:
         assert has_ref, "At least one fact should have referenced_date from 'March 5, 2026'"
 
     def test_observation_date_from_session(self, engine: MemoryEngine) -> None:
-        engine.store("Alice had lunch.",
+        engine.store("Alice had lunch at the Italian restaurant near the office with her colleagues.",
                       session_id="s1",
                       session_date="3:00 pm on 5 March, 2026")
         rows = _query(engine,
@@ -294,8 +294,8 @@ class TestGraphBuilderWiring:
         assert len(rows) >= 1, "Shared entity (Alice) should produce graph edges"
 
     def test_entity_edges_exist(self, engine: MemoryEngine) -> None:
-        engine.store("Bob works at Microsoft.", session_id="s1")
-        engine.store("Bob lives in Seattle.", session_id="s1")
+        engine.store("Bob works at Microsoft as a principal engineer in the cloud infrastructure team.", session_id="s1")
+        engine.store("Bob lives in Seattle near the waterfront in a modern apartment building.", session_id="s1")
         rows = _query(engine,
             "SELECT * FROM graph_edges WHERE profile_id = 'default' AND edge_type = 'entity'")
         assert len(rows) >= 1, "Shared entity (Bob) should produce entity edges"
@@ -318,7 +318,7 @@ class TestConsolidationWiring:
     """Contradicting facts trigger consolidation actions."""
 
     def test_consolidation_log_entry(self, engine: MemoryEngine) -> None:
-        engine.store("Alice works at Google.", session_id="s1")
+        engine.store("Alice works at Google as a senior software engineer in Mountain View.", session_id="s1")
         engine.store("Alice no longer works at Google.", session_id="s2")
         rows = _query(engine,
             "SELECT * FROM consolidation_log WHERE profile_id = 'default'")
@@ -326,7 +326,7 @@ class TestConsolidationWiring:
         assert len(rows) >= 1
 
     def test_consolidation_action_types(self, engine: MemoryEngine) -> None:
-        engine.store("David lives in New York City.", session_id="s1")
+        engine.store("David lives in New York City and works as a financial analyst on Wall Street.", session_id="s1")
         engine.store("David moved from New York City to San Francisco.",
                       session_id="s2")
         rows = _query(engine,
@@ -532,14 +532,14 @@ class TestMemoryRecordWiring:
         assert rows[0]["content"] == original
 
     def test_memory_session_id_matches(self, engine: MemoryEngine) -> None:
-        engine.store("Some test fact.", session_id="session_42")
+        engine.store("Some test fact about the project deadline being moved to next quarter.", session_id="session_42")
         rows = _query(engine,
             "SELECT session_id FROM memories WHERE profile_id = 'default'")
         assert len(rows) >= 1
         assert any(r["session_id"] == "session_42" for r in rows)
 
     def test_memory_speaker_stored(self, engine: MemoryEngine) -> None:
-        engine.store("Alice went to Paris.",
+        engine.store("Alice went to Paris last summer for a two week vacation with her family.",
                       session_id="s1", speaker="narrator")
         rows = _query(engine,
             "SELECT speaker FROM memories WHERE profile_id = 'default'")
