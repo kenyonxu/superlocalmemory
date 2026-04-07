@@ -5,7 +5,7 @@
 <h1 align="center">SuperLocalMemory V3.3</h1>
 <p align="center"><strong>Every other AI forgets. Yours won't.</strong><br/><em>Infinite memory for Claude Code, Cursor, Windsurf & 17+ AI tools.</em></p>
 <p align="center"><code>v3.3.26</code> — Install once. Every session remembers the last. Automatically.</p>
-<p align="center"><strong>Backed by 3 peer-reviewed research papers</strong> · <a href="#research-papers">arXiv:2603.02240</a> · <a href="#research-papers">arXiv:2603.14588</a> · <a href="#research-papers">Paper 3 (submitted)</a></p>
+<p align="center"><strong>Backed by 3 peer-reviewed research papers</strong> · <a href="https://arxiv.org/abs/2603.02240">arXiv:2603.02240</a> · <a href="https://arxiv.org/abs/2603.14588">arXiv:2603.14588</a> · <a href="https://arxiv.org/abs/2604.04514">arXiv:2604.04514</a></p>
 
 <p align="center">
   <code>+16pp vs Mem0 (zero cloud)</code> &nbsp;·&nbsp; <code>85% Open-Domain (best of any system)</code> &nbsp;·&nbsp; <code>EU AI Act Ready</code>
@@ -441,7 +441,7 @@ SuperLocalMemory is backed by three peer-reviewed research papers covering trust
 ### Paper 3: The Living Brain (V3.3)
 > **SuperLocalMemory V3.3: The Living Brain — Biologically-Inspired Forgetting, Cognitive Quantization, and Multi-Channel Retrieval for Zero-LLM Agent Memory Systems**
 > Varun Pratap Bhardwaj (2026)
-> [Zenodo DOI: 10.5281/zenodo.19435120](https://zenodo.org/records/19435120) · arXiv ID pending
+> [arXiv:2604.04514](https://arxiv.org/abs/2604.04514) · [Zenodo DOI: 10.5281/zenodo.19435120](https://zenodo.org/records/19435120)
 
 ### Paper 2: Information-Geometric Foundations (V3)
 > **SuperLocalMemory V3: Information-Geometric Foundations for Zero-LLM Enterprise Agent Memory**
@@ -461,9 +461,9 @@ SuperLocalMemory is backed by three peer-reviewed research papers covering trust
          Forgetting, Cognitive Quantization, and Multi-Channel Retrieval
          for Zero-LLM Agent Memory Systems},
   author={Bhardwaj, Varun Pratap},
-  journal={Zenodo},
-  doi={10.5281/zenodo.19435120},
-  year={2026}
+  journal={arXiv preprint arXiv:2604.04514},
+  year={2026},
+  url={https://arxiv.org/abs/2604.04514}
 }
 
 @article{bhardwaj2026slmv3,

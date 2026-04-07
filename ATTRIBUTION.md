@@ -46,7 +46,7 @@ SuperLocalMemory is backed by three peer-reviewed research papers:
 2. **Paper 2 — Information-Geometric Foundations** (arXiv:2603.14588)
    Fisher-Rao geodesic distance, cellular sheaf cohomology, Riemannian Langevin lifecycle dynamics.
 
-3. **Paper 3 — The Living Brain** (Zenodo: 10.5281/zenodo.19435120)
+3. **Paper 3 — The Living Brain** (arXiv:2604.04514)
    FRQAD mixed-precision metric, Ebbinghaus adaptive forgetting, 7-channel cognitive retrieval, memory parameterization, trust-weighted forgetting.
 
 ### Research Initiative

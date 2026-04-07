@@ -60,7 +60,7 @@ The security architecture is formally documented across three peer-reviewed pape
 
 - **Paper 1** ([arXiv:2603.02240](https://arxiv.org/abs/2603.02240)): Bayesian trust defense, OWASP-aligned memory poisoning protection
 - **Paper 2** ([arXiv:2603.14588](https://arxiv.org/abs/2603.14588)): Information-geometric foundations, cellular sheaf cohomology for contradiction detection
-- **Paper 3** ([Zenodo:10.5281/zenodo.19435120](https://zenodo.org/records/19435120)): Trust-weighted forgetting, compliance audit trails, FRQAD mixed-precision integrity
+- **Paper 3** ([arXiv:2604.04514](https://arxiv.org/abs/2604.04514)): Trust-weighted forgetting, compliance audit trails, FRQAD mixed-precision integrity
 
 ---
 
