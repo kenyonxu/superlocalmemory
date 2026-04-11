@@ -341,20 +341,19 @@ slm dashboard    # Opens at http://localhost:8765
 
 <details open>
 <summary><strong>Dashboard Screenshots</strong> (click to collapse)</summary>
-<p align="center"><img src="docs/screenshots/01-dashboard-main.png" alt="Dashboard" width="600"/></p>
+<p align="center"><img src="docs/screenshots/01-dashboard-main.png" alt="Dashboard Overview — 3,100+ memories, 430K connections" width="600"/></p>
 <p align="center">
-<img src="docs/screenshots/02-knowledge-graph.png" alt="Graph" width="190"/>
-<img src="docs/screenshots/03-math-health.png" alt="Math" width="190"/>
-<img src="docs/screenshots/05-trust-dashboard.png" alt="Trust" width="190"/>
+<img src="docs/screenshots/02-knowledge-graph.png" alt="Knowledge Graph — Sigma.js WebGL with community detection, chat, quick actions, timeline" width="290"/>
+<img src="docs/screenshots/06-graph-communities.png" alt="Graph Communities — Louvain clustering with colored nodes" width="290"/>
 </p>
 <p align="center">
-<img src="docs/screenshots/04-recall-lab.png" alt="Recall" width="190"/>
-<img src="docs/screenshots/06-settings.png" alt="Settings" width="190"/>
-<img src="docs/screenshots/07-memories-blurred.png" alt="Memories" width="190"/>
+<img src="docs/screenshots/03-patterns-learning.png" alt="Patterns — 50 learned behavioral patterns with confidence bars" width="190"/>
+<img src="docs/screenshots/04-learning-dashboard.png" alt="Learning — 722 signals, ML Model phase, tech preferences" width="190"/>
+<img src="docs/screenshots/05-behavioral-analysis.png" alt="Behavioral — pattern analysis with confidence distribution" width="190"/>
 </p>
 </details>
 
-23 tabs: Dashboard, Recall Lab, Knowledge Graph, Memories, Trust Scores, Math Health, Compliance, Learning, IDE Connections, Settings, Memory Lifecycle, Compression, Patterns, and more. Runs locally — no data leaves your machine.
+**v3.4.1 Visual Intelligence:** Sigma.js WebGL knowledge graph with community detection (Louvain/Leiden), 5 quick insight actions, D3 memory timeline, graph-enhanced retrieval (PageRank bias + community boost + contradiction suppression), and 56 auto-mined behavioral patterns. 23+ tabs. Runs locally — no data leaves your machine.
 
 ---
 
