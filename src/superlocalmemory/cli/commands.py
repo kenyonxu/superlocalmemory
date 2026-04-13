@@ -58,6 +58,8 @@ def dispatch(args: Namespace) -> None:
         "reap": cmd_reap,
         # V3.3.21 daemon
         "serve": cmd_serve,
+        # V3.4.3 ingestion adapters
+        "adapters": cmd_adapters,
     }
     handler = handlers.get(args.command)
     if handler:
@@ -108,6 +110,26 @@ def cmd_serve(args: Namespace) -> None:
         print("  slm serve stop    — stop daemon and free RAM")
     else:
         print("Failed to start daemon. Check ~/.superlocalmemory/logs/daemon.log")
+
+
+# -- Ingestion Adapters (V3.4.3) ------------------------------------------
+
+
+def cmd_adapters(args: Namespace) -> None:
+    """Manage ingestion adapters (Gmail, Calendar, Transcript).
+
+    Usage:
+      slm adapters list                — show all adapters
+      slm adapters enable <name>       — enable an adapter
+      slm adapters disable <name>      — disable and stop
+      slm adapters start <name>        — start running
+      slm adapters stop <name>         — stop running
+      slm adapters status              — detailed status
+    """
+    from superlocalmemory.ingestion.adapter_manager import handle_adapters_cli
+    # args.rest contains everything after "adapters"
+    rest = getattr(args, 'rest', []) or []
+    handle_adapters_cli(rest)
 
 
 # -- Setup & Config (no --json — interactive commands) ---------------------
@@ -1159,72 +1181,32 @@ def _warmup_diagnose() -> None:
 
 
 def cmd_dashboard(args: Namespace) -> None:
-    """Launch the web dashboard."""
-    try:
-        import uvicorn
-    except ImportError:
-        print("Dashboard requires additional deps. Run: slm doctor")
-        print("Or install manually: pip install 'fastapi[all]' uvicorn")
+    """Open the web dashboard in the browser.
+
+    v3.4.3: Dashboard is now served by the unified daemon. This command
+    ensures the daemon is running and opens the browser. It does NOT
+    start a separate server (saves ~500MB RAM from duplicate engine).
+    """
+    from superlocalmemory.cli.daemon import ensure_daemon, _get_port
+
+    port = getattr(args, "port", None) or _get_port()
+
+    print("  SuperLocalMemory V3 — Web Dashboard")
+    print(f"  Starting daemon if needed...")
+
+    if not ensure_daemon():
+        print("  ✗ Could not start daemon. Run `slm doctor` to diagnose.")
         sys.exit(1)
 
-    import os
-    import signal
-    import socket
+    url = f"http://localhost:{port}"
+    print(f"  ✓ Daemon running")
+    print(f"  Dashboard: {url}")
+    print(f"  API Docs:  {url}/docs")
 
-    port = getattr(args, "port", 8765)
-
-    def _kill_existing_on_port(target_port: int) -> None:
-        """Kill any existing SLM dashboard on the target port.
-
-        V3.3.2: ONE port, no auto-increment. If port is busy with
-        another SLM instance, kill it. If busy with a non-SLM process,
-        warn and exit — never silently shift to a different port.
-        """
-        if sys.platform == "win32":
-            return  # Windows: user must close manually
-        try:
-            import subprocess
-            result = subprocess.run(
-                ["lsof", "-ti", f":{target_port}"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                pids = result.stdout.strip().split("\n")
-                for pid_str in pids:
-                    pid = int(pid_str.strip())
-                    if pid == os.getpid():
-                        continue
-                    # Check if it's an SLM/Python process
-                    ps_result = subprocess.run(
-                        ["ps", "-p", str(pid), "-o", "command="],
-                        capture_output=True, text=True, timeout=5,
-                    )
-                    cmd = ps_result.stdout.strip().lower()
-                    if "superlocalmemory" in cmd or "slm" in cmd or "uvicorn" in cmd:
-                        os.kill(pid, signal.SIGTERM)
-                        print(f"  Stopped previous dashboard (PID {pid})")
-                        import time
-                        time.sleep(1)
-        except Exception:
-            pass  # Best-effort
-
-    _kill_existing_on_port(port)
-
-    # Brief wait for port to fully release after killing old process
-    import time
-    time.sleep(1)
-
-    print("=" * 60)
-    print("  SuperLocalMemory V3 — Web Dashboard")
-    print("=" * 60)
-    print(f"  Dashboard:  http://localhost:{port}")
-    print(f"  API Docs:   http://localhost:{port}/api/docs")
-    print("  Press Ctrl+C to stop\n")
-
-    from superlocalmemory.server.ui import create_app
-
-    app = create_app()
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+    # Open browser
+    import webbrowser
+    webbrowser.open(url)
+    print("\n  Dashboard opened in browser. Daemon continues running in background.")
 
 
 # -- Profiles (supports --json) -------------------------------------------

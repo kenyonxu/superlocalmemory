@@ -2,26 +2,18 @@
 # Licensed under the Elastic License 2.0 - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
-"""SLM Daemon — keeps engine warm for instant CLI/MCP response.
+"""SLM Daemon — client functions for communicating with the unified daemon.
 
-Problem: CLI cold start is 23s (embedding worker spawn + model load).
-Solution: Background daemon keeps MemoryEngine warm. CLI commands route
-requests through the daemon via localhost HTTP (~10ms overhead).
+The unified daemon (server/unified_daemon.py) runs as a single FastAPI/uvicorn
+process on port 8765, with port 8767 as a backward-compat TCP redirect.
 
-Architecture:
-  slm serve       → starts daemon (engine init, workers warm, ~600MB RAM)
-  slm remember X  → HTTP POST to daemon → instant (no cold start)
-  slm recall X    → HTTP GET from daemon → instant
-  slm serve stop  → graceful shutdown, workers killed, RAM freed
+This module contains CLIENT functions used by CLI commands:
+  - is_daemon_running(): check if daemon is alive
+  - ensure_daemon(): start daemon if not running
+  - stop_daemon(): gracefully stop the daemon
+  - daemon_request(): send HTTP request to daemon
 
-Auto-start: if daemon not running on CLI use, starts it automatically.
-Auto-shutdown: after 30 min idle (configurable via SLM_DAEMON_IDLE_TIMEOUT).
-
-Memory safety:
-  - RSS watchdog on embedding worker (2.5GB cap)
-  - Worker recycling every 5000 requests
-  - Parent watchdog kills workers if daemon dies
-  - SQLite WAL mode for concurrent access
+The actual daemon server code is in server/unified_daemon.py.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
 License: Elastic-2.0
@@ -42,8 +34,9 @@ from threading import Thread
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_PORT = 8767
-_DEFAULT_IDLE_TIMEOUT = 1800  # 30 min
+_DEFAULT_PORT = 8765  # v3.4.3: unified daemon on 8765 (was 8767)
+_LEGACY_PORT = 8767   # backward-compat redirect
+_DEFAULT_IDLE_TIMEOUT = 0  # v3.4.3: 24/7 default (was 1800)
 _PID_FILE = Path.home() / ".superlocalmemory" / "daemon.pid"
 _PORT_FILE = Path.home() / ".superlocalmemory" / "daemon.port"
 
@@ -53,26 +46,70 @@ _PORT_FILE = Path.home() / ".superlocalmemory" / "daemon.port"
 # ---------------------------------------------------------------------------
 
 def is_daemon_running() -> bool:
-    """Check if daemon is alive via PID file + HTTP health check."""
+    """Check if daemon is alive via PID file + HTTP health check.
+
+    v3.4.3: Checks both port 8765 (new) and 8767 (legacy) for upgrade compat.
+    Also checks ports directly if PID file is missing (daemon started by MCP/hook).
+    """
     if not _PID_FILE.exists():
+        # PID file missing but daemon might still be running (started by MCP/hook)
+        # Try health check on known ports
+        for try_port in (_DEFAULT_PORT, _LEGACY_PORT):
+            try:
+                import urllib.request
+                resp = urllib.request.urlopen(
+                    f"http://127.0.0.1:{try_port}/health", timeout=2,
+                )
+                if resp.status == 200:
+                    # Daemon is running without PID file — write one for future checks
+                    try:
+                        import json as _json
+                        data = _json.loads(resp.read().decode())
+                        pid = data.get("pid")
+                        if pid:
+                            _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+                            _PID_FILE.write_text(str(pid))
+                            _PORT_FILE.write_text(str(try_port))
+                    except Exception:
+                        pass
+                    return True
+            except Exception:
+                continue
         return False
     try:
         pid = int(_PID_FILE.read_text().strip())
-        os.kill(pid, 0)  # Check if process exists
-    except (ValueError, ProcessLookupError, PermissionError):
+        # Cross-platform PID check via psutil if available, else os.kill
+        try:
+            import psutil
+            if not psutil.pid_exists(pid):
+                _PID_FILE.unlink(missing_ok=True)
+                return False
+        except ImportError:
+            try:
+                os.kill(pid, 0)
+            except (ProcessLookupError, PermissionError):
+                _PID_FILE.unlink(missing_ok=True)
+                return False
+    except ValueError:
         _PID_FILE.unlink(missing_ok=True)
         return False
 
-    # PID exists — verify HTTP health
+    # PID exists — verify HTTP health on primary port
     port = _get_port()
-    try:
-        import urllib.request
-        resp = urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/health", timeout=2,
-        )
-        return resp.status == 200
-    except Exception:
-        return False
+    for try_port in (port, _DEFAULT_PORT, _LEGACY_PORT):
+        try:
+            import urllib.request
+            resp = urllib.request.urlopen(
+                f"http://127.0.0.1:{try_port}/health", timeout=2,
+            )
+            if resp.status == 200:
+                # Update port file if it was stale (upgrade from 8767 → 8765)
+                if try_port != port:
+                    _PORT_FILE.write_text(str(try_port))
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _get_port() -> int:
@@ -100,22 +137,30 @@ def daemon_request(method: str, path: str, body: dict | None = None) -> dict | N
 
 
 def ensure_daemon() -> bool:
-    """Start daemon if not running. Returns True if daemon is ready."""
+    """Start daemon if not running. Returns True if daemon is ready.
+
+    v3.4.3: Starts unified daemon (server/unified_daemon.py) instead of
+    old stdlib daemon. Cross-platform subprocess flags.
+    """
     if is_daemon_running():
         return True
 
-    # Start daemon in background
+    # Start unified daemon in background
     import subprocess
-    cmd = [sys.executable, "-m", "superlocalmemory.cli.daemon", "--start"]
+    cmd = [sys.executable, "-m", "superlocalmemory.server.unified_daemon", "--start"]
     log_dir = Path.home() / ".superlocalmemory" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "daemon.log"
 
+    # Cross-platform background process flags
+    kwargs: dict = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    else:
+        kwargs["start_new_session"] = True
+
     with open(log_file, "a") as lf:
-        subprocess.Popen(
-            cmd, stdout=lf, stderr=lf,
-            start_new_session=True,
-        )
+        subprocess.Popen(cmd, stdout=lf, stderr=lf, **kwargs)
 
     # Wait for daemon to become ready (max 30s for cold start)
     for _ in range(60):
@@ -127,19 +172,34 @@ def ensure_daemon() -> bool:
 
 
 def stop_daemon() -> bool:
-    """Stop the running daemon gracefully."""
+    """Stop the running daemon gracefully.
+
+    v3.4.3: Uses psutil for cross-platform process termination.
+    Falls back to os.kill if psutil unavailable.
+    """
     if not _PID_FILE.exists():
         return True
     try:
         pid = int(_PID_FILE.read_text().strip())
-        os.kill(pid, signal.SIGTERM)
-        # Wait for cleanup
-        for _ in range(20):
-            time.sleep(0.5)
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                break
+
+        # Cross-platform termination via psutil
+        try:
+            import psutil
+            proc = psutil.Process(pid)
+            proc.terminate()  # SIGTERM on Unix, TerminateProcess on Windows
+            proc.wait(timeout=10)
+        except ImportError:
+            # Fallback: direct signal (works on Unix, may fail on Windows)
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(20):
+                time.sleep(0.5)
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+        except Exception:
+            pass
+
         _PID_FILE.unlink(missing_ok=True)
         _PORT_FILE.unlink(missing_ok=True)
         return True

@@ -116,6 +116,15 @@ class MemoryEngine:
 
         self._db = DatabaseManager(self._config.db_path)
         self._db.initialize(schema)
+
+        # V3.4.3: Apply "Unified Brain" schema extensions (mesh, entity compilation, ingestion)
+        # Idempotent — safe to call on every init. Skips if already applied.
+        try:
+            from superlocalmemory.storage.schema_v343 import apply_v343_schema
+            apply_v343_schema(str(self._db.db_path))
+        except Exception as exc:
+            logger.debug("V3.4.3 schema migration: %s", exc)
+
         self._embedder = init_embedder(self._config)
 
         if self._caps.llm_fact_extraction:

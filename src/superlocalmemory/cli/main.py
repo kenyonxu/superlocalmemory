@@ -272,6 +272,16 @@ def main() -> None:
     )
     reap_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
+    # V3.4.3: Ingestion adapters
+    adapters_p = sub.add_parser(
+        "adapters",
+        help="Manage ingestion adapters (Gmail, Calendar, Transcript)",
+    )
+    adapters_p.add_argument(
+        "rest", nargs="*", default=[],
+        help="Subcommand: list, enable, disable, start, stop, status [name]",
+    )
+
     args = parser.parse_args()
 
     if not args.command:

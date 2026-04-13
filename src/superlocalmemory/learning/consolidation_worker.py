@@ -119,6 +119,21 @@ class ConsolidationWorker:
         except Exception as exc:
             logger.debug("Retrain check failed: %s", exc)
 
+        # 6. Entity compilation (v3.4.3: compiled truth per entity)
+        if not dry_run:
+            try:
+                from superlocalmemory.learning.entity_compiler import EntityCompiler
+                from superlocalmemory.core.config import SLMConfig
+                config = SLMConfig.load()
+                compiler = EntityCompiler(self._memory_db, config)
+                ec_result = compiler.compile_all(profile_id)
+                stats["entities_compiled"] = ec_result.get("compiled", 0)
+                if ec_result["compiled"] > 0:
+                    logger.info("Entity compilation: %d entities compiled",
+                                ec_result["compiled"])
+            except Exception as exc:
+                logger.debug("Entity compilation failed: %s", exc)
+
         return stats
 
     def _deduplicate(self, profile_id: str, dry_run: bool) -> int:

@@ -1,6 +1,6 @@
 [project]
 name = "superlocalmemory"
-version = "3.4.2"
+version = "3.4.3"
 description = "Information-geometric agent memory with mathematical guarantees"
 readme = "README.md"
 license = {text = "AGPL-3.0-or-later"}
@@ -49,6 +49,9 @@ dependencies = [
     "tree-sitter-language-pack>=0.3,<2",
     "rustworkx>=0.15,<1",
     "watchdog>=4.0,<6",
+    # V3.4.3: Unified Brain
+    "psutil>=5.9.0",
+    "structlog>=24.0.0,<27.0.0",
 ]
 
 [project.optional-dependencies]
@@ -72,8 +75,14 @@ performance = [
     "diskcache>=5.6.0",
     "orjson>=3.9.0",
 ]
+ingestion = [
+    "keyring>=25.0.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-api-python-client>=2.100.0",
+    "icalendar>=6.0.0",
+]
 full = [
-    "superlocalmemory[search,ui,learning,performance]",
+    "superlocalmemory[search,ui,learning,performance,ingestion]",
 ]
 dev = [
     "pytest>=8.0",

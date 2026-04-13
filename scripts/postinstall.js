@@ -15,7 +15,7 @@ const os = require('os');
 const fs = require('fs');
 
 console.log('\n════════════════════════════════════════════════════════════');
-console.log('  SuperLocalMemory V3 — Post-Installation');
+console.log('  SuperLocalMemory V3 — The Unified Brain');
 console.log('  by Varun Pratap Bhardwaj / Qualixar');
 console.log('  https://github.com/qualixar/superlocalmemory');
 console.log('════════════════════════════════════════════════════════════\n');
@@ -164,6 +164,17 @@ if (pipInstall(perfDeps, 'performance')) {
     console.log('⚠ Performance deps skipped (system works fine without them).');
 }
 
+// V3.4.3: Unified Brain dependencies (health monitor, structured logging, file watching)
+const brainDeps = ['psutil>=5.9.0', 'structlog>=24.0.0', 'watchdog>=4.0.0'];
+console.log('\nInstalling Unified Brain dependencies (health monitor, file watcher)...');
+if (pipInstall(brainDeps, 'brain')) {
+    console.log('✓ Unified Brain deps installed (psutil + structlog + watchdog)');
+    console.log('  Health monitoring, structured logging, and file watching enabled');
+} else {
+    console.log('⚠ Unified Brain deps partially installed (health monitoring may be limited).');
+    console.log('  Run manually: pip install psutil structlog watchdog');
+}
+
 // --- Step 3b: Install the superlocalmemory package itself ---
 // This ensures `python -m superlocalmemory.cli.main` always resolves the
 // correct version, even when invoked outside the Node.js wrapper (e.g.,
@@ -281,13 +292,21 @@ if (setupResult.status === 0) {
 
 // --- Done ---
 console.log('\n════════════════════════════════════════════════════════════');
-console.log('  ✓ SuperLocalMemory V3 installed!');
+console.log('  ✓ SuperLocalMemory V3 — The Unified Brain installed!');
 console.log('');
 console.log('  Quick start:');
-console.log('    slm remember "..."   # Store a memory');
-console.log('    slm recall "..."     # Search memories');
-console.log('    slm dashboard        # Open web dashboard');
-console.log('    slm setup            # Re-run setup wizard');
+console.log('    slm remember "..."        # Store a memory');
+console.log('    slm recall "..."          # Search memories');
+console.log('    slm dashboard             # Open web dashboard');
+console.log('    slm serve                 # Start 24/7 daemon');
+console.log('    slm adapters enable gmail # Enable Gmail ingestion');
+console.log('    slm setup                 # Re-run 9-step wizard');
 console.log('');
-console.log('  Docs: https://github.com/qualixar/superlocalmemory/wiki');
+console.log('  New in v3.4.3:');
+console.log('    • Unified daemon (one process, 24/7, < 700MB)');
+console.log('    • SLM Mesh (agent-to-agent P2P built in)');
+console.log('    • Entity compilation (auto knowledge summaries)');
+console.log('    • Ingestion adapters (Gmail, Calendar, Transcripts)');
+console.log('');
+console.log('  Docs: https://github.com/qualixar/superlocalmemory');
 console.log('════════════════════════════════════════════════════════════\n');

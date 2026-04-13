@@ -259,7 +259,7 @@ def run_wizard(auto: bool = False) -> None:
 
     print()
     print("╔══════════════════════════════════════════════════════════╗")
-    print("║  SuperLocalMemory V3 — Setup Wizard                    ║")
+    print("║  SuperLocalMemory V3 — The Unified Brain               ║")
     print("║  by Varun Pratap Bhardwaj / Qualixar                   ║")
     print("╚══════════════════════════════════════════════════════════╝")
     print()
@@ -373,9 +373,9 @@ def run_wizard(auto: bool = False) -> None:
     else:
         print(f"\n  ✓ CodeGraph disabled (enable later in {cg_config_path})")
 
-    # -- Step 4: Download embedding model --
+    # -- Step 4: Download models --
     print()
-    print("─── Step 4/6: Download Embedding Model ───")
+    print("─── Step 4/9: Download Embedding Model ───")
 
     if not st_ok:
         print("  ⚠ Skipped (sentence-transformers not installed)")
@@ -385,18 +385,129 @@ def run_wizard(auto: bool = False) -> None:
         if not embed_ok:
             print("  ⚠ Model will download on first use (may take a few minutes)")
 
-    # -- Step 4: Download reranker model --
     print()
-    print("─── Step 5/6: Download Reranker Model ───")
+    print("─── Step 4b/9: Download Reranker Model ───")
 
     if not st_ok:
         print("  ⚠ Skipped (sentence-transformers not installed)")
     else:
         _download_reranker(_RERANKER_MODEL)
 
-    # -- Step 5: Verification --
+    # -- Step 5: Daemon Configuration (v3.4.3) --
     print()
-    print("─── Step 6/6: Verification ───")
+    print("─── Step 5/9: Daemon Configuration ───")
+    print()
+    print("  The SLM daemon runs in the background for instant memory access.")
+    print()
+    print("  [1] 24/7 Always-On (recommended — brain never sleeps)")
+    print("  [2] Auto-shutdown after idle (saves RAM when not coding)")
+    print()
+
+    if interactive:
+        daemon_choice = _prompt("  Select daemon mode [1/2] (default: 1): ", "1")
+    else:
+        daemon_choice = "1"
+        print("  Auto-selecting 24/7 mode (non-interactive)")
+
+    if daemon_choice == "2":
+        if interactive:
+            timeout_choice = _prompt("  Idle timeout [30m/1h/2h] (default: 30m): ", "30m")
+        else:
+            timeout_choice = "30m"
+        timeout_map = {"30m": 1800, "1h": 3600, "2h": 7200}
+        config.daemon_idle_timeout = timeout_map.get(timeout_choice, 1800)
+        print(f"\n  ✓ Auto-shutdown after {timeout_choice} idle")
+    else:
+        config.daemon_idle_timeout = 0
+        print("\n  ✓ 24/7 Always-On mode")
+
+    config.save()
+
+    # -- Step 6: Mesh Communication (v3.4.3) --
+    print()
+    print("─── Step 6/9: Mesh Communication ───")
+    print()
+    print("  SLM Mesh enables agent-to-agent P2P communication.")
+    print("  Multiple AI sessions can share knowledge in real-time.")
+    print()
+    print("  [Y] Enable Mesh (recommended)")
+    print("  [N] Disable Mesh")
+    print()
+
+    if interactive:
+        mesh_choice = _prompt("  Enable Mesh? [Y/n] (default: Y): ", "y").lower()
+    else:
+        mesh_choice = "y"
+        print("  Auto-enabling Mesh (non-interactive)")
+
+    config.mesh_enabled = mesh_choice in ("", "y", "yes")
+    config.save()
+    print(f"\n  ✓ Mesh {'enabled' if config.mesh_enabled else 'disabled'}")
+
+    # -- Step 7: Ingestion Adapters (v3.4.3) --
+    print()
+    print("─── Step 7/9: Ingestion Adapters ───")
+    print()
+    print("  These let SLM learn from your email, calendar, and meetings.")
+    print("  All adapters are OFF by default. You can enable them later.")
+    print()
+    print("  Available adapters:")
+    print("    • Gmail Ingestion     — requires Google OAuth setup")
+    print("    • Google Calendar     — shares Gmail credentials")
+    print("    • Meeting Transcripts — watches a folder for .srt/.vtt files")
+    print()
+
+    if interactive:
+        adapter_input = _prompt("  Enable any now? [Enter to skip, or type: gmail,calendar,transcript]: ", "")
+    else:
+        adapter_input = ""
+
+    # Save adapter preferences (actual setup happens via `slm adapters enable X`)
+    adapters_config = {"gmail": False, "calendar": False, "transcript": False}
+    if adapter_input:
+        for name in adapter_input.split(","):
+            name = name.strip().lower()
+            if name in adapters_config:
+                adapters_config[name] = True
+
+    adapters_path = _SLM_HOME / "adapters.json"
+    import json as _json
+    adapters_path.write_text(_json.dumps(
+        {k: {"enabled": v, "tier": "polling"} for k, v in adapters_config.items()},
+        indent=2,
+    ))
+
+    enabled_adapters = [k for k, v in adapters_config.items() if v]
+    if enabled_adapters:
+        print(f"\n  ✓ Enabled: {', '.join(enabled_adapters)}")
+        print("    Run `slm adapters start <name>` to begin ingestion")
+    else:
+        print("\n  ✓ All adapters disabled (enable later: slm adapters enable gmail)")
+
+    # -- Step 8: Entity Compilation (v3.4.3) --
+    print()
+    print("─── Step 8/9: Entity Compilation ───")
+    print()
+    print("  Entity compilation builds knowledge summaries per person,")
+    print("  project, and concept. Runs automatically during consolidation.")
+    print()
+    print("  [Y] Enable entity compilation (recommended)")
+    print("  [N] Disable")
+    print()
+
+    if interactive:
+        ec_choice = _prompt("  Enable entity compilation? [Y/n] (default: Y): ", "y").lower()
+    else:
+        ec_choice = "y"
+        print("  Auto-enabling entity compilation (non-interactive)")
+
+    config.entity_compilation_enabled = ec_choice in ("", "y", "yes")
+    config.save()
+    print(f"\n  ✓ Entity compilation {'enabled' if config.entity_compilation_enabled else 'disabled'}")
+
+    # -- Step 9: Verification --
+    print()
+    print("─── Step 9/9: Verification ───")
 
     if st_ok:
         verified = _verify_installation()
@@ -410,16 +521,33 @@ def run_wizard(auto: bool = False) -> None:
     print()
     print("╔══════════════════════════════════════════════════════════╗")
     if verified:
-        print("║  ✓ Setup Complete — SuperLocalMemory is ready!         ║")
+        print("║  ✓ Setup Complete — The Unified Brain is ready!        ║")
     else:
         print("║  ✓ Setup Complete — basic config saved                 ║")
         print("║    Models will auto-download on first use              ║")
     print("╚══════════════════════════════════════════════════════════╝")
     print()
+
+    # Summary of choices
+    daemon_mode = "24/7" if config.daemon_idle_timeout == 0 else f"auto-shutdown ({config.daemon_idle_timeout}s)"
+    print(f"  Enabled: Mode {choice.upper()}, Daemon ({daemon_mode})", end="")
+    if config.mesh_enabled:
+        print(", Mesh", end="")
+    if config.entity_compilation_enabled:
+        print(", Entity Compilation", end="")
+    if code_graph_enabled:
+        print(", CodeGraph", end="")
+    print()
+    if enabled_adapters:
+        print(f"  Adapters: {', '.join(enabled_adapters)}")
+    else:
+        print("  Adapters: none (enable via: slm adapters enable gmail)")
+    print()
     print("  Quick start:")
     print('    slm remember "your first memory"')
     print('    slm recall "search query"')
-    print("    slm dashboard")
+    print("    slm dashboard              → http://localhost:8765")
+    print("    slm adapters enable gmail  → start Gmail ingestion")
     print()
     print("  Need help?")
     print("    slm doctor     — diagnose issues")

@@ -581,6 +581,19 @@ class SLMConfig:
         default_factory=ParameterizationConfig,
     )
 
+    # v3.4.3: Daemon configuration
+    daemon_idle_timeout: int = 0       # 0 = 24/7 (no auto-kill). >0 = seconds before auto-kill.
+    daemon_port: int = 8765            # Primary daemon port
+    daemon_legacy_port: int = 8767     # Backward-compat redirect port
+    daemon_enable_legacy_port: bool = True  # Set False to disable 8767 redirect
+
+    # v3.4.3: Entity compilation
+    entity_compilation_enabled: bool = True
+    entity_compilation_retrieval_boost: float = 1.0  # 1.0 = disabled. >1.0 = boost score.
+
+    # v3.4.3: Mesh
+    mesh_enabled: bool = True
+
     def __post_init__(self) -> None:
         if self.db_path is None:
             self.db_path = self.base_dir / DEFAULT_DB_NAME
@@ -632,6 +645,17 @@ class SLMConfig:
                 k: v for k, v in rt.items()
                 if k in RetrievalConfig.__dataclass_fields__
             })
+
+        # V3.4.3 config fields (additive — missing keys get dataclass defaults)
+        config.daemon_idle_timeout = data.get("daemon_idle_timeout", 0)
+        config.daemon_port = data.get("daemon_port", 8765)
+        config.daemon_legacy_port = data.get("daemon_legacy_port", 8767)
+        config.daemon_enable_legacy_port = data.get("daemon_enable_legacy_port", True)
+        config.entity_compilation_enabled = data.get("entity_compilation_enabled", True)
+        config.entity_compilation_retrieval_boost = data.get(
+            "entity_compilation_retrieval_boost", 1.0,
+        )
+        config.mesh_enabled = data.get("mesh_enabled", True)
 
         return config
 

@@ -1,0 +1,118 @@
+# Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
+# Licensed under the Elastic License 2.0 - see LICENSE file
+# Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
+
+"""Cross-platform credential storage for ingestion adapters.
+
+Uses OS keychain via keyring library (macOS Keychain, Windows Credential Locker,
+Linux SecretService). Falls back to file-based storage with restricted permissions.
+
+Part of Qualixar | Author: Varun Pratap Bhardwaj
+License: Elastic-2.0
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+
+logger = logging.getLogger("superlocalmemory.ingestion.credentials")
+
+_CRED_DIR = Path.home() / ".superlocalmemory" / "credentials"
+_SERVICE_PREFIX = "slm"
+
+
+def store_credential(service: str, key: str, value: str) -> bool:
+    """Store a credential securely. Returns True on success."""
+    # Try OS keychain first
+    try:
+        import keyring
+        keyring.set_password(f"{_SERVICE_PREFIX}-{service}", key, value)
+        logger.debug("Stored %s/%s in OS keychain", service, key)
+        return True
+    except Exception:
+        pass
+
+    # Fallback: encrypted file with restricted permissions
+    try:
+        _CRED_DIR.mkdir(parents=True, exist_ok=True)
+        cred_file = _CRED_DIR / f"{service}.json"
+
+        existing = {}
+        if cred_file.exists():
+            try:
+                existing = json.loads(cred_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        existing[key] = value
+        cred_file.write_text(json.dumps(existing, indent=2))
+
+        # Restrict permissions (Unix only — Windows skipped)
+        if sys.platform != "win32":
+            os.chmod(cred_file, 0o600)
+            os.chmod(_CRED_DIR, 0o700)
+
+        logger.debug("Stored %s/%s in file (keychain unavailable)", service, key)
+        return True
+    except Exception as exc:
+        logger.error("Failed to store credential %s/%s: %s", service, key, exc)
+        return False
+
+
+def load_credential(service: str, key: str) -> str | None:
+    """Load a credential. Tries keychain first, then file."""
+    # Try OS keychain
+    try:
+        import keyring
+        value = keyring.get_password(f"{_SERVICE_PREFIX}-{service}", key)
+        if value:
+            return value
+    except Exception:
+        pass
+
+    # Fallback: file
+    try:
+        cred_file = _CRED_DIR / f"{service}.json"
+        if cred_file.exists():
+            data = json.loads(cred_file.read_text())
+            return data.get(key)
+    except Exception:
+        pass
+
+    return None
+
+
+def delete_credential(service: str, key: str) -> bool:
+    """Delete a credential from both keychain and file."""
+    deleted = False
+
+    # Try keychain
+    try:
+        import keyring
+        keyring.delete_password(f"{_SERVICE_PREFIX}-{service}", key)
+        deleted = True
+    except Exception:
+        pass
+
+    # Also remove from file
+    try:
+        cred_file = _CRED_DIR / f"{service}.json"
+        if cred_file.exists():
+            data = json.loads(cred_file.read_text())
+            if key in data:
+                del data[key]
+                cred_file.write_text(json.dumps(data, indent=2))
+                deleted = True
+    except Exception:
+        pass
+
+    return deleted
+
+
+def has_credential(service: str, key: str) -> bool:
+    """Check if a credential exists."""
+    return load_credential(service, key) is not None

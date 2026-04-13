@@ -236,16 +236,15 @@ def create_app() -> FastAPI:
     return application
 
 
-app = create_app()
-
-
-# ============================================================================
-# Server Startup
-# ============================================================================
+# v3.4.3: Module-level app removed to prevent duplicate MemoryEngine.
+# The unified daemon (server/unified_daemon.py) imports routes from this
+# module via _register_dashboard_routes(). Do NOT create app here.
+# For standalone use: python -m superlocalmemory.server.api
 
 if __name__ == "__main__":
+    app = create_app()
     print("=" * 60)
-    print("SuperLocalMemory V3 - API Server")
+    print("SuperLocalMemory V3 - API Server (standalone mode)")
     print("=" * 60)
     print(f"Database: {DB_PATH}")
     print(f"UI Directory: {UI_DIR}")
