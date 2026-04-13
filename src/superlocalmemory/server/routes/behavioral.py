@@ -1,8 +1,8 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
-# Licensed under the Elastic License 2.0 - see LICENSE file
+# Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 """SuperLocalMemory V3 - Behavioral Routes
- - Elastic License 2.0
+ - AGPL-3.0-or-later
 
 Routes: /api/behavioral/status, /api/behavioral/report-outcome
 Uses V3 learning.behavioral.BehavioralPatternStore and learning.outcomes.OutcomeTracker.
@@ -144,3 +144,93 @@ async def report_outcome(data: dict):
     except Exception as e:
         logger.error("report_outcome error: %s", e)
         return {"success": False, "error": str(e)}
+
+
+# --------------------------------------------------------------------------
+# v3.4.7: Behavioral Assertions API (for dashboard + external consumers)
+# --------------------------------------------------------------------------
+
+@router.get("/api/behavioral/assertions")
+async def get_assertions(min_confidence: float = 0.0, category: str = "", limit: int = 50):
+    """Get learned behavioral assertions for dashboard display."""
+    try:
+        import sqlite3 as _sqlite3
+        profile = get_active_profile()
+        conn = _sqlite3.connect(str(MEMORY_DIR / "memory.db"))
+        conn.row_factory = _sqlite3.Row
+
+        query = (
+            "SELECT id, trigger_condition, action, category, confidence, "
+            "evidence_count, reinforcement_count, contradiction_count, "
+            "project_path, source, created_at, updated_at "
+            "FROM behavioral_assertions "
+            "WHERE profile_id = ? AND confidence >= ?"
+        )
+        params: list = [profile, min_confidence]
+        if category:
+            query += " AND category = ?"
+            params.append(category)
+        query += " ORDER BY confidence DESC LIMIT ?"
+        params.append(limit)
+
+        rows = conn.execute(query, tuple(params)).fetchall()
+        conn.close()
+
+        assertions = [dict(r) for r in rows]
+        return {
+            "assertions": assertions,
+            "count": len(assertions),
+            "active_profile": profile,
+        }
+    except Exception as e:
+        logger.debug("get_assertions error: %s", e)
+        return {"assertions": [], "count": 0, "error": str(e)}
+
+
+@router.get("/api/behavioral/tool-events")
+async def get_tool_events(tool_name: str = "", limit: int = 100):
+    """Get recent tool events for dashboard display."""
+    try:
+        import sqlite3 as _sqlite3
+        profile = get_active_profile()
+        conn = _sqlite3.connect(str(MEMORY_DIR / "memory.db"))
+        conn.row_factory = _sqlite3.Row
+
+        query = (
+            "SELECT id, tool_name, event_type, input_summary, output_summary, "
+            "duration_ms, created_at FROM tool_events "
+            "WHERE profile_id = ?"
+        )
+        params: list = [profile]
+        if tool_name:
+            query += " AND tool_name = ?"
+            params.append(tool_name)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = conn.execute(query, tuple(params)).fetchall()
+        conn.close()
+
+        events = [dict(r) for r in rows]
+        return {"events": events, "count": len(events)}
+    except Exception as e:
+        logger.debug("get_tool_events error: %s", e)
+        return {"events": [], "count": 0, "error": str(e)}
+
+
+@router.get("/api/behavioral/soft-prompts")
+async def get_soft_prompts():
+    """Get active soft prompt templates for dashboard display."""
+    try:
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(str(MEMORY_DIR / "memory.db"))
+        conn.row_factory = _sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM soft_prompt_templates WHERE active = 1 "
+            "ORDER BY category"
+        ).fetchall()
+        conn.close()
+        return {"prompts": [dict(r) for r in rows], "count": len(rows)}
+    except Exception as e:
+        logger.debug("get_soft_prompts error: %s", e)
+        return {"prompts": [], "count": 0, "error": str(e)}

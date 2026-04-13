@@ -1,6 +1,6 @@
-// SPDX-License-Identifier: Elastic-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 SuperLocalMemory (superlocalmemory.com)
-// Behavioral Learning tab — outcomes, patterns, cross-project transfers (v2.8)
+// Behavioral Learning tab — assertions, outcomes, patterns, tool events (v3.4.7)
 // NOTE: All dynamic values use textContent or escapeHtml() from core.js before DOM insertion.
 
 var _behavioralData = null;
@@ -12,7 +12,7 @@ async function loadBehavioral() {
         _behavioralData = data;
 
         if (!data.available) {
-            showEmpty('behavioral-patterns-content', 'lightbulb', 'Behavioral learning not available. Upgrade to v2.8.');
+            showEmpty('behavioral-patterns-content', 'lightbulb', 'Behavioral learning not available.');
             return;
         }
 
@@ -20,6 +20,22 @@ async function loadBehavioral() {
         renderBehavioralPatterns(data);
         renderBehavioralTransfers(data);
         renderBehavioralOutcomes(data);
+
+        // v3.4.7: Load behavioral assertions (learned patterns with confidence)
+        try {
+            var assertResp = await fetch('/api/behavioral/assertions');
+            var assertData = await assertResp.json();
+            renderBehavioralAssertions(assertData);
+            // Update stats with assertion count
+            animateCounter('bh-patterns-count', (data.stats || {}).patterns_count + (assertData.count || 0));
+        } catch (e) { console.debug('assertions load:', e); }
+
+        // v3.4.7: Load tool events summary
+        try {
+            var evResp = await fetch('/api/behavioral/tool-events?limit=20');
+            var evData = await evResp.json();
+            renderToolEventsSummary(evData);
+        } catch (e) { console.debug('tool events load:', e); }
 
         var badge = document.getElementById('behavioral-profile-badge');
         if (badge) badge.textContent = data.active_profile || 'default';
@@ -227,6 +243,161 @@ function renderBehavioralOutcomes(data) {
         var dateCell = document.createElement('td');
         dateCell.className = 'small text-muted';
         dateCell.textContent = formatDate(o.created_at || '');
+        row.appendChild(dateCell);
+
+        tbody.appendChild(row);
+    }
+    table.appendChild(tbody);
+    container.appendChild(table);
+}
+
+// v3.4.7: Render behavioral assertions (learned patterns with confidence evolution)
+function renderBehavioralAssertions(data) {
+    var container = document.getElementById('behavioral-patterns-content');
+    if (!container) return;
+    var assertions = data.assertions || [];
+    if (assertions.length === 0) return; // Don't clear existing patterns
+
+    // Add assertions section header
+    var header = document.createElement('div');
+    header.className = 'd-flex align-items-center mt-3 mb-2';
+    header.innerHTML = '<span class="badge bg-info me-2">NEW</span><strong>Behavioral Assertions (v3.4.7)</strong>';
+    container.appendChild(header);
+
+    for (var i = 0; i < assertions.length; i++) {
+        var a = assertions[i];
+        var confPct = Math.round((a.confidence || 0) * 100);
+        var barColor = confPct >= 70 ? 'bg-success' : (confPct >= 40 ? 'bg-warning' : 'bg-secondary');
+
+        var card = document.createElement('div');
+        card.className = 'card mb-2';
+        card.style.cursor = 'pointer';
+        card.style.border = '1px solid rgba(255,255,255,0.1)';
+        card.style.background = 'rgba(255,255,255,0.03)';
+
+        var body = document.createElement('div');
+        body.className = 'card-body py-2 px-3';
+
+        // Top row: trigger → action
+        var topRow = document.createElement('div');
+        topRow.className = 'd-flex justify-content-between align-items-start';
+
+        var triggerSpan = document.createElement('div');
+        triggerSpan.className = 'small';
+        var trigBadge = document.createElement('span');
+        trigBadge.className = 'badge bg-secondary me-1';
+        trigBadge.textContent = a.trigger_condition || '';
+        var arrow = document.createElement('span');
+        arrow.className = 'text-muted mx-1';
+        arrow.textContent = '→';
+        var actionSpan = document.createElement('span');
+        actionSpan.textContent = a.action || '';
+        triggerSpan.appendChild(trigBadge);
+        triggerSpan.appendChild(arrow);
+        triggerSpan.appendChild(actionSpan);
+
+        var confBadge = document.createElement('span');
+        confBadge.className = 'badge ' + barColor;
+        confBadge.textContent = confPct + '%';
+        confBadge.title = 'Confidence: ' + confPct + '% (reinforced ' + (a.reinforcement_count || 0) + 'x, contradicted ' + (a.contradiction_count || 0) + 'x)';
+
+        topRow.appendChild(triggerSpan);
+        topRow.appendChild(confBadge);
+        body.appendChild(topRow);
+
+        // Bottom row: category + evidence + confidence bar
+        var bottomRow = document.createElement('div');
+        bottomRow.className = 'd-flex align-items-center mt-1';
+        var catBadge = document.createElement('span');
+        catBadge.className = 'badge bg-outline-secondary me-2 small';
+        catBadge.style.border = '1px solid rgba(255,255,255,0.2)';
+        catBadge.textContent = a.category || '';
+        var evidenceSpan = document.createElement('small');
+        evidenceSpan.className = 'text-muted me-2';
+        evidenceSpan.textContent = (a.evidence_count || 0) + ' evidence';
+        var progress = document.createElement('div');
+        progress.className = 'progress flex-grow-1';
+        progress.style.height = '4px';
+        var bar = document.createElement('div');
+        bar.className = 'progress-bar ' + barColor;
+        bar.style.width = confPct + '%';
+        progress.appendChild(bar);
+        bottomRow.appendChild(catBadge);
+        bottomRow.appendChild(evidenceSpan);
+        bottomRow.appendChild(progress);
+        body.appendChild(bottomRow);
+
+        card.appendChild(body);
+
+        // Click to expand details
+        (function(assertion, cardEl) {
+            cardEl.addEventListener('click', function() {
+                var existing = cardEl.querySelector('.assertion-detail');
+                if (existing) { existing.remove(); return; }
+                var detail = document.createElement('div');
+                detail.className = 'assertion-detail px-3 pb-2 small text-muted';
+                detail.innerHTML = '<div>ID: <code>' + escapeHtml(assertion.id) + '</code></div>' +
+                    '<div>Source: ' + escapeHtml(assertion.source || 'auto') + '</div>' +
+                    '<div>Project: ' + escapeHtml(assertion.project_path || 'global') + '</div>' +
+                    '<div>Created: ' + escapeHtml(formatDate(assertion.created_at || '')) + '</div>' +
+                    '<div>Reinforced: ' + (assertion.reinforcement_count || 0) + 'x | Contradicted: ' + (assertion.contradiction_count || 0) + 'x</div>';
+                cardEl.appendChild(detail);
+            });
+        })(a, card);
+
+        container.appendChild(card);
+    }
+}
+
+// v3.4.7: Render tool events summary in behavioral tab
+function renderToolEventsSummary(data) {
+    var container = document.getElementById('behavioral-outcomes-content');
+    if (!container) return;
+    var events = data.events || [];
+    if (events.length === 0) return;
+
+    // Add tool events section
+    var header = document.createElement('div');
+    header.className = 'd-flex align-items-center mt-3 mb-2';
+    header.innerHTML = '<span class="badge bg-info me-2">NEW</span><strong>Recent Tool Events</strong> <small class="text-muted ms-2">(' + data.count + ' shown)</small>';
+    container.appendChild(header);
+
+    var table = document.createElement('table');
+    table.className = 'table table-sm table-hover mb-0';
+    var thead = document.createElement('thead');
+    var headRow = document.createElement('tr');
+    ['Tool', 'Event', 'Time'].forEach(function(h) {
+        var th = document.createElement('th');
+        th.textContent = h;
+        headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    for (var i = 0; i < Math.min(events.length, 10); i++) {
+        var ev = events[i];
+        var row = document.createElement('tr');
+        row.style.cursor = 'pointer';
+
+        var toolCell = document.createElement('td');
+        var toolBadge = document.createElement('code');
+        toolBadge.className = 'small';
+        toolBadge.textContent = ev.tool_name || '';
+        toolCell.appendChild(toolBadge);
+        row.appendChild(toolCell);
+
+        var typeCell = document.createElement('td');
+        var typeBadge = document.createElement('span');
+        var typeColors = { invoke: 'bg-primary', complete: 'bg-success', error: 'bg-danger', correction: 'bg-warning' };
+        typeBadge.className = 'badge ' + (typeColors[ev.event_type] || 'bg-secondary');
+        typeBadge.textContent = ev.event_type || '';
+        typeCell.appendChild(typeBadge);
+        row.appendChild(typeCell);
+
+        var dateCell = document.createElement('td');
+        dateCell.className = 'small text-muted';
+        dateCell.textContent = formatDate(ev.created_at || '');
         row.appendChild(dateCell);
 
         tbody.appendChild(row);

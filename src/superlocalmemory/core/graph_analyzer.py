@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
-# Licensed under the Elastic License 2.0 - see LICENSE file
+# Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3
 
 """Graph structural analysis -- PageRank, community detection, centrality.
@@ -437,5 +437,19 @@ class GraphAnalyzer:
                     )
         except Exception as exc:
             logger.debug("association_edges read failed: %s", exc)
+
+        # v3.4.7: Add ALL facts as nodes so isolated facts get base PageRank.
+        # Previously, facts without edges were invisible to graph analysis.
+        try:
+            all_facts = self._db.execute(
+                "SELECT fact_id FROM atomic_facts WHERE profile_id = ?",
+                (profile_id,),
+            )
+            for row in all_facts:
+                fact_id = dict(row)["fact_id"]
+                if fact_id not in g:
+                    g.add_node(fact_id)
+        except Exception as exc:
+            logger.debug("Failed to add isolated fact nodes: %s", exc)
 
         return g

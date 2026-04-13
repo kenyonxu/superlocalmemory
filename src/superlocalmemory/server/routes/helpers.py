@@ -1,8 +1,8 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
-# Licensed under the Elastic License 2.0 - see LICENSE file
+# Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 """SuperLocalMemory V3 - Route Helpers
- - Elastic License 2.0
+ - AGPL-3.0-or-later
 
 Shared utilities for all route modules: DB connection, dict factory,
 profile helper, validation, Pydantic models, config paths.

@@ -1,8 +1,8 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
-# Licensed under the Elastic License 2.0 - see LICENSE file
+# Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 """SuperLocalMemory V3 - Learning Routes
- - Elastic License 2.0
+ - AGPL-3.0-or-later
 
 Routes: /api/learning/status, /api/feedback, /api/feedback/dwell,
         /api/feedback/stats, /api/learning/backup, /api/learning/reset,

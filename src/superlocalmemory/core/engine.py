@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
-# Licensed under the Elastic License 2.0 - see LICENSE file
+# Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
 """SuperLocalMemory V3 — Main Memory Engine (Facade).
@@ -132,6 +132,13 @@ class MemoryEngine:
         except Exception as exc:
             logger.debug("V3.4.6 schema migration: %s", exc)
 
+        # V3.4.7: Apply "Learning Brain" schema (tool_events, behavioral_assertions)
+        try:
+            from superlocalmemory.storage.schema_v347 import apply_v347_schema
+            apply_v347_schema(str(self._db.db_path))
+        except Exception as exc:
+            logger.debug("V3.4.7 schema migration: %s", exc)
+
         self._embedder = init_embedder(self._config)
 
         if self._caps.llm_fact_extraction:
@@ -206,6 +213,8 @@ class MemoryEngine:
             temporal_validator=self._temporal_validator,
             summarizer=summarizer,
             behavioral_store=None,
+            embedder=self._embedder,  # v3.4.7: for CCQ worker
+            llm=getattr(self, "_llm", None),  # v3.4.7: for CCQ worker
         )
 
         # V3.3: Check for embedding model migration on mode switch

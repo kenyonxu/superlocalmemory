@@ -1,8 +1,8 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
-# Licensed under the Elastic License 2.0 - see LICENSE file
+# Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 """SuperLocalMemory V3 - Stats Routes
- - Elastic License 2.0
+ - AGPL-3.0-or-later
 
 Routes: /api/stats, /api/timeline, /api/patterns
 """
@@ -323,25 +323,44 @@ async def get_patterns():
                 from superlocalmemory.learning.behavioral import BehavioralPatternStore
                 store = BehavioralPatternStore(str(MEMORY_DIR / "learning.db"))
                 raw = store.get_patterns(profile_id=active_profile)
-                # v3.4.1: Map pattern_type to frontend-expected keys
+                # v3.4.7: Map all pattern types to frontend categories
                 type_map = {
                     "tech_preference": "preference",
+                    "interest": "preference",
+                    "entity_preferences": "preference",
                     "style": "style",
+                    "fact_type_distribution": "style",
+                    "knowledge_structure": "style",
                     "terminology": "terminology",
                     "temporal": "workflow",
-                    "interest": "workflow",
+                    "session_activity": "workflow",
                     "workflow": "workflow",
+                    "co_retrieval_clusters": "workflow",
+                    "channel_performance": "performance",
                 }
                 grouped = defaultdict(list)
                 for p in raw:
                     meta = p.get("metadata", {})
+                    data = meta  # metadata IS the data dict
                     frontend_key = type_map.get(p.get("pattern_type", ""), "preference")
+                    # Extract human-readable value from data fields
+                    readable_value = (
+                        data.get("value")
+                        or data.get("topic")
+                        or data.get("pattern_key", "")
+                        or p.get("pattern_key", "")
+                    )
+                    readable_key = (
+                        data.get("pattern_key")
+                        or data.get("key")
+                        or p.get("pattern_key", "")
+                    )
                     grouped[frontend_key].append({
                         "pattern_type": p.get("pattern_type", ""),
-                        "key": meta.get("key", p.get("pattern_key", "")),
-                        "value": meta.get("value", p.get("pattern_key", "")),
+                        "key": readable_key,
+                        "value": readable_value,
                         "confidence": p.get("confidence", 0),
-                        "evidence_count": p.get("evidence_count", 0),
+                        "evidence_count": data.get("evidence", p.get("evidence_count", 0)),
                     })
                 all_patterns = [p for ps in grouped.values() for p in ps]
                 confs = [p["confidence"] for p in all_patterns if p.get("confidence")]

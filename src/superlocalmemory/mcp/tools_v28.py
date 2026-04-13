@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
-# Licensed under the Elastic License 2.0 - see LICENSE file
+# Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
 """SuperLocalMemory V3 — V2.8 Ported MCP Tools (6 tools).
@@ -53,6 +53,28 @@ def register_v28_tools(server, get_engine: Callable) -> None:
                 profile_id=engine.profile_id,
                 context=ctx,
             )
+
+            # v3.4.7: Bridge outcomes → learning signals for two-way learning.
+            # Previously, outcomes were stored but never created learning signals.
+            try:
+                from superlocalmemory.learning.feedback import FeedbackCollector
+                from pathlib import Path as _Path
+                learning_db = _Path.home() / ".superlocalmemory" / "learning.db"
+                collector = FeedbackCollector(learning_db)
+                signal_map = {"success": ("user_positive", 1.0),
+                              "failure": ("user_negative", 0.0),
+                              "partial": ("user_correction", 0.5)}
+                sig_type, sig_val = signal_map.get(outcome, ("user_correction", 0.5))
+                for fid in ids:
+                    collector.record_explicit(
+                        profile_id=engine.profile_id,
+                        fact_id=fid,
+                        signal_type=sig_type,
+                        value=sig_val,
+                    )
+            except Exception as exc2:
+                logger.debug("Outcome→signal bridge: %s", exc2)
+
             return {"success": True, "outcome_id": ao.outcome_id, "outcome": outcome}
         except Exception as exc:
             logger.exception("report_outcome failed")

@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
-# Licensed under the Elastic License 2.0 - see LICENSE file
+# Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
 """Sleep-time consolidation engine (Phase 5).
@@ -127,6 +127,38 @@ class ConsolidationEngine:
                 )
                 # Step 7: Cognitive Consolidation Quantization (Phase E)
                 results["ccq"] = self._step7_ccq(profile_id)
+
+                # Step 8 (v3.4.7): Mine behavioral assertions from tool events.
+                try:
+                    from superlocalmemory.learning.assertion_miner import AssertionMiner
+                    miner = AssertionMiner(self._db.db_path)
+                    results["assertions"] = miner.mine(profile_id)
+                except Exception as exc:
+                    logger.debug("Assertion mining (non-fatal): %s", exc)
+                    results["assertions"] = {"error": str(exc)}
+
+                # Step 9 (v3.4.7): Generate soft prompts from patterns + assertions.
+                # Previously the AutoParameterizeHook was never wired.
+                try:
+                    from superlocalmemory.parameterization.pattern_extractor import PatternExtractor
+                    from superlocalmemory.parameterization.soft_prompt_generator import SoftPromptGenerator
+                    from superlocalmemory.parameterization.prompt_injector import PromptInjector
+                    from superlocalmemory.parameterization.prompt_lifecycle import PromptLifecycleManager
+                    from superlocalmemory.hooks.auto_parameterize import AutoParameterizeHook
+                    from superlocalmemory.core.config import ParameterizationConfig
+
+                    p_config = getattr(self._slm_config, "parameterization", ParameterizationConfig())
+                    extractor = PatternExtractor(self._db)
+                    generator = SoftPromptGenerator(p_config)
+                    injector = PromptInjector(self._db)
+                    lifecycle = PromptLifecycleManager(self._db, p_config)
+                    hook = AutoParameterizeHook(extractor, generator, injector, lifecycle, p_config)
+                    sp_result = hook.on_consolidation_complete(profile_id)
+                    results["soft_prompts"] = sp_result
+                except Exception as exc:
+                    logger.debug("Soft prompt generation (non-fatal): %s", exc)
+                    results["soft_prompts"] = {"error": str(exc)}
+
             results["success"] = True
         except Exception as exc:
             logger.warning(

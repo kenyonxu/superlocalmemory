@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
-# Licensed under the Elastic License 2.0 - see LICENSE file
+# Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
 """Sleep-Time Consolidation Worker — background memory maintenance.
@@ -332,14 +332,30 @@ class ConsolidationWorker:
                     except (ValueError, TypeError):
                         pass
 
+            # v3.4.7: Resolve entity IDs to readable canonical names
+            entity_names: dict = {}
+            try:
+                eid_list = list(entity_counts.keys())
+                if eid_list:
+                    placeholders = ",".join("?" * len(eid_list))
+                    name_rows = conn.execute(
+                        f"SELECT entity_id, canonical_name FROM canonical_entities "
+                        f"WHERE entity_id IN ({placeholders})",
+                        eid_list,
+                    ).fetchall()
+                    entity_names = {dict(r)["entity_id"]: dict(r)["canonical_name"] for r in name_rows}
+            except Exception:
+                pass
+
             for entity, count in entity_counts.most_common(15):
                 if count >= 3 and not dry_run:
+                    readable = entity_names.get(entity, entity)
                     confidence = min(1.0, count / max(len(facts) * 0.05, 10))
                     store.record_pattern(
                         profile_id=profile_id,
-                        pattern_type="interest",
-                        data={"topic": entity, "pattern_key": f"entity:{entity}",
-                              "value": entity, "evidence": count,
+                        pattern_type="entity_preferences",
+                        data={"topic": readable, "pattern_key": f"entity:{readable}",
+                              "value": readable, "evidence": count,
                               "source": "entity_frequency"},
                         success_rate=confidence,
                         confidence=confidence,
@@ -359,7 +375,7 @@ class ConsolidationWorker:
                 if heavy_sessions and not dry_run:
                     store.record_pattern(
                         profile_id=profile_id,
-                        pattern_type="workflow",
+                        pattern_type="session_activity",
                         data={"pattern_key": "heavy_session_usage",
                               "value": f"{len(heavy_sessions)} intensive sessions",
                               "evidence": len(heavy_sessions),
@@ -382,7 +398,7 @@ class ConsolidationWorker:
                 pct = round(dominant_type[1] / total_ft * 100)
                 store.record_pattern(
                     profile_id=profile_id,
-                    pattern_type="style",
+                    pattern_type="fact_type_distribution",
                     data={"pattern_key": "memory_style",
                           "value": f"{dominant_type[0]} dominant ({pct}%)",
                           "evidence": dominant_type[1],
@@ -415,7 +431,7 @@ class ConsolidationWorker:
                     if cnt >= 5 and not dry_run:
                         store.record_pattern(
                             profile_id=profile_id,
-                            pattern_type="style",
+                            pattern_type="channel_performance",
                             data={"pattern_key": f"channel:{ch}",
                                   "value": f"{ch} ({cnt} hits, {avg_sig} avg)",
                                   "evidence": cnt,
@@ -437,7 +453,7 @@ class ConsolidationWorker:
                     if coret_rows and not dry_run:
                         store.record_pattern(
                             profile_id=profile_id,
-                            pattern_type="workflow",
+                            pattern_type="co_retrieval_clusters",
                             data={"pattern_key": "co_retrieval_clusters",
                                   "value": f"{len(coret_rows)} strong fact pairs",
                                   "evidence": len(coret_rows),
@@ -466,7 +482,7 @@ class ConsolidationWorker:
                     total_comm = sum(dict(r)["cnt"] for r in comm_rows)
                     store.record_pattern(
                         profile_id=profile_id,
-                        pattern_type="style",
+                        pattern_type="knowledge_structure",
                         data={"pattern_key": "knowledge_structure",
                               "value": f"{len(comm_rows)} topic communities, {total_comm} classified facts",
                               "evidence": total_comm,

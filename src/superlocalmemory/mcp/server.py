@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
-# Licensed under the Elastic License 2.0 - see LICENSE file
+# Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
 """SuperLocalMemory V3 — MCP Server.
@@ -76,6 +76,9 @@ _ESSENTIAL_TOOLS: set[str] = {
     # Infinite memory + learning (4)
     "consolidate_cognitive", "get_soft_prompts",
     "set_mode", "report_outcome",
+    # v3.4.7: Two-way learning (4)
+    "log_tool_event", "get_assertions",
+    "reinforce_assertion", "contradict_assertion",
 }
 
 # v3.4.4: Mesh tools — enabled if mesh_enabled in config or SLM_MCP_MESH_TOOLS=1
@@ -134,6 +137,7 @@ from superlocalmemory.mcp.tools_v33 import register_v33_tools
 from superlocalmemory.mcp.resources import register_resources
 from superlocalmemory.mcp.tools_code_graph import register_code_graph_tools
 from superlocalmemory.mcp.tools_mesh import register_mesh_tools
+from superlocalmemory.mcp.tools_learning import register_learning_tools
 
 register_core_tools(_target, get_engine)
 register_v28_tools(_target, get_engine)
@@ -143,6 +147,7 @@ register_v33_tools(_target, get_engine)
 register_resources(server, get_engine)  # Resources always registered (not tools)
 register_code_graph_tools(_target, get_engine)  # CodeGraph: filtered like other tools (SLM_MCP_ALL_TOOLS=1 to show all)
 register_mesh_tools(_target, get_engine)  # v3.4.4: Mesh P2P tools — ships with SLM, no separate slm-mesh needed
+register_learning_tools(_target, get_engine)  # v3.4.7: Two-way learning tools
 
 
 # V3.3.21: Eager engine warmup — start initializing BEFORE first tool call.

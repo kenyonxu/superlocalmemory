@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
-# Licensed under the Elastic License 2.0 - see LICENSE file
+# Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
 """Recall pipeline — extracted free functions for MemoryEngine.recall().
@@ -230,10 +230,23 @@ def run_recall(
     # singletons to avoid creating new objects per recall (was causing
     # object accumulation across 304 benchmark recalls).
     try:
+        # v3.4.7: Extract entities from results for behavioral tracking.
+        # Was passing wrong param (result_count instead of entities) → TypeError.
+        entities: list[str] = []
+        for r in response.results[:10]:
+            rd = r if isinstance(r, dict) else (dict(r) if hasattr(r, "keys") else {})
+            ents_json = rd.get("canonical_entities_json", "")
+            if ents_json:
+                try:
+                    import json as _json
+                    entities.extend(_json.loads(ents_json))
+                except (ValueError, TypeError):
+                    pass
         _get_behavioral_tracker(db).record_query(
-            profile_id=profile_id, query=query,
+            query=query,
             query_type=response.query_type,
-            result_count=len(response.results),
+            entities=entities[:20],
+            profile_id=profile_id,
         )
     except Exception as exc:
         logger.debug("Behavioral tracking: %s", exc)

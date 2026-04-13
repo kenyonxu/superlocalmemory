@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
-# Licensed under the Elastic License 2.0 - see LICENSE file
+# Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
 """Engine wiring — extracted free functions for MemoryEngine initialization.
@@ -330,10 +330,29 @@ def _init_consolidation(
     temporal_validator: Any,
     summarizer: Any,
     behavioral_store: Any,
+    embedder: Any = None,
+    llm: Any = None,
 ) -> Any | None:
     """Create ConsolidationEngine for Phase 5 sleep-time consolidation."""
     try:
         from superlocalmemory.core.consolidation_engine import ConsolidationEngine
+
+        # v3.4.7: Create CCQWorker so Step 7 (cognitive consolidation) actually runs.
+        # Previously, ccq_worker was always None → Step 7 returned {"enabled": False}.
+        ccq_worker = None
+        try:
+            from superlocalmemory.core.config import CCQConfig
+            from superlocalmemory.encoding.cognitive_consolidator import CognitiveConsolidator
+            from superlocalmemory.learning.consolidation_quantization_worker import CCQWorker
+            ccq_config = getattr(config, "ccq", CCQConfig())
+            consolidator = CognitiveConsolidator(
+                db=db, embedder=embedder, llm=llm, config=ccq_config,
+            )
+            ccq_worker = CCQWorker(consolidator=consolidator, config=ccq_config)
+            logger.info("CCQ worker initialized (enabled=%s)", ccq_config.enabled)
+        except Exception as exc:
+            logger.debug("CCQ worker init failed (non-fatal): %s", exc)
+
         return ConsolidationEngine(
             db=db,
             config=config.consolidation,
@@ -343,6 +362,7 @@ def _init_consolidation(
             graph_analyzer=graph_analyzer,
             temporal_validator=temporal_validator,
             slm_config=config,
+            ccq_worker=ccq_worker,
         )
     except Exception as exc:
         logger.debug("ConsolidationEngine init failed: %s", exc)
