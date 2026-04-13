@@ -234,3 +234,36 @@ async def get_soft_prompts():
     except Exception as e:
         logger.debug("get_soft_prompts error: %s", e)
         return {"prompts": [], "count": 0, "error": str(e)}
+
+
+@router.post("/api/v3/tool-event")
+async def log_tool_event_api(data: dict):
+    """Log a tool event via HTTP (called by PostToolUse hook).
+
+    Body: { "tool_name": "Read", "event_type": "complete" }
+    Lightweight — no LLM, just an INSERT. For the shipped hook.
+    """
+    try:
+        import sqlite3 as _sqlite3
+        from datetime import datetime, timezone
+        import os
+
+        tool_name = data.get("tool_name", "unknown")
+        event_type = data.get("event_type", "complete")
+        now = datetime.now(timezone.utc).isoformat()
+        session_id = data.get("session_id", os.environ.get("CLAUDE_SESSION_ID", "hook"))
+        profile = get_active_profile()
+
+        conn = _sqlite3.connect(str(MEMORY_DIR / "memory.db"))
+        conn.execute(
+            "INSERT INTO tool_events "
+            "(session_id, profile_id, project_path, tool_name, event_type, "
+            " input_summary, output_summary, duration_ms, metadata, created_at) "
+            "VALUES (?, ?, ?, ?, ?, '', '', 0, '{}', ?)",
+            (session_id, profile, "", tool_name, event_type, now),
+        )
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

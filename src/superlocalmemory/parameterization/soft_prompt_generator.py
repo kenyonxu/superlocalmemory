@@ -61,12 +61,18 @@ CATEGORY_TEMPLATES: dict[str, str] = {
         "The user has explicitly asked to avoid: {avoid_list}. "
         "Do not suggest or use these."
     ),
+    # v3.4.7: Behavioral assertions — learned patterns from tool usage
+    "behavioral": (
+        "Learned behavior: When {trigger}, {action}. "
+        "(Confidence: {confidence}%, based on {evidence} observations)"
+    ),
 }
 
 CATEGORY_PRIORITY_ORDER: list[str] = [
     "identity",
     "tech_preference",
     "communication_style",
+    "behavioral",  # v3.4.7: behavioral assertions after communication style
     "workflow_pattern",
     "project_context",
     "decision_history",

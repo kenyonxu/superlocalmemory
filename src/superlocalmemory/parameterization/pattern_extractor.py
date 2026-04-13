@@ -159,6 +159,8 @@ class PatternExtractor:
         all_patterns.extend(self._extract_from_behavioral(profile_id))
         all_patterns.extend(self._extract_from_cross_project())
         all_patterns.extend(self._extract_from_workflows(profile_id))
+        # v3.4.7: Extract from behavioral assertions (learned patterns)
+        all_patterns.extend(self._extract_from_assertions(profile_id))
 
         if not all_patterns:
             return []
@@ -318,6 +320,38 @@ class PatternExtractor:
                 source="workflow",
                 created_at=datetime.now(timezone.utc).isoformat(),
             ))
+        return patterns
+
+    # ------------------------------------------------------------------
+    # v3.4.7: Behavioral assertions → soft prompts
+    # ------------------------------------------------------------------
+
+    def _extract_from_assertions(
+        self, profile_id: str,
+    ) -> list[PatternAssertion]:
+        """Extract high-confidence behavioral assertions for soft prompt injection."""
+        patterns: list[PatternAssertion] = []
+        try:
+            rows = self._db.execute(
+                "SELECT trigger_condition, action, confidence, evidence_count, "
+                "created_at FROM behavioral_assertions "
+                "WHERE profile_id = ? AND confidence >= 0.5 "
+                "ORDER BY confidence DESC LIMIT 10",
+                (profile_id,),
+            )
+            for row in rows:
+                r = dict(row)
+                patterns.append(PatternAssertion(
+                    category=PatternCategory.WORKFLOW_PATTERN,
+                    key=f"behavioral:{r['trigger_condition'][:30]}",
+                    value=f"When {r['trigger_condition']}, {r['action']}",
+                    confidence=r["confidence"],
+                    evidence_count=r["evidence_count"],
+                    source="behavioral_assertion",
+                    created_at=r.get("created_at", ""),
+                ))
+        except Exception as exc:
+            logger.debug("Behavioral assertion extraction: %s", exc)
         return patterns
 
     # ------------------------------------------------------------------

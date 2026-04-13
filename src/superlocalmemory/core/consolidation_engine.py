@@ -144,11 +144,19 @@ class ConsolidationEngine:
                     from superlocalmemory.parameterization.soft_prompt_generator import SoftPromptGenerator
                     from superlocalmemory.parameterization.prompt_injector import PromptInjector
                     from superlocalmemory.parameterization.prompt_lifecycle import PromptLifecycleManager
+                    from superlocalmemory.parameterization.cross_project import CrossProjectAggregator
+                    from superlocalmemory.parameterization.workflow_miner import WorkflowMiner
+                    from superlocalmemory.learning.behavioral import BehavioralPatternStore
                     from superlocalmemory.hooks.auto_parameterize import AutoParameterizeHook
                     from superlocalmemory.core.config import ParameterizationConfig
+                    from pathlib import Path as _Path
 
                     p_config = getattr(self._slm_config, "parameterization", ParameterizationConfig())
-                    extractor = PatternExtractor(self._db)
+                    learning_db = str(_Path.home() / ".superlocalmemory" / "learning.db")
+                    beh_store = BehavioralPatternStore(learning_db)
+                    cross_proj = CrossProjectAggregator(self._db)
+                    wf_miner = WorkflowMiner(self._db)
+                    extractor = PatternExtractor(self._db, beh_store, cross_proj, wf_miner, p_config)
                     generator = SoftPromptGenerator(p_config)
                     injector = PromptInjector(self._db)
                     lifecycle = PromptLifecycleManager(self._db, p_config)
