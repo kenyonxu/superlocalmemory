@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture
 def entity_db(tmp_path):

@@ -268,6 +268,20 @@ async def lifespan(application: FastAPI):
             if reranker and hasattr(reranker, 'warmup_sync'):
                 reranker.warmup_sync(timeout=120)
 
+        # V3.4.11: Pre-warm embedding worker (load ONNX model on startup)
+        # Without this, first recall takes 60-90s for model load.
+        # Same pattern as reranker warmup above.
+        import threading
+        def _warmup_embedder():
+            try:
+                embedder = getattr(retrieval_eng, '_embedder', None) if retrieval_eng else None
+                if embedder and hasattr(embedder, 'embed'):
+                    embedder.embed("warmup")
+                    logger.info("Embedding worker pre-warmed (ONNX model loaded)")
+            except Exception as exc:
+                logger.warning("Embedding warmup failed: %s", exc)
+        threading.Thread(target=_warmup_embedder, daemon=True, name="embed-warmup").start()
+
     except Exception as exc:
         logger.warning("Engine init failed: %s", exc)
         application.state.engine = None
@@ -318,6 +332,8 @@ async def lifespan(application: FastAPI):
     if enable_legacy:
         asyncio.create_task(_start_legacy_redirect(_DEFAULT_PORT, _LEGACY_PORT))
 
+    global _start_time
+    _start_time = time.monotonic()
     _last_activity = time.monotonic()
     logger.info("Unified daemon ready on port %d (24/7 mode)" if idle_timeout <= 0
                 else "Unified daemon ready on port %d (idle timeout: %ds)",
@@ -422,7 +438,7 @@ def _register_dashboard_routes(application: FastAPI) -> None:
                 return JSONResponse(
                     status_code=429,
                     content={"error": "Too many requests."},
-                    headers={"Retry-After": str(limiter.window_seconds)},
+                    headers={"Retry-After": str(getattr(limiter, 'window', 60))},
                 )
             response = await call_next(request)
             response.headers["X-RateLimit-Remaining"] = str(remaining)
@@ -472,6 +488,19 @@ def _register_dashboard_routes(application: FastAPI) -> None:
     application.include_router(profiles_router)
     application.include_router(backup_router)
     application.include_router(data_io_router)
+
+    # Optional routers — ImportError-safe so missing modules don't crash startup
+    try:
+        from superlocalmemory.server.routes.tiers import router as tiers_router
+        application.include_router(tiers_router)
+    except ImportError:
+        logger.debug("tiers_router not available")
+
+    try:
+        from superlocalmemory.server.routes.evolution import router as evolution_router
+        application.include_router(evolution_router)
+    except ImportError:
+        logger.debug("evolution_router not available")
     application.include_router(events_router)
     application.include_router(agents_router)
     application.include_router(ws_router)
@@ -542,13 +571,16 @@ def _register_daemon_routes(application: FastAPI) -> None:
         }
 
     @application.get("/recall")
-    async def recall(q: str = "", limit: int = 20):
+    async def recall(q: str = "", query: str = "", limit: int = 20):
         _update_activity()
+        search_query = q or query  # Accept both ?q= and ?query= for compatibility
         engine = application.state.engine
         if engine is None:
             raise HTTPException(503, detail="Engine not initialized")
+        if not search_query:
+            return {"results": [], "count": 0, "query_type": "none", "retrieval_time_ms": 0}
         try:
-            response = engine.recall(q, limit=limit)
+            response = engine.recall(search_query, limit=limit)
             results = [
                 {
                     "content": r.fact.content,
@@ -590,7 +622,6 @@ def _register_daemon_routes(application: FastAPI) -> None:
     async def status():
         _update_activity()
         engine = application.state.engine
-        uptime = time.monotonic() - _last_activity
         fact_count = engine.fact_count if engine else 0
         mode = engine._config.mode.value if engine and hasattr(engine, '_config') else "unknown"
         return {
@@ -656,7 +687,7 @@ def _start_memory_watchdog() -> None:
     """
     import threading
 
-    MAX_WORKER_MB = 2048  # 2GB per worker — kill if exceeded
+    MAX_WORKER_MB = 4096  # 4GB per worker — ONNX full model is 1.6GB + overhead
 
     def watchdog_loop():
         while True:

@@ -170,7 +170,7 @@ def _worker_main() -> None:
             # a fresh worker on next request (existing mechanism in embeddings.py).
             # V3.3.21: Configurable via SLM_EMBED_WORKER_RSS_LIMIT_MB (default 2500MB).
             import resource
-            _rss_limit = int(os.environ.get("SLM_EMBED_WORKER_RSS_LIMIT_MB", 2500))
+            _rss_limit = int(os.environ.get("SLM_EMBED_WORKER_RSS_LIMIT_MB", 4000))
             rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
             if rss_mb > _rss_limit:
                 sys.exit(0)

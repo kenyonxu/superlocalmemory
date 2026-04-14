@@ -38,6 +38,8 @@ from superlocalmemory.core.engine import MemoryEngine
 from superlocalmemory.llm.backbone import LLMBackbone
 from superlocalmemory.storage.models import Mode, RecallResponse
 
+pytestmark = pytest.mark.slow
+
 
 # ---------------------------------------------------------------------------
 # Ollama availability check

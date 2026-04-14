@@ -64,6 +64,9 @@ def dispatch(args: Namespace) -> None:
         "adapters": cmd_adapters,
         # V3.4.8 external observation ingestion
         "ingest": cmd_ingest,
+        # V3.4.11 skill evolution
+        "config": cmd_config,
+        "evolve": cmd_evolve,
     }
     handler = handlers.get(args.command)
     if handler:
@@ -339,6 +342,173 @@ def cmd_ingest(args: Namespace) -> None:
     """Import external observations into SLM learning pipeline."""
     from superlocalmemory.cli.ingest_cmd import cmd_ingest as _ingest
     _ingest(args)
+
+
+# -- Config & Evolution (V3.4.11) -----------------------------------------------
+
+
+def cmd_config(args: Namespace) -> None:
+    """Get or set config values (dot-notation).
+
+    Usage:
+      slm config set evolution.enabled true
+      slm config set evolution.backend auto
+      slm config get evolution.enabled
+      slm config get evolution.backend
+    """
+    import json
+    from pathlib import Path
+
+    use_json = getattr(args, "json", False)
+    action = getattr(args, "action", "get")
+    key = getattr(args, "key", "")
+    value = getattr(args, "value", None)
+
+    config_path = Path.home() / ".superlocalmemory" / "config.json"
+
+    # Read existing config
+    cfg: dict = {}
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if action == "get":
+        # Parse dot-notation key (e.g. "evolution.enabled")
+        parts = key.split(".") if key else []
+        node = cfg
+        for part in parts:
+            if isinstance(node, dict) and part in node:
+                node = node[part]
+            else:
+                node = None
+                break
+
+        if use_json:
+            from superlocalmemory.cli.json_output import json_print
+            json_print("config", data={"key": key, "value": node})
+        else:
+            if node is None:
+                print(f"{key}: (not set)")
+            else:
+                print(f"{key}: {node}")
+
+    elif action == "set":
+        _ALLOWED_CONFIG_KEYS = {
+            "evolution.enabled", "evolution.backend", "evolution.max_evolutions_per_cycle",
+            "mesh_enabled", "daemon_idle_timeout", "entity_compilation_enabled",
+        }
+        if key not in _ALLOWED_CONFIG_KEYS:
+            if use_json:
+                from superlocalmemory.cli.json_output import json_print
+                json_print("config", error={
+                    "code": "DISALLOWED_KEY",
+                    "message": f"'{key}' is not a configurable key. Allowed: {', '.join(sorted(_ALLOWED_CONFIG_KEYS))}",
+                })
+            else:
+                print(f"Error: '{key}' is not a configurable key. Allowed: {', '.join(sorted(_ALLOWED_CONFIG_KEYS))}")
+            sys.exit(1)
+
+        if not key or value is None:
+            if use_json:
+                from superlocalmemory.cli.json_output import json_print
+                json_print("config", error={
+                    "code": "INVALID_INPUT",
+                    "message": "Usage: slm config set <key> <value>",
+                })
+            else:
+                print("Usage: slm config set <key> <value>")
+            sys.exit(1)
+
+        # Parse value: booleans, numbers, strings
+        parsed_value: object
+        if value.lower() in ("true", "yes", "on"):
+            parsed_value = True
+        elif value.lower() in ("false", "no", "off"):
+            parsed_value = False
+        else:
+            try:
+                parsed_value = int(value)
+            except ValueError:
+                try:
+                    parsed_value = float(value)
+                except ValueError:
+                    parsed_value = value
+
+        # Set via dot-notation (e.g. "evolution.enabled" -> cfg["evolution"]["enabled"])
+        parts = key.split(".")
+        node = cfg
+        for part in parts[:-1]:
+            if part not in node or not isinstance(node.get(part), dict):
+                node[part] = {}
+            node = node[part]
+        old_value = node.get(parts[-1])
+        node[parts[-1]] = parsed_value
+
+        # Write back
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(cfg, indent=2) + "\n")
+
+        if use_json:
+            from superlocalmemory.cli.json_output import json_print
+            json_print("config", data={
+                "key": key, "old_value": old_value, "new_value": parsed_value,
+            })
+        else:
+            print(f"{key}: {old_value} -> {parsed_value}")
+
+    else:
+        if use_json:
+            from superlocalmemory.cli.json_output import json_print
+            json_print("config", error={
+                "code": "UNKNOWN_ACTION",
+                "message": f"Unknown action: {action}. Use 'get' or 'set'.",
+            })
+        else:
+            print(f"Unknown config action: {action}. Use 'get' or 'set'.")
+        sys.exit(1)
+
+
+def cmd_evolve(args: Namespace) -> None:
+    """Run skill evolution for a session (called from Stop hook).
+
+    Reads config.json to check if evolution is enabled.
+    If enabled, imports SkillEvolver and runs run_post_session().
+    If disabled, exits silently (zero output for fire-and-forget).
+    """
+    import json
+    from pathlib import Path
+
+    session_id = getattr(args, "session", "") or ""
+    profile = getattr(args, "profile", "default") or "default"
+
+    if not session_id:
+        return  # Silent exit — nothing to do without a session
+
+    # Check if evolution is enabled via config.json
+    config_path = Path.home() / ".superlocalmemory" / "config.json"
+    try:
+        cfg = json.loads(config_path.read_text()) if config_path.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        return  # Config unreadable — silent exit
+
+    evolution_cfg = cfg.get("evolution", {})
+    if not evolution_cfg.get("enabled", False):
+        return  # Disabled — silent exit
+
+    # Heavy imports only if enabled (this runs as a Popen child)
+    try:
+        from superlocalmemory.evolution.skill_evolver import SkillEvolver
+
+        db_path = Path.home() / ".superlocalmemory" / "memory.db"
+        if not db_path.exists():
+            return
+
+        evolver = SkillEvolver(db_path)
+        evolver.run_post_session(session_id, profile)
+    except Exception:
+        pass  # Best-effort — don't crash the Stop hook
 
 
 def cmd_adapters(args: Namespace) -> None:

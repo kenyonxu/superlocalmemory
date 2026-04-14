@@ -53,7 +53,7 @@ _PLACE_MARKERS = ("City", "State", "County", "Island", "River", "Mountain",
 _EVENT_MARKERS = ("Festival", "Conference", "Summit", "Workshop", "Meeting",
                   "Election", "War", "Match", "Game", "Concert", "Wedding")
 # v3.4.10: Skill entity type — skills, commands, agents, plugins
-_SKILL_MARKERS = ("skill", "command", "agent", "plugin", "hook", "mcp")
+_SKILL_MARKERS_RE = re.compile(r'\b(?:skill|command|agent|plugin|hook|mcp)\b', re.IGNORECASE)
 _SKILL_NAMESPACE_RE = re.compile(r"^[\w-]+:[\w-]+$")  # e.g., "superpowers:brainstorming"
 
 
@@ -184,17 +184,18 @@ def _guess_entity_type(name: str) -> str:
     if any(m in name for m in _EVENT_MARKERS):
         return "event"
 
-    # v3.4.10: Skill entities — namespaced skills or skill-related terms
+    # v3.4.10: Skill entities — namespaced skills always skill type
     if _SKILL_NAMESPACE_RE.match(name):
-        return "skill"
-    name_lower = name.lower()
-    if any(m in name_lower for m in _SKILL_MARKERS):
         return "skill"
 
     # Check ALL words against the stop list (not just the full name)
     words = name.lower().split()
     if any(w in _COMMON_WORDS for w in words):
         return "concept"
+
+    # v3.4.10: Skill entities — word-boundary match AFTER common-word filter
+    if _SKILL_MARKERS_RE.search(name):
+        return "skill"
 
     # Multi-word entity: "person" only if 2-3 capitalized words, no stop words
     if re.match(r"^[A-Z][a-z]+ [A-Z][a-z]+( [A-Z][a-z]+)?$", name):

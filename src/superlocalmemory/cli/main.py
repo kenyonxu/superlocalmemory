@@ -313,6 +313,26 @@ def main() -> None:
     )
     ingest_p.add_argument("--json", action="store_true", help="Output structured JSON")
 
+    # V3.4.11: Config get/set (dot-notation)
+    config_p = sub.add_parser(
+        "config",
+        help="Get or set config values (e.g. slm config set evolution.enabled true)",
+    )
+    config_p.add_argument(
+        "action", choices=["get", "set"], help="Action: get or set",
+    )
+    config_p.add_argument("key", help="Config key in dot notation (e.g. evolution.enabled)")
+    config_p.add_argument("value", nargs="?", default=None, help="Value to set (for 'set' action)")
+    config_p.add_argument("--json", action="store_true", help="Output structured JSON")
+
+    # V3.4.11: Skill evolution (called from Stop hook, fire-and-forget)
+    evolve_p = sub.add_parser(
+        "evolve",
+        help="Run post-session skill evolution (internal, called by Stop hook)",
+    )
+    evolve_p.add_argument("--session", default="", help="Session ID to process")
+    evolve_p.add_argument("--profile", default="default", help="Profile ID")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -328,6 +348,7 @@ def main() -> None:
     # Cross-platform: macOS + Windows + Linux.
     _NO_DAEMON_COMMANDS = {
         "setup", "mode", "provider", "connect", "migrate", "mcp", "warmup",
+        "config", "evolve",
     }
     if args.command not in _NO_DAEMON_COMMANDS:
         try:

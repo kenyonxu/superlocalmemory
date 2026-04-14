@@ -146,6 +146,13 @@ class MemoryEngine:
         except Exception as exc:
             logger.debug("V3.4.10 schema migration: %s", exc)
 
+        # V3.4.11: Apply "Scale-Ready" schema (pinned_facts, backend_status, fact_consolidations)
+        try:
+            from superlocalmemory.storage.schema_v3411 import apply_v3411_schema
+            apply_v3411_schema(str(self._db.db_path))
+        except Exception as exc:
+            logger.debug("V3.4.11 schema migration: %s", exc)
+
         self._embedder = init_embedder(self._config)
 
         if self._caps.llm_fact_extraction:
@@ -384,6 +391,11 @@ class MemoryEngine:
     def close(self) -> None:
         if self._maintenance_scheduler is not None:
             self._maintenance_scheduler.stop()
+        if self._db is not None:
+            try:
+                self._db.close()
+            except Exception:
+                pass
         self._initialized = False
 
     @property

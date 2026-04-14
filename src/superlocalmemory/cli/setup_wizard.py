@@ -265,7 +265,7 @@ def run_wizard(auto: bool = False) -> None:
     print()
 
     # -- Step 1: System check --
-    print("─── Step 1/6: System Check ───")
+    print("─── Step 1/10: System Check ───")
     print()
     py_ver = platform.python_version()
     py_ok = sys.version_info >= (3, 11)
@@ -293,7 +293,7 @@ def run_wizard(auto: bool = False) -> None:
 
     # -- Step 2: Mode selection --
     print()
-    print("─── Step 2/6: Choose Operating Mode ───")
+    print("─── Step 2/10: Choose Operating Mode ───")
     print()
     print("  [A] Local Guardian (recommended)")
     print("      Zero cloud. Zero LLM. Full privacy.")
@@ -342,7 +342,7 @@ def run_wizard(auto: bool = False) -> None:
 
     # -- Step 3: Code Knowledge Graph --
     print()
-    print("─── Step 3/6: Code Knowledge Graph ───")
+    print("─── Step 3/10: Code Knowledge Graph ───")
     print()
     print("  CodeGraph builds a structural map of your codebase using Tree-sitter.")
     print("  It gives your AI assistant blast-radius analysis, call graphs,")
@@ -375,7 +375,7 @@ def run_wizard(auto: bool = False) -> None:
 
     # -- Step 4: Download models --
     print()
-    print("─── Step 4/9: Download Embedding Model ───")
+    print("─── Step 4/10: Download Embedding Model ───")
 
     if not st_ok:
         print("  ⚠ Skipped (sentence-transformers not installed)")
@@ -386,7 +386,7 @@ def run_wizard(auto: bool = False) -> None:
             print("  ⚠ Model will download on first use (may take a few minutes)")
 
     print()
-    print("─── Step 4b/9: Download Reranker Model ───")
+    print("─── Step 4b/10: Download Reranker Model ───")
 
     if not st_ok:
         print("  ⚠ Skipped (sentence-transformers not installed)")
@@ -395,7 +395,7 @@ def run_wizard(auto: bool = False) -> None:
 
     # -- Step 5: Daemon Configuration (v3.4.3) --
     print()
-    print("─── Step 5/9: Daemon Configuration ───")
+    print("─── Step 5/10: Daemon Configuration ───")
     print()
     print("  The SLM daemon runs in the background for instant memory access.")
     print()
@@ -425,7 +425,7 @@ def run_wizard(auto: bool = False) -> None:
 
     # -- Step 6: Mesh Communication (v3.4.3) --
     print()
-    print("─── Step 6/9: Mesh Communication ───")
+    print("─── Step 6/10: Mesh Communication ───")
     print()
     print("  SLM Mesh enables agent-to-agent P2P communication.")
     print("  Multiple AI sessions can share knowledge in real-time.")
@@ -446,7 +446,7 @@ def run_wizard(auto: bool = False) -> None:
 
     # -- Step 7: Ingestion Adapters (v3.4.3) --
     print()
-    print("─── Step 7/9: Ingestion Adapters ───")
+    print("─── Step 7/10: Ingestion Adapters ───")
     print()
     print("  These let SLM learn from your email, calendar, and meetings.")
     print("  All adapters are OFF by default. You can enable them later.")
@@ -486,7 +486,7 @@ def run_wizard(auto: bool = False) -> None:
 
     # -- Step 8: Entity Compilation (v3.4.3) --
     print()
-    print("─── Step 8/9: Entity Compilation ───")
+    print("─── Step 8/10: Entity Compilation ───")
     print()
     print("  Entity compilation builds knowledge summaries per person,")
     print("  project, and concept. Runs automatically during consolidation.")
@@ -505,9 +505,50 @@ def run_wizard(auto: bool = False) -> None:
     config.save()
     print(f"\n  ✓ Entity compilation {'enabled' if config.entity_compilation_enabled else 'disabled'}")
 
-    # -- Step 9: Verification --
+    # -- Step 9: Skill Evolution (v3.4.11) --
     print()
-    print("─── Step 9/9: Verification ───")
+    print("─── Step 9/10: Skill Evolution ───")
+    print()
+    print("  SLM can automatically evolve skills that underperform.")
+    print("  It detects degradation, generates improvements, and verifies them blindly.")
+    print("  Requires an LLM backend (Claude CLI, Ollama, or API key).")
+    print()
+    print("  [Y] Enable Skill Evolution")
+    print("  [N] Disable (can enable later: slm config set evolution.enabled true)")
+    print()
+
+    if interactive:
+        evo_choice = _prompt("  Enable Skill Evolution? [Y/n] (default: Y): ", "y").lower()
+    else:
+        evo_choice = "y"
+        print("  Auto-enabling Skill Evolution (non-interactive)")
+
+    evolution_enabled = evo_choice in ("", "y", "yes")
+
+    # Write evolution config to config.json directly
+    # (SLMConfig.save() doesn't serialize evolution)
+    _SLM_HOME.mkdir(parents=True, exist_ok=True)
+    evo_config_path = _SLM_HOME / "config.json"
+    evo_cfg: dict = {}
+    if evo_config_path.exists():
+        try:
+            evo_cfg = json.loads(evo_config_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    evo_cfg["evolution"] = {
+        "enabled": evolution_enabled,
+        "backend": "auto",
+    }
+    evo_config_path.write_text(json.dumps(evo_cfg, indent=2) + "\n")
+
+    if evolution_enabled:
+        print(f"\n  ✓ Skill Evolution enabled (backend: auto-detect)")
+    else:
+        print(f"\n  ✓ Skill Evolution disabled")
+
+    # -- Step 10: Verification --
+    print()
+    print("─── Step 10/10: Verification ───")
 
     if st_ok:
         verified = _verify_installation()
@@ -537,6 +578,8 @@ def run_wizard(auto: bool = False) -> None:
         print(", Entity Compilation", end="")
     if code_graph_enabled:
         print(", CodeGraph", end="")
+    if evolution_enabled:
+        print(", Skill Evolution", end="")
     print()
     if enabled_adapters:
         print(f"  Adapters: {', '.join(enabled_adapters)}")

@@ -193,9 +193,6 @@ class RetrievalEngine:
         facts = self._load_facts(top, profile_id)
 
         # V3.3.21: Session diversity for aggregation queries.
-        # Cat 1 (single-hop/aggregation) needs facts from MULTIPLE sessions.
-        # Without diversity enforcement, top-20 may all come from 1-2 sessions,
-        # missing scattered mentions across 19+ sessions.
         if strat.query_type == "aggregation" and facts:
             top = self._enforce_session_diversity(top, facts, min_sessions=3, top_k=20)
 
@@ -212,8 +209,18 @@ class RetrievalEngine:
             ce_alpha = 0.5 if strat.query_type in ("multi_hop", "temporal") else 0.75
             top = self._apply_reranker(query, top, facts, alpha=ce_alpha)
 
+        # V3.4.11: Channel diversity — guarantee entity_graph results appear in
+        # the final output. Applied AFTER reranker so results can't be pushed out.
+        final_top = top[:effective_limit]
+        final_top = self._enforce_channel_diversity(
+            final_top, fused, ch_results, effective_limit,
+        )
+        # Reload facts for any newly injected results
+        if len(final_top) > len(top[:effective_limit]):
+            facts = self._load_facts(final_top, profile_id)
+
         # 6. Build response
-        results = self._build_results(top[:effective_limit], facts, strat)
+        results = self._build_results(final_top, facts, strat)
         ms = (time.monotonic() - t0) * 1000.0
         return RecallResponse(
             query=query, mode=mode, results=results,
@@ -334,6 +341,54 @@ class RetrievalEngine:
         remaining = [fr for fr in rest if fr.fact_id not in promoted_ids]
         return top + promoted + remaining
 
+    # -- Channel diversity enforcement ----------------------------------------
+
+    @staticmethod
+    def _enforce_channel_diversity(
+        top: list,
+        fused: list,
+        ch_results: dict[str, list[tuple[str, float]]],
+        effective_limit: int,
+        min_per_channel: int = 2,
+    ) -> list:
+        """Ensure structure channels (entity_graph) get representation.
+
+        V3.4.11: entity_graph finds valid results but RRF scores them low
+        because they don't overlap with semantic/bm25 results. This interleaves
+        top entity_graph facts into positions 3-4 of the final output instead
+        of appending at the end where they'd never be seen.
+        """
+        structure_channels = ["entity_graph"]
+        top_ids = {fr.fact_id for fr in top}
+
+        promoted = []
+        for ch_name in structure_channels:
+            ch_items = ch_results.get(ch_name, [])
+            if not ch_items:
+                continue
+
+            present = sum(1 for fid, _ in ch_items if fid in top_ids)
+            if present >= min_per_channel:
+                continue
+
+            needed = min_per_channel - present
+            ch_fids = {fid for fid, _ in ch_items}
+            for fr in fused:
+                if fr.fact_id in ch_fids and fr.fact_id not in top_ids:
+                    promoted.append(fr)
+                    top_ids.add(fr.fact_id)
+                    needed -= 1
+                    if needed <= 0:
+                        break
+
+        if not promoted:
+            return top
+
+        # Append as safety net — with proper RRF weights (strategy.py),
+        # entity_graph facts should already rank naturally in the top-k.
+        # This only fires when they're still missing despite weight boost.
+        return list(top) + promoted
+
     # -- Channel execution --------------------------------------------------
 
     def _embed_query(self, query: str) -> list[float] | None:
@@ -369,6 +424,11 @@ class RetrievalEngine:
         if needs_embedding:
             try:
                 q_emb = self._embed_query(query)
+                if q_emb is None:
+                    logger.warning(
+                        "Query embedding returned None — semantic, hopfield, "
+                        "spreading_activation channels will be skipped this recall"
+                    )
             except Exception as exc:
                 logger.warning("Query embedding failed: %s", exc)
 

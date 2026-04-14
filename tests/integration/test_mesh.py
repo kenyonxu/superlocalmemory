@@ -9,6 +9,8 @@ import sqlite3
 import pytest
 from pathlib import Path
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture
 def mesh_db(tmp_path):

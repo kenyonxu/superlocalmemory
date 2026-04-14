@@ -379,11 +379,12 @@ Auto-capture hooks: `slm hooks install` + `slm observe` + `slm session-context`.
 - Behavioral pattern detection and outcome tracking
 
 ### Skill Evolution (NEW in v3.4.10)
-- **Per-skill performance tracking** — automatically tracks which skills succeed and which fail, across sessions
+- **Per-skill performance tracking** — automatically tracks which skills succeed and which fail, across sessions (zero-LLM, always on)
 - **Execution trace analysis** — mines tool usage patterns around skill invocations to determine effectiveness
 - **Skill entities in Entity Explorer** — each skill becomes a browsable entity with performance facts and evolution history
 - **Dedicated Skill Evolution dashboard tab** — overview cards, performance assertions, skill correlations
 - **Behavioral assertions for skill routing** — soft prompts recommend high-performing skills in future sessions
+- **LLM-powered skill evolution** — 3-trigger system (post-session + degradation + health check) with blind verification. **Off by default** — opt-in via `slm config set evolution.enabled true`. Supports Ollama (free, local), Anthropic API, and OpenAI API backends.
 - **ECC integration** — enhanced observation support with [Everything Claude Code](https://github.com/affaan-m/everything-claude-code) via `slm ingest --source ecc`
 - **IDE compatibility:** Skill tracking currently works with Claude Code. The `/api/v3/tool-event` endpoint accepts events from any IDE client — adapters for other IDEs in future releases.
 

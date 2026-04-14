@@ -76,14 +76,14 @@ import json, sys, os, re
 
 # Secret scrubbing pattern (adopted from ECC observe.sh)
 _SECRET_RE = re.compile(
-    r"(?i)(api[_-]?key|token|secret|password|authorization|credentials?|auth)"
+    r"(?i)(api[_-]?key|[a-z_]*_key|token|secret|password|pass\b|authorization|credentials?|auth)"
     r"""([\"'"'"'"'"'"'\s:=]+)"""
     r"([A-Za-z]+\s+)?"
     r"([A-Za-z0-9_\-/.+=]{8,})"
 )
 
 def scrub(val, max_len=500):
-    """Truncate and scrub secrets from a value."""
+    """Scrub secrets first, then truncate."""
     if val is None:
         return ""
     if isinstance(val, dict):
@@ -92,10 +92,10 @@ def scrub(val, max_len=500):
         s = json.dumps(val, default=str)
     else:
         s = str(val)
-    s = s[:max_len]
-    return _SECRET_RE.sub(
+    s = _SECRET_RE.sub(
         lambda m: m.group(1) + m.group(2) + (m.group(3) or "") + "[REDACTED]", s
     )
+    return s[:max_len]
 
 try:
     data = json.load(sys.stdin)

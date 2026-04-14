@@ -45,6 +45,8 @@ from superlocalmemory.storage.models import (
     RetrievalResult,
 )
 
+pytestmark = pytest.mark.slow
+
 
 # ---------------------------------------------------------------------------
 # Mock Embedder — deterministic, zero model loading

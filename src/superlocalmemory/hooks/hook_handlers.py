@@ -301,6 +301,19 @@ def _hook_stop() -> None:
         except Exception:
             pass
 
+    # --- Post-session skill evolution trigger (best-effort) ---
+    try:
+        session_id = os.environ.get("CLAUDE_SESSION_ID", "")
+        if session_id:
+            subprocess.Popen(
+                ["slm", "evolve", "--session", session_id],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+    except Exception:
+        pass
+
     # --- Auto-consolidation (if >24h since last run) ---
     _maybe_consolidate()
 

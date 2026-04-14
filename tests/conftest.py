@@ -85,20 +85,48 @@ def _kill_orphaned_slm_workers() -> None:
 
 
 @pytest.fixture(autouse=True, scope="session")
-def cleanup_slm_workers_at_end():
-    """Kill all SLM subprocess workers when the test session ends.
+def _prevent_heavy_model_loading():
+    """Prevent ALL heavy ML model loading during tests.
 
-    Session-scoped + autouse = runs once at session start (yields),
-    then cleans up after ALL tests complete or crash.
+    V3.4.11: Mock CrossEncoderReranker (spawns 130MB ONNX subprocess)
+    and WorkerPool (spawns 930MB embedding subprocess). Without this,
+    the full suite takes 20+ minutes. With it: under 2 minutes.
 
-    V3.3.14: Wraps cleanup in KeyboardInterrupt handler for Windows CI.
-    On Windows, daemon thread teardown during pytest exit can raise
-    KeyboardInterrupt (pre-existing since v3.3.7).
+    Tests that explicitly need real models should patch these back.
     """
+    from unittest.mock import MagicMock, patch as _patch
+
+    mock_reranker = MagicMock()
+    mock_reranker.rerank.return_value = None
+    mock_reranker.warmup_sync.return_value = True
+    mock_reranker._kill_worker = MagicMock()
+
+    mock_pool = MagicMock()
+    mock_pool.store.return_value = {"ok": True, "fact_ids": ["pending:mock"], "count": 1}
+    mock_pool.recall.return_value = {"ok": True, "results": [], "count": 0}
+    mock_pool.kill.return_value = None
+
+    patches = [
+        _patch(
+            "superlocalmemory.retrieval.reranker.CrossEncoderReranker",
+            return_value=mock_reranker,
+        ),
+        _patch(
+            "superlocalmemory.core.worker_pool.WorkerPool.shared",
+            return_value=mock_pool,
+        ),
+    ]
+    for p in patches:
+        p.start()
+
     yield
+
+    for p in patches:
+        p.stop()
+
     try:
         _kill_orphaned_slm_workers()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, Exception):
         pass
 
 
@@ -106,13 +134,10 @@ def cleanup_slm_workers_at_end():
 def cleanup_slm_workers_between_tests():
     """Kill SLM subprocess workers after EACH test to prevent memory pileup.
 
-    V3.3.12: Without this, each test that creates a MemoryEngine spawns
-    embedding_worker (~930 MB) + reranker_worker (~500 MB). Workers from
-    test N don't auto-kill before test N+1 spawns new ones, causing 7+ GB
-    memory pileup. This fixture ensures workers are cleaned between tests.
+    V3.3.12: Safety net — if any test bypasses the session mock and creates
+    real workers, this cleans them up. Lightweight when no workers exist.
     """
     yield
-    # Clean up any embedding/reranker services created during this test
     try:
         from superlocalmemory.core.embeddings import _cleanup_all_embedding_services
         _cleanup_all_embedding_services()
@@ -170,6 +195,10 @@ def mode_a_config(tmp_path):
     from superlocalmemory.storage.models import Mode
 
     config = SLMConfig.for_mode(Mode.A, base_dir=tmp_path)
+    # V3.4.11: Disable cross-encoder in tests — spawning a real reranker
+    # subprocess per test adds 3s teardown overhead (kills ONNX worker).
+    # 13 engine tests × 3s = 39s wasted. Cross-encoder has its own tests.
+    config.retrieval.use_cross_encoder = False
     return config
 
 

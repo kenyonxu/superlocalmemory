@@ -193,6 +193,7 @@ async def get_tool_events(tool_name: str = "", limit: int = 100):
     try:
         import sqlite3 as _sqlite3
         profile = get_active_profile()
+        limit = min(int(limit), 1000)
         conn = _sqlite3.connect(str(MEMORY_DIR / "memory.db"))
         conn.row_factory = _sqlite3.Row
 
@@ -208,11 +209,12 @@ async def get_tool_events(tool_name: str = "", limit: int = 100):
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
 
-        rows = conn.execute(query, tuple(params)).fetchall()
-        conn.close()
-
-        events = [dict(r) for r in rows]
-        return {"events": events, "count": len(events)}
+        try:
+            rows = conn.execute(query, tuple(params)).fetchall()
+            events = [dict(r) for r in rows]
+            return {"events": events, "count": len(events)}
+        finally:
+            conn.close()
     except Exception as e:
         logger.debug("get_tool_events error: %s", e)
         return {"events": [], "count": 0, "error": str(e)}
@@ -276,16 +278,18 @@ async def log_tool_event_api(data: dict):
         output_summary = str(output_summary)[:500] if output_summary else ""
 
         conn = _sqlite3.connect(str(MEMORY_DIR / "memory.db"))
-        conn.execute(
-            "INSERT INTO tool_events "
-            "(session_id, profile_id, project_path, tool_name, event_type, "
-            " input_summary, output_summary, duration_ms, metadata, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 0, '{}', ?)",
-            (session_id, profile, project_path, tool_name, event_type,
-             input_summary, output_summary, now),
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(
+                "INSERT INTO tool_events "
+                "(session_id, profile_id, project_path, tool_name, event_type, "
+                " input_summary, output_summary, duration_ms, metadata, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, '{}', ?)",
+                (session_id, profile, project_path, tool_name, event_type,
+                 input_summary, output_summary, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": str(e)}

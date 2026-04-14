@@ -12,6 +12,8 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 
 # -- Import tests -------------------------------------------------------------
 

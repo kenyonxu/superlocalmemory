@@ -226,6 +226,15 @@ def run_recall(
         except Exception as exc:
             logger.debug("Access log batch store failed: %s", exc)
 
+    # V3.4.11: Promote recalled facts back to active tier (single batch UPDATE)
+    if response.results:
+        try:
+            from superlocalmemory.core.tier_manager import promote_on_access_batch
+            fact_ids = [r.fact.fact_id for r in response.results[:10]]
+            promote_on_access_batch(db, fact_ids)
+        except Exception:
+            pass  # tier_manager not available yet — graceful
+
     # V3.3.16: Behavioral tracking + spaced repetition use module-level
     # singletons to avoid creating new objects per recall (was causing
     # object accumulation across 304 benchmark recalls).

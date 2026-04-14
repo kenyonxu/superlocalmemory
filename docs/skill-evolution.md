@@ -70,8 +70,10 @@ The dedicated **Skill Evolution** tab in the SLM dashboard shows:
 
 - **Overview cards** — Total skill events, unique skills, performance assertions, skill correlations
 - **Skill performance cards** — Per-skill effective score, invocation count, confidence level
+- **Evolution Engine status** — Backend detection, enable/disable toggle, run button
+- **Skill Lineage DAG** — Visual graph of evolved skill versions (parent → child relationships)
+- **Lineage table** — Clickable rows showing evolution type, status, verification result
 - **Skill correlations** — Which skills work well together
-- **Compatibility notice** — Current IDE support status
 
 Access: Open `http://localhost:8765` and navigate to the Skill Evolution tab in the sidebar.
 
@@ -132,23 +134,69 @@ This reads ECC's observation files from `~/.claude/homunculus/projects/*/observa
 
 ## Configuration
 
-### Enable/Disable Skill Tracking
+### Skill Tracking (C1 — always on)
 
-Skill tracking is enabled by default when the SLM hook is registered. To check:
+Skill performance tracking is enabled by default when the SLM hook is registered. Zero-LLM, zero-cost. Runs as Step 10 in the consolidation pipeline.
 
 ```bash
 slm status  # Shows hook registration status
+slm consolidate --cognitive  # Trigger manual consolidation
 ```
 
-### Consolidation
+### Skill Evolution (C2 — off by default)
 
-Skill performance mining runs as Step 10 in the consolidation pipeline. It processes only new events since the last run (incremental). To trigger manually:
+The Skill Evolution Engine uses LLM calls to generate improved skill versions. **It is OFF by default** — end users must opt in.
+
+**Why off by default:** Evolution makes LLM calls (confirmation gate + mutation + blind verification). Even with budget caps, users should consciously enable this and configure their LLM backend.
+
+#### Enable via CLI
 
 ```bash
-slm consolidate --cognitive
+slm config set evolution.enabled true
 ```
 
-### Minimum Thresholds
+#### Enable via Interactive Installer
+
+```bash
+slm setup  # Interactive wizard includes evolution opt-in
+```
+
+#### Enable via Dashboard
+
+Navigate to Settings → Skill Evolution → Enable.
+
+### LLM Backend — Auto-Detect
+
+Evolution uses a single auto-detect chain. No manual configuration needed for most users:
+
+```
+Priority 1: `claude` CLI available → spawn `claude --model haiku` (FREE, best quality)
+Priority 2: Ollama running         → use Ollama (FREE, local)
+Priority 3: API key set            → use Anthropic/OpenAI API (paid)
+Priority 4: Nothing available      → dashboard-only (show candidates, manual evolution)
+```
+
+This means:
+- **Claude Code users:** Evolution works for free — uses your existing Claude subscription
+- **Other IDE users with Ollama:** Evolution works for free — uses local Ollama
+- **Advanced users:** Can point at Anthropic/OpenAI API if preferred
+
+```bash
+# Override auto-detect (optional — most users never need this)
+slm config set evolution.backend claude
+slm config set evolution.backend ollama
+slm config set evolution.backend anthropic
+```
+
+### Full Evolution Config Reference
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `evolution.enabled` | `false` | Master switch — off by default, opt-in |
+| `evolution.backend` | `auto` | LLM backend: `auto`, `claude`, `ollama`, `anthropic`, `openai` |
+| `evolution.max_evolutions_per_cycle` | `3` | Budget cap per consolidation cycle |
+
+### Tracking Thresholds (C1)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -172,11 +220,30 @@ SLM's skill evolution system draws from:
 
 ---
 
+## MCP Tools
+
+Three MCP tools are available for programmatic access:
+
+| Tool | Description |
+|------|-------------|
+| `evolve_skill` | Manually trigger evolution for a specific skill |
+| `skill_health` | Get health metrics (invocations, error rate, status) for skills |
+| `skill_lineage` | Get evolution lineage tree for a skill |
+
+These tools are registered automatically and available in all supported IDEs.
+
+## CLI Commands
+
+```bash
+slm config get evolution.enabled     # Check if evolution is enabled
+slm config set evolution.enabled true  # Enable evolution
+slm config set evolution.backend auto  # Set LLM backend
+```
+
 ## What's Next
 
-- **C2: Arsenal Evolution Engine** — Automatic skill mutation with 3-trigger system, LLM confirmation gate, and blind verification. Evolved skills stored in `~/.claude/skills/evolved/`.
-- **C3: SLM Productization** — New MCP tools (`evolve_skill`, `skill_health`, `skill_lineage`), new fact types, full dashboard evolution history.
-- **IDE Adapters** — Cursor, Windsurf, VS Code Copilot, JetBrains support.
+- **IDE Adapters** — Cursor, Windsurf, VS Code Copilot, JetBrains support for skill tracking.
+- **Skill lineage visualization improvements** — Richer DAG with performance history overlay.
 
 ---
 

@@ -34,6 +34,8 @@ from superlocalmemory.storage.models import (
     _new_id,
 )
 
+pytestmark = pytest.mark.slow
+
 
 # ---------------------------------------------------------------------------
 # Mock Embedder (identical to test_e2e.py)

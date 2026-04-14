@@ -41,6 +41,8 @@ from superlocalmemory.core.config import (
 from superlocalmemory.core.engine import MemoryEngine
 from superlocalmemory.storage.models import Mode, RecallResponse
 
+pytestmark = pytest.mark.slow
+
 
 # ---------------------------------------------------------------------------
 # Mock Embedder -- deterministic, zero model loading, cosine-meaningful

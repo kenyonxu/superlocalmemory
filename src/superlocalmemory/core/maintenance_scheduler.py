@@ -85,6 +85,26 @@ class MaintenanceScheduler:
         except Exception as exc:
             logger.warning("Scheduled maintenance failed: %s", exc)
 
+        # V3.4.11: Graph pruning (remove orphan edges)
+        try:
+            from superlocalmemory.core.graph_pruner import prune_graph
+            prune_stats = prune_graph(self._db.db_path, self._profile_id)
+            removed = prune_stats["total_before"] - prune_stats["total_after"]
+            if removed > 0:
+                logger.info("Graph pruning: %d edges removed", removed)
+        except Exception as exc:
+            logger.debug("Graph pruning skipped: %s", exc)
+
+        # V3.4.11: Run tier evaluation (demote old facts)
+        try:
+            from superlocalmemory.core.tier_manager import evaluate_tiers
+            stats = evaluate_tiers(self._db, self._profile_id)
+            demoted = stats["demoted_to_warm"] + stats["demoted_to_cold"] + stats["demoted_to_archive"]
+            if demoted > 0:
+                logger.info("Tier evaluation: %d facts demoted", demoted)
+        except Exception as exc:
+            logger.debug("Tier evaluation skipped: %s", exc)
+
         # V3.4.10: Check if auto-backup is due
         try:
             from superlocalmemory.infra.backup import BackupManager

@@ -41,8 +41,20 @@ _ZONE_WEIGHTS: dict[str, float] = {
     "forgotten": 0.0,
 }
 
-# Zones where facts are excluded from results
+# V3.4.11: Deep recall weights — includes cold/archive with reduced scores
+_DEEP_ZONE_WEIGHTS: dict[str, float] = {
+    "active": 1.0,
+    "warm": 0.7,
+    "cold": 0.3,
+    "archive": 0.15,
+    "forgotten": 0.05,
+}
+
+# Zones where facts are excluded from results (default recall)
 _EXCLUDED_ZONES: frozenset[str] = frozenset({"archive", "forgotten"})
+
+# Deep recall excludes nothing — every fact is searchable
+_DEEP_EXCLUDED_ZONES: frozenset[str] = frozenset()
 
 
 class ForgettingFilter:
@@ -51,11 +63,12 @@ class ForgettingFilter:
     Removes archived/forgotten facts and adjusts scores for other zones.
     """
 
-    __slots__ = ("_db", "_config")
+    __slots__ = ("_db", "_config", "_deep_recall")
 
-    def __init__(self, db: DatabaseManager, config: ForgettingConfig) -> None:
+    def __init__(self, db: DatabaseManager, config: ForgettingConfig, deep_recall: bool = False) -> None:
         self._db = db
         self._config = config
+        self._deep_recall = deep_recall
 
     def filter(
         self,
@@ -112,12 +125,14 @@ class ForgettingFilter:
 
                 zone = ret_data.get("lifecycle_zone", "active")
 
-                if zone in _EXCLUDED_ZONES:
-                    # Archive/forgotten: remove from results
+                # V3.4.11: Deep recall mode includes all tiers
+                excluded = _DEEP_EXCLUDED_ZONES if self._deep_recall else _EXCLUDED_ZONES
+                weights = _DEEP_ZONE_WEIGHTS if self._deep_recall else _ZONE_WEIGHTS
+
+                if zone in excluded:
                     continue
 
-                # Apply weight
-                weight = _ZONE_WEIGHTS.get(zone, 1.0)
+                weight = weights.get(zone, 1.0)
                 new_results.append((fact_id, score * weight))
 
             filtered[channel_name] = new_results

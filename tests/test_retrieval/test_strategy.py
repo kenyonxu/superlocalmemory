@@ -140,8 +140,8 @@ class TestWeightAdaptation:
         strat = classifier.classify(
             "connection between Alice and Bob?", base_weights
         )
-        # MULTIPLY: base 1.0 * preset 2.0 = 2.0
-        assert strat.weights["entity_graph"] == pytest.approx(2.0)
+        # MULTIPLY: base 1.0 * preset 2.5 = 2.5 (v3.4.11: boosted for multi_hop)
+        assert strat.weights["entity_graph"] == pytest.approx(2.5)
 
     def test_general_preserves_base_weights(
         self,

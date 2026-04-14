@@ -171,6 +171,8 @@ class SkillPerformanceMiner:
         - Signal 2 (NEGATIVE): Same Skill re-invoked within 5 min
         - Signal 3 (NEGATIVE): Bash errors in next 3 events
         - Signal 4 (WEAK POSITIVE): Session continues 10+ events
+
+        H-N1QUERY: Batch-loads all trace events in one query instead of N+1.
         """
         metrics: dict[str, dict] = defaultdict(lambda: {
             "total_invocations": 0,
@@ -180,6 +182,29 @@ class SkillPerformanceMiner:
             "projects": set(),
         })
 
+        if not invocations:
+            return {}
+
+        # H-N1QUERY: Batch-load all potential trace events in one query.
+        # Find the min event_id across all invocations so we can fetch
+        # all subsequent events in a single SELECT.
+        min_event_id = min(inv["event_id"] for inv in invocations)
+        all_trace_rows = conn.execute(
+            "SELECT id, tool_name, event_type, output_summary, created_at "
+            "FROM tool_events "
+            "WHERE profile_id = ? AND id > ? "
+            "ORDER BY id ASC",
+            (profile_id, min_event_id),
+        ).fetchall()
+        all_trace = [dict(r) for r in all_trace_rows]
+
+        # Build an index: for each event_id, find its position in all_trace
+        # so we can slice TRACE_WINDOW events after it in O(1).
+        trace_id_to_idx: dict[int, int] = {}
+        for idx, t in enumerate(all_trace):
+            if t["id"] not in trace_id_to_idx:
+                trace_id_to_idx[t["id"]] = idx
+
         for inv in invocations:
             skill = inv["skill_name"]
             m = metrics[skill]
@@ -188,16 +213,24 @@ class SkillPerformanceMiner:
             if inv["project_path"]:
                 m["projects"].add(inv["project_path"])
 
-            # Get surrounding tool events for execution trace
-            trace = conn.execute(
-                "SELECT tool_name, event_type, output_summary, created_at "
-                "FROM tool_events "
-                "WHERE profile_id = ? AND id > ? "
-                "ORDER BY id ASC LIMIT ?",
-                (profile_id, inv["event_id"], TRACE_WINDOW),
-            ).fetchall()
+            # Find trace window for this invocation from pre-loaded data
+            # Events with id > inv["event_id"], take first TRACE_WINDOW
+            start_idx = 0
+            eid = inv["event_id"]
+            # The first entry in all_trace with id > eid
+            # Since all_trace starts at min_event_id+1 and is sorted, we
+            # can bisect or scan. Use the index if the next id is present.
+            # Simple approach: events after eid start at the position of eid+1
+            # or the first id > eid in the sorted list.
+            for candidate_id in range(eid + 1, eid + TRACE_WINDOW + 2):
+                if candidate_id in trace_id_to_idx:
+                    start_idx = trace_id_to_idx[candidate_id]
+                    break
+            else:
+                # No trace events found after this invocation
+                start_idx = len(all_trace)
 
-            trace_list = [dict(r) for r in trace]
+            trace_list = all_trace[start_idx:start_idx + TRACE_WINDOW]
             outcome = self._evaluate_trace(skill, inv, trace_list, invocations)
 
             if outcome > 0:
@@ -318,7 +351,7 @@ class SkillPerformanceMiner:
 
         assertion_id = hashlib.sha256(
             f"{profile_id}:skill_perf:{skill_name}".encode(),
-        ).hexdigest()[:16]
+        ).hexdigest()[:32]
 
         existing = conn.execute(
             "SELECT id, confidence FROM behavioral_assertions WHERE id = ?",
@@ -363,7 +396,7 @@ class SkillPerformanceMiner:
 
         assertion_id = hashlib.sha256(
             f"{profile_id}:skill_corr:{pair[0]}:{pair[1]}".encode(),
-        ).hexdigest()[:16]
+        ).hexdigest()[:32]
 
         existing = conn.execute(
             "SELECT id FROM behavioral_assertions WHERE id = ?",

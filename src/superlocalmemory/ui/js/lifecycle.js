@@ -7,9 +7,26 @@ var _lifecycleData = null;
 
 async function loadLifecycle() {
     try {
+        // V3.4.11: Load tier stats from the authoritative source (atomic_facts.lifecycle)
+        // and merge into the existing lifecycle view for a unified display.
+        var tierResponse = await fetch('/api/tiers/stats');
+        var tierData = await tierResponse.json();
+
         var response = await fetch('/api/lifecycle/status');
         var data = await response.json();
         _lifecycleData = data;
+
+        // Override state counts with tier stats (atomic_facts is the truth)
+        if (tierData && tierData.total > 0) {
+            data.states = data.states || {};
+            data.states.active = tierData.active;
+            data.states.warm = tierData.warm;
+            data.states.cold = tierData.cold;
+            data.states.archived = tierData.archived;
+            data.total_memories = tierData.total;
+            data._pinned = tierData.pinned;
+            data.available = true;
+        }
 
         if (!data.available) {
             showEmpty('lifecycle-states-row', 'hourglass-split', 'Lifecycle engine not available. Upgrade to v2.8.');
@@ -20,6 +37,19 @@ async function loadLifecycle() {
         renderLifecycleProgress(data);
         renderLifecycleAgeStats(data);
         renderLifecycleTransitions(data);
+
+        // V3.4.11: Show pinned count below the state cards
+        var pinnedInfo = document.getElementById('lifecycle-pinned-info');
+        if (!pinnedInfo) {
+            pinnedInfo = document.createElement('div');
+            pinnedInfo.id = 'lifecycle-pinned-info';
+            pinnedInfo.className = 'small text-muted mb-3';
+            var statesRow = document.getElementById('lifecycle-states-row');
+            if (statesRow) statesRow.parentNode.insertBefore(pinnedInfo, statesRow.nextSibling);
+        }
+        var pinCount = data._pinned || 0;
+        pinnedInfo.innerHTML = '<i class="bi bi-pin-angle"></i> ' + pinCount + ' pinned facts (protected from demotion). ' +
+            '<span class="text-muted" style="font-size:11px;">Active = full weight | Warm = 0.7x | Cold = 0.3x | Archived = deep recall only</span>';
 
         var badge = document.getElementById('lifecycle-profile-badge');
         if (badge) badge.textContent = data.active_profile || 'default';
@@ -294,5 +324,58 @@ async function compactExecute() {
         loadLifecycle(); // Refresh
     } catch (e) {
         console.error('Compaction error:', e);
+    }
+}
+
+
+// ---- V3.4.11: Tier Management (pinning + evaluation) ----
+
+async function evaluateTiersNow() {
+    showToast('Evaluating tiers...');
+    try {
+        var response = await fetch('/api/tiers/evaluate', { method: 'POST' });
+        var data = await response.json();
+        if (data.success) {
+            var s = data.stats;
+            var demoted = (s.demoted_to_warm || 0) + (s.demoted_to_cold || 0) + (s.demoted_to_archive || 0);
+            showToast('Tier evaluation: ' + demoted + ' facts demoted, ' + s.pinned_protected + ' pinned protected');
+            loadTierStats();
+            loadLifecycle();
+        }
+    } catch (error) {
+        showToast('Tier evaluation failed');
+    }
+}
+
+async function pinFact(factId, reason) {
+    try {
+        var response = await fetch('/api/tiers/pin', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fact_id: factId, reason: reason || '' })
+        });
+        var data = await response.json();
+        if (data.success) {
+            showToast('Fact pinned');
+            loadTierStats();
+        }
+    } catch (error) {
+        showToast('Failed to pin fact');
+    }
+}
+
+async function unpinFact(factId) {
+    try {
+        var response = await fetch('/api/tiers/unpin', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fact_id: factId })
+        });
+        if (response.ok) {
+            showToast('Fact unpinned');
+            loadTierStats();
+        }
+    } catch (error) {
+        showToast('Failed to unpin fact');
     }
 }

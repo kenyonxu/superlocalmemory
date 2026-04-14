@@ -38,6 +38,8 @@ from superlocalmemory.core.config import RetrievalConfig, SLMConfig
 from superlocalmemory.core.engine import MemoryEngine
 from superlocalmemory.storage.models import Mode
 
+pytestmark = pytest.mark.slow
+
 
 # ---------------------------------------------------------------------------
 # Mock Embedder (deterministic, zero model loading)

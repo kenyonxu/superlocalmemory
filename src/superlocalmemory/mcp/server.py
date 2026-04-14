@@ -79,6 +79,8 @@ _ESSENTIAL_TOOLS: set[str] = {
     # v3.4.7: Two-way learning (4)
     "log_tool_event", "get_assertions",
     "reinforce_assertion", "contradict_assertion",
+    # v3.4.11: Skill evolution (3)
+    "evolve_skill", "skill_health", "skill_lineage",
 }
 
 # v3.4.4: Mesh tools — enabled if mesh_enabled in config or SLM_MCP_MESH_TOOLS=1
@@ -138,6 +140,7 @@ from superlocalmemory.mcp.resources import register_resources
 from superlocalmemory.mcp.tools_code_graph import register_code_graph_tools
 from superlocalmemory.mcp.tools_mesh import register_mesh_tools
 from superlocalmemory.mcp.tools_learning import register_learning_tools
+from superlocalmemory.mcp.tools_evolution import register_evolution_tools
 
 register_core_tools(_target, get_engine)
 register_v28_tools(_target, get_engine)
@@ -148,6 +151,7 @@ register_resources(server, get_engine)  # Resources always registered (not tools
 register_code_graph_tools(_target, get_engine)  # CodeGraph: filtered like other tools (SLM_MCP_ALL_TOOLS=1 to show all)
 register_mesh_tools(_target, get_engine)  # v3.4.4: Mesh P2P tools — ships with SLM, no separate slm-mesh needed
 register_learning_tools(_target, get_engine)  # v3.4.7: Two-way learning tools
+register_evolution_tools(_target, get_engine)  # v3.4.11: Skill evolution tools
 
 
 # V3.3.21: Eager engine warmup — start initializing BEFORE first tool call.

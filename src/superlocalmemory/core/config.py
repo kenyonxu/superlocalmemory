@@ -491,6 +491,25 @@ class TemporalValidatorConfig:
 
 
 @dataclass(frozen=True)
+class EvolutionConfig:
+    """Configuration for Skill Evolution Engine (v3.4.10).
+
+    OFF by default — opt in via `slm setup` (interactive) or
+    `slm config set evolution.enabled true` (CLI).
+
+    Backend auto-detection priority:
+      1. `claude` CLI available → spawn `claude --model haiku` (ECC pattern, free)
+      2. Ollama running → use Ollama (free, local)
+      3. API key set → use Anthropic/OpenAI API (paid)
+      4. Nothing → dashboard-only (show candidates, manual evolution)
+    """
+
+    enabled: bool = False                        # OFF by default, opt-in
+    backend: str = "auto"                        # auto, claude, ollama, anthropic, openai
+    max_evolutions_per_cycle: int = 3            # Budget cap per consolidation
+
+
+@dataclass(frozen=True)
 class AutoInvokeConfig:
     """Configuration for the Auto-Invoke Engine (Phase 2).
 
@@ -580,6 +599,7 @@ class SLMConfig:
     parameterization: ParameterizationConfig = field(
         default_factory=ParameterizationConfig,
     )
+    evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
 
     # v3.4.3: Daemon configuration
     daemon_idle_timeout: int = 0       # 0 = 24/7 (no auto-kill). >0 = seconds before auto-kill.
@@ -657,6 +677,14 @@ class SLMConfig:
         )
         config.mesh_enabled = data.get("mesh_enabled", True)
 
+        # V3.4.10: Evolution config
+        evo = data.get("evolution", {})
+        if evo:
+            config.evolution = EvolutionConfig(**{
+                k: v for k, v in evo.items()
+                if k in EvolutionConfig.__dataclass_fields__
+            })
+
         return config
 
     def save(self, config_path: Path | None = None) -> None:
@@ -694,6 +722,13 @@ class SLMConfig:
                 "cross_encoder_model": self.retrieval.cross_encoder_model,
                 "cross_encoder_backend": self.retrieval.cross_encoder_backend,
             },
+        }
+
+        # V3.4.11: Persist evolution config (C-CONFIGSAVE fix)
+        data["evolution"] = {
+            "enabled": self.evolution.enabled,
+            "backend": self.evolution.backend,
+            "max_evolutions_per_cycle": self.evolution.max_evolutions_per_cycle,
         }
 
         # Preserve existing V3.3 config sections that aren't in for_mode()

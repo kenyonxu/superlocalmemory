@@ -188,6 +188,27 @@ class ConsolidationEngine:
                     logger.debug("Skill performance mining (non-fatal): %s", exc)
                     results["skill_performance"] = {"error": str(exc)}
 
+                # Step 11 (v3.4.10): Skill evolution — 3-trigger system.
+                # Runs degradation + health check triggers. Post-session
+                # trigger runs separately from the Stop hook.
+                # Never on recall/remember hot path. Budget: max 3 per cycle.
+                try:
+                    from superlocalmemory.evolution.skill_evolver import SkillEvolver
+                    evolver = SkillEvolver(self._db.db_path)
+                    results["skill_evolution"] = evolver.run_consolidation_cycle(profile_id)
+                except Exception as exc:
+                    logger.debug("Skill evolution (non-fatal): %s", exc)
+                    results["skill_evolution"] = {"error": str(exc)}
+
+                # Step 12 (v3.4.11): Generate soft prompts for evolved skills.
+                # Queries promoted evolutions and creates/updates custom soft
+                # prompts so the AI prefers evolved skill variants.
+                try:
+                    results["evolution_soft_prompts"] = self._step12_evolution_soft_prompts(profile_id)
+                except Exception as exc:
+                    logger.debug("Evolution soft prompts (non-fatal): %s", exc)
+                    results["evolution_soft_prompts"] = {"error": str(exc)}
+
             results["success"] = True
         except Exception as exc:
             logger.warning(
@@ -597,6 +618,113 @@ class ConsolidationEngine:
         except Exception as exc:
             logger.warning("CCQ step failed (non-fatal): %s", exc)
             return {"error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Step 12: Evolution Soft Prompts
+    # ------------------------------------------------------------------
+
+    def _step12_evolution_soft_prompts(self, profile_id: str) -> dict[str, Any]:
+        """Generate soft prompts for promoted evolved skills.
+
+        Queries skill_evolution_log for promoted evolutions and creates
+        or updates soft_prompt_templates with category='custom' so the
+        AI agent prefers evolved skill variants over originals.
+
+        Uses 'custom' category because the soft_prompt_templates CHECK
+        constraint does not include 'skill_evolution'. The content is
+        prefixed with [SKILL_EVOLUTION] for easy filtering.
+        """
+        import sqlite3 as _sqlite3
+
+        db_path = str(self._db.db_path)
+
+        conn = _sqlite3.connect(db_path, timeout=10)
+        conn.row_factory = _sqlite3.Row
+
+        # Fetch promoted evolutions
+        try:
+            promoted_rows = conn.execute(
+                "SELECT id, skill_name, parent_skill_id, evolution_type, "
+                "mutation_summary, created_at "
+                "FROM skill_evolution_log "
+                "WHERE status = 'promoted' "
+                "ORDER BY created_at DESC LIMIT 20",
+            ).fetchall()
+        except _sqlite3.OperationalError:
+            # Table may not exist yet
+            conn.close()
+            return {"created": 0, "message": "skill_evolution_log table not found"}
+
+        created_count = 0
+        now = datetime.now(timezone.utc).isoformat()
+
+        for row in promoted_rows:
+            r = dict(row)
+            skill_name = r["skill_name"]
+            parent = r.get("parent_skill_id") or skill_name
+            evo_type = r["evolution_type"]
+            summary = r.get("mutation_summary", "")
+            evo_id = r["id"]
+
+            # Build prompt content
+            content = (
+                f"[SKILL_EVOLUTION] Evolved skill: '{skill_name}' "
+                f"({'replaces' if evo_type == 'fix' else 'extends'} '{parent}' "
+                f"via {evo_type}). {summary}. "
+                f"Use the evolved version for better results."
+            )
+
+            # Use a deterministic prompt_id based on the evolution record
+            prompt_id = f"evo-{evo_id}"
+
+            # Check if prompt already exists
+            existing = conn.execute(
+                "SELECT prompt_id FROM soft_prompt_templates WHERE prompt_id = ?",
+                (prompt_id,),
+            ).fetchone()
+
+            if existing:
+                # M-REPLACE: Update existing record instead of INSERT OR REPLACE
+                # to avoid silently dropping columns with defaults
+                try:
+                    conn.execute(
+                        "UPDATE soft_prompt_templates "
+                        "SET content = ?, updated_at = ? "
+                        "WHERE prompt_id = ?",
+                        (content, now, prompt_id),
+                    )
+                except _sqlite3.OperationalError as upd_exc:
+                    logger.debug("Failed to update soft prompt %s: %s", prompt_id, upd_exc)
+                continue
+
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO soft_prompt_templates "
+                    "(prompt_id, profile_id, category, content, source_pattern_ids, "
+                    " confidence, effectiveness, token_count, retention_score, "
+                    " active, version, created_at, updated_at) "
+                    "VALUES (?, ?, 'custom', ?, ?, 0.8, 0.5, ?, 1.0, 1, 1, ?, ?)",
+                    (prompt_id, profile_id, content,
+                     json.dumps([evo_id]),
+                     len(content.split()),  # Rough token estimate
+                     now, now),
+                )
+                if conn.total_changes:
+                    created_count += 1
+            except _sqlite3.IntegrityError:
+                # Unique constraint on (profile_id, category) WHERE active=1
+                logger.debug(
+                    "Skipping soft prompt for %s: unique constraint on active custom",
+                    skill_name,
+                )
+
+        conn.commit()
+        conn.close()
+
+        return {
+            "promoted_skills_found": len(promoted_rows),
+            "soft_prompts_created": created_count,
+        }
 
     # ------------------------------------------------------------------
     # Core Memory Block Storage
