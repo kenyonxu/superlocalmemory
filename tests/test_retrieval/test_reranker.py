@@ -93,8 +93,10 @@ class TestWorkerManagement:
         reranker = _make_reranker(model_name="fake-model")
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
-        with patch("subprocess.Popen", return_value=mock_proc):
-            reranker._ensure_worker()
+        mock_proc.pid = 99999
+        with patch("superlocalmemory.retrieval.reranker._is_reranker_worker_alive", return_value=False):
+            with patch("subprocess.Popen", return_value=mock_proc):
+                reranker._ensure_worker()
         assert reranker._worker_proc is mock_proc
 
     def test_ensure_worker_noop_if_alive(self) -> None:
@@ -113,8 +115,10 @@ class TestWorkerManagement:
         reranker._worker_proc = dead_proc
         new_proc = MagicMock()
         new_proc.poll.return_value = None
-        with patch("subprocess.Popen", return_value=new_proc):
-            reranker._ensure_worker()
+        new_proc.pid = 99998
+        with patch("superlocalmemory.retrieval.reranker._is_reranker_worker_alive", return_value=False):
+            with patch("subprocess.Popen", return_value=new_proc):
+                reranker._ensure_worker()
         assert reranker._worker_proc is new_proc
 
     def test_ensure_worker_handles_spawn_failure(self) -> None:
