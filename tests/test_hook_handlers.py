@@ -483,9 +483,10 @@ class TestHookInitDone:
 class TestHookCheckpoint:
     """_hook_checkpoint: rate-limited auto-observe on Write/Edit."""
 
-    @patch("superlocalmemory.hooks.hook_handlers.subprocess.Popen")
-    def test_observes_file_change(self, mock_popen, capsys, _clean_rate_locks):
-        """First checkpoint for a file should trigger observe."""
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
+    def test_observes_file_change(self, mock_daemon_post, capsys, _clean_rate_locks):
+        """First checkpoint for a file should trigger observe via daemon HTTP."""
+        mock_daemon_post.return_value = True
         stdin_data = json.dumps({
             "tool_input": {"file_path": "/project/src/main.py"},
         })
@@ -495,18 +496,18 @@ class TestHookCheckpoint:
                     handle_hook("checkpoint")
 
         assert exc_info.value.code == 0
-        # Should have called slm observe
-        mock_popen.assert_called()
-        observe_call = mock_popen.call_args_list[0]
-        assert "slm" in observe_call[0][0]
-        assert "observe" in observe_call[0][0]
+        # v3.4.13: Should POST to daemon instead of subprocess
+        mock_daemon_post.assert_called()
+        call_args = mock_daemon_post.call_args
+        assert call_args[0][0] == "/observe"
+        assert "main.py" in call_args[0][1]["content"]
 
         out = capsys.readouterr().out
         assert "[SLM-AUTO]" in out
         assert "main.py" in out
 
-    @patch("superlocalmemory.hooks.hook_handlers.subprocess.Popen")
-    def test_rate_limits_same_file(self, mock_popen, capsys, _clean_rate_locks):
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
+    def test_rate_limits_same_file(self, mock_daemon_post, capsys, _clean_rate_locks):
         """Second checkpoint for same file within cooldown should NOT observe."""
         file_path = "/project/src/rate_test.py"
         file_hash = _safe_hash(file_path)
@@ -526,13 +527,13 @@ class TestHookCheckpoint:
                     handle_hook("checkpoint")
 
         assert exc_info.value.code == 0
-        # Popen should NOT have been called for observe (within cooldown)
-        mock_popen.assert_not_called()
+        # _daemon_post should NOT have been called (within cooldown)
+        mock_daemon_post.assert_not_called()
         out = capsys.readouterr().out
         assert "[SLM-AUTO]" not in out
 
-    @patch("superlocalmemory.hooks.hook_handlers.subprocess.Popen")
-    def test_fires_after_cooldown_expires(self, mock_popen, capsys, _clean_rate_locks):
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
+    def test_fires_after_cooldown_expires(self, mock_daemon_post, capsys, _clean_rate_locks):
         """After 5 minutes, same file should trigger observe again."""
         file_path = "/project/src/expired_test.py"
         file_hash = _safe_hash(file_path)
@@ -552,12 +553,12 @@ class TestHookCheckpoint:
                     handle_hook("checkpoint")
 
         assert exc_info.value.code == 0
-        mock_popen.assert_called()
+        mock_daemon_post.assert_called()
         out = capsys.readouterr().out
         assert "[SLM-AUTO]" in out
 
-    @patch("superlocalmemory.hooks.hook_handlers.subprocess.Popen")
-    def test_logs_to_activity_file(self, mock_popen, _clean_rate_locks):
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
+    def test_logs_to_activity_file(self, mock_daemon_post, _clean_rate_locks):
         """Checkpoint should append to the activity log."""
         # Create activity log
         with open(_ACTIVITY_LOG, "w") as f:
@@ -576,8 +577,8 @@ class TestHookCheckpoint:
             content = f.read()
         assert "logged.py" in content
 
-    @patch("superlocalmemory.hooks.hook_handlers.subprocess.Popen")
-    def test_recall_reminder_after_15_min(self, mock_popen, capsys, _clean_rate_locks):
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
+    def test_recall_reminder_after_15_min(self, mock_daemon_post, capsys, _clean_rate_locks):
         """After 15 minutes, should print recall reminder."""
         recall_lock = os.path.join(tempfile.gettempdir(), "slm-recall-reminder")
         old_ts = int(time.time()) - (_RECALL_INTERVAL + 60)
@@ -593,8 +594,8 @@ class TestHookCheckpoint:
         out = capsys.readouterr().out
         assert "context refresh" in out or "recall" in out.lower()
 
-    @patch("superlocalmemory.hooks.hook_handlers.subprocess.Popen")
-    def test_learn_reminder_after_30_min(self, mock_popen, capsys, _clean_rate_locks):
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
+    def test_learn_reminder_after_30_min(self, mock_daemon_post, capsys, _clean_rate_locks):
         """After 30 minutes, should print learn reminder."""
         learn_lock = os.path.join(tempfile.gettempdir(), "slm-learn-reminder")
         old_ts = int(time.time()) - (_LEARN_INTERVAL + 60)
@@ -610,8 +611,8 @@ class TestHookCheckpoint:
         out = capsys.readouterr().out
         assert "learned_patterns" in out or "learn" in out.lower()
 
-    @patch("superlocalmemory.hooks.hook_handlers.subprocess.Popen")
-    def test_no_recall_reminder_within_interval(self, mock_popen, capsys, _clean_rate_locks):
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
+    def test_no_recall_reminder_within_interval(self, mock_daemon_post, capsys, _clean_rate_locks):
         """Within 15 minutes, no recall reminder."""
         recall_lock = os.path.join(tempfile.gettempdir(), "slm-recall-reminder")
         recent_ts = int(time.time()) - 60  # 1 minute ago
@@ -632,8 +633,8 @@ class TestHookCheckpoint:
         out = capsys.readouterr().out
         assert "context refresh" not in out
 
-    @patch("superlocalmemory.hooks.hook_handlers.subprocess.Popen")
-    def test_no_file_path_skips_observe(self, mock_popen, capsys, _clean_rate_locks):
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
+    def test_no_file_path_skips_observe(self, mock_daemon_post, capsys, _clean_rate_locks):
         """If tool_input has no file_path, skip observe but still check reminders."""
         # Suppress reminders by setting recent locks
         for name in ("slm-recall-reminder", "slm-learn-reminder"):
@@ -648,12 +649,12 @@ class TestHookCheckpoint:
                     handle_hook("checkpoint")
 
         assert exc_info.value.code == 0
-        mock_popen.assert_not_called()
+        mock_daemon_post.assert_not_called()
         out = capsys.readouterr().out
         assert "[SLM-AUTO]" not in out
 
-    @patch("superlocalmemory.hooks.hook_handlers.subprocess.Popen")
-    def test_tty_stdin_skips_observe(self, mock_popen, capsys, _clean_rate_locks):
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
+    def test_tty_stdin_skips_observe(self, mock_daemon_post, capsys, _clean_rate_locks):
         """If stdin is a tty, no file info available — skip observe."""
         # Suppress reminders
         for name in ("slm-recall-reminder", "slm-learn-reminder"):
@@ -667,10 +668,10 @@ class TestHookCheckpoint:
                 handle_hook("checkpoint")
 
         assert exc_info.value.code == 0
-        mock_popen.assert_not_called()
+        mock_daemon_post.assert_not_called()
 
-    @patch("superlocalmemory.hooks.hook_handlers.subprocess.Popen")
-    def test_different_files_have_independent_cooldowns(self, mock_popen, capsys, _clean_rate_locks):
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
+    def test_different_files_have_independent_cooldowns(self, mock_daemon_post, capsys, _clean_rate_locks):
         """Two different files should have independent rate limits."""
         now = int(time.time())
 
@@ -695,7 +696,7 @@ class TestHookCheckpoint:
                 with pytest.raises(SystemExit):
                     handle_hook("checkpoint")
 
-        mock_popen.assert_called()
+        mock_daemon_post.assert_called()
         out = capsys.readouterr().out
         assert "b.py" in out
 
@@ -708,32 +709,29 @@ class TestHookStop:
     """_hook_stop: session summary with git context, cleanup, consolidation."""
 
     @patch("superlocalmemory.hooks.hook_handlers._maybe_consolidate")
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
     @patch("superlocalmemory.hooks.hook_handlers.subprocess.run")
-    def test_builds_summary_with_project_name(self, mock_run, mock_consolidate, monkeypatch):
+    def test_builds_summary_with_project_name(self, mock_run, mock_daemon, mock_consolidate, monkeypatch):
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/my/test-project")
         mock_run.return_value = MagicMock(stdout="", returncode=0)
+        mock_daemon.return_value = True
 
         with pytest.raises(SystemExit) as exc_info:
             handle_hook("stop")
         assert exc_info.value.code == 0
 
-        # _hook_stop calls _run_quiet (subprocess.run) for git commands first,
-        # then subprocess.run for slm observe. Find the slm observe call.
-        assert mock_run.called
-        slm_call = None
-        for c in mock_run.call_args_list:
-            args = c[0][0] if c[0] else c[1].get("args", [])
-            if len(args) >= 3 and args[0] == "slm" and args[1] == "observe":
-                slm_call = args
-                break
-        assert slm_call is not None, "slm observe was not called"
-        summary = slm_call[2]
-        assert "test-project" in summary
+        # v3.4.13: Summary now POSTed to daemon via _daemon_post
+        mock_daemon.assert_called()
+        observe_call = mock_daemon.call_args_list[0]
+        assert observe_call[0][0] == "/observe"
+        assert "test-project" in observe_call[0][1]["content"]
 
     @patch("superlocalmemory.hooks.hook_handlers._maybe_consolidate")
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
     @patch("superlocalmemory.hooks.hook_handlers.subprocess.run")
-    def test_includes_git_branch(self, mock_run, mock_consolidate, monkeypatch):
+    def test_includes_git_branch(self, mock_run, mock_daemon, mock_consolidate, monkeypatch):
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/proj")
+        mock_daemon.return_value = True
 
         def run_side_effect(cmd, **kwargs):
             result = MagicMock()
@@ -743,8 +741,6 @@ class TestHookStop:
                 result.stdout = ""
             elif "log" in cmd:
                 result.stdout = ""
-            elif cmd[0] == "slm":
-                result.stdout = ""
             result.returncode = 0
             return result
 
@@ -753,17 +749,15 @@ class TestHookStop:
         with pytest.raises(SystemExit):
             handle_hook("stop")
 
-        # Find the slm observe call
-        for c in mock_run.call_args_list:
-            if c[0][0][0] == "slm" and c[0][0][1] == "observe":
-                summary = c[0][0][2]
-                assert "feature/hooks" in summary
-                break
+        observe_call = mock_daemon.call_args_list[0]
+        assert "feature/hooks" in observe_call[0][1]["content"]
 
     @patch("superlocalmemory.hooks.hook_handlers._maybe_consolidate")
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
     @patch("superlocalmemory.hooks.hook_handlers.subprocess.run")
-    def test_includes_recent_commits(self, mock_run, mock_consolidate, monkeypatch):
+    def test_includes_recent_commits(self, mock_run, mock_daemon, mock_consolidate, monkeypatch):
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/proj")
+        mock_daemon.return_value = True
 
         def run_side_effect(cmd, **kwargs):
             result = MagicMock()
@@ -773,8 +767,6 @@ class TestHookStop:
                 result.stdout = ""
             elif "log" in cmd:
                 result.stdout = "abc1234 fix: auth bug\ndef5678 feat: login\n"
-            elif cmd[0] == "slm":
-                result.stdout = ""
             result.returncode = 0
             return result
 
@@ -783,18 +775,17 @@ class TestHookStop:
         with pytest.raises(SystemExit):
             handle_hook("stop")
 
-        for c in mock_run.call_args_list:
-            if c[0][0][0] == "slm" and c[0][0][1] == "observe":
-                summary = c[0][0][2]
-                assert "abc1234" in summary or "recent" in summary
-                break
+        observe_call = mock_daemon.call_args_list[0]
+        summary = observe_call[0][1]["content"]
+        assert "abc1234" in summary or "recent" in summary
 
     @patch("superlocalmemory.hooks.hook_handlers._maybe_consolidate")
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
     @patch("superlocalmemory.hooks.hook_handlers.subprocess.run")
-    def test_includes_modified_files_from_activity_log(self, mock_run, mock_consolidate, monkeypatch):
+    def test_includes_modified_files_from_activity_log(self, mock_run, mock_daemon, mock_consolidate, monkeypatch):
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/proj")
+        mock_daemon.return_value = True
 
-        # Write activity log with file entries
         now = int(time.time())
         with open(_ACTIVITY_LOG, "w") as f:
             f.write(f"{now}|engine.py\n{now}|config.py\n{now}|engine.py\n")
@@ -804,17 +795,15 @@ class TestHookStop:
         with pytest.raises(SystemExit):
             handle_hook("stop")
 
-        for c in mock_run.call_args_list:
-            if c[0][0][0] == "slm" and c[0][0][1] == "observe":
-                summary = c[0][0][2]
-                # Files should be deduplicated and sorted
-                assert "config.py" in summary
-                assert "engine.py" in summary
-                break
+        observe_call = mock_daemon.call_args_list[0]
+        summary = observe_call[0][1]["content"]
+        assert "config.py" in summary
+        assert "engine.py" in summary
 
     @patch("superlocalmemory.hooks.hook_handlers._maybe_consolidate")
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
     @patch("superlocalmemory.hooks.hook_handlers.subprocess.run")
-    def test_cleans_up_markers_after_stop(self, mock_run, mock_consolidate):
+    def test_cleans_up_markers_after_stop(self, mock_run, mock_daemon, mock_consolidate):
         # Create all marker files
         for p in (_MARKER, _START_TIME, _ACTIVITY_LOG):
             with open(p, "w") as f:
@@ -829,8 +818,9 @@ class TestHookStop:
             assert not os.path.exists(p)
 
     @patch("superlocalmemory.hooks.hook_handlers._maybe_consolidate")
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
     @patch("superlocalmemory.hooks.hook_handlers.subprocess.run")
-    def test_cleans_rate_limit_locks(self, mock_run, mock_consolidate, _clean_rate_locks):
+    def test_cleans_rate_limit_locks(self, mock_run, mock_daemon, mock_consolidate, _clean_rate_locks):
         tmp = tempfile.gettempdir()
         # Create rate-limit lock files
         for name in ("slm-obs-abc12345", "slm-recall-reminder", "slm-learn-reminder"):
@@ -846,8 +836,9 @@ class TestHookStop:
             assert not os.path.exists(os.path.join(tmp, name))
 
     @patch("superlocalmemory.hooks.hook_handlers._maybe_consolidate")
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
     @patch("superlocalmemory.hooks.hook_handlers.subprocess.run")
-    def test_calls_consolidate(self, mock_run, mock_consolidate):
+    def test_calls_consolidate(self, mock_run, mock_daemon, mock_consolidate):
         mock_run.return_value = MagicMock(stdout="", returncode=0)
 
         with pytest.raises(SystemExit):
@@ -857,27 +848,26 @@ class TestHookStop:
 
     @patch("superlocalmemory.hooks.hook_handlers._maybe_consolidate")
     @patch("superlocalmemory.hooks.hook_handlers.subprocess.run")
-    def test_falls_back_to_remember_on_observe_failure(self, mock_run, mock_consolidate, monkeypatch):
+    @patch("superlocalmemory.hooks.hook_handlers._daemon_post")
+    def test_falls_back_to_remember_on_observe_failure(self, mock_daemon, mock_run, mock_consolidate, monkeypatch):
+        """v3.4.13: When /observe fails, falls back to /remember via daemon."""
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/proj")
-        call_count = {"n": 0}
+        mock_run.return_value = MagicMock(stdout="", returncode=0)
+        call_paths = []
 
-        def run_side_effect(cmd, **kwargs):
-            if cmd[0] == "slm" and cmd[1] == "observe":
-                raise Exception("observe failed")
-            if cmd[0] == "slm" and cmd[1] == "remember":
-                call_count["n"] += 1
-                return MagicMock(stdout="", returncode=0)
-            result = MagicMock()
-            result.stdout = ""
-            result.returncode = 0
-            return result
+        def daemon_side_effect(path, body, timeout=3.0):
+            call_paths.append(path)
+            if path == "/observe":
+                return False  # observe failed
+            return True  # remember succeeds
 
-        mock_run.side_effect = run_side_effect
+        mock_daemon.side_effect = daemon_side_effect
 
         with pytest.raises(SystemExit):
             handle_hook("stop")
 
-        assert call_count["n"] == 1
+        assert "/observe" in call_paths
+        assert "/remember" in call_paths
 
 
 # ───────────────────────────────────────────────────────────────────

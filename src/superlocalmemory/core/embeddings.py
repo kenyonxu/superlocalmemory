@@ -62,19 +62,50 @@ class DimensionMismatchError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 _EMBEDDING_LOCK_FILE = Path.home() / ".superlocalmemory" / ".embedding.lock"
-_MAX_CONCURRENT_WORKERS = int(os.environ.get("SLM_MAX_EMBEDDING_WORKERS", 2))
+_EMBEDDING_PID_FILE = Path.home() / ".superlocalmemory" / ".embedding-worker.pid"
+_MAX_CONCURRENT_WORKERS = int(os.environ.get("SLM_MAX_EMBEDDING_WORKERS", 1))
 _embedding_lock_fd: int | None = None
+
+
+def _is_embedding_worker_alive() -> bool:
+    """Check if an embedding worker PID file exists and that PID is alive.
+
+    v3.4.13: Machine-wide singleton guard. Before spawning a new worker,
+    check if one is already running. Prevents duplicate 1.6GB workers.
+    """
+    try:
+        if not _EMBEDDING_PID_FILE.exists():
+            return False
+        pid = int(_EMBEDDING_PID_FILE.read_text().strip())
+        os.kill(pid, 0)  # Signal 0 = check if alive
+        return True
+    except (ValueError, OSError, ProcessLookupError):
+        # PID file invalid or process dead — clean up stale file
+        _EMBEDDING_PID_FILE.unlink(missing_ok=True)
+        return False
+
+
+def register_embedding_worker_pid(pid: int) -> None:
+    """Write the embedding worker PID to the machine-wide PID file."""
+    _EMBEDDING_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _EMBEDDING_PID_FILE.write_text(str(pid))
 
 
 def acquire_embedding_lock(timeout: float = 5.0) -> bool:
     """Acquire system-wide embedding worker lock.
 
-    Uses fcntl.flock on Unix. On Windows, falls back to allowing (no lock).
-    Returns True if lock acquired, False if timed out (another worker active).
+    v3.4.13: First checks if a worker PID is already alive (fast path).
+    Falls back to fcntl.flock on Unix. On Windows, falls back to PID check only.
+    Returns True if lock acquired (safe to spawn), False if another worker active.
     """
     global _embedding_lock_fd
+
+    # v3.4.13: Fast path — if a worker PID is alive, don't even try the lock
+    if _is_embedding_worker_alive():
+        return False
+
     if sys.platform == "win32":
-        return True  # No file locking on Windows — daemon routing is primary defense
+        return True  # No file locking on Windows — PID check above is the guard
 
     import fcntl
     _EMBEDDING_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -389,10 +420,20 @@ class EmbeddingService:
         return True
 
     def _ensure_worker(self) -> None:
-        """Spawn worker subprocess if not running."""
+        """Spawn worker subprocess if not running.
+
+        v3.4.13: Machine-wide singleton — checks PID file before spawning.
+        Only ONE embedding_worker can exist at a time on the machine.
+        """
         if self._worker_proc is not None and self._worker_proc.poll() is None:
             return
         self._worker_proc = None
+
+        # v3.4.13: Check if another worker is already alive (machine-wide)
+        if _is_embedding_worker_alive():
+            logger.debug("Embedding worker already alive (PID file), skipping spawn")
+            self._available = False
+            return
 
         # V3.3.28: Check memory pressure before spawning
         if not self._check_memory_pressure():
@@ -419,8 +460,10 @@ class EmbeddingService:
                 text=True,
                 bufsize=1,
                 env=env,
-                start_new_session=True,  # Prevent terminal signals bleeding to worker
+                start_new_session=True,
             )
+            # v3.4.13: Register PID for machine-wide singleton guard
+            register_embedding_worker_pid(self._worker_proc.pid)
             logger.info("Embedding worker spawned (PID %d)", self._worker_proc.pid)
             self._worker_ready = True
         except Exception as exc:

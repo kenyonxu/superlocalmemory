@@ -27,7 +27,24 @@ import time
 import weakref
 from typing import Any
 
+from pathlib import Path
+
 from superlocalmemory.storage.models import AtomicFact
+
+_RERANKER_PID_FILE = Path.home() / ".superlocalmemory" / ".reranker-worker.pid"
+
+
+def _is_reranker_worker_alive() -> bool:
+    """Check if a reranker worker PID is already alive (machine-wide singleton)."""
+    try:
+        if not _RERANKER_PID_FILE.exists():
+            return False
+        pid = int(_RERANKER_PID_FILE.read_text().strip())
+        os.kill(pid, 0)
+        return True
+    except (ValueError, OSError, ProcessLookupError):
+        _RERANKER_PID_FILE.unlink(missing_ok=True)
+        return False
 
 # Track all live reranker instances for atexit cleanup
 _live_rerankers: set[weakref.ref] = set()
@@ -148,11 +165,20 @@ class CrossEncoderReranker:
     # ------------------------------------------------------------------
 
     def _ensure_worker(self) -> None:
-        """Spawn worker subprocess if not running. Non-blocking."""
+        """Spawn worker subprocess if not running. Machine-wide singleton.
+
+        v3.4.13: Checks PID file before spawning — only ONE reranker worker
+        can exist at a time on the machine.
+        """
         if self._worker_proc is not None and self._worker_proc.poll() is None:
             return
         self._worker_proc = None
         self._worker_ready = False
+
+        # v3.4.13: Machine-wide singleton guard
+        if _is_reranker_worker_alive():
+            logger.debug("Reranker worker already alive (PID file), skipping spawn")
+            return
 
         worker_module = "superlocalmemory.core.reranker_worker"
         try:
@@ -175,6 +201,9 @@ class CrossEncoderReranker:
                 env=env,
                 start_new_session=True,
             )
+            # v3.4.13: Register PID for machine-wide singleton
+            _RERANKER_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _RERANKER_PID_FILE.write_text(str(self._worker_proc.pid))
             logger.info(
                 "Reranker worker spawned (PID %d)", self._worker_proc.pid,
             )

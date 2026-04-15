@@ -230,20 +230,43 @@ def cmd_restart(args: Namespace) -> None:
     _log(1, "Kill all SLM processes", "ok", f"{killed} processes killed")
     time.sleep(3)
 
-    # Step 2: Clean stale files
+    # Step 2: Clean stale files + HOLD the lock to prevent races
+    # v3.4.13: Do NOT delete daemon.lock — HOLD it instead.
+    # If we delete it, `slm mcp` (still running in Claude) will see no lock,
+    # acquire a NEW lock, and start a second daemon during our restart.
     cleaned = []
-    for fname in ("daemon.pid", "daemon.port", "daemon.lock"):
+    for fname in ("daemon.pid", "daemon.port", ".embedding-worker.pid", ".reranker-worker.pid"):
         fpath = slm_dir / fname
         if fpath.exists():
             fpath.unlink(missing_ok=True)
             cleaned.append(fname)
+
+    # Hold the lock file to block other processes from starting a daemon
+    _LOCK_FILE = slm_dir / "daemon.lock"
+    _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    restart_lock_fd = None
+    try:
+        restart_lock_fd = open(_LOCK_FILE, "w")
+        if sys.platform != "win32":
+            import fcntl
+            fcntl.flock(restart_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        pass  # Best-effort — don't block restart if lock fails
+
     _log(2, "Clean stale state files", "ok",
          f"removed: {', '.join(cleaned)}" if cleaned else "already clean")
 
-    # Step 3: Start fresh daemon
+    # Step 3: Start fresh daemon (lock still held — no races)
     time.sleep(1)
     from superlocalmemory.cli.daemon import ensure_daemon
     started = ensure_daemon()
+
+    # Release restart lock — daemon is now running with its own lock
+    if restart_lock_fd:
+        try:
+            restart_lock_fd.close()
+        except Exception:
+            pass
     _log(3, "Start fresh daemon", "ok" if started else "fail",
          "daemon started" if started else "failed to start — check slm doctor")
 
@@ -750,27 +773,14 @@ def cmd_remember(args: Namespace) -> None:
         except Exception:
             pass  # Fall through to pending store
 
-        # Fallback: store-first pattern (Option C — zero data loss)
-        import subprocess
+        # v3.4.13: Store to pending DB (zero data loss) — daemon processes in background.
+        # NO subprocess spawn. Daemon's background loop picks up pending memories.
         from superlocalmemory.cli.pending_store import store_pending
 
         row_id = store_pending(
             content=args.content,
             tags=args.tags or "",
         )
-
-        cmd = [sys.executable, "-m", "superlocalmemory.cli.main",
-               "remember", args.content, "--sync"]
-        if args.tags:
-            cmd.extend(["--tags", args.tags])
-        log_dir = __import__("pathlib").Path.home() / ".superlocalmemory" / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "async-remember.log"
-        with open(log_file, "a") as lf:
-            subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=lf,
-                start_new_session=True,
-            )
 
         if use_json:
             from superlocalmemory.cli.json_output import json_print

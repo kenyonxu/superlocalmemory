@@ -288,13 +288,58 @@ def stop_daemon() -> bool:
         except Exception:
             pass
 
-    # Clean up PID/port files
+    # Clean up PID/port files + worker PID files
     _PID_FILE.unlink(missing_ok=True)
     _PORT_FILE.unlink(missing_ok=True)
+    # v3.4.13: Clean worker PID files (singleton guards)
+    for pidfile in (".embedding-worker.pid", ".reranker-worker.pid"):
+        (Path.home() / ".superlocalmemory" / pidfile).unlink(missing_ok=True)
 
+    # v3.4.13: Wait for ALL workers to actually die before returning.
+    # Without this, `slm restart` starts a new daemon before old workers exit,
+    # causing duplicate embedding_workers (1.6GB each).
     if killed:
-        logger.info("Stopped %d SLM processes", killed)
+        logger.info("Stopped %d SLM processes, waiting for exit...", killed)
+        _wait_for_workers_dead(timeout=10)
+
     return True
+
+
+def _wait_for_workers_dead(timeout: int = 10) -> None:
+    """Wait until no SLM worker processes remain alive."""
+    targets = [
+        "superlocalmemory.server.unified_daemon",
+        "superlocalmemory.core.embedding_worker",
+        "superlocalmemory.core.recall_worker",
+        "superlocalmemory.core.reranker_worker",
+    ]
+    my_pid = os.getpid()
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        alive = False
+        try:
+            import psutil
+            for proc in psutil.process_iter(["pid", "cmdline"]):
+                try:
+                    if proc.pid == my_pid:
+                        continue
+                    cmdline = " ".join(proc.info.get("cmdline") or [])
+                    if any(t in cmdline for t in targets):
+                        alive = True
+                        break
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except ImportError:
+            # No psutil — just wait a fixed time
+            time.sleep(3)
+            return
+
+        if not alive:
+            return
+        time.sleep(0.5)
+
+    logger.warning("Some SLM workers still alive after %ds timeout", timeout)
 
 
 # ---------------------------------------------------------------------------

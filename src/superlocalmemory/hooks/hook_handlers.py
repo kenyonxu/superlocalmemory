@@ -21,6 +21,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
+import urllib.error
 
 # ---------------------------------------------------------------------------
 # Cross-platform temp paths
@@ -32,6 +34,30 @@ _ACTIVITY_LOG = os.path.join(_TMP, "slm-session-activity")
 _LAST_CONSOLIDATION = os.path.join(
     os.path.expanduser("~"), ".superlocalmemory", ".last-consolidation",
 )
+
+
+_DAEMON_URL = "http://127.0.0.1:8765"
+
+
+def _daemon_post(path: str, body: dict, timeout: float = 3.0) -> bool:
+    """POST to SLM daemon via stdlib urllib. Returns True on success.
+
+    v3.4.13: Hooks route through daemon HTTP instead of spawning subprocesses.
+    This eliminates the memory blast from concurrent worker spawns.
+    Uses ONLY stdlib — no httpx, no requests.
+    """
+    try:
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            f"{_DAEMON_URL}{path}",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=timeout)
+        return True
+    except Exception:
+        return False
 
 
 def handle_hook(action: str) -> None:
@@ -202,15 +228,9 @@ def _hook_checkpoint() -> None:
         if _cooldown_elapsed(lock_file, _OBSERVE_COOLDOWN, now):
             _write_timestamp(lock_file, now)
 
-            # Direct observe — SLM records the change even if Claude ignores
-            try:
-                subprocess.Popen(
-                    ["slm", "observe", f"File changed: {basename}"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception:
-                pass
+            # v3.4.13: Route through daemon HTTP (not subprocess) to prevent
+            # memory blast from concurrent embedding_worker spawns.
+            _daemon_post("/observe", {"content": f"File changed: {basename}"})
 
             # Log to session activity
             try:
@@ -286,33 +306,20 @@ def _hook_stop() -> None:
 
     summary = " | ".join(parts)
 
-    # --- Save to SLM ---
-    try:
-        subprocess.run(
-            ["slm", "observe", summary],
-            capture_output=True, timeout=8,
-        )
-    except Exception:
-        try:
-            subprocess.run(
-                ["slm", "remember", summary],
-                capture_output=True, timeout=8,
-            )
-        except Exception:
-            pass
+    # --- Save to SLM (v3.4.13: daemon HTTP, not subprocess) ---
+    if not _daemon_post("/observe", {"content": summary}, timeout=5.0):
+        # Fallback: try /remember if observe failed
+        _daemon_post("/remember", {"content": summary, "tags": "session-end"}, timeout=5.0)
 
-    # --- Post-session skill evolution trigger (best-effort) ---
-    try:
-        session_id = os.environ.get("CLAUDE_SESSION_ID", "")
-        if session_id:
-            subprocess.Popen(
-                ["slm", "evolve", "--session", session_id],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-    except Exception:
-        pass
+    # --- Post-session skill evolution trigger (best-effort, via tool-event) ---
+    session_id = os.environ.get("CLAUDE_SESSION_ID", "")
+    if session_id:
+        _daemon_post("/api/v3/tool-event", {
+            "tool_name": "session_end",
+            "event_type": "session_end",
+            "session_id": session_id,
+            "output_summary": summary[:500],
+        })
 
     # --- Auto-consolidation (if >24h since last run) ---
     _maybe_consolidate()
