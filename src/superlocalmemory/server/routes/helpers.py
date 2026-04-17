@@ -5,16 +5,24 @@
  - AGPL-3.0-or-later
 
 Shared utilities for all route modules: DB connection, dict factory,
-profile helper, validation, Pydantic models, config paths.
+profile helper, validation, Pydantic models, config paths, and the
+shared lazy engine accessor used by every engine-dependent route.
 """
+import logging
 import re
 import json
 import sqlite3
+import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
+
+
+_engine_logger = logging.getLogger("superlocalmemory.engine")
 
 
 # ---------------------------------------------------------------------------
@@ -65,25 +73,122 @@ UI_DIR = Path(__file__).parent.parent / "ui"
 PROFILES_DIR = MEMORY_DIR / "profiles"
 
 
+# ---------------------------------------------------------------------------
+# Engine lifecycle — lazy, thread-safe, recoverable after mode changes.
+# ---------------------------------------------------------------------------
+
+_engine_init_lock = threading.Lock()
+_last_engine_failure: float = 0.0
+_ENGINE_FAILURE_COOLDOWN_S: float = 5.0
+
+
 def get_engine_lazy(app_state):
-    """Get or lazily initialize the V3 engine. Returns engine or None."""
+    """Return ``app_state.engine``, initialising it if None.
+
+    Why this exists
+    ---------------
+    Mode-change endpoints (``PUT`` / ``POST /api/v3/mode[/set]``) set
+    ``app.state.engine = None`` so the next request picks up the new config.
+    Before this helper, no code path re-created the engine until the daemon
+    restarted, breaking every engine-backed route (entity, ingest, tiers,
+    recall, remember, list, status).
+
+    Contract
+    --------
+    * Returns the cached engine if already initialised.
+    * Otherwise acquires a process-wide lock and builds a fresh
+      ``MemoryEngine`` from the latest ``SLMConfig.load()``.
+    * Returns ``None`` if init fails. A brief cooldown prevents hammering
+      init when the underlying cause (e.g., corrupt DB) is persistent.
+    * Never uses a sticky "already attempted" flag — recovery must be
+      automatic after a transient failure.
+    """
+    global _last_engine_failure
+
     engine = getattr(app_state, "engine", None)
     if engine is not None:
         return engine
-    if getattr(app_state, "_engine_init_attempted", False):
+
+    now = time.monotonic()
+    if _last_engine_failure and (now - _last_engine_failure) < _ENGINE_FAILURE_COOLDOWN_S:
         return None
+
+    with _engine_init_lock:
+        # Double-checked: another thread may have initialised while we waited.
+        engine = getattr(app_state, "engine", None)
+        if engine is not None:
+            return engine
+        try:
+            from superlocalmemory.core.config import SLMConfig
+            from superlocalmemory.core.engine import MemoryEngine
+            config = SLMConfig.load()
+            new_engine = MemoryEngine(config)
+            new_engine.initialize()
+            app_state.engine = new_engine
+            app_state.config = config
+            _engine_logger.info(
+                "Engine lazy-initialised (mode=%s, profile=%s)",
+                getattr(getattr(config, "mode", None), "value", "?"),
+                getattr(config, "active_profile", "?"),
+            )
+            _last_engine_failure = 0.0
+            return new_engine
+        except Exception as exc:
+            _engine_logger.warning("Engine lazy init failed: %s", exc)
+            _last_engine_failure = time.monotonic()
+            return None
+
+
+def require_engine(request: Request):
+    """Return the engine or raise ``HTTPException(503)``.
+
+    Use this in every route that touches ``app.state.engine``. Replaces the
+    old ``engine = request.app.state.engine; if engine is None: raise ...``
+    pattern with a single call that also lazily re-initialises after a mode
+    change.
+    """
+    engine = get_engine_lazy(request.app.state)
+    if engine is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Engine not initialized. Retry in a few seconds — it's warming up.",
+        )
+    return engine
+
+
+def log_mode_change(
+    old_mode: str,
+    new_mode: str,
+    *,
+    provider: str = "",
+    model: str = "",
+    source: str = "api",
+) -> None:
+    """Append an audit entry for every mode change.
+
+    Lets us trace phantom writes (e.g., a stray dashboard-card button click
+    silently flipping the system to Mode C with ``anthropic/claude-sonnet-4``
+    as the auto-defaulted model).
+
+    Audit file: ``<base_dir>/logs/mode-audit.log`` (tab-separated).
+    """
+    audit_path = MEMORY_DIR / "logs" / "mode-audit.log"
     try:
-        from superlocalmemory.core.config import SLMConfig
-        from superlocalmemory.core.engine import MemoryEngine
-        config = SLMConfig.load()
-        engine = MemoryEngine(config)
-        engine.initialize()
-        app_state.engine = engine
-        app_state._engine_init_attempted = True
-        return engine
-    except Exception:
-        app_state._engine_init_attempted = True
-        return None
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        line = (
+            f"{ts}\told={old_mode}\tnew={new_mode}"
+            f"\tprovider={provider}\tmodel={model}\tsource={source}\n"
+        )
+        with open(audit_path, "a", encoding="utf-8") as handle:
+            handle.write(line)
+    except Exception as exc:  # Logging must never break the mode-change path.
+        _engine_logger.warning("mode audit write failed: %s", exc)
+
+    _engine_logger.info(
+        "Mode change: %s→%s provider=%s model=%s (%s)",
+        old_mode, new_mode, provider, model, source,
+    )
 
 
 def get_db_connection() -> sqlite3.Connection:

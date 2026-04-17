@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.4.17] - 2026-04-17
+
+### Fixed
+- Entity Explorer no longer stuck on "No entities found" after switching operating modes.
+- Engine-backed routes (entity, ingest, recall, remember, list) auto-recover after mode changes — no daemon restart required.
+
+### Added
+- Mode change audit log at `~/.superlocalmemory/logs/mode-audit.log`.
+- Mode C now requires an explicit API key via Settings to prevent accidental cloud-mode writes.
+
+---
+
 ## Author
 
 **Varun Pratap Bhardwaj**

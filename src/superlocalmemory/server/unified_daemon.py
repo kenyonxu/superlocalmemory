@@ -559,10 +559,25 @@ def _register_daemon_routes(application: FastAPI) -> None:
     """Add daemon-specific routes for CLI integration."""
     global _last_activity
 
+    from superlocalmemory.server.routes.helpers import get_engine_lazy
+
+    def _get_engine_or_503():
+        """Lazy-init engine; raise 503 if init fails.
+
+        Shared by every daemon route so a mode switch that nulled
+        ``application.state.engine`` never leaves the daemon stuck in
+        503 until restart.
+        """
+        engine = get_engine_lazy(application.state)
+        if engine is None:
+            raise HTTPException(503, detail="Engine not initialized")
+        return engine
+
     @application.get("/health")
     async def health():
         _update_activity()
-        engine = application.state.engine
+        # Non-blocking peek: report status without forcing a re-init.
+        engine = getattr(application.state, "engine", None)
         return {
             "status": "ok",
             "pid": os.getpid(),
@@ -574,9 +589,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
     async def recall(q: str = "", query: str = "", limit: int = 20):
         _update_activity()
         search_query = q or query  # Accept both ?q= and ?query= for compatibility
-        engine = application.state.engine
-        if engine is None:
-            raise HTTPException(503, detail="Engine not initialized")
+        engine = _get_engine_or_503()
         if not search_query:
             return {"results": [], "count": 0, "query_type": "none", "retrieval_time_ms": 0}
         try:
@@ -605,9 +618,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
     @application.post("/remember")
     async def remember(req: RememberRequest):
         _update_activity()
-        engine = application.state.engine
-        if engine is None:
-            raise HTTPException(503, detail="Engine not initialized")
+        engine = _get_engine_or_503()
         try:
             metadata = {"tags": req.tags} if req.tags else {}
             fact_ids = engine.store(req.content, metadata=metadata)
@@ -624,7 +635,8 @@ def _register_daemon_routes(application: FastAPI) -> None:
     @application.get("/status")
     async def status():
         _update_activity()
-        engine = application.state.engine
+        # Non-blocking peek — status must never force a re-init.
+        engine = getattr(application.state, "engine", None)
         fact_count = engine.fact_count if engine else 0
         mode = engine._config.mode.value if engine and hasattr(engine, '_config') else "unknown"
         return {
@@ -641,9 +653,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
     @application.get("/list")
     async def list_facts(limit: int = 50):
         _update_activity()
-        engine = application.state.engine
-        if engine is None:
-            raise HTTPException(503, detail="Engine not initialized")
+        engine = _get_engine_or_503()
         try:
             facts = engine.list_facts(limit=limit)
             items = [

@@ -44,9 +44,8 @@ async def ingest(req: IngestRequest, request: Request):
     """
     global _active_count
 
-    engine = request.app.state.engine
-    if engine is None:
-        raise HTTPException(503, detail="Engine not initialized")
+    from .helpers import require_engine
+    engine = require_engine(request)
 
     if not req.content:
         raise HTTPException(400, detail="content required")

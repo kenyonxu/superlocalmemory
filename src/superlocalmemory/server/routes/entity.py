@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request, Query
 
+from .helpers import require_engine
+
 router = APIRouter(prefix="/api/entity", tags=["entity"])
 
 
@@ -19,9 +21,7 @@ async def list_entities(
     offset: int = Query(default=0, ge=0),
 ):
     """List all entities with basic info (canonical name, type, fact count)."""
-    engine = request.app.state.engine
-    if engine is None:
-        raise HTTPException(503, detail="Engine not initialized")
+    engine = require_engine(request)
 
     import sqlite3
     import json
@@ -75,9 +75,7 @@ async def get_entity(
     project: str = Query(default=""),
 ):
     """Get compiled truth + timeline for an entity."""
-    engine = request.app.state.engine
-    if engine is None:
-        raise HTTPException(503, detail="Engine not initialized")
+    engine = require_engine(request)
 
     import sqlite3
     import json
@@ -121,9 +119,7 @@ async def recompile_entity(
     project: str = Query(default=""),
 ):
     """Force immediate recompilation of an entity."""
-    engine = request.app.state.engine
-    if engine is None:
-        raise HTTPException(503, detail="Engine not initialized")
+    engine = require_engine(request)
 
     import sqlite3
     conn = sqlite3.connect(str(engine._config.db_path))

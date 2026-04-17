@@ -101,7 +101,28 @@ async def set_mode(request: Request):
 
         from superlocalmemory.core.config import SLMConfig
         from superlocalmemory.storage.models import Mode
+        from superlocalmemory.server.routes.helpers import log_mode_change
         old_config = SLMConfig.load()
+        old_mode = old_config.mode.value
+
+        # Safety: a bare ``{mode:"c"}`` body (e.g., a stray dashboard button
+        # click) used to silently auto-default the model to
+        # ``anthropic/claude-sonnet-4`` with no API key, writing phantom state
+        # into config.json. Refuse that path — Mode C requires explicit
+        # provider+key via POST /api/v3/mode/set.
+        if new_mode == "c" and not old_config.llm.api_key:
+            return JSONResponse(
+                {
+                    "error": (
+                        "Mode C requires a cloud API key. "
+                        "Configure provider + key in Settings → Step 2 "
+                        "(uses POST /api/v3/mode/set)."
+                    ),
+                    "code": "mode_c_requires_api_key",
+                },
+                status_code=400,
+            )
+
         new_config = SLMConfig.for_mode(
             Mode(new_mode),
             llm_provider=old_config.llm.provider,
@@ -112,13 +133,23 @@ async def set_mode(request: Request):
         new_config.active_profile = old_config.active_profile
         new_config.save()
 
+        # Audit the change before we lose context — proves who/when/what.
+        # Captures the phantom-write case where `for_mode(C)` auto-defaults
+        # the model to "anthropic/claude-sonnet-4" (see core/config.py).
+        log_mode_change(
+            old_mode, new_mode,
+            provider=new_config.llm.provider,
+            model=new_config.llm.model,
+            source="PUT /api/v3/mode",
+        )
+
         # V3.3: Check if embedding model changed — flag for re-indexing
         needs_reindex = (
             old_config.embedding.provider != new_config.embedding.provider
             or old_config.embedding.model_name != new_config.embedding.model_name
         )
 
-        # Reset engine to pick up new config
+        # Invalidate engine; next engine-backed request lazy-inits with new config.
         if hasattr(request.app.state, "engine"):
             request.app.state.engine = None
 
@@ -147,6 +178,9 @@ async def set_full_config(request: Request):
 
         from superlocalmemory.core.config import SLMConfig
         from superlocalmemory.storage.models import Mode
+        from superlocalmemory.server.routes.helpers import log_mode_change
+        old = SLMConfig.load()
+        old_mode = old.mode.value
         config = SLMConfig.for_mode(
             Mode(new_mode),
             llm_provider=provider if provider != "none" else "",
@@ -154,9 +188,15 @@ async def set_full_config(request: Request):
             llm_api_key=api_key,
             llm_api_base="http://localhost:11434" if provider == "ollama" else "",
         )
-        old = SLMConfig.load()
         config.active_profile = old.active_profile
         config.save()
+
+        log_mode_change(
+            old_mode, new_mode,
+            provider=config.llm.provider,
+            model=config.llm.model,
+            source="POST /api/v3/mode/set",
+        )
 
         # Kill existing worker so next request uses new config
         try:
