@@ -453,3 +453,115 @@ def test_safe_resolve_identifier_rejects_path_escape_via_symlink(
     (base / escape_id).symlink_to(outside)
     with pytest.raises(ValueError):
         sp.safe_resolve_identifier(base, escape_id)
+
+
+# ---------------------------------------------------------------------------
+# redact_secrets aggression='high' — LLD-00 §5 contract (P0.3)
+# ---------------------------------------------------------------------------
+
+
+def test_redact_secrets_high_jwt() -> None:
+    # A realistic 3-segment JWT — must redact.
+    jwt = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+        "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+        "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+    )
+    redacted = sp.redact_secrets(f"Authorization: {jwt}", aggression="high")
+    assert jwt not in redacted
+    assert "[REDACTED:JWT:" in redacted
+
+
+def test_redact_secrets_high_bearer() -> None:
+    text = "Authorization: Bearer abcdef0123456789ABCDEF.signed-value=="
+    redacted = sp.redact_secrets(text, aggression="high")
+    assert "abcdef0123456789ABCDEF.signed-value==" not in redacted
+    assert "[REDACTED:BEARER:" in redacted
+
+
+def test_redact_secrets_high_github_pat_classic() -> None:
+    token = "ghp_" + "A" * 36
+    redacted = sp.redact_secrets(f"token={token}", aggression="high")
+    assert token not in redacted
+    assert "[REDACTED:GITHUB_PAT:" in redacted
+
+
+def test_redact_secrets_high_github_pat_oauth() -> None:
+    token = "gho_" + "B" * 36
+    redacted = sp.redact_secrets(f"oauth={token}", aggression="high")
+    assert token not in redacted
+    assert "[REDACTED:GITHUB_PAT:" in redacted
+
+
+def test_redact_secrets_high_github_pat_server() -> None:
+    token = "ghs_" + "C" * 36
+    redacted = sp.redact_secrets(f"server={token}", aggression="high")
+    assert token not in redacted
+    assert "[REDACTED:GITHUB_PAT:" in redacted
+
+
+def test_redact_secrets_high_anthropic_key() -> None:
+    key = "sk-ant-api03-" + "D" * 55
+    redacted = sp.redact_secrets(f"ANTHROPIC_API_KEY={key}", aggression="high")
+    assert key not in redacted
+    assert "[REDACTED:ANTHROPIC_KEY:" in redacted
+
+
+def test_redact_secrets_high_anthropic_admin_key() -> None:
+    key = "sk-ant-admin01-" + "E" * 55
+    redacted = sp.redact_secrets(f"KEY={key}", aggression="high")
+    assert key not in redacted
+    assert "[REDACTED:ANTHROPIC_KEY:" in redacted
+
+
+def test_redact_secrets_high_openai_key() -> None:
+    key = "sk-" + "F" * 20 + "T3BlbkFJ" + "G" * 20
+    redacted = sp.redact_secrets(f"OPENAI_API_KEY={key}", aggression="high")
+    assert key not in redacted
+    assert "[REDACTED:OPENAI_KEY:" in redacted
+
+
+def test_redact_secrets_high_generic_uppercase_key() -> None:
+    # [A-Z]{2,5}_[A-Z0-9]{20,} pattern — typical env-var secret shape.
+    key = "SLM_" + "A1B2C3D4E5F6G7H8I9J0"
+    redacted = sp.redact_secrets(f"config={key}", aggression="high")
+    assert key not in redacted
+    assert "[REDACTED:GENERIC_KEY:" in redacted
+
+
+def test_redact_secrets_high_preserves_non_secret_text() -> None:
+    text = "The quick brown fox jumps over the lazy dog."
+    assert sp.redact_secrets(text, aggression="high") == text
+
+
+def test_redact_secrets_normal_unchanged_behavior() -> None:
+    # Regression: default behavior still works with NO aggression kwarg.
+    text = "my key is sk-" + "A" * 40 + " end"
+    default_redacted = sp.redact_secrets(text)
+    explicit_normal = sp.redact_secrets(text, aggression="normal")
+    assert default_redacted == explicit_normal
+    assert "[REDACTED:" in default_redacted
+
+
+def test_redact_secrets_high_rejects_invalid_aggression() -> None:
+    with pytest.raises(ValueError):
+        sp.redact_secrets("x", aggression="ultra")  # type: ignore[arg-type]
+
+
+def test_redact_secrets_high_masks_show_last4() -> None:
+    """LLD-00 §5 mandates [REDACTED:TYPE:last4] format."""
+    token = "ghp_" + "A" * 32 + "ABCD"
+    redacted = sp.redact_secrets(f"t={token}", aggression="high")
+    assert "[REDACTED:GITHUB_PAT:ABCD]" in redacted
+
+
+def test_redact_secrets_high_multiple_secrets_in_text() -> None:
+    """Multiple different secrets → all redacted independently."""
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123def456ghi789"
+    gh = "ghp_" + "A" * 36
+    text = f"JWT: {jwt}\nGH: {gh}"
+    redacted = sp.redact_secrets(text, aggression="high")
+    assert jwt not in redacted
+    assert gh not in redacted
+    assert "[REDACTED:JWT:" in redacted
+    assert "[REDACTED:GITHUB_PAT:" in redacted

@@ -229,6 +229,32 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"-----BEGIN [A-Z ]+-----"), "PRIVATE_KEY"),
 )
 
+# LLD-00 §5 high-aggression patterns (P0.3). Stricter than the defaults:
+# they match concrete, well-known secret shapes only, and are tried FIRST
+# so their specific labels win over the broader 'OPENAI'/'ANTHROPIC' fallbacks.
+_HIGH_AGGRESSION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Generic JWT — three dot-separated base64url segments starting with "eyJ".
+    (re.compile(
+        r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"
+    ), "JWT"),
+    # Bearer header — catches `Authorization: Bearer ...` style tokens.
+    (re.compile(r"\bBearer\s+[A-Za-z0-9_\-.=]{20,}"), "BEARER"),
+    # GitHub PATs: classic + OAuth + server-to-server.
+    (re.compile(
+        r"\bghp_[A-Za-z0-9]{36}\b|\bgho_[A-Za-z0-9]{36}\b|\bghs_[A-Za-z0-9]{36}\b"
+    ), "GITHUB_PAT"),
+    # Anthropic API/admin keys — current format as of 2026.
+    (re.compile(r"\bsk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_-]{50,}\b"),
+     "ANTHROPIC_KEY"),
+    # OpenAI modern keys — carry the "T3BlbkFJ" ("OpenAI" base64) sentinel.
+    (re.compile(r"\bsk-[A-Za-z0-9]{20,}T3BlbkFJ[A-Za-z0-9]{20,}\b"),
+     "OPENAI_KEY"),
+    # Generic env-var-style secret (e.g. SLM_API_ABC123...).
+    (re.compile(r"\b[A-Z]{2,5}_[A-Z0-9]{20,}\b"), "GENERIC_KEY"),
+)
+
+_VALID_AGGRESSION = frozenset({"normal", "high"})
+
 
 def _shannon_entropy(s: str) -> float:
     if not s:  # pragma: no cover — callers guard
@@ -245,25 +271,44 @@ def _shannon_entropy(s: str) -> float:
 
 
 def redact_secrets(text: str, *, entropy_threshold: float = 4.5,
-                   window: int = 32) -> str:
+                   window: int = 32,
+                   aggression: str = "normal") -> str:
     """Replace detected secrets with ``[REDACTED:TYPE:last4]`` markers.
 
-    Two-layer defense:
-      1. Pattern-based (OpenAI/Anthropic/GitHub/AWS/Slack/JWT/PEM).
-      2. Entropy-based fallback — any 32+ char contiguous high-entropy run
+    Three-layer defense:
+      1. High-aggression patterns (JWT/Bearer/GitHub PAT/Anthropic/OpenAI/
+         GENERIC_KEY) — applied first when ``aggression='high'`` (LLD-00 §5).
+         These have concrete, well-known shapes so labels are specific.
+      2. Pattern-based fallback (OpenAI/Anthropic/GitHub/AWS/Slack/JWT/PEM).
+      3. Entropy-based sweep — any 32+ char contiguous high-entropy run
          of URL-safe characters that survived pattern scan gets redacted as
          ``[REDACTED:ENTROPY:last4]``.
 
-    Rationale: patterns catch known formats; entropy catches novel tokens
-    (proprietary API keys, custom JWT-likes, base64 dumps). LLD-07 §6.3 rule:
-    every string entering cache or dashboard goes through this.
+    ``aggression='high'`` is mandatory for every LLM-bound prompt
+    (LLD-11 evolution dispatch). Rationale: LLM providers may log or
+    retain prompts, so any leaked secret is a breach. LLD-07 §6.3 rule:
+    every string entering cache or dashboard goes through this helper.
     """
+    if aggression not in _VALID_AGGRESSION:
+        raise ValueError(
+            f"aggression must be one of {sorted(_VALID_AGGRESSION)}, "
+            f"got {aggression!r}"
+        )
     if not isinstance(text, str):
         return text  # pragma: no cover — defensive
     if not text:
         return text
 
     out = text
+
+    if aggression == "high":
+        for pat, label in _HIGH_AGGRESSION_PATTERNS:
+            def _sub_high(match: re.Match[str], _label: str = label) -> str:
+                matched = match.group(0)
+                last4 = matched[-4:] if len(matched) >= 4 else matched
+                return f"[REDACTED:{_label}:{last4}]"
+            out = pat.sub(_sub_high, out)
+
     for pat, label in _SECRET_PATTERNS:
         def _sub(match: re.Match[str], _label: str = label) -> str:
             matched = match.group(0)
