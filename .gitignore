@@ -10,7 +10,11 @@ backups/
 profiles/
 
 # ==== BENCHMARKS (Internal — code, data, results) ====
-benchmarks/
+# /benchmarks/ is the root-level perf-output dir; tests/benchmarks/ is
+# pytest-benchmark artifacts. docs/benchmarks/ is the PUBLIC benchmark
+# doc (e.g. EVO-MEMORY.md) and MUST remain tracked.
+/benchmarks/
+tests/benchmarks/
 docs/plans/
 vectors/
 cold-storage/
