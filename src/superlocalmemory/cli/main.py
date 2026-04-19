@@ -129,6 +129,22 @@ def main() -> None:
         "--rollback", action="store_true", help="Rollback migration",
     )
 
+    # LLD-06 §7.2 — `slm db migrate` wraps LLD-07's additive schema migrations.
+    db_p = sub.add_parser("db", help="Database maintenance commands (v3.4.21)")
+    db_sub = db_p.add_subparsers(dest="db_command", title="db subcommands")
+    db_mig_p = db_sub.add_parser(
+        "migrate",
+        help="Apply additive schema migrations (LLD-07)",
+    )
+    db_mig_p.add_argument(
+        "--status", action="store_true",
+        help="Print migration status from migration_log; no writes",
+    )
+    db_mig_p.add_argument(
+        "--dry-run", action="store_true",
+        help="Report what would change without applying",
+    )
+
     # -- Memory Operations ---------------------------------------------
     remember_p = sub.add_parser("remember", help="Store a memory (extracts facts, builds graph)")
     remember_p.add_argument("content", help="Content to remember")
@@ -333,6 +349,44 @@ def main() -> None:
     evolve_p.add_argument("--session", default="", help="Session ID to process")
     evolve_p.add_argument("--profile", default="default", help="Profile ID")
 
+    # v3.4.21 — MASTER-PLAN §8 escape hatches (Stage 8 SB-5).
+    disable_p = sub.add_parser(
+        "disable",
+        help="Disable SLM globally (writes ~/.superlocalmemory/.disabled, stops daemon)",
+    )
+    disable_p.add_argument(
+        "--reason", default="",
+        help="Optional reason string written into the marker for audit",
+    )
+
+    sub.add_parser(
+        "enable",
+        help="Remove the .disabled marker; print command to start daemon",
+    )
+
+    sub.add_parser(
+        "clear-cache",
+        help="Wipe regenerable caches (memory.db + learning.db are preserved)",
+    )
+
+    recon_p = sub.add_parser(
+        "reconfigure",
+        help="Re-run the interactive postinstall (changes profile/knobs)",
+    )
+    recon_p.add_argument(
+        "extras", nargs="*", default=[],
+        help="Extra flags passed to postinstall-interactive.js",
+    )
+
+    bench_p = sub.add_parser(
+        "benchmark",
+        help="Run evo-memory benchmark against an isolated tmp DB (never touches user data)",
+    )
+    bench_p.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON result instead of human-readable summary",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -348,7 +402,9 @@ def main() -> None:
     # Cross-platform: macOS + Windows + Linux.
     _NO_DAEMON_COMMANDS = {
         "setup", "mode", "provider", "connect", "migrate", "mcp", "warmup",
-        "config", "evolve",
+        "config", "evolve", "db",
+        # v3.4.21 escape hatches — never auto-start the daemon on these.
+        "disable", "enable", "clear-cache", "reconfigure", "benchmark",
     }
     if args.command not in _NO_DAEMON_COMMANDS:
         try:

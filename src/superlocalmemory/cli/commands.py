@@ -16,6 +16,44 @@ import sys
 from argparse import Namespace
 
 
+def _cmd_db_dispatch(args: Namespace) -> None:
+    """Route ``slm db ...`` subcommands. LLD-06 §7.2."""
+    sub = getattr(args, "db_command", None)
+    if sub == "migrate":
+        from superlocalmemory.cli.db_migrate import cmd_db_migrate
+        rc = cmd_db_migrate(args)
+        if rc:
+            sys.exit(rc)
+        return
+    print("Usage: slm db migrate [--status] [--dry-run]")
+    sys.exit(2)
+
+
+def _cmd_escape_disable(args: Namespace) -> None:
+    from superlocalmemory.cli.escape_hatch import cmd_disable
+    cmd_disable(args)
+
+
+def _cmd_escape_enable(args: Namespace) -> None:
+    from superlocalmemory.cli.escape_hatch import cmd_enable
+    cmd_enable(args)
+
+
+def _cmd_escape_clear_cache(args: Namespace) -> None:
+    from superlocalmemory.cli.escape_hatch import cmd_clear_cache
+    cmd_clear_cache(args)
+
+
+def _cmd_escape_reconfigure(args: Namespace) -> None:
+    from superlocalmemory.cli.escape_hatch import cmd_reconfigure
+    cmd_reconfigure(args)
+
+
+def _cmd_escape_benchmark(args: Namespace) -> None:
+    from superlocalmemory.cli.escape_hatch import cmd_benchmark
+    cmd_benchmark(args)
+
+
 def dispatch(args: Namespace) -> None:
     """Route CLI command to the appropriate handler."""
     # Auto-install/upgrade hooks on version change (single file read, ~0.1ms)
@@ -67,6 +105,16 @@ def dispatch(args: Namespace) -> None:
         # V3.4.11 skill evolution
         "config": cmd_config,
         "evolve": cmd_evolve,
+        # V3.4.21 LLD-05 context pre-staging
+        "context": _cmd_context_dispatch,
+        # V3.4.21 LLD-06 additive schema migrations
+        "db": _cmd_db_dispatch,
+        # V3.4.21 Stage 8 SB-5 — MASTER-PLAN §8 escape hatches.
+        "disable": _cmd_escape_disable,
+        "enable": _cmd_escape_enable,
+        "clear-cache": _cmd_escape_clear_cache,
+        "reconfigure": _cmd_escape_reconfigure,
+        "benchmark": _cmd_escape_benchmark,
     }
     handler = handlers.get(args.command)
     if handler:
@@ -633,8 +681,21 @@ def cmd_provider(args: Namespace) -> None:
             print(f"Model: {config.llm.model}")
 
 
+def _cmd_context_dispatch(args: Namespace) -> None:
+    """V3.4.21 LLD-05: ``slm context prestage``."""
+    from superlocalmemory.cli.context_commands import cmd_context
+    cmd_context(args)
+
+
 def cmd_connect(args: Namespace) -> None:
-    """Configure IDE integrations."""
+    """Configure IDE integrations. V3.4.21: ``--cross-platform`` uses LLD-05."""
+    # Route --disable <name> and --cross-platform to the LLD-05 orchestrator.
+    if getattr(args, "disable", None) or getattr(args, "cross_platform", False):
+        from superlocalmemory.cli.context_commands import (
+            cmd_connect_cross_platform,
+        )
+        cmd_connect_cross_platform(args)
+        return
     from superlocalmemory.hooks.ide_connector import IDEConnector
 
     connector = IDEConnector()
