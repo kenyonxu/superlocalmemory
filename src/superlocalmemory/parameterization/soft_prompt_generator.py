@@ -123,12 +123,18 @@ class SoftPromptGenerator:
         self,
         patterns: list[PatternAssertion],
         profile_id: str,
+        *,
+        high_reward_source_ids: set[str] | None = None,
     ) -> list[SoftPromptTemplate]:
         """Master generation pipeline: filter, group, render, budget-trim.
 
         Args:
             patterns: Extracted pattern assertions.
             profile_id: Target profile.
+            high_reward_source_ids: Optional v3.4.21 (LLD-12 §6) filter —
+                when provided, only patterns whose source_ids intersect
+                this set are considered. When None (default), behaviour
+                matches pre-v3.4.21 and every pattern flows through.
 
         Returns:
             List of SoftPromptTemplate, ordered by category priority,
@@ -139,6 +145,13 @@ class SoftPromptGenerator:
         filtered = [
             p for p in patterns if p.category.value in enabled
         ]
+
+        # v3.4.21 (LLD-12 §6): reward-aware filter — opt-in only.
+        if high_reward_source_ids is not None:
+            filtered = [
+                p for p in filtered
+                if set(p.source_ids) & high_reward_source_ids
+            ]
 
         # Group by category
         grouped: dict[str, list[PatternAssertion]] = defaultdict(list)

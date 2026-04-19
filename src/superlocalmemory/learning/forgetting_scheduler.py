@@ -306,10 +306,43 @@ class ForgettingScheduler:
     def _soft_delete_with_audit(self, fact_id: str, profile_id: str) -> None:
         """Soft-delete a forgotten fact with compliance audit trail.
 
+        v3.4.21 (LLD-12 §4): reward-gated. If the fact has any positive
+        reward (>0.3) in the last 60 days, it is considered "still
+        useful" and kept live — consolidation will retry next cycle.
+
         HR-04: Never physically deletes.
         """
+        if self._has_recent_positive_reward(fact_id, profile_id):
+            logger.debug(
+                "forgetting_scheduler: fact_id=%s kept live (recent reward)",
+                fact_id,
+            )
+            return
         logger.info(
             "Soft-deleting forgotten fact: fact_id=%s, profile_id=%s",
             fact_id, profile_id,
         )
         self._db.soft_delete_fact(fact_id, profile_id)
+
+    def _has_recent_positive_reward(
+        self, fact_id: str, profile_id: str,
+    ) -> bool:
+        """True if fact has an outcome_reward > 0.3 in the last 60 days.
+
+        Resilient to schema drift: if ``action_outcomes`` or its columns
+        are unavailable we return False (no gating), preserving legacy
+        behaviour.
+        """
+        try:
+            rows = self._db.execute(
+                "SELECT 1 FROM action_outcomes "
+                "WHERE profile_id = ? "
+                "  AND reward IS NOT NULL AND reward > 0.3 "
+                "  AND fact_ids_json LIKE ? "
+                "  AND COALESCE(settled_at, '') >= datetime('now', '-60 days') "
+                "LIMIT 1",
+                (profile_id, f'%"{fact_id}"%'),
+            )
+            return bool(rows)
+        except Exception:
+            return False

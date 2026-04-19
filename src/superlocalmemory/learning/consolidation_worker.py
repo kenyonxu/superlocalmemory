@@ -17,7 +17,9 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -139,9 +141,36 @@ class ConsolidationWorker:
     def _deduplicate(self, profile_id: str, dry_run: bool) -> int:
         """Find and mark near-duplicate facts.
 
-        Uses content similarity (exact prefix match for now).
-        Does NOT delete — marks with lower confidence.
+        v3.4.21 (LLD-12): prefer HNSW ANN + entity-overlap dedup with a
+        reversible merge log. On any error (missing schema columns,
+        hnswlib unavailable, RAM budget exceeded) fall back to the
+        legacy prefix dedup so existing deployments keep working.
+
+        Never DELETEs from atomic_facts — merges flip archive_status
+        and write memory_merge_log rows.
         """
+        # --- v3.4.21 preferred path: HNSW + memory_merge (LLD-12) ---
+        try:
+            from superlocalmemory.learning.hnsw_dedup import HnswDeduplicator
+            from superlocalmemory.learning.memory_merge import apply_merges
+
+            dedup = HnswDeduplicator(memory_db_path=self._memory_db)
+            candidates = dedup.find_merge_candidates(profile_id)
+            if not candidates:
+                return 0
+            if dry_run:
+                return len(candidates)
+            applied = apply_merges(
+                self._memory_db, candidates, profile_id=profile_id,
+            )
+            return applied
+        except sqlite3.OperationalError as exc:
+            # Schema probably predates M011 — fall through to legacy path.
+            logger.debug("hnsw dedup schema missing, fallback: %s", exc)
+        except Exception as exc:
+            logger.debug("hnsw dedup unexpected error, fallback: %s", exc)
+
+        # --- Legacy fallback (pre-v3.4.21 behaviour) ---
         try:
             conn = sqlite3.connect(self._memory_db, timeout=10)
             conn.execute("PRAGMA busy_timeout=5000")
@@ -507,33 +536,274 @@ class ConsolidationWorker:
             return 0
 
     def _retrain_ranker(self, profile_id: str, signal_count: int) -> bool:
-        """Retrain the adaptive ranker from accumulated feedback."""
+        """Retrain the adaptive ranker (LLD-02 §4.6).
+
+        Uses real 20-dim feature vectors + integer labels + group param,
+        trained with ``objective="lambdarank"``. Persisted via
+        ``LearningDatabase.persist_model`` with SHA-256 integrity.
+        """
         try:
-            from superlocalmemory.learning.feedback import FeedbackCollector
-            from superlocalmemory.learning.ranker import AdaptiveRanker
-
-            collector = FeedbackCollector(Path(self._learning_db))
-            feedback = collector.get_feedback(profile_id, limit=500)
-
-            if len(feedback) < 200:
-                return False
-
-            # Build training data from feedback
-            training_data = []
-            for f in feedback:
-                label = f.get("signal_value", 0.5)
-                training_data.append({
-                    "features": {"signal_value": label},
-                    "label": label,
-                })
-
-            ranker = AdaptiveRanker(signal_count=signal_count)
-            trained = ranker.train(training_data)
-
-            if trained:
-                logger.info("Ranker retrained with %d examples (Phase 3)", len(training_data))
-
-            return trained
+            return _retrain_ranker_impl(self._learning_db, profile_id)
         except Exception as exc:
             logger.debug("Retrain failed: %s", exc)
             return False
+
+
+# ---------------------------------------------------------------------------
+# LLD-02 §4.6 — lambdarank retraining
+# ---------------------------------------------------------------------------
+
+
+def _retrain_ranker_impl(
+    learning_db: str | Path,
+    profile_id: str,
+    *,
+    include_synthetic: bool = False,
+) -> bool:
+    """Real training path — pure function so tests can call it directly.
+
+    ``include_synthetic`` forwards to
+    :meth:`LearningDatabase.fetch_training_examples` so migrated legacy
+    rows (``is_synthetic=1``) participate in training when the user opts
+    in via the dashboard "Migrate legacy data" flow.
+    """
+    try:
+        import numpy as np
+        import lightgbm as lgb  # noqa: PLC0415
+    except ImportError:
+        logger.info("lightgbm or numpy missing; skipping retrain")
+        return False
+
+    from superlocalmemory.learning.database import LearningDatabase
+    from superlocalmemory.learning.features import FEATURE_NAMES
+    from superlocalmemory.learning.labeler import label_for_row, label_gain
+
+    db = LearningDatabase(learning_db)
+    rows = db.fetch_training_examples(
+        profile_id=profile_id,
+        limit=2000,
+        min_outcome_age_sec=60,
+        include_synthetic=include_synthetic,
+    )
+    if len(rows) < 200:
+        logger.info(
+            "retrain: need ≥200 rows, have %d — deferring", len(rows),
+        )
+        return False
+
+    X, y_int, groups = _build_training_matrix(rows, FEATURE_NAMES)
+    if groups is None or len(groups) < 2:
+        logger.info("retrain: insufficient query groups (%s) — deferring",
+                    None if groups is None else len(groups))
+        return False
+    assert sum(groups) == X.shape[0], (
+        f"group sum mismatch: {sum(groups)} != {X.shape[0]}")
+
+    gain = label_gain()
+    # Defensive: clamp any out-of-range label.
+    y_int = np.clip(y_int, 0, len(gain) - 1)
+
+    ds_train = lgb.Dataset(
+        X,
+        label=y_int,
+        group=groups,
+        feature_name=list(FEATURE_NAMES),
+        free_raw_data=False,
+    )
+    # MKT-v2-M-01: allow switching between ``lambdarank`` (default, LLD-02
+    # CR1) and ``rank_xendcg`` (verified as faster with comparable NDCG per
+    # verification-2026-04-17.md claim 6). Operators can A/B on real data
+    # by flipping ``SLM_LGBM_OBJECTIVE`` without touching code.
+    _allowed_objectives = {"lambdarank", "rank_xendcg"}
+    objective = os.environ.get("SLM_LGBM_OBJECTIVE", "lambdarank").strip()
+    if objective not in _allowed_objectives:
+        logger.warning(
+            "SLM_LGBM_OBJECTIVE=%r not in %s; defaulting to lambdarank",
+            objective, sorted(_allowed_objectives),
+        )
+        objective = "lambdarank"
+    params = {
+        "objective": objective,
+        "metric": "ndcg",
+        "ndcg_eval_at": [1, 3, 5, 10],
+        "label_gain": gain,
+        "learning_rate": 0.05,
+        "num_leaves": 31,
+        "min_data_in_leaf": 20,
+        "verbosity": -1,
+        "num_threads": max(1, (os.cpu_count() or 2) - 1),
+    }
+    try:
+        booster_new = lgb.train(params, ds_train, num_boost_round=50)
+    except lgb.basic.LightGBMError as exc:
+        logger.warning("retrain: lightgbm train failed: %s", exc)
+        return False
+
+    # Shadow test: only promote if better than prior active model.
+    prior = db.load_active_model(profile_id)
+    if prior is not None:
+        if not _shadow_test_improved(prior, booster_new, rows, FEATURE_NAMES):
+            logger.info("Shadow test: new model did not beat prior; keeping")
+            return False
+
+    model_str = booster_new.model_to_string()
+    state_bytes = model_str.encode("utf-8")
+    sha = hashlib.sha256(state_bytes).hexdigest()
+    try:
+        db.persist_model(
+            profile_id=profile_id,
+            state_bytes=state_bytes,
+            bytes_sha256=sha,
+            feature_names=list(FEATURE_NAMES),
+            trained_on_count=len(rows),
+            metrics=_compute_eval_metrics(booster_new, rows, FEATURE_NAMES),
+        )
+    except Exception as exc:
+        logger.warning("persist_model failed: %s", exc)
+        return False
+
+    # Invalidate in-process cache so new model is picked up.
+    try:
+        from superlocalmemory.learning.model_cache import invalidate
+        invalidate(profile_id)
+    except Exception:  # pragma: no cover — defensive
+        pass
+
+    logger.info(
+        "Ranker retrained (lambdarank): %d rows, %d groups, promoted=True",
+        len(rows), len(groups),
+    )
+    return True
+
+
+def _build_training_matrix(rows: list[dict], feature_names):
+    """Group rows by ``query_id``, preserve order by ``position``.
+
+    Returns (X, y_int, group_counts).  ``group_counts`` is None when no
+    groups are discoverable.
+    """
+    import numpy as np
+    from superlocalmemory.learning.labeler import label_for_row
+
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        qid = row.get("query_id") or ""
+        grouped.setdefault(qid, []).append(row)
+    if not grouped:
+        return np.zeros((0, len(feature_names)), dtype=np.float32), [], None
+
+    xs: list[list[float]] = []
+    ys: list[int] = []
+    group_counts: list[int] = []
+    for qid, group_rows in grouped.items():
+        # Sort by position ascending; missing positions land at the end.
+        group_rows = sorted(
+            group_rows,
+            key=lambda r: (r.get("position") if r.get("position") is not None
+                           else 10**9),
+        )
+        for r in group_rows:
+            feats = r.get("features") or {}
+            xs.append([float(feats.get(n, 0.0)) for n in feature_names])
+            ys.append(label_for_row(r))
+        group_counts.append(len(group_rows))
+
+    X = np.asarray(xs, dtype=np.float32)
+    y = np.asarray(ys, dtype=np.int32)
+    return X, y, group_counts
+
+
+def _shadow_test_improved(prior_row, booster_new, rows, feature_names) -> bool:
+    """Return True iff new booster beats prior on NDCG@10 with p<0.05.
+
+    Lightweight paired t-test across per-query NDCG@10 scores.
+    ``prior_row`` is the dict returned by ``load_active_model`` — may be
+    unusable (no state_bytes / unparseable); in that case we promote.
+    """
+    try:
+        import numpy as np
+        import lightgbm as lgb
+    except ImportError:  # pragma: no cover
+        return True
+
+    try:
+        prior_booster = lgb.Booster(
+            model_str=bytes(prior_row["state_bytes"]).decode("utf-8"),
+        )
+    except Exception:
+        return True  # prior unusable → promote new.
+
+    X, y, groups = _build_training_matrix(rows, feature_names)
+    if groups is None or not groups:
+        return True
+
+    offsets = [0]
+    for g in groups:
+        offsets.append(offsets[-1] + g)
+
+    def _ndcg_at_k(scores, labels, k=10):
+        order = np.argsort(-scores)
+        gains_map = [0, 1, 3, 7, 15]
+        dcg = 0.0
+        for i, idx in enumerate(order[:k]):
+            l = int(labels[idx])
+            if 0 <= l < len(gains_map):
+                dcg += gains_map[l] / np.log2(i + 2)
+        ideal = sorted(labels.tolist(), reverse=True)[:k]
+        idcg = sum(
+            (gains_map[int(l)] if 0 <= int(l) < len(gains_map) else 0)
+            / np.log2(i + 2)
+            for i, l in enumerate(ideal)
+        )
+        return dcg / idcg if idcg > 0 else 0.0
+
+    old_ndcgs: list[float] = []
+    new_ndcgs: list[float] = []
+    for i in range(len(groups)):
+        lo, hi = offsets[i], offsets[i + 1]
+        if hi - lo < 2:
+            continue
+        Xg, yg = X[lo:hi], y[lo:hi]
+        try:
+            s_old = prior_booster.predict(Xg)
+            s_new = booster_new.predict(Xg)
+        except Exception:
+            return False
+        old_ndcgs.append(_ndcg_at_k(s_old, yg))
+        new_ndcgs.append(_ndcg_at_k(s_new, yg))
+
+    if not old_ndcgs:
+        return True
+    old_arr = np.asarray(old_ndcgs)
+    new_arr = np.asarray(new_ndcgs)
+    delta = float(np.mean(new_arr - old_arr))
+    if delta < 0.02:
+        return False
+
+    # Paired t-test — small-sample safe.
+    diff = new_arr - old_arr
+    n = len(diff)
+    if n < 2:
+        return True
+    mean = float(np.mean(diff))
+    std = float(np.std(diff, ddof=1))
+    if std == 0.0:
+        return mean > 0
+    t_stat = mean / (std / np.sqrt(n))
+    # Rough threshold: t > 2.0 (~p<0.05 for n ≥ 10 two-tailed).
+    return t_stat > 2.0
+
+
+def _compute_eval_metrics(booster, rows, feature_names) -> dict:
+    """Lightweight training metrics snapshot."""
+    try:
+        import numpy as np
+        X, y, groups = _build_training_matrix(rows, feature_names)
+        preds = booster.predict(X) if X.size else np.zeros(0)
+        return {
+            "n_rows": int(X.shape[0]),
+            "n_groups": int(len(groups or [])),
+            "mean_score": float(np.mean(preds)) if preds.size else 0.0,
+        }
+    except Exception:  # pragma: no cover
+        return {}
