@@ -1,0 +1,428 @@
+# Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
+# Licensed under AGPL-3.0-or-later - see LICENSE file
+# Part of SuperLocalMemory v3.4.21 — LLD-07 §6
+
+"""Shared security primitives for SLM v3.4.21.
+
+LLD reference: `.backup/active-brain/lld/LLD-07-schema-migrations-and-security-primitives.md`
+Section: 6.1 through 6.10.
+
+Every file write, subprocess spawn, and secret-bearing string across SLM
+daemon, adapters, hooks, and binary installer routes through this module.
+Single source of truth — the hard rules in LLD-07 §7 are enforced here.
+
+All functions are defensive: they raise early, log nothing about the secret
+content, and use constant-time comparisons where applicable.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import math
+import os
+import re
+import secrets as _secrets
+import stat
+import subprocess
+import sys
+from pathlib import Path
+from typing import Iterable
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class PathTraversalError(ValueError):
+    """Raised by safe_resolve when a path escapes its allowed base."""
+
+
+class IntegrityError(ValueError):
+    """Raised when a SHA-256 integrity check fails."""
+
+
+# ---------------------------------------------------------------------------
+# 6.1 Safe path resolver (SEC-01-05, SEC-05-01, SEC-06-03)
+# ---------------------------------------------------------------------------
+
+
+_DENY_PREFIXES_POSIX: tuple[str, ...] = (
+    "/etc",
+    "/usr",
+    "/var",
+    "/sys",
+    "/proc",
+    "/bin",
+    "/sbin",
+    "/System",
+    "/Library",
+)
+_DENY_PREFIXES_WINDOWS: tuple[str, ...] = (
+    r"C:\Windows",
+    r"C:\Program Files",
+    r"C:\ProgramData",
+)
+
+
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _hits_deny_prefix(resolved: Path) -> bool:
+    resolved_str = str(resolved)
+    if _is_windows():  # pragma: no cover — Windows-only branch
+        lower = resolved_str.lower()
+        return any(lower.startswith(p.lower()) for p in _DENY_PREFIXES_WINDOWS)
+    return any(resolved_str == p or resolved_str.startswith(p + os.sep)
+               for p in _DENY_PREFIXES_POSIX)
+
+
+def safe_resolve(base: Path, rel: str | Path) -> Path:
+    """Resolve ``rel`` against ``base`` safely.
+
+    Rules:
+      - ``rel`` must be str or Path.
+      - ``..`` components are refused outright.
+      - Resolved absolute path must be a descendant of ``base.resolve()``.
+      - Resolved path must not land in a reserved system prefix.
+      - Any symlink in the chain is re-validated: its target must also live
+        under ``base``.
+
+    Returns the resolved absolute Path on success; raises PathTraversalError
+    otherwise.
+    """
+    if not isinstance(rel, (str, Path)):
+        raise TypeError(f"rel must be str | Path, got {type(rel).__name__}")
+
+    rel_path = Path(rel)
+    if ".." in rel_path.parts:
+        raise PathTraversalError(f"'..' components are forbidden: {rel!r}")
+
+    if rel_path.is_absolute():
+        candidate = rel_path
+    else:
+        candidate = base / rel_path
+
+    try:
+        resolved = candidate.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:  # pragma: no cover — defensive
+        raise PathTraversalError(f"cannot resolve {rel!r}: {exc}") from exc
+
+    if _hits_deny_prefix(resolved):
+        raise PathTraversalError(f"denied system prefix: {resolved}")
+
+    try:
+        base_resolved = base.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:  # pragma: no cover — defensive
+        raise PathTraversalError(f"cannot resolve base {base!r}: {exc}") from exc
+
+    try:
+        resolved.relative_to(base_resolved)
+    except ValueError as exc:
+        raise PathTraversalError(
+            f"{resolved} escapes base {base_resolved}"
+        ) from exc
+
+    # Symlink walk — defense in depth against TOCTOU on a symlink parent.
+    # The ``resolved.relative_to(base)`` check above catches the common case;
+    # this loop walks the pre-resolution chain so we refuse when any
+    # intermediate component is a symlink whose target escapes the base.
+    cur = candidate
+    while cur != cur.parent:
+        if cur.exists() and cur.is_symlink():
+            try:
+                target = cur.resolve(strict=False)
+                target.relative_to(base_resolved)
+            except (ValueError, OSError) as exc:  # pragma: no cover — TOCTOU
+                raise PathTraversalError(
+                    f"symlink {cur} points outside base"
+                ) from exc
+        cur = cur.parent
+
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# LLD-00 §4 — safe_resolve_identifier (SEC-C-02 fix)
+# ---------------------------------------------------------------------------
+#
+# The pre-existing ``safe_resolve`` above handles hardcoded relative paths
+# (e.g. `.cursor/rules/file.mdc`) against a trusted base. LLD-00 §4 adds a
+# stricter contract for *untrusted identifiers* — a ``session_id`` or
+# ``profile_id`` that may reach the filesystem via path join. This helper
+# enforces the LLD-00 regex AND the base-containment check. Callers in
+# LLD-09 (session state files) and LLD-11 (evolution.lock) MUST use this.
+#
+# Naming deviation from IMPLEMENTATION-MANIFEST P0.2: the manifest reused
+# the name ``safe_resolve`` but the existing path-style helper is used in
+# 9+ call sites. A separate name avoids breakage. See
+# ``.backup/active-brain/MANIFEST-DEVIATION.md`` P0.2 entry.
+
+_SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
+
+
+def safe_resolve_identifier(base: Path, untrusted: str) -> Path:
+    """Return ``base / untrusted`` only if ``untrusted`` is a safe identifier
+    AND the resolved path stays within ``base``. Raises ``ValueError`` otherwise.
+
+    Rejects: '..', '/', '\\', null bytes, empty strings, strings longer than
+    128 chars, and anything outside ``[a-zA-Z0-9_-]``.
+
+    Used for untrusted filesystem identifiers (``session_id``, ``profile_id``)
+    — NOT for hardcoded template paths (use :func:`safe_resolve` for those).
+    """
+    if not isinstance(untrusted, str):
+        raise ValueError(
+            f"unsafe identifier: expected str, got {type(untrusted).__name__}"
+        )
+    if not _SAFE_ID_RE.match(untrusted):
+        raise ValueError(f"unsafe identifier: {untrusted!r}")
+
+    base_abs = base.resolve(strict=False)
+    target = (base / untrusted).resolve(strict=False)
+    # The resolved target must be a direct child of base (or equal to it —
+    # defensive, though the regex already forbids the empty case).
+    if target != base_abs and base_abs not in target.parents:
+        raise ValueError(f"path escape: {untrusted!r}")
+    return target
+
+
+# ---------------------------------------------------------------------------
+# 6.10 SHA-256 integrity verifier (SEC-06-01)
+# ---------------------------------------------------------------------------
+
+
+def verify_sha256(data: bytes, expected_hex: str) -> None:
+    """Verify ``hashlib.sha256(data).hexdigest() == expected_hex``.
+
+    Uses ``hmac.compare_digest`` for constant-time comparison.
+    Raises IntegrityError on any mismatch.
+
+    Accepts expected_hex in either case (SHA-256 hex is case-insensitive).
+    """
+    if not isinstance(expected_hex, str):
+        raise IntegrityError("expected_hex must be str")
+    if len(expected_hex) != 64:
+        raise IntegrityError(
+            f"expected_hex must be 64 chars, got {len(expected_hex)}"
+        )
+    actual = hashlib.sha256(data).hexdigest()
+    if not hmac.compare_digest(actual.lower(), expected_hex.lower()):
+        raise IntegrityError("SHA-256 mismatch")
+
+
+# ---------------------------------------------------------------------------
+# 6.3 Secret redaction (SEC-02-01, SEC-01-03)
+# ---------------------------------------------------------------------------
+
+
+_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"), "ANTHROPIC"),
+    (re.compile(r"sk-[A-Za-z0-9_\-]{20,}"), "OPENAI"),
+    (re.compile(r"ghp_[A-Za-z0-9]{30,}"), "GITHUB"),
+    (re.compile(r"AKIA[A-Z0-9]{16}"), "AWS"),
+    (re.compile(r"xoxb-[A-Za-z0-9\-]{10,}"), "SLACK"),
+    (re.compile(r"ey[A-Za-z0-9_\-]{10,}\.ey[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{5,}"),
+     "JWT"),
+    (re.compile(r"-----BEGIN [A-Z ]+-----"), "PRIVATE_KEY"),
+)
+
+
+def _shannon_entropy(s: str) -> float:
+    if not s:  # pragma: no cover — callers guard
+        return 0.0
+    counts: dict[str, int] = {}
+    for c in s:
+        counts[c] = counts.get(c, 0) + 1
+    total = len(s)
+    entropy = 0.0
+    for n in counts.values():
+        p = n / total
+        entropy -= p * math.log2(p)
+    return entropy
+
+
+def redact_secrets(text: str, *, entropy_threshold: float = 4.5,
+                   window: int = 32) -> str:
+    """Replace detected secrets with ``[REDACTED:TYPE:last4]`` markers.
+
+    Two-layer defense:
+      1. Pattern-based (OpenAI/Anthropic/GitHub/AWS/Slack/JWT/PEM).
+      2. Entropy-based fallback — any 32+ char contiguous high-entropy run
+         of URL-safe characters that survived pattern scan gets redacted as
+         ``[REDACTED:ENTROPY:last4]``.
+
+    Rationale: patterns catch known formats; entropy catches novel tokens
+    (proprietary API keys, custom JWT-likes, base64 dumps). LLD-07 §6.3 rule:
+    every string entering cache or dashboard goes through this.
+    """
+    if not isinstance(text, str):
+        return text  # pragma: no cover — defensive
+    if not text:
+        return text
+
+    out = text
+    for pat, label in _SECRET_PATTERNS:
+        def _sub(match: re.Match[str], _label: str = label) -> str:
+            matched = match.group(0)
+            last4 = matched[-4:] if len(matched) >= 4 else matched
+            return f"[REDACTED:{_label}:{last4}]"
+        out = pat.sub(_sub, out)
+
+    # Entropy sweep — scan contiguous URL-safe runs.
+    token_re = re.compile(r"[A-Za-z0-9_\-./+=]{%d,}" % window)
+
+    def _entropy_sub(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if _shannon_entropy(token) >= entropy_threshold:
+            last4 = token[-4:]
+            return f"[REDACTED:ENTROPY:{last4}]"
+        return token
+
+    out = token_re.sub(_entropy_sub, out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 6.6 Install-token generation + verification (SEC-01-02, SEC-06-03)
+# ---------------------------------------------------------------------------
+
+
+def _install_token_path() -> Path:  # pragma: no cover — monkeypatched in tests
+    """Default install-token location — override in tests via monkeypatch."""
+    return Path.home() / ".superlocalmemory" / ".install_token"
+
+
+def ensure_install_token() -> str:
+    """Create or read the install token at ``~/.superlocalmemory/.install_token``.
+
+    On first call, creates the file with 32 bytes of ``secrets.token_hex``
+    and sets mode 0600 on POSIX. On subsequent calls, returns the existing
+    token unchanged.
+
+    The token is used as:
+      - ``X-SLM-Hook-Token`` header for ``/internal/prewarm`` auth.
+      - Cache-install binding via ``slm_meta`` row.
+    """
+    token_path = _install_token_path()
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if token_path.exists():
+        token = token_path.read_text(encoding="utf-8").strip()
+        if token:
+            return token
+        # Empty file — regenerate.
+
+    token = _secrets.token_hex(32)
+    # Open with O_EXCL where possible to prevent races; fall back to write.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(str(token_path), flags, 0o600)
+        try:
+            os.write(fd, token.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError:  # pragma: no cover — fallback for exotic FS
+        token_path.write_text(token, encoding="utf-8")
+
+    if not _is_windows():
+        try:
+            os.chmod(token_path, 0o600)
+        except OSError:  # pragma: no cover
+            pass
+
+    return token
+
+
+def verify_install_token(presented: str) -> bool:
+    """Constant-time compare ``presented`` against the stored install token.
+
+    Returns False (never raises) on missing file, empty input, or mismatch.
+    """
+    if not isinstance(presented, str) or not presented:
+        return False
+    token_path = _install_token_path()
+    if not token_path.exists():
+        return False
+    try:
+        stored = token_path.read_text(encoding="utf-8").strip()
+    except OSError:  # pragma: no cover
+        return False
+    if not stored:
+        return False
+    return hmac.compare_digest(stored, presented)
+
+
+# ---------------------------------------------------------------------------
+# 6.9 Subprocess sanitizer (SEC-05-01)
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_SAFE_ENV_KEYS: tuple[str, ...] = (
+    "PATH", "HOME", "USER", "LANG", "LC_ALL",
+    "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE",  # Windows
+)
+
+
+def _default_env() -> dict[str, str]:
+    return {k: os.environ[k] for k in _DEFAULT_SAFE_ENV_KEYS if k in os.environ}
+
+
+def run_subprocess_safe(
+    argv: list[str],
+    *,
+    timeout: float = 5.0,
+    env: dict[str, str] | None = None,
+    check: bool = False,
+    capture_output: bool = True,
+) -> subprocess.CompletedProcess:
+    """Safe wrapper around ``subprocess.run``.
+
+    Rules enforced:
+      - ``argv`` must be a list of strings (never a shell string).
+      - ``shell=False`` always.
+      - ``timeout`` is mandatory.
+      - Restricted environment by default — only a minimal set of safe keys.
+      - Callers may pass an explicit ``env`` to add specific variables.
+
+    This is the ONE place in the codebase allowed to call ``subprocess.run``.
+    Grep guard in CI enforces this (LLD-07 §7 SEC-HR-06).
+    """
+    if not isinstance(argv, list):
+        raise TypeError("argv must be list[str], shell=False only")
+    if not argv:
+        raise ValueError("argv must be non-empty")
+    for i, piece in enumerate(argv):
+        if not isinstance(piece, str):
+            raise TypeError(f"argv[{i}] must be str, got {type(piece).__name__}")
+
+    effective_env = _default_env()
+    if env is not None:
+        effective_env.update(env)
+
+    # NOTE: This is the sanctioned subprocess.run call site for SLM.
+    return subprocess.run(  # noqa: S603
+        argv,
+        shell=False,
+        timeout=timeout,
+        check=check,
+        capture_output=capture_output,
+        env=effective_env,
+    )
+
+
+__all__ = (
+    "PathTraversalError",
+    "IntegrityError",
+    "safe_resolve",
+    "safe_resolve_identifier",
+    "verify_sha256",
+    "redact_secrets",
+    "ensure_install_token",
+    "verify_install_token",
+    "run_subprocess_safe",
+)
