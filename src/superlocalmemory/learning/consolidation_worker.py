@@ -18,13 +18,64 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import sqlite3
-from datetime import datetime, timezone
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Final
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# LLD-10 — online retrain constants (Stage 6 Track A.3)
+#
+# Exposed at module scope so tests + dashboards import a single source of
+# truth. Matches LLD-10 §3.2 (hyperparam caps) + §9.1 (wall-time budget).
+# ---------------------------------------------------------------------------
+
+#: LightGBM hyperparameter caps. Contractual — violating these is a
+#: Stage-8 audit failure. Manifest A.3 names: num_leaves ≤ 31,
+#: max_depth ≤ 7, feature_fraction ≤ 0.8.
+RETRAIN_HYPERPARAM_CAPS: Final[dict] = {
+    "num_leaves": 31,
+    "max_depth": 7,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "min_data_in_leaf": 20,
+    "num_boost_round": 50,
+    "learning_rate": 0.05,
+    "metric": "ndcg",
+    "ndcg_eval_at": [1, 3, 5, 10],
+    "verbosity": -1,
+}
+
+#: Wall-time ceiling (seconds) for a single retrain cycle.
+RETRAIN_WALL_TIME_BUDGET_SEC: Final[float] = 30.0
+
+#: Model-size ceiling for the serialised booster blob (10 MB).
+RETRAIN_MODEL_SIZE_BYTES_CAP: Final[int] = 10 * 1024 * 1024
+
+#: Trigger: new outcomes since last retrain ≥ this → retrain.
+RETRAIN_NEW_OUTCOMES_THRESHOLD: Final[int] = 50
+
+#: Trigger: hours since last retrain ≥ this → retrain.
+RETRAIN_HOURS_THRESHOLD: Final[float] = 24.0
+
+
+class RetrainWallTimeExceeded(Exception):
+    """Raised by ``_train_booster`` when the 30 s budget is blown."""
+
+    def __init__(self, *, elapsed_sec: float) -> None:
+        super().__init__(
+            f"retrain wall-time exceeded: {elapsed_sec:.1f}s > "
+            f"{RETRAIN_WALL_TIME_BUDGET_SEC:.1f}s",
+        )
+        self.elapsed_sec = elapsed_sec
 
 
 class ConsolidationWorker:
@@ -548,6 +599,81 @@ class ConsolidationWorker:
             logger.debug("Retrain failed: %s", exc)
             return False
 
+    # ------------------------------------------------------------------
+    # LLD-10 — online retrain trigger
+    # ------------------------------------------------------------------
+
+    def _should_retrain(self, profile_id: str) -> bool:
+        """Return True if the outcome-count or 24h trigger has fired.
+
+        Reads ``learning_model_state.metadata_json`` on the active row.
+        Honours ``metadata_json.retrain_disabled_until`` (post-rollback
+        cooldown). No DB writes — pure SELECT + JSON parse.
+        """
+        try:
+            conn = sqlite3.connect(self._learning_db, timeout=5)
+            try:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT metadata_json FROM learning_model_state "
+                    "WHERE profile_id = ? AND is_active = 1 LIMIT 1",
+                    (profile_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            logger.debug("_should_retrain sqlite error: %s", exc)
+            return False
+
+        if row is None:
+            # No active model yet — let the legacy cold-start path
+            # (signal_count >= 200) drive first training.
+            return False
+
+        try:
+            meta = json.loads(row["metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+
+        now = datetime.now(timezone.utc)
+
+        # Cooldown: honour retrain_disabled_until (post-rollback).
+        disabled_until = meta.get("retrain_disabled_until")
+        if disabled_until:
+            try:
+                dt = datetime.fromisoformat(disabled_until)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt > now:
+                    return False
+            except (TypeError, ValueError):
+                pass  # malformed → ignore the cooldown
+
+        # Trigger A — outcome-count delta.
+        try:
+            new_outcomes = int(
+                meta.get("new_outcomes_since_last_retrain", 0) or 0,
+            )
+        except (TypeError, ValueError):
+            new_outcomes = 0
+        if new_outcomes >= RETRAIN_NEW_OUTCOMES_THRESHOLD:
+            return True
+
+        # Trigger B — hours since last retrain.
+        last = meta.get("last_retrain_at")
+        if last:
+            try:
+                last_dt = datetime.fromisoformat(last)
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                hours = (now - last_dt).total_seconds() / 3600.0
+                if hours >= RETRAIN_HOURS_THRESHOLD:
+                    return True
+            except (TypeError, ValueError):
+                pass
+
+        return False
+
 
 # ---------------------------------------------------------------------------
 # LLD-02 §4.6 — lambdarank retraining
@@ -807,3 +933,385 @@ def _compute_eval_metrics(booster, rows, feature_names) -> dict:
         }
     except Exception:  # pragma: no cover
         return {}
+
+
+# ===========================================================================
+# LLD-10 — online retrain + shadow + rollback (Track A.3)
+#
+# These helpers are ADDITIVE: the existing legacy ``_retrain_ranker_impl``
+# path is preserved verbatim for the cold-start signal-count>=200 trigger.
+# The online retrain cycle runs via ``_run_shadow_cycle`` — the worker's
+# consolidation tick calls ``_should_retrain`` first and, on True, drives
+# the cycle here.
+#
+# All four helpers are module-level so tests can monkey-patch them (the
+# trainer + row-fetch + size-measure are the seams the manifest tests
+# exercise).
+# ===========================================================================
+
+
+def _feature_names() -> list[str]:
+    """Indirection for tests — returns the live ranker FEATURE_NAMES."""
+    from superlocalmemory.learning.features import FEATURE_NAMES
+    return list(FEATURE_NAMES)
+
+
+def _fetch_training_rows(
+    learning_db_path: str, profile_id: str,
+) -> tuple[list[dict], list[str]]:
+    """Fetch real training rows + queue of candidate query_ids.
+
+    Returns ``(rows, candidate_ids)`` — ``rows`` matches the shape that
+    ``_build_training_matrix`` expects (``query_id``, ``fact_id``,
+    ``position``, ``features`` dict, ``outcome_reward``).
+    Tests monkey-patch this seam to inject deterministic fixtures.
+    """
+    from superlocalmemory.learning.database import LearningDatabase
+
+    db = LearningDatabase(learning_db_path)
+    rows = db.fetch_training_examples(
+        profile_id=profile_id,
+        limit=5000,
+        min_outcome_age_sec=60,
+        include_synthetic=False,
+    )
+    return rows, [r.get("query_id", "") for r in rows if r.get("query_id")]
+
+
+def _measure_serialized_size(booster) -> int:
+    """Return the serialised booster size in bytes. Seam for tests."""
+    try:
+        return len(booster.model_to_string().encode("utf-8"))
+    except Exception:
+        return 0
+
+
+def _train_booster(
+    learning_db_path: str,
+    profile_id: str,
+    *,
+    training_rows: list[dict],
+    feature_names: list[str],
+    prior_row: dict | None,
+):
+    """Train a LightGBM booster with the HARD hyperparam caps + wall-time
+    guard. Raises :class:`RetrainWallTimeExceeded` on budget breach.
+
+    Returns ``(booster, metrics_dict)``. Tests monkey-patch this seam;
+    production invocation uses the real path.
+    """
+    try:
+        import numpy as np
+        import lightgbm as lgb
+    except ImportError as exc:  # pragma: no cover — platform guard
+        raise RuntimeError(f"lightgbm unavailable: {exc}") from exc
+
+    from superlocalmemory.learning.labeler import label_gain
+
+    X, y_int, groups = _build_training_matrix(training_rows, feature_names)
+    if groups is None or len(groups) < 2:
+        raise ValueError(
+            f"insufficient query groups for retrain "
+            f"(got {None if groups is None else len(groups)})",
+        )
+    assert sum(groups) == X.shape[0], (
+        f"group sum mismatch: {sum(groups)} != {X.shape[0]}")
+
+    gain = label_gain()
+    y_int = np.clip(y_int, 0, len(gain) - 1)
+
+    ds_train = lgb.Dataset(
+        X,
+        label=y_int,
+        group=groups,
+        feature_name=list(feature_names),
+        free_raw_data=False,
+    )
+
+    _allowed_objectives = {"lambdarank", "rank_xendcg"}
+    objective = os.environ.get("SLM_LGBM_OBJECTIVE", "lambdarank").strip()
+    if objective not in _allowed_objectives:
+        objective = "lambdarank"
+
+    # CAPS — values are enforced both in the params dict (trainer side)
+    # and in RETRAIN_HYPERPARAM_CAPS (surface constant for tests + ops).
+    params = dict(RETRAIN_HYPERPARAM_CAPS)
+    params["objective"] = objective
+    params["label_gain"] = gain
+    params["num_threads"] = max(1, (os.cpu_count() or 2) - 1)
+    num_boost_round = int(params.pop("num_boost_round"))
+
+    start = time.monotonic()
+    # Wall-time guard: lgb.train is CPU-bound and not natively
+    # interruptible. We run inline + post-check. For belt-and-suspenders
+    # a deadline callback would fire between iterations.
+    try:
+        booster = lgb.train(
+            params, ds_train, num_boost_round=num_boost_round,
+        )
+    except lgb.basic.LightGBMError as exc:  # pragma: no cover
+        raise RuntimeError(f"lgb.train failed: {exc}") from exc
+    elapsed = time.monotonic() - start
+    if elapsed >= RETRAIN_WALL_TIME_BUDGET_SEC:
+        raise RetrainWallTimeExceeded(elapsed_sec=elapsed)
+
+    metrics = _compute_eval_metrics(booster, training_rows, feature_names)
+    metrics["wall_time_sec"] = elapsed
+    return booster, metrics
+
+
+def _persist_candidate(
+    learning_db_path: str,
+    *,
+    profile_id: str,
+    state_bytes: bytes,
+    feature_names: list[str],
+    trained_on_count: int,
+    metrics: dict,
+    shadow_results: dict | None,
+) -> int:
+    """Insert a fresh candidate row with is_candidate=1 + is_active=0.
+
+    Honours the partial unique index ``idx_model_candidate_one`` —
+    callers must discard/reject any prior candidate before insert.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    sha = hashlib.sha256(state_bytes).hexdigest()
+    metrics_json = json.dumps(metrics or {}, separators=(",", ":"))
+    fn_json = json.dumps(list(feature_names), separators=(",", ":"))
+    shadow_json = json.dumps(shadow_results or {}, separators=(",", ":"))
+
+    with sqlite3.connect(learning_db_path, timeout=10) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            # Wipe any stale candidate first (one-at-a-time contract).
+            conn.execute(
+                "DELETE FROM learning_model_state "
+                "WHERE profile_id = ? AND is_candidate = 1",
+                (profile_id,),
+            )
+            cur = conn.execute(
+                "INSERT INTO learning_model_state "
+                "(profile_id, model_version, state_bytes, bytes_sha256, "
+                " trained_on_count, feature_names, metrics_json, "
+                " is_active, is_candidate, shadow_results_json, "
+                " trained_at, updated_at) "
+                "VALUES (?, '3.4.21', ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)",
+                (
+                    profile_id, state_bytes, sha, int(trained_on_count),
+                    fn_json, metrics_json, shadow_json, now, now,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid or 0)
+        except sqlite3.Error:
+            conn.rollback()
+            raise
+
+
+def _promote_candidate(
+    learning_db_path: str, *, profile_id: str, candidate_id: int,
+) -> bool:
+    """Atomic lineage flip (LLD-10 §5 / §6.1).
+
+    Invariants (enforced by M009 partial unique indexes):
+      * Exactly one ``is_active=1`` per profile at any instant.
+      * Exactly one ``is_candidate=1`` per profile at any instant.
+
+    Flip order inside one BEGIN IMMEDIATE:
+      1. Clear existing is_previous (it becomes is_rollback).
+      2. Current active → is_active=0, is_previous=1.
+      3. Candidate → is_active=1, is_candidate=0, promoted_at=now.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(learning_db_path, timeout=10) as conn:
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+
+            # Step 1 — demote the existing previous to rollback, if any.
+            existing_prev = conn.execute(
+                "SELECT id FROM learning_model_state "
+                "WHERE profile_id = ? AND is_previous = 1",
+                (profile_id,),
+            ).fetchone()
+            if existing_prev is not None:
+                conn.execute(
+                    "UPDATE learning_model_state "
+                    "SET is_previous = 0, is_rollback = 1 "
+                    "WHERE id = ?",
+                    (existing_prev["id"],),
+                )
+
+            # Step 2 — demote current active. Clear is_active first so
+            # the partial unique index on is_active=1 never sees two
+            # rows simultaneously.
+            conn.execute(
+                "UPDATE learning_model_state "
+                "SET is_active = 0, is_previous = 1 "
+                "WHERE profile_id = ? AND is_active = 1",
+                (profile_id,),
+            )
+
+            # Step 3 — promote candidate.
+            conn.execute(
+                "UPDATE learning_model_state "
+                "SET is_active = 1, is_candidate = 0, promoted_at = ? "
+                "WHERE id = ?",
+                (now, candidate_id),
+            )
+
+            # Reset the outcome counter on the new active.
+            row = conn.execute(
+                "SELECT metadata_json FROM learning_model_state "
+                "WHERE id = ?", (candidate_id,),
+            ).fetchone()
+            try:
+                meta = json.loads(row["metadata_json"] or "{}")
+            except (TypeError, ValueError):
+                meta = {}
+            meta["new_outcomes_since_last_retrain"] = 0
+            meta["last_retrain_at"] = now
+            conn.execute(
+                "UPDATE learning_model_state SET metadata_json = ? "
+                "WHERE id = ?",
+                (json.dumps(meta), candidate_id),
+            )
+            conn.commit()
+            return True
+        except sqlite3.Error as exc:
+            conn.rollback()
+            logger.error("_promote_candidate sqlite error: %s", exc)
+            return False
+
+
+def _run_shadow_cycle(
+    *,
+    memory_db_path: str,
+    learning_db_path: str,
+    profile_id: str,
+) -> dict:
+    """Top-level online retrain cycle — runs inside the consolidation
+    worker. Orchestrates: fetch rows → train → size-check → persist
+    candidate (NOT auto-promote).
+
+    Promotion happens AFTER accumulating live-recall shadow results
+    (ShadowTest.decide == 'promote'). That path is driven by the
+    ranker's recall hook; the cycle here only produces the candidate.
+
+    Returns a result dict with keys:
+      * ``aborted``: reason string if aborted (``'insufficient_data'``,
+        ``'model_too_large'``, ``'wall_time_exceeded'``, ``'train_error'``).
+      * ``candidate_persisted``: True if a candidate row was written.
+      * ``promoted``: False (always — promotion is a separate step).
+      * ``metrics``: training metrics dict on success.
+    """
+    out: dict = {
+        "aborted": None, "candidate_persisted": False,
+        "promoted": False, "metrics": None,
+    }
+
+    try:
+        rows, _qids = _fetch_training_rows(learning_db_path, profile_id)
+    except Exception as exc:
+        logger.debug("fetch_training_rows failed: %s", exc)
+        out["aborted"] = "fetch_error"
+        return out
+
+    if len(rows) < 20:
+        out["aborted"] = "insufficient_data"
+        return out
+
+    # Load prior active for in-sample shadow (reuse existing helper).
+    try:
+        from superlocalmemory.learning.database import LearningDatabase
+        db = LearningDatabase(learning_db_path)
+        prior_row = db.load_active_model(profile_id)
+    except Exception:
+        prior_row = None
+
+    feature_names = _feature_names()
+
+    try:
+        booster, metrics = _train_booster(
+            learning_db_path, profile_id,
+            training_rows=rows, feature_names=feature_names,
+            prior_row=prior_row,
+        )
+    except RetrainWallTimeExceeded as exc:
+        out["aborted"] = "wall_time_exceeded"
+        out["metrics"] = {"wall_time_sec": exc.elapsed_sec}
+        return out
+    except Exception as exc:
+        logger.debug("train_booster failed: %s", exc)
+        out["aborted"] = "train_error"
+        return out
+
+    # Model-size guardrail (LLD-10 §3.2 post-train check).
+    size_bytes = _measure_serialized_size(booster)
+    if size_bytes > RETRAIN_MODEL_SIZE_BYTES_CAP:
+        logger.warning(
+            "retrain: candidate %.2f MB exceeds %.1f MB cap — rejecting",
+            size_bytes / 1e6, RETRAIN_MODEL_SIZE_BYTES_CAP / 1e6,
+        )
+        out["aborted"] = "model_too_large"
+        out["metrics"] = metrics
+        return out
+
+    # In-sample shadow gate — cheap filter before spending live recalls.
+    if prior_row is not None:
+        if not _shadow_test_improved(
+            prior_row, booster, rows, feature_names,
+        ):
+            out["aborted"] = "insample_shadow_fail"
+            out["metrics"] = metrics
+            return out
+
+    try:
+        state_bytes = booster.model_to_string().encode("utf-8")
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.debug("model serialise failed: %s", exc)
+        out["aborted"] = "serialise_error"
+        return out
+
+    try:
+        _persist_candidate(
+            learning_db_path, profile_id=profile_id,
+            state_bytes=state_bytes, feature_names=feature_names,
+            trained_on_count=len(rows), metrics=metrics,
+            shadow_results={"in_sample_pass": prior_row is not None},
+        )
+    except sqlite3.Error as exc:
+        logger.warning("persist_candidate failed: %s", exc)
+        out["aborted"] = "persist_error"
+        return out
+
+    out["candidate_persisted"] = True
+    out["promoted"] = False  # Promotion is a separate live-shadow step.
+    out["metrics"] = metrics
+    return out
+
+
+def _check_rollback(
+    *,
+    learning_db_path: str,
+    profile_id: str,
+    observations: list[float],
+    baseline_ndcg: float,
+) -> bool:
+    """Evaluate the 200-recall watch window and fire rollback if needed.
+
+    Returns True iff rollback was executed.
+    """
+    from superlocalmemory.learning.model_rollback import ModelRollback
+
+    rb = ModelRollback(
+        learning_db_path=learning_db_path,
+        profile_id=profile_id,
+        baseline_ndcg=baseline_ndcg,
+    )
+    for i, val in enumerate(observations):
+        rb.record_post_promotion(query_id=f"watch-{i}", ndcg_at_10=val)
+    if rb.should_rollback():
+        return rb.execute_rollback(reason="watch_window_regression")
+    return False
