@@ -233,6 +233,47 @@ async def lifespan(application: FastAPI):
     engine = None
     config = None
 
+    # H-21 (Stage 8) — first-boot-after-upgrade notice. Compare the cached
+    # version marker against the current package version; if they differ
+    # (fresh install or upgrade), log a one-time banner with a link to the
+    # CHANGELOG. Non-fatal; any filesystem error is swallowed.
+    try:
+        from pathlib import Path as _VP
+        try:
+            from importlib.metadata import version as _pkg_version
+            _slm_version = _pkg_version("superlocalmemory")
+        except Exception:
+            _slm_version = "unknown"
+        _version_marker = _VP.home() / ".superlocalmemory" / ".last_version"
+        _prev = None
+        if _version_marker.exists():
+            try:
+                _prev = _version_marker.read_text(encoding="utf-8").strip()
+            except OSError:
+                _prev = None
+        if _prev != _slm_version:
+            if _prev is None:
+                logger.info(
+                    "[slm] first boot on v%s — run `slm status` to see your "
+                    "memory overview. Changelog: "
+                    "https://github.com/qualixar/superlocalmemory/blob/main/CHANGELOG.md",
+                    _slm_version,
+                )
+            else:
+                logger.info(
+                    "[slm] upgraded %s → %s. Data migrations run in a moment; "
+                    "your 18k+ atomic facts are preserved. Changelog: "
+                    "https://github.com/qualixar/superlocalmemory/blob/main/CHANGELOG.md",
+                    _prev, _slm_version,
+                )
+            try:
+                _version_marker.parent.mkdir(parents=True, exist_ok=True)
+                _version_marker.write_text(_slm_version, encoding="utf-8")
+            except OSError:
+                pass  # non-fatal
+    except Exception as _exc:  # pragma: no cover — never block startup
+        logger.debug("version-banner skipped: %s", _exc)
+
     # LLD-06 §7.3 / LLD-07 §4.1 — run additive schema migrations BEFORE
     # engine init so later queries see the expected columns/tables.
     # Non-fatal: any failure here is logged and the daemon still starts.

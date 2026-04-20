@@ -4,11 +4,11 @@
 
 <h1 align="center">SuperLocalMemory V3.4</h1>
 <p align="center"><strong>Every other AI forgets. Yours won't.</strong><br/><em>Infinite memory for Claude Code, Cursor, Windsurf & 17+ AI tools.</em></p>
-<p align="center"><code>v3.4.11</code> — Install once. Every session remembers the last. Automatically.</p>
+<p align="center"><code>v3.4.21</code> — Install once. Every session remembers the last. Automatically.</p>
 <p align="center"><strong>Backed by 3 peer-reviewed research papers</strong> · <a href="https://arxiv.org/abs/2603.02240">arXiv:2603.02240</a> · <a href="https://arxiv.org/abs/2603.14588">arXiv:2603.14588</a> · <a href="https://arxiv.org/abs/2604.04514">arXiv:2604.04514</a></p>
 
 <p align="center">
-  <code>+16pp vs Mem0 (zero cloud)</code> &nbsp;·&nbsp; <code>85% Open-Domain (best of any system)</code> &nbsp;·&nbsp; <code>EU AI Act Ready</code>
+  <code>+16pp vs Mem0 (zero cloud)</code> &nbsp;·&nbsp; <code>85% Open-Domain (best zero-LLM score)</code> &nbsp;·&nbsp; <code>EU AI Act Ready</code>
 </p>
 
 <p align="center">
@@ -45,7 +45,9 @@ SuperLocalMemory V3 takes a different approach: **mathematics instead of cloud c
 | **SLM V3 Mode A** | **74.8%** | **No** | **Yes (EL2)** | $0 |
 | Mem0 | 64.2% | Yes | Partial | $24M |
 
-Mode A scores **74.8% with zero cloud dependency** — outperforming Mem0 by 16 percentage points without a single API call. On open-domain questions, Mode A scores **85.0% — the highest of any system in the evaluation**, including cloud-powered ones. Mode C reaches **87.7%**, matching enterprise cloud systems.
+Mode A scores **74.8% with zero cloud dependency** — outperforming Mem0 by 16 percentage points on this evaluation, without a single API call. On the open-domain subset, Mode A scores **85.0%**, the highest observed score among the systems we evaluated without any cloud LLM call. Mode C reaches **87.7%**, competitive with enterprise cloud systems.
+
+> **Comparison caveat.** We compare Mode A (zero-LLM, CPU-only) with published Mem0, Zep, Letta, and EverMemOS scores on LoCoMo. Mem0's public hybrid-with-LLM configuration reports numbers higher than 64.2% on some LoCoMo splits; the 64.2% cited here is the zero-retrieval-LLM baseline disclosed in their paper. Our scores were re-run in-house on the same LoCoMo questions. Mode C uses a local LLM (Ollama / Mistral by default); it is not "zero cloud". The goal of the table is like-for-like among locally-running configurations, not an across-the-board ranking.
 
 Mathematical layers contribute **+12.7 percentage points** on average across 6 conversations (n=832 questions), with up to **+19.9pp on the most challenging dialogues**. This isn't more compute — it's better math.
 
@@ -201,7 +203,7 @@ slm status
 
 ### Dual Interface: MCP + CLI
 
-SLM works everywhere -- from IDEs to CI pipelines to Docker containers. The only AI memory system with both MCP and agent-native CLI.
+SLM works everywhere — from IDEs to CI pipelines to Docker containers. Both the MCP server and the agent-native CLI are first-class, so the same backend serves IDE-side integrations and scripted automations.
 
 | Need | Use | Example |
 |------|-----|---------|
@@ -241,7 +243,7 @@ slm mode b   # Local Ollama
 slm mode c   # Cloud LLM
 ```
 
-**Mode A** is the only agent memory that operates with **zero cloud dependency** while achieving competitive retrieval accuracy on a standard benchmark. All data stays on your device. No API keys. No GPU. Runs on 2 vCPUs + 4GB RAM.
+**Mode A** is, to the best of our knowledge, the only publicly-released agent memory that runs with zero cloud calls while clearing Mem0's published LoCoMo score. All data stays on your device. No API keys. No GPU. Runs on 2 vCPUs + 4GB RAM. If another fully-local system hits similar numbers, please open an issue — we'll update this line.
 
 ---
 
@@ -269,9 +271,9 @@ Query  ──►  Strategy Classifier  ──►  6 Parallel Channels:
 
 Three novel contributions replace cloud LLM dependency with mathematical guarantees:
 
-1. **Fisher-Rao Retrieval Metric** — Similarity scoring derived from the Fisher information structure of diagonal Gaussian families. Graduated ramp from cosine to geodesic distance over the first 10 accesses. The first application of information geometry to agent memory retrieval.
+1. **Fisher-Rao Retrieval Metric** — Similarity scoring derived from the Fisher information structure of diagonal Gaussian families. Graduated ramp from cosine to geodesic distance over the first 10 accesses. To the best of our knowledge, the first public application of information geometry specifically to agent memory retrieval — if prior work exists please open an issue so we can credit it.
 
-2. **Sheaf Cohomology for Consistency** — Algebraic topology detects contradictions by computing coboundary norms on the knowledge graph. The first algebraic guarantee for contradiction detection in agent memory.
+2. **Sheaf Cohomology for Consistency** — Algebraic topology detects contradictions by computing coboundary norms on the knowledge graph. We are not aware of a prior production agent-memory system that computes sheaf-cohomology coboundary norms this way; corrections welcome.
 
 3. **Riemannian Langevin Lifecycle** — Memory positions evolve on the Poincare ball via discretized Langevin SDE. Frequently accessed memories stay active; neglected memories self-archive. No hardcoded thresholds.
 

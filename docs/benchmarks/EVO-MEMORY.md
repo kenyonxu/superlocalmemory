@@ -145,6 +145,56 @@ merging to `main`.
 3. The harness is single-threaded and single-process so the 5-minute
    wall-time budget is deterministic across CI runners.
 
+### Known limitation: day-14 dip
+
+**What drops.** MRR@10 and Recall@10 fall sharply on the day-14
+measurement (MRR 0.0538 → 0.0212, Recall 0.190 → 0.070) before
+recovering by day-30. This is reproducible across runs — the
+Stage-8 audit flagged it as a real signal, not a reproducibility
+artefact, and we have now traced it.
+
+**Why.** The reward channel in the harness is asymmetric in two
+directions at once, and the synthetic activity schedule hits a
+window on days ~10-16 where both asymmetries compound:
+
+1. The negative nudge is twice the positive one — `_NEGATIVE_NUDGE
+   = -0.10` vs `_POSITIVE_NUDGE = +0.05` (see
+   `tests/test_benchmarks/evo_memory.py` §Constants). A single
+   requery-labelled activity query cancels two cite-labelled ones
+   on the same fact.
+2. In `simulate_day()` (same file, step 5), a negative settled
+   reward still nudges the *ground-truth relevant* facts for that
+   activity query downward. For the 20 % of activity rows labelled
+   `requery` (`reward = 0.0` in `fixtures/generate_synthetic_fixture.py`),
+   the relevant facts are correct by construction — the "miss" is
+   a retrieval failure, not a fact-quality failure — yet the prior
+   gets punished anyway. The fixture RNG clusters enough
+   requery-labelled activity around days 10-16 that the priors for
+   the day-14 test-query relevants dip into the negative band.
+
+Reward accumulation across days 17-30 dominates this window, which
+is why day-30 still clears the +10 % publish gate.
+
+**What a fix would need.** Any of these independently would
+eliminate the dip; a real v3.4.22 design would pick one after
+re-benchmarking:
+
+- Route the negative nudge to the *retrieved-but-wrong* fact_ids
+  (the recall's actual output), not to `relevant_seed_idxs`.
+- Symmetric magnitudes (`_POSITIVE_NUDGE == -_NEGATIVE_NUDGE`) plus
+  a mild temporal smoothing of priors — e.g. EMA across the last
+  k=7 days instead of instantaneous accumulation.
+- Gate the nudge on signal identity: `requery` should demote the
+  *bad* candidates only, `cite` should promote the relevant.
+
+**Why it's acceptable for v3.4.21.** The day-30 vs day-1 gate is
+what we publish against, and day-30 lift is `+18.6 %` — well above
+the stable threshold. The dip is inside the reward-prior coupling
+of the harness, not inside the SLM retrieval code. Once Track
+A.3's LightGBM retrain fully replaces the harness's hand-rolled
+prior nudge, this asymmetry is removed at the source. Tracked as a
+v3.4.22 design item; no runtime code change in this release.
+
 ---
 
 _Template version: 1.0 (LLD-14 §7)._

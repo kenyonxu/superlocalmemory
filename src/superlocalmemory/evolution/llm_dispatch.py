@@ -261,7 +261,20 @@ def _log_cost(
     cost_usd: float = 0.0,
     cycle_id: str | None = None,
 ) -> None:
-    """Append a redacted cost-log row. Never stores prompt/response text."""
+    """Append a redacted cost-log row. Never stores prompt/response text.
+
+    H-16 (Stage 8): ``profile_id`` must be a non-empty string. The schema
+    has ``NOT NULL`` on the column but SQLite accepts empty strings — that
+    would break the dashboard's per-profile cost widget by silently
+    aggregating unattributed spend. We raise here instead so the caller
+    fixes the upstream bug rather than learning about it weeks later from
+    a mis-reported invoice.
+    """
+    if not isinstance(profile_id, str) or not profile_id.strip():
+        raise ValueError(
+            "evolution_llm_cost_log.profile_id must be a non-empty string "
+            f"(got {profile_id!r})"
+        )
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
         conn = sqlite3.connect(learning_db)

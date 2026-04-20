@@ -136,7 +136,16 @@ class EvolutionBudget:
 
         Tokens/cost are zero — the real LLM cost rows land as
         ``charge_llm_call`` is invoked by the dispatcher.
+
+        H-16 (Stage 8): profile_id must be a non-empty string. Enforced
+        here so a mis-constructed EvolutionBudget fails at the first
+        write instead of silently attributing cost to an empty bucket.
         """
+        if not isinstance(self._profile_id, str) or not self._profile_id.strip():
+            raise ValueError(
+                "EvolutionBudget.profile_id must be a non-empty string "
+                f"(got {self._profile_id!r})"
+            )
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         conn = sqlite3.connect(self._learning_db)
         try:
