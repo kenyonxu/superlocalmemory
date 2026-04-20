@@ -20,7 +20,7 @@ jobs:
         shell: bash
 
       - name: Install test dependencies
-        run: pip install pytest sqlite-vec
+        run: pip install pytest pytest-asyncio sqlite-vec
 
       - name: Run tests
         shell: bash
