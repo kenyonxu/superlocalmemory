@@ -23,6 +23,84 @@ router = APIRouter()
 
 LEARNING_DB = MEMORY_DIR / "learning.db"
 
+
+# ---------------------------------------------------------------------------
+# LLD-02 §4.10 — Dashboard phase truth
+# ---------------------------------------------------------------------------
+
+
+def _compute_ranker_phase(
+    profile_id: str,
+    *,
+    learning_db_path: Path | None = None,
+) -> dict:
+    """Return {phase, label, model_active, signals} — LLD-02 §4.10.
+
+    Phase 3 requires BOTH an active (is_active=1) row AND a successful
+    SHA-256 verification on the model_cache load. Tampered bytes fall
+    back to phase 2.
+    """
+    from superlocalmemory.learning.database import LearningDatabase
+    from superlocalmemory.learning.model_cache import load_active, invalidate
+
+    db_path = Path(learning_db_path) if learning_db_path else LEARNING_DB
+    if not db_path.exists():
+        return {
+            "phase": 1,
+            "label": "Cold start (cross-encoder only)",
+            "model_active": False,
+            "signals": 0,
+        }
+
+    db = LearningDatabase(db_path)
+    try:
+        signals = db.count_signals(profile_id)
+    except Exception as exc:
+        logger.warning("count_signals failed: %s", exc)
+        signals = 0
+
+    # Force a cache-bypass load — the dashboard read is rare and we want
+    # tamper detection to surface immediately.
+    invalidate(profile_id)
+    try:
+        model = load_active(db, profile_id, use_cache=False)
+    except Exception as exc:
+        logger.warning("load_active failed: %s", exc)
+        model = None
+
+    active = model is not None
+
+    if active and signals >= 200:
+        return {
+            "phase": 3,
+            "label": "LightGBM ranker active",
+            "model_active": True,
+            "signals": signals,
+        }
+    if signals >= 50:
+        return {
+            "phase": 2,
+            "label": "Contextual bandit",
+            "model_active": False,
+            "signals": signals,
+        }
+    return {
+        "phase": 1,
+        "label": "Cold start (cross-encoder only)",
+        "model_active": False,
+        "signals": signals,
+    }
+
+
+@router.get("/api/learning/ranker_phase")
+async def ranker_phase():
+    """Dashboard endpoint — LLD-02 §4.10 phase truth."""
+    try:
+        profile = get_active_profile()
+    except Exception:
+        profile = "default"
+    return _compute_ranker_phase(profile)
+
 # Feature detection
 LEARNING_AVAILABLE = False
 BEHAVIORAL_AVAILABLE = False
@@ -451,15 +529,86 @@ async def learning_backup():
 
 @router.post("/api/learning/reset")
 async def learning_reset():
-    """Reset all learning data. Memories preserved."""
+    """Reset all learning data for the active profile. Memories preserved."""
     if not LEARNING_AVAILABLE:
         return {"success": False, "error": "Learning system not available"}
-    return {"status": "not_implemented", "message": "Coming soon"}
+    try:
+        from superlocalmemory.learning.database import LearningDatabase
+        db = LearningDatabase(LEARNING_DB)
+        profile_id = get_active_profile() or "default"
+        db.reset(profile_id=profile_id)
+        return {
+            "success": True,
+            "message": "Learning data reset. Memories preserved.",
+            "profile_id": profile_id,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.error("learning_reset failed: %s", exc)
+        return {"success": False, "error": str(exc)}
 
 
 @router.post("/api/learning/retrain")
-async def learning_retrain():
-    """Force retrain the ranking model."""
+async def learning_retrain(data: dict | None = None):
+    """Force a retrain of the LightGBM ranker.
+
+    Body (optional, JSON):
+        ``{"include_synthetic": bool}`` — when True, migrated legacy rows
+        (``is_synthetic=1``) participate in training. Default False.
+    """
     if not LEARNING_AVAILABLE:
         return {"success": False, "error": "Learning system not available"}
-    return {"status": "not_implemented", "message": "Coming soon"}
+    include_synthetic = bool(
+        data and data.get("include_synthetic")
+    ) if isinstance(data, dict) else False
+    try:
+        from superlocalmemory.learning.consolidation_worker import (
+            _retrain_ranker_impl,
+        )
+        profile_id = get_active_profile() or "default"
+        trained = _retrain_ranker_impl(
+            LEARNING_DB,
+            profile_id,
+            include_synthetic=include_synthetic,
+        )
+        if trained:
+            return {
+                "success": True,
+                "trained": True,
+                "profile_id": profile_id,
+                "include_synthetic": include_synthetic,
+            }
+        return {
+            "success": True,
+            "trained": False,
+            "profile_id": profile_id,
+            "include_synthetic": include_synthetic,
+            "message": (
+                "Not enough training rows yet. Keep using SLM, or run "
+                "legacy migration + retry with include_synthetic=true."
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.error("learning_retrain failed: %s", exc)
+        return {"success": False, "error": str(exc)}
+
+
+@router.post("/api/learning/migrate-legacy")
+async def learning_migrate_legacy():
+    """Copy ``learning_feedback`` rows into LLD-02 tables for training.
+
+    Idempotent: subsequent calls detect the migration_log sentinel and
+    return ``already_done=True`` without re-copying. The rows are written
+    with ``is_synthetic=1`` to preserve provenance; the trainer must be
+    invoked with ``include_synthetic=True`` to use them.
+    """
+    if not LEARNING_AVAILABLE:
+        return {"success": False, "error": "Learning system not available"}
+    try:
+        from superlocalmemory.learning.legacy_migration import (
+            migrate_legacy_feedback,
+        )
+        stats = migrate_legacy_feedback(LEARNING_DB)
+        return {"success": True, **stats}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("learning_migrate_legacy failed: %s", exc)
+        return {"success": False, "error": str(exc)}

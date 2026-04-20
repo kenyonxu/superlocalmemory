@@ -1,45 +1,54 @@
 // SuperLocalMemory V2 - Event Listener Wiring
 // Loads LAST — after all module scripts. Connects UI events to module functions.
+//
+// v3.4.21 Domain rewrite: several tabs / panes were folded together
+// (Patterns/Learning/Behavioral -> Brain; Clusters/Entities -> Graph;
+// Recall Lab/Timeline -> Memories; Events/Agents/Trust/Lifecycle/
+// Compliance/Math/Ingestion -> Health). Every line below is now
+// null-guarded so missing elements never halt JS execution — a
+// silent TypeError here used to cascade into "all spinners forever"
+// because ng-shell.js failed to initialise. This whole file is
+// slated for deletion in the final dead-code purge; until then,
+// null-guards keep it harmless.
 
-document.getElementById('memories-tab').addEventListener('shown.bs.tab', loadMemories);
-document.getElementById('clusters-tab').addEventListener('shown.bs.tab', loadClusters);
-document.getElementById('patterns-tab').addEventListener('shown.bs.tab', loadPatterns);
-document.getElementById('timeline-tab').addEventListener('shown.bs.tab', loadTimeline);
-document.getElementById('settings-tab').addEventListener('shown.bs.tab', loadSettings);
-document.getElementById('search-query').addEventListener('keypress', function(e) { if (e.key === 'Enter') searchMemories(); });
+(function wire() {
+    function onShown(id, fn) {
+        var el = document.getElementById(id);
+        if (el && typeof fn === 'function') {
+            el.addEventListener('shown.bs.tab', fn);
+        }
+    }
 
-document.getElementById('profile-select').addEventListener('change', function() {
-    switchProfile(this.value);
-});
+    function on(id, ev, fn) {
+        var el = document.getElementById(id);
+        if (el) el.addEventListener(ev, fn);
+    }
 
-document.getElementById('add-profile-btn').addEventListener('click', function() {
-    createProfile();
-});
+    onShown('memories-tab', typeof loadMemories === 'function' ? loadMemories : null);
+    onShown('clusters-tab', typeof loadClusters === 'function' ? loadClusters : null);
+    onShown('patterns-tab', typeof loadPatterns === 'function' ? loadPatterns : null);
+    onShown('timeline-tab', typeof loadTimeline === 'function' ? loadTimeline : null);
+    onShown('settings-tab', typeof loadSettings === 'function' ? loadSettings : null);
+    onShown('events-tab', typeof loadEventStats === 'function' ? loadEventStats : null);
+    onShown('agents-tab', typeof loadAgents === 'function' ? loadAgents : null);
+    onShown('learning-tab', typeof loadLearning === 'function' ? loadLearning : null);
+    onShown('lifecycle-tab', typeof loadLifecycle === 'function' ? loadLifecycle : null);
+    onShown('behavioral-tab', typeof loadBehavioral === 'function' ? loadBehavioral : null);
+    onShown('compliance-tab', typeof loadCompliance === 'function' ? loadCompliance : null);
 
-var newProfileInput = document.getElementById('new-profile-name');
-if (newProfileInput) {
-    newProfileInput.addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') createProfile();
+    on('search-query', 'keypress', function (e) {
+        if (e.key === 'Enter' && typeof searchMemories === 'function') searchMemories();
     });
-}
 
-// v2.5 tabs (graceful — elements may not exist on older installs)
-var eventsTab = document.getElementById('events-tab');
-if (eventsTab) eventsTab.addEventListener('shown.bs.tab', loadEventStats);
+    on('profile-select', 'change', function () {
+        if (typeof switchProfile === 'function') switchProfile(this.value);
+    });
 
-var agentsTab = document.getElementById('agents-tab');
-if (agentsTab) agentsTab.addEventListener('shown.bs.tab', loadAgents);
+    on('add-profile-btn', 'click', function () {
+        if (typeof createProfile === 'function') createProfile();
+    });
 
-// v2.7 learning tab (graceful)
-var learningTab = document.getElementById('learning-tab');
-if (learningTab) learningTab.addEventListener('shown.bs.tab', loadLearning);
-
-// v2.8 tabs (graceful — elements may not exist on older installs)
-var lifecycleTab = document.getElementById('lifecycle-tab');
-if (lifecycleTab) lifecycleTab.addEventListener('shown.bs.tab', loadLifecycle);
-
-var behavioralTab = document.getElementById('behavioral-tab');
-if (behavioralTab) behavioralTab.addEventListener('shown.bs.tab', loadBehavioral);
-
-var complianceTab = document.getElementById('compliance-tab');
-if (complianceTab) complianceTab.addEventListener('shown.bs.tab', loadCompliance);
+    on('new-profile-name', 'keypress', function (e) {
+        if (e.key === 'Enter' && typeof createProfile === 'function') createProfile();
+    });
+})();

@@ -19,14 +19,328 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
+import queue
 import sqlite3
 import threading
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# ===========================================================================
+# LLD-02 §4.1 — SignalBatch + enqueue + record_signal_batch
+# ===========================================================================
+#
+# These module-level helpers are the v3.4.21 signal pipeline. The class
+# ``LearningSignals`` below stays in place for v3.4.20 compatibility (D5);
+# new writers go through ``enqueue`` / ``record_signal_batch``.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SignalCandidate:
+    """One candidate returned by the retrieval pipeline for signal recording.
+
+    Immutable (frozen=True). Carries the minimum needed to write both a
+    ``learning_signals`` row and a ``learning_features`` row in a single TX.
+    """
+
+    fact_id: str
+    channel_scores: dict[str, float] = field(default_factory=dict)
+    cross_encoder_score: float | None = None
+    # Full result dict — used by FeatureExtractor.extract(); kept lazily so we
+    # only serialise features at drain time, not enqueue time.
+    result_dict: dict[str, Any] = field(default_factory=dict)
+
+    def to_result_dict(self) -> dict[str, Any]:
+        """Return a result dict suitable for ``FeatureExtractor.extract()``.
+
+        Includes channel_scores and cross_encoder_score. Callers can override
+        by placing richer fields in ``result_dict`` at construction time.
+        """
+        merged: dict[str, Any] = {"fact_id": self.fact_id}
+        if self.channel_scores:
+            merged["channel_scores"] = dict(self.channel_scores)
+        if self.cross_encoder_score is not None:
+            merged["cross_encoder_score"] = self.cross_encoder_score
+        # Caller-provided fields override defaults.
+        merged.update(self.result_dict)
+        return merged
+
+
+@dataclass(frozen=True)
+class SignalBatch:
+    """One recall's worth of signal rows. Enqueued onto the worker."""
+
+    profile_id: str
+    query_id: str
+    query_text: str
+    candidates: tuple[SignalCandidate, ...] = field(default_factory=tuple)
+    query_context: dict[str, Any] = field(default_factory=dict)
+
+
+# Module-level bounded queue — one per process. Sized per LLD-02 §9
+# ``SLM_SIGNAL_QUEUE_MAX`` (default 5000). Readers are the signal_worker.
+_QUEUE_MAX: int = 5000
+_Q: "queue.Queue[SignalBatch]" = queue.Queue(maxsize=_QUEUE_MAX)
+
+# Observability counters — module-level so tests can reset/inspect.
+_counters: dict[str, int] = {
+    "signal_dropped_total": 0,
+    "signal_enqueued_total": 0,
+    "enqueue_failed_total": 0,
+    "signal_drop_on_flush_total": 0,
+}
+_counters_lock = threading.Lock()
+
+# Throttle drop-warning logging to once per 60 seconds (LLD-02 §4.2).
+_last_drop_log_ts: list[float] = [0.0]
+
+
+def _bump(counter: str, n: int = 1) -> None:
+    with _counters_lock:
+        _counters[counter] = _counters.get(counter, 0) + n
+
+
+# S8-ARC-03 (v3.4.22): public producer/consumer contract. ``signal_worker``
+# used to reach through ``signals._Q`` and ``signals._bump`` by name,
+# which made the private-by-convention boundary the actual test seam
+# too. These wrappers are the sanctioned surface; ``_Q`` / ``_bump`` stay
+# internal, and test-only helpers live on the ``_testing`` submodule.
+def get_queue() -> "queue.Queue[SignalBatch]":
+    """Return the module-level producer queue (shared across threads)."""
+    import sys as _sys
+    # Tests may monkeypatch _Q by attribute — resolve dynamically.
+    return getattr(_sys.modules[__name__], "_Q", None) or _Q
+
+
+def bump_counter(counter: str, n: int = 1) -> None:
+    """Public counter increment (identical semantics to internal ``_bump``)."""
+    _bump(counter, n)
+
+
+def get_counters() -> dict[str, int]:
+    """Return a snapshot of signal pipeline counters."""
+    with _counters_lock:
+        return dict(_counters)
+
+
+def reset_counters() -> None:
+    """Reset counters to zero — TEST-ONLY helper."""
+    with _counters_lock:
+        for k in _counters:
+            _counters[k] = 0
+    _last_drop_log_ts[0] = 0.0
+
+
+def _drain_queue_for_tests() -> None:
+    """Drain the module queue — TEST-ONLY."""
+    while True:
+        try:
+            _Q.get_nowait()
+        except queue.Empty:
+            return
+
+
+def queue_size() -> int:
+    """Return current queue depth — used by worker + tests."""
+    import sys as _sys
+    q = getattr(_sys.modules[__name__], "_Q", None) or _Q
+    return q.qsize()
+
+
+def _hash_query(query_text: str) -> str:
+    """Compute ``query_text_hash`` per LLD-02 §4.1.
+
+    Lowercased, stripped, SHA-256 truncated to 32 hex chars. Stored in the
+    ``learning_signals.query_text_hash`` column. The raw ``query`` column
+    MUST stay empty (S2 privacy rule).
+    """
+    normalised = (query_text or "").lower().strip().encode("utf-8")
+    return hashlib.sha256(normalised).hexdigest()[:32]
+
+
+def enqueue(batch: SignalBatch) -> None:
+    """Non-blocking enqueue of a SignalBatch.
+
+    Hot-path-safe: never raises, never blocks longer than a ``put_nowait``.
+    Drops with a counter bump if the queue is full (SW2).
+    Wraps ``queue.put_nowait`` exceptions (RP1 — never propagate).
+    """
+    import sys as _sys
+    import time as _time
+
+    if batch is None or not isinstance(batch, SignalBatch):
+        _bump("enqueue_failed_total")
+        return
+
+    # Resolve the queue through the module to honour monkeypatches in tests
+    # and future runtime reconfig. This is cheap — one dict lookup.
+    q = getattr(_sys.modules[__name__], "_Q", None) or _Q
+
+    try:
+        q.put_nowait(batch)
+    except queue.Full:
+        _bump("signal_dropped_total")
+        now = _time.monotonic()
+        if now - _last_drop_log_ts[0] >= 60.0:
+            _last_drop_log_ts[0] = now
+            logger.warning(
+                "signal queue full; dropped batch (total dropped=%d)",
+                get_counters()["signal_dropped_total"],
+            )
+        return
+    except Exception as exc:  # pragma: no cover — defensive; never propagate.
+        _bump("enqueue_failed_total")
+        logger.debug("enqueue failed: %s", exc)
+        return
+
+    _bump("signal_enqueued_total")
+
+
+def enqueue_shown_flip(query_id: str, fact_id: str, shown: bool) -> None:
+    """Record whether a candidate was shown to the user.
+
+    LLD-02 §4.9 — replaces the old fake-positive ``recall_hit`` emission.
+    Updates ``learning_signals.signal_type`` to ``'shown'`` (or
+    ``'not_shown'``) for an existing candidate row. Non-blocking;
+    defers the actual UPDATE to the signal_worker via a sentinel batch.
+    """
+    # Use a zero-candidate batch carrying the flip in ``query_context``.
+    batch = SignalBatch(
+        profile_id="",
+        query_id=query_id,
+        query_text="",
+        candidates=(),
+        query_context={
+            "_shown_flip": {"fact_id": fact_id, "shown": bool(shown)},
+        },
+    )
+    enqueue(batch)
+
+
+def _apply_shown_flip(conn: sqlite3.Connection, batch: SignalBatch) -> None:
+    """Apply a shown-flip sentinel batch (see enqueue_shown_flip).
+
+    Updates the signal_type of matching ``(query_id, fact_id)`` rows.
+    Never invents reward data (S2 / M1 honesty rule).
+    """
+    flip = batch.query_context.get("_shown_flip") or {}
+    fact_id = flip.get("fact_id")
+    shown = bool(flip.get("shown", False))
+    if not fact_id or not batch.query_id:
+        return
+    new_type = "shown" if shown else "not_shown"
+    conn.execute(
+        "UPDATE learning_signals SET signal_type = ? "
+        "WHERE query_id = ? AND fact_id = ?",
+        (new_type, batch.query_id, fact_id),
+    )
+
+
+def record_signal_batch(
+    conn: sqlite3.Connection, batch: SignalBatch,
+) -> list[int]:
+    """Synchronous write path used by the signal_worker drain.
+
+    Atomic (S1): signals+features INSERTs inside a single ``with conn:`` TX.
+    Privacy (S2): stores only ``query_text_hash``; ``query`` column is empty.
+    Handles the empty-candidate case (S3): returns ``[]`` with no side effect.
+
+    Args:
+        conn: sqlite3.Connection already configured (WAL, busy_timeout).
+              The caller owns the lifecycle.
+        batch: A ``SignalBatch``; if it carries a ``_shown_flip`` sentinel
+               the UPDATE path runs instead of the INSERT path.
+
+    Returns:
+        List of inserted ``learning_signals.id`` values in insert order.
+        Empty list if no candidates were present.
+    """
+    # Shown-flip path — LLD-02 §4.9.
+    if batch.query_context and "_shown_flip" in batch.query_context:
+        with conn:  # implicit BEGIN/COMMIT
+            _apply_shown_flip(conn, batch)
+        return []
+
+    if not batch.candidates:
+        return []
+
+    # Import lazily — avoids a circular import at module load time.
+    from superlocalmemory.learning.features import FeatureExtractor
+
+    query_hash = _hash_query(batch.query_text)
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    signal_ids: list[int] = []
+
+    with conn:  # BEGIN ... COMMIT on success, ROLLBACK on exception (S1).
+        for i, cand in enumerate(batch.candidates):
+            cur = conn.execute(
+                "INSERT INTO learning_signals "
+                "(profile_id, query, fact_id, signal_type, value, created_at, "
+                " query_id, query_text_hash, position, channel_scores, "
+                " cross_encoder) "
+                "VALUES (?, '', ?, ?, 1.0, ?, ?, ?, ?, ?, ?)",
+                (
+                    batch.profile_id,
+                    cand.fact_id,
+                    "candidate",
+                    now_iso,
+                    batch.query_id,
+                    query_hash,
+                    i,
+                    json.dumps(cand.channel_scores, separators=(",", ":")),
+                    cand.cross_encoder_score,
+                ),
+            )
+            sid = cur.lastrowid
+            if sid is None:  # pragma: no cover — should not occur.
+                raise sqlite3.OperationalError("no lastrowid from signal insert")
+
+            # PERF-v2-02: if ensemble_rerank already built features for this
+            # candidate (during the hot path), reuse them instead of calling
+            # FeatureExtractor.extract a second time. The reranker stashes a
+            # {fact_id: features_json_str} dict under a reserved key on
+            # ``query_context``. Cache miss falls through to extract.
+            fv_cache = batch.query_context.get(
+                "_precomputed_features_json", None,
+            ) if isinstance(batch.query_context, dict) else None
+            features_json_str: str
+            if isinstance(fv_cache, dict) and cand.fact_id in fv_cache:
+                raw = fv_cache[cand.fact_id]
+                features_json_str = raw if isinstance(raw, str) \
+                    else json.dumps(raw, separators=(",", ":"))
+            else:
+                fv = FeatureExtractor.extract(
+                    cand.to_result_dict(), batch.query_context,
+                ).features
+                features_json_str = json.dumps(fv, separators=(",", ":"))
+            # label column is NOT NULL REAL → use 0.0 sentinel (unlabeled).
+            # Real label comes from labeler.label_for_row at training time.
+            conn.execute(
+                "INSERT INTO learning_features "
+                "(profile_id, query_id, fact_id, features_json, label, "
+                " created_at, signal_id, is_synthetic) "
+                "VALUES (?, ?, ?, ?, 0.0, ?, ?, 0)",
+                (
+                    batch.profile_id,
+                    batch.query_id,
+                    cand.fact_id,
+                    features_json_str,
+                    now_iso,
+                    sid,
+                ),
+            )
+            signal_ids.append(sid)
+
+    return signal_ids
 
 
 class LearningSignals:

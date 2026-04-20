@@ -233,6 +233,30 @@ async def lifespan(application: FastAPI):
     engine = None
     config = None
 
+    # LLD-06 §7.3 / LLD-07 §4.1 — run additive schema migrations BEFORE
+    # engine init so later queries see the expected columns/tables.
+    # Non-fatal: any failure here is logged and the daemon still starts.
+    try:
+        from pathlib import Path as _P
+        from superlocalmemory.storage.migration_runner import apply_all
+        _home = _P.home() / ".superlocalmemory"
+        _learning_db = _home / "learning.db"
+        _memory_db = _home / "memory.db"
+        _result = apply_all(_learning_db, _memory_db)
+        _applied = _result.get("applied", [])
+        _failed = _result.get("failed", [])
+        if _applied:
+            logger.info("migrations applied: %s", _applied)
+        if _failed:
+            logger.warning("migrations failed (non-fatal): %s", _failed)
+        application.state.migration_result = _result
+    except Exception as _exc:
+        logger.warning("migration runner crashed (non-fatal): %s", _exc)
+        application.state.migration_result = {
+            "applied": [], "skipped": [], "failed": [],
+            "details": {"_crash": str(_exc)},
+        }
+
     try:
         from superlocalmemory.core.config import SLMConfig
         from superlocalmemory.core.engine import MemoryEngine
@@ -253,6 +277,36 @@ async def lifespan(application: FastAPI):
         application.state.engine = engine
         application.state.config = config
         logger.info("Unified daemon: MemoryEngine initialized (mode=%s)", config.mode.value)
+
+        # LLD-07 §4 — deferred migrations (e.g. M006 reward column) need to
+        # run AFTER MemoryEngine.initialize() has bootstrapped runtime tables
+        # like action_outcomes. Non-fatal by contract.
+        try:
+            from superlocalmemory.storage.migration_runner import apply_deferred
+            _deferred = apply_deferred(_learning_db, _memory_db)
+            _d_applied = _deferred.get("applied", [])
+            _d_failed = _deferred.get("failed", [])
+            if _d_applied:
+                logger.info("deferred migrations applied: %s", _d_applied)
+            if _d_failed:
+                logger.warning(
+                    "deferred migrations failed (non-fatal, trainer falls "
+                    "back to position proxy): %s", _d_failed,
+                )
+            # Merge into the migration result already on app state so the
+            # dashboard sees one consolidated picture.
+            _mr = getattr(application.state, "migration_result", None) or {
+                "applied": [], "skipped": [], "failed": [], "details": {},
+            }
+            _mr.setdefault("applied", []).extend(_d_applied)
+            _mr.setdefault("skipped", []).extend(_deferred.get("skipped", []))
+            _mr.setdefault("failed", []).extend(_d_failed)
+            _mr.setdefault("details", {}).update(_deferred.get("details", {}))
+            application.state.migration_result = _mr
+        except Exception as _dexc:  # pragma: no cover — defensive
+            logger.warning(
+                "deferred migration runner crashed (non-fatal): %s", _dexc,
+            )
 
         # Set up observe buffer
         _observe_buffer.set_engine(engine)
@@ -332,6 +386,41 @@ async def lifespan(application: FastAPI):
     if enable_legacy:
         asyncio.create_task(_start_legacy_redirect(_DEFAULT_PORT, _LEGACY_PORT))
 
+    # V3.4.21 LLD-02: signal-worker background drainer (S8-SK-01 fix).
+    # Without this, ``signals.enqueue`` fills a bounded queue and drops
+    # silently after ~250 recalls — learning_signals never populates,
+    # Phase 3 never activates, the whole Living Brain stays cold.
+    if os.environ.get("SLM_SIGNALS_ENABLED", "1") != "0":
+        try:
+            from superlocalmemory.learning import signal_worker as _sw
+            from pathlib import Path as _P
+            _learning_db = _P.home() / ".superlocalmemory" / "learning.db"
+            _sw.start(_learning_db)
+            application.state.signal_worker_started = True
+            logger.info("signal_worker started on %s", _learning_db)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("signal_worker failed to start: %s", exc)
+            application.state.signal_worker_started = False
+
+    # V3.4.21 LLD-05: cross-platform adapter sync loop
+    if os.environ.get("SLM_CROSS_PLATFORM_SYNC_DISABLED", "").lower() not in ("1", "true"):
+        try:
+            from superlocalmemory.cli.context_commands import build_default_adapters
+            from superlocalmemory.hooks.sync_loop import schedule as _schedule_sync
+            _schedule_sync(build_default_adapters())
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("cross-platform sync loop failed to start: %s", exc)
+
+    # V3.4.21 LLD-03: bandit reward proxy settler + retention sweep loops
+    if os.environ.get("SLM_BANDIT_DISABLED", "0") != "1":
+        try:
+            from superlocalmemory.server.bandit_loops import (
+                schedule_bandit_loops,
+            )
+            schedule_bandit_loops(application, config)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("bandit loops failed to start: %s", exc)
+
     global _start_time
     _start_time = time.monotonic()
     _last_activity = time.monotonic()
@@ -343,6 +432,14 @@ async def lifespan(application: FastAPI):
 
     # Shutdown
     _observe_buffer.flush_sync()
+    # LLD-02 SW3: flush pending signals to DB before closing. Bounded 3 s
+    # to keep daemon shutdown snappy; drops + counts anything unwritten.
+    if getattr(application.state, "signal_worker_started", False):
+        try:
+            from superlocalmemory.learning import signal_worker as _sw
+            _sw.stop(timeout=3.0)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("signal_worker shutdown flush failed: %s", exc)
     if engine is not None:
         try:
             engine.close()
@@ -407,6 +504,51 @@ def create_app() -> FastAPI:
         application.include_router(ingest_router)
     except ImportError:
         pass
+
+    # -- Brain route (LLD-04 v2: /api/v3/brain + deprecated shims) --
+    try:
+        from superlocalmemory.server.routes.brain import (
+            router as brain_router,
+        )
+        from superlocalmemory.server.middleware.security_headers import (
+            SecurityHeadersMiddleware as StrictSecurityHeadersMiddleware,
+        )
+        application.include_router(brain_router)
+        # Strict CSP / XFO / XCTO / Referrer-Policy — applies to every
+        # response including the Brain route. Added as the outermost
+        # middleware so it overrides the legacy security_middleware's
+        # looser CSP on requests that pass through this strict wall.
+        application.add_middleware(StrictSecurityHeadersMiddleware)
+    except ImportError as exc:  # pragma: no cover — defensive wiring
+        logger.warning("brain router not wired: %s", exc)
+
+    # -- Prewarm route (LLD-01 §4.4 — S8-SK-02 fix) --
+    # POST /internal/prewarm populates active_brain_cache after every
+    # tool_use. Without this handler, the async hook POSTs to a 404 and
+    # the cache never gets populated, which made every UserPromptSubmit
+    # a structural miss. All 4 auth gates applied inside the route.
+    try:
+        from superlocalmemory.server.routes.prewarm import (
+            router as prewarm_router,
+        )
+        application.include_router(prewarm_router)
+    except ImportError as exc:  # pragma: no cover — defensive wiring
+        logger.warning("prewarm router not wired: %s", exc)
+
+    # -- Token route — auto-inject install token into the local dashboard --
+    # GET /internal/token returns the install token to loopback+origin-
+    # scoped browser callers so brain.js (and any future token-gated
+    # dashboard fetch) can include X-Install-Token without ever asking
+    # the non-technical user to paste it. Non-browser clients (MCP, CLI,
+    # IDE adapters) keep reading ~/.superlocalmemory/.install_token
+    # directly and sending the header themselves.
+    try:
+        from superlocalmemory.server.routes.token import (
+            router as token_router,
+        )
+        application.include_router(token_router)
+    except ImportError as exc:  # pragma: no cover — defensive wiring
+        logger.warning("token router not wired: %s", exc)
 
     # -- Daemon-specific routes --
     _register_daemon_routes(application)

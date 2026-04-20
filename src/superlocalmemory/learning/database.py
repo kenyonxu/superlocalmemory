@@ -87,6 +87,32 @@ class LearningDatabase:
         self._lock = threading.Lock()
         self._init_schema()
 
+    @property
+    def path(self) -> str:
+        """Read-only path to the learning SQLite database.
+
+        S8-ARC-02 (v3.4.22): public alternative to the underscore-private
+        ``_db_path``. Callers that need a raw connection for specialised
+        read patterns should prefer :meth:`ro_connection` over building
+        one themselves so WAL + busy_timeout pragmas are consistent.
+        """
+        return self._db_path
+
+    def ro_connection(self, *, timeout: float = 5.0) -> sqlite3.Connection:
+        """Return a read-only-shaped connection with WAL/timeout pragmas set.
+
+        Callers outside this class previously opened raw
+        ``sqlite3.connect(lrn_db._db_path, ...)`` connections without the
+        WAL/busy_timeout pragmas, making them vulnerable to ``database is
+        locked`` errors under concurrent writer activity. This helper
+        produces a configured connection they can use instead.
+        """
+        conn = sqlite3.connect(self._db_path, timeout=timeout)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.row_factory = sqlite3.Row
+        return conn
+
     def _connect(self) -> sqlite3.Connection:
         """Create a configured connection to the learning database."""
         conn = sqlite3.connect(self._db_path, timeout=10)
@@ -336,6 +362,236 @@ class LearningDatabase:
                 (profile_id,),
             ).fetchall()
             return {row["metric_type"]: float(row["value"]) for row in rows}
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # LLD-02 §4.8 — v3.4.21 writer surface
+    # ------------------------------------------------------------------
+
+    def count_signals(self, profile_id: str) -> int:
+        """Count ``learning_signals`` rows for ``profile_id``.
+
+        Used by ``_compute_ranker_phase`` + consolidation_worker training
+        gate. Pure SELECT — thread-safe without lock.
+        """
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM learning_signals "
+                "WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchone()
+            return int(row["cnt"]) if row else 0
+        finally:
+            conn.close()
+
+    def persist_model(
+        self,
+        *,
+        profile_id: str,
+        state_bytes: bytes,
+        bytes_sha256: str,
+        feature_names: list[str],
+        trained_on_count: int,
+        metrics: dict,
+        model_version: str = "3.4.21",
+    ) -> int:
+        """Persist a newly trained model and flip the active flag.
+
+        LLD-02 §4.8 — single TX:
+            1. UPDATE existing active row → is_active = 0.
+            2. INSERT new row with is_active = 1.
+
+        Requires M002 (columns ``bytes_sha256``, ``feature_names``,
+        ``metrics_json``, ``trained_on_count``, ``is_active``). Raises if
+        M002 hasn't been applied.
+
+        Returns the new row id.
+        """
+        if not isinstance(state_bytes, (bytes, bytearray)):
+            raise TypeError("state_bytes must be bytes")
+        if not bytes_sha256 or len(bytes_sha256) != 64:
+            raise ValueError("bytes_sha256 must be 64 hex chars")
+        names_json = json.dumps(list(feature_names), separators=(",", ":"))
+        metrics_json = json.dumps(dict(metrics), separators=(",", ":"))
+        now = self._now()
+
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "UPDATE learning_model_state "
+                    "SET is_active = 0 "
+                    "WHERE profile_id = ? AND is_active = 1",
+                    (profile_id,),
+                )
+                cur = conn.execute(
+                    "INSERT INTO learning_model_state "
+                    "(profile_id, model_version, state_bytes, bytes_sha256, "
+                    " trained_on_count, feature_names, metrics_json, "
+                    " is_active, trained_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                    (
+                        profile_id,
+                        model_version,
+                        bytes(state_bytes),
+                        bytes_sha256.lower(),
+                        int(trained_on_count),
+                        names_json,
+                        metrics_json,
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+                return int(cur.lastrowid or 0)
+            except sqlite3.Error as exc:
+                conn.rollback()
+                logger.error("persist_model failed: %s", exc)
+                raise
+            finally:
+                conn.close()
+
+    def load_active_model(self, profile_id: str) -> Optional[dict]:
+        """Return the active model row as a dict, or ``None`` if none.
+
+        Post-M002 schema. Keys: ``state_bytes``, ``bytes_sha256``,
+        ``feature_names`` (JSON str), ``trained_at``, ``model_version``.
+        """
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT state_bytes, bytes_sha256, feature_names, trained_at, "
+                "       model_version "
+                "FROM learning_model_state "
+                "WHERE profile_id = ? AND is_active = 1 "
+                "LIMIT 1",
+                (profile_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "state_bytes": bytes(row["state_bytes"]),
+                "bytes_sha256": row["bytes_sha256"],
+                "feature_names": row["feature_names"],
+                "trained_at": row["trained_at"],
+                "model_version": row["model_version"],
+            }
+        except sqlite3.Error as exc:
+            logger.error("load_active_model failed: %s", exc)
+            return None
+        finally:
+            conn.close()
+
+    # --- training-row fetch (version-gated on M006) --------------------
+
+    _SQL_POSITION_ONLY = (
+        "SELECT s.id AS signal_id, s.query_id, s.fact_id, s.position, "
+        "       s.created_at, f.features_json, NULL AS outcome_reward "
+        "FROM learning_signals s "
+        "JOIN learning_features f "
+        "  ON f.signal_id = s.id AND f.profile_id = s.profile_id "
+        "WHERE s.profile_id = ? "
+        "  AND s.signal_type IN ('candidate', 'shown', 'legacy_feedback') "
+        "  AND f.is_synthetic = 0 "
+        "ORDER BY s.created_at DESC "
+        "LIMIT ?"
+    )
+
+    _SQL_WITH_OUTCOMES = (
+        "SELECT s.id AS signal_id, s.query_id, s.fact_id, s.position, "
+        "       s.created_at, f.features_json, o.reward AS outcome_reward "
+        "FROM learning_signals s "
+        "JOIN learning_features f "
+        "  ON f.signal_id = s.id AND f.profile_id = s.profile_id "
+        "LEFT JOIN action_outcomes o "
+        "  ON o.recall_query_id = s.query_id AND o.settled = 1 "
+        "WHERE s.profile_id = ? "
+        "  AND s.signal_type IN ('candidate', 'shown', 'legacy_feedback') "
+        "  AND f.is_synthetic = 0 "
+        "  AND (o.settled IS NULL OR "
+        "       (julianday('now') - julianday(o.settled_at)) * 86400.0 >= ?) "
+        "ORDER BY s.created_at DESC "
+        "LIMIT ?"
+    )
+
+    def _migration_applied(self, name: str) -> bool:
+        """Return True if ``name`` is recorded complete in migration_log.
+
+        M006 (action_outcomes.reward) lands in v3.4.22. When absent, we
+        fall back to the position-only training query.
+        """
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT status FROM migration_log WHERE name = ?",
+                (name,),
+            ).fetchone()
+        except sqlite3.Error:
+            return False
+        finally:
+            conn.close()
+        if row is None:
+            return False
+        return row["status"] == "complete"
+
+    def fetch_training_examples(
+        self,
+        *,
+        profile_id: str,
+        limit: int = 2000,
+        min_outcome_age_sec: int = 60,
+        include_synthetic: bool = False,
+    ) -> list[dict]:
+        """Fetch training rows for LightGBM lambdarank training.
+
+        Version-gated on M006: without the ``reward`` column we return rows
+        with ``outcome_reward = None`` and the labeler falls through to the
+        position proxy (§4.7).
+
+        When ``include_synthetic`` is True, migrated legacy rows (with
+        ``learning_features.is_synthetic=1``) are included. The default
+        (False) preserves Stage 8 D9 — synthetic rows excluded unless the
+        caller opts in explicitly. The UI exposes this via the
+        "Migrate legacy data" flow so users consciously choose to let their
+        pre-v3.4.21 feedback bootstrap the model.
+
+        Returns rows sorted newest-first; the caller is expected to regroup
+        by ``query_id`` before training.
+        """
+        m006_applied = self._migration_applied("M006_action_outcomes_reward")
+        sql = self._SQL_WITH_OUTCOMES if m006_applied else self._SQL_POSITION_ONLY
+        if include_synthetic:
+            # Drop the synthetic-filter clause verbatim. Safe because the
+            # surrounding clauses already reference ``f.`` so removing this
+            # one keeps the SQL grammatically valid.
+            sql = sql.replace(" AND f.is_synthetic = 0 ", " ")
+        params: tuple
+        if m006_applied:
+            params = (profile_id, int(min_outcome_age_sec), int(limit))
+        else:
+            params = (profile_id, int(limit))
+        conn = self._connect()
+        try:
+            try:
+                rows = conn.execute(sql, params).fetchall()
+            except sqlite3.Error as exc:
+                logger.warning(
+                    "fetch_training_examples failed (m006=%s): %s",
+                    m006_applied, exc,
+                )
+                return []
+            out: list[dict] = []
+            for row in rows:
+                d = dict(row)
+                try:
+                    d["features"] = json.loads(d.pop("features_json") or "{}")
+                except (ValueError, TypeError):
+                    d["features"] = {}
+                out.append(d)
+            return out
         finally:
             conn.close()
 

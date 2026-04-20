@@ -35,45 +35,59 @@ def _emit_event(event_type: str, payload: dict | None = None,
         pass
 
 
-def _record_recall_hits(get_engine: Callable, query: str, results: list[dict]) -> None:
-    """Record implicit feedback + learning signals for each recall.
+def _record_recall_hits(
+    get_engine: Callable,
+    query: str,
+    results: list[dict],
+    *,
+    query_id: str = "",
+    fact_ids_candidates: list[str] | None = None,
+) -> None:
+    """Record honest shown-state signals (LLD-02 §4.9).
 
-    Non-blocking, non-critical — failures silently ignored.
-    Feeds: FeedbackCollector + Co-Retrieval + Confidence Boost.
+    v3.4.21: No more fake positives. For every candidate we enqueue a
+    ``shown`` / ``not_shown`` flip based on whether it was returned in the
+    top-K presented to the user. Outcome/reward arrives in v3.4.22 via the
+    action-outcomes pipeline.
+
+    Non-blocking: all work funnels through ``signals.enqueue_shown_flip``
+    (module-level queue + background drain). Failures are swallowed —
+    signal quality is never load-bearing on recall correctness.
     """
     try:
         from pathlib import Path
+        from superlocalmemory.learning.signals import (
+            LearningSignals,
+            enqueue_shown_flip,
+        )
+
         engine = get_engine()
         pid = engine.profile_id
         slm_dir = Path.home() / ".superlocalmemory"
-        fact_ids = [r.get("fact_id", "") for r in results[:10] if r.get("fact_id")]
-        if not fact_ids:
+
+        shown_ids = [r.get("fact_id", "") for r in results[:10]
+                     if r.get("fact_id")]
+        candidates = (fact_ids_candidates
+                      if fact_ids_candidates is not None
+                      else shown_ids)
+        if not candidates:
             return
 
-        # 1. Implicit feedback (recall_hit signals for adaptive learner)
-        try:
-            from superlocalmemory.learning.feedback import FeedbackCollector
-            collector = FeedbackCollector(slm_dir / "learning.db")
-            collector.record_implicit(
-                profile_id=pid, query=query,
-                fact_ids_returned=fact_ids, fact_ids_available=fact_ids,
-            )
-        except Exception:
-            pass
+        # Shown-flip enqueue per §4.9. No synthetic positives.
+        shown_set = set(shown_ids)
+        if query_id:
+            for fid in candidates:
+                enqueue_shown_flip(query_id, fid, shown=(fid in shown_set))
 
-        # 2. Co-retrieval signals (strengthen implicit graph edges)
+        # Legacy zero-cost signals — unchanged (co-retrieval + confidence).
         try:
-            from superlocalmemory.learning.signals import LearningSignals
             signals = LearningSignals(slm_dir / "learning.db")
-            signals.record_co_retrieval(pid, fact_ids)
+            signals.record_co_retrieval(pid, shown_ids)
         except Exception:
             pass
-
-        # 3. Confidence boost (accessed facts get +0.02, cap 1.0)
         try:
-            from superlocalmemory.learning.signals import LearningSignals
             mem_db = str(slm_dir / "memory.db")
-            for fid in fact_ids[:5]:
+            for fid in shown_ids[:5]:
                 LearningSignals.boost_confidence(mem_db, fid)
         except Exception:
             pass

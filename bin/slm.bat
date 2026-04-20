@@ -13,6 +13,18 @@ REM Handle --version / -v directly (fast path, no Python needed)
 if "%~1"=="--version" goto :show_version
 if "%~1"=="-v" goto :show_version
 
+REM LLD-06 §6.3 — prefer the PyInstaller-built binary on the hot hook path.
+set "SLM_HOOK_BIN=%USERPROFILE%\.superlocalmemory\bin\slm-hook\slm-hook.exe"
+if defined SLM_HOOK_BINARY set "SLM_HOOK_BIN=%SLM_HOOK_BINARY%"
+if "%~1"=="hook" if "%~2"=="user_prompt_submit" (
+    if exist "%SLM_HOOK_BIN%" (
+        if not "%SLM_HOOK_BINARY_DISABLED%"=="1" (
+            "%SLM_HOOK_BIN%"
+            exit /b %ERRORLEVEL%
+        )
+    )
+)
+
 REM Find Python 3
 where python3 >nul 2>&1
 if %ERRORLEVEL% EQU 0 (

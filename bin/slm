@@ -15,6 +15,17 @@ for arg in "$@"; do
     fi
 done
 
+# LLD-06 §6.3 — prefer the PyInstaller-built binary on the hot hook path.
+# If the onedir binary exists and isn't disabled, run it directly; the
+# binary is stdlib-only and ~30ms cold on Windows. Otherwise fall back
+# to the Python CLI below.
+SLM_HOOK_BIN="${SLM_HOOK_BINARY:-$HOME/.superlocalmemory/bin/slm-hook/slm-hook}"
+if [ "${1:-}" = "hook" ] && [ "${2:-}" = "user_prompt_submit" ] \
+   && [ -x "$SLM_HOOK_BIN" ] \
+   && [ "${SLM_HOOK_BINARY_DISABLED:-0}" != "1" ]; then
+    exec "$SLM_HOOK_BIN"
+fi
+
 # Find Python
 PYTHON=""
 for cmd in python3 python; do

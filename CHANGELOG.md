@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.4.21] - 2026-04-18
+
+SLM now actively learns from your use.
+
+---
+
 ## [3.4.19] - 2026-04-17
 
 ### Fixed

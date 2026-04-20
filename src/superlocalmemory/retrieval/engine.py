@@ -705,3 +705,55 @@ class RetrievalEngine:
                 trust_score=raw_trust,
             ))
         return results
+
+
+# ---------------------------------------------------------------------------
+# apply_channel_weights (LLD-03 §5.5 — module-level pure helper)
+# ---------------------------------------------------------------------------
+
+
+_CHANNEL_KEYS: tuple[str, ...] = (
+    "semantic", "bm25", "entity_graph", "temporal",
+)
+
+
+def apply_channel_weights(
+    candidates: list[RetrievalResult],
+    weights: dict[str, float] | None,
+) -> list[RetrievalResult]:
+    """Re-score candidates under a bandit-chosen weight bundle.
+
+    Multiplies each candidate's ``channel_scores[ch]`` by ``weights[ch]``
+    and applies ``cross_encoder_bias`` to the final score. Preserves order;
+    callers reorder via ensemble_rerank.
+
+    Returns a NEW list with new ``RetrievalResult`` instances — never mutates
+    input. Unknown / missing weights default to 1.0.
+
+    Safe against ``weights=None`` (returns input unchanged) and empty lists.
+    """
+    if not candidates or not weights:
+        return list(candidates)
+
+    ce_bias = float(weights.get("cross_encoder_bias", 1.0))
+    out: list[RetrievalResult] = []
+    for c in candidates:
+        original_cs = c.channel_scores or {}
+        new_cs: dict[str, float] = dict(original_cs)
+        base = 0.0
+        for ch in _CHANNEL_KEYS:
+            raw = float(original_cs.get(ch, 0.0))
+            w = float(weights.get(ch, 1.0))
+            scaled = raw * w
+            new_cs[ch] = scaled
+            base += scaled
+        new_score = (base if base > 0.0 else float(c.score)) * ce_bias
+        out.append(RetrievalResult(
+            fact=c.fact,
+            score=new_score,
+            channel_scores=new_cs,
+            confidence=c.confidence,
+            evidence_chain=c.evidence_chain,
+            trust_score=c.trust_score,
+        ))
+    return out

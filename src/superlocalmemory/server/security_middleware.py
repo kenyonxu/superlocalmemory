@@ -33,17 +33,23 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # Enable browser XSS filter (legacy, but doesn't hurt)
         response.headers["X-XSS-Protection"] = "1; mode=block"
 
-        # Content Security Policy
-        # Note: 'unsafe-inline' is needed for Bootstrap and inline scripts
-        # For production, consider moving inline scripts to separate files
+        # Content Security Policy (v3.4.22 — vendored assets, no CDN hosts).
+        # All Bootstrap/D3/Sigma/graphology/Inter assets ship locally under
+        # /static/vendor/, so we drop every CDN host from the allow-list.
+        # 'unsafe-inline' stays on script-src/style-src for the legacy inline
+        # click handlers in index.html — migrating those to addEventListener
+        # is tracked as a separate backlog item. img-src drops the https:
+        # wildcard now that nothing remote loads.
         csp_directives = [
             "default-src 'self'",
-            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com https://d3js.org",
-            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com",
-            "font-src 'self' https://cdn.jsdelivr.net",
-            "img-src 'self' data: https:",
+            "script-src 'self' 'unsafe-inline'",
+            "style-src 'self' 'unsafe-inline'",
+            "font-src 'self'",
+            "img-src 'self' data:",
             "connect-src 'self' ws://localhost:* ws://127.0.0.1:*",
             "frame-ancestors 'none'",
+            "base-uri 'self'",
+            "form-action 'self'",
         ]
         response.headers["Content-Security-Policy"] = "; ".join(csp_directives)
 

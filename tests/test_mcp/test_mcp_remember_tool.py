@@ -81,9 +81,16 @@ class TestRememberTool:
         assert result["count"] >= 1
         assert len(result["fact_ids"]) >= 1
 
+    @pytest.mark.slow
     @patch("superlocalmemory.mcp.tools_core._emit_event")
     def test_remember_returns_pending_id(self, mock_emit):
-        """V3.3.27: Store-first pattern returns pending ID for background processing."""
+        """V3.3.27: Store-first pattern returns pending ID for background processing.
+
+        Marked ``slow`` (Stage 7 delivery-lead review): spawns a real
+        worker subprocess and blocks ~100s on its ready-signal, which
+        single-handedly doubled the default suite runtime. Runs under
+        ``pytest -m slow``; default config excludes it.
+        """
         remember = _get_remember_tool()
         result = asyncio.run(remember("Test content for pending store"))
         assert result["success"] is True

@@ -11,41 +11,19 @@
       label: 'Memory',
       items: [
         { id: 'dashboard-pane', icon: 'bi-speedometer2', text: 'Dashboard' },
+        { id: 'brain-pane', icon: 'bi-lightbulb', text: 'Brain' },
         { id: 'graph-pane', icon: 'bi-diagram-3', text: 'Knowledge Graph' },
-        { id: 'memories-pane', icon: 'bi-list-ul', text: 'Memories' },
-        { id: 'recall-lab-pane', icon: 'bi-search-heart', text: 'Recall Lab' },
-        { id: 'timeline-pane', icon: 'bi-clock-history', text: 'Timeline' }
-      ]
-    },
-    {
-      label: 'Intelligence',
-      items: [
-        { id: 'clusters-pane', icon: 'bi-collection', text: 'Clusters' },
-        { id: 'patterns-pane', icon: 'bi-puzzle', text: 'Patterns' },
-        { id: 'learning-pane', icon: 'bi-mortarboard', text: 'Learning' },
-        { id: 'behavioral-pane', icon: 'bi-lightbulb', text: 'Behavioral' }
+        { id: 'memories-pane', icon: 'bi-list-ul', text: 'Memories' }
       ]
     },
     {
       label: 'System',
       items: [
-        { id: 'events-pane', icon: 'bi-broadcast', text: 'Live Events' },
-        { id: 'agents-pane', icon: 'bi-robot', text: 'Agents' },
-        { id: 'trust-pane', icon: 'bi-shield-check', text: 'Trust' },
-        { id: 'lifecycle-pane', icon: 'bi-hourglass-split', text: 'Lifecycle' },
-        { id: 'compliance-pane', icon: 'bi-shield-lock', text: 'Compliance' },
-        { id: 'math-health-pane', icon: 'bi-calculator', text: 'Math Health' },
-        { id: 'ide-pane', icon: 'bi-plug', text: 'IDEs' }
-      ]
-    },
-    {
-      label: 'v3.4.3',
-      items: [
-        { id: 'health-pane', icon: 'bi-heart-pulse', text: 'Health Monitor', badge: 'NEW' },
-        { id: 'ingestion-pane', icon: 'bi-cloud-download', text: 'Ingestion', badge: 'NEW' },
-        { id: 'entities-pane', icon: 'bi-person-badge', text: 'Entity Explorer', badge: 'NEW' },
-        { id: 'skills-pane', icon: 'bi-lightning-charge', text: 'Skill Evolution', badge: 'NEW' },
-        { id: 'mesh-pane', icon: 'bi-share', text: 'Mesh Peers', badge: 'NEW' }
+        { id: 'health-pane', icon: 'bi-heart-pulse', text: 'Health' },
+        { id: 'operations-pane', icon: 'bi-diagram-2', text: 'Operations' },
+        { id: 'entities-pane', icon: 'bi-person-badge', text: 'Entity Explorer' },
+        { id: 'skills-pane', icon: 'bi-lightning-charge', text: 'Skill Evolution' },
+        { id: 'mesh-pane', icon: 'bi-share', text: 'Mesh Peers' }
       ]
     },
     {
@@ -74,7 +52,7 @@
         '</div>' +
         '<div>' +
           '<div class="ng-sidebar-brand-text">SuperLocalMemory</div>' +
-          '<div class="ng-sidebar-brand-version" id="ng-version">v3.4.4</div>' +
+          '<div class="ng-sidebar-brand-version" id="ng-version">\u2026</div>' +
         '</div>' +
       '</div>';
     sidebar.appendChild(header);
@@ -230,12 +208,17 @@
     // Replace container with shell
     container.parentNode.replaceChild(shell, container);
 
-    // Move dashboard-only elements INTO the dashboard-pane so they scroll with it
+    // Move dashboard-only elements INTO the dashboard-pane so they scroll
+    // with it. stats-container starts ``display:none`` in the HTML to kill
+    // the pre-glass flash; reveal it once it's in its final home.
     var dashboardPane = document.getElementById('dashboard-pane');
     if (dashboardPane) {
       ['stats-container', 'privacy-notice', 'feedback-progress'].forEach(function(id) {
         var el = document.getElementById(id);
-        if (el) dashboardPane.insertBefore(el, dashboardPane.firstChild);
+        if (el) {
+          dashboardPane.insertBefore(el, dashboardPane.firstChild);
+          if (id === 'stats-container') el.style.display = '';
+        }
       });
     }
 
@@ -260,14 +243,26 @@
       refreshBtn.addEventListener('click', refreshDashboard);
     }
 
-    // Sync version from dashboard
-    setTimeout(function() {
-      var dashVer = document.getElementById('dashboard-version');
-      var ngVer = document.getElementById('ng-version');
-      if (dashVer && ngVer && dashVer.textContent !== '...') {
-        ngVer.textContent = 'v' + dashVer.textContent;
-      }
-    }, 1500);
+    // Sidebar version: always the live daemon version from /health.
+    // Don't depend on dashboard.js timing — that used to leave "v3.4.4"
+    // hardcoded in the sidebar when dashboard.js hadn't run yet.
+    fetch('/health', { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        var ngVer = document.getElementById('ng-version');
+        if (ngVer && data && data.version) {
+          ngVer.textContent = 'v' + data.version;
+        }
+      })
+      .catch(function () {
+        // Fallback: if /health is unreachable, fall back to whatever
+        // dashboard.js populates into #dashboard-version.
+        var dashVer = document.getElementById('dashboard-version');
+        var ngVer = document.getElementById('ng-version');
+        if (dashVer && ngVer && dashVer.textContent && dashVer.textContent !== '...') {
+          ngVer.textContent = 'v' + dashVer.textContent;
+        }
+      });
   }
 
   // ── Tab Activation ─────────────────────────────────────────
@@ -296,16 +291,25 @@
       targetPane.classList.add('show', 'active');
     }
 
-    // Dispatch Bootstrap tab event for backward compat
+    // Dispatch Bootstrap tab event for backward compat.
+    //
+    // Previous code assigned ``event.target = tabButton``; that property
+    // is readonly on DOM Event objects, so in strict mode the assignment
+    // throws TypeError, the surrounding try/catch silently swallowed it,
+    // and dispatchEvent() was NEVER reached. brain.js's
+    // ``shown.bs.tab`` listener never fired when navigating between tabs
+    // via the sidebar, so the Brain pane stayed stuck on "Loading Brain..."
+    // forever (and any other listener that relied on the event didn't
+    // get a chance). The DOM automatically sets ``event.target`` to the
+    // element on which ``dispatchEvent`` is called, so we don't need to
+    // assign it manually.
     var tabButton = document.getElementById(targetId.replace('-pane', '-tab'));
     if (tabButton) {
       try {
-        var event = new Event('shown.bs.tab', { bubbles: true });
-        event.target = tabButton;
-        event.relatedTarget = null;
-        tabButton.dispatchEvent(event);
+        var tabEvent = new Event('shown.bs.tab', { bubbles: true });
+        tabButton.dispatchEvent(tabEvent);
       } catch (e) {
-        // Ignore if event dispatch fails
+        // Ignore if event dispatch fails (very old browsers)
       }
     }
 
@@ -339,55 +343,38 @@
         if (typeof initMemoryChat === 'function' && !document.getElementById('chat-panel')) {
           initMemoryChat();
         }
-        break;
-      case 'memories-pane':
-        if (typeof loadMemories === 'function') loadMemories();
-        break;
-      case 'clusters-pane':
+        // Domain 3 (v3.4.21): Clusters still folded into graph. Entity
+        // Explorer has its own standalone sidebar entry now.
         if (typeof loadClusters === 'function') loadClusters();
-        break;
-      case 'patterns-pane':
-        if (typeof loadPatterns === 'function') loadPatterns();
-        break;
-      case 'timeline-pane':
-        if (typeof loadTimeline === 'function') loadTimeline();
-        break;
-      case 'events-pane':
-        if (typeof initEventStream === 'function') initEventStream();
-        if (typeof loadEventStats === 'function') loadEventStats();
-        break;
-      case 'agents-pane':
-        if (typeof loadAgents === 'function') loadAgents();
-        break;
-      case 'learning-pane':
-        if (typeof loadLearning === 'function') loadLearning();
-        break;
-      case 'trust-pane':
-        if (typeof loadTrustDashboard === 'function') loadTrustDashboard();
-        break;
-      case 'lifecycle-pane':
-        if (typeof loadLifecycle === 'function') loadLifecycle();
-        break;
-      case 'behavioral-pane':
-        if (typeof loadBehavioral === 'function') loadBehavioral();
-        break;
-      case 'compliance-pane':
-        if (typeof loadCompliance === 'function') loadCompliance();
-        break;
-      case 'math-health-pane':
-        if (typeof loadMathHealth === 'function') loadMathHealth();
-        break;
-      case 'ide-pane':
-        if (typeof loadIDEStatus === 'function') loadIDEStatus();
-        break;
-      case 'health-pane':
-        if (typeof loadHealthMonitor === 'function') loadHealthMonitor();
-        break;
-      case 'ingestion-pane':
-        if (typeof loadIngestionStatus === 'function') loadIngestionStatus();
         break;
       case 'entities-pane':
         if (typeof loadEntityExplorer === 'function') loadEntityExplorer();
+        break;
+      case 'memories-pane':
+        if (typeof loadMemories === 'function') loadMemories();
+        // Domain 4 (v3.4.21): Recall Lab + Timeline now live inside
+        // memories-pane. Fire the timeline loader alongside so users
+        // don't need a separate tab click to see the chart.
+        if (typeof loadTimeline === 'function') loadTimeline();
+        break;
+      case 'health-pane':
+        // v3.4.21 / v3.4.22 (taxonomy): Health = runtime health ONLY
+        // (Daemon, Events, Agents, IDEs, Math). Governance concerns live
+        // in operations-pane. IDEs folded in v3.4.22 per Varun — they're
+        // connected-client state, same category as Agents.
+        if (typeof loadHealthMonitor === 'function') loadHealthMonitor();
+        if (typeof initEventStream === 'function') initEventStream();
+        if (typeof loadEventStats === 'function') loadEventStats();
+        if (typeof loadAgents === 'function') loadAgents();
+        if (typeof loadIDEStatus === 'function') loadIDEStatus();
+        if (typeof loadMathHealth === 'function') loadMathHealth();
+        break;
+      case 'operations-pane':
+        // v3.4.21: data governance (Ingestion, Lifecycle, Trust, Compliance).
+        if (typeof loadIngestionStatus === 'function') loadIngestionStatus();
+        if (typeof loadLifecycle === 'function') loadLifecycle();
+        if (typeof loadTrustDashboard === 'function') loadTrustDashboard();
+        if (typeof loadCompliance === 'function') loadCompliance();
         break;
       case 'skills-pane':
         if (typeof loadSkillEvolution === 'function') loadSkillEvolution();
@@ -407,8 +394,25 @@
   // ── Hash-based Routing ─────────────────────────────────────
   function handleHash() {
     var hash = window.location.hash.replace('#', '');
-    if (hash && document.getElementById(hash)) {
+    if (!hash) return;
+    var el = document.getElementById(hash);
+    if (!el) return;
+    // Only activate real tab-panes. Previously this tried to activate
+    // ANY element whose id matched the hash, which broke when Domain 5
+    // sub-nav anchors like ``#health-section-events`` fired — it would
+    // strip ``show active`` off every real pane and leave the app blank.
+    if (el.classList && el.classList.contains('tab-pane')) {
       activateTab(hash);
+      return;
+    }
+    // Not a tab-pane — find the pane that contains this element (e.g.
+    // a section inside health-pane) and activate that first, then scroll.
+    var parent = el.closest && el.closest('.tab-pane');
+    if (parent && parent.id) activateTab(parent.id);
+    try {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (e) {
+      // pre-smooth-scroll browsers: no-op
     }
   }
 
@@ -470,12 +474,21 @@
     // Restructure DOM
     restructureDOM();
 
-    // Handle initial hash — run synchronously, no timeout race
+    // v3.4.21 fix: a browser-restored URL fragment (e.g. a stale
+    // ``#health-section-events`` from a previous session) used to yank
+    // the user off Dashboard on refresh. Refresh should always land on
+    // the pane that has ``show active`` in the HTML — Dashboard. Only
+    // respond to hash changes the user triggers explicitly AFTER load.
     if (window.location.hash) {
-      handleHash();
+      try {
+        history.replaceState(null, '', window.location.pathname);
+      } catch (e) {
+        // Older browsers without replaceState: leave the hash alone
+        // rather than crashing init.
+      }
     }
 
-    // Listen for hash changes
+    // Listen for subsequent (user-triggered) hash changes
     window.addEventListener('hashchange', handleHash);
 
     // toggleDarkMode already overridden above with theme toggle support

@@ -303,13 +303,36 @@ p {{ color: #999; margin: 0 0 20px; font-size: 13px; }}
 </div></body></html>"""
 
 
+# S8-SEC-04: OAuth success / error pages render user-influenced strings
+# (``error``, ``error_description``, provider ``message`` / ``title``).
+# ``str.format`` doesn't escape HTML, so a hostile OAuth callback can
+# inject ``<script>`` into these pages. These helpers HTML-escape every
+# interpolated value before emitting the template.
+import html as _html
+
+
+def _oauth_error_page(icon: str, error: str) -> str:
+    return _OAUTH_ERROR_HTML.format(
+        icon=_html.escape(str(icon), quote=True),
+        error=_html.escape(str(error), quote=True),
+    )
+
+
+def _oauth_success_page(icon: str, title: str, message: str) -> str:
+    return _OAUTH_SUCCESS_HTML.format(
+        icon=_html.escape(str(icon), quote=True),
+        title=_html.escape(str(title), quote=True),
+        message=_html.escape(str(message), quote=True),
+    )
+
+
 # ---- Google OAuth SSO Flow ------------------------------------------------
 
 @router.get("/api/backup/oauth/google/start")
 async def google_oauth_start(request: Request):
     """Start Google OAuth2 flow — redirects to Google's login page."""
     if not CLOUD_AVAILABLE:
-        return HTMLResponse(_OAUTH_ERROR_HTML.format(icon="&#x26A0;", error="Cloud backup module not available"))
+        return HTMLResponse(_oauth_error_page(icon="&#x26A0;", error="Cloud backup module not available"))
 
     from superlocalmemory.infra.cloud_backup import _get_credential
 
@@ -424,10 +447,10 @@ async function saveAndConnect() {
 async def google_oauth_callback(request: Request, code: str = "", error: str = ""):
     """Google OAuth2 callback — exchanges code for tokens."""
     if error:
-        return HTMLResponse(_OAUTH_ERROR_HTML.format(icon="&#x274C;", error=f"Google denied access: {error}"))
+        return HTMLResponse(_oauth_error_page(icon="&#x274C;", error=f"Google denied access: {error}"))
 
     if not code:
-        return HTMLResponse(_OAUTH_ERROR_HTML.format(icon="&#x274C;", error="No authorization code received"))
+        return HTMLResponse(_oauth_error_page(icon="&#x274C;", error="No authorization code received"))
 
     base_url = str(request.base_url).rstrip("/")
     redirect_uri = f"{base_url}/api/backup/oauth/google/callback"
@@ -435,9 +458,9 @@ async def google_oauth_callback(request: Request, code: str = "", error: str = "
     result = connect_google_drive(code, redirect_uri)
 
     if "error" in result:
-        return HTMLResponse(_OAUTH_ERROR_HTML.format(icon="&#x274C;", error=result["error"]))
+        return HTMLResponse(_oauth_error_page(icon="&#x274C;", error=result["error"]))
 
-    return HTMLResponse(_OAUTH_SUCCESS_HTML.format(
+    return HTMLResponse(_oauth_success_page(
         icon="&#x2601;&#xFE0F;",
         title="Google Drive Connected!",
         message=f"Signed in as {result.get('email', 'unknown')}. Your memories will be backed up automatically."
@@ -453,7 +476,7 @@ async def google_oauth_callback(request: Request, code: str = "", error: str = "
 async def github_oauth_start(request: Request):
     """Start GitHub OAuth flow."""
     if not CLOUD_AVAILABLE:
-        return HTMLResponse(_OAUTH_ERROR_HTML.format(icon="&#x26A0;", error="Cloud backup module not available"))
+        return HTMLResponse(_oauth_error_page(icon="&#x26A0;", error="Cloud backup module not available"))
 
     from superlocalmemory.infra.cloud_backup import _get_credential
 
@@ -553,10 +576,10 @@ async function doConnect() {
 async def github_oauth_callback(request: Request, code: str = "", error: str = ""):
     """GitHub OAuth callback — exchanges code for access token."""
     if error:
-        return HTMLResponse(_OAUTH_ERROR_HTML.format(icon="&#x274C;", error=f"GitHub denied access: {error}"))
+        return HTMLResponse(_oauth_error_page(icon="&#x274C;", error=f"GitHub denied access: {error}"))
 
     if not code:
-        return HTMLResponse(_OAUTH_ERROR_HTML.format(icon="&#x274C;", error="No authorization code received"))
+        return HTMLResponse(_oauth_error_page(icon="&#x274C;", error="No authorization code received"))
 
     from superlocalmemory.infra.cloud_backup import _get_credential, _store_credential
     import httpx
@@ -565,7 +588,7 @@ async def github_oauth_callback(request: Request, code: str = "", error: str = "
     gh_client_secret = _get_credential("github_client_secret")
 
     if not gh_client_id or not gh_client_secret:
-        return HTMLResponse(_OAUTH_ERROR_HTML.format(icon="&#x274C;", error="GitHub OAuth App not configured"))
+        return HTMLResponse(_oauth_error_page(icon="&#x274C;", error="GitHub OAuth App not configured"))
 
     try:
         # Exchange code for access token
@@ -578,18 +601,18 @@ async def github_oauth_callback(request: Request, code: str = "", error: str = "
         data = resp.json()
         access_token = data.get("access_token")
         if not access_token:
-            return HTMLResponse(_OAUTH_ERROR_HTML.format(icon="&#x274C;", error=data.get("error_description", "Failed to get access token")))
+            return HTMLResponse(_oauth_error_page(icon="&#x274C;", error=data.get("error_description", "Failed to get access token")))
 
         # Use the token to connect
         result = connect_github(access_token, "slm-backup")
         if "error" in result:
-            return HTMLResponse(_OAUTH_ERROR_HTML.format(icon="&#x274C;", error=result["error"]))
+            return HTMLResponse(_oauth_error_page(icon="&#x274C;", error=result["error"]))
 
-        return HTMLResponse(_OAUTH_SUCCESS_HTML.format(
+        return HTMLResponse(_oauth_success_page(
             icon="&#x2705;",
             title="GitHub Connected!",
             message=f"Repository: {result.get('repo', 'slm-backup')}. Your memories will be backed up automatically."
         ))
 
     except Exception as exc:
-        return HTMLResponse(_OAUTH_ERROR_HTML.format(icon="&#x274C;", error=str(exc)))
+        return HTMLResponse(_oauth_error_page(icon="&#x274C;", error=str(exc)))
