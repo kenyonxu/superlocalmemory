@@ -112,7 +112,7 @@ def test_tty_detection_defaults_to_balanced_for_non_tty(tmp_path: Path) -> None:
         "SLM_INSTALL_DISK_FREE_GB": "250",
     }
     result = _run(
-        ["--dry-run", f"--home={home}"],
+        ["--dry-run", f"--home={home}", "--home-outside-home"],
         env=env,
     )
     assert result.returncode == 0, (
@@ -145,7 +145,7 @@ def test_benchmark_recommends_minimal_on_low_ram(tmp_path: Path) -> None:
         "SLM_INSTALL_FREE_RAM_MB": "400",  # below Light's 900 MB threshold
     }
     result = _run(
-        ["--dry-run", f"--home={home}"],
+        ["--dry-run", f"--home={home}", "--home-outside-home"],
         env=env,
         timeout=20,
     )
@@ -180,6 +180,7 @@ def test_custom_profile_writes_config_toml(tmp_path: Path) -> None:
     result = _run(
         [
             f"--home={home}",
+            "--home-outside-home",
             "--profile=custom",
             f"--reply-file={reply_file}",
         ],
@@ -212,7 +213,7 @@ def test_reconfigure_preserves_config_bak(tmp_path: Path) -> None:
 
     # First: without --reconfigure, should NOT overwrite.
     result_skip = _run(
-        [f"--home={home}", "--profile=power"],
+        [f"--home={home}", "--home-outside-home", "--profile=power"],
         env={"CI": "true"},
     )
     assert result_skip.returncode == 0, result_skip.stderr
@@ -222,7 +223,7 @@ def test_reconfigure_preserves_config_bak(tmp_path: Path) -> None:
 
     # Second: with --reconfigure, should back up and overwrite.
     result_rc = _run(
-        [f"--home={home}", "--profile=power", "--reconfigure"],
+        [f"--home={home}", "--home-outside-home", "--profile=power", "--reconfigure"],
         env={"CI": "true"},
     )
     assert result_rc.returncode == 0, result_rc.stderr
@@ -246,7 +247,7 @@ def test_skill_evolution_prompt_defaults_no(tmp_path: Path) -> None:
     home.mkdir()
     # Non-TTY Balanced path — no prompts, skill_evolution must be OFF.
     result = _run(
-        [f"--home={home}", "--profile=balanced"],
+        [f"--home={home}", "--home-outside-home", "--profile=balanced"],
         env={"CI": "true"},
     )
     assert result.returncode == 0, result.stderr

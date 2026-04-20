@@ -133,15 +133,135 @@ function parseArgs(argv) {
     reconfigure: false,
     home: null,
     replyFile: null,
+    homeOutsideHome: false, // H-10: opt-in flag for --home outside $HOME
   };
   for (const a of argv) {
     if (a === '--dry-run') args.dryRun = true;
     else if (a === '--reconfigure') args.reconfigure = true;
+    else if (a === '--home-outside-home') args.homeOutsideHome = true; // H-10
     else if (a.startsWith('--profile=')) args.profile = a.slice('--profile='.length);
     else if (a.startsWith('--home=')) args.home = a.slice('--home='.length);
     else if (a.startsWith('--reply-file=')) args.replyFile = a.slice('--reply-file='.length);
   }
   return args;
+}
+
+// ------------------------------------------------------------------------
+// H-09 — Reply-file schema validation
+// ------------------------------------------------------------------------
+// Allow-list of top-level keys accepted from --reply-file, each with a type
+// constraint. Any extra key, wrong type, or malformed value is rejected.
+//
+//   key                        | type       | required shape / notes
+//   ---------------------------|------------|-----------------------------------
+//   profile                    | string     | one of minimal|light|balanced|power|custom
+//   home                       | string     | path; further validated in validateHomePath
+//   accept_default             | boolean    |
+//   no_benchmark               | boolean    |
+//   ram_ceiling_mb             | number     | integer, > 0
+//   hot_path_hooks             | string     |
+//   reranker                   | string     |
+//   context_injection_tokens   | number     | integer, >= 0
+//   skill_evolution_enabled    | boolean    |
+//   evolution_llm              | string     | haiku|sonnet|ollama|skip
+//   online_retrain_cadence     | string     |
+//   consolidation_cadence      | string     |
+//   inline_entity_detection    | boolean    |
+//   telemetry                  | string     |
+function validateReplyFileSchema(obj) {
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
+    return { ok: false, error: 'reply-file must decode to a JSON object' };
+  }
+  const schema = {
+    profile: { type: 'string', enum: ['minimal', 'light', 'balanced', 'power', 'custom'] },
+    home: { type: 'string' },
+    accept_default: { type: 'boolean' },
+    no_benchmark: { type: 'boolean' },
+    ram_ceiling_mb: { type: 'number', integer: true, min: 1 },
+    hot_path_hooks: { type: 'string' },
+    reranker: { type: 'string' },
+    context_injection_tokens: { type: 'number', integer: true, min: 0 },
+    skill_evolution_enabled: { type: 'boolean' },
+    evolution_llm: { type: 'string', enum: ['haiku', 'sonnet', 'ollama', 'skip'] },
+    online_retrain_cadence: { type: 'string' },
+    consolidation_cadence: { type: 'string' },
+    inline_entity_detection: { type: 'boolean' },
+    telemetry: { type: 'string' },
+  };
+  for (const key of Object.keys(obj)) {
+    if (!Object.prototype.hasOwnProperty.call(schema, key)) {
+      return { ok: false, error: 'unexpected key in reply-file: "' + key + '"' };
+    }
+    const rule = schema[key];
+    const val = obj[key];
+    if (rule.type === 'string') {
+      if (typeof val !== 'string') {
+        return { ok: false, error: 'reply-file key "' + key + '" must be a string' };
+      }
+      if (rule.enum && !rule.enum.includes(val)) {
+        return {
+          ok: false,
+          error: 'reply-file key "' + key + '" must be one of: ' + rule.enum.join('|'),
+        };
+      }
+    } else if (rule.type === 'boolean') {
+      if (typeof val !== 'boolean') {
+        return { ok: false, error: 'reply-file key "' + key + '" must be a boolean' };
+      }
+    } else if (rule.type === 'number') {
+      if (typeof val !== 'number' || Number.isNaN(val) || !Number.isFinite(val)) {
+        return { ok: false, error: 'reply-file key "' + key + '" must be a number' };
+      }
+      if (rule.integer && !Number.isInteger(val)) {
+        return { ok: false, error: 'reply-file key "' + key + '" must be an integer' };
+      }
+      if (rule.min !== undefined && val < rule.min) {
+        return { ok: false, error: 'reply-file key "' + key + '" must be >= ' + rule.min };
+      }
+    }
+  }
+  return { ok: true };
+}
+
+// ------------------------------------------------------------------------
+// H-10 — --home path validation
+// ------------------------------------------------------------------------
+// Rejects non-absolute paths, paths containing ".." segments, paths outside
+// the user's $HOME (unless --home-outside-home was passed), and paths that
+// resolve to an existing non-directory (e.g., a file).
+function validateHomePath(homeArg, userHomeDir, outsideOptIn) {
+  if (typeof homeArg !== 'string' || homeArg === '') {
+    return { ok: false, error: '--home must be a non-empty string' };
+  }
+  if (!path.isAbsolute(homeArg)) {
+    return { ok: false, error: '--home must be an absolute path (rule: not-absolute)' };
+  }
+  const segments = homeArg.split(path.sep);
+  if (segments.includes('..')) {
+    return { ok: false, error: '--home must not contain ".." segments (rule: dotdot-segment)' };
+  }
+  const resolved = path.resolve(homeArg);
+  const resolvedHome = path.resolve(userHomeDir || os.homedir());
+  const insideHome =
+    resolved === resolvedHome || resolved.startsWith(resolvedHome + path.sep);
+  if (!insideHome && !outsideOptIn) {
+    return {
+      ok: false,
+      error:
+        '--home resolves outside $HOME (' +
+        resolvedHome +
+        '); pass --home-outside-home to override (rule: outside-home)',
+    };
+  }
+  try {
+    const st = fs.statSync(resolved);
+    if (!st.isDirectory()) {
+      return { ok: false, error: '--home exists but is not a directory (rule: not-a-directory)' };
+    }
+  } catch (e) {
+    // Path does not yet exist — that's OK; caller will mkdirSync it.
+  }
+  return { ok: true, resolved };
 }
 
 // ------------------------------------------------------------------------
@@ -224,6 +344,36 @@ function recommendProfileFromBenchmark(bench) {
   if (bench.freeRamMb < BALANCED_RAM_THRESHOLD_MB) return 'balanced';
   // Ample resources — still default to Balanced (Power is an explicit opt-in).
   return 'balanced';
+}
+
+// H-15 — Compute a machine-readable reason code when the benchmark forces a
+// downgrade from a user-requested profile. Returns null if no downgrade.
+function describeDowngradeReason(requestedProfile, benchProfile, bench) {
+  const rank = { minimal: 0, light: 1, balanced: 2, power: 3, custom: 2 };
+  if (!requestedProfile || !(requestedProfile in rank)) return null;
+  if (!(benchProfile in rank)) return null;
+  if (rank[benchProfile] >= rank[requestedProfile]) return null;
+  // A downgrade occurred — classify by which threshold fired.
+  let code = 'PROFILE_RAM_FLOOR';
+  if (bench.freeRamMb >= LIGHT_RAM_THRESHOLD_MB && bench.coldStartMs > COLD_START_SLOW_MS) {
+    code = 'PROFILE_COLD_START_FLOOR';
+  }
+  const ramGb = (bench.freeRamMb / 1024).toFixed(0);
+  return {
+    code,
+    line:
+      '[downgrade] Requested profile "' +
+      requestedProfile.charAt(0).toUpperCase() +
+      requestedProfile.slice(1) +
+      '" but RAM is ' +
+      ramGb +
+      'GB — falling back to "' +
+      benchProfile.charAt(0).toUpperCase() +
+      benchProfile.slice(1) +
+      '". Reason: ' +
+      code +
+      '.',
+  };
 }
 
 // ------------------------------------------------------------------------
@@ -398,6 +548,14 @@ function printFirstRunChecklist(config) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  // H-10: validate --home before using it.
+  if (args.home !== null) {
+    const homeCheck = validateHomePath(args.home, os.homedir(), args.homeOutsideHome);
+    if (!homeCheck.ok) {
+      console.error('SLM: invalid --home: ' + homeCheck.error);
+      return 2;
+    }
+  }
   const homeDir = args.home || os.homedir();
   const slmDir = path.join(homeDir, '.superlocalmemory');
   const cfgPath = path.join(slmDir, 'config.toml');
@@ -442,6 +600,26 @@ async function main() {
       console.error('SLM: failed to read --reply-file: ' + e.message);
       return 2;
     }
+    // H-09: reject unknown keys / wrong types before we trust the payload.
+    const schemaCheck = validateReplyFileSchema(replyFileContents);
+    if (!schemaCheck.ok) {
+      console.error('SLM: invalid --reply-file: ' + schemaCheck.error);
+      return 2;
+    }
+  }
+
+  // H-15: track the user's requested profile before any silent override so
+  // we can surface a downgrade reason on TTY. `requestedProfile` is what the
+  // user *asked for* (via --profile or reply-file); `recommended` is what
+  // the benchmark would pick.
+  const requestedProfile =
+    (args.profile && PROFILES[args.profile] ? args.profile : null) ||
+    (replyFileContents && typeof replyFileContents.profile === 'string'
+      ? replyFileContents.profile
+      : null);
+  const downgrade = describeDowngradeReason(requestedProfile, recommended, bench);
+  if (downgrade && process.stdout.isTTY) {
+    console.log(downgrade.line);
   }
 
   if (args.profile === 'custom' || (replyFileContents && replyFileContents.profile === 'custom')) {
@@ -518,6 +696,10 @@ module.exports = {
   renderConfigToml,
   parsePriorConfigToml,
   buildCustomConfig,
+  validateReplyFileSchema, // H-09
+  validateHomePath, // H-10
+  describeDowngradeReason, // H-15
+  main, // exported so test harnesses can simulate TTY flags before invoking
   LLM_MODEL_CHOICES,
   PROFILES,
 };
