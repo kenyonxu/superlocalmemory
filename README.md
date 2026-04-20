@@ -347,6 +347,9 @@ slm dashboard    # Opens at http://localhost:8765
 
 **v3.4.4 "Neural Glass":** 21-tab sidebar dashboard with light + dark theme. Knowledge Graph (Sigma.js WebGL, community detection), Health Monitor, Entity Explorer (1,300+ entities), Mesh Peers (P2P agent communication), Ingestion Status (Gmail/Calendar/Transcript management), Privacy blur mode. Always-on daemon with auto-start. 8 mesh MCP tools built-in. Cross-platform: macOS + Windows + Linux. All data stays local.
 
+<!-- UX-M1: link dashboard-coverage so users can find deferred Living Brain Evolution tiles -->
+> **Living Brain Evolution visibility:** v3.4.21 ships the reward model, shadow test + online retrain, and evolution cost log via the REST API and `slm status --json`; the dedicated dashboard tiles are deferred to the next cycle. See [docs/DASHBOARD-COVERAGE.md](docs/DASHBOARD-COVERAGE.md) for endpoints and workarounds.
+
 ---
 
 <details>

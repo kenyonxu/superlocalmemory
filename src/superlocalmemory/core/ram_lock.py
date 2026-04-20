@@ -73,6 +73,13 @@ def ram_reservation(
         )
 
     RAM_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # SEC-M6 — tighten the parent dir so the audit marker (``{pid}:{name}``)
+    # is not readable by other UIDs on shared hosts. Idempotent; POSIX-only.
+    try:
+        if os.name == "posix":
+            os.chmod(RAM_LOCK_PATH.parent, 0o700)
+    except OSError:  # pragma: no cover — perms race
+        pass
     fd = os.open(str(RAM_LOCK_PATH), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         deadline = time.time() + timeout_s

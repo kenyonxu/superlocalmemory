@@ -86,7 +86,26 @@ def _parse_embedding(raw: str | None) -> list[float] | None:
         return None
 
 
+# L-P-01: vectorise ``_cosine`` via NumPy when available. NumPy cold
+# import is ~30 ms, but hnswlib already forces numpy in; the import is
+# effectively free in the consolidation context where these helpers run.
+# Pure-Python fallback is retained for environments where numpy is
+# missing (contract: this module MUST NOT hard-depend on numpy).
+try:  # pragma: no cover — environment-dependent
+    import numpy as _np  # type: ignore
+except Exception:  # pragma: no cover — numpy always present in our deps
+    _np = None
+
+
 def _cosine(u: Sequence[float], v: Sequence[float]) -> float:
+    if _np is not None:
+        ua = _np.asarray(u, dtype=_np.float32)
+        va = _np.asarray(v, dtype=_np.float32)
+        nu = float(_np.linalg.norm(ua))
+        nv = float(_np.linalg.norm(va))
+        if nu == 0.0 or nv == 0.0:
+            return 0.0
+        return float(_np.dot(ua, va)) / (nu * nv)
     dot = 0.0
     nu = 0.0
     nv = 0.0
@@ -100,6 +119,10 @@ def _cosine(u: Sequence[float], v: Sequence[float]) -> float:
 
 
 def _jaccard(a: Iterable[str], b: Iterable[str]) -> float:
+    # L-P-01: _jaccard is already O(|a|+|b|) set ops — numpy adds
+    # hashing overhead for short string sets, so we keep the pure-Python
+    # path. The change from the audit is the explicit note here; no
+    # behaviour delta.
     sa, sb = set(a), set(b)
     if not sa and not sb:
         return 0.0
@@ -136,7 +159,22 @@ class HnswDeduplicator:
     ENTITY_JACCARD_THRESHOLD: float = 0.8
     MAX_FACTS_FOR_HNSW: int = 200_000
 
-    # Per-vector HNSW footprint estimate (LLD-12 §3.1).
+    # S-L01: HNSW init params — stored on the class so ``_estimate_ram_mb``
+    # and ``_ann_candidates`` share ONE source of truth. Previously the
+    # estimator hardcoded M=16 while the real build also used M=16 / ef=100
+    # — the numbers agreed by coincidence, not by construction. If either
+    # knob changes, the estimate tracks automatically and the ``ef_construction``
+    # build-time buffer is captured in the 1.4× multiplier below.
+    HNSW_M: int = 16
+    HNSW_EF_CONSTRUCTION: int = 100
+    # Build-time overhead multiplier vs steady-state footprint. Empirically
+    # hnswlib uses ~1.3× steady RAM during construction due to the
+    # ef_construction candidate pool — we round up to 1.4 for safety on
+    # tight-RAM (Light) profiles.
+    HNSW_BUILD_OVERHEAD: float = 1.4
+
+    # Per-vector HNSW footprint estimate (LLD-12 §3.1). Kept for
+    # back-compat — callers should prefer ``_estimate_ram_mb``.
     _BYTES_PER_VEC_DEFAULT: int = 384 * 4 + 16 * 8 * 2
 
     def __init__(self, *, memory_db_path: str | Path) -> None:
@@ -238,8 +276,12 @@ class HnswDeduplicator:
         return 384
 
     def _estimate_ram_mb(self, n: int, *, dim: int) -> float:
-        bytes_per_vec = dim * 4 + 16 * 8 * 2
-        return (n * bytes_per_vec * 1.10) / (1024 * 1024)
+        # S-L01: derive per-vector size from the actual HNSW_M knob so
+        # a future tuning of M updates the estimate automatically. The
+        # 1.4× multiplier folds in the ef_construction build-time
+        # candidate pool that the old 1.10× factor under-counted.
+        bytes_per_vec = dim * 4 + self.HNSW_M * 8 * 2
+        return (n * bytes_per_vec * self.HNSW_BUILD_OVERHEAD) / (1024 * 1024)
 
     def _ann_candidates(
         self,
@@ -258,7 +300,13 @@ class HnswDeduplicator:
             return self._prefix_fallback(rows, deadline)
 
         index = hnswlib_mod.Index(space="cosine", dim=dim)
-        index.init_index(max_elements=len(embedded), ef_construction=100, M=16)
+        # S-L01: share knobs with ``_estimate_ram_mb`` so RAM reservation
+        # never under-counts.
+        index.init_index(
+            max_elements=len(embedded),
+            ef_construction=self.HNSW_EF_CONSTRUCTION,
+            M=self.HNSW_M,
+        )
         index.set_ef(min(50, len(embedded)))
 
         try:

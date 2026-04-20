@@ -26,12 +26,15 @@ This module is the single source of truth for:
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import IO, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +50,12 @@ SCAN_BYTES_CAP: int = 100_000
 #: Re-query detection window (ms). Outside → no signal.
 REQUERY_WINDOW_MS: int = 60_000
 
+# SEC-M4 — perf log rotation. Cap at 10 MB; keep one rotated copy
+# (``hook-perf.log.1``). Bounds disk growth + limits info-disclosure
+# window on multi-year retention.
+PERF_LOG_MAX_BYTES: int = 10 * 1024 * 1024
+PERF_LOG_CHECK_EVERY: int = 256  # check size every N writes, not every write
+
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -58,11 +67,21 @@ def slm_home() -> Path:
 
     ``SLM_HOME`` exists solely so unit tests can isolate filesystem state.
     Production code sets nothing and falls back to the home-directory path.
+
+    SEC-M6 — first-creation chmod's the dir to 0700 so the audit marker
+    in ``ram_lock.sem`` (``{pid}:{name}``) and session-state files are
+    not world-readable on shared hosts.
     """
     override = os.environ.get("SLM_HOME", "").strip()
-    if override:
-        return Path(override)
-    return Path.home() / ".superlocalmemory"
+    base = Path(override) if override else (Path.home() / ".superlocalmemory")
+    try:
+        if not base.exists():
+            base.mkdir(parents=True, exist_ok=True)
+        if os.name == "posix":
+            os.chmod(base, 0o700)  # SEC-M6
+    except Exception:  # pragma: no cover — read-only fs / perms
+        pass
+    return base
 
 
 def memory_db_path() -> Path:
@@ -71,10 +90,16 @@ def memory_db_path() -> Path:
 
 
 def session_state_dir() -> Path:
-    """Per-session JSON state directory (created on demand)."""
+    """Per-session JSON state directory (created on demand).
+
+    SEC-M3 — chmod 0700 so session_state/*.json (topic_sig, outcome_id)
+    side-channels are not readable by other UIDs.
+    """
     d = slm_home() / "session_state"
     try:
         d.mkdir(parents=True, exist_ok=True)
+        if os.name == "posix":
+            os.chmod(d, 0o700)  # SEC-M3
     except Exception:  # pragma: no cover — disk full / ro fs
         pass
     return d
@@ -84,6 +109,8 @@ def perf_log_path() -> Path:
     d = slm_home() / "logs"
     try:
         d.mkdir(parents=True, exist_ok=True)
+        if os.name == "posix":
+            os.chmod(d, 0o700)  # SEC-M4 — logs dir private
     except Exception:  # pragma: no cover
         pass
     return d / "hook-perf.log"
@@ -202,14 +229,92 @@ def summarize_response(raw: object, cap: int = SCAN_BYTES_CAP) -> str:
 # ---------------------------------------------------------------------------
 
 
+# M-P-01: module-level append-only fd + atexit flush/close. Previously
+# ``log_perf`` opened and closed the perf log on every invocation. At
+# 20 tool-events/min × 8 h that was ~9.6k gratuitous APFS metadata
+# round-trips per day. The shared fd is guarded by a lock because long-
+# lived daemons may call ``log_perf`` from multiple threads; POSIX
+# ``write()`` is atomic for payloads ≤ PIPE_BUF but our lock keeps us
+# safe across platforms and captures a post-rotation reopen cleanly.
+_PERF_LOG_FD: Optional[IO[str]] = None
+_PERF_LOG_PATH: Optional[Path] = None
+_PERF_LOG_LOCK = threading.Lock()
+_PERF_LOG_WRITE_COUNT: int = 0  # SEC-M4 — rotation cadence counter
+
+
+def _open_perf_log_fd(path: Path) -> Optional[IO[str]]:
+    """Open the append-only perf-log fd at mode 0600 on POSIX.
+
+    SEC-M4 — log is private (info-disclosure surface). ``os.open`` is
+    used to set the mode on creation; we wrap the fd with fdopen so the
+    rest of the module sees a normal text file object.
+    """
+    try:
+        if os.name == "posix":
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+            fd_int = os.open(str(path), flags, 0o600)
+            # Harden existing files that may predate this change.
+            try:
+                os.chmod(path, 0o600)
+            except OSError:  # pragma: no cover — perms
+                pass
+            return os.fdopen(fd_int, "a", encoding="utf-8", buffering=1)
+        return open(path, "a", encoding="utf-8", buffering=1)
+    except Exception:  # pragma: no cover — disk full / perms
+        return None
+
+
+def _maybe_rotate_perf_log(path: Path) -> None:
+    """Rotate ``hook-perf.log`` → ``hook-perf.log.1`` when over 10 MB.
+
+    SEC-M4 — called from ``log_perf`` under ``_PERF_LOG_LOCK`` every
+    ``PERF_LOG_CHECK_EVERY`` writes so the stat() cost is negligible
+    on the hot path. Single rotation slot (overwrite .1 if present).
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size < PERF_LOG_MAX_BYTES:
+        return
+    rotated = path.with_suffix(path.suffix + ".1")
+    try:
+        if rotated.exists():
+            rotated.unlink()
+        path.rename(rotated)
+    except OSError:  # pragma: no cover — fs race
+        pass
+
+
+def _perf_log_flush() -> None:
+    """Flush the cached perf log fd (atexit hook). Never raises."""
+    global _PERF_LOG_FD
+    with _PERF_LOG_LOCK:
+        fd = _PERF_LOG_FD
+        _PERF_LOG_FD = None
+    if fd is None:
+        return
+    try:
+        fd.flush()
+    except Exception:  # pragma: no cover
+        pass
+    try:
+        fd.close()
+    except Exception:  # pragma: no cover
+        pass
+
+
+atexit.register(_perf_log_flush)
+
+
 def log_perf(hook_name: str, duration_ms: float, outcome: str) -> None:
     """Append one NDJSON line to ``logs/hook-perf.log``.
 
-    Best-effort: disk full / unwritable dir → silently skip. One short
-    ``open(..., 'a')`` per invocation. On POSIX, a single ``write()`` of
-    ≤ PIPE_BUF (4 KB) is atomic — our lines are ≪100 bytes so no lock
-    is required.
+    Best-effort: disk full / unwritable dir → silently skip. Uses a
+    module-level append-only fd opened on first use and flushed on
+    process exit via :func:`_perf_log_flush`.
     """
+    global _PERF_LOG_FD, _PERF_LOG_PATH, _PERF_LOG_WRITE_COUNT
     try:
         rec = {
             "ts": int(time.time() * 1000),
@@ -218,8 +323,33 @@ def log_perf(hook_name: str, duration_ms: float, outcome: str) -> None:
             "outcome": outcome,
         }
         line = json.dumps(rec, separators=(",", ":")) + "\n"
-        with open(perf_log_path(), "a", encoding="utf-8") as f:
-            f.write(line)
+        path = perf_log_path()
+        with _PERF_LOG_LOCK:
+            # SEC-M4 — amortised rotation check.
+            _PERF_LOG_WRITE_COUNT += 1
+            if _PERF_LOG_WRITE_COUNT % PERF_LOG_CHECK_EVERY == 0:
+                # Close fd before rename so POSIX release is clean.
+                if _PERF_LOG_FD is not None:
+                    try:
+                        _PERF_LOG_FD.close()
+                    except Exception:  # pragma: no cover
+                        pass
+                    _PERF_LOG_FD = None
+                _maybe_rotate_perf_log(path)
+            # Reopen if first use OR if the target path has changed (tests
+            # flip ``SLM_HOME`` between cases — honour the new location).
+            if _PERF_LOG_FD is None or _PERF_LOG_PATH != path:
+                if _PERF_LOG_FD is not None:
+                    try:
+                        _PERF_LOG_FD.close()
+                    except Exception:  # pragma: no cover
+                        pass
+                _PERF_LOG_FD = _open_perf_log_fd(path)
+                _PERF_LOG_PATH = path
+            fd = _PERF_LOG_FD
+            if fd is None:
+                return
+            fd.write(line)
     except Exception:  # pragma: no cover — disk full / perms
         pass
 

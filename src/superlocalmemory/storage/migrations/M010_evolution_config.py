@@ -15,6 +15,16 @@ migration creates the two tables the evolution subsystem needs:
   report tokens + USD spend.
 
 Target DB: learning.db. Additive only.
+
+SEC-L2 — ``cost_usd`` is IEEE-754 REAL (double). This loses precision
+when summing thousands of sub-cent rows (rounding drift < 0.5 ¢ per
+10k rows in practice). The schema is additive and therefore locked
+for v3.4.21 — dashboards MUST compute aggregate cost as
+``SUM(cost_usd)`` with explicit ``ROUND(x, 4)`` at display time, and
+MUST NOT branch on sub-cent equality. A follow-on migration is
+scheduled to switch the column to INTEGER millicents (see FINAL
+board). The ``cost_usd >= 0`` non-negativity invariant is enforced
+application-side by ``evolution.llm_dispatch._log_cost``.
 """
 
 from __future__ import annotations

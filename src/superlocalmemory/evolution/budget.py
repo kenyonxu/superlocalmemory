@@ -36,6 +36,35 @@ from superlocalmemory.core.security_primitives import safe_resolve_identifier
 logger = logging.getLogger(__name__)
 
 
+# M-P-07: path-component hints for filesystems where ``fcntl.flock`` is
+# known to degrade to a no-op. We do NOT abort — some users accept the
+# risk — but we emit a one-shot warning so a double-cycle is at least
+# attributable to a known root cause. If/when we ship a threading-only
+# fallback, this list becomes the trigger for switching modes.
+_SYNC_ROOT_HINTS: tuple[str, ...] = (
+    "iCloud Drive",
+    "Library/Mobile Documents",       # macOS iCloud backing store
+    "OneDrive",
+    "Dropbox",
+    "Google Drive",
+    "pCloudDrive",
+)
+_WARNED_SYNC_PATHS: set[str] = set()
+
+
+def _detect_sync_root(path: Path) -> str | None:
+    """Return the matching sync-root hint if ``path`` lives under one."""
+    try:
+        parts = tuple(path.resolve().parts)
+    except Exception:  # pragma: no cover — path resolution failures
+        parts = path.parts
+    joined = "/".join(parts)
+    for hint in _SYNC_ROOT_HINTS:
+        if hint in joined:
+            return hint
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Contract constants (non-negotiable per MASTER-PLAN §4.4)
 # ---------------------------------------------------------------------------
@@ -97,6 +126,28 @@ class EvolutionBudget:
             self._lock_dir, f"evolution-{profile_id}",
         )
         self._lock_path = safe_stem.with_suffix(".lock")
+        # M-P-07: warn once per lock-path when we detect the lock sits on
+        # a known sync-backed filesystem. ``fcntl.flock`` silently
+        # degrades on iCloud/OneDrive/Dropbox — two concurrent cycles
+        # would each acquire and burn LLM budget. Documentation-only for
+        # now; a future release may refuse to run until the lock_dir is
+        # moved off the sync root.
+        try:
+            root_hint = _detect_sync_root(self._lock_path)
+        except Exception:  # pragma: no cover — defensive
+            root_hint = None
+        if root_hint is not None:
+            key = str(self._lock_path)
+            if key not in _WARNED_SYNC_PATHS:
+                _WARNED_SYNC_PATHS.add(key)
+                logger.warning(
+                    "evolution lock at %s lives under %r — fcntl.flock "
+                    "may silently no-op on sync-backed filesystems. "
+                    "Concurrent cycles could double-bill LLM cost. Move "
+                    "the lock_dir off the sync root to make single-flight "
+                    "enforceable.",
+                    key, root_hint,
+                )
 
         self._cycle_start_mono: float | None = None
         self._llm_calls_this_cycle: int = 0

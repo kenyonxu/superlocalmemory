@@ -5,6 +5,13 @@ v1 synthetic fixture, above the 10 % stable threshold. First run
 recorded 2026-04-19 against v3.4.21 FINAL (all of Track A.3 online
 retrain + LightGBM lineage M009 + reward model A.1 live).
 
+<!-- UX-M2: synthetic caveat adjacent to the headline -->
+> *Synthetic fixture only — this is not a claim about real-user
+> workloads. The `+18.6 %` is measured on our deterministic 500-seed
+> Evo-Memory v1 fixture (SHA-pinned). Real-user lift is measured via
+> the opt-in engagement reward model (LLD-08) and is not published.
+> See "Honesty Clause" below.*
+
 **Publish gate:** See § Publish Gate below. The harness emits a tier
 automatically — this document is rewritten from the template every run.
 

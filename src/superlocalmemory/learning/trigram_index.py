@@ -33,6 +33,7 @@ if the cache DB is absent; the hook uses this to fall back silently.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import unicodedata
@@ -114,6 +115,30 @@ def _reset_cache_conn() -> None:
 # --------------------------------------------------------------------------
 
 
+#: L-P-02: cheap proxy for trigram "commonness". A trigram composed of
+#: three ASCII lowercase letters is the most frequent class; any trigram
+#: with a digit or with an uncommon starting letter is rarer and thus
+#: more discriminative for entity lookup. Lower key == earlier sort ==
+#: preferred to keep.
+_COMMON_STARTS: frozenset[str] = frozenset("etaoinshrdlucmfgpwby")
+
+
+def _trigram_rarity_key(t: str) -> int:
+    """Return a small-int rarity rank; LOW == rare/kept, HIGH == common."""
+    if not t:
+        return 3
+    has_digit = any(c.isdigit() for c in t)
+    starts_common = t[0] in _COMMON_STARTS
+    # 0: has a digit (very discriminative, e.g. "sl3", "1st").
+    # 1: starts with an uncommon letter.
+    # 2: all-letter common trigram (default big bucket).
+    if has_digit:
+        return 0
+    if not starts_common:
+        return 1
+    return 2
+
+
 def _trigrams_for(text: str) -> set[str]:
     """Extract 3-gram set from ``text``.
 
@@ -172,16 +197,52 @@ class TrigramIndex:
     # bootstrap() — daemon-side rebuild
     # ----------------------------------------------------------------------
 
+    #: L-P-04: reservation default mirrors LLD-00 §7 (300 MB sized for
+    #: ~10k entities × ~5 aliases × ~15 trigrams). On small installs this
+    #: over-reserves on tight-RAM laptops; on 500k-entity power users it
+    #: under-protects. The env override lets operators right-size per host
+    #: without a code change — the fallback stays safe.
+    BOOTSTRAP_RAM_MB_DEFAULT: int = 300
+    BOOTSTRAP_RAM_MB_ENV: str = "SLM_TRIGRAM_BOOTSTRAP_RAM_MB"
+
+    @classmethod
+    def _bootstrap_ram_mb(cls) -> int:
+        raw = os.environ.get(cls.BOOTSTRAP_RAM_MB_ENV, "").strip()
+        if not raw:
+            return cls.BOOTSTRAP_RAM_MB_DEFAULT
+        try:
+            val = int(raw)
+        except ValueError:
+            return cls.BOOTSTRAP_RAM_MB_DEFAULT
+        if val < 16:
+            # Refuse to under-reserve — the minimum keeps semaphore math
+            # meaningful even on tiny CI boxes.
+            return 16
+        return val
+
     def bootstrap(self) -> None:
         """Read canonical_entities + entity_aliases, recompute trigram
         buckets, atomically swap the cache table.
 
         Wraps the heavy phase in ``ram_reservation('trigram_rebuild',
-        required_mb=300)``. Source DB is opened read-only; memory.db is
-        never mutated.
+        required_mb=<default 300, overridable via
+        ``SLM_TRIGRAM_BOOTSTRAP_RAM_MB``>)``. Source DB is opened
+        read-only; memory.db is never mutated.
         """
-        with ram_reservation("trigram_rebuild", required_mb=300):
+        with ram_reservation(
+            "trigram_rebuild",
+            required_mb=self._bootstrap_ram_mb(),
+        ):
             self._rebuild_index()
+
+    # SEC-M5 — safety cap on rebuild input row count. An adversarial or
+    # bloated memory.db with millions of canonical_entities could exceed
+    # the 300 MB ``ram_reservation`` block after fast-fail passed, since
+    # ``fetchall()`` materialises the entire JOIN into Python memory.
+    # ``MAX_TRIGRAMS=1_000_000`` downstream already bounds the final
+    # index; capping the source fetch at 5M rows keeps peak RAM within
+    # I2 even on pathological inputs.
+    _MAX_REBUILD_ROWS: int = 5_000_000
 
     def _rebuild_index(self) -> None:
         buckets: dict[str, dict[str, float]] = {}
@@ -191,14 +252,18 @@ class TrigramIndex:
             timeout=1.0,
         )
         try:
-            # One LEFT JOIN fetch. Params: active profile.
+            # SEC-M5 — bounded LIMIT + explicit busy_timeout on the
+            # source connection so a locked memory.db fails fast rather
+            # than blocking the entire timeout.
+            src.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
             rows = src.execute(
                 "SELECT ce.entity_id, ce.canonical_name, "
                 "       COALESCE(ea.alias, '') AS alias "
                 "FROM canonical_entities ce "
                 "LEFT JOIN entity_aliases ea USING (entity_id) "
-                "WHERE ce.profile_id = ?",
-                (_ACTIVE_PROFILE,),
+                "WHERE ce.profile_id = ? "
+                "LIMIT ?",
+                (_ACTIVE_PROFILE, self._MAX_REBUILD_ROWS),
             ).fetchall()
         finally:
             src.close()
@@ -298,9 +363,16 @@ class TrigramIndex:
         if not trigrams:
             return []
         if len(trigrams) > _MAX_IN_CLAUSE:
-            # Deterministic truncation — sorted for stability so the LRU
-            # keys stay hashable and repeatable across identical prompts.
-            trigrams = set(sorted(trigrams)[:_MAX_IN_CLAUSE])
+            # L-P-02: alphabetical ``sorted(trigrams)[:256]`` threw away
+            # the discriminative tail of the signature. Switch to a
+            # rarity-weighted selection that prefers trigrams with at
+            # least one digit or non-common prefix — those are IDF-rich
+            # relative to plain ASCII letter trigrams. The selection is
+            # still deterministic (stable secondary sort on the trigram
+            # itself) so the LRU key remains repeatable across identical
+            # prompts.
+            ranked = sorted(trigrams, key=lambda t: (_trigram_rarity_key(t), t))
+            trigrams = set(ranked[:_MAX_IN_CLAUSE])
         key = frozenset(trigrams)
         try:
             return list(self._cached_lookup_key(key))

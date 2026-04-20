@@ -122,6 +122,16 @@ const LIGHT_RAM_THRESHOLD_MB = 1500; // under this → recommend Light
 const BALANCED_RAM_THRESHOLD_MB = 3000; // under this → recommend Balanced
 const COLD_START_SLOW_MS = 800; // above this → downgrade one tier
 
+// UX-M3 — Allowed enum values for custom-profile knobs. Any value not in
+// these lists is rejected by buildCustomConfig and reprompted interactively.
+const CUSTOM_KNOB_ENUMS = Object.freeze({
+  hot_path_hooks: ['session_start_only', 'post_tool_use_async', 'sync_async', 'all'],
+  reranker: ['off', 'fts5_only', 'onnx_int8_l6', 'onnx_int8_l12'],
+  online_retrain_cadence: ['manual', '50_outcomes', '100_outcomes', 'daily'],
+  consolidation_cadence: ['manual', 'weekly', '6h_nightly', 'nightly'],
+  telemetry: ['local_only', 'local', 'local_plus_opt_in'],
+});
+
 // ------------------------------------------------------------------------
 // CLI flag parsing
 // ------------------------------------------------------------------------
@@ -464,6 +474,31 @@ function buildCustomConfig(replies) {
   for (const key of allowedKeys) {
     if (replies[key] !== undefined) base[key] = replies[key];
   }
+  // UX-M3: reject custom-knob values that fall outside the allowed enum for
+  // their knob. Silent passthrough of free-text like `cadence = "yes"` was
+  // the Stage-8 UX-M3 failure mode — daemon would accept and then quietly
+  // ignore or crash. Fall back to the Balanced baseline value on mismatch.
+  for (const [knob, allowed] of Object.entries(CUSTOM_KNOB_ENUMS)) {
+    if (!allowed.includes(String(base[knob]))) {
+      base[knob] = PROFILES.balanced[knob];
+    }
+  }
+  // UX-M3: numeric knobs — reject non-finite, negative, or out-of-band
+  // values for ram_ceiling_mb and context_injection_tokens.
+  const ramN = Number(base.ram_ceiling_mb);
+  if (!Number.isFinite(ramN) || !Number.isInteger(ramN) || ramN < 256 || ramN > 65536) {
+    base.ram_ceiling_mb = PROFILES.balanced.ram_ceiling_mb;
+  }
+  const tokN = Number(base.context_injection_tokens);
+  if (!Number.isFinite(tokN) || !Number.isInteger(tokN) || tokN < 0 || tokN > 10000) {
+    base.context_injection_tokens = PROFILES.balanced.context_injection_tokens;
+  }
+  if (typeof base.skill_evolution_enabled !== 'boolean') {
+    base.skill_evolution_enabled = PROFILES.balanced.skill_evolution_enabled;
+  }
+  if (typeof base.inline_entity_detection !== 'boolean') {
+    base.inline_entity_detection = PROFILES.balanced.inline_entity_detection;
+  }
   // Reject the banned high-tier Claude family even if a reply-file tries to
   // sneak one in. We compare against the sanitized id set, not a spelled-out
   // model name, so this source file stays clean for the Stage-5b gate scan.
@@ -508,7 +543,13 @@ async function runInteractiveFlow(rl, recommendedProfile) {
     replies.context_injection_tokens = Number.parseInt(
       await promptTTY(rl, 'Context injection per turn (tokens)?', 500), 10);
     // Skill evolution — default OFF (opt-in).
-    const evoAns = await promptTTY(rl, 'Enable skill evolution (opt-in, default no)?', 'no');
+    // UX-L2: disclose that enabling evolution makes outbound API calls so
+    // corporate users on a locked-down network know before opting in.
+    const evoAns = await promptTTY(
+      rl,
+      'Enable skill evolution? (opt-in; default no; makes up to 10 outbound LLM API calls per 6 h cycle)',
+      'no',
+    );
     replies.skill_evolution_enabled = /^y(es)?$/i.test(String(evoAns).trim());
     console.log('LLM for evolution (Haiku default; high-tier is Sonnet only):');
     for (const c of LLM_MODEL_CHOICES) console.log(`   ${c.id}: ${c.label}`);
@@ -528,6 +569,24 @@ async function runInteractiveFlow(rl, recommendedProfile) {
 // First-run checklist
 // ------------------------------------------------------------------------
 
+// UX-G2 — one-screen "what's new in v3.4.21" banner for upgraders so
+// existing users see the headline before the first-run checklist. Kept
+// under 60 LOC per Stage-8 G2 scope.
+function printLivingBrainDelta() {
+  console.log('');
+  console.log('What\'s new in v3.4.21 FINAL:');
+  console.log('  + Engagement reward model (action_outcomes populated)');
+  console.log('  + Online LightGBM retrain (shadow-tested, auto-rollback)');
+  console.log('  + Real consolidation (hnswlib, reversible merges)');
+  console.log('  + Inline entity detection (<2 ms trigram lookup)');
+  console.log('  + Opt-in skill evolution (Haiku 4.5 default)');
+  console.log('  + Evo-Memory public benchmark');
+  console.log('What\'s unchanged:');
+  console.log('  * Your memory.db — zero deletes, zero rewrites');
+  console.log('  * Your profile settings');
+  console.log('  * All CLI commands you already use');
+}
+
 function printFirstRunChecklist(config) {
   console.log('');
   console.log('SuperLocalMemory is configured.');
@@ -535,10 +594,21 @@ function printFirstRunChecklist(config) {
   console.log('  ram_ceiling_mb:    ' + config.ram_ceiling_mb);
   console.log('  skill_evolution:   ' + (config.skill_evolution_enabled ? 'ON' : 'OFF (opt-in)'));
   console.log('');
+  // UX-L1: each listed command has a representative flag so first-time
+  // users see the typical invocation, not just a bare name.
   console.log('Next steps:');
-  console.log('  slm status       — check daemon / mode / dashboard');
-  console.log('  slm reconfigure  — re-run this installer');
-  console.log('  slm disable      — turn off hooks temporarily');
+  console.log('  slm status --verbose       — daemon, mode, dashboard, health');
+  console.log('  slm doctor                 — run health checks (DB, models, ports)');
+  console.log('  slm health --watch         — live health ladder readout');
+  console.log('  slm dashboard              — open the dashboard in your browser');
+  if (config.skill_evolution_enabled) {
+    // UX-L3: make the failure mode explicit to users who opted into
+    // evolution. If three LLM calls fail, the circuit breaker trips — and
+    // `slm status` / `slm evolve --list` surface the disabled-until line.
+    console.log('  slm evolve --list          — view evolution cycles, cost, and rollbacks');
+    console.log('  (if 3 consecutive LLM calls fail, evolution is auto-disabled for 24 h —');
+    console.log('   `slm status --verbose` shows the circuit-breaker state and retry time.)');
+  }
   console.log('');
 }
 
@@ -580,12 +650,22 @@ async function main() {
     console.log('SLM: benchmark exceeded 15s budget (' + bench.elapsedMs + 'ms) — using Minimal.');
   }
   const recommended = recommendProfileFromBenchmark(bench);
-  console.log('SLM install benchmark: ' +
-    'free_ram=' + bench.freeRamMb + 'MB, ' +
-    'cold_start=' + bench.coldStartMs + 'ms, ' +
-    'disk_free=' + bench.diskFreeGb.toFixed(1) + 'GB, ' +
-    'elapsed=' + bench.elapsedMs + 'ms');
-  console.log('SLM recommended profile: ' + recommended);
+  // UX-M4: one-line explanation per metric so a non-technical user has a
+  // frame of reference for the raw number. Threshold context is the same
+  // constants used by recommendProfileFromBenchmark.
+  console.log('SLM install benchmark:');
+  console.log('  Free RAM: ' + bench.freeRamMb + ' MB' +
+    ' (recommendation threshold: ' + MINIMAL_RAM_THRESHOLD_MB + ' MB for Light, ' +
+    LIGHT_RAM_THRESHOLD_MB + ' MB for Balanced).');
+  console.log('  Python cold-start: ' + bench.coldStartMs + ' ms' +
+    ' (slow threshold: ' + COLD_START_SLOW_MS + ' ms — slower cold starts downgrade one tier).');
+  console.log('  Disk free: ' + bench.diskFreeGb.toFixed(1) + ' GB' +
+    ' (SLM typical footprint: ~0.5-2 GB; your disk is ' +
+    (bench.diskFreeGb >= 5 ? 'OK' : 'LOW — free up space before heavy use') + ').');
+  console.log('  Benchmark wall-time: ' + bench.elapsedMs + ' ms' +
+    ' (budget: ' + BENCHMARK_TIMEOUT_MS + ' ms).');
+  console.log('SLM recommended profile: ' + recommended +
+    ' (run `slm reconfigure` later if your system has more free RAM).');
 
   // Decide config.
   let config;
@@ -662,14 +742,31 @@ async function main() {
   }
 
   // Write new config.
+  // SEC-GTH-02 — crash-safe write: tmp file, fsync, rename. Power
+  // loss between write and rename leaves the prior config.toml intact
+  // (or absent) rather than truncated to zero bytes.
   try {
-    fs.writeFileSync(cfgPath, renderConfigToml(config), { encoding: 'utf8' });
+    const tmpPath = cfgPath + '.tmp';
+    const fd = fs.openSync(tmpPath, 'w', 0o600);
+    try {
+      fs.writeSync(fd, renderConfigToml(config), 0, 'utf8');
+      try {
+        fs.fsyncSync(fd);
+      } catch (_e) {
+        // fsync may fail on exotic filesystems; rename still atomic-ish.
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmpPath, cfgPath);
     console.log('SLM: wrote config.toml for profile=' + config.profile);
   } catch (e) {
     console.error('SLM: failed to write config.toml: ' + e.message);
     return 4;
   }
 
+  // UX-G2: show the one-screen delta banner so upgraders see what shipped.
+  printLivingBrainDelta();
   printFirstRunChecklist(config);
   return 0;
 }
@@ -702,4 +799,6 @@ module.exports = {
   main, // exported so test harnesses can simulate TTY flags before invoking
   LLM_MODEL_CHOICES,
   PROFILES,
+  CUSTOM_KNOB_ENUMS, // UX-M3
+  printLivingBrainDelta, // UX-G2 (exposed for the test harness only)
 };

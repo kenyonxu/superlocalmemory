@@ -85,6 +85,12 @@ def _apply_markers_to_response(response: RecallResponse) -> None:
 
     Called as the last step of :func:`run_recall` before returning. Empty
     responses pass through untouched.
+
+    # L-P-06: audit flagged ``dataclasses.replace`` as a cheaper path.
+    # Verified: ``RecallResult`` is NOT frozen, so the direct in-place
+    # attribute assignment below is the O(1) mutation path — no dataclass
+    # reconstruction happens. ``replace`` would ALLOCATE a fresh instance
+    # per result (strictly slower). Keep the in-place mutation.
     """
     for r in response.results:
         r.marker = _emit_marker(r.fact.fact_id)

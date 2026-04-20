@@ -106,14 +106,18 @@ def _compute_label(signals: Mapping[str, object]) -> float:
     edited = bool(signals.get("edit"))
     requeried = bool(signals.get("requery"))
     dwell_raw = signals.get("dwell_ms", 0) or 0
+    # S-M06: compute the threshold on an integer so a 0.1 ms fp perturbation
+    # at 1999.9 vs 2000.0 cannot flip the label by 0.05 (10 % of the label
+    # range). Producers clamp to int in ``_coerce_signal_value`` — this is
+    # the belt-and-suspenders mirror on the consumer side.
     try:
-        dwell_ms = float(dwell_raw)
+        dwell_int = int(dwell_raw)
     except (TypeError, ValueError):  # pragma: no cover — defensive
-        dwell_ms = 0.0
+        dwell_int = 0
 
     dwell_bonus = 0.0
-    if dwell_ms >= 2000.0:
-        dwell_bonus = min(0.15, 0.05 + (dwell_ms - 2000.0) / 80_000.0)
+    if dwell_int >= 2000:
+        dwell_bonus = min(0.15, 0.05 + (dwell_int - 2000) / 80_000.0)
 
     label = (
         0.5
@@ -135,14 +139,18 @@ def _coerce_signal_value(
 ) -> object | None:
     """Return a safe, canonical signal value or ``None`` to reject.
 
-    - ``dwell_ms``: int, clamped to ``[0, 3_600_000]``. Non-numeric → None.
+    - ``dwell_ms``: strict int (not bool), clamped to ``[0, 3_600_000]``.
+      Rejects bool / float / str / bytes / bytearray to make the
+      signal contract strictly-typed (SEC-M1).
     - ``requery`` / ``edit`` / ``cite``: cast to bool.
     """
     if signal_name == "dwell_ms":
-        try:
-            v = int(raw)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
+        # SEC-M1 — bool is a subclass of int in Python, reject it first.
+        # Also reject floats (silent truncation surface per audit) and
+        # non-int types so adversarial hooks cannot slip past the clamp.
+        if isinstance(raw, bool) or not isinstance(raw, int):
             return None
+        v = raw
         if v < _DWELL_MIN_MS:
             v = _DWELL_MIN_MS
         if v > _DWELL_MAX_MS:
@@ -233,7 +241,10 @@ class EngagementRewardModel:
                 check_same_thread=False,
             )
             self._conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS * 10}")
-            self._conn.execute("PRAGMA journal_mode=WAL")
+            # M-P-02: daemon bootstrap owns journal_mode=WAL; flipping it
+            # here contradicts ``hooks/_outcome_common.py``'s policy ("must
+            # not flip the journal mode under a live daemon"). synchronous
+            # is connection-scoped and safe to keep.
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.row_factory = sqlite3.Row
         return self._conn
@@ -467,6 +478,14 @@ class EngagementRewardModel:
 
         Called by the consolidation worker and by the daemon lifespan
         before any hot-path traffic resumes. Returns the count finalized.
+
+        # S-M01: previous impl iterated ``finalize_outcome`` per row —
+        # 3 statements × N rows under the RLock. After a long crash the
+        # table can hold 10k+ rows and the daemon startup freezes. The
+        # batched path below does a single SELECT + executemany INSERT +
+        # bulk UPDATE inside one transaction, preserving the same
+        # observable contract (reward labels + settled status) at ~50×
+        # fewer SQL round-trips.
         """
         if self._kill_switch():
             return 0
@@ -476,21 +495,69 @@ class EngagementRewardModel:
         try:
             with self._lock:
                 conn = self._get_conn()
-                rows = conn.execute(
-                    "SELECT outcome_id FROM pending_outcomes "
+                pending_rows = conn.execute(
+                    "SELECT outcome_id, profile_id, recall_query_id, "
+                    "       fact_ids_json, signals_json "
+                    "FROM pending_outcomes "
                     "WHERE status = 'pending' AND created_at_ms < ?",
                     (cutoff_ms,),
                 ).fetchall()
+                if not pending_rows:
+                    return 0
+
+                # Compute rewards in Python (deterministic, stdlib-only).
+                timestamp_iso = _iso_from_ms(now_ms)
+                insert_batch: list[tuple] = []
+                settle_ids: list[str] = []
+                for row in pending_rows:
+                    try:
+                        signals = json.loads(row["signals_json"] or "{}")
+                    except json.JSONDecodeError:  # pragma: no cover
+                        signals = {}
+                    reward = _compute_label(signals)
+                    insert_batch.append(
+                        (
+                            row["outcome_id"],
+                            row["profile_id"],
+                            row["fact_ids_json"],
+                            timestamp_iso,
+                            reward,
+                            timestamp_iso,
+                            row["recall_query_id"],
+                        ),
+                    )
+                    settle_ids.append(row["outcome_id"])
+
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO action_outcomes "
+                        "(outcome_id, profile_id, query, fact_ids_json, "
+                        " outcome, context_json, timestamp, reward, "
+                        " settled, settled_at, recall_query_id) "
+                        "VALUES "
+                        "(?, ?, '', ?, 'settled', '{}', ?, ?, 1, ?, ?)",
+                        insert_batch,
+                    )
+                    # Bulk settle. SQLite's parameterised IN requires one
+                    # placeholder per value; chunk to respect SQLITE_MAX_VARIABLE_NUMBER.
+                    _CHUNK = 500
+                    for i in range(0, len(settle_ids), _CHUNK):
+                        chunk = settle_ids[i:i + _CHUNK]
+                        placeholders = ",".join("?" * len(chunk))
+                        conn.execute(
+                            "UPDATE pending_outcomes "
+                            f"SET status = 'settled' WHERE outcome_id IN ({placeholders})",
+                            chunk,
+                        )
+                    conn.execute("COMMIT")
+                except sqlite3.Error:
+                    conn.execute("ROLLBACK")
+                    raise
+                return len(insert_batch)
         except sqlite3.Error as exc:  # pragma: no cover — defensive
             logger.debug("reap_stale SQLite error: %s", exc)
             return 0
-
-        count = 0
-        for (outcome_id,) in rows:
-            # finalize_outcome handles its own locking + error isolation.
-            self.finalize_outcome(outcome_id=outcome_id)
-            count += 1
-        return count
 
 
 # ---------------------------------------------------------------------------
@@ -499,9 +566,14 @@ class EngagementRewardModel:
 
 
 def _iso_from_ms(ms: int) -> str:
-    """UTC ISO-8601 timestamp from epoch milliseconds (sqlite-friendly)."""
+    """UTC ISO-8601 timestamp from epoch milliseconds.
+
+    SEC-GTH-01 / S-G-02 — use strict ISO-8601 (``T`` separator + ``Z``
+    suffix) so downstream pandas/datetime parsing treats the value as
+    UTC-aware and cannot mis-read it as local time.
+    """
     secs = ms / 1000.0
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(secs))
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(secs))
 
 
 __all__ = (

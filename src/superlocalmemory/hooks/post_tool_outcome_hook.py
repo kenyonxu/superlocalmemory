@@ -60,9 +60,16 @@ _DEFAULT_DWELL_MS = 3000
 
 # Marker regex — mirrors recall_pipeline._emit_marker but scoped locally
 # so this module has no hot-path import of the full recall pipeline.
-# ``fact_id`` allows anything that is not ':' or whitespace so the
-# validator ultimately runs via recall_pipeline._validate_marker.
-_MARKER_RE = re.compile(r"slm:fact:([^:\s]+):([0-9a-f]{8})")
+#
+# S-L04 — ``fact_id`` is constrained to a conservative alphabet
+# (alphanumerics, ``-`` and ``_``). The previous ``[^:\s]+`` allowed
+# colons and let a malicious tool response emit markers like
+# ``slm:fact:evil:deadbeef:abcdef01`` that the regex grouped wrong and
+# still handed off to the validator. Defence-in-depth: the HMAC
+# validator already rejects these, but disallowing colons keeps garbage
+# from reaching it in the first place. The HMAC suffix stays lowercase
+# hex (matches ``recall_pipeline._emit_marker``).
+_MARKER_RE = re.compile(r"slm:fact:([A-Za-z0-9_\-]+):([0-9a-f]{8})")
 
 
 def _validate(marker: str) -> str | None:
@@ -144,10 +151,17 @@ def _inner_main() -> str:
             # json.loads loop. We stream the 20 most-recent pending rows
             # through json_each; on a JSON1 failure we fall back to the
             # original Python decode on the same rows (no second connect).
+            # SEC-M2 — tighten pending window cap to 5. Pending queue
+            # depth per session is typically 1-2; the old LIMIT 20 left
+            # a 5120-UPDATE amplification surface (256 HMAC hits × 20
+            # rows). The "attacker within your own session" threat
+            # model is documented as out-of-scope in LLD-09 §8: they
+            # already surfaced the fact via recall, so forging a
+            # signal on it is a no-op.
             rows = conn.execute(
                 "SELECT outcome_id, fact_ids_json FROM pending_outcomes "
                 "WHERE session_id = ? AND status = 'pending' "
-                "ORDER BY created_at_ms DESC LIMIT 20",
+                "ORDER BY created_at_ms DESC LIMIT 5",
                 (session_id,),
             ).fetchall()
             if not rows:

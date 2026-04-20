@@ -51,10 +51,14 @@ def _emit_deprecation_once() -> None:
     if _warned:
         return
     _warned = True
+    # M-P-10: HARD removal target — v3.5.0. The legacy path must not
+    # survive into v3.5.x tech debt. Remove with the dashboard lineage
+    # UI ship (Stage 7+) per MANIFEST-DEVIATION A.3 #3.
     warnings.warn(
-        "ranker_retrain_legacy is deprecated as of SLM v3.4.21 — use "
-        "ranker_retrain_online._run_shadow_cycle instead. The legacy "
-        "path is kept for cold-start profiles with no active model.",
+        "ranker_retrain_legacy is deprecated as of SLM v3.4.21 and will "
+        "be REMOVED in v3.5.0 — use ranker_retrain_online._run_shadow_cycle "
+        "instead. The legacy path is kept only for cold-start profiles "
+        "with no active model.",
         DeprecationWarning,
         stacklevel=3,
     )

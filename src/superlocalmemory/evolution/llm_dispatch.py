@@ -27,13 +27,15 @@ Author: Varun Pratap Bhardwaj / Qualixar
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import sqlite3
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 from superlocalmemory.core.security_primitives import (
     redact_secrets,
@@ -41,6 +43,42 @@ from superlocalmemory.core.security_primitives import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# M-P-09: one cached writer connection per learning_db path — LLM cost
+# logging used to pay a fresh ``sqlite3.connect`` + fsync per call. At
+# current volume (<10 calls/cycle) the cost is small, but caching keeps
+# the dispatch code consistent with the rest of the "one-cached-writer"
+# pattern the codebase standardised on (reward.py, trigram_index.py).
+_COST_CONN_CACHE: dict[str, sqlite3.Connection] = {}
+_COST_CONN_LOCK = threading.Lock()
+
+
+def _get_cost_conn(learning_db: Path) -> sqlite3.Connection:
+    """Return a cached writer connection for ``learning_db``. Never raises."""
+    key = str(learning_db)
+    with _COST_CONN_LOCK:
+        conn = _COST_CONN_CACHE.get(key)
+        if conn is not None:
+            return conn
+        conn = sqlite3.connect(key, check_same_thread=False, timeout=2.0)
+        _COST_CONN_CACHE[key] = conn
+        return conn
+
+
+def _close_cost_conns() -> None:
+    """Close every cached cost-log connection (atexit)."""
+    with _COST_CONN_LOCK:
+        conns = list(_COST_CONN_CACHE.items())
+        _COST_CONN_CACHE.clear()
+    for _key, conn in conns:
+        try:
+            conn.close()
+        except Exception:  # pragma: no cover
+            pass
+
+
+atexit.register(_close_cost_conns)
 
 
 # ---------------------------------------------------------------------------
@@ -277,8 +315,11 @@ def _log_cost(
         )
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
-        conn = sqlite3.connect(learning_db)
-        try:
+        # M-P-09: reuse a cached writer conn across calls. Serialised by
+        # a dedicated lock so multi-threaded dispatchers don't interleave
+        # in-flight ``execute`` / ``commit`` on the same handle.
+        conn = _get_cost_conn(Path(learning_db))
+        with _COST_CONN_LOCK:
             conn.execute(
                 "INSERT INTO evolution_llm_cost_log "
                 "(profile_id, ts, model, tokens_in, tokens_out, cost_usd, cycle_id) "
@@ -286,8 +327,6 @@ def _log_cost(
                 (profile_id, now, model, tokens_in, tokens_out, cost_usd, cycle_id),
             )
             conn.commit()
-        finally:
-            conn.close()
     except sqlite3.Error as e:
         logger.warning("cost log write failed: %s", e)
 

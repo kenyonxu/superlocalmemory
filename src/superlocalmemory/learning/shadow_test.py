@@ -217,6 +217,14 @@ class ShadowTest:
 
         LLD-10 §4.1 — exact formula: ``int(hexdigest[:8], 16) % 2``.
         0 → ``'active'``, 1 → ``'candidate'``.
+
+        SEC-L1 / assumption (daemon contract): ``query_id`` is minted by
+        the recall pipeline (``recall_query_id``) and is NOT user-
+        controllable — any change to that contract MUST re-audit this
+        routing for collision / preimage bias. The current 32-bit hash
+        prefix is adequate because pairing validity (Phase A/B t-test)
+        degrades gracefully under skew (n_pairs shrinks) rather than
+        producing a one-sided false promotion.
         """
         h = hashlib.sha256(query_id.encode("utf-8")).hexdigest()[:8]
         bucket = int(h, 16) % 2
@@ -274,6 +282,22 @@ class ShadowTest:
         if n_pairs == 0:
             return "continue", stats
 
+        # S-M03: guard against significant arm imbalance. SHA-256 routing
+        # is approximately 50/50 in expectation, but on small samples the
+        # buckets can skew. When one arm is more than 2× the other AND
+        # both arms have a minimal footprint, the paired-by-index diff
+        # silently discards the long tail — the statistic is still valid
+        # but operators should be told the data is unbalanced before any
+        # promote/reject decision is attempted.
+        _MIN_PER_ARM = 8
+        if (
+            n_active >= _MIN_PER_ARM
+            and n_cand >= _MIN_PER_ARM
+            and max(n_active, n_cand) > 2 * min(n_active, n_cand)
+        ):
+            stats["criterion"] = "unbalanced_arms"
+            return "continue", stats
+
         diffs = [
             self._candidate[i] - self._active[i] for i in range(n_pairs)
         ]
@@ -300,7 +324,16 @@ class ShadowTest:
 
         # --- Phase B full validation ---
         if n_pairs >= self.PHASE_B_N:
-            crit = _critical_t(n_pairs - 1, alpha=self.ALPHA)
+            # S-L05: we compare ``t_stat > crit`` which is a one-tailed
+            # "candidate better than active" test. ``_critical_t`` returns
+            # a TWO-tailed critical (α=0.05 → 1.96). For a one-tailed
+            # directional test at α=0.05 the correct critical is 1.645, i.e.
+            # the two-tailed critical at α=0.10. We pass α×2 so the
+            # comparison semantics match the docstring ("paired t-test
+            # p<0.05") under a one-sided directional constraint AND the
+            # ``mean >= MIN_EFFECT`` gate preserves the conservative
+            # direction preference.
+            crit = _critical_t(n_pairs - 1, alpha=min(0.999, self.ALPHA * 2.0))
             stats["phase"] = "B"
             if mean >= self.MIN_EFFECT and t_stat > crit:
                 stats["criterion"] = "phase_b_promote"

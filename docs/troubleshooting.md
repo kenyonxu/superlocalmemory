@@ -4,6 +4,16 @@
 
 Solutions for common issues. If your problem is not listed here, run `slm status --verbose` and check the output for clues.
 
+<!-- UX-G1: document the planned slm doctor --fix auto-repair mode so the
+     health-ladder self-healing surface has a user-facing verb in docs now,
+     even though the CLI flag lands in a follow-up cycle. -->
+> **Planned (next cycle): `slm doctor --fix`** — an auto-repair mode that
+> applies the safe, reversible fixes `slm doctor` identifies (rebuild
+> trigram cache, stop orphan worker processes, WAL truncate, port reset).
+> Today, run `slm doctor` to see findings and apply the recommended
+> commands manually. The `--fix` flag lands in a follow-up release;
+> tracked as Stage 8 UX-G1.
+
 ---
 
 ## Installation Issues

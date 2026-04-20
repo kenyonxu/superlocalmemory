@@ -4,6 +4,37 @@
 
 Get your AI's memory system running in under 5 minutes. **V3.1: Now with Active Memory — your memory learns from your usage and gets smarter over time, at zero token cost.**
 
+<!-- MKT-M4: orient new Claude users who already have Anthropic's free
+     built-in memory (shipped March 2026) on why SLM still earns a
+     `pip install` + daemon. Three-bullet contrast. -->
+<!-- MKT-M5: one-line framing so expectations match the product shape. -->
+<!-- MKT-L1: reframe the integration surface as MCP-native so every MCP
+     client (LangChain-MCP, LlamaIndex MCP, CrewAI-via-MCP, etc.) is
+     covered, not just the 5 named IDEs. -->
+
+### Why not just use Claude's built-in memory?
+
+Anthropic's free Claude Memory (March 2026) and Claude Code's Auto-Memory
+are fine defaults. SLM earns the daemon in three places:
+
+- **Local-only by default.** Your memory never leaves your laptop — no
+  cloud sync, no vendor lock-in. (Opt-in skill evolution is the only
+  outbound path, and it is off by default.)
+- **Shared across tools, not just one chat.** One memory, consumed by
+  Claude Code + Cursor + Antigravity + VS Code + Claude Desktop —
+  anything that speaks MCP.
+- **Learns from your outcomes.** Implicit reward signals (dwell,
+  re-query, edit, cite) retrain the ranker against how you actually
+  work, not just summarised chat transcripts.
+
+SuperLocalMemory is built for **one developer, one laptop, many tools.**
+Team / multi-user memory is a different product (SLM-Mesh).
+
+**Integration surface: MCP-native.** The five IDEs listed below are
+explicit wirings, but any MCP-compatible client (LangChain-MCP adapters,
+LlamaIndex MCP, CrewAI-via-MCP, etc.) can use SLM without a custom
+adapter.
+
 ---
 
 ## Prerequisites

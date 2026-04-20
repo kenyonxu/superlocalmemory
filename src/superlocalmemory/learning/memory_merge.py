@@ -58,6 +58,12 @@ def apply_merges(
     conn = sqlite3.connect(str(memory_db_path), timeout=10.0)
     conn.execute("PRAGMA busy_timeout=2000")
     applied = 0
+    # S-L02: track the candidate list in flight so a rollback diagnostic
+    # can blame the exact set of (canonical, merged) pairs instead of a
+    # blanket "rollback" message. Operators on the dashboard previously
+    # saw zero fidelity about which candidates were in the transaction
+    # at commit-time.
+    in_flight: list[tuple[str, str]] = []
     try:
         conn.execute("BEGIN IMMEDIATE")
         for canonical_id, merged_id, cos, jac in candidates:
@@ -95,10 +101,15 @@ def apply_merges(
                 (canonical_id, merged_id),
             )
             applied += 1
+            in_flight.append((canonical_id, merged_id))
         conn.commit()
     except sqlite3.Error as exc:
         conn.rollback()
-        logger.warning("apply_merges rollback: %s", exc)
+        logger.warning(
+            "apply_merges rollback: profile=%s pre-rollback_applied=%d "
+            "in_flight=%s error=%s",
+            profile_id, applied, in_flight, exc,
+        )
         applied = 0
     finally:
         conn.close()

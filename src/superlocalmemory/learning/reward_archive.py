@@ -41,11 +41,21 @@ logger = logging.getLogger(__name__)
 REWARD_WINDOW_DAYS: int = 60
 ARCHIVE_REWARD_THRESHOLD: float = 0.3
 
+# SEC-L3 — soft cap on ``memory_archive.payload_json`` length. The DDL
+# in M011 is ``TEXT NOT NULL`` with no column cap (SQLite has no native
+# column-length limit), so a runaway fact could write multi-MB blobs
+# and blow past the MASTER-PLAN §2 I4 disk budget. Enforced on the
+# write path; oversize payloads are truncated with a breadcrumb in the
+# ``reason`` column so an operator can still retrieve the original
+# fact via ``atomic_facts`` (archive does not DELETE).
+PAYLOAD_JSON_MAX_BYTES: int = 262_144
+
 
 __all__ = (
     "run_reward_gated_archive",
     "REWARD_WINDOW_DAYS",
     "ARCHIVE_REWARD_THRESHOLD",
+    "PAYLOAD_JSON_MAX_BYTES",
 )
 
 
@@ -131,6 +141,23 @@ def run_reward_gated_archive(
                 "embedding": entry["embedding"],
                 "created_at": entry["created_at"],
             }
+            # SEC-L3 — cap payload_json at 256 KB. Oversize blobs are
+            # replaced with a minimal stub + ``truncated`` reason so the
+            # archive row stays within the I4 disk budget while still
+            # pointing back to the original ``fact_id`` in atomic_facts.
+            payload_str = json.dumps(payload)
+            reason = "reward_gated_ebbinghaus"
+            if len(payload_str.encode("utf-8")) > PAYLOAD_JSON_MAX_BYTES:
+                payload_str = json.dumps({
+                    "fact_id": fid,
+                    "truncated": True,
+                    "original_bytes": len(payload_str.encode("utf-8")),
+                })
+                reason = "reward_gated_ebbinghaus_truncated"
+                logger.warning(
+                    "memory_archive payload >%d bytes for fact_id=%s; "
+                    "truncated to stub", PAYLOAD_JSON_MAX_BYTES, fid,
+                )
             conn.execute(
                 "INSERT INTO memory_archive "
                 "(archive_id, fact_id, profile_id, payload_json, "
@@ -139,9 +166,9 @@ def run_reward_gated_archive(
                     str(uuid.uuid4()),
                     fid,
                     profile_id,
-                    json.dumps(payload),
+                    payload_str,
                     _iso_now(),
-                    "reward_gated_ebbinghaus",
+                    reason,
                 ),
             )
             conn.execute(
