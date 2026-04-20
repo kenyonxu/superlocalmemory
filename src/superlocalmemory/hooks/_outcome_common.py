@@ -150,12 +150,21 @@ def load_session_state(session_id: str) -> dict:
 
 
 def save_session_state(session_id: str, state: dict) -> None:
-    """Persist session state JSON (best-effort; never raises)."""
+    """Persist session state JSON (best-effort; never raises).
+
+    # H-12/M-P-06: atomic temp-file + os.replace so a hook killed
+    # mid-write cannot leave a truncated JSON on disk. A truncated file
+    # would make ``load_session_state`` return ``{}`` and silently
+    # forfeit the rehash signal on the next turn.
+    """
     p = session_state_file(session_id)
     if p is None:
         return
     try:
-        p.write_text(json.dumps(state))
+        data = json.dumps(state)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(data)
+        os.replace(tmp, p)
     except Exception:
         pass
 
@@ -228,10 +237,24 @@ def emit_empty_json() -> None:
         pass
 
 
+#: Upper bound on stdin bytes read per hook invocation. Claude Code
+#: pipes the full tool_response through stdin; a large blob (e.g. a
+#: multi-MB git log) would otherwise block the hook while the pipe
+#: drains. ``summarize_response`` caps the SCANNED payload at 100 KB
+#: downstream, so reading 200 KB here keeps header/envelope fields
+#: intact without exceeding the hot-path budget.
+STDIN_READ_CAP_BYTES: int = 200_000
+
+
 def read_stdin_json() -> dict | None:
-    """Read a JSON dict from stdin. Returns None on any failure."""
+    """Read a JSON dict from stdin. Returns None on any failure.
+
+    # H-12/M-P-05: bounded read — previously ``sys.stdin.read()`` was
+    # unbounded and a multi-MB tool_response could block the hook for
+    # hundreds of ms just to drain the pipe.
+    """
     try:
-        raw = sys.stdin.read()
+        raw = sys.stdin.read(STDIN_READ_CAP_BYTES)
     except Exception:
         return None
     if not raw:

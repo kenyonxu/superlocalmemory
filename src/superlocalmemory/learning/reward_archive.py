@@ -85,13 +85,19 @@ def run_reward_gated_archive(
             (profile_id, *candidate_fact_ids),
         ).fetchall()
 
-        conn.execute("BEGIN IMMEDIATE")
+        # H-12/H-P-02: compute the archivable set BEFORE acquiring the
+        # writer lock. Previously ``BEGIN IMMEDIATE`` wrapped the full
+        # per-candidate reward-lookup loop — holding RESERVED for the
+        # entire scan starved concurrent ``record_recall`` writers out
+        # with SQLITE_BUSY after their 50 ms busy_timeout. Splitting the
+        # read phase keeps the writer lock held only for the bulk
+        # INSERT/UPDATE pass.
+        to_archive: list[dict] = []
         for row in rows:
             fid = row["fact_id"]
             # 1. Important flag skip (LLD-12 §4 criterion 3).
             if float(row["importance"] or 0.0) >= 1.0:
                 continue
-
             # 2. Recent positive reward skip (criterion 2).
             #    H-06 fix — JSON1 equality join via helper.
             if has_recent_positive_reward(
@@ -100,15 +106,30 @@ def run_reward_gated_archive(
                 window_days=REWARD_WINDOW_DAYS,
             ):
                 continue
-
-            payload = {
-                "fact_id": fid,
+            to_archive.append({
+                "fid": fid,
                 "content": row["content"],
                 "canonical_entities_json": row["canonical_entities_json"],
                 "importance": row["importance"],
                 "confidence": row["confidence"],
                 "embedding": row["embedding"],
                 "created_at": row["created_at"],
+            })
+
+        if not to_archive:
+            return []
+
+        conn.execute("BEGIN IMMEDIATE")
+        for entry in to_archive:
+            fid = entry["fid"]
+            payload = {
+                "fact_id": fid,
+                "content": entry["content"],
+                "canonical_entities_json": entry["canonical_entities_json"],
+                "importance": entry["importance"],
+                "confidence": entry["confidence"],
+                "embedding": entry["embedding"],
+                "created_at": entry["created_at"],
             }
             conn.execute(
                 "INSERT INTO memory_archive "

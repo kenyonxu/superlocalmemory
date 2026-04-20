@@ -24,6 +24,38 @@ from superlocalmemory.learning.fact_outcome_joins import (
     aggregate_reward_for_fact,
 )
 
+
+# H-12/H-P-01: single-pass JSON1 aggregation across ALL facts for a profile.
+# Returns ``{fact_id: (count, mean_reward)}`` for outcomes with reward NOT
+# NULL. Replaces the per-fact O(F) loop of ``aggregate_reward_for_fact``
+# with one GROUP BY scan — O(F+O) instead of O(F·O). JSON1 has been
+# mandatory since v3.4.21 (see ``fact_outcome_joins._json1_available``
+# contract in the module docstring); if it is missing at runtime the
+# caller falls back to the per-fact helper which retains its own
+# LIKE-based shim.
+def _bulk_fact_reward_stats(
+    conn: sqlite3.Connection, profile_id: str,
+) -> dict[str, tuple[int, float]]:
+    try:
+        rows = conn.execute(
+            "SELECT j.value AS fact_id, "
+            "       COUNT(*) AS c, "
+            "       AVG(reward) AS m "
+            "FROM action_outcomes a, json_each(a.fact_ids_json) j "
+            "WHERE a.profile_id = ? AND a.reward IS NOT NULL "
+            "GROUP BY j.value",
+            (profile_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # JSON1 missing — signal to caller to fall back.
+        return {}
+    out: dict[str, tuple[int, float]] = {}
+    for fid, c, m in rows:
+        if fid is None:
+            continue
+        out[str(fid)] = (int(c or 0), float(m or 0.0))
+    return out
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,10 +97,16 @@ def apply_strong_memory_boost(
         if not rows:
             return 0
 
+        # H-12/H-P-01: single JSON1 GROUP BY replaces the per-fact loop.
+        # Fallback to per-fact helper preserves legacy behaviour on
+        # SQLite without JSON1.
+        stats = _bulk_fact_reward_stats(conn, profile_id)
         conn.execute("BEGIN IMMEDIATE")
         for (fid,) in rows:
-            # H-06 fix: JSON1 aggregate instead of LIKE substring.
-            count, mean = aggregate_reward_for_fact(conn, profile_id, fid)
+            if stats:
+                count, mean = stats.get(fid, (0, 0.0))
+            else:
+                count, mean = aggregate_reward_for_fact(conn, profile_id, fid)
             if count < STRONG_BOOST_MIN_OUTCOMES:
                 continue
             if mean <= STRONG_BOOST_MIN_MEAN:
@@ -108,9 +146,14 @@ def select_high_reward_fact_ids(
             "  AND (archive_status IS NULL OR archive_status='live')",
             (profile_id,),
         ).fetchall()
+        # H-12/H-P-01: bulk aggregate replaces per-fact loop.
+        stats = _bulk_fact_reward_stats(conn, profile_id)
         out: list[str] = []
         for (fid,) in fact_rows:
-            count, mean = aggregate_reward_for_fact(conn, profile_id, fid)
+            if stats:
+                count, mean = stats.get(fid, (0, 0.0))
+            else:
+                count, mean = aggregate_reward_for_fact(conn, profile_id, fid)
             if count < min_outcomes:
                 continue
             if mean >= min_reward:

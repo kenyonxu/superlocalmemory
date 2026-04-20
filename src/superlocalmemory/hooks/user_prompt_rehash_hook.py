@@ -42,7 +42,11 @@ _HOOK_NAME = "user_prompt_rehash"
 
 
 def _current_latest_outcome_id(session_id: str) -> str | None:
-    """Return the most-recent pending outcome_id for this session, or None."""
+    """Return the most-recent pending outcome_id for this session, or None.
+
+    Kept for monkey-patch compatibility in tests. The main hot path in
+    ``_inner_main`` now reuses a single DB connection — see H-12/H-P-04.
+    """
     try:
         with open_memory_db() as conn:
             row = conn.execute(
@@ -51,6 +55,24 @@ def _current_latest_outcome_id(session_id: str) -> str | None:
                 "ORDER BY created_at_ms DESC LIMIT 1",
                 (session_id,),
             ).fetchone()
+    except Exception:
+        return None
+    return row["outcome_id"] if row else None
+
+
+def _current_latest_outcome_id_on(
+    conn, session_id: str,
+) -> str | None:
+    """H-12/H-P-04: same as above but drives an existing connection —
+    avoids a second ``sqlite3.connect`` on the UserPromptSubmit hot path.
+    """
+    try:
+        row = conn.execute(
+            "SELECT outcome_id FROM pending_outcomes "
+            "WHERE session_id = ? AND status = 'pending' "
+            "ORDER BY created_at_ms DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
     except Exception:
         return None
     return row["outcome_id"] if row else None
@@ -90,8 +112,21 @@ def _inner_main() -> str:
 
     ts_now = now_ms()
 
+    # H-12/H-P-04: share one connection for the outcome_id probe instead
+    # of opening a fresh ``sqlite3.connect`` every hook call. The reward
+    # model itself opens its own cached writer conn on the signal path
+    # below, so the total connects-per-hook drops from 3 → 2 on the
+    # UserPromptSubmit hot path (the flagship I1 path).
+    new_oid = prior_oid
+    try:
+        with open_memory_db() as conn:
+            fresh_oid = _current_latest_outcome_id_on(conn, session_id)
+            if fresh_oid:
+                new_oid = fresh_oid
+    except Exception:
+        pass
+
     # Update state first so even an early-return leaves fresh context.
-    new_oid = _current_latest_outcome_id(session_id) or prior_oid
     save_session_state(session_id, {
         "last_topic_sig": sig_now,
         "last_prompt_ts_ms": ts_now,

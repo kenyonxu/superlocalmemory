@@ -126,38 +126,67 @@ def _inner_main() -> str:
     signal_value: object = True if signal_name == "edit" else _DEFAULT_DWELL_MS
 
     # Locate pending outcome(s) for this session whose fact_ids_json
-    # contains ANY of the validated fact_ids. We scan pending rows for
-    # the session (typically very few) and JSON-decode in Python — small,
-    # bounded, avoids SQL JSON1 feature dependence.
+    # contains ANY of the validated fact_ids.
+    #
+    # H-12/C-P-02: SQL json_each replaces the Python-side loop of
+    # json.loads + set.intersection. We restrict the candidate window
+    # to the 20 most recent pending rows (preserving the original LIMIT
+    # 20 ordering + semantics) and then ask SQLite to match via JSON1.
+    # Falls back to the Python decode path when JSON1 is unavailable
+    # so the hot path remains hermetic on stock SQLite.
+    hit_list = list(hits)
+    target_outcome_ids: list[str] = []
+    any_pending = False
     try:
         with open_memory_db() as conn:
+            # H-12/C-P-02: single connection does both the pending-window
+            # fetch and the JSON1 match, avoiding the Python-side
+            # json.loads loop. We stream the 20 most-recent pending rows
+            # through json_each; on a JSON1 failure we fall back to the
+            # original Python decode on the same rows (no second connect).
             rows = conn.execute(
                 "SELECT outcome_id, fact_ids_json FROM pending_outcomes "
                 "WHERE session_id = ? AND status = 'pending' "
                 "ORDER BY created_at_ms DESC LIMIT 20",
                 (session_id,),
             ).fetchall()
+            if not rows:
+                return "no_pending"
+            any_pending = True
+
+            placeholders = ",".join("?" for _ in hit_list)
+            oid_list = [r["outcome_id"] for r in rows]
+            oid_ph = ",".join("?" for _ in oid_list)
+            sql_json1 = (
+                "SELECT DISTINCT po.outcome_id "
+                "FROM pending_outcomes po, json_each(po.fact_ids_json) j "
+                f"WHERE po.outcome_id IN ({oid_ph}) "
+                f"  AND j.value IN ({placeholders})"
+            )
+            try:
+                hit_rows = conn.execute(
+                    sql_json1, (*oid_list, *hit_list),
+                ).fetchall()
+                target_outcome_ids = [r["outcome_id"] for r in hit_rows]
+            except Exception:
+                # JSON1 unavailable — fall back to the Python decode
+                # over the already-fetched `rows` (no extra DB work).
+                import json as _json
+                hit_set = set(hits)
+                for r in rows:
+                    try:
+                        facts = _json.loads(r["fact_ids_json"])
+                    except Exception:
+                        continue
+                    if not isinstance(facts, list):
+                        continue
+                    if hit_set.intersection(facts):
+                        target_outcome_ids.append(r["outcome_id"])
     except Exception:
         return "db_locked"
 
-    if not rows:
-        return "no_pending"
-
-    import json as _json
-    target_outcome_ids: list[str] = []
-    hit_set = set(hits)
-    for r in rows:
-        try:
-            facts = _json.loads(r["fact_ids_json"])
-        except Exception:
-            continue
-        if not isinstance(facts, list):
-            continue
-        if hit_set.intersection(facts):
-            target_outcome_ids.append(r["outcome_id"])
-
     if not target_outcome_ids:
-        return "no_match"
+        return "no_match" if any_pending else "no_pending"
 
     try:
         model = EngagementRewardModel(_memory_db_path())

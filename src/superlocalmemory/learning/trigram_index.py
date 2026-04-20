@@ -34,6 +34,7 @@ if the cache DB is absent; the hook uses this to fall back silently.
 from __future__ import annotations
 
 import sqlite3
+import threading
 import unicodedata
 from functools import lru_cache
 from pathlib import Path
@@ -52,6 +53,60 @@ _ACTIVE_PROFILE: str = "default"
 _BUSY_TIMEOUT_MS: int = 50
 _MAX_IN_CLAUSE: int = 256
 _MAX_INPUT_CHARS: int = 500
+
+
+# H-12/H-P-06: module-level cached connection for the inline lookup
+# path. The first cache miss on a fresh session previously paid the
+# ``sqlite3.connect`` cost (~1–3 ms warm, blowing the <2 ms p99
+# budget). With a shared conn (guarded by ``_CACHE_CONN_LOCK``), every
+# lookup pays only the query cost. ``_reset_cache_conn()`` exists so
+# tests + ``bootstrap()`` can drop a stale conn after the cache DB is
+# rebuilt.
+_CACHE_CONN: Optional[sqlite3.Connection] = None
+_CACHE_CONN_LOCK = threading.Lock()
+
+
+def _get_cache_conn() -> Optional[sqlite3.Connection]:
+    """Return a process-cached connection to the trigram cache DB.
+
+    Returns ``None`` if the cache DB is missing or the connect fails.
+    Caller holds no lock — every ``execute`` is serialised via
+    ``_CACHE_CONN_LOCK``.
+    """
+    global _CACHE_CONN
+    if _CACHE_CONN is not None:
+        return _CACHE_CONN
+    with _CACHE_CONN_LOCK:
+        if _CACHE_CONN is not None:
+            return _CACHE_CONN
+        if not TrigramIndex.CACHE_DB_PATH.exists():
+            return None
+        try:
+            conn = sqlite3.connect(
+                str(TrigramIndex.CACHE_DB_PATH),
+                timeout=0.05,
+                isolation_level=None,
+                check_same_thread=False,
+            )
+            conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        except sqlite3.OperationalError:
+            return None
+        _CACHE_CONN = conn
+        return _CACHE_CONN
+
+
+def _reset_cache_conn() -> None:
+    """Drop the cached connection. Called after ``bootstrap()`` swaps
+    the cache table so subsequent lookups re-connect to the fresh DB.
+    """
+    global _CACHE_CONN
+    with _CACHE_CONN_LOCK:
+        if _CACHE_CONN is not None:
+            try:
+                _CACHE_CONN.close()
+            except sqlite3.Error:  # pragma: no cover — defensive
+                pass
+            _CACHE_CONN = None
 
 
 # --------------------------------------------------------------------------
@@ -220,6 +275,11 @@ class TrigramIndex:
         # Bust the per-instance LRU — stale entries would point at now-
         # dropped rows.
         self._cached_lookup_key.cache_clear()
+        # H-12/H-P-06: also drop the module-level cached conn so the
+        # next lookup re-connects to the post-swap schema. Without this
+        # a long-lived process could hold a handle pinned to the
+        # (dropped-and-recreated) table.
+        _reset_cache_conn()
 
     # ----------------------------------------------------------------------
     # lookup() — hot path
@@ -275,23 +335,38 @@ class TrigramIndex:
         )
         bound = params + (self.LOOKUP_MIN_HITS, self.LOOKUP_LIMIT)
 
-        try:
-            conn = sqlite3.connect(
-                str(self.CACHE_DB_PATH),
-                timeout=0.05,  # 50 ms connection timeout
-                isolation_level=None,
-            )
-        except sqlite3.OperationalError:
-            return ()
-        try:
-            conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        # H-12/H-P-06: use the module-cached connection; fall back to a
+        # fresh connect only when the cache is empty (first-lookup-in-
+        # process or post-rebuild). ``_CACHE_CONN_LOCK`` serialises
+        # access because ``check_same_thread=False`` lets worker threads
+        # share the conn with the hot path.
+        conn = _get_cache_conn()
+        if conn is not None:
             try:
-                rows = conn.execute(sql, bound).fetchall()
+                with _CACHE_CONN_LOCK:
+                    rows = conn.execute(sql, bound).fetchall()
             except sqlite3.OperationalError:
-                # Table missing or DB locked past busy_timeout.
+                # Table missing/locked or conn stale — drop + one-shot
+                # fresh connect as the defensive fallback path.
+                _reset_cache_conn()
+                conn = None
+        if conn is None:
+            try:
+                fresh = sqlite3.connect(
+                    str(self.CACHE_DB_PATH),
+                    timeout=0.05,  # 50 ms connection timeout
+                    isolation_level=None,
+                )
+            except sqlite3.OperationalError:
                 return ()
-        finally:
-            conn.close()
+            try:
+                fresh.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+                try:
+                    rows = fresh.execute(sql, bound).fetchall()
+                except sqlite3.OperationalError:
+                    return ()
+            finally:
+                fresh.close()
         return tuple((eid, int(hits)) for (eid, hits, _score) in rows)
 
 

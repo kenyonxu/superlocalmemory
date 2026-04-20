@@ -262,21 +262,27 @@ class HnswDeduplicator:
         index.set_ef(min(50, len(embedded)))
 
         try:
-            for i, r in enumerate(embedded):
-                index.add_items([r["embedding"]], [i])
+            # H-12/C-P-04 + H-12/L-P-05: batch add_items + knn_query instead
+            # of one-at-a-time Python→C round-trips. hnswlib releases the GIL
+            # during the batch call and processes rows in the same order, so
+            # neighbour-label output is unchanged — behavioural equivalence
+            # holds. The subsequent candidate-selection loop below still
+            # drives `seen_losers` inline, so its decisions are identical.
+            all_embeddings = [r["embedding"] for r in embedded]
+            index.add_items(all_embeddings, list(range(len(embedded))))
 
             k = min(6, len(embedded))
             candidates: list[tuple[str, str, float, float]] = []
             seen_losers: set[str] = set()
 
+            # H-12/C-P-04: one batched knn_query for all rows.
+            all_labels, all_distances = index.knn_query(all_embeddings, k=k)
+
             for i, r in enumerate(embedded):
                 if time.monotonic() > deadline:
                     break
-                labels, distances = index.knn_query(
-                    [r["embedding"]], k=k,
-                )
-                lbls = labels[0] if hasattr(labels, "__iter__") else labels
-                dsts = distances[0] if hasattr(distances, "__iter__") else distances
+                lbls = all_labels[i]
+                dsts = all_distances[i]
                 for nb_idx, dist in zip(lbls, dsts):
                     if int(nb_idx) == i:
                         continue
