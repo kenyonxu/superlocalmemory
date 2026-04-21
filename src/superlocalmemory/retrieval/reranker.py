@@ -193,6 +193,7 @@ class CrossEncoderReranker:
                 "TOKENIZERS_PARALLELISM": "false",
                 "TORCH_DEVICE": "cpu",
             }
+            from superlocalmemory.core.platform_utils import popen_platform_kwargs
             self._worker_proc = subprocess.Popen(
                 [sys.executable, "-m", worker_module],
                 stdin=subprocess.PIPE,
@@ -201,7 +202,7 @@ class CrossEncoderReranker:
                 text=True,
                 bufsize=1,
                 env=env,
-                start_new_session=True,
+                **popen_platform_kwargs(),
             )
             # v3.4.13: Register PID for machine-wide singleton
             _RERANKER_PID_FILE.parent.mkdir(parents=True, exist_ok=True)

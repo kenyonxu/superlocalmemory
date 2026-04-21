@@ -178,6 +178,7 @@ class EmbeddingService:
         self._idle_timer: threading.Timer | None = None
         self._worker_ready = False
         self._request_count: int = 0
+        self._http_client: object | None = None
 
         # Register for atexit cleanup (prevent orphaned workers)
         ref = weakref.ref(self, _live_embedding_services.discard)
@@ -189,10 +190,17 @@ class EmbeddingService:
             self._kill_worker()
         except Exception:
             pass
+        try:
+            if self._http_client is not None:
+                self._http_client.close()
+        except Exception:
+            pass
 
     @property
     def is_available(self) -> bool:
         """Check if embedding service can produce embeddings."""
+        if self._config.is_openai_compatible:
+            return bool(self._config.api_endpoint)
         if self._config.is_cloud:
             return bool(self._config.api_endpoint and self._config.api_key)
         return self._available
@@ -215,6 +223,11 @@ class EmbeddingService:
         """Embed a single text string. Returns list of floats or None."""
         if not text or not text.strip():
             raise ValueError("Cannot embed empty text")
+        if self._config.is_openai_compatible:
+            vecs = self._openai_compatible_embed_batch([text])
+            vec = vecs[0]
+            self._validate_dimension(np.asarray(vec))
+            return vec
         if self._config.is_cloud:
             return self._cloud_embed_single(text)
         result = self._subprocess_embed([text])
@@ -228,6 +241,12 @@ class EmbeddingService:
         """Embed a batch of texts."""
         if not texts:
             raise ValueError("Cannot embed empty batch")
+        if self._config.is_openai_compatible:
+            results = self._openai_compatible_embed_batch(texts)
+            for vec in results:
+                if vec is not None:
+                    self._validate_dimension(np.asarray(vec))
+            return results
         if self._config.is_cloud:
             return self._cloud_embed_batch(texts)
         result = self._subprocess_embed(texts)
@@ -458,6 +477,7 @@ class EmbeddingService:
                 "TOKENIZERS_PARALLELISM": "false",
                 "TORCH_DEVICE": "cpu",
             }
+            from superlocalmemory.core.platform_utils import popen_platform_kwargs
             self._worker_proc = subprocess.Popen(
                 [sys.executable, "-m", worker_module],
                 stdin=subprocess.PIPE,
@@ -466,7 +486,7 @@ class EmbeddingService:
                 text=True,
                 bufsize=1,
                 env=env,
-                start_new_session=True,
+                **popen_platform_kwargs(),
             )
             # v3.4.13: Register PID for machine-wide singleton guard
             register_embedding_worker_pid(self._worker_proc.pid)
@@ -510,6 +530,68 @@ class EmbeddingService:
         self._idle_timer.daemon = True
         self._idle_timer.start()
         self._last_used = time.time()
+
+    # ------------------------------------------------------------------
+    # OpenAI-compatible embedding (V3.4.24 — any /v1/embeddings endpoint)
+    # ------------------------------------------------------------------
+
+    def _get_http_client(self):
+        """Reusable httpx client for OpenAI-compatible endpoints."""
+        if self._http_client is None:
+            import httpx
+            self._http_client = httpx.Client(
+                timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0),
+            )
+        return self._http_client
+
+    def _openai_compatible_embed_batch(
+        self, texts: list[str], *, max_retries: int = 3,
+    ) -> list[list[float]]:
+        """Encode via any OpenAI-compatible embedding API.
+
+        V3.4.24: Standard ``/v1/embeddings`` format. Works with Ollama,
+        vLLM, LiteLLM, text-embeddings-inference, and any endpoint that
+        implements the OpenAI embeddings spec.
+        """
+        endpoint = self._config.api_endpoint.rstrip("/")
+        if not endpoint.endswith("/embeddings"):
+            endpoint = f"{endpoint}/embeddings"
+        headers = {"Content-Type": "application/json"}
+        if self._config.api_key:
+            headers["Authorization"] = f"Bearer {self._config.api_key}"
+        body = {
+            "input": texts,
+            "model": self._config.model_name,
+        }
+
+        client = self._get_http_client()
+        last_error: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                resp = client.post(endpoint, headers=headers, json=body)
+                resp.raise_for_status()
+                data = resp.json()
+                if "data" not in data or not isinstance(data["data"], list):
+                    raise ValueError(
+                        f"Unexpected response: missing 'data' array. Keys: {list(data.keys())}"
+                    )
+                results: list[list[float]] = []
+                for item in sorted(data["data"], key=lambda d: d["index"]):
+                    results.append(item["embedding"])
+                if len(results) != len(texts):
+                    logger.warning(
+                        "Embedding count mismatch: sent %d texts, got %d vectors",
+                        len(texts), len(results),
+                    )
+                return results
+            except Exception as exc:
+                last_error = exc
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+        raise RuntimeError(
+            f"OpenAI-compatible embedding failed after {max_retries} retries: "
+            f"{last_error}"
+        )
 
     # ------------------------------------------------------------------
     # Cloud embedding (no subprocess needed — just HTTP)

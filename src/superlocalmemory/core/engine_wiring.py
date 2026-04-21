@@ -113,6 +113,14 @@ def init_embedder(config: SLMConfig) -> Any | None:
             return result
         return None
 
+    # --- V3.4.24: Explicit OpenAI-compatible provider ---
+    if provider == "openai" and emb_cfg.is_openai_compatible:
+        logger.info(
+            "Using OpenAI-compatible embedding endpoint: %s (model=%s, dim=%d)",
+            emb_cfg.api_endpoint, emb_cfg.model_name, emb_cfg.dimension,
+        )
+        return _try_service_embedder(EmbeddingService, emb_cfg)
+
     # --- Explicit cloud provider ---
     if provider == "cloud" or emb_cfg.is_cloud:
         return _try_service_embedder(EmbeddingService, emb_cfg)

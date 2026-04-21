@@ -353,20 +353,28 @@ async function saveAllSettings() {
     if (statusEl) { statusEl.textContent = 'Saving...'; statusEl.style.display = 'inline'; statusEl.className = 'ms-2 text-muted'; }
 
     try {
-        // Save mode
+        // V3.4.24: Include embedding params in save payload
+        var embParams = getEmbeddingParams();
+        var payload = Object.assign({mode: mode, provider: provider, model: model, api_key: apiKey}, embParams);
         var modeResp = await fetch('/api/v3/mode/set', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({mode: mode, provider: provider, model: model, api_key: apiKey})
+            body: JSON.stringify(payload)
         });
 
         if (modeResp.ok) {
+            var modeData = await modeResp.json();
+            var msg = 'Configuration saved! Mode: ' + mode.toUpperCase() +
+                (provider !== 'none' ? ' | Provider: ' + provider : '');
+            if (modeData.needs_reindex) {
+                msg += ' | Embeddings will be re-indexed on next use (may take several minutes).';
+            }
             if (statusEl) {
-                statusEl.textContent = 'Configuration saved! Mode: ' + mode.toUpperCase() +
-                    (provider !== 'none' ? ' | Provider: ' + provider : '');
-                statusEl.className = 'ms-2 text-success fw-bold';
+                statusEl.textContent = msg;
+                statusEl.className = modeData.needs_reindex ? 'ms-2 text-warning fw-bold' : 'ms-2 text-success fw-bold';
             }
             loadModeSettings();
+            loadEmbeddingSettings();
         } else {
             if (statusEl) { statusEl.textContent = 'Save failed'; statusEl.className = 'ms-2 text-danger'; }
         }
@@ -381,10 +389,127 @@ async function saveAllSettings() {
     }, 5000);
 }
 
+// ============================================================================
+// Embedding Configuration (V3.4.24 — Custom OpenAI-compatible endpoints)
+// ============================================================================
+
+async function loadEmbeddingSettings() {
+    try {
+        var resp = await fetch('/api/v3/embedding/config');
+        if (!resp.ok) return;
+        var data = await resp.json();
+
+        var provEl = document.getElementById('settings-emb-provider');
+        if (provEl) {
+            provEl.value = data.is_openai_compatible ? 'openai' : 'default';
+        }
+
+        if (data.is_openai_compatible) {
+            var modelEl = document.getElementById('settings-emb-model');
+            if (modelEl) modelEl.value = data.model_name || '';
+            var dimEl = document.getElementById('settings-emb-dimension');
+            if (dimEl) dimEl.value = data.dimension || '';
+            var epEl = document.getElementById('settings-emb-endpoint');
+            if (epEl) epEl.value = data.api_endpoint || '';
+        }
+
+        updateEmbeddingUI();
+
+        var info = document.getElementById('settings-emb-info');
+        if (info) {
+            var _name = (data.model_name || 'unknown').replace(/[<>&"']/g, function(c) {
+                return {'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c];
+            });
+            if (data.is_openai_compatible) {
+                info.innerHTML = 'Using custom endpoint: <strong>' + _name + '</strong> (' + data.dimension + 'd)';
+            } else {
+                info.innerHTML = 'Using local <strong>' + _name + '</strong> (' + data.dimension + 'd)';
+            }
+        }
+    } catch (e) {
+        console.log('Load embedding settings error:', e);
+    }
+}
+
+function updateEmbeddingUI() {
+    var provider = document.getElementById('settings-emb-provider')?.value || 'default';
+    var isCustom = provider === 'openai';
+
+    var modelCol = document.getElementById('settings-emb-model-col');
+    var dimCol = document.getElementById('settings-emb-dim-col');
+    var endpointRow = document.getElementById('settings-emb-endpoint-row');
+    var testRow = document.getElementById('settings-emb-test-row');
+
+    if (modelCol) modelCol.style.display = isCustom ? 'block' : 'none';
+    if (dimCol) dimCol.style.display = isCustom ? 'block' : 'none';
+    if (endpointRow) endpointRow.style.display = isCustom ? 'flex' : 'none';
+    if (testRow) testRow.style.display = isCustom ? 'block' : 'none';
+
+    var info = document.getElementById('settings-emb-info');
+    if (info && !isCustom) {
+        info.innerHTML = 'Using local <strong>nomic-embed-text-v1.5</strong> (768d)';
+    }
+}
+
+async function testEmbeddingEndpoint() {
+    var endpoint = document.getElementById('settings-emb-endpoint')?.value || '';
+    var model = document.getElementById('settings-emb-model')?.value || '';
+    var key = document.getElementById('settings-emb-key')?.value || '';
+    var resultEl = document.getElementById('settings-emb-test-result');
+
+    if (!endpoint) {
+        if (resultEl) { resultEl.textContent = 'Enter an endpoint first'; resultEl.className = 'ms-2 small text-danger'; }
+        return;
+    }
+
+    if (resultEl) { resultEl.textContent = 'Testing...'; resultEl.className = 'ms-2 small text-muted'; }
+
+    try {
+        var resp = await fetch('/api/v3/embedding/test', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({api_endpoint: endpoint, model_name: model, api_key: key})
+        });
+        var data = await resp.json();
+        if (data.success) {
+            if (resultEl) { resultEl.textContent = data.message; resultEl.className = 'ms-2 small text-success fw-bold'; }
+            var dimEl = document.getElementById('settings-emb-dimension');
+            if (dimEl && data.dimension) {
+                if (!dimEl.value) {
+                    dimEl.value = data.dimension;
+                } else if (parseInt(dimEl.value) !== data.dimension) {
+                    if (resultEl) {
+                        resultEl.textContent = 'Connected! Warning: endpoint returns ' + data.dimension + 'd but you entered ' + dimEl.value + 'd';
+                        resultEl.className = 'ms-2 small text-warning fw-bold';
+                    }
+                }
+            }
+        } else {
+            if (resultEl) { resultEl.textContent = 'Failed: ' + (data.error || 'Unknown'); resultEl.className = 'ms-2 small text-danger'; }
+        }
+    } catch (e) {
+        if (resultEl) { resultEl.textContent = 'Error: ' + e.message; resultEl.className = 'ms-2 small text-danger'; }
+    }
+}
+
+function getEmbeddingParams() {
+    var provider = document.getElementById('settings-emb-provider')?.value || 'default';
+    if (provider !== 'openai') return {};
+    return {
+        embedding_provider: 'openai',
+        embedding_endpoint: document.getElementById('settings-emb-endpoint')?.value || '',
+        embedding_model: document.getElementById('settings-emb-model')?.value || '',
+        embedding_dimension: parseInt(document.getElementById('settings-emb-dimension')?.value) || 0,
+        embedding_key: document.getElementById('settings-emb-key')?.value || '',
+    };
+}
+
 // Bind events
 document.getElementById('settings-provider')?.addEventListener('change', updateProviderUI);
 document.getElementById('settings-save-all')?.addEventListener('click', saveAllSettings);
 document.getElementById('settings-test-btn')?.addEventListener('click', testConnection);
+document.getElementById('settings-emb-provider')?.addEventListener('change', updateEmbeddingUI);
+document.getElementById('settings-emb-test-btn')?.addEventListener('click', testEmbeddingEndpoint);
 
 // Mode radio buttons
 document.querySelectorAll('input[name="settings-mode-radio"]').forEach(function(radio) {
@@ -395,5 +520,6 @@ document.querySelectorAll('input[name="settings-mode-radio"]').forEach(function(
 document.getElementById('settings-tab')?.addEventListener('shown.bs.tab', function() {
     loadAutoSettings();
     loadModeSettings();
+    loadEmbeddingSettings();
     updateModeUI();
 });

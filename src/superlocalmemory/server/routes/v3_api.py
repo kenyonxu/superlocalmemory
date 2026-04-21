@@ -129,6 +129,11 @@ async def set_mode(request: Request):
             llm_model=old_config.llm.model,
             llm_api_key=old_config.llm.api_key,
             llm_api_base=old_config.llm.api_base,
+            embedding_provider=old_config.embedding.provider,
+            embedding_endpoint=old_config.embedding.api_endpoint,
+            embedding_key=old_config.embedding.api_key,
+            embedding_model_name=old_config.embedding.model_name,
+            embedding_dimension=old_config.embedding.dimension,
         )
         new_config.active_profile = old_config.active_profile
         new_config.save()
@@ -165,7 +170,10 @@ async def set_mode(request: Request):
 
 @router.post("/mode/set")
 async def set_full_config(request: Request):
-    """Save mode + provider + model + API key together."""
+    """Save mode + provider + model + API key together.
+
+    V3.4.24: Also accepts embedding_* fields for custom embedding endpoints.
+    """
     try:
         body = await request.json()
         new_mode = body.get("mode", "a").lower()
@@ -187,6 +195,11 @@ async def set_full_config(request: Request):
             llm_model=model,
             llm_api_key=api_key,
             llm_api_base="http://localhost:11434" if provider == "ollama" else "",
+            embedding_provider=body.get("embedding_provider", ""),
+            embedding_endpoint=body.get("embedding_endpoint", ""),
+            embedding_key=body.get("embedding_key", ""),
+            embedding_model_name=body.get("embedding_model", ""),
+            embedding_dimension=int(body.get("embedding_dimension", 0) or 0),
         )
         config.active_profile = old.active_profile
         config.save()
@@ -213,9 +226,143 @@ async def set_full_config(request: Request):
             "mode": new_mode,
             "provider": provider,
             "model": model,
+            "embedding_provider": config.embedding.provider,
+            "embedding_model": config.embedding.model_name,
+            "embedding_dimension": config.embedding.dimension,
         }
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── V3.4.24: Embedding Configuration ────────────────────────────────
+
+@router.get("/embedding/config")
+async def get_embedding_config(request: Request):
+    """Return current embedding configuration."""
+    try:
+        from superlocalmemory.core.config import SLMConfig
+        config = SLMConfig.load()
+        emb = config.embedding
+        return {
+            "provider": emb.provider,
+            "model_name": emb.model_name,
+            "dimension": emb.dimension,
+            "api_endpoint": emb.api_endpoint,
+            "has_key": bool(emb.api_key),
+            "is_openai_compatible": emb.is_openai_compatible,
+            "mode": config.mode.value,
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.put("/embedding/config")
+async def set_embedding_config(request: Request):
+    """Update embedding configuration independently of mode switch."""
+    try:
+        body = await request.json()
+        from superlocalmemory.core.config import SLMConfig, EmbeddingConfig
+        config = SLMConfig.load()
+
+        new_provider = body.get("provider", config.embedding.provider)
+        new_model = body.get("model_name", config.embedding.model_name)
+        new_dim = int(body.get("dimension", config.embedding.dimension) or 768)
+        if not (64 <= new_dim <= 8192):
+            return JSONResponse({"error": f"Dimension must be 64-8192, got {new_dim}"}, status_code=400)
+        new_endpoint = body.get("api_endpoint", config.embedding.api_endpoint)
+        new_key = body.get("api_key", config.embedding.api_key)
+
+        old_emb = config.embedding
+        config.embedding = EmbeddingConfig(
+            model_name=new_model,
+            dimension=new_dim,
+            provider=new_provider,
+            api_endpoint=new_endpoint,
+            api_key=new_key,
+            ollama_model=old_emb.ollama_model,
+            ollama_base_url=old_emb.ollama_base_url,
+            api_version=old_emb.api_version,
+            deployment_name=old_emb.deployment_name,
+        )
+        config.save()
+
+        needs_reindex = (
+            old_emb.provider != new_provider
+            or old_emb.model_name != new_model
+            or old_emb.dimension != new_dim
+        )
+
+        # Kill workers so next request uses new config
+        try:
+            from superlocalmemory.core.worker_pool import WorkerPool
+            WorkerPool.shared().shutdown()
+        except Exception:
+            pass
+        if hasattr(request.app.state, "engine"):
+            request.app.state.engine = None
+
+        return {
+            "success": True,
+            "provider": new_provider,
+            "model_name": new_model,
+            "dimension": new_dim,
+            "needs_reindex": needs_reindex,
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.post("/embedding/test")
+async def test_embedding_endpoint(request: Request):
+    """Test connectivity to a custom embedding endpoint."""
+    try:
+        import httpx
+        from urllib.parse import urlparse
+        body = await request.json()
+        endpoint = body.get("api_endpoint", "").rstrip("/")
+        model = body.get("model_name", "test")
+        api_key = body.get("api_key", "")
+
+        if not endpoint:
+            return JSONResponse({"error": "No endpoint provided"}, status_code=400)
+
+        parsed = urlparse(endpoint)
+        if parsed.scheme not in ("http", "https"):
+            return JSONResponse({"error": "Only http/https endpoints supported"}, status_code=400)
+        host = parsed.hostname or ""
+        if host in ("169.254.169.254", "metadata.google.internal"):
+            return JSONResponse({"error": "Cloud metadata endpoints not allowed"}, status_code=400)
+
+        if not endpoint.endswith("/embeddings"):
+            endpoint = f"{endpoint}/embeddings"
+
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        payload = {"input": ["test embedding connection"], "model": model}
+
+        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+            resp = client.post(endpoint, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            emb_data = data.get("data", [])
+            if emb_data:
+                dim = len(emb_data[0].get("embedding", []))
+                return {
+                    "success": True,
+                    "message": f"Connected! Dimension: {dim}",
+                    "dimension": dim,
+                }
+            return {"success": False, "error": "No embedding data returned"}
+    except httpx.HTTPStatusError as e:
+        return {"success": False, "error": f"HTTP {e.response.status_code}"}
+    except httpx.ConnectError:
+        return {"success": False, "error": "Cannot reach the embedding server. Is it running?"}
+    except httpx.TimeoutException:
+        return {"success": False, "error": "Connection timed out after 15 seconds."}
+    except Exception as e:
+        return {"success": False, "error": type(e).__name__}
 
 
 @router.post("/provider/test")
@@ -1593,13 +1740,8 @@ async def process_health(request: Request):
         processes["worker_pool"] = {"status": worker_status}
 
         # Memory usage of current process (approximate)
-        memory_mb = 0.0
-        try:
-            import resource
-            usage = resource.getrusage(resource.RUSAGE_SELF)
-            memory_mb = round(usage.ru_maxrss / (1024 * 1024), 1)
-        except Exception:
-            pass
+        from superlocalmemory.core.platform_utils import get_rss_mb
+        memory_mb = round(get_rss_mb(), 1)
 
         return {
             "processes": processes,

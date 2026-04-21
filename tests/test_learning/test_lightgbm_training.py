@@ -14,7 +14,10 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("lightgbm")
+try:
+    import lightgbm  # noqa: F401
+except (ImportError, OSError):
+    pytest.skip("lightgbm not available", allow_module_level=True)
 pytest.importorskip("numpy")
 
 import lightgbm as lgb

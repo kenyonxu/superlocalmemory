@@ -31,7 +31,6 @@ import platform
 import signal
 import struct
 import sys
-import threading
 
 # Force CPU BEFORE any torch import
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -52,25 +51,10 @@ if sys.platform != "win32":
 def _start_parent_watchdog() -> None:
     """Monitor parent process — self-terminate if parent dies.
 
-    Prevents orphaned workers that consume 1+ GB each when the parent
-    process crashes, is killed, or exits without cleanup.
-
-    V3.3.7: Added after incident where ~30 orphaned workers consumed 33 GB.
+    V3.4.24: Delegates to platform_utils.start_parent_watchdog().
     """
-    parent_pid = os.getppid()
-
-    def _watch() -> None:
-        import time
-        while True:
-            time.sleep(5)
-            try:
-                os.kill(parent_pid, 0)  # Check if parent is alive (signal 0)
-            except OSError:
-                # Parent is dead — self-terminate
-                os._exit(0)
-
-    t = threading.Thread(target=_watch, daemon=True, name="parent-watchdog")
-    t.start()
+    from superlocalmemory.core.platform_utils import start_parent_watchdog
+    start_parent_watchdog()
 
 
 def _detect_onnx_variant(model_name: str = "") -> str:
@@ -101,7 +85,8 @@ def _detect_onnx_variant(model_name: str = "") -> str:
 
 def _worker_main() -> None:
     """Main loop: read JSON requests from stdin, write responses to stdout."""
-    _start_parent_watchdog()  # V3.3.7: self-terminate if parent dies
+    _start_parent_watchdog()
+    from superlocalmemory.core.platform_utils import get_rss_mb
 
     model = None
     active_backend = ""
@@ -194,10 +179,9 @@ def _worker_main() -> None:
             except Exception as exc:
                 _respond({"ok": False, "error": str(exc)})
 
-            # V3.3.16: RSS watchdog — same as embedding_worker
-            import resource
-            rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
-            if rss_mb > 2500:
+            # V3.3.16: RSS watchdog — V3.4.24: cross-platform via platform_utils.
+            rss_mb = get_rss_mb()
+            if rss_mb > 0 and rss_mb > 2500:
                 sys.exit(0)
 
             continue

@@ -10,7 +10,10 @@ import sqlite3
 
 import pytest
 
-pytest.importorskip("lightgbm")
+try:
+    import lightgbm  # noqa: F401
+except (ImportError, OSError):
+    pytest.skip("lightgbm not available", allow_module_level=True)
 
 import lightgbm as lgb
 import numpy as np

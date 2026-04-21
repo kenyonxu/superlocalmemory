@@ -11,7 +11,10 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("lightgbm")
+try:
+    import lightgbm  # noqa: F401
+except (ImportError, OSError):
+    pytest.skip("lightgbm not available (missing libomp on macOS CI)", allow_module_level=True)
 
 from superlocalmemory.learning import model_cache
 from superlocalmemory.learning.consolidation_worker import _retrain_ranker_impl

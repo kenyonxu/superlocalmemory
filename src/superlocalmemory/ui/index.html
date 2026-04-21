@@ -1007,8 +1007,53 @@
                             </div>
                         </div>
 
+                        <!-- Step 3: Embedding Configuration (V3.4.24) -->
+                        <div class="mt-3 pt-3 border-top" id="settings-embedding-panel">
+                            <h6 class="text-muted"><i class="bi bi-cpu"></i> Step 3: Embedding Model</h6>
+                            <p class="small text-muted mb-2">
+                                Controls how text is converted to vectors for semantic search.
+                                Default: local model (768d). Custom: any OpenAI-compatible endpoint.
+                            </p>
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-4">
+                                    <label class="form-label small">Embedding Provider</label>
+                                    <select class="form-select form-select-sm" id="settings-emb-provider">
+                                        <option value="default">Default (Local Model)</option>
+                                        <option value="openai">Custom Endpoint (OpenAI-compatible)</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4" id="settings-emb-model-col" style="display:none;">
+                                    <label class="form-label small">Model Name</label>
+                                    <input type="text" id="settings-emb-model" class="form-control form-control-sm" placeholder="e.g. Qwen3-Embedding">
+                                </div>
+                                <div class="col-md-4" id="settings-emb-dim-col" style="display:none;">
+                                    <label class="form-label small">Dimension</label>
+                                    <input type="number" id="settings-emb-dimension" class="form-control form-control-sm" placeholder="e.g. 1024" min="64" max="8192">
+                                </div>
+                            </div>
+                            <div class="row g-2 mb-2" id="settings-emb-endpoint-row" style="display:none;">
+                                <div class="col-md-8">
+                                    <label class="form-label small">Embedding Endpoint</label>
+                                    <input type="text" id="settings-emb-endpoint" class="form-control form-control-sm" placeholder="http://localhost:8045/v1/embeddings">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">API Key (optional)</label>
+                                    <input type="password" id="settings-emb-key" class="form-control form-control-sm" placeholder="not-needed">
+                                </div>
+                            </div>
+                            <div id="settings-emb-test-row" style="display:none;">
+                                <button class="btn btn-sm btn-outline-info" id="settings-emb-test-btn">
+                                    <i class="bi bi-lightning"></i> Test Embedding
+                                </button>
+                                <span id="settings-emb-test-result" class="ms-2 small"></span>
+                            </div>
+                            <div id="settings-emb-info" class="small text-muted mt-1">
+                                Using local <strong>nomic-embed-text-v1.5</strong> (768d)
+                            </div>
+                        </div>
+
                         <!-- Save button -->
-                        <div class="mt-2">
+                        <div class="mt-3">
                             <button class="btn btn-primary" id="settings-save-all">
                                 <i class="bi bi-check-circle"></i> Save Configuration
                             </button>

@@ -37,7 +37,8 @@ class EmbeddingConfig:
 
     model_name: str = "nomic-ai/nomic-embed-text-v1.5"
     dimension: int = 768
-    # Provider: "" = auto-detect, "sentence-transformers", "ollama", "cloud"
+    # Provider: "" = auto-detect, "sentence-transformers", "ollama", "cloud",
+    # "openai" (V3.4.24: any OpenAI-compatible /v1/embeddings endpoint)
     provider: str = ""
     # Ollama settings (used when provider="ollama" or auto-detected)
     ollama_model: str = "nomic-embed-text"
@@ -50,11 +51,18 @@ class EmbeddingConfig:
 
     @property
     def is_cloud(self) -> bool:
+        if self.provider == "openai":
+            return False
         return bool(self.api_endpoint) or self.provider == "cloud"
 
     @property
     def is_ollama(self) -> bool:
         return self.provider == "ollama"
+
+    @property
+    def is_openai_compatible(self) -> bool:
+        """V3.4.24: True when using a custom OpenAI-compatible endpoint."""
+        return self.provider == "openai" and bool(self.api_endpoint)
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +647,8 @@ class SLMConfig:
             embedding_endpoint=emb_data.get("api_endpoint", ""),
             embedding_key=emb_data.get("api_key", ""),
             embedding_deployment=emb_data.get("deployment_name", ""),
+            embedding_model_name=emb_data.get("model_name", ""),
+            embedding_dimension=int(emb_data.get("dimension", 0) or 0),
         )
         config.active_profile = data.get("active_profile", "default")
 
@@ -787,20 +797,34 @@ class SLMConfig:
         embedding_endpoint: str = "",
         embedding_key: str = "",
         embedding_deployment: str = "",
+        embedding_model_name: str = "",
+        embedding_dimension: int = 0,
     ) -> SLMConfig:
         """Create config with mode-appropriate defaults."""
         _base = base_dir or DEFAULT_BASE_DIR
 
         if mode == Mode.A:
+            # V3.4.24: If user chose "openai" provider, honour their custom
+            # endpoint/model/dimension. Otherwise use local defaults.
+            _a_provider = embedding_provider or "sentence-transformers"
+            if _a_provider == "openai" and embedding_endpoint:
+                _a_emb = EmbeddingConfig(
+                    model_name=embedding_model_name or "nomic-ai/nomic-embed-text-v1.5",
+                    dimension=embedding_dimension or 768,
+                    provider="openai",
+                    api_endpoint=embedding_endpoint,
+                    api_key=embedding_key,
+                )
+            else:
+                _a_emb = EmbeddingConfig(
+                    model_name="nomic-ai/nomic-embed-text-v1.5",
+                    dimension=768,
+                    provider=_a_provider,
+                )
             return cls(
                 mode=mode,
                 base_dir=_base,
-                embedding=EmbeddingConfig(
-                    model_name="nomic-ai/nomic-embed-text-v1.5",
-                    dimension=768,
-                    # Mode A: sentence-transformers in SUBPROCESS (never in-process)
-                    provider=embedding_provider or "sentence-transformers",
-                ),
+                embedding=_a_emb,
                 llm=LLMConfig(),  # No LLM
                 retrieval=RetrievalConfig(
                     # V3.3.2: ONNX cross-encoder enabled for all modes (~200MB)
@@ -816,15 +840,27 @@ class SLMConfig:
             )
 
         if mode == Mode.B:
+            # V3.4.24: If user chose "openai" provider with a custom endpoint
+            # (e.g. local vLLM, LiteLLM, Ollama /v1), honour it.
+            _b_provider = embedding_provider or "ollama"
+            if _b_provider == "openai" and embedding_endpoint:
+                _b_emb = EmbeddingConfig(
+                    model_name=embedding_model_name or "nomic-ai/nomic-embed-text-v1.5",
+                    dimension=embedding_dimension or 768,
+                    provider="openai",
+                    api_endpoint=embedding_endpoint,
+                    api_key=embedding_key,
+                )
+            else:
+                _b_emb = EmbeddingConfig(
+                    model_name="nomic-ai/nomic-embed-text-v1.5",
+                    dimension=768,
+                    provider=_b_provider,
+                )
             return cls(
                 mode=mode,
                 base_dir=_base,
-                embedding=EmbeddingConfig(
-                    model_name="nomic-ai/nomic-embed-text-v1.5",
-                    dimension=768,
-                    # Mode B: Ollama HTTP API (zero PyTorch in-process)
-                    provider=embedding_provider or "ollama",
-                ),
+                embedding=_b_emb,
                 llm=LLMConfig(
                     provider=llm_provider or "ollama",
                     model=llm_model or "llama3.2",
@@ -841,16 +877,28 @@ class SLMConfig:
         # Don't carry over local-only providers (ollama) to cloud mode
         c_provider = llm_provider if llm_provider not in ("ollama", "") else "openrouter"
         c_model = llm_model if llm_provider not in ("ollama", "") else "anthropic/claude-sonnet-4"
-        return cls(
-            mode=mode,
-            base_dir=_base,
-            embedding=EmbeddingConfig(
+        # V3.4.24: If user chose "openai" provider, honour it in Mode C too.
+        _c_emb_provider = embedding_provider or ""
+        if _c_emb_provider == "openai" and embedding_endpoint:
+            _c_emb = EmbeddingConfig(
+                model_name=embedding_model_name or "text-embedding-3-large",
+                dimension=embedding_dimension or 3072,
+                provider="openai",
+                api_endpoint=embedding_endpoint,
+                api_key=embedding_key,
+            )
+        else:
+            _c_emb = EmbeddingConfig(
                 model_name="text-embedding-3-large",
                 dimension=3072,
                 api_endpoint=embedding_endpoint,
                 api_key=embedding_key,
                 deployment_name=embedding_deployment,
-            ),
+            )
+        return cls(
+            mode=mode,
+            base_dir=_base,
+            embedding=_c_emb,
             llm=LLMConfig(
                 provider=c_provider,
                 model=c_model,
