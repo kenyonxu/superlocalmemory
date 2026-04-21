@@ -72,6 +72,10 @@ dist/
 *.exe
 *.tgz
 *.sha256
+# Keep the benchmark fixture sidecars — CI verifies them during
+# pre-publish tests, so they must be checked in. Broader *.sha256
+# stays ignored for downloaded release artifacts.
+!tests/test_benchmarks/fixtures/*.sha256
 *.md5
 package/
 __pycache__/
