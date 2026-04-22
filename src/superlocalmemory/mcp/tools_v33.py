@@ -20,6 +20,8 @@ import logging
 from pathlib import Path
 from typing import Callable
 
+from mcp.types import ToolAnnotations
+
 logger = logging.getLogger(__name__)
 
 MEMORY_DIR = Path.home() / ".superlocalmemory"
@@ -44,7 +46,7 @@ def register_v33_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 1. forget — Ebbinghaus forgetting decay cycle
     # ------------------------------------------------------------------
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(destructiveHint=True))
     async def forget(
         profile_id: str = "",
         dry_run: bool = True,
@@ -216,7 +218,7 @@ def register_v33_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 4. get_soft_prompts — Retrieve active soft prompts
     # ------------------------------------------------------------------
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_soft_prompts(
         profile_id: str = "",
     ) -> dict:

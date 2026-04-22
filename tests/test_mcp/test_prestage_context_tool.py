@@ -114,7 +114,8 @@ def test_register_tool_smoke():
         def __init__(self):
             self.registered = []
 
-        def tool(self):
+        def tool(self, *args, **kwargs):
+            # v3.4.26 Phase 1: ignore ToolAnnotations kwargs.
             def deco(fn):
                 self.registered.append(fn.__name__)
                 return fn

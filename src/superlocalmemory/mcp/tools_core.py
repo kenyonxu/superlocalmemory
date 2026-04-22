@@ -18,6 +18,8 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
+from mcp.types import ToolAnnotations
+
 logger = logging.getLogger(__name__)
 
 _DB_PATH = str(Path.home() / ".superlocalmemory" / "memory.db")
@@ -98,7 +100,7 @@ def _record_recall_hits(
 def register_core_tools(server, get_engine: Callable) -> None:
     """Register the 13 core MCP tools on *server*."""
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(idempotentHint=True))
     async def remember(
         content: str, tags: str = "", project: str = "",
         importance: int = 5, session_id: str = "",
@@ -163,7 +165,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("remember failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def recall(
         query: str, limit: int = 10, agent_id: str = "mcp_client",
         session_id: str = "",
@@ -219,7 +221,9 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     pass
             if not effective_sid:
                 effective_sid = f"mcp:{agent_id}"
-            # V3.3.19: Run in thread pool to avoid blocking MCP event loop
+            # V3.3.19: Run in thread pool to avoid blocking MCP event loop.
+            # V3.4.26: WorkerPool now concurrent — parallel calls no longer
+            # block behind a single threading.Lock. See worker_pool.py.
             result = await asyncio.to_thread(
                 pool.recall, query, limit=limit, session_id=effective_sid,
             )
@@ -248,7 +252,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("recall failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def search(query: str, limit: int = 10, profile_id: str = "") -> dict:
         """Full-text search across memories using FTS5 with BM25 ranking."""
         try:
@@ -269,7 +273,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("search failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def fetch(fact_ids: str) -> dict:
         """Fetch full details for specific fact IDs (comma-separated)."""
         try:
@@ -295,7 +299,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("fetch failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def list_recent(limit: int = 20, profile_id: str = "") -> dict:
         """List most recently stored memories, newest first."""
         try:
@@ -316,7 +320,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("list_recent failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_status() -> dict:
         """Get memory system status: fact count, entity count, mode, profile, db size."""
         try:
@@ -473,7 +477,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("correct_pattern failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(destructiveHint=True))
     async def delete_memory(fact_id: str, agent_id: str = "mcp_client") -> dict:
         """Delete a specific memory by exact fact ID.
 
@@ -505,7 +509,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("delete_memory failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(idempotentHint=True))
     async def update_memory(
         fact_id: str, content: str, agent_id: str = "mcp_client",
     ) -> dict:

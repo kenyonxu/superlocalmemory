@@ -24,6 +24,8 @@ import time
 import uuid
 from typing import Callable
 
+from mcp.types import ToolAnnotations
+
 logger = logging.getLogger(__name__)
 
 # Unique peer ID for this MCP server session
@@ -156,7 +158,7 @@ def register_mesh_tools(server, get_engine: Callable) -> None:
             "broker_response": result,
         }
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def mesh_peers() -> dict:
         """List all active peer sessions on this machine.
 
@@ -267,7 +269,7 @@ def register_mesh_tools(server, get_engine: Callable) -> None:
         })
         return result or {"error": "Lock operation failed"}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def mesh_events() -> dict:
         """Get recent mesh events (peer joins, leaves, messages, state changes).
 
@@ -276,7 +278,7 @@ def register_mesh_tools(server, get_engine: Callable) -> None:
         result = _mesh_request("GET", "/events")
         return result or {"events": []}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def mesh_status() -> dict:
         """Get mesh broker health and statistics.
 

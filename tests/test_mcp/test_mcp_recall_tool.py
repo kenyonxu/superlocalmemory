@@ -33,7 +33,10 @@ class _MockServer:
     def __init__(self):
         self._tools: dict[str, object] = {}
 
-    def tool(self):
+    def tool(self, *args, **kwargs):
+        # v3.4.26 Phase 1: tools now carry ToolAnnotations kwargs
+        # (readOnlyHint, destructiveHint, idempotentHint). The mock
+        # ignores them — behaviour tests don't need the metadata.
         def decorator(fn):
             self._tools[fn.__name__] = fn
             return fn

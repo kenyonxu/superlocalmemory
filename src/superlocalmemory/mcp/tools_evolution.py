@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from mcp.types import ToolAnnotations
+
 logger = logging.getLogger(__name__)
 
 MEMORY_DB = Path.home() / ".superlocalmemory" / "memory.db"
@@ -125,7 +127,7 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
             logger.debug("evolve_skill failed: %s", exc)
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def skill_health(
         skill_name: str = "",
         include_history: bool = False,
@@ -258,7 +260,7 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
             logger.debug("skill_health failed: %s", exc)
             return {"skills": [], "skill_count": 0, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def skill_lineage(
         skill_name: str = "",
     ) -> dict:

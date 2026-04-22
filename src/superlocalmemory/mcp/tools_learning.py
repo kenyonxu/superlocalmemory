@@ -22,6 +22,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Callable
 
+from mcp.types import ToolAnnotations
+
 logger = logging.getLogger(__name__)
 
 _MAX_SUMMARY_LEN = 500  # Truncate input/output summaries
@@ -80,7 +82,7 @@ def register_learning_tools(server, get_engine: Callable) -> None:
             logger.debug("log_tool_event failed: %s", exc)
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_assertions(
         min_confidence: float = 0.0,
         category: str = "",
@@ -131,7 +133,7 @@ def register_learning_tools(server, get_engine: Callable) -> None:
             logger.debug("get_assertions failed: %s", exc)
             return {"assertions": [], "count": 0, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(idempotentHint=True))
     async def reinforce_assertion(assertion_id: str) -> dict:
         """Reinforce a behavioral assertion (increase confidence).
 
@@ -144,7 +146,7 @@ def register_learning_tools(server, get_engine: Callable) -> None:
         engine = get_engine()
         return _update_assertion_confidence(engine._db, assertion_id, reinforce=True)
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(idempotentHint=True))
     async def contradict_assertion(assertion_id: str) -> dict:
         """Contradict a behavioral assertion (decrease confidence).
 
