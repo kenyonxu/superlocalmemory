@@ -273,35 +273,31 @@ def register_v3_tools(server, get_engine: Callable) -> None:
             limit: Maximum results (default 10).
         """
         try:
-            engine = get_engine()
-            response = engine.recall(query, limit=limit)
+            from superlocalmemory.core.worker_pool import WorkerPool
+            raw = WorkerPool.shared().recall(query=query, limit=limit)
+            items = raw.get("results", []) if isinstance(raw, dict) else []
             results = []
-            for r in response.results[:limit]:
+            for item in items[:limit]:
                 results.append({
-                    "fact_id": r.fact.fact_id,
-                    "content": r.fact.content,
-                    "final_score": round(r.score, 4),
-                    "confidence": round(r.confidence, 3),
-                    "trust_score": round(r.trust_score, 3),
-                    "channel_scores": {
-                        k: round(v, 4) for k, v in r.channel_scores.items()
-                    },
-                    "evidence_chain": r.evidence_chain,
-                    "fact_type": r.fact.fact_type.value,
-                    "lifecycle": r.fact.lifecycle.value,
-                    "access_count": r.fact.access_count,
+                    "fact_id": item.get("fact_id", ""),
+                    "content": item.get("content", ""),
+                    "final_score": round(float(item.get("score", 0.0)), 4),
+                    "confidence": round(float(item.get("confidence", 0.0)), 3),
+                    "trust_score": round(float(item.get("trust_score", 0.0)), 3),
+                    "channel_scores": item.get("channel_scores", {}) or {},
+                    "evidence_chain": item.get("evidence_chain", []) or [],
+                    "fact_type": item.get("fact_type", ""),
+                    "lifecycle": item.get("lifecycle", ""),
+                    "access_count": int(item.get("access_count", 0)),
                 })
             return {
                 "success": True,
                 "results": results,
                 "count": len(results),
-                "query_type": response.query_type,
-                "channel_weights": {
-                    k: round(v, 3)
-                    for k, v in response.channel_weights.items()
-                },
-                "total_candidates": response.total_candidates,
-                "retrieval_time_ms": round(response.retrieval_time_ms, 1),
+                "query_type": raw.get("query_type", "") if isinstance(raw, dict) else "",
+                "channel_weights": raw.get("channel_weights", {}) if isinstance(raw, dict) else {},
+                "total_candidates": raw.get("total_candidates", 0) if isinstance(raw, dict) else 0,
+                "retrieval_time_ms": round(float(raw.get("retrieval_time_ms", 0.0)) if isinstance(raw, dict) else 0.0, 1),
             }
         except Exception as exc:
             logger.exception("recall_trace failed")

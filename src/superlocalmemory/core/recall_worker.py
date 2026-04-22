@@ -69,6 +69,8 @@ def _handle_recall(query: str, limit: int, session_id: str = "") -> dict:
 
     results = []
     for r in response.results[:limit]:
+        fact_type = getattr(r.fact, "fact_type", None)
+        lifecycle = getattr(r.fact, "lifecycle", None)
         results.append({
             "fact_id": r.fact.fact_id,
             "memory_id": r.fact.memory_id,
@@ -80,6 +82,10 @@ def _handle_recall(query: str, limit: int, session_id: str = "") -> dict:
             "channel_scores": {
                 k: round(v, 4) for k, v in (r.channel_scores or {}).items()
             },
+            "fact_type": fact_type.value if fact_type and hasattr(fact_type, "value") else "",
+            "lifecycle": lifecycle.value if lifecycle and hasattr(lifecycle, "value") else "",
+            "access_count": getattr(r.fact, "access_count", 0),
+            "evidence_chain": list(getattr(r, "evidence_chain", []) or []),
         })
     return {
         "ok": True,
@@ -87,6 +93,10 @@ def _handle_recall(query: str, limit: int, session_id: str = "") -> dict:
         "query_type": response.query_type,
         "result_count": len(results),
         "retrieval_time_ms": round(response.retrieval_time_ms, 1),
+        "channel_weights": {
+            k: round(v, 3) for k, v in (response.channel_weights or {}).items()
+        },
+        "total_candidates": getattr(response, "total_candidates", 0),
         "results": results,
     }
 

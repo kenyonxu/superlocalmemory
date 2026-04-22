@@ -35,9 +35,9 @@ def register_resources(server, get_engine: Callable) -> None:
         """
         try:
             from superlocalmemory.hooks.auto_recall import AutoRecall
-            engine = get_engine()
+            from superlocalmemory.mcp._pool_adapter import pool_recall
             auto = AutoRecall(
-                engine=engine,
+                recall_fn=pool_recall,
                 config={"enabled": True, "max_memories_injected": 10, "relevance_threshold": 0.3},
             )
             context = auto.get_session_context(query="recent decisions and important context")

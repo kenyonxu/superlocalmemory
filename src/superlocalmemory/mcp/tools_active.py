@@ -73,6 +73,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
         try:
             from superlocalmemory.hooks.auto_recall import AutoRecall
             from superlocalmemory.hooks.rules_engine import RulesEngine
+            from superlocalmemory.mcp._pool_adapter import pool_recall
 
             engine = get_engine()
             rules = RulesEngine()
@@ -82,7 +83,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
 
             recall_config = rules.get_recall_config()
             auto = AutoRecall(
-                engine=engine,
+                recall_fn=pool_recall,
                 config={
                     "enabled": True,
                     "max_memories_injected": max_results,
@@ -148,12 +149,13 @@ def register_active_tools(server, get_engine: Callable) -> None:
         try:
             from superlocalmemory.hooks.auto_capture import AutoCapture
             from superlocalmemory.hooks.rules_engine import RulesEngine
+            from superlocalmemory.mcp._pool_adapter import pool_store
 
             engine = get_engine()
             rules = RulesEngine()
 
             auto = AutoCapture(
-                engine=engine,
+                store_fn=pool_store,
                 config=rules.get_capture_config(),
             )
 
