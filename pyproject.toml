@@ -52,6 +52,8 @@ dependencies = [
     # V3.4.3: Unified Brain
     "psutil>=5.9.0",
     "structlog>=24.0.0,<27.0.0",
+    # Cross-platform file locking for single-daemon enforcement.
+    "portalocker>=2.7.0,<4.0.0",
     # V3.4.18: Semantic search + cross-encoder reranker (npm install parity).
     # Previously under [search] extra — pip users silently lost 30pp of recall
     # quality vs. npm users. Now ships by default for both install paths.
