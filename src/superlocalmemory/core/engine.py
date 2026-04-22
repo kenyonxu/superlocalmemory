@@ -21,6 +21,7 @@ import logging
 from typing import Any
 
 from superlocalmemory.core.config import SLMConfig
+from superlocalmemory.core.engine_capabilities import Capabilities, CapabilityError
 from superlocalmemory.core.modes import get_capabilities
 from superlocalmemory.storage.models import (
     AtomicFact, MemoryRecord, Mode, RecallResponse,
@@ -46,9 +47,14 @@ class MemoryEngine:
         response = engine.recall("Where did Alice go?")
     """
 
-    def __init__(self, config: SLMConfig) -> None:
+    def __init__(
+        self,
+        config: SLMConfig,
+        capabilities: Capabilities = Capabilities.FULL,
+    ) -> None:
         self._config = config
         self._caps = get_capabilities(config.mode)
+        self._capabilities = capabilities
         self._profile_id = config.active_profile
         self._initialized = False
 
@@ -99,20 +105,42 @@ class MemoryEngine:
         """Embedding service (read-only access for Phase 2+)."""
         return self._embedder
 
+    @property
+    def capabilities(self) -> Capabilities:
+        """Capability level chosen at construction (LIGHT or FULL)."""
+        return self._capabilities
+
     # -- Initialization -----------------------------------------------------
 
     def initialize(self) -> None:
-        """Initialize all components. Call once before use."""
+        """Initialize all components. Call once before use.
+
+        In LIGHT mode only the DB layer is initialized (SQLite + schema
+        migrations + profile bookkeeping). In FULL mode the heavy layer
+        (embedder, LLM, encoding, retrieval, hooks, consolidation) follows.
+        """
         if self._initialized:
             return
 
+        self._init_db_layer()
+
+        if self._capabilities is Capabilities.FULL:
+            self._init_heavy_layer()
+
+        self._initialized = True
+        logger.info(
+            "MemoryEngine initialized: mode=%s profile=%s capabilities=%s",
+            self._config.mode.value, self._profile_id,
+            self._capabilities.value,
+        )
+
+        if self._capabilities is Capabilities.FULL:
+            # Replay pending async writes only when heavy layer is available.
+            self._process_pending_memories()
+
+    def _init_db_layer(self) -> None:
         from superlocalmemory.storage import schema
         from superlocalmemory.storage.database import DatabaseManager
-        from superlocalmemory.llm.backbone import LLMBackbone
-        from superlocalmemory.core.engine_wiring import (
-            init_embedder, init_encoding, init_retrieval, wire_hooks,
-            _init_auto_invoker, _init_consolidation,
-        )
 
         self._db = DatabaseManager(self._config.db_path)
         self._db.initialize(schema)
@@ -153,6 +181,13 @@ class MemoryEngine:
         except Exception as exc:
             logger.debug("V3.4.11 schema migration: %s", exc)
 
+    def _init_heavy_layer(self) -> None:
+        from superlocalmemory.llm.backbone import LLMBackbone
+        from superlocalmemory.core.engine_wiring import (
+            init_embedder, init_encoding, init_retrieval, wire_hooks,
+            _init_auto_invoker, _init_consolidation,
+        )
+
         self._embedder = init_embedder(self._config)
 
         if self._caps.llm_fact_extraction:
@@ -170,7 +205,6 @@ class MemoryEngine:
 
         self._trust_scorer = TrustScorer(self._db)
 
-        # Encoding components
         enc = init_encoding(
             self._config, self._db, self._embedder, self._llm,
         )
@@ -192,7 +226,6 @@ class MemoryEngine:
         self._auto_linker = enc.get("auto_linker")
         self._graph_analyzer = enc.get("graph_analyzer")
 
-        # Retrieval engine
         self._retrieval_engine = init_retrieval(
             self._config, self._db, self._embedder,
             self._entity_resolver, self._trust_scorer,
@@ -203,7 +236,6 @@ class MemoryEngine:
         self._adaptive_learner = AdaptiveLearner(self._db)
         self._compliance_checker = EUAIActChecker()
 
-        # Wire lifecycle hooks
         hook_result = wire_hooks(
             self._hooks, self._config, self._db,
             self._trust_scorer, self._profile_id,
@@ -231,7 +263,6 @@ class MemoryEngine:
             llm=getattr(self, "_llm", None),  # v3.4.7: for CCQ worker
         )
 
-        # V3.3: Check for embedding model migration on mode switch
         self._check_embedding_migration()
 
         # V3.3.13: Background maintenance scheduler (Langevin/Ebbinghaus/Sheaf)
@@ -244,16 +275,6 @@ class MemoryEngine:
                 self._maintenance_scheduler.start()
             except Exception as exc:
                 logger.debug("Maintenance scheduler init failed: %s", exc)
-
-        self._initialized = True
-        logger.info(
-            "MemoryEngine initialized: mode=%s profile=%s",
-            self._config.mode.value, self._profile_id,
-        )
-
-        # V3.3.21: Process any pending memories from failed async remember.
-        # Zero cost if no pending.db exists. Backward compatible.
-        self._process_pending_memories()
 
     def _process_pending_memories(self) -> None:
         """Process pending memories from store-first async pattern.
@@ -295,6 +316,7 @@ class MemoryEngine:
         metadata: dict[str, Any] | None = None,
     ) -> list[str]:
         """Store content and extract structured facts. Returns fact_ids."""
+        self._require_full("store")
         self._ensure_init()
 
         from superlocalmemory.core.store_pipeline import run_store
@@ -327,6 +349,7 @@ class MemoryEngine:
 
     def store_fact_direct(self, fact: AtomicFact) -> str:
         """Store a pre-built fact with full enrichment."""
+        self._require_full("store_fact_direct")
         self._ensure_init()
 
         from superlocalmemory.core.store_pipeline import run_store_fact_direct
@@ -357,6 +380,7 @@ class MemoryEngine:
         ``put_nowait`` and the actual ``pending_outcomes`` INSERT runs
         on a background worker.
         """
+        self._require_full("recall")
         self._ensure_init()
 
         pid = profile_id or self._profile_id
@@ -407,6 +431,7 @@ class MemoryEngine:
         self, speaker_a: str, speaker_b: str,
     ) -> None:
         """Pre-create canonical entities for conversation speakers."""
+        self._require_full("create_speaker_entities")
         self._ensure_init()
         if self._entity_resolver:
             self._entity_resolver.create_speaker_entities(
@@ -470,3 +495,11 @@ class MemoryEngine:
     def _ensure_init(self) -> None:
         if not self._initialized:
             self.initialize()
+
+    def _require_full(self, operation: str) -> None:
+        if self._capabilities is not Capabilities.FULL:
+            raise CapabilityError(
+                f"{operation} requires a FULL MemoryEngine but this instance "
+                f"is LIGHT; route through WorkerPool (pool.{operation}) or "
+                f"construct MemoryEngine(config, capabilities=Capabilities.FULL)."
+            )

@@ -46,6 +46,8 @@ def _make_engine(monkeypatch) -> "tuple[object, object]":
         _fake_run_recall,
     )
 
+    from superlocalmemory.core.engine_capabilities import Capabilities
+
     class _E:
         _profile_id = "p"
         _config = None
@@ -58,8 +60,12 @@ def _make_engine(monkeypatch) -> "tuple[object, object]":
         _access_log = None
         _auto_linker = None
         _initialized = True
+        _capabilities = Capabilities.FULL
 
         def _ensure_init(self):
+            pass
+
+        def _require_full(self, operation):
             pass
 
     return _E(), stub_response
