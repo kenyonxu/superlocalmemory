@@ -556,6 +556,26 @@ def run_wizard(auto: bool = False) -> None:
         print("  ⚠ Skipped (sentence-transformers not installed)")
         verified = False
 
+    # v3.4.26 options — data-dir safety + queue toggle. One prompt max.
+    try:
+        from superlocalmemory.cli.wizard_v3426_options import (
+            persist_v3426_options,
+            prompt_v3426_options,
+            validate_install_data_dir,
+        )
+        ok, reason = validate_install_data_dir(_SLM_HOME)
+        if not ok:
+            print()
+            print("  ⚠ Data directory check failed:")
+            for line in reason.splitlines():
+                print(f"    {line}")
+            print()
+        v3426_opts = prompt_v3426_options(interactive=interactive)
+        persist_v3426_options(v3426_opts, _SLM_HOME)
+    except Exception as exc:
+        # Wizard must never crash over an advisory feature.
+        print(f"  (v3.4.26 options step skipped: {exc})")
+
     # -- Done --
     _mark_complete()
 
