@@ -10,6 +10,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.4.30] - 2026-04-24
+
+Multi-IDE shared worker, silent migration, and security hardening.
+
+### Added
+- **Multi-IDE RAM sharing.** MCP processes share a single recall worker
+  via the daemon. Total RSS stays below 2 GB with four IDEs open.
+- **Feedback and learning signals** flow from every IDE session to the
+  daemon, not just the first.
+- **Setup wizard** validates the data directory at install time and
+  rejects iCloud, Dropbox, OneDrive, Box, Google Drive, and
+  `Library/CloudStorage` paths that silently corrupt SQLite WAL.
+- **One-time upgrade banner** after `pip install -U` / `npm install -g`
+  points users to `slm doctor`.
+- **`docs/errors.md`** — canonical error catalog with codes, recovery
+  steps, exit codes, and HTTP status mappings.
+- **CI matrix** now runs on `ubuntu-22.04`, `macos-14` (Apple Silicon),
+  and `windows-latest` with `portalocker`.
+
+### Changed
+- **Silent, atomic data migration** on upgrade — no manual steps.
+- **Migration serialized via file lock** so parallel pip + npm installs
+  cannot race.
+- **Concurrent-safe MCP engine singleton** with double-checked locking.
+- Pool adapter returns frozen dataclasses instead of `SimpleNamespace`.
+
+### Security
+- File permissions tightened: marker files written at 0600, parent
+  directories at 0700.
+- Symlink-following blocked on version marker reads.
+- Cloud-synced directory detection extended to `Library/CloudStorage`
+  (macOS 13+).
+
+### Fixed
+- Silent error swallows in daemon shutdown, migration probe, and banner
+  emission now log at WARNING.
+- Fenced-out `complete()` writes (stale worker claims) emit a WARNING
+  log instead of vanishing silently.
+- Daemon-start migration guarded behind `is_ready` sentinel — skips
+  when already applied.
+
+---
+
 ## [3.4.23] - 2026-04-21
 
 Critical hotfix on top of 3.4.22 for two end-user-facing regressions.

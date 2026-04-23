@@ -6,7 +6,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-22.04, macos-14, windows-latest]
         python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +22,10 @@ jobs:
       - name: Install package
         run: pip install -e ".[dev]" 2>/dev/null || pip install -e .
         shell: bash
+
+      - name: Install portalocker (Windows file locking)
+        if: runner.os == 'Windows'
+        run: pip install portalocker
 
       - name: Install test dependencies
         run: pip install pytest pytest-asyncio sqlite-vec
