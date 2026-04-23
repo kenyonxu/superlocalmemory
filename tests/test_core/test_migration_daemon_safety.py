@@ -80,3 +80,47 @@ class TestMigrateIfSafe:
         # defer, not crash the user's upgrade.
         result = migrate_if_safe(tmp_path)
         assert result["status"] == "deferred"
+
+
+class TestConcurrentMigrateSafety:
+    """pip install + daemon-start + npm postinstall can all run
+    ``migrate_if_safe`` on the same data dir within ~100ms. File lock
+    must serialize them so migrate() runs at most once."""
+
+    def test_concurrent_callers_apply_exactly_once(
+        self, tmp_path, monkeypatch,
+    ):
+        import threading
+        import superlocalmemory.migrations.v3_4_25_to_v3_4_26 as mod
+        monkeypatch.setattr(mod, "_daemon_running", lambda: False)
+
+        call_count = {"n": 0}
+        original_migrate = mod.migrate
+
+        def _counting_migrate(data_dir):
+            call_count["n"] += 1
+            return original_migrate(data_dir)
+
+        monkeypatch.setattr(mod, "migrate", _counting_migrate)
+
+        statuses: list[str] = []
+        status_lock = threading.Lock()
+
+        def _call():
+            res = mod.migrate_if_safe(tmp_path)
+            with status_lock:
+                statuses.append(res["status"])
+
+        threads = [threading.Thread(target=_call) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert call_count["n"] == 1, \
+            f"migrate() ran {call_count['n']}x instead of exactly once"
+        assert statuses.count("applied") == 1
+        # The other 7 must see either already_applied or deferred —
+        # never applied again.
+        for s in statuses:
+            assert s in ("applied", "already_applied", "deferred"), s

@@ -199,7 +199,10 @@ def ensure_daemon() -> bool:
         return _wait_for_daemon(timeout=60)
 
     except Exception as exc:
-        logger.debug("ensure_daemon error: %s", exc)
+        # Daemon auto-start is the entry point for dashboard / mesh /
+        # health features; failure here silently disables all of them.
+        # Log at WARNING so operators can see it in production logs.
+        logger.warning("ensure_daemon error: %s (run `slm doctor`)", exc)
         return False
     finally:
         if lock_fd:
@@ -386,8 +389,10 @@ def _flush_observe_buffer() -> None:
             decision = auto.evaluate(content)
             if decision.capture:
                 auto.capture(content, category=decision.category)
-        except Exception:
-            pass  # Don't let one bad observation kill the batch
+        except Exception as exc:
+            # Swallow per-observation to protect the batch, but log so
+            # a pattern of dropped observations is visible.
+            logger.warning("observation dropped during batch: %s", exc)
 
     logger.info("Observe debounce: processed %d observations (from buffer)", len(batch))
 

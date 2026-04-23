@@ -31,34 +31,42 @@ server = FastMCP("SuperLocalMemory V3")
 
 # Lazy engine singleton -------------------------------------------------------
 
+import threading as _threading
 _engine = None
+_engine_lock = _threading.Lock()
 
 
 def get_engine():
     """Return (or create) the singleton LIGHT MemoryEngine.
 
-    The MCP server process is one per IDE. A FULL engine here would
-    load the ONNX embedder into every IDE's MCP process — that is the
-    multi-IDE RAM blast Path B is designed to prevent. Heavy work
-    (recall, store, consolidate) routes through the daemon / worker
-    subprocess via the pool adapter in mcp/_pool_adapter.py.
+    FastMCP may call tools concurrently from multiple threads. The
+    double-checked lock keeps construction single-shot even if two
+    tool invocations race on a cold process — without it we would
+    double-run the schema migrations and build two ``AdaptiveLearner``
+    instances over the same DB file.
     """
     global _engine
-    if _engine is None:
+    if _engine is not None:
+        return _engine
+    with _engine_lock:
+        if _engine is not None:
+            return _engine
         from superlocalmemory.core.config import SLMConfig
         from superlocalmemory.core.engine import MemoryEngine
         from superlocalmemory.core.engine_capabilities import Capabilities
 
         config = SLMConfig.load()
-        _engine = MemoryEngine(config, capabilities=Capabilities.LIGHT)
-        _engine.initialize()
+        new_engine = MemoryEngine(config, capabilities=Capabilities.LIGHT)
+        new_engine.initialize()
+        _engine = new_engine
     return _engine
 
 
 def reset_engine():
     """Reset engine singleton (for testing or mode switch)."""
     global _engine
-    _engine = None
+    with _engine_lock:
+        _engine = None
 
 
 # Register tools and resources -------------------------------------------------

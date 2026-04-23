@@ -50,6 +50,46 @@ def test_get_engine_still_exposes_db_layer():
         server.reset_engine()
 
 
+def test_get_engine_concurrent_callers_single_instance():
+    """FastMCP dispatches tools from multiple threads. Two threads
+    racing on a cold ``get_engine()`` must see the same instance and
+    must only construct the engine once."""
+    import threading
+    from superlocalmemory.mcp import server
+    server.reset_engine()
+
+    construct_counter = {"n": 0}
+    original_init = None
+
+    def _counting_init(self, config, **kw):
+        construct_counter["n"] += 1
+        return original_init(self, config, **kw)
+
+    from superlocalmemory.core.engine import MemoryEngine
+    original_init = MemoryEngine.__init__
+    try:
+        MemoryEngine.__init__ = _counting_init  # type: ignore[method-assign]
+
+        engines: list = []
+        def _call():
+            engines.append(server.get_engine())
+
+        threads = [threading.Thread(target=_call) for _ in range(16)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert construct_counter["n"] == 1, \
+            f"get_engine double-constructed: {construct_counter['n']}x"
+        first = engines[0]
+        assert all(e is first for e in engines), \
+            "threads saw different engine instances"
+    finally:
+        MemoryEngine.__init__ = original_init  # type: ignore[method-assign]
+        server.reset_engine()
+
+
 def test_subprocess_does_not_import_onnxruntime():
     """Spawn a fresh subprocess that imports mcp.server and calls
     get_engine(). Assert onnxruntime is NOT in sys.modules after init.

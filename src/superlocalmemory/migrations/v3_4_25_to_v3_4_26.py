@@ -28,13 +28,17 @@ def _daemon_running() -> bool:
 def migrate_if_safe(data_dir: Path) -> dict[str, object]:
     """Run :func:`migrate` only when it's safe to touch the data dir.
 
-    If a live daemon is detected (v3.4.25 still running during ``pip
-    install -U``), the migration is deferred and the next daemon start
-    will apply it. If the daemon probe fails we err on the safe side
-    and also defer — we never crash the user's upgrade.
+    Safety guarantees:
 
-    Returns a dict with a ``status`` in ``{applied, already_applied,
-    deferred}``.
+    1. A live daemon means defer — the daemon is the authoritative DB
+       holder and will apply the migration on its next start.
+    2. If the daemon probe itself fails, err on the safe side and defer.
+    3. Concurrent CLI + daemon-start + npm-postinstall invocations on
+       the same data dir serialize through a file lock, so no two
+       processes can race into ``migrate()`` at the same moment.
+
+    Returns a dict with a ``status`` in
+    ``{applied, already_applied, deferred}``.
     """
     data_dir = Path(data_dir)
 
@@ -44,8 +48,6 @@ def migrate_if_safe(data_dir: Path) -> dict[str, object]:
     try:
         daemon_up = _daemon_running()
     except Exception as exc:
-        # Probe failure — we default to "daemon is up" (safer: defers
-        # the migration) but we must not hide it from operators.
         logger.warning(
             "daemon probe failed, deferring migrate_if_safe: %s", exc,
         )
@@ -58,9 +60,51 @@ def migrate_if_safe(data_dir: Path) -> dict[str, object]:
             "reason": "daemon is running — migration will apply on next daemon start",
         }
 
-    result = migrate(data_dir)
-    result["status"] = "applied"
-    return result
+    # Serialize concurrent CLI / postinstall / daemon-boot callers.
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = data_dir / ".migrate-v3.4.26.lock"
+    lock_fd = None
+    try:
+        import os
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        import sys
+        if sys.platform == "win32":
+            try:
+                import msvcrt
+                msvcrt.locking(lock_fd, msvcrt.LK_LOCK, 1)
+            except (IOError, OSError):
+                # Another process is mid-migrate — they will apply it.
+                return {
+                    "status": "deferred",
+                    "data_dir": str(data_dir),
+                    "reason": "concurrent migrate_if_safe in progress",
+                }
+        else:
+            try:
+                import fcntl
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            except (IOError, OSError):
+                return {
+                    "status": "deferred",
+                    "data_dir": str(data_dir),
+                    "reason": "concurrent migrate_if_safe in progress",
+                }
+
+        # Re-check the sentinel now that we own the lock — another
+        # process may have applied the migration while we waited.
+        if is_ready(data_dir):
+            return {"status": "already_applied", "data_dir": str(data_dir)}
+
+        result = migrate(data_dir)
+        result["status"] = "applied"
+        return result
+    finally:
+        if lock_fd is not None:
+            try:
+                import os as _os
+                _os.close(lock_fd)
+            except OSError:
+                pass
 
 
 def migrate(data_dir: Path) -> dict[str, object]:
