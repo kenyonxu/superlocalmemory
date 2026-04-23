@@ -40,6 +40,12 @@ async def get_stats():
                 "SELECT COUNT(*) as total FROM atomic_facts WHERE profile_id = ?",
                 (active_profile,),
             )
+            total_facts = cursor.fetchone()['total']
+
+            cursor.execute(
+                "SELECT COUNT(*) as total FROM memories WHERE profile_id = ?",
+                (active_profile,),
+            )
             total_memories = cursor.fetchone()['total']
 
             total_sessions = 0
@@ -52,7 +58,7 @@ async def get_stats():
             except Exception:
                 pass
 
-            total_graph_nodes = total_memories
+            total_graph_nodes = total_facts
             total_graph_edges = 0
             try:
                 cursor.execute(
@@ -121,12 +127,13 @@ async def get_stats():
             importance_dist = []
 
         else:
-            # V2 fallback
+            # V2 fallback — no atomic_facts; facts == memories
             cursor.execute(
                 "SELECT COUNT(*) as total FROM memories WHERE profile = ?",
                 (active_profile,),
             )
             total_memories = cursor.fetchone()['total']
+            total_facts = total_memories
 
             try:
                 cursor.execute("SELECT COUNT(*) as total FROM sessions")
@@ -201,9 +208,16 @@ async def get_stats():
 
         conn.close()
 
+        facts_per_memory = (
+            round(total_facts / total_memories, 1)
+            if total_memories > 0 else 0.0
+        )
+
         return {
             "overview": {
                 "total_memories": total_memories,
+                "total_facts": total_facts,
+                "facts_per_memory": facts_per_memory,
                 "total_sessions": total_sessions,
                 "total_clusters": total_clusters,
                 "graph_nodes": total_graph_nodes,

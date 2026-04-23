@@ -41,8 +41,35 @@ function exportAll(format) {
     var project = document.getElementById('filter-project').value;
     if (category) url += '&category=' + encodeURIComponent(category);
     if (project) url += '&project_name=' + encodeURIComponent(project);
+    if (typeof showToast === 'function') {
+        showToast('Preparing ' + format.toUpperCase() + ' export...');
+    }
     window.location.href = url;
 }
+
+(function wireSearchInput() {
+    function init() {
+        var el = document.getElementById('search-query');
+        if (!el || el._slmWired) return;
+        el._slmWired = true;
+        var timer = null;
+        el.addEventListener('input', function() {
+            clearTimeout(timer);
+            timer = setTimeout(searchMemories, 280);
+        });
+        el.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                clearTimeout(timer);
+                searchMemories();
+            }
+        });
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
 
 function exportSearchResults() {
     if (!lastSearchResults || lastSearchResults.length === 0) {

@@ -362,6 +362,9 @@ class TestConsolidateCognitiveTool:
         tool, engine = self._get_tool()
 
         with patch(
+            "superlocalmemory.mcp.tools_v33._try_daemon_post",
+            return_value=None,
+        ), patch(
             "superlocalmemory.encoding.cognitive_consolidator.CognitiveConsolidator"
         ) as MockCCQ:
             MockCCQ.return_value.run_pipeline.return_value = _MockCCQResult()
@@ -378,6 +381,9 @@ class TestConsolidateCognitiveTool:
         tool, engine = self._get_tool()
 
         with patch(
+            "superlocalmemory.mcp.tools_v33._try_daemon_post",
+            return_value=None,
+        ), patch(
             "superlocalmemory.encoding.cognitive_consolidator.CognitiveConsolidator",
             side_effect=RuntimeError("ccq fail"),
         ):
@@ -625,6 +631,7 @@ class TestRunMaintenanceTool:
         tool, engine = self._get_tool()
 
         with (
+            patch("superlocalmemory.mcp.tools_v33._try_daemon_post", return_value=None),
             patch("superlocalmemory.learning.consolidation_worker.ConsolidationWorker", autospec=True) as MockCW,
             patch(
                 "superlocalmemory.core.maintenance.run_maintenance",

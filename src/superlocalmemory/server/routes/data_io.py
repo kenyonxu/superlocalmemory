@@ -28,11 +28,11 @@ router = APIRouter()
 
 @router.get("/api/export")
 async def export_memories(
-    format: str = Query("json", pattern="^(json|jsonl)$"),
+    format: str = Query("json", pattern="^(json|jsonl|csv)$"),
     category: Optional[str] = None,
     project_name: Optional[str] = None,
 ):
-    """Export memories as JSON or JSONL."""
+    """Export memories as JSON, JSONL, or CSV."""
     try:
         conn = get_db_connection()
         conn.row_factory = dict_factory
@@ -76,6 +76,25 @@ async def export_memories(
         if format == "jsonl":
             content = "\n".join(json.dumps(m) for m in memories)
             media_type = "application/x-ndjson"
+        elif format == "csv":
+            import csv
+            import io as _io
+            if memories:
+                buf = _io.StringIO()
+                fieldnames = list(memories[0].keys())
+                writer = csv.DictWriter(
+                    buf, fieldnames=fieldnames, extrasaction="ignore",
+                )
+                writer.writeheader()
+                for m in memories:
+                    writer.writerow({
+                        k: (json.dumps(v) if isinstance(v, (dict, list)) else v)
+                        for k, v in m.items()
+                    })
+                content = buf.getvalue()
+            else:
+                content = ""
+            media_type = "text/csv"
         else:
             content = json.dumps({
                 "version": "3.0.0",

@@ -20,10 +20,18 @@ function setMemoryFilter(name) {
     loadMemories();
 }
 
-async function loadMemories() {
+// v3.4.31 pagination state
+var _slmPage = 0;
+var _slmPageSize = 50;
+var _slmLastTotal = 0;
+
+async function loadMemories(page) {
+    if (typeof page === 'number') _slmPage = Math.max(0, page);
     var category = document.getElementById('filter-category').value;
     var project = document.getElementById('filter-project').value;
-    var url = '/api/memories?limit=50';
+    var limit = _slmPageSize;
+    var offset = _slmPage * limit;
+    var url = '/api/memories?limit=' + limit + '&offset=' + offset;
     if (category) url += '&category=' + encodeURIComponent(category);
     if (project) url += '&project_name=' + encodeURIComponent(project);
     if (_slmMemoryFilter) {
@@ -37,11 +45,35 @@ async function loadMemories() {
         lastSearchResults = null;
         var exportBtn = document.getElementById('export-search-btn');
         if (exportBtn) exportBtn.style.display = 'none';
+        _slmLastTotal = data.total || 0;
         renderMemoriesTable(data.memories, false);
+        renderPaginationControls(data);
     } catch (error) {
         console.error('Error loading memories:', error);
         showEmpty('memories-list', 'exclamation-triangle', 'Failed to load memories');
     }
+}
+
+function renderPaginationControls(data) {
+    var el = document.getElementById('memories-pagination');
+    if (!el) return;
+    var total = data.total || 0;
+    var limit = data.limit || _slmPageSize;
+    var offset = data.offset || 0;
+    var showing = Math.min(offset + limit, total);
+    var firstIdx = total === 0 ? 0 : offset + 1;
+    var lastPage = Math.max(0, Math.ceil(total / limit) - 1);
+    var prevDisabled = _slmPage <= 0 ? 'disabled' : '';
+    var nextDisabled = _slmPage >= lastPage ? 'disabled' : '';
+    el.innerHTML =
+        '<div class="d-flex justify-content-between align-items-center mt-3 small">' +
+          '<span class="text-muted">Showing ' + firstIdx + '\u2013' + showing + ' of ' + total + ' memories</span>' +
+          '<div class="btn-group btn-group-sm">' +
+            '<button type="button" class="btn btn-outline-secondary" ' + prevDisabled + ' onclick="loadMemories(' + (_slmPage - 1) + ')"><i class="bi bi-chevron-left"></i> Prev</button>' +
+            '<button type="button" class="btn btn-outline-secondary disabled">Page ' + (_slmPage + 1) + ' / ' + (lastPage + 1) + '</button>' +
+            '<button type="button" class="btn btn-outline-secondary" ' + nextDisabled + ' onclick="loadMemories(' + (_slmPage + 1) + ')">Next <i class="bi bi-chevron-right"></i></button>' +
+          '</div>' +
+        '</div>';
 }
 
 function renderMemoriesTable(memories, showScores) {

@@ -25,6 +25,19 @@ import numpy as np
 import pytest
 
 
+@pytest.fixture(autouse=True, scope="function")
+def _block_live_slm_home_writes(tmp_path, monkeypatch):
+    """Global guard: refuse any test-time write to the user's live
+    ~/.superlocalmemory/ by default.
+
+    Point SLM_DATA_DIR at tmp_path for every test unless the test explicitly
+    opts out by setting SLM_TEST_ALLOW_LIVE_HOME=1 (tightly-scoped for
+    integration tests that must cover live-dir init).
+    """
+    if os.environ.get("SLM_TEST_ALLOW_LIVE_HOME") != "1":
+        monkeypatch.setenv("SLM_DATA_DIR", str(tmp_path))
+
+
 # V3.3.14: Windows CI fix — KeyboardInterrupt during daemon thread teardown.
 # On Windows, when pytest exits, daemon threads (reranker warmup, maintenance
 # scheduler, parent watchdog) trigger KeyboardInterrupt that kills the process.

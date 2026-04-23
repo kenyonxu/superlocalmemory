@@ -23,6 +23,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_slm_data_dir(tmp_path, monkeypatch):
+    """Ensure every test in this module stores into tmp_path, not the live
+    ~/.superlocalmemory/. pending_store honors SLM_DATA_DIR in v3.4.31+."""
+    monkeypatch.setenv("SLM_DATA_DIR", str(tmp_path))
+
+
 # ---------------------------------------------------------------------------
 # Helper: capture tool functions registered on a mock server
 # ---------------------------------------------------------------------------

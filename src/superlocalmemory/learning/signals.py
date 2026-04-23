@@ -141,11 +141,17 @@ def reset_counters() -> None:
 
 
 def _drain_queue_for_tests() -> None:
-    """Drain the module queue — TEST-ONLY."""
+    """Drain the module queue — TEST-ONLY.
+
+    Swallows AttributeError so test harnesses that swap in a minimal
+    stub queue (e.g. exploding-queue fixtures) can still clean up.
+    """
     while True:
         try:
             _Q.get_nowait()
         except queue.Empty:
+            return
+        except AttributeError:
             return
 
 

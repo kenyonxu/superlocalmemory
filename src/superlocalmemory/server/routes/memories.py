@@ -607,6 +607,97 @@ async def get_memory_facts(request: Request, memory_id: str):
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
+@router.get("/api/memories/{memory_id}/detail")
+async def get_memory_detail(request: Request, memory_id: str):
+    """Full memory row + all child atomic facts (for dashboard modal)."""
+    try:
+        conn = get_db_connection()
+        conn.row_factory = dict_factory
+        cursor = conn.cursor()
+        active_profile = get_active_profile()
+
+        cursor.execute(
+            "SELECT memory_id, content, session_id, speaker, role, "
+            "session_date, created_at, metadata_json "
+            "FROM memories WHERE memory_id = ? AND profile_id = ?",
+            (memory_id, active_profile),
+        )
+        mem = cursor.fetchone()
+        if not mem:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Memory not found")
+
+        cursor.execute(
+            "SELECT fact_id, content, fact_type, confidence, importance, "
+            "access_count, created_at, entities_json "
+            "FROM atomic_facts WHERE memory_id = ? AND profile_id = ? "
+            "ORDER BY created_at ASC",
+            (memory_id, active_profile),
+        )
+        facts = cursor.fetchall()
+        conn.close()
+
+        try:
+            mem["metadata"] = json.loads(mem.pop("metadata_json") or "{}")
+        except Exception:
+            mem["metadata"] = {}
+        for f in facts:
+            try:
+                f["entities"] = json.loads(f.pop("entities_json") or "[]")
+            except Exception:
+                f["entities"] = []
+
+        return {
+            "memory": mem,
+            "facts": facts,
+            "fact_count": len(facts),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Detail error: {str(e)}")
+
+
+@router.get("/api/facts/{fact_id}")
+async def get_fact_detail(request: Request, fact_id: str):
+    """Single atomic fact detail (for fact popup)."""
+    try:
+        conn = get_db_connection()
+        conn.row_factory = dict_factory
+        cursor = conn.cursor()
+        active_profile = get_active_profile()
+
+        cursor.execute(
+            "SELECT f.fact_id, f.memory_id, f.content, f.fact_type, "
+            "f.confidence, f.importance, f.access_count, f.created_at, "
+            "f.entities_json, f.canonical_entities_json, f.session_id, "
+            "m.content AS source_memory_content "
+            "FROM atomic_facts f "
+            "LEFT JOIN memories m ON f.memory_id = m.memory_id "
+            "WHERE f.fact_id = ? AND f.profile_id = ?",
+            (fact_id, active_profile),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="Fact not found")
+        try:
+            row["entities"] = json.loads(row.pop("entities_json") or "[]")
+        except Exception:
+            row["entities"] = []
+        try:
+            row["canonical_entities"] = json.loads(
+                row.pop("canonical_entities_json") or "[]"
+            )
+        except Exception:
+            row["canonical_entities"] = []
+        return row
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Fact detail error: {str(e)}")
+
+
 @router.delete("/api/memories/{fact_id}")
 async def delete_memory(request: Request, fact_id: str):
     """Delete a specific memory (atomic fact) by ID."""

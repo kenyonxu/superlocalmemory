@@ -40,11 +40,18 @@ function openMemoryDetail(mem, source) {
     var dl = document.createElement('dl');
     dl.className = 'memory-detail-meta row';
 
+    // v3.4.31: disambiguate Fact ID (the atomic unit) from Memory ID (the parent).
+    var factId = mem.fact_id || mem.id || '';
+    var memoryId = mem.memory_id || mem.id || '';
+
     // Left column
     var col1 = document.createElement('div');
     col1.className = 'col-md-6';
-    addDetailRow(col1, 'ID', String(mem.id || '-'));
-    addDetailBadgeRow(col1, 'Category', mem.category || 'None', 'bg-primary');
+    addDetailRow(col1, 'Memory ID', String(memoryId || '-'));
+    if (factId && factId !== memoryId) {
+        addDetailRow(col1, 'Fact ID', String(factId));
+    }
+    addDetailBadgeRow(col1, 'Category', mem.category || mem.fact_type || 'None', 'bg-primary');
     addDetailRow(col1, 'Project', mem.project_name || '-');
     addDetailTagsRow(col1, 'Tags', tags);
     dl.appendChild(col1);
@@ -64,6 +71,38 @@ function openMemoryDetail(mem, source) {
     dl.appendChild(col2);
 
     body.appendChild(dl);
+
+    // v3.4.31: hydrate with full memory + fact list from /api/memories/{id}/detail
+    if (memoryId) {
+        fetch('/api/memories/' + encodeURIComponent(memoryId) + '/detail')
+            .then(function(r) { return r.ok ? r.json() : null; })
+            .then(function(data) {
+                if (!data || !data.memory) return;
+                var hydration = document.getElementById('memory-detail-hydration');
+                if (hydration) hydration.remove();
+                var block = document.createElement('div');
+                block.id = 'memory-detail-hydration';
+                block.className = 'mt-3';
+                var h = document.createElement('h6');
+                h.innerHTML = '<i class="bi bi-diagram-3"></i> Atomic facts extracted from this memory (' + (data.fact_count || 0) + ')';
+                block.appendChild(h);
+                var list = document.createElement('div');
+                list.className = 'list-group list-group-flush';
+                (data.facts || []).forEach(function(f) {
+                    var row = document.createElement('div');
+                    row.className = 'list-group-item list-group-item-action small fact-result-item';
+                    row.setAttribute('data-fact-id', f.fact_id);
+                    row.style.cursor = 'pointer';
+                    var badge = '<span class="badge bg-secondary me-2">' + (f.fact_type || '-') + '</span>';
+                    var confText = ' · confidence ' + (f.confidence || 0).toFixed(2);
+                    row.innerHTML = badge + escapeHtml(String(f.content || '')) + '<small class="text-muted">' + escapeHtml(confText) + '</small>';
+                    list.appendChild(row);
+                });
+                block.appendChild(list);
+                body.appendChild(block);
+            })
+            .catch(function(err) { console.warn('Hydration error:', err); });
+    }
 
     // Context-aware action buttons
     if (mem.id) {

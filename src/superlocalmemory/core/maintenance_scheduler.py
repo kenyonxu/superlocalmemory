@@ -116,6 +116,14 @@ class MaintenanceScheduler:
         except Exception as exc:
             logger.debug("Auto-backup check skipped: %s", exc)
 
+        try:
+            from superlocalmemory.cli.pending_store import cleanup_stale
+            stats = cleanup_stale()
+            if stats["total"] > 0:
+                logger.info("Pending cleanup: %s", stats)
+        except Exception as exc:
+            logger.debug("Pending cleanup skipped: %s", exc)
+
         self._schedule_next()
 
     def _sync_cloud_destinations(self, manager: object) -> None:

@@ -274,16 +274,32 @@ async function loadStats() {
         var response = await slmFetch('/api/stats');
         var data = await response.json();
         var ov = data.overview || {};
-        animateCounter('stat-memories', ov.total_memories || 0);
-        animateCounter('stat-clusters', ov.total_clusters || 0);
+        var memories = ov.total_memories || 0;
+        var facts = ov.total_facts || 0;
+        var ratio = ov.facts_per_memory || 0;
+
+        animateCounter('stat-memories', memories);
+        animateCounter('stat-facts', facts);
         animateCounter('stat-nodes', ov.graph_nodes || 0);
         animateCounter('stat-edges', ov.graph_edges || 0);
+
+        var mSub = document.getElementById('stat-memories-sub');
+        if (mSub) {
+            mSub.textContent = memories > 0
+                ? 'what you stored'
+                : '\u00a0';
+        }
+        var fSub = document.getElementById('stat-facts-sub');
+        if (fSub) {
+            fSub.textContent = memories > 0
+                ? 'avg ' + ratio + ' per memory'
+                : '\u00a0';
+        }
         populateFilters(data.categories || [], data.projects || []);
     } catch (error) {
         console.error('Error loading stats:', error);
-        // On error (fresh install, server starting), show 0 instead of "-"
         animateCounter('stat-memories', 0);
-        animateCounter('stat-clusters', 0);
+        animateCounter('stat-facts', 0);
         animateCounter('stat-nodes', 0);
         animateCounter('stat-edges', 0);
     }

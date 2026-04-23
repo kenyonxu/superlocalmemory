@@ -10,6 +10,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.4.31] - 2026-04-24
+
+Dashboard truth, memory vs fact clarity, and self-cleaning pending queue.
+
+### Changed
+- **Dashboard now shows both memory counts honestly.** Parent memories
+  (what you stored) and atomic facts (what retrieval indexes) appear as
+  two distinct cards with their ratio. No more "Total Memories: 6,000"
+  when you actually have 2,000 memories decomposed into 6,000 facts.
+- **"Browse atomic facts"** relabeled for clarity — this view lists the
+  indexed atomic units.
+- **Visible search box** in the Memories tab — previously hidden behind
+  the Recall Lab only. Search now debounces 280 ms on input.
+
+### Added
+- **`/api/memories/{id}/detail`** — full memory + all child atomic facts
+  in one call. Powers the click-to-expand modal.
+- **`/api/facts/{id}`** — single atomic fact detail with source memory
+  content, entities, and canonical entities.
+- **Pagination UI** — Prev/Next controls show "Showing 1–50 of 6,123".
+  Previously hardcoded to 50 with no navigation.
+- **CSV export** — new `format=csv` option on `/api/export` plus a
+  dedicated "Export All (CSV)" menu item. JSON and JSONL still work.
+- **Export progress toast** — "Preparing JSON export…" notification
+  before the download starts.
+- **`total_facts` + `facts_per_memory`** in `/api/stats` response.
+- **Pending queue auto-cleanup** — the maintenance scheduler now sweeps
+  the pending queue every cycle: completed rows > 7 days, failed rows
+  over retry limit, and stuck rows > 7 days are removed; a 30-day hard
+  cap prevents runaway growth on any status.
+
+### Fixed
+- **Test isolation** — `pending_store` now honors `SLM_DATA_DIR`. Four
+  MCP remember tests were writing to the live `~/.superlocalmemory/`
+  instead of `tmp_path`. Root conftest now forces `SLM_DATA_DIR=tmp_path`
+  for every test unless explicitly opted out.
+- **Fact click popup** — was calling `/api/v3/recall/trace` with a text
+  substring (re-query by first 100 chars) and colliding with the memory
+  row click handler. Now scoped to `.fact-result-item` only, hits the
+  new `/api/facts/{fact_id}` endpoint.
+- **Memory modal ID confusion** — the modal labeled `mem.id` as "ID"
+  regardless of whether it was a memory_id or fact_id. Now displays
+  both "Memory ID" and "Fact ID" when they differ.
+- **Memory modal hydration** — fetches the full memory + fact list
+  asynchronously when opened, so source content and entity data appear
+  even for rows that arrived from the search endpoint.
+
+---
+
 ## [3.4.30] - 2026-04-24
 
 Multi-IDE shared worker, silent migration, and security hardening.

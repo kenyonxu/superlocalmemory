@@ -1,92 +1,81 @@
 // SuperLocalMemory V3 — Fact Detail View
-// Adds click-to-expand on memory list items to show channel scores and trust data.
+// v3.4.31: scoped click listener, real fact_id lookup, no text-based re-query.
+//
+// Scope: only `.fact-result-item` elements (search results view), NEVER
+// fires on the main memories table rows (those use openMemoryDetail via
+// memories.js). This prevents the two listeners from colliding.
 
 document.addEventListener('click', function(e) {
-    var item = e.target.closest('[data-fact-id]');
+    var item = e.target.closest('.fact-result-item[data-fact-id]');
     if (!item) return;
 
-    // Toggle: if detail panel already exists, remove it
+    // Don't interfere if the click was on an action button/link inside the row
+    if (e.target.closest('button, a, [data-bs-toggle]')) return;
+
     var existingDetail = item.querySelector('.fact-detail-panel');
     if (existingDetail) {
         existingDetail.remove();
         return;
     }
 
-    // Extract query text from the item (first 100 chars)
-    var queryText = (item.textContent || '').substring(0, 100).trim();
-    if (!queryText) return;
+    var factId = item.getAttribute('data-fact-id');
+    if (!factId) return;
 
-    fetch('/api/v3/recall/trace', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: queryText, limit: 1 })
-    }).then(function(r) {
-        return r.json();
-    }).then(function(data) {
-        var result = (data.results || [])[0];
-        if (!result) return;
+    fetch('/api/facts/' + encodeURIComponent(factId))
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(data) {
+            if (!data || !data.fact_id) return;
 
-        var panel = document.createElement('div');
-        panel.className = 'fact-detail-panel card mt-2 mb-2 border-info';
+            var panel = document.createElement('div');
+            panel.className = 'fact-detail-panel card mt-2 mb-2 border-info';
+            var body = document.createElement('div');
+            body.className = 'card-body small';
 
-        var cardBody = document.createElement('div');
-        cardBody.className = 'card-body small';
+            var head = document.createElement('div');
+            head.className = 'mb-2';
+            var h = document.createElement('strong');
+            h.textContent = 'Atomic fact';
+            head.appendChild(h);
+            head.appendChild(document.createTextNode(
+                ' · ' + (data.fact_type || '-') +
+                ' · confidence ' + (data.confidence || 0) +
+                ' · importance ' + (data.importance || 0)
+            ));
+            body.appendChild(head);
 
-        // Score / Trust / Confidence row
-        var row1 = document.createElement('div');
-        row1.className = 'row';
+            if (data.source_memory_content) {
+                var src = document.createElement('div');
+                src.className = 'text-muted small mt-2';
+                var srcLabel = document.createElement('strong');
+                srcLabel.textContent = 'From memory: ';
+                src.appendChild(srcLabel);
+                var srcText = String(data.source_memory_content);
+                src.appendChild(document.createTextNode(
+                    srcText.length > 200 ? srcText.substring(0, 200) + '...' : srcText
+                ));
+                body.appendChild(src);
+            }
 
-        var col1 = document.createElement('div');
-        col1.className = 'col-md-4';
-        var col1Label = document.createElement('strong');
-        col1Label.textContent = 'Score: ';
-        col1.appendChild(col1Label);
-        col1.appendChild(document.createTextNode(result.score || 0));
-        row1.appendChild(col1);
+            var ids = document.createElement('div');
+            ids.className = 'text-muted mt-2';
+            ids.style.fontSize = '0.75rem';
+            ids.textContent = 'Fact ID: ' + data.fact_id + ' · Memory ID: ' + (data.memory_id || '-');
+            body.appendChild(ids);
 
-        var col2 = document.createElement('div');
-        col2.className = 'col-md-4';
-        var col2Label = document.createElement('strong');
-        col2Label.textContent = 'Trust: ';
-        col2.appendChild(col2Label);
-        col2.appendChild(document.createTextNode(result.trust_score || 0));
-        row1.appendChild(col2);
+            if (data.entities && data.entities.length > 0) {
+                var ent = document.createElement('div');
+                ent.className = 'mt-2';
+                var entLabel = document.createElement('strong');
+                entLabel.textContent = 'Entities: ';
+                ent.appendChild(entLabel);
+                ent.appendChild(document.createTextNode(data.entities.join(', ')));
+                body.appendChild(ent);
+            }
 
-        var col3 = document.createElement('div');
-        col3.className = 'col-md-4';
-        var col3Label = document.createElement('strong');
-        col3Label.textContent = 'Confidence: ';
-        col3.appendChild(col3Label);
-        col3.appendChild(document.createTextNode(result.confidence || 0));
-        row1.appendChild(col3);
-
-        cardBody.appendChild(row1);
-
-        // Channel scores section
-        var channels = result.channel_scores || {};
-        var channelKeys = Object.keys(channels);
-        if (channelKeys.length > 0) {
-            var label = document.createElement('div');
-            label.className = 'mt-2';
-            var labelStrong = document.createElement('strong');
-            labelStrong.textContent = 'Channel Scores:';
-            label.appendChild(labelStrong);
-            cardBody.appendChild(label);
-
-            var row2 = document.createElement('div');
-            row2.className = 'row text-muted';
-            channelKeys.forEach(function(chKey) {
-                var chCol = document.createElement('div');
-                chCol.className = 'col-md-3';
-                chCol.textContent = chKey + ': ' + channels[chKey];
-                row2.appendChild(chCol);
-            });
-            cardBody.appendChild(row2);
-        }
-
-        panel.appendChild(cardBody);
-        item.appendChild(panel);
-    }).catch(function(e) {
-        console.log('Fact detail error:', e);
-    });
+            panel.appendChild(body);
+            item.appendChild(panel);
+        })
+        .catch(function(err) {
+            console.warn('Fact detail error:', err);
+        });
 });
