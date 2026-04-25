@@ -53,9 +53,9 @@ def _emit_marker(fact_id: str) -> str:
     produces the same marker. Token rotation invalidates old markers.
     """
     token = ensure_install_token()
-    digest = hmac.new(
-        token.encode("utf-8"), fact_id.encode("utf-8"), hashlib.sha256
-    ).hexdigest()[:_HMAC_LEN]
+    digest = hmac.new(token.encode("utf-8"), fact_id.encode("utf-8"), hashlib.sha256).hexdigest()[
+        :_HMAC_LEN
+    ]
     return f"{_HMAC_MARKER_PREFIX}{fact_id}:{digest}"
 
 
@@ -66,7 +66,7 @@ def _validate_marker(marker: str) -> str | None:
     """
     if not isinstance(marker, str) or not marker.startswith(_HMAC_MARKER_PREFIX):
         return None
-    rest = marker[len(_HMAC_MARKER_PREFIX):]
+    rest = marker[len(_HMAC_MARKER_PREFIX) :]
     fact_id, sep, presented = rest.rpartition(":")
     if not sep or not fact_id or len(presented) != _HMAC_LEN:
         return None
@@ -74,9 +74,9 @@ def _validate_marker(marker: str) -> str | None:
         token = ensure_install_token()
     except Exception:  # pragma: no cover — install-token I/O failure
         return None
-    expected = hmac.new(
-        token.encode("utf-8"), fact_id.encode("utf-8"), hashlib.sha256
-    ).hexdigest()[:_HMAC_LEN]
+    expected = hmac.new(token.encode("utf-8"), fact_id.encode("utf-8"), hashlib.sha256).hexdigest()[
+        :_HMAC_LEN
+    ]
     if hmac.compare_digest(presented, expected):
         return fact_id
     return None
@@ -134,6 +134,7 @@ def feed_recall_settled(
     """
     try:
         from superlocalmemory.core import shadow_router as _sr
+
         router = _sr.get_shadow_router(
             memory_db=memory_db,
             learning_db=learning_db,
@@ -141,7 +142,9 @@ def feed_recall_settled(
         )
         arm = router.route_query(query_id)
         router.on_recall_settled(
-            query_id=query_id, arm=arm, ndcg_at_10=float(ndcg_at_10),
+            query_id=query_id,
+            arm=arm,
+            ndcg_at_10=float(ndcg_at_10),
         )
     except Exception as exc:  # pragma: no cover — defence in depth
         logger.debug("feed_recall_settled error: %s", exc)
@@ -162,6 +165,7 @@ def _get_behavioral_tracker(db: Any) -> Any:
     key = id(db)
     if key not in _behavioral_tracker_cache:
         from superlocalmemory.learning.behavioral import BehavioralTracker
+
         _behavioral_tracker_cache[key] = BehavioralTracker(db)
     return _behavioral_tracker_cache[key]
 
@@ -172,6 +176,7 @@ def _get_forgetting_scheduler(db: Any, config: Any) -> Any:
     if key not in _forgetting_scheduler_cache:
         from superlocalmemory.learning.forgetting_scheduler import ForgettingScheduler
         from superlocalmemory.math.ebbinghaus import EbbinghausCurve
+
         ebbinghaus = EbbinghausCurve(config.forgetting)
         _forgetting_scheduler_cache[key] = ForgettingScheduler(db, ebbinghaus, config.forgetting)
     return _forgetting_scheduler_cache[key]
@@ -228,15 +233,17 @@ def apply_ranking(
     if pipeline_version == "off":
         return response
     try:
-        response = apply_adaptive_ranking(response, query, profile_id,
-                                          config=config)
+        response = apply_adaptive_ranking(response, query, profile_id, config=config)
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("apply_ranking v1 step skipped: %s", exc)
     if pipeline_version == "v1":
         return response
     try:
         response = apply_v2_adaptive_ranking(
-            response, query, profile_id, query_id,
+            response,
+            query,
+            profile_id,
+            query_id,
         )
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("apply_ranking v2 step skipped: %s", exc)
@@ -244,7 +251,10 @@ def apply_ranking(
         return response
     try:
         response = apply_v2_bandit_ensemble(
-            response, query, profile_id, query_id,
+            response,
+            query,
+            profile_id,
+            query_id,
         )
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("apply_ranking ensemble step skipped: %s", exc)
@@ -254,6 +264,7 @@ def apply_ranking(
 # ---------------------------------------------------------------------------
 # apply_adaptive_ranking  (was MemoryEngine._apply_adaptive_ranking)
 # ---------------------------------------------------------------------------
+
 
 def apply_adaptive_ranking(
     response: RecallResponse,
@@ -282,21 +293,24 @@ def apply_adaptive_ranking(
         return response  # Phase 1: no change
 
     from superlocalmemory.learning.ranker import AdaptiveRanker
+
     ranker = AdaptiveRanker(signal_count=signal_count)
 
     result_dicts = []
     for r in response.results:
-        result_dicts.append({
-            "score": r.score,
-            "cross_encoder_score": r.score,
-            "trust_score": r.trust_score,
-            "channel_scores": r.channel_scores or {},
-            "fact": {
-                "age_days": 0,
-                "access_count": r.fact.access_count,
-            },
-            "_original": r,
-        })
+        result_dicts.append(
+            {
+                "score": r.score,
+                "cross_encoder_score": r.score,
+                "trust_score": r.trust_score,
+                "channel_scores": r.channel_scores or {},
+                "fact": {
+                    "age_days": 0,
+                    "access_count": r.fact.access_count,
+                },
+                "_original": r,
+            }
+        )
 
     query_context = {"query_type": response.query_type}
     reranked = ranker.rerank(result_dicts, query_context)
@@ -349,8 +363,11 @@ def apply_v2_adaptive_ranking(
             enqueue,
         )
 
-        db_path = (_P(learning_db_path) if learning_db_path
-                   else _P.home() / ".superlocalmemory" / "learning.db")
+        db_path = (
+            _P(learning_db_path)
+            if learning_db_path
+            else _P.home() / ".superlocalmemory" / "learning.db"
+        )
         if not db_path.exists():
             return response
 
@@ -366,26 +383,27 @@ def apply_v2_adaptive_ranking(
         # Build result-dict shape expected by the ranker's rerank() path.
         result_dicts: list[dict] = []
         for r in response.results:
-            result_dicts.append({
-                "fact_id": r.fact.fact_id,
-                "score": r.score,
-                "cross_encoder_score": r.score,
-                "trust_score": r.trust_score,
-                "channel_scores": r.channel_scores or {},
-                "fact": {
-                    "age_days": 0,
-                    "access_count": r.fact.access_count,
-                },
-                "_original": r,
-            })
+            result_dicts.append(
+                {
+                    "fact_id": r.fact.fact_id,
+                    "score": r.score,
+                    "cross_encoder_score": r.score,
+                    "trust_score": r.trust_score,
+                    "channel_scores": r.channel_scores or {},
+                    "fact": {
+                        "age_days": 0,
+                        "access_count": r.fact.access_count,
+                    },
+                    "_original": r,
+                }
+            )
 
         query_context = {
             "query_type": response.query_type,
             "profile_id": profile_id,
         }
         reranked_dicts = ranker.rerank(result_dicts, query_context)
-        new_results = [d["_original"] for d in reranked_dicts
-                       if "_original" in d]
+        new_results = [d["_original"] for d in reranked_dicts if "_original" in d]
 
         # S8-SK-04 fix: signal enqueue is OWNED by ``apply_v2_bandit_ensemble``
         # (see below), not this function. Previously both emitted a batch
@@ -450,8 +468,11 @@ def apply_v2_bandit_ensemble(
         )
         from superlocalmemory.retrieval.engine import apply_channel_weights
 
-        db_path = (_P(learning_db_path) if learning_db_path
-                   else _P.home() / ".superlocalmemory" / "learning.db")
+        db_path = (
+            _P(learning_db_path)
+            if learning_db_path
+            else _P.home() / ".superlocalmemory" / "learning.db"
+        )
         if not db_path.exists():
             return response
 
@@ -476,6 +497,7 @@ def apply_v2_bandit_ensemble(
         try:
             from superlocalmemory.learning.database import LearningDatabase
             from superlocalmemory.learning.model_cache import load_active
+
             db = LearningDatabase(db_path)
             signal_count = db.count_signals(profile_id)
             active_model = load_active(db, profile_id)
@@ -493,7 +515,11 @@ def apply_v2_bandit_ensemble(
         }
         try:
             final_results = ensemble_rerank(
-                weighted, choice, active_model, weights, query_context,
+                weighted,
+                choice,
+                active_model,
+                weights,
+                query_context,
             )
         except Exception as exc:
             logger.debug("v2 bandit ensemble_rerank skipped: %s", exc)
@@ -507,18 +533,19 @@ def apply_v2_bandit_ensemble(
                     fact_id=r.fact.fact_id,
                     channel_scores=dict(r.channel_scores or {}),
                     cross_encoder_score=None,
-                    result_dict={"fact_id": r.fact.fact_id,
-                                 "score": r.score},
+                    result_dict={"fact_id": r.fact.fact_id, "score": r.score},
                 )
                 for r in top20
             )
-            enqueue(SignalBatch(
-                profile_id=profile_id,
-                query_id=query_id,
-                query_text=query,
-                candidates=candidates,
-                query_context=query_context,
-            ))
+            enqueue(
+                SignalBatch(
+                    profile_id=profile_id,
+                    query_id=query_id,
+                    query_text=query,
+                    candidates=candidates,
+                    query_context=query_context,
+                )
+            )
         except Exception as exc:
             logger.debug("v2 bandit signal enqueue skipped: %s", exc)
 
@@ -540,6 +567,7 @@ def apply_v2_bandit_ensemble(
 # run_recall  (was MemoryEngine.recall)
 # ---------------------------------------------------------------------------
 
+
 def run_recall(
     query: str,
     profile_id: str,
@@ -547,6 +575,8 @@ def run_recall(
     limit: int = 20,
     agent_id: str = "unknown",
     *,
+    include_global: bool = True,
+    include_shared: bool = True,
     config: SLMConfig,
     retrieval_engine: Any,
     trust_scorer: Any,
@@ -572,7 +602,14 @@ def run_recall(
 
     m = mode or config.mode
 
-    response = retrieval_engine.recall(query, profile_id, m, limit)
+    response = retrieval_engine.recall(
+        query,
+        profile_id,
+        m,
+        limit,
+        include_global=include_global,
+        include_shared=include_shared,
+    )
 
     # Agentic sufficiency verification
     # V3.3.19: Only trigger for multi_hop queries in Mode A (rule-based).
@@ -590,12 +627,14 @@ def run_recall(
         if should_trigger:
             try:
                 from superlocalmemory.retrieval.agentic import AgenticRetriever
+
                 agentic = AgenticRetriever(
                     confidence_threshold=config.retrieval.agentic_confidence_threshold,
                     db=db,
                 )
                 enhanced_facts = agentic.retrieve(
-                    query=query, profile_id=profile_id,
+                    query=query,
+                    profile_id=profile_id,
                     retrieval_engine=retrieval_engine,
                     llm=llm,
                     top_k=limit,
@@ -604,6 +643,7 @@ def run_recall(
                 # Replace response results with enhanced facts if we got more
                 if len(enhanced_facts) > len(response.results):
                     from superlocalmemory.storage.models import RetrievalResult
+
                     enhanced_results = []
                     for i, f in enumerate(enhanced_facts):
                         # Look up real trust score for agentic results
@@ -611,19 +651,25 @@ def run_recall(
                         if trust_scorer:
                             try:
                                 fact_trust = trust_scorer.get_fact_trust(
-                                    f.fact_id, profile_id,
+                                    f.fact_id,
+                                    profile_id,
                                 )
                             except Exception:
                                 pass
-                        enhanced_results.append(RetrievalResult(
-                            fact=f, score=1.0 / (i + 1),
-                            channel_scores={"agentic": 1.0},
-                            confidence=f.confidence,
-                            evidence_chain=["agentic_round_2"],
-                            trust_score=fact_trust,
-                        ))
+                        enhanced_results.append(
+                            RetrievalResult(
+                                fact=f,
+                                score=1.0 / (i + 1),
+                                channel_scores={"agentic": 1.0},
+                                confidence=f.confidence,
+                                evidence_chain=["agentic_round_2"],
+                                trust_score=fact_trust,
+                            )
+                        )
                     response = RecallResponse(
-                        query=query, mode=m, results=enhanced_results[:limit],
+                        query=query,
+                        mode=m,
+                        results=enhanced_results[:limit],
                         query_type=response.query_type,
                         channel_weights=response.channel_weights,
                         total_candidates=response.total_candidates + len(enhanced_facts),
@@ -648,6 +694,7 @@ def run_recall(
     if response.results:
         try:
             from superlocalmemory.core.tier_manager import promote_on_access_batch
+
             fact_ids = [r.fact.fact_id for r in response.results[:10]]
             promote_on_access_batch(db, fact_ids)
         except Exception:
@@ -666,6 +713,7 @@ def run_recall(
             if ents_json:
                 try:
                     import json as _json
+
                     entities.extend(_json.loads(ents_json))
                 except (ValueError, TypeError):
                     pass
@@ -689,9 +737,7 @@ def run_recall(
     # Phase 3: Hebbian strengthening for co-accessed facts
     if auto_linker and response.results:
         try:
-            recalled_ids = [
-                r.fact.fact_id for r in response.results[:10]
-            ]
+            recalled_ids = [r.fact.fact_id for r in response.results[:10]]
             auto_linker.strengthen_co_access(recalled_ids, profile_id)
         except Exception as exc:
             logger.debug("Hebbian strengthening: %s", exc)
@@ -703,11 +749,16 @@ def run_recall(
     try:
         import os as _os
         import uuid as _uuid
+
         query_id = _uuid.uuid4().hex
         mode = _resolve_ranking_mode(_os.environ)
         response = apply_ranking(
-            response, query, profile_id, query_id,
-            config=config, pipeline_version=mode,
+            response,
+            query,
+            profile_id,
+            query_id,
+            config=config,
+            pipeline_version=mode,
         )
     except Exception as exc:
         logger.debug("Ranking pipeline skipped: %s", exc)
@@ -722,10 +773,11 @@ def run_recall(
     # V3.3.16: Reuse query embedding from retrieval engine cache instead of
     # calling embedder.embed() again (which was the memory leak source).
     q_var_arr = None
-    if embedder and hasattr(retrieval_engine, '_query_embedding_cache'):
+    if embedder and hasattr(retrieval_engine, "_query_embedding_cache"):
         cached_emb = retrieval_engine._query_embedding_cache.get(query)
         if cached_emb is not None:
             import numpy as _np
+
             _, q_var_list = embedder.compute_fisher_params(cached_emb)
             q_var_arr = _np.array(q_var_list, dtype=_np.float64)
 
@@ -733,11 +785,14 @@ def run_recall(
         updates: dict[str, object] = {
             "access_count": r.fact.access_count + 1,
         }
-        if (q_var_arr is not None
-                and r.fact.fisher_variance
-                and len(r.fact.fisher_variance) == len(q_var_arr)
-                and r.fact.access_count >= 3):
+        if (
+            q_var_arr is not None
+            and r.fact.fisher_variance
+            and len(r.fact.fisher_variance) == len(q_var_arr)
+            and r.fact.access_count >= 3
+        ):
             import numpy as _np
+
             f_var = _np.array(r.fact.fisher_variance, dtype=_np.float64)
             new_var = 1.0 / (1.0 / _np.maximum(f_var, 0.05) + 1.0 / _np.maximum(q_var_arr, 0.05))
             new_var = _np.clip(new_var, 0.05, 2.0)

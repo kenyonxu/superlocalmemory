@@ -11,6 +11,7 @@ Replaces V1's broken 10-channel triple-re-fusion pipeline.
 Part of Qualixar | Author: Varun Pratap Bhardwaj
 License: Elastic-2.0
 """
+
 from __future__ import annotations
 
 import logging
@@ -23,7 +24,10 @@ from superlocalmemory.core.config import ChannelWeights, RetrievalConfig
 from superlocalmemory.retrieval.fusion import FusionResult, weighted_rrf
 from superlocalmemory.retrieval.strategy import QueryStrategy, QueryStrategyClassifier
 from superlocalmemory.storage.models import (
-    AtomicFact, Mode, RecallResponse, RetrievalResult,
+    AtomicFact,
+    Mode,
+    RecallResponse,
+    RetrievalResult,
 )
 
 if TYPE_CHECKING:
@@ -40,11 +44,13 @@ logger = logging.getLogger(__name__)
 
 class CrossEncoderProtocol(Protocol):
     """Duck-typed cross-encoder interface."""
+
     def rerank(self, query: str, candidates: list[tuple[str, str]]) -> list[tuple[str, float]]: ...
 
 
 class EmbeddingProvider(Protocol):
     """Duck-typed embedding provider."""
+
     def embed(self, text: str) -> list[float]: ...
 
 
@@ -57,7 +63,9 @@ class RetrievalEngine:
     """
 
     def __init__(
-        self, db: DatabaseManager, config: RetrievalConfig,
+        self,
+        db: DatabaseManager,
+        config: RetrievalConfig,
         channels: dict[str, Any],
         embedder: EmbeddingProvider | None = None,
         reranker: CrossEncoderProtocol | None = None,
@@ -91,6 +99,7 @@ class RetrievalEngine:
 
         # V3.2: ChannelRegistry for self-registration (Phase 0.5)
         from superlocalmemory.retrieval.channel_registry import ChannelRegistry
+
         self._registry = ChannelRegistry()
         if self._semantic is not None:
             self._registry.register_channel("semantic", self._semantic, needs_embedding=True)
@@ -106,14 +115,26 @@ class RetrievalEngine:
         # Phase 3: Spreading Activation (5th channel) — needs embedding input
         if self._spreading_activation is not None:
             self._registry.register_channel(
-                "spreading_activation", self._spreading_activation, needs_embedding=True,
+                "spreading_activation",
+                self._spreading_activation,
+                needs_embedding=True,
             )
 
     def recall(
-        self, query: str, profile_id: str,
-        mode: Mode = Mode.A, limit: int = 20,
+        self,
+        query: str,
+        profile_id: str,
+        mode: Mode = Mode.A,
+        limit: int = 20,
+        *,
+        include_global: bool = True,
+        include_shared: bool = True,
     ) -> RecallResponse:
-        """Full retrieval pipeline: strategy -> channels -> RRF -> rerank."""
+        """Full retrieval pipeline: strategy -> channels -> RRF -> rerank.
+
+        Multi-scope: runs channels for personal (always), global, and shared
+        scopes independently, then fuses with scope-weighted RRF.
+        """
         t0 = time.monotonic()
 
         # 1. Classify query, get adaptive weights
@@ -123,7 +144,9 @@ class RetrievalEngine:
         if self._profile_channel is not None:
             try:
                 profile_hits = self._profile_channel.search(
-                    query, profile_id, top_k=10,
+                    query,
+                    profile_id,
+                    top_k=10,
                 )
                 if profile_hits:
                     strat.weights["profile"] = 2.0
@@ -136,37 +159,75 @@ class RetrievalEngine:
         # Dynamic top-k for aggregation queries
         effective_limit = 100 if strat.query_type == "aggregation" else limit
 
-        # 3. Run 4 channels
-        ch_results = self._run_channels(query, profile_id, strat)
-        if profile_hits:
-            ch_results["profile"] = profile_hits
-        total = sum(len(v) for v in ch_results.values())
+        # Multi-scope retrieval: run channels per scope, merge with weighted RRF
+        all_ch_results: dict[str, list[tuple[str, float]]] = {}
+        all_weights: dict[str, float] = {}
 
-        # 3. Single-pass RRF fusion
-        fused = weighted_rrf(ch_results, strat.weights, k=self._config.rrf_k)
+        _SCOPE_WEIGHTS = {"personal": 1.0, "global": 0.5, "shared": 0.7}
+
+        # Personal scope (always)
+        personal_ch = self._run_channels(query, profile_id, strat, scope="personal")
+        for ch_name, results in personal_ch.items():
+            key = f"{ch_name}:personal"
+            all_ch_results[key] = results
+            all_weights[key] = strat.weights.get(ch_name, 1.0) * _SCOPE_WEIGHTS["personal"]
+
+        # Global scope
+        if include_global:
+            global_ch = self._run_channels(query, profile_id, strat, scope="global")
+            for ch_name, results in global_ch.items():
+                key = f"{ch_name}:global"
+                all_ch_results[key] = results
+                all_weights[key] = strat.weights.get(ch_name, 1.0) * _SCOPE_WEIGHTS["global"]
+
+        # Shared scope
+        if include_shared:
+            shared_ch = self._run_channels(query, profile_id, strat, scope="shared")
+            for ch_name, results in shared_ch.items():
+                key = f"{ch_name}:shared"
+                all_ch_results[key] = results
+                all_weights[key] = strat.weights.get(ch_name, 1.0) * _SCOPE_WEIGHTS["shared"]
+
+        if profile_hits:
+            all_ch_results["profile"] = profile_hits
+            all_weights["profile"] = strat.weights.get("profile", 2.0)
+
+        total = sum(len(v) for v in all_ch_results.values())
+
+        # Weighted RRF fusion across all scope-channel combinations
+        fused = weighted_rrf(all_ch_results, all_weights, k=self._config.rrf_k)
 
         # V3.3.21: Cross-channel intersection boost for multi-hop/temporal queries.
         # Problem: channels work in ISOLATION. "When did Caroline go to X?" needs
         # entity(Caroline) ∩ temporal(date). RRF averages scores but doesn't enforce
         # the intersection constraint. Fix: boost facts that appear in 2+ signal-type
         # channels (entity+temporal, entity+semantic, temporal+semantic).
-        if strat.query_type == "multi_hop" and len(ch_results) >= 2:
-            fused = self._apply_cross_channel_intersection(fused, ch_results, strat)
+        if strat.query_type == "multi_hop" and len(all_ch_results) >= 2:
+            fused = self._apply_cross_channel_intersection(fused, all_ch_results, strat)
 
         # Bridge discovery for multi-hop queries
         # V3.3.19: Only bridge.discover() (86ms). Removed bridge.spreading_activation()
         # which did per-node SQL queries across 254K edges → 78s latency.
         # The SYNAPSE SA channel already provides proper SA with in-memory caching.
-        if self._bridge is not None and strat.query_type in ("multi_hop", "entity", "factual", "general"):
+        if self._bridge is not None and strat.query_type in (
+            "multi_hop",
+            "entity",
+            "factual",
+            "general",
+        ):
             try:
                 seed_ids = [fr.fact_id for fr in fused[:10]]
                 bridges = self._bridge.discover(seed_ids, profile_id, max_bridges=10)
                 for fid, score in bridges:
                     if not any(fr.fact_id == fid for fr in fused):
-                        fused.append(FusionResult(
-                            fact_id=fid, fused_score=score * 0.8,
-                            channel_ranks={}, channel_scores={},
-                        ))
+                        fused.append(
+                            FusionResult(
+                                fact_id=fid,
+                                fused_score=score * 0.8,
+                                channel_ranks={},
+                                channel_scores={},
+                            )
+                        )
             except Exception as exc:
                 logger.warning("Bridge discovery: %s", exc)
 
@@ -178,12 +239,19 @@ class RetrievalEngine:
                     scenes = self._db.get_scenes_for_fact(fr.fact_id, profile_id)
                     for scene in scenes[:2]:
                         for sfid in scene.fact_ids:
-                            if not any(f.fact_id == sfid for f in fused) and sfid not in expanded_ids:
+                            if (
+                                not any(f.fact_id == sfid for f in fused)
+                                and sfid not in expanded_ids
+                            ):
                                 expanded_ids.add(sfid)
-                                fused.append(FusionResult(
-                                    fact_id=sfid, fused_score=fr.fused_score * 0.8,
-                                    channel_ranks={}, channel_scores={},
-                                ))
+                                fused.append(
+                                    FusionResult(
+                                        fact_id=sfid,
+                                        fused_score=fr.fused_score * 0.8,
+                                        channel_ranks={},
+                                        channel_scores={},
+                                    )
+                                )
             except Exception as exc:
                 logger.warning("Scene expansion: %s", exc)
 
@@ -191,13 +259,17 @@ class RetrievalEngine:
         # Instead of competing as independent channel, entity_graph SCORES
         # the candidates from other channels by graph proximity to query entities.
         # Research: Microsoft GraphRAG DRIFT, Pistis-RAG cascaded architecture.
-        if (self._entity is not None
-                and "entity_graph" not in set(self._config.disabled_channels)
-                and fused):
+        if (
+            self._entity is not None
+            and "entity_graph" not in set(self._config.disabled_channels)
+            and fused
+        ):
             try:
                 candidate_ids = [fr.fact_id for fr in fused[:100]]
                 eg_scores = self._entity.score_candidates(
-                    query, candidate_ids, profile_id,
+                    query,
+                    candidate_ids,
+                    profile_id,
                 )
                 if eg_scores:
                     boosted = []
@@ -206,12 +278,14 @@ class RetrievalEngine:
                         if eg_sc > 0:
                             eg_weight = strat.weights.get("entity_graph", 1.0)
                             boost = 1.0 + eg_sc * eg_weight * 0.3
-                            boosted.append(FusionResult(
-                                fact_id=fr.fact_id,
-                                fused_score=fr.fused_score * boost,
-                                channel_ranks=fr.channel_ranks,
-                                channel_scores={**fr.channel_scores, "entity_graph": eg_sc},
-                            ))
+                            boosted.append(
+                                FusionResult(
+                                    fact_id=fr.fact_id,
+                                    fused_score=fr.fused_score * boost,
+                                    channel_ranks=fr.channel_ranks,
+                                    channel_scores={**fr.channel_scores, "entity_graph": eg_sc},
+                                )
+                            )
                         else:
                             boosted.append(fr)
                     fused = sorted(boosted, key=lambda r: r.fused_score, reverse=True)
@@ -232,9 +306,8 @@ class RetrievalEngine:
         # V3.3.21: Skip reranker if worker isn't ready yet (cold start).
         # Returns results without CE reranking (~5-10pp lower quality) but instant
         # instead of blocking 15-19s on first recall. Worker warms up in background.
-        reranker_ready = (
-            self._reranker is not None
-            and getattr(self._reranker, '_worker_ready', False)
+        reranker_ready = self._reranker is not None and getattr(
+            self._reranker, "_worker_ready", False
         )
         if reranker_ready and facts:
             ce_alpha = 0.5 if strat.query_type in ("multi_hop", "temporal") else 0.75
@@ -244,7 +317,10 @@ class RetrievalEngine:
         # the final output. Applied AFTER reranker so results can't be pushed out.
         final_top = top[:effective_limit]
         final_top = self._enforce_channel_diversity(
-            final_top, fused, ch_results, effective_limit,
+            final_top,
+            fused,
+            all_ch_results,
+            effective_limit,
         )
         # Reload facts for any newly injected results
         if len(final_top) > len(top[:effective_limit]):
@@ -254,9 +330,13 @@ class RetrievalEngine:
         results = self._build_results(final_top, facts, strat)
         ms = (time.monotonic() - t0) * 1000.0
         return RecallResponse(
-            query=query, mode=mode, results=results,
-            query_type=strat.query_type, channel_weights=strat.weights,
-            total_candidates=total, retrieval_time_ms=ms,
+            query=query,
+            mode=mode,
+            results=results,
+            query_type=strat.query_type,
+            channel_weights=strat.weights,
+            total_candidates=total,
+            retrieval_time_ms=ms,
         )
 
     # -- Cross-channel intersection boost -----------------------------------
@@ -283,8 +363,10 @@ class RetrievalEngine:
         """
         # Map channels to signal groups
         _CHANNEL_GROUPS = {
-            "semantic": "content", "bm25": "content",
-            "entity_graph": "structure", "spreading_activation": "structure",
+            "semantic": "content",
+            "bm25": "content",
+            "entity_graph": "structure",
+            "spreading_activation": "structure",
             "temporal": "temporal",
             "hopfield": "associative",
             "profile": "content",
@@ -314,12 +396,14 @@ class RetrievalEngine:
                     boost = 1.5
             else:
                 boost = 1.0
-            boosted.append(FusionResult(
-                fact_id=fr.fact_id,
-                fused_score=fr.fused_score * boost,
-                channel_ranks=fr.channel_ranks,
-                channel_scores=fr.channel_scores,
-            ))
+            boosted.append(
+                FusionResult(
+                    fact_id=fr.fact_id,
+                    fused_score=fr.fused_score * boost,
+                    channel_ranks=fr.channel_ranks,
+                    channel_scores=fr.channel_scores,
+                )
+            )
         boosted.sort(key=lambda r: r.fused_score, reverse=True)
         return boosted
 
@@ -438,9 +522,20 @@ class RetrievalEngine:
         return emb
 
     def _run_channels(
-        self, query: str, profile_id: str, strat: QueryStrategy,
+        self,
+        query: str,
+        profile_id: str,
+        strat: QueryStrategy,
+        *,
+        scope: str = "personal",
     ) -> dict[str, list[tuple[str, float]]]:
-        """Run active retrieval channels. Respects disabled_channels config for ablation."""
+        """Run active retrieval channels. Respects disabled_channels config for ablation.
+
+        The ``scope`` parameter is forwarded to each channel's ``search()`` call
+        so channels can filter results by scope.  For multi-scope retrieval the
+        ``recall()`` method calls this once per active scope and merges with
+        weighted RRF.
+        """
         out: dict[str, list[tuple[str, float]]] = {}
         # Skip channels listed in disabled_channels (ablation support)
         disabled = set(self._config.disabled_channels)
@@ -465,17 +560,34 @@ class RetrievalEngine:
 
         if self._semantic is not None and q_emb is not None and "semantic" not in disabled:
             try:
-                r = self._semantic.search(q_emb, profile_id, self._config.semantic_top_k)
+                r = self._semantic.search(
+                    q_emb, profile_id, self._config.semantic_top_k, scope=scope
+                )
                 if r:
                     out["semantic"] = r
+            except TypeError:
+                # Channel doesn't accept scope yet (pre-Task-8); call without it
+                try:
+                    r = self._semantic.search(q_emb, profile_id, self._config.semantic_top_k)
+                    if r:
+                        out["semantic"] = r
+                except Exception as exc:
+                    logger.warning("Semantic channel: %s", exc)
             except Exception as exc:
                 logger.warning("Semantic channel: %s", exc)
 
         if self._bm25 is not None and "bm25" not in disabled:
             try:
-                r = self._bm25.search(query, profile_id, self._config.bm25_top_k)
+                r = self._bm25.search(query, profile_id, self._config.bm25_top_k, scope=scope)
                 if r:
                     out["bm25"] = r
+            except TypeError:
+                try:
+                    r = self._bm25.search(query, profile_id, self._config.bm25_top_k)
+                    if r:
+                        out["bm25"] = r
+                except Exception as exc:
+                    logger.warning("BM25 channel: %s", exc)
             except Exception as exc:
                 logger.warning("BM25 channel: %s", exc)
 
@@ -485,32 +597,65 @@ class RetrievalEngine:
 
         if self._temporal is not None and "temporal" not in disabled:
             try:
-                r = self._temporal.search(query, profile_id, top_k=self._config.bm25_top_k)
+                r = self._temporal.search(
+                    query, profile_id, top_k=self._config.bm25_top_k, scope=scope
+                )
                 if r:
                     out["temporal"] = r
+            except TypeError:
+                try:
+                    r = self._temporal.search(query, profile_id, top_k=self._config.bm25_top_k)
+                    if r:
+                        out["temporal"] = r
+                except Exception as exc:
+                    logger.warning("Temporal channel: %s", exc)
             except Exception as exc:
                 logger.warning("Temporal channel: %s", exc)
 
         # Phase G: Hopfield channel (6th) — energy-based pattern completion
         if self._hopfield is not None and q_emb is not None and "hopfield" not in disabled:
             try:
-                r = self._hopfield.search(q_emb, profile_id, self._config.hopfield_top_k)
+                r = self._hopfield.search(
+                    q_emb, profile_id, self._config.hopfield_top_k, scope=scope
+                )
                 if r:
                     out["hopfield"] = r
+            except TypeError:
+                try:
+                    r = self._hopfield.search(q_emb, profile_id, self._config.hopfield_top_k)
+                    if r:
+                        out["hopfield"] = r
+                except Exception as exc:
+                    logger.warning("Hopfield channel: %s", exc)
             except Exception as exc:
                 logger.warning("Hopfield channel: %s", exc)
 
         # Phase 3: Spreading Activation channel (5th) — graph-based associative recall
-        if self._spreading_activation is not None and q_emb is not None and "spreading_activation" not in disabled:
+        if (
+            self._spreading_activation is not None
+            and q_emb is not None
+            and "spreading_activation" not in disabled
+        ):
             try:
-                r = self._spreading_activation.search(q_emb, profile_id, self._config.bm25_top_k)
+                r = self._spreading_activation.search(
+                    q_emb, profile_id, self._config.bm25_top_k, scope=scope
+                )
                 if r:
                     out["spreading_activation"] = r
+            except TypeError:
+                try:
+                    r = self._spreading_activation.search(
+                        q_emb, profile_id, self._config.bm25_top_k
+                    )
+                    if r:
+                        out["spreading_activation"] = r
+                except Exception as exc:
+                    logger.warning("Spreading activation channel: %s", exc)
             except Exception as exc:
                 logger.warning("Spreading activation channel: %s", exc)
 
         # Apply registered post-retrieval filters (forgetting filter, etc.)
-        if hasattr(self, '_registry') and self._registry._filters:
+        if hasattr(self, "_registry") and self._registry._filters:
             for fn in self._registry._filters:
                 try:
                     out = fn(out, profile_id, None)
@@ -522,7 +667,9 @@ class RetrievalEngine:
     # -- Fact loading -------------------------------------------------------
 
     def _load_facts(
-        self, fused: list[FusionResult], profile_id: str,
+        self,
+        fused: list[FusionResult],
+        profile_id: str,
     ) -> dict[str, AtomicFact]:
         """Load facts by ID — targeted query, not full-table scan.
 
@@ -544,7 +691,9 @@ class RetrievalEngine:
         return 1.0 / (1.0 + math.exp(-x))
 
     def _apply_reranker(
-        self, query: str, fused: list[FusionResult],
+        self,
+        query: str,
+        fused: list[FusionResult],
         fact_map: dict[str, AtomicFact],
         alpha: float = 0.75,
     ) -> list[FusionResult]:
@@ -555,8 +704,7 @@ class RetrievalEngine:
         """
         # Bug 2 fix: score ALL candidates, not just top_k
         candidates = [
-            (fact_map[fr.fact_id], fr.fused_score)
-            for fr in fused if fr.fact_id in fact_map
+            (fact_map[fr.fact_id], fr.fused_score) for fr in fused if fr.fact_id in fact_map
         ]
         if not candidates:
             return fused
@@ -568,12 +716,14 @@ class RetrievalEngine:
         originals: list[tuple[AtomicFact, str]] = []  # (fact, original_content)
         for fact, _ in candidates:
             orig = fact.content
-            fact.content = re.sub(r'^\[[A-Za-z]+\]:\s*', '', orig)
+            fact.content = re.sub(r"^\[[A-Za-z]+\]:\s*", "", orig)
             originals.append((fact, orig))
 
         try:
             scored = self._reranker.rerank(  # type: ignore[union-attr]
-                query, candidates, top_k=len(candidates),
+                query,
+                candidates,
+                top_k=len(candidates),
             )
         except Exception as exc:
             logger.warning("Cross-encoder rerank failed: %s", exc)
@@ -615,8 +765,11 @@ class RetrievalEngine:
     # -- Agentic adapter -----------------------------------
 
     def recall_facts(
-        self, query: str, profile_id: str,
-        top_k: int = 20, skip_agentic: bool = True,
+        self,
+        query: str,
+        profile_id: str,
+        top_k: int = 20,
+        skip_agentic: bool = True,
     ) -> list[tuple[AtomicFact, float]]:
         """Simplified recall returning (fact, score) tuples.
 
@@ -653,14 +806,18 @@ class RetrievalEngine:
     # -- Response building --------------------------------------------------
 
     def _build_results(
-        self, fused: list[FusionResult], fact_map: dict[str, AtomicFact],
+        self,
+        fused: list[FusionResult],
+        fact_map: dict[str, AtomicFact],
         strat: QueryStrategy,
     ) -> list[RetrievalResult]:
         from datetime import UTC, datetime
+
         now = datetime.now(UTC)
         results: list[RetrievalResult] = []
         profile_id = next(
-            (f.profile_id for f in fact_map.values()), "default",
+            (f.profile_id for f in fact_map.values()),
+            "default",
         )
         for fr in fused:
             fact = fact_map.get(fr.fact_id)
@@ -698,12 +855,16 @@ class RetrievalEngine:
 
             boosted_score = fr.fused_score * recency_boost * quality * trust_weight
             confidence = min(1.0, boosted_score * 10.0) * fact.confidence
-            results.append(RetrievalResult(
-                fact=fact, score=boosted_score,
-                channel_scores=fr.channel_scores,
-                confidence=confidence, evidence_chain=evidence,
-                trust_score=raw_trust,
-            ))
+            results.append(
+                RetrievalResult(
+                    fact=fact,
+                    score=boosted_score,
+                    channel_scores=fr.channel_scores,
+                    confidence=confidence,
+                    evidence_chain=evidence,
+                    trust_score=raw_trust,
+                )
+            )
         return results
 
 
@@ -713,7 +874,10 @@ class RetrievalEngine:
 
 
 _CHANNEL_KEYS: tuple[str, ...] = (
-    "semantic", "bm25", "entity_graph", "temporal",
+    "semantic",
+    "bm25",
+    "entity_graph",
+    "temporal",
 )
 
 
@@ -748,12 +912,14 @@ def apply_channel_weights(
             new_cs[ch] = scaled
             base += scaled
         new_score = (base if base > 0.0 else float(c.score)) * ce_bias
-        out.append(RetrievalResult(
-            fact=c.fact,
-            score=new_score,
-            channel_scores=new_cs,
-            confidence=c.confidence,
-            evidence_chain=c.evidence_chain,
-            trust_score=c.trust_score,
-        ))
+        out.append(
+            RetrievalResult(
+                fact=c.fact,
+                score=new_score,
+                channel_scores=new_cs,
+                confidence=c.confidence,
+                evidence_chain=c.evidence_chain,
+                trust_score=c.trust_score,
+            )
+        )
     return out

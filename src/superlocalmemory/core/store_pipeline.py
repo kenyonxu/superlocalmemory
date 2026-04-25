@@ -20,7 +20,9 @@ if TYPE_CHECKING:
     from superlocalmemory.storage.database import DatabaseManager
 
 from superlocalmemory.storage.models import (
-    AtomicFact, FactType, MemoryRecord,
+    AtomicFact,
+    FactType,
+    MemoryRecord,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,7 @@ def _init_langevin_position(dim: int = 8) -> list[float]:
     while staying deep in the ACTIVE zone (radius < 0.3).
     """
     import numpy as np
+
     rng = np.random.default_rng()
     direction = rng.standard_normal(dim)
     norm = float(np.linalg.norm(direction))
@@ -48,6 +51,7 @@ def _init_langevin_position(dim: int = 8) -> list[float]:
 # ---------------------------------------------------------------------------
 # enrich_fact  (was MemoryEngine._enrich_fact)
 # ---------------------------------------------------------------------------
+
 
 def enrich_fact(
     fact: AtomicFact,
@@ -83,9 +87,12 @@ def enrich_fact(
     langevin_pos = _init_langevin_position(dim=8)
 
     return AtomicFact(
-        fact_id=fact.fact_id, memory_id=record.memory_id,
-        profile_id=profile_id, content=fact.content,
-        fact_type=fact.fact_type, entities=fact.entities,
+        fact_id=fact.fact_id,
+        memory_id=record.memory_id,
+        profile_id=profile_id,
+        content=fact.content,
+        fact_type=fact.fact_type,
+        entities=fact.entities,
         canonical_entities=list(canonical.values()),
         observation_date=fact.observation_date or record.session_date,
         referenced_date=fact.referenced_date or temporal.get("referenced_date"),
@@ -94,17 +101,25 @@ def enrich_fact(
         confidence=fact.confidence,
         importance=min(1.0, fact.importance + emotional_importance_boost(emotion)),
         evidence_count=fact.evidence_count,
-        source_turn_ids=fact.source_turn_ids, session_id=record.session_id,
-        embedding=embedding, fisher_mean=fisher_mean, fisher_variance=fisher_variance,
+        source_turn_ids=fact.source_turn_ids,
+        session_id=record.session_id,
+        embedding=embedding,
+        fisher_mean=fisher_mean,
+        fisher_variance=fisher_variance,
         langevin_position=langevin_pos,
-        emotional_valence=emotion.valence, emotional_arousal=emotion.arousal,
-        signal_type=signal, created_at=fact.created_at,
+        emotional_valence=emotion.valence,
+        emotional_arousal=emotion.arousal,
+        signal_type=signal,
+        created_at=fact.created_at,
+        scope=fact.scope,
+        shared_with=fact.shared_with,
     )
 
 
 # ---------------------------------------------------------------------------
 # run_store  (was MemoryEngine.store)
 # ---------------------------------------------------------------------------
+
 
 def run_store(
     content: str,
@@ -115,6 +130,8 @@ def run_store(
     role: str = "user",
     metadata: dict[str, Any] | None = None,
     *,
+    scope: str = "personal",
+    shared_with: list[str] | None = None,
     config: SLMConfig,
     db: DatabaseManager,
     embedder: Any,
@@ -152,19 +169,28 @@ def run_store(
         return []
 
     from superlocalmemory.encoding.temporal_parser import TemporalParser
+
     parser = temporal_parser or TemporalParser()
     parsed_date = parser.parse_session_date(session_date) if session_date else None
 
     record = MemoryRecord(
-        profile_id=profile_id, content=content,
-        session_id=session_id, speaker=speaker, role=role,
-        session_date=parsed_date, metadata=metadata or {},
+        profile_id=profile_id,
+        content=content,
+        session_id=session_id,
+        speaker=speaker,
+        role=role,
+        session_date=parsed_date,
+        metadata=metadata or {},
+        scope=scope,
+        shared_with=shared_with,
     )
     db.store_memory(record)
 
     facts = fact_extractor.extract_facts(
-        turns=[content], session_id=session_id,
-        session_date=parsed_date, speaker_a=speaker,
+        turns=[content],
+        session_id=session_id,
+        session_date=parsed_date,
+        speaker_a=speaker,
     )
 
     # V3.3.11: Also store raw content as a verbatim fact to preserve details
@@ -175,17 +201,20 @@ def run_store(
     # V3.3.20: Stronger verbatim filter — skip greetings, filler, short phrases.
     # Verbatim facts with just "Hey! How are you?" dilute embeddings and add noise.
     _MIN_VERBATIM_WORDS = 8
-    if (content.strip()
-            and len(content.strip()) >= 40
-            and len(content.strip().split()) >= _MIN_VERBATIM_WORDS):
+    if (
+        content.strip()
+        and len(content.strip()) >= 40
+        and len(content.strip().split()) >= _MIN_VERBATIM_WORDS
+    ):
         import uuid
         import re as _re
+
         _verbatim_text = content.strip()
         # Extract entities using the same regex as fact_extractor
         _ent_re = _re.compile(r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+){0,3})\b")
         _entity_set = {m.group(1) for m in _ent_re.finditer(_verbatim_text)}
         # Also extract all-caps abbreviations (NYU, MIT, etc.) — dedup with first set
-        _entity_set |= {m.group(1) for m in _re.finditer(r'\b([A-Z]{2,})\b', _verbatim_text)}
+        _entity_set |= {m.group(1) for m in _re.finditer(r"\b([A-Z]{2,})\b", _verbatim_text)}
         _verbatim_entities = sorted(_entity_set)
         verbatim = AtomicFact(
             fact_id=uuid.uuid4().hex[:16],
@@ -196,6 +225,8 @@ def run_store(
             observation_date=parsed_date,
             confidence=0.9,
             importance=0.5,
+            scope=scope,
+            shared_with=shared_with,
         )
         # Avoid duplicate if extraction already produced the exact same text
         extracted_texts = {f.content.strip().lower() for f in facts}
@@ -208,16 +239,21 @@ def run_store(
     # are designed for automatic conversation extraction, not explicit user storage.
     if not facts and content.strip():
         import uuid
-        facts = [AtomicFact(
-            fact_id=uuid.uuid4().hex[:16],
-            content=content.strip(),
-            fact_type=FactType.SEMANTIC,
-            entities=[],
-            session_id=session_id,
-            observation_date=parsed_date,
-            confidence=0.7,
-            importance=0.3,
-        )]
+
+        facts = [
+            AtomicFact(
+                fact_id=uuid.uuid4().hex[:16],
+                content=content.strip(),
+                fact_type=FactType.SEMANTIC,
+                entities=[],
+                session_id=session_id,
+                observation_date=parsed_date,
+                confidence=0.7,
+                importance=0.3,
+                scope=scope,
+                shared_with=shared_with,
+            )
+        ]
 
     if not facts:
         return []
@@ -227,8 +263,14 @@ def run_store(
 
     stored_ids: list[str] = []
     for fact in facts:
+        # Propagate scope/shared_with to all facts
+        fact.scope = scope
+        fact.shared_with = shared_with
+
         fact = enrich_fact(
-            fact, record, profile_id,
+            fact,
+            record,
+            profile_id,
             embedder=embedder,
             entity_resolver=entity_resolver,
             temporal_parser=temporal_parser,
@@ -267,7 +309,9 @@ def run_store(
                     if observation_builder:
                         for eid in updated_fact.canonical_entities:
                             observation_builder.update_profile(
-                                eid, updated_fact, profile_id,
+                                eid,
+                                updated_fact,
+                                profile_id,
                             )
                 stored_ids.append(action.new_fact_id)
                 continue
@@ -291,6 +335,7 @@ def run_store(
         if context_generator:
             try:
                 import json as _json
+
                 ctx_result = context_generator.generate(fact, config.mode.value)
                 db.store_fact_context(
                     fact_id=fact.fact_id,
@@ -313,17 +358,18 @@ def run_store(
                 logger.debug("AutoLinker.link_new_fact: %s", exc)
 
         # Sheaf consistency check (runs after edges exist)
-        if (sheaf_checker
-                and fact.embedding
-                and fact.canonical_entities):
+        if sheaf_checker and fact.embedding and fact.canonical_entities:
             from superlocalmemory.storage.models import EdgeType, GraphEdge
+
             try:
                 edges_for_fact = db.get_edges_for_node(
-                    fact.fact_id, profile_id,
+                    fact.fact_id,
+                    profile_id,
                 )
                 if len(edges_for_fact) < config.math.sheaf_max_edges_per_check:
                     contradictions = sheaf_checker.check_consistency(
-                        fact, profile_id,
+                        fact,
+                        profile_id,
                     )
                     for c in contradictions:
                         if c.severity > 0.45:
@@ -333,6 +379,8 @@ def run_store(
                                 target_id=c.fact_id_b,
                                 edge_type=EdgeType.SUPERSEDES,
                                 weight=c.severity,
+                                scope=scope,
+                                shared_with=shared_with,
                             )
                             db.store_edge(edge)
             except Exception as exc:
@@ -354,12 +402,14 @@ def run_store(
                 if invalidations:
                     logger.info(
                         "Temporal: %d facts invalidated by new fact %s",
-                        len(invalidations), fact.fact_id,
+                        len(invalidations),
+                        fact.fact_id,
                     )
             except Exception as exc:
                 logger.debug(
                     "Temporal validation skipped for fact %s: %s",
-                    fact.fact_id, exc,
+                    fact.fact_id,
+                    exc,
                 )
 
         if observation_builder:
@@ -376,19 +426,22 @@ def run_store(
             scene_builder.assign_to_scene(fact, profile_id)
 
         # Populate temporal_events for temporal retrieval
-        has_dates = (fact.observation_date or fact.referenced_date
-                     or fact.interval_start)
+        has_dates = fact.observation_date or fact.referenced_date or fact.interval_start
         if fact.canonical_entities and has_dates:
             from superlocalmemory.storage.models import TemporalEvent
+
             for eid in fact.canonical_entities:
                 event = TemporalEvent(
-                    profile_id=profile_id, entity_id=eid,
+                    profile_id=profile_id,
+                    entity_id=eid,
                     fact_id=fact.fact_id,
                     observation_date=fact.observation_date,
                     referenced_date=fact.referenced_date,
                     interval_start=fact.interval_start,
                     interval_end=fact.interval_end,
                     description=fact.content[:200],
+                    scope=scope,
+                    shared_with=shared_with,
                 )
                 db.store_temporal_event(event)
 
@@ -396,6 +449,7 @@ def run_store(
         try:
             from superlocalmemory.encoding.foresight import extract_foresight_signals
             from superlocalmemory.storage.models import TemporalEvent as _TE
+
             foresight_signals = extract_foresight_signals(fact)
             for sig in foresight_signals:
                 f_event = _TE(
@@ -405,13 +459,15 @@ def run_store(
                     interval_start=sig.get("start_time"),
                     interval_end=sig.get("end_time"),
                     description=sig.get("description", ""),
+                    scope=scope,
+                    shared_with=shared_with,
                 )
                 db.store_temporal_event(f_event)
         except Exception as exc:
             logger.debug("Foresight extraction: %s", exc)
 
         # Persist BM25 tokens at ingestion
-        bm25 = getattr(retrieval_engine, '_bm25', None) if retrieval_engine else None
+        bm25 = getattr(retrieval_engine, "_bm25", None) if retrieval_engine else None
         if bm25:
             bm25.add(fact.fact_id, fact.content, profile_id)
 
@@ -449,6 +505,7 @@ def run_store(
 # run_store_fact_direct  (was MemoryEngine.store_fact_direct)
 # ---------------------------------------------------------------------------
 
+
 def run_store_fact_direct(
     fact: AtomicFact,
     profile_id: str,
@@ -480,12 +537,11 @@ def run_store_fact_direct(
     if not fact.embedding and embedder:
         fact.embedding = embedder.embed(fact.content)
         if fact.embedding:
-            fact.fisher_mean, fact.fisher_variance = (
-                embedder.compute_fisher_params(fact.embedding)
-            )
+            fact.fisher_mean, fact.fisher_variance = embedder.compute_fisher_params(fact.embedding)
     if entity_resolver and fact.entities:
         canonical = entity_resolver.resolve(
-            fact.entities, profile_id,
+            fact.entities,
+            profile_id,
         )
         fact.canonical_entities = list(canonical.values())
     db.store_fact(fact)
@@ -501,7 +557,7 @@ def run_store_fact_direct(
     if graph_builder:
         graph_builder.build_edges(fact, profile_id)
     # BM25 indexing
-    bm25 = getattr(retrieval_engine, '_bm25', None) if retrieval_engine else None
+    bm25 = getattr(retrieval_engine, "_bm25", None) if retrieval_engine else None
     if bm25:
         bm25.add(fact.fact_id, fact.content, profile_id)
     return fact.fact_id
@@ -510,6 +566,7 @@ def run_store_fact_direct(
 # ---------------------------------------------------------------------------
 # run_close_session  (was MemoryEngine.close_session)
 # ---------------------------------------------------------------------------
+
 
 def run_close_session(
     session_id: str,
@@ -555,6 +612,8 @@ def run_close_session(
 
     logger.info(
         "Session %s closed: %d summary events for %d facts",
-        session_id, count, len(session_facts),
+        session_id,
+        count,
+        len(session_facts),
     )
     return count
