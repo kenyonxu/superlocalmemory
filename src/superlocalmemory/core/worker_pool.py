@@ -67,6 +67,7 @@ class WorkerPool:
 
     def recall(
         self, query: str, limit: int = 10, session_id: str = "",
+        include_global: bool = True, include_shared: bool = True,
     ) -> dict:
         """Run recall in worker subprocess. Returns result dict.
 
@@ -78,6 +79,8 @@ class WorkerPool:
         return self._send({
             "cmd": "recall", "query": query, "limit": limit,
             "session_id": session_id or "",
+            "include_global": include_global,
+            "include_shared": include_shared,
         })
 
     def store(self, content: str, metadata: dict | None = None) -> dict:
