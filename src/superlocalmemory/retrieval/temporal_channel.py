@@ -52,7 +52,14 @@ class TemporalChannel:
     def __init__(self, db: DatabaseManager) -> None:
         self._db = db
 
-    def search(self, query: str, profile_id: str, top_k: int = 30) -> list[tuple[str, float]]:
+    def search(
+        self,
+        query: str,
+        profile_id: str,
+        top_k: int = 30,
+        *,
+        scope: str = "personal",
+    ) -> list[tuple[str, float]]:
         """Search for temporally relevant facts.
 
         Two strategies:
@@ -71,13 +78,13 @@ class TemporalChannel:
 
         # Strategy 1: Entity-temporal metadata search
         # "When did Alice...?" → find all temporal events for Alice
-        entity_results = self._entity_temporal_search(query, profile_id)
+        entity_results = self._entity_temporal_search(query, profile_id, scope=scope)
 
         # Strategy 2: Date proximity search
         if query_dt is None and not entity_results:
             return []
 
-        events = self._load_events(profile_id)
+        events = self._load_events(profile_id, scope=scope)
         scored: dict[str, float] = {}
 
         # Include entity-temporal results with high base score
@@ -114,7 +121,7 @@ class TemporalChannel:
         return results[:top_k]
 
     def _entity_temporal_search(
-        self, query: str, profile_id: str,
+        self, query: str, profile_id: str, *, scope: str = "personal",
     ) -> list[tuple[str, float]]:
         """Metadata-first: find temporal events for entities mentioned in query.
 
@@ -142,15 +149,20 @@ class TemporalChannel:
 
         for name in names[:3]:  # Limit to first 3 entity mentions
             # Look up entity ID
-            entity = self._db.get_entity_by_name(name, profile_id)
+            include_global = (scope == "global")
+            include_shared = (scope == "shared")
+            entity = self._db.get_entity_by_name(
+                name, profile_id, scope="personal",
+                include_global=include_global, include_shared=include_shared,
+            )
             if entity is None:
                 continue
 
             # Find all temporal events for this entity
             rows = self._db.execute(
                 "SELECT fact_id FROM temporal_events "
-                "WHERE profile_id = ? AND entity_id = ?",
-                (profile_id, entity.entity_id),
+                "WHERE profile_id = ? AND entity_id = ? AND scope = ?",
+                (profile_id, entity.entity_id, scope),
             )
             for row in rows:
                 fid = dict(row)["fact_id"]
@@ -163,12 +175,12 @@ class TemporalChannel:
 
         return results
 
-    def _load_events(self, profile_id: str) -> list[dict]:
+    def _load_events(self, profile_id: str, *, scope: str = "personal") -> list[dict]:
         rows = self._db.execute(
             "SELECT fact_id, observation_date, referenced_date, "
             "interval_start, interval_end "
-            "FROM temporal_events WHERE profile_id = ?",
-            (profile_id,),
+            "FROM temporal_events WHERE profile_id = ? AND scope = ?",
+            (profile_id, scope),
         )
         return [dict(r) for r in rows]
 
