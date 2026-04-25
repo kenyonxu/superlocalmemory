@@ -295,6 +295,8 @@ Expected: FAIL — module not found
 
 - [ ] **Step 3: Create migration file**
 
+Follow the M013 pattern: provide a proper DDL string with ALTER TABLE statements.
+
 ```python
 # src/superlocalmemory/storage/migrations/M014_add_scope_support.py
 """M014: Add scope and shared_with columns for multi-scope memory support.
@@ -314,33 +316,14 @@ TABLES = [
     "graph_edges", "temporal_events",
 ]
 
-DDL = ""  # DDL is empty; upgrade() handles dynamic ALTER TABLEs
-
-
-def upgrade(conn) -> None:
-    """Add scope + shared_with columns and indexes to all core tables."""
-    for table in TABLES:
-        # Add columns (idempotent — skip if already exists)
-        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-        if "scope" not in existing:
-            conn.execute(
-                f"ALTER TABLE {table} ADD COLUMN scope TEXT NOT NULL DEFAULT 'personal'"
-            )
-        if "shared_with" not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN shared_with TEXT")
-
-    conn.commit()
-
-    # Add indexes (IF NOT EXISTS for idempotency)
-    for table in TABLES:
-        conn.execute(
-            f"CREATE INDEX IF NOT EXISTS idx_{table}_scope ON {table}(scope)"
-        )
-        conn.execute(
-            f"CREATE INDEX IF NOT EXISTS idx_{table}_profile_scope "
-            f"ON {table}(profile_id, scope)"
-        )
-    conn.commit()
+DDL = ";".join(
+    [f"ALTER TABLE {t} ADD COLUMN scope TEXT NOT NULL DEFAULT 'personal'"
+     for t in TABLES]
+    + [f"ALTER TABLE {t} ADD COLUMN shared_with TEXT" for t in TABLES]
+    + [f"CREATE INDEX IF NOT EXISTS idx_{t}_scope ON {t}(scope)" for t in TABLES]
+    + [f"CREATE INDEX IF NOT EXISTS idx_{t}_profile_scope ON {t}(profile_id, scope)"
+       for t in TABLES]
+)
 
 
 def verify(conn) -> bool:
@@ -351,19 +334,24 @@ def verify(conn) -> bool:
 
 - [ ] **Step 4: Register migration**
 
-In `src/superlocalmemory/storage/migrations/__init__.py`, add import:
-```python
-from superlocalmemory.storage.migrations.M014_add_scope_support import NAME as _M014_NAME
-```
+Follow the existing pattern in the codebase:
 
-In `src/superlocalmemory/storage/migration_runner.py`:
-1. Add import at top: `from superlocalmemory.storage.migrations import M014_add_scope_support as _M014`
-2. Add to `MIGRATIONS` list after M013:
+1. In `src/superlocalmemory/storage/migrations/__init__.py`, add to the package import block (follows M013):
 ```python
-Migration(name=_M014.NAME, db_target="memory", ddl=_M014.DDL, verify=_M014.verify),
+from . import M014_add_scope_support  # noqa: F401
 ```
+And add to `__all__` tuple.
 
-Note: Check if `Migration` dataclass supports a `verify` field. If not, add it or use the existing pattern for custom migrations.
+2. In `src/superlocalmemory/storage/migration_runner.py`:
+   - Add to the imports section (~line 39-52): `from superlocalmemory.storage.migrations import M014_add_scope_support as _M014`
+   - Add to `DEFERRED_MIGRATIONS` list (not `MIGRATIONS` — because these tables are bootstrapped at engine init, same reason M011/M013 use deferred):
+```python
+Migration(name=_M014.NAME, db_target="memory", ddl=_M014.DDL),
+```
+   - The `verify()` function is resolved at runtime via `_MODULES` dict — add `_M014` to it:
+```python
+_MODULES[_M014.NAME] = _M014
+```
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -701,6 +689,8 @@ Key methods to update (with their current line numbers):
 | `get_ccq_audit` | ~1171 | CCQ audit |
 
 For write methods (store_bm25_tokens, delete_association_edges, soft_delete_fact, delete_core_blocks), scope is set at write time and doesn't need query-time scope filtering. These can be left unchanged for Phase 1.
+
+**Important: INSERT methods also need updating.** The `store_memory()` (~line 152) and `store_fact()` (~line 192) INSERT statements must include `scope` and `shared_with` columns. This is covered in Task 6 (StorePipeline) when we update `run_store()` to pass scope down. The INSERT changes happen there, not in this task, to keep Task 4 focused on read-path scope filtering.
 
 Priority methods to update (read queries in the retrieval path):
 1. `get_all_facts` — done (Step 4)
