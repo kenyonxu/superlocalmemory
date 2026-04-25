@@ -1282,7 +1282,10 @@ def _start_pending_materializer() -> None:
                             md.setdefault("tags", item["tags"])
                         scope = md.pop("scope", "personal")
                         shared_with = md.pop("shared_with", None)
-                        engine.store(item["content"], metadata=md, scope=scope, shared_with=shared_with)
+                        engine.store(
+                            item["content"], metadata=md,
+                            scope=scope, shared_with=shared_with,
+                        )
                         mark_done(item["id"])
                     except Exception as exc:
                         logger.warning(
