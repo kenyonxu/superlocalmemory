@@ -131,11 +131,11 @@ Reasons:
 
 ---
 
-## DatabaseManager Changes (~100 lines)
+## DatabaseManager Changes (~200 lines)
 
 ### Query Signature Extension
 
-All 30+ query methods gain scope parameters:
+24 query methods in `database.py` (plus 7 in `learning/database.py`) gain scope parameters:
 
 ```python
 # Before
@@ -159,11 +159,11 @@ Replace all instances of `WHERE profile_id = ?` with:
 WHERE (
     (scope = 'personal' AND profile_id = ?)
     OR (scope = 'global')
-    OR (? IN (SELECT value FROM json_each(shared_where)))
+    OR (? IN (SELECT value FROM json_each(shared_with)))
 )
 ```
 
-This pattern applies uniformly across all 30+ query methods.
+This pattern applies uniformly across all 24+ query methods.
 
 ---
 
@@ -279,22 +279,54 @@ Each channel follows the same pattern: replace `WHERE profile_id = ?` with the t
 
 ### Existing Tool Extensions
 
+The actual `remember` tool uses a **pending store** architecture: it writes to `pending.db`, then the unified daemon materializes items via `engine.store()`. Scope parameters must flow through this pipeline.
+
 ```python
-# remember
+# remember (tools_core.py)
+# Actual current signature:
 async def remember(
-    content: str, tags: str = "",
-    profile_id: str = "",
+    content: str, tags: str = "", project: str = "",
+    importance: int = 5, session_id: str = "",
+    agent_id: str = "mcp_client",
     scope: str = "personal",       # NEW: "personal" | "global"
     shared_with: str = "",         # NEW: comma-separated profile_ids
 ) -> dict
 
-# recall
+# The new scope/shared_with fields are stored in pending metadata:
+#   store_pending(content, tags=tags, metadata={
+#       "project": project, "importance": importance,
+#       "agent_id": agent_id, "session_id": session_id,
+#       "scope": scope,                       # NEW
+#       "shared_with": shared_with.split(","), # NEW
+#   })
+```
+
+```python
+# recall (tools_core.py)
+# Actual current signature:
 async def recall(
     query: str, limit: int = 10,
-    profile_id: str = "",
+    agent_id: str = "mcp_client",
+    session_id: str = "",
     include_global: bool = True,   # NEW
     include_shared: bool = True,   # NEW
 ) -> dict
+```
+
+### Pending Store + Daemon Materializer Changes
+
+**`cli/pending_store.py`**: No schema change needed — `metadata` JSON column already accepts arbitrary fields. The `scope` and `shared_with` values are stored as metadata entries.
+
+**`server/unified_daemon.py`** (`_start_pending_materializer`): When calling `engine.store()`, extract `scope` and `shared_with` from pending item metadata and pass them through:
+
+```python
+# In the materializer loop (currently at ~line 1270):
+metadata = json.loads(item["metadata"])
+engine.store(
+    item["content"],
+    scope=metadata.get("scope", "personal"),
+    shared_with=metadata.get("shared_with"),
+)
 ```
 
 ### No New Tools in Phase 1
@@ -328,7 +360,31 @@ def downgrade(db):
     for table in TABLES:
         db.execute(f"DROP INDEX IF EXISTS idx_{table}_scope")
         db.execute(f"DROP INDEX IF EXISTS idx_{table}_profile_scope")
+    # Note: SQLite < 3.35.0 does not support DROP COLUMN.
+    # Columns remain but are harmless (DEFAULT 'personal' / NULL).
 ```
+
+---
+
+## Performance Considerations
+
+### Recall Pipeline: Multi-Scope Retrieval Cost
+
+The recall pipeline runs 2-3 separate retrieval passes per query:
+
+1. **Personal scope** (always): 7 channels against agent's own memories
+2. **Global scope** (if `include_global=True`): 7 channels against all global memories
+3. **Shared-with-me** (if `include_shared=True`): filtered query for items where agent is in `shared_with`
+
+This means up to **3x channel invocation** per recall. Mitigation strategies:
+
+- Global and shared passes can run in parallel with personal pass (thread pool)
+- Global scope queries benefit from the `idx_*_scope` index (fast filtering)
+- `json_each()` on `shared_with` cannot use a regular index — for Phase 1 this is acceptable because point-to-point sharing is low-frequency. If it becomes a bottleneck in Phase 2, consider a materialized `shared_with_flat` junction table.
+
+### RRF Fusion Overhead
+
+The weighted RRF fusion adds one dict lookup per result (scope → weight). This is negligible compared to channel retrieval cost.
 
 ---
 
@@ -336,12 +392,15 @@ def downgrade(db):
 
 ### Test Pattern: Simulated Multi-Agent
 
-Tests create multiple `MemoryEngine` instances with different `profile_id`s to simulate different agents:
+Tests create multiple `MemoryEngine` instances with different `SLMConfig.active_profile` values to simulate different agents:
 
 ```python
 def test_cross_agent_global_visibility(in_memory_db, mock_embedder):
-    engine_zhihui = MemoryEngine(config=config, profile_id="zhihui")
-    engine_xiaoming = MemoryEngine(config=config, profile_id="xiaoming")
+    config_zhihui = SLMConfig(active_profile="zhihui")
+    config_xiaoming = SLMConfig(active_profile="xiaoming")
+
+    engine_zhihui = MemoryEngine(config=config_zhihui)
+    engine_xiaoming = MemoryEngine(config=config_xiaoming)
 
     # Zhihui stores global memory
     engine_zhihui.store("Project uses React 19", scope="global")
@@ -372,16 +431,16 @@ def test_cross_agent_global_visibility(in_memory_db, mock_embedder):
 |--------|--------------|
 | Schema + migration | ~50 |
 | Models | ~20 |
-| DatabaseManager | ~100 |
+| DatabaseManager | ~200 |
 | MemoryEngine | ~40 |
 | StorePipeline | ~30 |
 | RecallPipeline | ~80 |
 | Retrieval Channels (7 files) | ~100 |
-| MCP Tools | ~60 |
-| Config + migration | ~40 |
-| **Total** | **~520** |
+| MCP Tools + Pending Store | ~80 |
+| Config + migration | ~50 |
+| **Total** | **~620** |
 
-Compared to original roadmap (~1200 lines), this is a 57% reduction by eliminating group management, group permissions, join/leave tools, and entity alias tables.
+Compared to original roadmap (~1200 lines), this is a ~48% reduction by eliminating group management, group permissions, join/leave tools, and entity alias tables.
 
 ---
 
