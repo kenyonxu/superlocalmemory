@@ -711,6 +711,23 @@ Priority methods to update (read queries in the retrieval path):
 Run: `pytest tests/test_scope_db.py -v`
 Expected: All PASS
 
+- [ ] **Step 7b: Update _row_to_fact() and other row-to-model mappings**
+
+In `src/superlocalmemory/storage/database.py`, update `_row_to_fact()` (~line 217) to read scope and shared_with from the row:
+
+```python
+# In _row_to_fact(), add these field mappings:
+scope=row.get("scope", "personal"),
+shared_with=json.loads(row["shared_with"]) if row.get("shared_with") else None,
+```
+
+Similarly update any other `_row_to_*` methods that map to data classes with scope fields:
+- `_row_to_memory()` (if exists) — for MemoryRecord
+- `_row_to_entity()` (if exists) — for CanonicalEntity
+- `_row_to_edge()` (if exists) — for GraphEdge
+
+Without this step, all retrieved facts would have `scope="personal"` regardless of actual DB values.
+
 - [ ] **Step 8: Run existing tests to verify no regression**
 
 Run: `pytest tests/ -q --tb=short -x`
@@ -943,7 +960,27 @@ fact.shared_with = shared_with
 
 Where facts are stored to the database (e.g., `db.insert_fact()` or equivalent INSERT), ensure scope and shared_with are included in the INSERT statement.
 
-Check `database.py` for the INSERT method and ensure it includes `scope` and `shared_with` columns. If it uses `**kwargs` or a model object, the fields should propagate automatically from the model.
+- [ ] **Step 2b: Update INSERT methods in database.py**
+
+In `src/superlocalmemory/storage/database.py`, update the write methods to include `scope` and `shared_with`:
+
+1. `store_memory()` (~line 152-161) — add `scope` and `shared_with` to the INSERT column list
+2. `store_fact()` or the equivalent INSERT for `atomic_facts` (~line 192-214) — same
+3. `store_entity()` or equivalent for `canonical_entities` — same
+4. `store_edge()` or equivalent for `graph_edges` — same
+5. `store_temporal_event()` or equivalent for `temporal_events` — same
+
+Each INSERT should add:
+```sql
+scope, shared_with
+```
+to the column list and
+```sql
+?, ?
+```
+to the VALUES, with `scope` and `shared_with` (JSON-serialized) as bind parameters.
+
+If these methods accept model objects (e.g., `store_fact(fact: AtomicFact)`), the fields propagate automatically from the model attributes set in Step 2. Verify by reading the actual method signatures.
 
 - [ ] **Step 3: Run engine tests**
 
@@ -1049,10 +1086,28 @@ def _run_channels(
 ) -> dict[str, list[tuple[str, float]]]:
 ```
 
-For `scope="global"`: pass `profile_id=None` to channels (no profile filter).
-For `scope="shared"`: pass profile_id normally; channels use shared_with filter.
+**How each scope value changes channel behavior:**
 
-Each channel's `search()` call gets an additional `scope` parameter.
+| scope value | profile_id passed to channel | Effect in DB WHERE clause |
+|-------------|------------------------------|---------------------------|
+| `"personal"` | `profile_id` (agent's own) | `scope='personal' AND profile_id=?` |
+| `"global"` | `profile_id` (for embedding, but DB ignores it) | `scope='global'` (no profile filter) |
+| `"shared"` | `profile_id` (the recalling agent) | `? IN json_each(shared_with)` |
+
+For `scope="global"`: channels still receive `profile_id` (needed for VectorStore embedding scoping and logging), but DB methods are called with `include_global=True, include_shared=False, scope="global"`. The DB `_scope_where` helper produces `WHERE scope='global'` only.
+
+For `scope="shared"`: channels receive `profile_id` normally. DB methods are called with `include_global=False, include_shared=True, scope="personal"`. The DB `_scope_where` helper produces `WHERE (? IN json_each(shared_with))` only.
+
+This means the DB methods need the full combination of flags, not just a single `scope` string. The `_run_channels` method translates the scope enum into the correct DB flags:
+
+```python
+if scope == "global":
+    db_kwargs = dict(scope="personal", include_global=True, include_shared=False)
+elif scope == "shared":
+    db_kwargs = dict(scope="personal", include_global=False, include_shared=True)
+else:  # personal
+    db_kwargs = dict(scope="personal", include_global=False, include_shared=False)
+```
 
 - [ ] **Step 5: Run engine tests**
 
@@ -1163,6 +1218,8 @@ git commit -m "feat(scope): add scope parameter to 7 retrieval channels"
 **Files:**
 - Modify: `src/superlocalmemory/mcp/tools_core.py`
 - Modify: `src/superlocalmemory/server/unified_daemon.py`
+- Modify: `src/superlocalmemory/core/worker_pool.py`
+- Modify: `src/superlocalmemory/core/recall_worker.py` (if exists)
 
 - [ ] **Step 1: Update remember MCP tool**
 
@@ -1190,10 +1247,11 @@ pending_id = store_pending(content, tags=tags, metadata={
 })
 ```
 
-- [ ] **Step 2: Update recall MCP tool**
+- [ ] **Step 2: Update recall MCP tool + WorkerPool IPC chain**
 
-In `src/superlocalmemory/mcp/tools_core.py`, modify `recall()` (line ~142):
+The MCP recall tool uses `pool.recall()` which sends commands to a `recall_worker.py` subprocess via JSON-over-stdin/stdout. The `include_global`/`include_shared` flags must propagate through this entire IPC chain:
 
+1. **`tools_core.py`** — add parameters to `recall()`:
 ```python
 async def recall(
     query: str, limit: int = 10,
@@ -1204,12 +1262,31 @@ async def recall(
 ) -> dict:
 ```
 
-Note: The recall tool uses `pool.recall()` via WorkerPool. The `include_global`/`include_shared` flags need to propagate through to `engine.recall()`. Check if WorkerPool.recall() supports additional kwargs or if it needs updating.
+2. **`worker_pool.py`** — update `WorkerPool.recall()` (~line 68) to accept and pass the flags:
+```python
+def recall(self, query, limit=10, session_id="", include_global=True, include_shared=True):
+    # Add include_global/include_shared to the _send() command dict
+```
 
-- [ ] **Step 3: Update daemon materializer**
+3. **`recall_worker.py`** — update `_handle_recall()` (~line 60) to accept and pass the flags to `engine.recall()`:
+```python
+def _handle_recall(cmd):
+    result = engine.recall(
+        cmd["query"],
+        limit=cmd.get("limit", 10),
+        session_id=cmd.get("session_id", ""),
+        include_global=cmd.get("include_global", True),
+        include_shared=cmd.get("include_shared", True),
+    )
+```
 
-In `src/superlocalmemory/server/unified_daemon.py`, modify the materializer loop (~line 1283):
+Without updating all 3 layers, the MCP recall tool's `include_global`/`include_shared` parameters would be silently discarded.
 
+- [ ] **Step 3: Update daemon materializer (BOTH locations)**
+
+In `src/superlocalmemory/server/unified_daemon.py`, there are TWO places that process pending items:
+
+**Location A: `_start_pending_materializer()`** (~line 1283, background thread):
 ```python
 # Extract scope from metadata
 scope = md.get("scope", "personal")
@@ -1224,12 +1301,25 @@ engine.store(
 mark_done(item["id"])
 ```
 
+**Location B: `_process_pending_queue()`** (~line 295, engine init retry):
+This function also calls `engine.store()` for pending items. Apply the same scope extraction:
+```python
+md_str = item.get("metadata") or "{}"
+md = json.loads(md_str)
+scope = md.get("scope", "personal")
+shared_with = md.get("shared_with")
+
+engine.store(item["content"], metadata=md, scope=scope, shared_with=shared_with)
+```
+
 - [ ] **Step 4: Commit**
 
 ```bash
 git add src/superlocalmemory/mcp/tools_core.py \
-        src/superlocalmemory/server/unified_daemon.py
-git commit -m "feat(scope): MCP tools + daemon materializer scope support"
+        src/superlocalmemory/server/unified_daemon.py \
+        src/superlocalmemory/core/worker_pool.py \
+        src/superlocalmemory/core/recall_worker.py
+git commit -m "feat(scope): MCP tools + WorkerPool IPC + daemon scope support"
 ```
 
 ---
