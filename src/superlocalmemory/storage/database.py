@@ -203,8 +203,9 @@ class DatabaseManager:
         self.execute(
             """INSERT OR REPLACE INTO memories
                (memory_id, profile_id, content, session_id, speaker,
-                role, session_date, created_at, metadata_json)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+                role, session_date, created_at, metadata_json,
+                scope, shared_with)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 record.memory_id,
                 record.profile_id,
@@ -215,6 +216,8 @@ class DatabaseManager:
                 record.session_date,
                 record.created_at,
                 json.dumps(record.metadata),
+                record.scope,
+                _jd(record.shared_with),
             ),
         )
         return record.memory_id
@@ -256,8 +259,9 @@ class DatabaseManager:
                 source_turn_ids_json, session_id,
                 embedding, fisher_mean, fisher_variance,
                 lifecycle, langevin_position,
-                emotional_valence, emotional_arousal, signal_type, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                emotional_valence, emotional_arousal, signal_type, created_at,
+                scope, shared_with)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 fact.fact_id,
                 fact.memory_id,
@@ -285,6 +289,8 @@ class DatabaseManager:
                 fact.emotional_arousal,
                 fact.signal_type.value,
                 fact.created_at,
+                fact.scope,
+                _jd(fact.shared_with),
             ),
         )
         return fact.fact_id
@@ -462,8 +468,9 @@ class DatabaseManager:
         self.execute(
             """INSERT OR REPLACE INTO canonical_entities
                (entity_id, profile_id, canonical_name, entity_type,
-                first_seen, last_seen, fact_count)
-               VALUES (?,?,?,?,?,?,?)""",
+                first_seen, last_seen, fact_count,
+                scope, shared_with)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (
                 entity.entity_id,
                 entity.profile_id,
@@ -472,6 +479,8 @@ class DatabaseManager:
                 entity.first_seen,
                 entity.last_seen,
                 entity.fact_count,
+                entity.scope,
+                _jd(entity.shared_with),
             ),
         )
         return entity.entity_id
@@ -560,8 +569,9 @@ class DatabaseManager:
         """Persist a graph edge. Returns edge_id."""
         self.execute(
             """INSERT OR REPLACE INTO graph_edges
-               (edge_id, profile_id, source_id, target_id, edge_type, weight, created_at)
-               VALUES (?,?,?,?,?,?,?)""",
+               (edge_id, profile_id, source_id, target_id, edge_type, weight, created_at,
+                scope, shared_with)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (
                 edge.edge_id,
                 edge.profile_id,
@@ -570,6 +580,8 @@ class DatabaseManager:
                 edge.edge_type.value,
                 edge.weight,
                 edge.created_at,
+                edge.scope,
+                _jd(edge.shared_with),
             ),
         )
         return edge.edge_id
@@ -609,8 +621,8 @@ class DatabaseManager:
             """INSERT OR REPLACE INTO temporal_events
                (event_id, profile_id, entity_id, fact_id,
                 observation_date, referenced_date, interval_start, interval_end,
-                description)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+                description, scope, shared_with)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 event.event_id,
                 event.profile_id,
@@ -621,6 +633,8 @@ class DatabaseManager:
                 event.interval_start,
                 event.interval_end,
                 event.description,
+                event.scope,
+                _jd(event.shared_with),
             ),
         )
         return event.event_id
