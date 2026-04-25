@@ -65,3 +65,48 @@ def test_shared_with_default_is_null(fresh_db):
     )
     row = fresh_db.execute("SELECT shared_with FROM atomic_facts WHERE fact_id='f2'").fetchone()
     assert row["shared_with"] is None
+
+
+# ---------------------------------------------------------------------------
+# Dataclass field tests
+# ---------------------------------------------------------------------------
+
+
+def test_atomic_fact_has_scope_field():
+    from superlocalmemory.storage.models import AtomicFact
+
+    fact = AtomicFact(fact_id="f1", memory_id="m1", content="test")
+    assert fact.scope == "personal"
+    assert fact.shared_with is None
+
+
+def test_graph_edge_has_scope_field():
+    from superlocalmemory.storage.models import GraphEdge
+
+    edge = GraphEdge(edge_id="e1", source_id="s1", target_id="t1")
+    assert edge.scope == "personal"
+    assert edge.shared_with is None
+
+
+def test_canonical_entity_has_scope_field():
+    from superlocalmemory.storage.models import CanonicalEntity
+
+    entity = CanonicalEntity(entity_id="ent1", canonical_name="React")
+    assert entity.scope == "personal"
+    assert entity.shared_with is None
+
+
+def test_temporal_event_has_scope_field():
+    from superlocalmemory.storage.models import TemporalEvent
+
+    event = TemporalEvent(event_id="ev1", entity_id="ent1", fact_id="f1")
+    assert event.scope == "personal"
+    assert event.shared_with is None
+
+
+def test_memory_record_has_scope_field():
+    from superlocalmemory.storage.models import MemoryRecord
+
+    rec = MemoryRecord(memory_id="m1", content="test")
+    assert rec.scope == "personal"
+    assert rec.shared_with is None
