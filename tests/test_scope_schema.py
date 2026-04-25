@@ -110,3 +110,58 @@ def test_memory_record_has_scope_field():
     rec = MemoryRecord(memory_id="m1", content="test")
     assert rec.scope == "personal"
     assert rec.shared_with is None
+
+
+# ---------------------------------------------------------------------------
+# M014 migration test
+# ---------------------------------------------------------------------------
+
+
+def test_m014_migration_adds_columns():
+    """M014 migration should add scope/shared_with to an existing DB without them."""
+    from superlocalmemory.storage.migrations.M014_add_scope_support import DDL, verify
+
+    # Create a minimal DB with tables but WITHOUT scope columns
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE IF NOT EXISTS atomic_facts (
+        fact_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL DEFAULT 'default',
+        content TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS memories (
+        memory_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL DEFAULT 'default',
+        content TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS canonical_entities (
+        entity_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL DEFAULT 'default',
+        canonical_name TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS graph_edges (
+        edge_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL DEFAULT 'default',
+        source_id TEXT NOT NULL, target_id TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS temporal_events (
+        event_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL DEFAULT 'default',
+        entity_id TEXT NOT NULL, fact_id TEXT NOT NULL)""")
+    conn.commit()
+
+    # Insert existing data (should be preserved)
+    conn.execute("INSERT INTO atomic_facts (fact_id, profile_id, content) VALUES ('old1', 'alice', 'old fact')")
+    conn.commit()
+
+    # Verify not yet applied
+    assert not verify(conn)
+
+    # Run DDL
+    conn.executescript(DDL)
+
+    # Verify applied
+    assert verify(conn)
+
+    # Verify columns added
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(atomic_facts)").fetchall()}
+    assert "scope" in cols
+    assert "shared_with" in cols
+
+    # Verify existing data has default scope='personal'
+    row = conn.execute("SELECT scope, shared_with FROM atomic_facts WHERE fact_id='old1'").fetchone()
+    assert row["scope"] == "personal"
+    assert row["shared_with"] is None
+
+    conn.close()

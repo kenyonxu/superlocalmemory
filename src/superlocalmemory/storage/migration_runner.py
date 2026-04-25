@@ -50,6 +50,7 @@ from superlocalmemory.storage.migrations import (
     M012_shadow_observations as _M012,
     M013_bi_temporal_columns as _M013,
     M014_v345_scale_ready as _M014,
+    M016_add_scope_support as _M016,
 )
 
 # Map migration name → module (used for the optional ``verify(conn)`` hook
@@ -130,6 +131,9 @@ DEFERRED_MIGRATIONS: list[Migration] = [
     # as M011.
     Migration(name=_M013.NAME, db_target="memory", ddl=_M013.DDL),
     Migration(name=_M014.NAME, db_target="memory", ddl=_M014.DDL),
+    # M016 adds scope/shared_with columns to core tables. Deferred for the
+    # same engine-init-bootstrap reason as M011 and M013.
+    Migration(name=_M016.NAME, db_target="memory", ddl=_M016.DDL),
 ]
 
 
