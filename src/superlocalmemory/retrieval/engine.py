@@ -565,14 +565,6 @@ class RetrievalEngine:
                 )
                 if r:
                     out["semantic"] = r
-            except TypeError:
-                # Channel doesn't accept scope yet (pre-Task-8); call without it
-                try:
-                    r = self._semantic.search(q_emb, profile_id, self._config.semantic_top_k)
-                    if r:
-                        out["semantic"] = r
-                except Exception as exc:
-                    logger.warning("Semantic channel: %s", exc)
             except Exception as exc:
                 logger.warning("Semantic channel: %s", exc)
 
@@ -581,13 +573,6 @@ class RetrievalEngine:
                 r = self._bm25.search(query, profile_id, self._config.bm25_top_k, scope=scope)
                 if r:
                     out["bm25"] = r
-            except TypeError:
-                try:
-                    r = self._bm25.search(query, profile_id, self._config.bm25_top_k)
-                    if r:
-                        out["bm25"] = r
-                except Exception as exc:
-                    logger.warning("BM25 channel: %s", exc)
             except Exception as exc:
                 logger.warning("BM25 channel: %s", exc)
 
@@ -602,13 +587,6 @@ class RetrievalEngine:
                 )
                 if r:
                     out["temporal"] = r
-            except TypeError:
-                try:
-                    r = self._temporal.search(query, profile_id, top_k=self._config.bm25_top_k)
-                    if r:
-                        out["temporal"] = r
-                except Exception as exc:
-                    logger.warning("Temporal channel: %s", exc)
             except Exception as exc:
                 logger.warning("Temporal channel: %s", exc)
 
@@ -620,13 +598,6 @@ class RetrievalEngine:
                 )
                 if r:
                     out["hopfield"] = r
-            except TypeError:
-                try:
-                    r = self._hopfield.search(q_emb, profile_id, self._config.hopfield_top_k)
-                    if r:
-                        out["hopfield"] = r
-                except Exception as exc:
-                    logger.warning("Hopfield channel: %s", exc)
             except Exception as exc:
                 logger.warning("Hopfield channel: %s", exc)
 
@@ -642,15 +613,6 @@ class RetrievalEngine:
                 )
                 if r:
                     out["spreading_activation"] = r
-            except TypeError:
-                try:
-                    r = self._spreading_activation.search(
-                        q_emb, profile_id, self._config.bm25_top_k
-                    )
-                    if r:
-                        out["spreading_activation"] = r
-                except Exception as exc:
-                    logger.warning("Spreading activation channel: %s", exc)
             except Exception as exc:
                 logger.warning("Spreading activation channel: %s", exc)
 

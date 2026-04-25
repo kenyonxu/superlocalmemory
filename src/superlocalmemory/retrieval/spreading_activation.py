@@ -96,6 +96,8 @@ class SpreadingActivation:
         query: Any,
         profile_id: str = "",
         top_k: int = 7,
+        *,
+        scope: str = "personal",
     ) -> list[tuple[str, float]]:
         """Channel-compatible interface: (query, top_k) -> [(fact_id, score)].
 

@@ -151,6 +151,8 @@ class BM25Channel:
         query: str,
         profile_id: str,
         top_k: int = 30,
+        *,
+        scope: str = "personal",
     ) -> list[tuple[str, float]]:
         """Search BM25 index for matching facts.
 
@@ -160,6 +162,7 @@ class BM25Channel:
             query: Search query text.
             profile_id: Scope to this profile.
             top_k: Maximum results.
+            scope: Memory scope to search (personal, global, shared).
 
         Returns:
             List of (fact_id, bm25_score) sorted by score descending.

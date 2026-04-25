@@ -88,6 +88,8 @@ class HopfieldChannel:
         query: Any,
         profile_id: str,
         top_k: int = 50,
+        *,
+        scope: str = "personal",
     ) -> list[tuple[str, float]]:
         """Search for facts using Hopfield associative retrieval.
 
@@ -95,6 +97,7 @@ class HopfieldChannel:
             query: Query embedding (list[float] or np.ndarray).
             profile_id: Scope search to this profile.
             top_k: Maximum results to return.
+            scope: Memory scope to search (personal, global, shared).
 
         Returns:
             List of (fact_id, score) sorted by score descending.
@@ -105,7 +108,7 @@ class HopfieldChannel:
             return []
 
         try:
-            return self._search_inner(query, profile_id, top_k)
+            return self._search_inner(query, profile_id, top_k, scope=scope)
         except Exception as exc:
             # HR-06: Return [] on any error
             logger.warning("Hopfield channel error: %s", exc)
@@ -118,6 +121,8 @@ class HopfieldChannel:
         query: Any,
         profile_id: str,
         top_k: int,
+        *,
+        scope: str = "personal",
     ) -> list[tuple[str, float]]:
         """Core search logic, separated for clean error handling."""
         # Step 2: Convert query to numpy
@@ -146,7 +151,7 @@ class HopfieldChannel:
             return []
 
         # Step 4: Get memory matrix
-        memory_matrix, fact_ids = self._get_memory_matrix(profile_id)
+        memory_matrix, fact_ids = self._get_memory_matrix(profile_id, scope=scope)
 
         # Step 5: Empty check
         if memory_matrix is None or len(fact_ids) == 0:
@@ -155,7 +160,7 @@ class HopfieldChannel:
         # Step 6/7: Route by size
         if len(fact_ids) > self._config.prefilter_threshold:
             return self._search_with_prefilter(
-                q_vec, profile_id, fact_ids, top_k,
+                q_vec, profile_id, fact_ids, top_k, scope=scope,
             )
         return self._search_full_matrix(
             q_vec, memory_matrix, fact_ids, top_k,
@@ -207,6 +212,8 @@ class HopfieldChannel:
         profile_id: str,
         all_fact_ids: list[str],
         top_k: int,
+        *,
+        scope: str = "personal",
     ) -> list[tuple[str, float]]:
         """Two-stage retrieval for large stores (>prefilter_threshold facts).
 
@@ -236,6 +243,9 @@ class HopfieldChannel:
         # Stage 2: Load candidate facts
         candidate_ids = [fid for fid, _ in knn_results]
         candidates = self._db.get_facts_by_ids(candidate_ids, profile_id)
+        # Scope filter: only keep facts matching the requested scope
+        if scope != "personal":
+            candidates = [f for f in candidates if getattr(f, "scope", "personal") == scope]
         if not candidates:
             return []
 
@@ -262,7 +272,7 @@ class HopfieldChannel:
         return self._search_full_matrix(query, sub_matrix, sub_ids, top_k)
 
     def _get_memory_matrix(
-        self, profile_id: str,
+        self, profile_id: str, *, scope: str = "personal",
     ) -> tuple[np.ndarray | None, list[str]]:
         """Build or retrieve cached memory matrix X (n x d).
 
@@ -289,7 +299,12 @@ class HopfieldChannel:
             return (self._cached_matrix, self._cached_fact_ids)
 
         # Step 2: Load facts (V3.3.12: cap to most recent 5000 to bound memory)
-        facts = self._db.get_all_facts(profile_id)[:5000]
+        include_global = (scope == "global")
+        include_shared = (scope == "shared")
+        facts = self._db.get_all_facts(
+            profile_id, scope="personal",
+            include_global=include_global, include_shared=include_shared,
+        )[:5000]
         if not facts:
             return (None, [])
 
