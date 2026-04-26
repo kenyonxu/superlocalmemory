@@ -171,3 +171,67 @@ def test_engine_merge_entities(tmp_path):
     )
 
     assert result["source_deleted"] is True
+
+
+def test_cmd_entity_merge(tmp_path, monkeypatch, capsys):
+    """cmd_entity_merge constructs engine and calls merge_entities."""
+    from superlocalmemory.cli.commands import cmd_entity_merge
+    from unittest.mock import MagicMock, patch
+    from argparse import Namespace
+
+    monkeypatch.setenv("SLM_DATA_DIR", str(tmp_path))
+
+    args = Namespace(source="src_123", target="tgt_456", profile="default", json=False)
+
+    with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+         patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+        mock_engine = MagicMock()
+        mock_engine.merge_entities.return_value = {
+            "aliases_moved": 2, "facts_updated": 1, "edges_updated": 0,
+            "source_deleted": True,
+        }
+        MockEngine.return_value = mock_engine
+        MockConfig.load.return_value = MagicMock()
+
+        cmd_entity_merge(args)
+
+    mock_engine.merge_entities.assert_called_once_with(
+        source_entity_id="src_123", target_entity_id="tgt_456",
+    )
+    captured = capsys.readouterr()
+    assert "Merged" in captured.out
+
+
+def test_cmd_entity_list(tmp_path, monkeypatch, capsys):
+    """cmd_entity_list shows entities with their scope."""
+    from superlocalmemory.cli.commands import cmd_entity_list
+    from unittest.mock import MagicMock, patch
+    from argparse import Namespace
+    from superlocalmemory.storage import schema
+    from superlocalmemory.storage.database import DatabaseManager
+    from superlocalmemory.storage.models import CanonicalEntity, _new_id, _now
+
+    monkeypatch.setenv("SLM_DATA_DIR", str(tmp_path))
+
+    args = Namespace(scope="personal", profile="default", json=False, limit=50)
+
+    with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+         patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+        mock_engine = MagicMock()
+
+        # Use a real DB for entity listing
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        db.initialize(schema)
+        db.store_entity(CanonicalEntity(
+            entity_id=_new_id(), profile_id="default", scope="personal",
+            canonical_name="ReactJS", entity_type="technology",
+            first_seen=_now(), last_seen=_now(), fact_count=3,
+        ))
+        mock_engine._db = db
+        MockEngine.return_value = mock_engine
+        MockConfig.load.return_value = MagicMock()
+
+        cmd_entity_list(args)
+
+    captured = capsys.readouterr()
+    assert "ReactJS" in captured.out

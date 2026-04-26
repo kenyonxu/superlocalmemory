@@ -429,6 +429,23 @@ def main() -> None:
         help="Rotate the SLM install token (run `slm restart` afterwards)",
     )
 
+    # Entity management (multi-scope memory)
+    entity_sp = sub.add_parser("entity", help="Entity management commands")
+    entity_sub = entity_sp.add_subparsers(dest="entity_command")
+
+    merge_p = entity_sub.add_parser("merge", help="Merge source entity into target")
+    merge_p.add_argument("source", help="Source entity ID (will be deleted)")
+    merge_p.add_argument("target", help="Target entity ID (kept)")
+    merge_p.add_argument("--profile", default="default", help="Profile ID")
+    merge_p.add_argument("--json", action="store_true")
+
+    list_p = entity_sub.add_parser("list", help="List entities by scope")
+    list_p.add_argument("--scope", default="personal",
+                        choices=["personal", "global", "shared"])
+    list_p.add_argument("--profile", default="default")
+    list_p.add_argument("--limit", type=int, default=50)
+    list_p.add_argument("--json", action="store_true")
+
     args = parser.parse_args()
 
     if not args.command:

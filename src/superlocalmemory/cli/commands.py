@@ -33,6 +33,86 @@ def _cmd_db_dispatch(args: Namespace) -> None:
     sys.exit(2)
 
 
+def _cmd_entity_dispatch(args: Namespace) -> None:
+    """Route ``slm entity ...`` subcommands."""
+    sub = getattr(args, "entity_command", None)
+    if sub == "merge":
+        cmd_entity_merge(args)
+        return
+    if sub == "list":
+        cmd_entity_list(args)
+        return
+    print("Usage: slm entity <merge|list> [options]")
+    sys.exit(2)
+
+
+def cmd_entity_merge(args: Namespace) -> None:
+    """Merge source entity into target entity."""
+    from superlocalmemory.core.config import SLMConfig
+    from superlocalmemory.core.engine import MemoryEngine
+
+    config = SLMConfig.load()
+    engine = MemoryEngine(config=config)
+    engine.initialize()
+
+    result = engine.merge_entities(
+        source_entity_id=args.source,
+        target_entity_id=args.target,
+    )
+
+    if getattr(args, "json", False):
+        from superlocalmemory.cli.json_output import json_print
+        json_print("entity-merge", data=result)
+        return
+
+    print(f"Merged entity {args.source} -> {args.target}")
+    print(f"  Aliases moved: {result.get('aliases_moved', 0)}")
+    print(f"  Facts updated: {result.get('facts_updated', 0)}")
+    print(f"  Edges updated: {result.get('edges_updated', 0)}")
+    if result.get("source_deleted"):
+        print("  Source entity deleted")
+    else:
+        print("  WARNING: Source entity was NOT deleted")
+
+
+def cmd_entity_list(args: Namespace) -> None:
+    """List entities filtered by scope."""
+    from superlocalmemory.core.config import SLMConfig
+    from superlocalmemory.core.engine import MemoryEngine
+
+    config = SLMConfig.load()
+    engine = MemoryEngine(config=config)
+    engine.initialize()
+
+    scope = getattr(args, "scope", "personal")
+    limit = getattr(args, "limit", 50)
+
+    entities = engine._db.get_entities_by_scope(
+        profile_id=getattr(args, "profile", "default"),
+        scope=scope,
+    )[:limit]
+
+    if getattr(args, "json", False):
+        from superlocalmemory.cli.json_output import json_print
+        json_print("entity-list", data=[{
+            "entity_id": e.entity_id,
+            "canonical_name": e.canonical_name,
+            "scope": e.scope,
+            "entity_type": e.entity_type,
+            "fact_count": e.fact_count,
+        } for e in entities])
+        return
+
+    if not entities:
+        print(f"No entities found with scope='{scope}'")
+        return
+
+    print(f"Entities (scope={scope}):")
+    for e in entities:
+        print(f"  {e.entity_id[:12]}...  {e.canonical_name:30s}  "
+              f"type={e.entity_type:15s}  facts={e.fact_count}")
+
+
 def _cmd_escape_disable(args: Namespace) -> None:
     from superlocalmemory.cli.escape_hatch import cmd_disable
     cmd_disable(args)
@@ -119,6 +199,7 @@ def dispatch(args: Namespace) -> None:
         "context": _cmd_context_dispatch,
         # V3.4.22 LLD-06 additive schema migrations
         "db": _cmd_db_dispatch,
+        "entity": _cmd_entity_dispatch,
         # V3.4.22 Stage 8 SB-5 — MASTER-PLAN §8 escape hatches.
         "disable": _cmd_escape_disable,
         "enable": _cmd_escape_enable,
