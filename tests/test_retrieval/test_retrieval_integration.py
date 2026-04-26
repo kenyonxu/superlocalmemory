@@ -218,7 +218,8 @@ class TestChannelDisabling:
         )
         engine.recall("q", "default")
         bm25_ch.search.assert_not_called()
-        sem_ch.search.assert_called_once()
+        # Multi-scope: semantic is called once per scope (personal, global, shared)
+        assert sem_ch.search.call_count == 3
 
     def test_empty_disabled_all_channels_run(self) -> None:
         """An empty disabled_channels list means all channels are active."""
@@ -237,8 +238,9 @@ class TestChannelDisabling:
             embedder=_mock_embedder(),
         )
         engine.recall("q", "default")
-        sem_ch.search.assert_called_once()
-        bm25_ch.search.assert_called_once()
+        # Multi-scope: each channel is called once per scope (personal, global, shared)
+        assert sem_ch.search.call_count == 3
+        assert bm25_ch.search.call_count == 3
 
 
 # ---------------------------------------------------------------------------

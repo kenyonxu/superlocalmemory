@@ -105,6 +105,8 @@ def register_core_tools(server, get_engine: Callable) -> None:
         content: str, tags: str = "", project: str = "",
         importance: int = 5, session_id: str = "",
         agent_id: str = "mcp_client",
+        scope: str = "personal",
+        shared_with: str = "",
     ) -> dict:
         """Store content to memory with intelligent indexing.
 
@@ -124,6 +126,8 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 "importance": importance,
                 "agent_id": agent_id,
                 "session_id": session_id,
+                "scope": scope,
+                "shared_with": shared_with.split(",") if shared_with else None,
             })
 
             return {
@@ -142,6 +146,8 @@ def register_core_tools(server, get_engine: Callable) -> None:
     async def recall(
         query: str, limit: int = 10, agent_id: str = "mcp_client",
         session_id: str = "",
+        include_global: bool = True,
+        include_shared: bool = True,
     ) -> dict:
         """Search memories by semantic query with 4-channel retrieval, RRF fusion, and reranking.
 
@@ -199,6 +205,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             # block behind a single threading.Lock. See worker_pool.py.
             result = await asyncio.to_thread(
                 pool.recall, query, limit=limit, session_id=effective_sid,
+                include_global=include_global, include_shared=include_shared,
             )
             if result.get("ok"):
                 # Record implicit feedback: every returned result is a recall_hit

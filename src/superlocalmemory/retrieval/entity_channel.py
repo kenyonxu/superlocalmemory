@@ -239,7 +239,14 @@ class EntityGraphChannel:
         self._graph_metrics.clear()
         self._graph_metrics_profile = ""
 
-    def search(self, query: str, profile_id: str, top_k: int = 50) -> list[tuple[str, float]]:
+    def search(
+        self,
+        query: str,
+        profile_id: str,
+        top_k: int = 50,
+        *,
+        scope: str = "personal",
+    ) -> list[tuple[str, float]]:
         """Search via entity graph with spreading activation.
 
         V3.3.9: Uses in-memory adjacency for O(1) edge lookups.
@@ -375,6 +382,8 @@ class EntityGraphChannel:
         query: str,
         candidate_fact_ids: list[str],
         profile_id: str,
+        *,
+        scope: str = "personal",
     ) -> dict[str, float]:
         """Score candidate facts by their entity-graph proximity to query entities.
 

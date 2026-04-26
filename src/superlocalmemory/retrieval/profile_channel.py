@@ -59,6 +59,8 @@ class ProfileChannel:
         query: str,
         profile_id: str,
         top_k: int = 10,
+        *,
+        scope: str = "personal",
     ) -> list[tuple[str, float]]:
         """Search entity profiles for matching facts.
 
@@ -66,6 +68,7 @@ class ProfileChannel:
             query: User query text.
             profile_id: Scope to this profile.
             top_k: Maximum results to return.
+            scope: Memory scope to search (personal, global, shared).
 
         Returns:
             List of (fact_id, score) sorted by score descending.
@@ -78,7 +81,12 @@ class ProfileChannel:
         seen: set[str] = set()
 
         for name in entities:
-            entity = self._db.get_entity_by_name(name, profile_id)
+            include_global = (scope == "global")
+            include_shared = (scope == "shared")
+            entity = self._db.get_entity_by_name(
+                name, profile_id, scope="personal",
+                include_global=include_global, include_shared=include_shared,
+            )
             if not entity:
                 continue
 
