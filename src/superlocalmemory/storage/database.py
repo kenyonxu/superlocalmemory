@@ -84,6 +84,7 @@ class DatabaseManager:
         include_global: bool = True,
         include_shared: bool = True,
         table_alias: str = "",
+        skill_tags: list[str] | None = None,
     ) -> tuple[str, list]:
         """Build a scope-aware WHERE clause fragment.
 
@@ -104,12 +105,34 @@ class DatabaseManager:
             conditions.append(f"? IN (SELECT value FROM json_each({prefix}shared_with))")
             params.append(profile_id)
 
+        # Phase 2: domain tag overlap matching
+        if include_shared and skill_tags:
+            domain_placeholders = ",".join("?" * len(skill_tags))
+            conditions.append(
+                f"({prefix}domain_tags IS NOT NULL AND EXISTS ("
+                f"SELECT 1 FROM json_each({prefix}domain_tags) "
+                f"WHERE value IN ({domain_placeholders})))"
+            )
+            params.extend(skill_tags)
+
         if not conditions:
             conditions.append(f"({prefix}scope = 'personal' AND {prefix}profile_id = ?)")
             params.append(profile_id)
 
         sql = "(" + " OR ".join(conditions) + ")"
         return sql, params
+
+    def resolve_domain_tags(self, entity_names: list[str]) -> list[str]:
+        """Batch lookup entity names -> deduplicated domain tags."""
+        if not entity_names:
+            return []
+        placeholders = ",".join("?" * len(entity_names))
+        rows = self.execute(
+            f"SELECT DISTINCT domain FROM domain_mapping "
+            f"WHERE entity_name IN ({placeholders})",
+            tuple(entity_names),
+        )
+        return [r["domain"] for r in rows]
 
     def _enable_wal(self) -> None:
         conn = sqlite3.connect(str(self.db_path))
@@ -260,8 +283,8 @@ class DatabaseManager:
                 embedding, fisher_mean, fisher_variance,
                 lifecycle, langevin_position,
                 emotional_valence, emotional_arousal, signal_type, created_at,
-                scope, shared_with)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                scope, shared_with, domain_tags)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 fact.fact_id,
                 fact.memory_id,
@@ -291,6 +314,7 @@ class DatabaseManager:
                 fact.created_at,
                 fact.scope,
                 _jd(fact.shared_with),
+                _jd(fact.domain_tags),
             ),
         )
         return fact.fact_id
@@ -304,6 +328,7 @@ class DatabaseManager:
             profile_id=d["profile_id"],
             scope=d.get("scope", "personal"),
             shared_with=json.loads(d["shared_with"]) if d.get("shared_with") else None,
+            domain_tags=json.loads(d["domain_tags"]) if d.get("domain_tags") else None,
             content=d["content"],
             fact_type=FactType(d["fact_type"]),
             entities=_jl(d.get("entities_json")),
@@ -339,13 +364,16 @@ class DatabaseManager:
         scope: str = "personal",
         include_global: bool = True,
         include_shared: bool = True,
+        skill_tags: list[str] | None = None,
     ) -> list[AtomicFact]:
         """All facts for a profile, newest first.
 
         Scope-aware: filters by personal/global/shared based on parameters.
         Defaults preserve backward compatibility (sees all scopes).
         """
-        where_clause, params = self._scope_where(profile_id, scope, include_global, include_shared)
+        where_clause, params = self._scope_where(
+            profile_id, scope, include_global, include_shared, skill_tags=skill_tags,
+        )
         rows = self.execute(
             f"SELECT * FROM atomic_facts WHERE {where_clause} ORDER BY created_at DESC",
             params,
@@ -361,6 +389,7 @@ class DatabaseManager:
         scope: str = "personal",
         include_global: bool = True,
         include_shared: bool = True,
+        skill_tags: list[str] | None = None,
     ) -> list[AtomicFact]:
         """Facts whose canonical_entities JSON array contains *entity_id*.
 
@@ -369,7 +398,9 @@ class DatabaseManager:
         facts for popular entities (500+) causing 17GB+ memory usage.
         Ordered by created_at DESC so newest facts are always included.
         """
-        where_clause, params = self._scope_where(profile_id, scope, include_global, include_shared)
+        where_clause, params = self._scope_where(
+            profile_id, scope, include_global, include_shared, skill_tags=skill_tags,
+        )
         rows = self.execute(
             f"SELECT * FROM atomic_facts WHERE {where_clause} "
             "AND canonical_entities_json LIKE ? "
@@ -385,9 +416,12 @@ class DatabaseManager:
         scope: str = "personal",
         include_global: bool = True,
         include_shared: bool = True,
+        skill_tags: list[str] | None = None,
     ) -> list[AtomicFact]:
         """All facts of a given type for a profile."""
-        where_clause, params = self._scope_where(profile_id, scope, include_global, include_shared)
+        where_clause, params = self._scope_where(
+            profile_id, scope, include_global, include_shared, skill_tags=skill_tags,
+        )
         rows = self.execute(
             f"SELECT * FROM atomic_facts WHERE {where_clause} AND fact_type = ? "
             "ORDER BY created_at DESC",
@@ -454,9 +488,12 @@ class DatabaseManager:
         scope: str = "personal",
         include_global: bool = True,
         include_shared: bool = True,
+        skill_tags: list[str] | None = None,
     ) -> int:
         """Total fact count for a profile."""
-        where_clause, params = self._scope_where(profile_id, scope, include_global, include_shared)
+        where_clause, params = self._scope_where(
+            profile_id, scope, include_global, include_shared, skill_tags=skill_tags,
+        )
         rows = self.execute(
             f"SELECT COUNT(*) AS c FROM atomic_facts WHERE {where_clause}",
             params,
@@ -492,9 +529,12 @@ class DatabaseManager:
         scope: str = "personal",
         include_global: bool = True,
         include_shared: bool = True,
+        skill_tags: list[str] | None = None,
     ) -> CanonicalEntity | None:
         """Look up entity by name (case-insensitive)."""
-        where_clause, params = self._scope_where(profile_id, scope, include_global, include_shared)
+        where_clause, params = self._scope_where(
+            profile_id, scope, include_global, include_shared, skill_tags=skill_tags,
+        )
         rows = self.execute(
             f"SELECT * FROM canonical_entities WHERE {where_clause} "
             "AND LOWER(canonical_name) = LOWER(?)",
@@ -593,9 +633,12 @@ class DatabaseManager:
         scope: str = "personal",
         include_global: bool = True,
         include_shared: bool = True,
+        skill_tags: list[str] | None = None,
     ) -> list[GraphEdge]:
         """All edges where node_id is source or target."""
-        where_clause, params = self._scope_where(profile_id, scope, include_global, include_shared)
+        where_clause, params = self._scope_where(
+            profile_id, scope, include_global, include_shared, skill_tags=skill_tags,
+        )
         rows = self.execute(
             f"SELECT * FROM graph_edges WHERE {where_clause} AND (source_id = ? OR target_id = ?)",
             (*params, node_id, node_id),
@@ -646,9 +689,12 @@ class DatabaseManager:
         scope: str = "personal",
         include_global: bool = True,
         include_shared: bool = True,
+        skill_tags: list[str] | None = None,
     ) -> list[TemporalEvent]:
         """All temporal events for an entity, newest first."""
-        where_clause, params = self._scope_where(profile_id, scope, include_global, include_shared)
+        where_clause, params = self._scope_where(
+            profile_id, scope, include_global, include_shared, skill_tags=skill_tags,
+        )
         rows = self.execute(
             f"SELECT * FROM temporal_events WHERE {where_clause} AND entity_id = ? "
             "ORDER BY observation_date DESC",
@@ -694,6 +740,7 @@ class DatabaseManager:
         scope: str = "personal",
         include_global: bool = True,
         include_shared: bool = True,
+        skill_tags: list[str] | None = None,
     ) -> list[AtomicFact]:
         """Full-text search via FTS5, joined to facts table for reconstruction."""
         where_clause, params = self._scope_where(
@@ -702,6 +749,7 @@ class DatabaseManager:
             include_global,
             include_shared,
             table_alias="f",
+            skill_tags=skill_tags,
         )
         rows = self.execute(
             f"""SELECT f.* FROM atomic_facts_fts AS fts
@@ -1205,6 +1253,7 @@ class DatabaseManager:
         scope: str = "personal",
         include_global: bool = True,
         include_shared: bool = True,
+        skill_tags: list[str] | None = None,
     ) -> list[str]:
         """Get fact_ids that are currently valid (not expired).
 
@@ -1217,6 +1266,7 @@ class DatabaseManager:
             include_global,
             include_shared,
             table_alias="f",
+            skill_tags=skill_tags,
         )
         rows = self.execute(
             f"SELECT f.fact_id FROM atomic_facts f "
@@ -1405,6 +1455,7 @@ class DatabaseManager:
         scope: str = "personal",
         include_global: bool = True,
         include_shared: bool = True,
+        skill_tags: list[str] | None = None,
     ) -> list[dict]:
         """Get facts that need decay computation (excludes core memory).
 
@@ -1417,6 +1468,7 @@ class DatabaseManager:
             include_global,
             include_shared,
             table_alias="f",
+            skill_tags=skill_tags,
         )
         rows = self.execute(
             f"SELECT f.fact_id, f.created_at, f.profile_id "
