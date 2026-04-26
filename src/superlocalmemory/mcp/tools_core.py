@@ -547,6 +547,27 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("add_domain_mapping failed")
             return {"success": False, "error": str(exc)}
 
+    @server.tool(annotations=ToolAnnotations(destructiveHint=True))
+    async def remove_domain_mapping(entity_name: str, domain: str) -> dict:
+        """Remove an entity-to-domain mapping.
+
+        Use this to correct misclassifications from LLM-based domain tagging.
+        Example: remove_domain_mapping("Celery", "backend")
+        """
+        try:
+            engine = get_engine()
+            cursor = engine._db.execute(
+                "DELETE FROM domain_mapping WHERE entity_name = ? AND domain = ?",
+                (entity_name, domain),
+            )
+            engine._db.commit()
+            if cursor.rowcount == 0:
+                return {"success": False, "error": f"No mapping found for '{entity_name}' -> '{domain}'"}
+            return {"success": True, "removed": {"entity_name": entity_name, "domain": domain}}
+        except Exception as exc:
+            logger.exception("remove_domain_mapping failed")
+            return {"success": False, "error": str(exc)}
+
     @server.tool()
     async def get_attribution() -> dict:
         """Get system attribution: author, version, license, and provenance metadata."""
