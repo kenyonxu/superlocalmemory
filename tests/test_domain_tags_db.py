@@ -101,6 +101,30 @@ def test_domain_recall_visibility(in_memory_db):
     assert "react tip" not in contents2
 
 
+def test_slm_config_skill_tags():
+    from superlocalmemory.core.config import SLMConfig
+    config = SLMConfig(skill_tags=["backend", "devops"])
+    assert config.skill_tags == ["backend", "devops"]
+
+
+def test_slm_config_skill_tags_default():
+    from superlocalmemory.core.config import SLMConfig
+    config = SLMConfig()
+    assert config.skill_tags == []
+
+
+def test_profile_skill_tags():
+    from superlocalmemory.storage.models import Profile
+    p = Profile(profile_id="x", name="X", config={"skill_tags": ["frontend"]})
+    assert p.skill_tags == ["frontend"]
+
+
+def test_profile_skill_tags_default():
+    from superlocalmemory.storage.models import Profile
+    p = Profile(profile_id="x", name="X")
+    assert p.skill_tags == []
+
+
 def test_enrich_fact_resolves_domain_tags(dbm_with_mappings):
     """enrich_fact resolves domain_tags from entity names."""
     from unittest.mock import MagicMock

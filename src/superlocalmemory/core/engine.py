@@ -248,6 +248,16 @@ class MemoryEngine:
         self._auto_linker = enc.get("auto_linker")
         self._graph_analyzer = enc.get("graph_analyzer")
 
+        # Phase 2: load skill_tags from active profile config
+        try:
+            from superlocalmemory.core.profiles import ProfileManager
+            pm = ProfileManager(self._config.base_dir)
+            profile = pm.get_active_profile()
+            if profile and profile.skill_tags:
+                self._config.skill_tags = profile.skill_tags
+        except Exception:
+            pass  # skill_tags defaults to []
+
         self._retrieval_engine = init_retrieval(
             self._config,
             self._db,
