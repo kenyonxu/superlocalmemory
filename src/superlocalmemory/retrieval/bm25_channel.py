@@ -204,7 +204,7 @@ class BM25Channel:
                 fid = self._fact_ids[i]
                 # Scope filtering: BM25 needs full corpus for IDF, so filter post-score
                 fact_scope = self._fact_scopes.get(fid, "personal")
-                if scope != "personal" and fact_scope != scope:
+                if scope != "personal" and fact_scope != scope and fact_scope != "global":
                     continue
                 bonus = score
                 # Exact phrase match bonus: if the query appears as a substring in the document

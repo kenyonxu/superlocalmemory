@@ -63,6 +63,7 @@ import time
 
 # 方式 A：通过 SLM Python API 导入
 from superlocalmemory.core.engine import MemoryEngine
+from superlocalmemory.core.config import SLMConfig
 from superlocalmemory.storage.database import DatabaseManager
 from superlocalmemory.storage import schema
 from pathlib import Path
@@ -84,7 +85,8 @@ def import_memories(data_file: str, profile_id: str = "default") -> None:
         return
 
     # 初始化引擎
-    engine = MemoryEngine(profile_id=profile_id)
+    config = SLMConfig(active_profile=profile_id)
+    engine = MemoryEngine(config=config)
     engine.initialize()
 
     imported = 0
@@ -223,6 +225,7 @@ curl -X POST http://localhost:8765/api/import \
 
 import json
 from superlocalmemory.core.engine import MemoryEngine
+from superlocalmemory.core.config import SLMConfig
 
 def import_from_mem0(mem0_export_file: str, profile_id: str = "default"):
     """Mem0 导出格式通常是 [{"id": ..., "memory": "内容", "metadata": {...}}]"""
@@ -263,6 +266,7 @@ if __name__ == "__main__":
 import re
 from pathlib import Path
 from superlocalmemory.core.engine import MemoryEngine
+from superlocalmemory.core.config import SLMConfig
 
 def import_markdown_notes(
     notes_dir: str,
@@ -311,6 +315,7 @@ def import_markdown_notes(
 """多 Agent 协作初始化：预加载共享知识到 global scope。"""
 
 from superlocalmemory.core.engine import MemoryEngine
+from superlocalmemory.core.config import SLMConfig
 
 # 团队共享知识（所有 Agent 都应知道的信息）
 TEAM_KNOWLEDGE = [
