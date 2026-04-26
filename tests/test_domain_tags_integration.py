@@ -25,15 +25,11 @@ def dbm_with_mappings(tmp_path):
     db_path = tmp_path / "test.db"
     dbm = DatabaseManager(db_path)
     dbm.initialize(schema)
-    dbm.execute(
-        "INSERT INTO domain_mapping (entity_name, domain) VALUES ('React', 'frontend')"
-    )
+    dbm.execute("INSERT INTO domain_mapping (entity_name, domain) VALUES ('React', 'frontend')")
     dbm.execute(
         "INSERT INTO domain_mapping (entity_name, domain) VALUES ('TypeScript', 'frontend')"
     )
-    dbm.execute(
-        "INSERT INTO domain_mapping (entity_name, domain) VALUES ('PostgreSQL', 'backend')"
-    )
+    dbm.execute("INSERT INTO domain_mapping (entity_name, domain) VALUES ('PostgreSQL', 'backend')")
     return dbm
 
 
@@ -55,12 +51,8 @@ def test_cross_agent_domain_sharing(in_memory_db):
     """Agent B with matching skill sees domain-tagged fact from Agent A."""
     from superlocalmemory.storage.database import DatabaseManager
 
-    in_memory_db.execute(
-        "INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('a', 'A')"
-    )
-    in_memory_db.execute(
-        "INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('b', 'B')"
-    )
+    in_memory_db.execute("INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('a', 'A')")
+    in_memory_db.execute("INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('b', 'B')")
     in_memory_db.execute(
         "INSERT INTO memories (memory_id, profile_id, content, scope) "
         "VALUES ('m1', 'a', 'src', 'personal')"
@@ -74,18 +66,30 @@ def test_cross_agent_domain_sharing(in_memory_db):
     in_memory_db.commit()
 
     where_b, params_b = DatabaseManager._scope_where(
-        "b", "personal", False, True, "", skill_tags=["devops"],
+        "b",
+        "personal",
+        False,
+        True,
+        "",
+        skill_tags=["devops"],
     )
     rows = in_memory_db.execute(
-        f"SELECT content FROM atomic_facts WHERE {where_b}", params_b,
+        f"SELECT content FROM atomic_facts WHERE {where_b}",
+        params_b,
     )
     assert any(r["content"] == "docker-compose tip" for r in rows)
 
     where_b2, params_b2 = DatabaseManager._scope_where(
-        "b", "personal", False, True, "", skill_tags=["frontend"],
+        "b",
+        "personal",
+        False,
+        True,
+        "",
+        skill_tags=["frontend"],
     )
     rows2 = in_memory_db.execute(
-        f"SELECT content FROM atomic_facts WHERE {where_b2}", params_b2,
+        f"SELECT content FROM atomic_facts WHERE {where_b2}",
+        params_b2,
     )
     assert not any(r["content"] == "docker-compose tip" for r in rows2)
 
@@ -93,6 +97,7 @@ def test_cross_agent_domain_sharing(in_memory_db):
 def test_seed_data_loads_via_post_ddl_hook(in_memory_db):
     """M015 post_ddl_hook seeds domain_mapping correctly."""
     from superlocalmemory.storage.migrations.M015_add_domain_tags import post_ddl_hook
+
     post_ddl_hook(in_memory_db)
 
     row = in_memory_db.execute("SELECT COUNT(*) as c FROM domain_mapping").fetchone()
@@ -104,12 +109,8 @@ def test_null_domain_tags_invisible_to_domain_matching(in_memory_db):
     """Facts with domain_tags=NULL are NOT matched by domain overlap."""
     from superlocalmemory.storage.database import DatabaseManager
 
-    in_memory_db.execute(
-        "INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('a', 'A')"
-    )
-    in_memory_db.execute(
-        "INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('b', 'B')"
-    )
+    in_memory_db.execute("INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('a', 'A')")
+    in_memory_db.execute("INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('b', 'B')")
     in_memory_db.execute(
         "INSERT INTO memories (memory_id, profile_id, content, scope) "
         "VALUES ('m1', 'a', 'src', 'personal')"
@@ -122,10 +123,16 @@ def test_null_domain_tags_invisible_to_domain_matching(in_memory_db):
     in_memory_db.commit()
 
     where, params = DatabaseManager._scope_where(
-        "b", "personal", False, True, "", skill_tags=["frontend"],
+        "b",
+        "personal",
+        False,
+        True,
+        "",
+        skill_tags=["frontend"],
     )
     rows = in_memory_db.execute(
-        f"SELECT content FROM atomic_facts WHERE {where}", params,
+        f"SELECT content FROM atomic_facts WHERE {where}",
+        params,
     )
     assert not any(r["content"] == "untagged fact" for r in rows)
 
@@ -134,12 +141,8 @@ def test_domain_and_shared_and_domain_overlap_all_visible(in_memory_db):
     """All three visibility paths (personal, shared_with, domain overlap) coexist."""
     from superlocalmemory.storage.database import DatabaseManager
 
-    in_memory_db.execute(
-        "INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('a', 'A')"
-    )
-    in_memory_db.execute(
-        "INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('b', 'B')"
-    )
+    in_memory_db.execute("INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('a', 'A')")
+    in_memory_db.execute("INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('b', 'B')")
     in_memory_db.execute(
         "INSERT INTO memories (memory_id, profile_id, content, scope) "
         "VALUES ('m1', 'a', 'src', 'personal')"
@@ -173,10 +176,16 @@ def test_domain_and_shared_and_domain_overlap_all_visible(in_memory_db):
     in_memory_db.commit()
 
     where, params = DatabaseManager._scope_where(
-        "b", "personal", False, True, "", skill_tags=["backend"],
+        "b",
+        "personal",
+        False,
+        True,
+        "",
+        skill_tags=["backend"],
     )
     rows = in_memory_db.execute(
-        f"SELECT content FROM atomic_facts WHERE {where}", params,
+        f"SELECT content FROM atomic_facts WHERE {where}",
+        params,
     )
     contents = [r["content"] for r in rows]
     assert "shared fact" in contents
@@ -187,6 +196,7 @@ def test_domain_and_shared_and_domain_overlap_all_visible(in_memory_db):
 def test_seed_covers_all_major_domains(in_memory_db):
     """Seed data covers at least frontend, backend, devops, mobile, data domains."""
     from superlocalmemory.storage.migrations.M015_add_domain_tags import post_ddl_hook
+
     post_ddl_hook(in_memory_db)
 
     rows = in_memory_db.execute("SELECT DISTINCT domain FROM domain_mapping")
