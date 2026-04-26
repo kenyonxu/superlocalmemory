@@ -101,6 +101,34 @@ def test_domain_recall_visibility(in_memory_db):
     assert "react tip" not in contents2
 
 
+def test_enrich_fact_resolves_domain_tags(dbm_with_mappings):
+    """enrich_fact resolves domain_tags from entity names."""
+    from unittest.mock import MagicMock
+    from superlocalmemory.storage.models import AtomicFact, MemoryRecord, FactType
+    from superlocalmemory.core.store_pipeline import enrich_fact
+
+    entity_resolver = MagicMock()
+    entity_resolver.resolve.return_value = {"React": "react_01"}
+
+    fact = AtomicFact(
+        content="React uses JSX",
+        entities=["React"],
+        fact_type=FactType.SEMANTIC,
+    )
+    record = MemoryRecord(memory_id="m1", profile_id="test")
+    embedder = MagicMock()
+    embedder.embed.return_value = None
+
+    enriched = enrich_fact(
+        fact, record, "test",
+        embedder=embedder,
+        entity_resolver=entity_resolver,
+        temporal_parser=None,
+        db=dbm_with_mappings,
+    )
+    assert enriched.domain_tags == ["frontend"]
+
+
 def test_domain_and_shared_with_coexist(in_memory_db):
     """Both shared_with and domain matching return results."""
     in_memory_db.execute(
