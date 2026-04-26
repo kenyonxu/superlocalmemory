@@ -136,3 +136,38 @@ def test_merge_entities_target_not_found(db):
             target_entity_id="nonexistent_id",
             profile_id="default",
         )
+
+
+def test_engine_merge_entities(tmp_path):
+    """MemoryEngine.merge_entities delegates to DatabaseManager."""
+    from superlocalmemory.core.config import SLMConfig
+    from superlocalmemory.core.engine import MemoryEngine
+    from superlocalmemory.storage.models import CanonicalEntity, EntityAlias, _new_id, _now
+
+    config = SLMConfig(base_dir=tmp_path)
+    engine = MemoryEngine(config=config)
+    engine.initialize()
+
+    source = CanonicalEntity(
+        entity_id=_new_id(), profile_id="default", scope="personal",
+        canonical_name="ReactJS", entity_type="technology",
+        first_seen=_now(), last_seen=_now(), fact_count=1,
+    )
+    target = CanonicalEntity(
+        entity_id=_new_id(), profile_id="default", scope="global",
+        canonical_name="React", entity_type="technology",
+        first_seen=_now(), last_seen=_now(), fact_count=5,
+    )
+    engine._db.store_entity(source)
+    engine._db.store_entity(target)
+    engine._db.store_alias(EntityAlias(
+        alias_id=_new_id(), entity_id=source.entity_id,
+        alias="ReactJS", confidence=1.0, source="canonical",
+    ))
+
+    result = engine.merge_entities(
+        source_entity_id=source.entity_id,
+        target_entity_id=target.entity_id,
+    )
+
+    assert result["source_deleted"] is True
