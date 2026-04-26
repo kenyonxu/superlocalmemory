@@ -134,6 +134,68 @@ class DatabaseManager:
         )
         return [r["domain"] for r in rows]
 
+    def get_unmapped_entities(self, entity_names: list[str]) -> list[str]:
+        """Return entity names that have no row in domain_mapping."""
+        if not entity_names:
+            return []
+        placeholders = ",".join("?" * len(entity_names))
+        rows = self.execute(
+            f"SELECT DISTINCT entity_name FROM domain_mapping "
+            f"WHERE entity_name IN ({placeholders})",
+            tuple(entity_names),
+        )
+        mapped = {r["entity_name"] for r in rows}
+        return [e for e in entity_names if e not in mapped]
+
+    def classify_and_cache_domain(
+        self,
+        entity_name: str,
+        llm: Any,
+        known_domains: list[str] | None = None,
+    ) -> str | None:
+        """Classify entity via LLM, cache in domain_mapping.
+
+        Returns domain string on success, None on failure or unknown.
+        """
+        if known_domains is None:
+            from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+
+            known_domains = KNOWN_DOMAINS
+
+        # Early return: already cached (avoid LLM call)
+        existing = self.execute(
+            "SELECT domain FROM domain_mapping WHERE entity_name = ?",
+            (entity_name,),
+        )
+        if existing:
+            return existing[0]["domain"]
+
+        prompt = (
+            f"Classify the following technology entity into a domain category.\n\n"
+            f"Entity: {entity_name}\n"
+            f"Available domains: {', '.join(known_domains)}\n\n"
+            f"Rules:\n"
+            f"- Respond with exactly one domain name from the list above.\n"
+            f"- If the entity doesn't fit any domain, respond: unknown\n"
+            f"- Do not explain. Only output the domain name."
+        )
+        try:
+            response = llm.generate(prompt=prompt, temperature=0.0, max_tokens=20)
+        except Exception as exc:
+            logger.warning("LLM domain classification failed for '%s': %s", entity_name, exc)
+            return None
+
+        domain = response.strip().lower()
+        if domain not in known_domains:
+            logger.debug("LLM returned unknown domain '%s' for entity '%s'", domain, entity_name)
+            return None
+
+        self.execute(
+            "INSERT OR IGNORE INTO domain_mapping (entity_name, domain) VALUES (?, ?)",
+            (entity_name, domain),
+        )
+        return domain
+
     def _enable_wal(self) -> None:
         conn = sqlite3.connect(str(self.db_path))
         try:

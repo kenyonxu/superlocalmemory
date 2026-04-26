@@ -351,3 +351,92 @@ def test_remove_domain_mapping_nonexistent(dbm_with_mappings):
         dbm_with_mappings.execute("SELECT * FROM domain_mapping")
     )
     assert count_after == count_before
+
+
+# ------------------------------------------------------------------
+# Phase 2B: classify_and_cache_domain
+# ------------------------------------------------------------------
+
+
+class MockLLMBackbone:
+    """Minimal mock for LLMBackbone with controllable responses."""
+
+    def __init__(self):
+        self.response = ""
+        self.should_raise = False
+        self.call_count = 0
+
+    def generate(self, prompt, system="", temperature=None, max_tokens=None):
+        self.call_count += 1
+        if self.should_raise:
+            raise RuntimeError("LLM unavailable")
+        return self.response
+
+    def is_available(self):
+        return True
+
+
+@pytest.fixture
+def mock_llm():
+    return MockLLMBackbone()
+
+
+def test_classify_valid_domain(dbm_with_mappings, mock_llm):
+    """LLM returns valid domain -> cached in domain_mapping, returned."""
+    from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+
+    mock_llm.response = "backend"
+    result = dbm_with_mappings.classify_and_cache_domain("Celery", mock_llm, KNOWN_DOMAINS)
+    assert result == "backend"
+    # Verify cached in DB
+    rows = dbm_with_mappings.execute(
+        "SELECT domain FROM domain_mapping WHERE entity_name = 'Celery'"
+    )
+    assert len(rows) == 1
+    assert rows[0]["domain"] == "backend"
+
+
+def test_classify_unknown_response(dbm_with_mappings, mock_llm):
+    """LLM returns 'unknown' -> not cached, returns None."""
+    from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+
+    mock_llm.response = "unknown"
+    result = dbm_with_mappings.classify_and_cache_domain("Celery", mock_llm, KNOWN_DOMAINS)
+    assert result is None
+    rows = dbm_with_mappings.execute(
+        "SELECT domain FROM domain_mapping WHERE entity_name = 'Celery'"
+    )
+    assert len(rows) == 0
+
+
+def test_classify_garbage_response(dbm_with_mappings, mock_llm):
+    """LLM returns garbage -> not cached, returns None."""
+    from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+
+    mock_llm.response = "I think this is a backend tool"
+    result = dbm_with_mappings.classify_and_cache_domain("Celery", mock_llm, KNOWN_DOMAINS)
+    assert result is None
+
+
+def test_classify_llm_exception(dbm_with_mappings, mock_llm):
+    """LLM raises exception -> returns None."""
+    from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+
+    mock_llm.should_raise = True
+    result = dbm_with_mappings.classify_and_cache_domain("Celery", mock_llm, KNOWN_DOMAINS)
+    assert result is None
+
+
+def test_classify_idempotent_cached(dbm_with_mappings, mock_llm):
+    """Already cached entity returns from cache without LLM call."""
+    from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+
+    mock_llm.response = "backend"
+    result1 = dbm_with_mappings.classify_and_cache_domain("Celery", mock_llm, KNOWN_DOMAINS)
+    assert result1 == "backend"
+    assert mock_llm.call_count == 1
+
+    mock_llm.call_count = 0
+    result2 = dbm_with_mappings.classify_and_cache_domain("Celery", mock_llm, KNOWN_DOMAINS)
+    assert result2 == "backend"
+    assert mock_llm.call_count == 0  # LLM not called — early return from cache
