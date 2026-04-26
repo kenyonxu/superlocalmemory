@@ -33,6 +33,29 @@ def dbm_with_mappings(tmp_path):
     return dbm
 
 
+class _MockLLM:
+    """Minimal mock for LLMBackbone."""
+
+    def __init__(self):
+        self.response = ""
+        self.should_raise = False
+        self.call_count = 0
+
+    def generate(self, prompt, system="", temperature=None, max_tokens=None):
+        self.call_count += 1
+        if self.should_raise:
+            raise RuntimeError("LLM unavailable")
+        return self.response
+
+    def is_available(self):
+        return True
+
+
+@pytest.fixture
+def mock_llm():
+    return _MockLLM()
+
+
 def test_store_with_entity_auto_tags(dbm_with_mappings):
     """Storing content with a known entity auto-tags the fact with domain."""
     from superlocalmemory.storage.database import DatabaseManager
@@ -203,3 +226,142 @@ def test_seed_covers_all_major_domains(in_memory_db):
     domains = {r["domain"] for r in rows}
     for expected in ("frontend", "backend", "devops", "mobile", "data"):
         assert expected in domains, f"Missing domain '{expected}' in seed data"
+
+
+def test_enrich_fact_llm_classify_on_store(tmp_path, mock_llm):
+    """Store with unmapped entity triggers LLM classification, cached for reuse."""
+    from unittest.mock import MagicMock
+    from superlocalmemory.core.store_pipeline import enrich_fact
+    from superlocalmemory.storage.database import DatabaseManager
+    from superlocalmemory.storage.models import AtomicFact, MemoryRecord, FactType
+    from superlocalmemory.storage import schema
+
+    db = DatabaseManager(tmp_path / "test.db")
+    db.initialize(schema)
+    mock_llm.response = "backend"
+
+    entity_resolver = MagicMock()
+    entity_resolver.resolve.return_value = {"Celery": "celery_01"}
+
+    fact = AtomicFact(
+        fact_id="f_llm1",
+        content="Celery is our task queue",
+        fact_type=FactType.SEMANTIC,
+        entities=["Celery"],
+        session_id="s1",
+        confidence=0.9,
+        importance=0.5,
+    )
+    record = MemoryRecord(
+        profile_id="test",
+        content="Celery is our task queue",
+        session_id="s1",
+    )
+
+    result = enrich_fact(
+        fact, record, "test",
+        embedder=None, entity_resolver=entity_resolver, temporal_parser=None,
+        db=db, llm=mock_llm,
+    )
+    assert result.domain_tags == ["backend"]
+    assert mock_llm.call_count == 1
+
+    # Second call with same entity — cached, no LLM call
+    mock_llm.call_count = 0
+    fact2 = AtomicFact(
+        fact_id="f_llm2",
+        content="Celery workers configured",
+        fact_type=FactType.SEMANTIC,
+        entities=["Celery"],
+        session_id="s1",
+        confidence=0.9,
+        importance=0.5,
+    )
+    result2 = enrich_fact(
+        fact2, record, "test",
+        embedder=None, entity_resolver=entity_resolver, temporal_parser=None,
+        db=db, llm=mock_llm,
+    )
+    assert result2.domain_tags == ["backend"]
+    assert mock_llm.call_count == 0
+
+
+def test_enrich_fact_llm_partial_match(tmp_path, mock_llm):
+    """Partial match: Redis (seed) + Celery (unmapped). Only Celery triggers LLM."""
+    from unittest.mock import MagicMock
+    from superlocalmemory.core.store_pipeline import enrich_fact
+    from superlocalmemory.storage.database import DatabaseManager
+    from superlocalmemory.storage.models import AtomicFact, MemoryRecord, FactType
+    from superlocalmemory.storage import schema
+
+    db = DatabaseManager(tmp_path / "test2.db")
+    db.initialize(schema)
+    db.execute("INSERT INTO domain_mapping (entity_name, domain) VALUES ('Redis', 'backend')")
+
+    mock_llm.response = "devops"
+
+    entity_resolver = MagicMock()
+    entity_resolver.resolve.return_value = {"Celery": "celery_01", "Redis": "redis_01"}
+
+    fact = AtomicFact(
+        fact_id="f_llm3",
+        content="Celery uses Redis as broker",
+        fact_type=FactType.SEMANTIC,
+        entities=["Celery", "Redis"],
+        session_id="s1",
+        confidence=0.9,
+        importance=0.5,
+    )
+    record = MemoryRecord(
+        profile_id="test",
+        content="Celery uses Redis as broker",
+        session_id="s1",
+    )
+
+    result = enrich_fact(
+        fact, record, "test",
+        embedder=None, entity_resolver=entity_resolver, temporal_parser=None,
+        db=db, llm=mock_llm,
+    )
+    assert "backend" in result.domain_tags  # from Redis seed
+    assert "devops" in result.domain_tags   # from LLM for Celery
+    assert mock_llm.call_count == 1         # only Celery triggered LLM
+
+
+def test_enrich_fact_no_llm_no_classification(tmp_path, mock_llm):
+    """llm=None -> no LLM calls, domain_tags from rules only."""
+    from unittest.mock import MagicMock
+    from superlocalmemory.core.store_pipeline import enrich_fact
+    from superlocalmemory.storage.database import DatabaseManager
+    from superlocalmemory.storage.models import AtomicFact, MemoryRecord, FactType
+    from superlocalmemory.storage import schema
+
+    db = DatabaseManager(tmp_path / "test3.db")
+    db.initialize(schema)
+    db.execute("INSERT INTO domain_mapping (entity_name, domain) VALUES ('Redis', 'backend')")
+
+    entity_resolver = MagicMock()
+    entity_resolver.resolve.return_value = {"Celery": "celery_01", "Redis": "redis_01"}
+
+    fact = AtomicFact(
+        fact_id="f_llm4",
+        content="Celery uses Redis",
+        fact_type=FactType.SEMANTIC,
+        entities=["Celery", "Redis"],
+        session_id="s1",
+        confidence=0.9,
+        importance=0.5,
+    )
+    record = MemoryRecord(
+        profile_id="test",
+        content="Celery uses Redis",
+        session_id="s1",
+    )
+
+    result = enrich_fact(
+        fact, record, "test",
+        embedder=None, entity_resolver=entity_resolver, temporal_parser=None,
+        db=db, llm=None,
+    )
+    assert result.domain_tags == ["backend"]  # only Redis seed
+    assert mock_llm.call_count == 0           # LLM never called

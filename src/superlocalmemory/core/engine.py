@@ -404,6 +404,7 @@ class MemoryEngine:
             temporal_validator=self._temporal_validator,
             auto_linker=self._auto_linker,
             consolidation_engine=self._consolidation_engine,
+            llm=self._llm,
         )
 
     def store_fact_direct(self, fact: AtomicFact) -> str:
