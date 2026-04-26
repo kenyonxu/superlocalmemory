@@ -282,3 +282,161 @@ def test_add_domain_mapping_duplicate():
     )
 
     assert result["success"] is True
+
+
+# ------------------------------------------------------------------
+# Phase 2B: KNOWN_DOMAINS + get_unmapped_entities
+# ------------------------------------------------------------------
+
+
+def test_known_domains_constant():
+    """KNOWN_DOMAINS contains the 5 expected domains."""
+    from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+
+    assert set(KNOWN_DOMAINS) == {"frontend", "backend", "devops", "mobile", "data"}
+
+
+def test_get_unmapped_entities_partial(dbm_with_mappings):
+    """Returns only entities with no domain_mapping row."""
+    unmapped = dbm_with_mappings.get_unmapped_entities(["React", "Celery", "Prisma"])
+    assert unmapped == ["Celery", "Prisma"]
+
+
+def test_get_unmapped_entities_all_mapped(dbm_with_mappings):
+    """All entities mapped returns empty list."""
+    unmapped = dbm_with_mappings.get_unmapped_entities(["React"])
+    assert unmapped == []
+
+
+def test_get_unmapped_entities_empty_input(dbm_with_mappings):
+    """Empty input returns empty list."""
+    unmapped = dbm_with_mappings.get_unmapped_entities([])
+    assert unmapped == []
+
+
+def test_remove_domain_mapping(dbm_with_mappings):
+    """Delete a domain_mapping row."""
+    # Verify row exists before delete
+    before = dbm_with_mappings.execute(
+        "SELECT * FROM domain_mapping WHERE entity_name = ? AND domain = ?",
+        ("React", "frontend"),
+    )
+    assert len(before) == 1
+
+    dbm_with_mappings.execute(
+        "DELETE FROM domain_mapping WHERE entity_name = ? AND domain = ?",
+        ("React", "frontend"),
+    )
+
+    # Verify row is gone
+    after = dbm_with_mappings.execute(
+        "SELECT * FROM domain_mapping WHERE entity_name = ? AND domain = ?",
+        ("React", "frontend"),
+    )
+    assert len(after) == 0
+
+
+def test_remove_domain_mapping_nonexistent(dbm_with_mappings):
+    """Deleting non-existent mapping is a no-op."""
+    count_before = len(
+        dbm_with_mappings.execute("SELECT * FROM domain_mapping")
+    )
+
+    dbm_with_mappings.execute(
+        "DELETE FROM domain_mapping WHERE entity_name = ? AND domain = ?",
+        ("NonExistent", "frontend"),
+    )
+
+    count_after = len(
+        dbm_with_mappings.execute("SELECT * FROM domain_mapping")
+    )
+    assert count_after == count_before
+
+
+# ------------------------------------------------------------------
+# Phase 2B: classify_and_cache_domain
+# ------------------------------------------------------------------
+
+
+class MockLLMBackbone:
+    """Minimal mock for LLMBackbone with controllable responses."""
+
+    def __init__(self):
+        self.response = ""
+        self.should_raise = False
+        self.call_count = 0
+
+    def generate(self, prompt, system="", temperature=None, max_tokens=None):
+        self.call_count += 1
+        if self.should_raise:
+            raise RuntimeError("LLM unavailable")
+        return self.response
+
+    def is_available(self):
+        return True
+
+
+@pytest.fixture
+def mock_llm():
+    return MockLLMBackbone()
+
+
+def test_classify_valid_domain(dbm_with_mappings, mock_llm):
+    """LLM returns valid domain -> cached in domain_mapping, returned."""
+    from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+
+    mock_llm.response = "backend"
+    result = dbm_with_mappings.classify_and_cache_domain("Celery", mock_llm, KNOWN_DOMAINS)
+    assert result == "backend"
+    # Verify cached in DB
+    rows = dbm_with_mappings.execute(
+        "SELECT domain FROM domain_mapping WHERE entity_name = 'Celery'"
+    )
+    assert len(rows) == 1
+    assert rows[0]["domain"] == "backend"
+
+
+def test_classify_unknown_response(dbm_with_mappings, mock_llm):
+    """LLM returns 'unknown' -> not cached, returns None."""
+    from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+
+    mock_llm.response = "unknown"
+    result = dbm_with_mappings.classify_and_cache_domain("Celery", mock_llm, KNOWN_DOMAINS)
+    assert result is None
+    rows = dbm_with_mappings.execute(
+        "SELECT domain FROM domain_mapping WHERE entity_name = 'Celery'"
+    )
+    assert len(rows) == 0
+
+
+def test_classify_garbage_response(dbm_with_mappings, mock_llm):
+    """LLM returns garbage -> not cached, returns None."""
+    from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+
+    mock_llm.response = "I think this is a backend tool"
+    result = dbm_with_mappings.classify_and_cache_domain("Celery", mock_llm, KNOWN_DOMAINS)
+    assert result is None
+
+
+def test_classify_llm_exception(dbm_with_mappings, mock_llm):
+    """LLM raises exception -> returns None."""
+    from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+
+    mock_llm.should_raise = True
+    result = dbm_with_mappings.classify_and_cache_domain("Celery", mock_llm, KNOWN_DOMAINS)
+    assert result is None
+
+
+def test_classify_idempotent_cached(dbm_with_mappings, mock_llm):
+    """Already cached entity returns from cache without LLM call."""
+    from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+
+    mock_llm.response = "backend"
+    result1 = dbm_with_mappings.classify_and_cache_domain("Celery", mock_llm, KNOWN_DOMAINS)
+    assert result1 == "backend"
+    assert mock_llm.call_count == 1
+
+    mock_llm.call_count = 0
+    result2 = dbm_with_mappings.classify_and_cache_domain("Celery", mock_llm, KNOWN_DOMAINS)
+    assert result2 == "backend"
+    assert mock_llm.call_count == 0  # LLM not called — early return from cache

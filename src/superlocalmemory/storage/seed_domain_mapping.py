@@ -55,3 +55,5 @@ SEED_DOMAIN_MAPPINGS: list[tuple[str, str]] = [
     ("TensorFlow", "data"),
     ("Spark", "data"),
 ]
+
+KNOWN_DOMAINS: list[str] = ["frontend", "backend", "devops", "mobile", "data"]
