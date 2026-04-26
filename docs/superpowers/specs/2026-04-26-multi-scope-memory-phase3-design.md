@@ -108,29 +108,57 @@ resolve("ObscureLib", profile_id="zhihui")
 
 ## Code Changes
 
-### 1. DatabaseManager: `get_entity_by_name()` scope parameter (~5 lines)
+### 1. DatabaseManager: No changes needed
 
-File: `src/superlocalmemory/storage/database.py`
-
-Add `scope` parameter to the existing `get_entity_by_name()` method:
+`get_entity_by_name()` already supports scope filtering via `_scope_where()`. Current signature (line 587 of `database.py`):
 
 ```python
 def get_entity_by_name(
-    self, name: str, profile_id: str, *, scope: str | None = None,
+    self, name: str, profile_id: str,
+    scope: str = "personal",
+    include_global: bool = True,
+    include_shared: bool = True,
+    skill_tags: list[str] | None = None,
 ) -> CanonicalEntity | None:
 ```
 
-When `scope` is provided, the query adds `AND scope = ?` condition. This allows callers to explicitly query for global-scope entities.
+By default it returns personal + global entities. To get ONLY global entities, call with `scope="personal", include_global=False` and then filter, or call with a direct query. The cleanest approach: EntityResolver adds a new helper `_get_global_entity()` that does a targeted global-only lookup.
 
-### 2. EntityResolver: Global-first resolution tier (~20 lines)
+### 2. EntityResolver: Global-first resolution tier (~15 lines)
 
 File: `src/superlocalmemory/encoding/entity_resolver.py`
 
-Add a new Tier 0 before the existing Tier a in `resolve()`:
+Add a helper method and a new Tier 0 before the existing Tier a in `resolve()`:
+
+```python
+def _get_global_entity(self, name: str) -> CanonicalEntity | None:
+    """Look up entity in global scope only."""
+    rows = self._db.execute(
+        "SELECT * FROM canonical_entities "
+        "WHERE LOWER(canonical_name) = LOWER(?) AND scope = 'global'",
+        (name,),
+    )
+    if not rows:
+        return None
+    d = dict(rows[0])
+    return CanonicalEntity(
+        entity_id=d["entity_id"],
+        profile_id=d["profile_id"],
+        scope=d.get("scope", "personal"),
+        shared_with=json.loads(d["shared_with"]) if d.get("shared_with") else None,
+        canonical_name=d["canonical_name"],
+        entity_type=d["entity_type"],
+        first_seen=d["first_seen"],
+        last_seen=d["last_seen"],
+        fact_count=d.get("fact_count", 0),
+    )
+```
+
+In `resolve()`, add Tier 0 after the stop-word/length filters and before "Tier a":
 
 ```python
 # Tier 0 (Phase 3): check global scope first
-global_entity = self._db.get_entity_by_name(name, profile_id, scope="global")
+global_entity = self._get_global_entity(name)
 if global_entity is not None:
     resolution[raw] = global_entity.entity_id
     self._touch_last_seen(global_entity.entity_id)
@@ -167,24 +195,24 @@ Note: `CanonicalEntity` already has a `scope` field (added in Phase 1). The `_cr
 
 The existing `_alias_lookup()` and `_fuzzy_match()` methods query `canonical_entities WHERE profile_id = ?`. These won't find global entities because global entities have `profile_id` set to the creator's ID but `scope='global'`.
 
-The fix: update `_alias_lookup()` and `_fuzzy_match()` to also consider global-scope entities. The simplest approach is to add `OR ce.scope = 'global'` to the WHERE clause:
+The fix: update `_alias_lookup()` and `_fuzzy_match()` to also consider global-scope entities by adding `OR ce.scope = 'global'` to the WHERE clause:
 
 ```python
-# _alias_lookup: change WHERE clause
+# _alias_lookup (line ~454): change WHERE clause
 "WHERE LOWER(ea.alias) = LOWER(?) AND (ce.profile_id = ? OR ce.scope = 'global')"
 ```
 
 ```python
-# _fuzzy_match: change WHERE clause for canonical names
+# _fuzzy_match canonical names (line ~478): change WHERE clause
 "WHERE profile_id = ? OR scope = 'global'"
 ```
 
-Same for alias fuzzy match:
 ```python
+# _fuzzy_match aliases (line ~491): change WHERE clause
 "WHERE ce.profile_id = ? OR ce.scope = 'global'"
 ```
 
-This ensures existing aliases and fuzzy matches can find global entities.
+Note: These changes are only needed as a safety net. Tier 0 already catches exact global matches. The alias/fuzzy changes ensure that if Tier 0 somehow misses (e.g., alias name differs from canonical name), the existing fallback tiers can still find global entities.
 
 ---
 
@@ -258,12 +286,13 @@ In practice, for the Hermes agent team (single human user, flat team), this is f
 
 | Module | Lines |
 |--------|-------|
-| `get_entity_by_name()` scope parameter | ~5 |
-| `resolve()` Tier 0 global lookup | ~8 |
+| `_get_global_entity()` helper method | ~18 |
+| `resolve()` Tier 0 global lookup | ~5 |
 | `_create_entity()` default scope | ~1 |
-| `_alias_lookup()` global scope inclusion | ~3 |
-| `_fuzzy_match()` global scope inclusion | ~3 |
+| `_alias_lookup()` global scope inclusion | ~2 |
+| `_fuzzy_match()` global scope inclusion | ~2 |
+| `import json` in entity_resolver | ~1 |
 | Tests | ~80 |
-| **Total** | **~100** |
+| **Total** | **~109** |
 
-This is significantly less than the roadmap estimate of ~400 lines because we reuse the existing `scope` column instead of introducing a new `entity_aliases` reference layer.
+Zero schema changes, zero migrations, zero new tables. The `canonical_entities` table already has `scope` from Phase 1.
