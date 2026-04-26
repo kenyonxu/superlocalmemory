@@ -562,7 +562,10 @@ def register_core_tools(server, get_engine: Callable) -> None:
             )
             engine._db.commit()
             if cursor.rowcount == 0:
-                return {"success": False, "error": f"No mapping found for '{entity_name}' -> '{domain}'"}
+                return {
+                    "success": False,
+                    "error": f"No mapping found for '{entity_name}' -> '{domain}'",
+                }
             return {"success": True, "removed": {"entity_name": entity_name, "domain": domain}}
         except Exception as exc:
             logger.exception("remove_domain_mapping failed")
