@@ -74,6 +74,7 @@ class RetrievalEngine:
         profile_channel: Any | None = None,
         bridge_discovery: Any | None = None,
         trust_scorer: TrustScorer | None = None,
+        skill_tags: list[str] | None = None,
     ) -> None:
         self._db = db
         self._config = config
@@ -92,6 +93,7 @@ class RetrievalEngine:
         self._profile_channel = profile_channel
         self._bridge = bridge_discovery
         self._trust_scorer = trust_scorer
+        self._skill_tags = skill_tags or []
 
         # V3.3.4: LRU cache for query embeddings (avoids redundant Ollama API calls)
         self._query_embedding_cache: dict[str, list[float]] = {}

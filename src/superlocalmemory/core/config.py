@@ -584,6 +584,7 @@ class SLMConfig:
     base_dir: Path = DEFAULT_BASE_DIR
     db_path: Path | None = None    # Computed from base_dir if None
     active_profile: str = "default"
+    skill_tags: list[str] = field(default_factory=list)
 
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
