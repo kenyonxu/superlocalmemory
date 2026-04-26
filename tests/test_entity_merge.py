@@ -261,3 +261,112 @@ def test_mcp_merge_entities_registered():
     params = set(sig.parameters.keys())
     assert "source_entity_id" in params
     assert "target_entity_id" in params
+
+
+def test_e2e_merge_workflow(tmp_path, monkeypatch):
+    """Full workflow: create entities, store facts, merge, verify."""
+    monkeypatch.setenv("SLM_DATA_DIR", str(tmp_path))
+
+    from superlocalmemory.core.config import SLMConfig
+    from superlocalmemory.core.engine import MemoryEngine
+    from superlocalmemory.storage.models import CanonicalEntity, EntityAlias, _new_id, _now
+    import json
+
+    config = SLMConfig(base_dir=tmp_path)
+    engine = MemoryEngine(config=config)
+    engine.initialize()
+
+    # Create personal entity "ReactJS" with alias
+    source = CanonicalEntity(
+        entity_id=_new_id(), profile_id="default", scope="personal",
+        canonical_name="ReactJS", entity_type="technology",
+        first_seen=_now(), last_seen=_now(), fact_count=0,
+    )
+    engine._db.store_entity(source)
+    engine._db.store_alias(EntityAlias(
+        alias_id=_new_id(), entity_id=source.entity_id,
+        alias="ReactJS", confidence=1.0, source="canonical",
+    ))
+
+    # Create global entity "React"
+    target = CanonicalEntity(
+        entity_id=_new_id(), profile_id="default", scope="global",
+        canonical_name="React", entity_type="technology",
+        first_seen=_now(), last_seen=_now(), fact_count=0,
+    )
+    engine._db.store_entity(target)
+
+    # Insert a memory row (atomic_facts.memory_id has FK → memories)
+    memory_id = _new_id()
+    engine._db.execute(
+        "INSERT INTO memories "
+        "(memory_id, profile_id, content, created_at) "
+        "VALUES (?, ?, ?, datetime('now'))",
+        (memory_id, "default", "ReactJS supports hooks"),
+    )
+
+    # Store a fact referencing the personal entity
+    fact_id = _new_id()
+    engine._db.execute(
+        "INSERT INTO atomic_facts "
+        "(fact_id, memory_id, profile_id, content, confidence, scope, "
+        " entities_json, canonical_entities_json, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+        (fact_id, memory_id, "default", "ReactJS supports hooks", 0.9, "personal",
+         json.dumps(["ReactJS"]), json.dumps([source.entity_id])),
+    )
+
+    # Create edge: personal "ReactJS" -> global "TypeScript"
+    ts_entity = CanonicalEntity(
+        entity_id=_new_id(), profile_id="default", scope="global",
+        canonical_name="TypeScript", entity_type="technology",
+        first_seen=_now(), last_seen=_now(), fact_count=0,
+    )
+    engine._db.store_entity(ts_entity)
+    engine._db.execute(
+        "INSERT INTO graph_edges "
+        "(edge_id, profile_id, source_id, target_id, edge_type, weight, "
+        " created_at, scope) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)",
+        (_new_id(), "default", source.entity_id, ts_entity.entity_id,
+         "entity", 0.8, "personal"),
+    )
+
+    # Merge personal "ReactJS" -> global "React"
+    result = engine.merge_entities(
+        source_entity_id=source.entity_id,
+        target_entity_id=target.entity_id,
+    )
+
+    # Verify
+    assert result["source_deleted"] is True
+    assert result["facts_updated"] == 1
+    assert result["edges_updated"] == 1
+
+    # Fact now references global "React"
+    rows = engine._db.execute(
+        "SELECT canonical_entities_json FROM atomic_facts WHERE fact_id = ?",
+        (fact_id,),
+    )
+    entities = json.loads(dict(rows[0])["canonical_entities_json"])
+    assert target.entity_id in entities
+    assert source.entity_id not in entities
+
+    # Edge: global "React" -> global "TypeScript"
+    edges = engine._db.execute(
+        "SELECT source_id, target_id FROM graph_edges WHERE profile_id = ?",
+        ("default",),
+    )
+    edge_list = [dict(r) for r in edges]
+    assert any(e["source_id"] == target.entity_id for e in edge_list)
+    assert not any(e["source_id"] == source.entity_id for e in edge_list)
+
+    # Source entity gone
+    assert not engine._db.execute(
+        "SELECT entity_id FROM canonical_entities WHERE entity_id = ?",
+        (source.entity_id,),
+    )
+
+    # Aliases moved: "ReactJS" points to global "React"
+    aliases = engine._db.get_aliases_for_entity(target.entity_id)
+    alias_texts = {a.alias for a in aliases}
+    assert "ReactJS" in alias_texts
