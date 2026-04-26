@@ -146,7 +146,105 @@ SLM 注册到 Hermes Agent 后，可直接调用以下工具：
 
 ---
 
-## 5. 用户画像（Profiles）
+## 5. 三层作用域记忆（Multi-Scope Memory）
+
+SLM V3.4+ 引入三层作用域记忆架构，让 Hermes Agent 团队中的多个 Agent 既能保持各自的记忆空间，又能共享公共知识。
+
+### 5.1 三层作用域模型
+
+```
+┌──────────────────────────────────────────────────────┐
+│  Global（全局）                                       │
+│  全员共享的技术实体：React、Python、Docker...         │
+│  新创建的实体默认存入此层                              │
+│  RRF 权重：0.5                                       │
+├──────────────────────────────────────────────────────┤
+│  Shared（指定共享）                                   │
+│  与特定 Agent 共享的记忆                              │
+│  通过 shared_with 参数指定共享对象                    │
+│  RRF 权重：0.7                                       │
+├──────────────────────────────────────────────────────┤
+│  Personal（个人）                                     │
+│  仅当前 Agent 可见的私有记忆                          │
+│  RRF 融合中权重最高（1.0）                            │
+└──────────────────────────────────────────────────────┘
+```
+
+**检索优先级**：personal > shared > global。RRF 融合时，个人记忆排在前面，全局记忆排在后面。
+
+### 5.2 全局权威实体
+
+所有 Agent 共享同一套技术实体（React、Python、Kubernetes 等），不再各自创建重复的实体副本。
+
+- 新创建的实体**默认存入 global scope**
+- 任意 Agent 都可以创建全局实体
+- 所有 Agent 的 `recall` 自动包含全局实体的关联记忆
+- 实体别名和模糊匹配也支持跨 scope 查找
+
+### 5.3 域标签（Domain Tags）
+
+SLM 自动将实体映射到技术领域（frontend / backend / devops / mobile / data），用于跨 Agent 的领域匹配：
+
+- 规则引擎：内置 48 个常见实体→领域映射（React→frontend, Docker→devops 等）
+- LLM 回退：未命中规则的实体，自动调用 LLM 分类并缓存结果
+- 域标签用于 `shared` scope 的跨 Agent 匹配——领域重叠的 Agent 自动共享相关记忆
+
+### 5.4 在 Hermes Agent 中使用
+
+**存储记忆时指定 scope**：
+
+```
+调用 remember，存储 "项目 Phoenix 使用 React 18"，scope 设为 "personal"
+```
+
+```
+调用 remember，存储 "团队约定使用 TypeScript strict 模式"，scope 设为 "global"
+```
+
+```
+调用 remember，存储 "后端 API 规范 v2"，scope 设为 "personal"，shared_with 设为 "backend_agent,frontend_agent"
+```
+
+| `scope` 值 | 含义 | 可见范围 |
+| --- | --- | --- |
+| `personal` | 仅自己可见 | 当前 profile_id |
+| `global` | 全员可见 | 所有 Agent |
+| `personal` + `shared_with` | 指定共享 | profile_id + 列表中的 Agent |
+
+**检索记忆时控制范围**：
+
+```
+调用 recall，查询 "React 技术栈"，include_global 设为 true
+```
+
+| 参数 | 说明 | 默认值 |
+| --- | --- | --- |
+| `include_global` | 是否包含全局 scope 的记忆 | `true` |
+| `include_shared` | 是否包含共享 scope 的记忆 | `true` |
+
+默认两个参数都为 `true`，即检索结果自动包含三层作用域的记忆。
+
+### 5.5 多 Agent 协作示例
+
+**场景**：Agent A（zhihui）存储了一条关于 React 的记忆，Agent B（xiaoming）可以自动检索到。
+
+```
+# Agent A 存储
+调用 remember：存储 "React 18 支持并发特性"，scope = "global"
+
+# Agent B 检索（自动找到 Agent A 存储的全局记忆）
+调用 recall：查询 "React 有什么新特性"
+→ 返回 Agent A 存储的 "React 18 支持并发特性"
+```
+
+**关键特性**：
+- 全局实体（如 React）只创建一次，所有 Agent 共享同一实体 ID
+- 通过全局实体关联的知识图谱边、域标签等也自动共享
+- 无需手动同步——检索时 RRF 融合自动合并三层结果
+
+---
+
+## 6. 用户画像（Profiles）
 
 SLM 支持多画像隔离，适合在 Hermes Agent 中切换不同工作上下文：
 
@@ -163,9 +261,14 @@ slm profile switch work       # 切换到工作画像
 调用 session_init，profile_id 设为 "work"
 ```
 
+**Profile 与 Scope 的关系**：
+- `profile_id` = 谁的记忆（身份隔离）
+- `scope` = 记忆的可见范围（层级隔离）
+- 两者正交组合：同一 profile 可以有 personal / global / shared 三种记忆
+
 ---
 
-## 6. 后台守护进程（推荐）
+## 7. 后台守护进程（推荐）
 
 启动守护进程可消除冷启动延迟（从 ~23 秒降至即时响应）：
 
@@ -182,7 +285,7 @@ slm restart         # 杀孤儿进程 + 清理 + 重启 + 健康检查
 
 ---
 
-## 7. Web 仪表盘
+## 8. Web 仪表盘
 
 ```bash
 slm dashboard       # 打开 http://localhost:8765
@@ -196,7 +299,7 @@ slm dashboard       # 打开 http://localhost:8765
 
 ---
 
-## 8. 日常 CLI 速查
+## 9. 日常 CLI 速查
 
 ```bash
 # 最常用
@@ -217,7 +320,7 @@ slm health
 
 ---
 
-## 9. 故障排查
+## 10. 故障排查
 
 | 现象 | 排查步骤 |
 |------|---------|
