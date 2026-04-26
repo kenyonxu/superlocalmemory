@@ -1,4 +1,4 @@
-# Multi-Scope Memory Phase 2 Implementation Plan
+za# Multi-Scope Memory Phase 2 Implementation Plan
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -9,6 +9,23 @@
 **Tech Stack:** Python 3.11+, SQLite, existing SLM retrieval infrastructure
 
 **Spec:** `docs/superpowers/specs/2026-04-25-multi-scope-memory-phase2-design.md`
+
+### Test Strategy
+
+每个 Task 只跑该 Task 相关的测试（几秒）。Chunk 结束时跑相关子系统（~30秒）。全量回归只在 Task 11 跑一次（~15分钟）。
+
+```bash
+# 每个 Task: 只跑新增测试 + 直接相关文件
+PHASE2_TESTS="tests/test_domain_tags_schema.py tests/test_domain_tags_db.py tests/test_domain_tags_integration.py"
+
+# 每个 Chunk 结束: 相关子系统
+CHUNK1_TESTS="tests/test_domain_tags_schema.py tests/test_domain_tags_db.py tests/test_storage/test_migration_runner.py tests/test_scope_integration.py"
+CHUNK2_TESTS="tests/test_domain_tags_db.py tests/test_storage/ tests/test_retrieval/"
+CHUNK3_TESTS="$PHASE2_TESTS tests/test_scope_integration.py"
+
+# Task 11 最终验证: 全量（排除预存在的 code_graph failures）
+pytest tests/ -q --ignore=tests/test_code_graph --ignore=tests/test_integration -m "not slow and not ollama and not benchmark"
+```
 
 ---
 
@@ -166,8 +183,8 @@ Add `skill_tags` property to `Profile` (after the `config` field at line ~110):
 
 - [ ] **Step 2: Run existing model tests to verify no regressions**
 
-Run: `pytest tests/test_storage/test_models.py -v -q 2>/dev/null || pytest tests/ -q --tb=short -k "models" 2>/dev/null | tail -5`
-Expected: All model tests pass
+Run: `pytest tests/test_storage/test_models.py -q --tb=short 2>/dev/null || echo "No model tests found — skip"`
+Expected: No failures (or no test file — that's fine too)
 
 - [ ] **Step 3: Commit**
 
@@ -614,10 +631,10 @@ Find all callers with: `grep -n "include_shared" src/superlocalmemory/storage/da
 Run: `pytest tests/test_domain_tags_db.py -v --tb=short`
 Expected: All 10 tests pass
 
-- [ ] **Step 9: Run existing scope integration tests**
+- [ ] **Step 9: Chunk 1 regression check**
 
-Run: `pytest tests/test_scope_integration.py tests/test_domain_tags_schema.py -v --tb=short`
-Expected: All pass (no regressions)
+Run: `pytest tests/test_domain_tags_schema.py tests/test_domain_tags_db.py tests/test_scope_integration.py tests/test_storage/test_migration_runner.py -q --tb=short`
+Expected: All pass (no regressions from Chunk 1)
 
 - [ ] **Step 10: Commit**
 
@@ -935,10 +952,10 @@ def search(self, query, profile_id, top_k=50, *, scope="personal", skill_tags=No
 
 The DB methods were updated in Task 4 Step 7 to accept `skill_tags`.
 
-- [ ] **Step 5: Run tests to verify no regressions**
+- [ ] **Step 5: Chunk 2 regression check**
 
-Run: `pytest tests/test_retrieval/ -v --tb=short -q 2>/dev/null | tail -5`
-Expected: All pass
+Run: `pytest tests/test_domain_tags_db.py tests/test_retrieval/ -q --tb=short`
+Expected: All pass (no regressions from Chunk 2)
 
 - [ ] **Step 6: Commit**
 
@@ -1188,12 +1205,12 @@ def test_null_domain_tags_invisible_to_domain_matching(in_memory_db):
 
 - [ ] **Step 2: Run all Phase 2 tests**
 
-Run: `pytest tests/test_domain_tags_schema.py tests/test_domain_tags_db.py tests/test_domain_tags_integration.py -v --tb=short`
+Run: `pytest tests/test_domain_tags_schema.py tests/test_domain_tags_db.py tests/test_domain_tags_integration.py tests/test_scope_integration.py -v --tb=short`
 Expected: All pass
 
-- [ ] **Step 3: Run full test suite to check for regressions**
+- [ ] **Step 3: Chunk 3 regression check (subsystems only, NOT full suite)**
 
-Run: `pytest tests/ -q --tb=short -x --ignore=tests/test_code_graph --ignore=tests/test_integration -m "not slow and not ollama and not benchmark" 2>&1 | tail -10`
+Run: `pytest tests/test_domain_tags_schema.py tests/test_domain_tags_db.py tests/test_domain_tags_integration.py tests/test_scope_integration.py tests/test_storage/test_migration_runner.py tests/test_retrieval/ -q --tb=short`
 Expected: No new failures
 
 - [ ] **Step 4: Commit**
