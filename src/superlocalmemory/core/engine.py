@@ -426,6 +426,30 @@ class MemoryEngine:
             vector_store=self._vector_store,
         )
 
+    def merge_entities(
+        self,
+        source_entity_id: str,
+        target_entity_id: str,
+    ) -> dict[str, int | bool]:
+        """Merge source entity into target entity.
+
+        Moves aliases, rewrites facts and edges, deletes source.
+        Typically used to consolidate pre-Phase 3 personal entities
+        into global authoritative entities.
+
+        Args:
+            source_entity_id: Entity to merge from (will be deleted).
+            target_entity_id: Entity to merge into (kept).
+
+        Returns:
+            Dict with aliases_moved, facts_updated, edges_updated, source_deleted.
+        """
+        return self._db.merge_entities(
+            source_entity_id=source_entity_id,
+            target_entity_id=target_entity_id,
+            profile_id=self._profile_id,
+        )
+
     # -- Recall operations --------------------------------------------------
 
     def recall(
