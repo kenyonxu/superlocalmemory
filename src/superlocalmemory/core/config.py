@@ -719,6 +719,14 @@ class SLMConfig:
                 if k in EvolutionConfig.__dataclass_fields__
             })
 
+        # Multi-scope memory: scope weights
+        sw = data.get("scope_weights", {})
+        if sw:
+            config.scope_weights = ScopeWeights(**{
+                k: v for k, v in sw.items()
+                if k in ScopeWeights.__dataclass_fields__
+            })
+
         return config
 
     def save(self, config_path: Path | None = None) -> None:
@@ -763,6 +771,13 @@ class SLMConfig:
             "enabled": self.evolution.enabled,
             "backend": self.evolution.backend,
             "max_evolutions_per_cycle": self.evolution.max_evolutions_per_cycle,
+        }
+
+        # Multi-scope memory: scope weights
+        data["scope_weights"] = {
+            "personal": self.scope_weights.personal,
+            "shared": self.scope_weights.shared,
+            "global_": self.scope_weights.global_,
         }
 
         # Preserve existing V3.3 config sections that aren't in for_mode()

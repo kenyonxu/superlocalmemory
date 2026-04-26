@@ -65,3 +65,26 @@ def test_retrieval_engine_uses_scope_weights():
     )
     assert engine._scope_weights.personal == 1.5
     assert engine._scope_weights.global_ == 0.1
+
+
+import json
+
+
+def test_scope_weights_persist_load_save(tmp_path):
+    """ScopeWeights round-trips through JSON config."""
+    config = SLMConfig.default()
+    config.scope_weights = ScopeWeights(personal=1.3, shared=0.6, global_=0.4)
+
+    config_path = tmp_path / "config.json"
+    config.base_dir = tmp_path
+    config.save(config_path)
+
+    data = json.loads(config_path.read_text())
+    assert "scope_weights" in data
+    assert data["scope_weights"]["personal"] == 1.3
+    assert data["scope_weights"]["global_"] == 0.4
+
+    loaded = SLMConfig.load(config_path)
+    assert loaded.scope_weights.personal == 1.3
+    assert loaded.scope_weights.shared == 0.6
+    assert loaded.scope_weights.global_ == 0.4
