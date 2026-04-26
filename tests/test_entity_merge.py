@@ -235,3 +235,29 @@ def test_cmd_entity_list(tmp_path, monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert "ReactJS" in captured.out
+
+
+def test_mcp_merge_entities_registered():
+    """merge_entities tool is registered in MCP server module."""
+    from importlib import import_module
+    import inspect
+    from unittest.mock import MagicMock
+
+    tools_core = import_module("superlocalmemory.mcp.tools_core")
+
+    # Trigger registration so the module-level ref is populated.
+    # server.tool() must act as an identity decorator so the real function
+    # (not a MagicMock wrapper) is stored in _tool_merge_entities.
+    mock_server = MagicMock()
+    mock_server.tool.side_effect = lambda **_kw: (lambda fn: fn)
+    mock_get_engine = MagicMock()
+    tools_core.register_core_tools(mock_server, mock_get_engine)
+
+    # Find the merge_entities function in the module
+    assert hasattr(tools_core, "_tool_merge_entities"), \
+        "tools_core should define _tool_merge_entities (registered via server.tool())"
+
+    sig = inspect.signature(tools_core._tool_merge_entities)
+    params = set(sig.parameters.keys())
+    assert "source_entity_id" in params
+    assert "target_entity_id" in params
