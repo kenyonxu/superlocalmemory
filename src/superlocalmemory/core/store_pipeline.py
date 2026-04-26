@@ -62,6 +62,7 @@ def enrich_fact(
     entity_resolver: Any,
     temporal_parser: Any,
     db: Any = None,
+    llm: Any = None,
 ) -> AtomicFact:
     """Enrich fact with embeddings, entities, temporal, emotional data."""
     from superlocalmemory.encoding.emotional import tag_emotion, emotional_importance_boost
@@ -80,6 +81,14 @@ def enrich_fact(
     domain_tags = None
     if db and canonical:
         domain_tags = db.resolve_domain_tags(list(canonical.keys()))
+        # Phase 2B: LLM fallback for unmapped entities (handles partial matches)
+        if llm:
+            from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+            unmapped = db.get_unmapped_entities(list(canonical.keys()))
+            for entity_name in unmapped:
+                db.classify_and_cache_domain(entity_name, llm, KNOWN_DOMAINS)
+            if unmapped:
+                domain_tags = db.resolve_domain_tags(list(canonical.keys()))
 
     temporal = {}
     if temporal_parser:
@@ -161,6 +170,7 @@ def run_store(
     auto_linker: Any = None,
     context_generator: Any = None,
     consolidation_engine: Any = None,
+    llm: Any = None,
 ) -> list[str]:
     """Store content and extract structured facts. Returns fact_ids."""
     # Pre-operation hooks (trust gate, ABAC, rate limiter)
@@ -282,6 +292,7 @@ def run_store(
             entity_resolver=entity_resolver,
             temporal_parser=temporal_parser,
             db=db,
+            llm=llm,
         )
 
         if consolidator:
