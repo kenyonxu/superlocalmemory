@@ -41,7 +41,7 @@ Out of scope:
 | Tag source | Rule-based: entity name → domain mapping table |
 | Agent skill declaration | `skill_tags` in profile `config` dict (`config_json` column) |
 | Domain matching mechanism | Reuse Phase 1 shared scope channel (weight=0.7) |
-| Schema change | New `domain_mapping` table + `domain_tags` column on 5 core tables |
+| Schema change | New `domain_mapping` table + `domain_tags` column on 4 core tables |
 | Seed data | ~50 built-in tech entity mappings, extensible via MCP tool |
 | LLM classification | Not in Phase 2 (deferred to Phase 2B) |
 
@@ -132,7 +132,7 @@ Note: `memories` is excluded — the recall pipeline never applies `_scope_where
 
 ```sql
 ALTER TABLE atomic_facts ADD COLUMN domain_tags TEXT;  -- JSON array or NULL
--- Same for the other 4 tables
+-- Same for the other 3 tables
 ```
 
 ### Migration
@@ -222,7 +222,7 @@ if canonical:
     fact.domain_tags = db.resolve_domain_tags(list(canonical.keys()))
 ```
 
-`run_store()` then propagates `domain_tags` from enriched facts to `MemoryRecord` and DB INSERT statements.
+`run_store()` then propagates `domain_tags` from enriched facts to `AtomicFact` DB INSERT statements.
 
 Note: `enrich_fact()` currently doesn't receive `db` as a parameter. It must be added as a keyword argument, passed from `run_store()` which already has it.
 
