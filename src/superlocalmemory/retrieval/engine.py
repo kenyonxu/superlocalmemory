@@ -20,7 +20,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any, Protocol
 
-from superlocalmemory.core.config import ChannelWeights, RetrievalConfig
+from superlocalmemory.core.config import ChannelWeights, RetrievalConfig, ScopeWeights
 from superlocalmemory.retrieval.fusion import FusionResult, weighted_rrf
 from superlocalmemory.retrieval.strategy import QueryStrategy, QueryStrategyClassifier
 from superlocalmemory.storage.models import (
@@ -75,6 +75,7 @@ class RetrievalEngine:
         bridge_discovery: Any | None = None,
         trust_scorer: TrustScorer | None = None,
         skill_tags: list[str] | None = None,
+        scope_weights: ScopeWeights | None = None,
     ) -> None:
         self._db = db
         self._config = config
@@ -90,6 +91,7 @@ class RetrievalEngine:
         self._reranker = reranker
         self._strategy = strategy or QueryStrategyClassifier()
         self._base_weights = (base_weights or ChannelWeights()).as_dict()
+        self._scope_weights = scope_weights or ScopeWeights()
         self._profile_channel = profile_channel
         self._bridge = bridge_discovery
         self._trust_scorer = trust_scorer
@@ -165,7 +167,7 @@ class RetrievalEngine:
         all_ch_results: dict[str, list[tuple[str, float]]] = {}
         all_weights: dict[str, float] = {}
 
-        _SCOPE_WEIGHTS = {"personal": 1.0, "global": 0.5, "shared": 0.7}
+        _SCOPE_WEIGHTS = self._scope_weights.as_dict()
 
         # Personal scope (always)
         personal_ch = self._run_channels(query, profile_id, strat, scope="personal")

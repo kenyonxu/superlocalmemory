@@ -34,3 +34,34 @@ def test_scope_weights_validation():
     import pytest
     with pytest.raises(ValueError, match="non-negative"):
         ScopeWeights(personal=-0.1)
+
+
+def test_retrieval_engine_uses_scope_weights():
+    """RetrievalEngine reads scope weights from ScopeWeights config."""
+    from superlocalmemory.core.config import ScopeWeights
+    from unittest.mock import MagicMock
+    from superlocalmemory.retrieval.engine import RetrievalEngine
+
+    sw = ScopeWeights(personal=1.5, shared=0.3, global_=0.1)
+
+    channels = {name: MagicMock() for name in
+                ["semantic", "bm25", "entity_graph", "temporal", "hopfield", "spreading_activation"]}
+    for ch in channels.values():
+        ch.search.return_value = []
+        ch.ensure_loaded = MagicMock()
+
+    db = MagicMock()
+    db.execute.return_value = []
+    db.get_all_bm25_tokens.return_value = {}
+    db.get_all_facts.return_value = []
+
+    config = MagicMock()
+    config.rrf_k = 15
+    config.disabled_channels = []
+    config.use_cross_encoder = False
+
+    engine = RetrievalEngine(
+        db=db, config=config, channels=channels, scope_weights=sw,
+    )
+    assert engine._scope_weights.personal == 1.5
+    assert engine._scope_weights.global_ == 0.1
