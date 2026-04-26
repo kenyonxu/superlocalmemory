@@ -100,6 +100,8 @@ _ESSENTIAL_TOOLS: set[str] = {
     "reinforce_assertion", "contradict_assertion",
     # v3.4.11: Skill evolution (3)
     "evolve_skill", "skill_health", "skill_lineage",
+    # Multi-scope memory: entity management
+    "merge_entities",
 }
 
 # v3.4.4: Mesh tools — enabled if mesh_enabled in config or SLM_MCP_MESH_TOOLS=1
