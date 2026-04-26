@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS atomic_facts (
     profile_id         TEXT NOT NULL DEFAULT 'default',
     scope              TEXT NOT NULL DEFAULT 'personal',
     shared_with        TEXT,
+    domain_tags        TEXT,
     content            TEXT NOT NULL,
     fact_type          TEXT NOT NULL DEFAULT 'semantic'
                             CHECK (fact_type IN (
@@ -300,6 +301,7 @@ CREATE TABLE IF NOT EXISTS canonical_entities (
     profile_id      TEXT NOT NULL DEFAULT 'default',
     scope           TEXT NOT NULL DEFAULT 'personal',
     shared_with     TEXT,
+    domain_tags     TEXT,
     canonical_name  TEXT NOT NULL,
     entity_type     TEXT NOT NULL DEFAULT '',
     first_seen      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -405,6 +407,7 @@ CREATE TABLE IF NOT EXISTS temporal_events (
     profile_id       TEXT NOT NULL DEFAULT 'default',
     scope            TEXT NOT NULL DEFAULT 'personal',
     shared_with      TEXT,
+    domain_tags      TEXT,
     entity_id        TEXT NOT NULL,
     fact_id          TEXT NOT NULL,
     observation_date TEXT,
@@ -445,6 +448,7 @@ CREATE TABLE IF NOT EXISTS graph_edges (
     profile_id  TEXT NOT NULL DEFAULT 'default',
     scope       TEXT NOT NULL DEFAULT 'personal',
     shared_with TEXT,
+    domain_tags TEXT,
     source_id   TEXT NOT NULL,
     target_id   TEXT NOT NULL,
     edge_type   TEXT NOT NULL DEFAULT 'entity'
@@ -688,6 +692,18 @@ CREATE TABLE IF NOT EXISTS config (
 """
 
 # ---------------------------------------------------------------------------
+# Domain mapping (Phase 2: entity → skill-domain mapping)
+# ---------------------------------------------------------------------------
+
+_SQL_DOMAIN_MAPPING: Final[str] = """\
+CREATE TABLE IF NOT EXISTS domain_mapping (
+    entity_name TEXT NOT NULL,
+    domain      TEXT NOT NULL,
+    PRIMARY KEY (entity_name, domain)
+);
+"""
+
+# ---------------------------------------------------------------------------
 # Ordered DDL list (tables before FTS, respects FK order)
 # ---------------------------------------------------------------------------
 
@@ -711,6 +727,7 @@ _DDL_ORDERED: Final[tuple[str, ...]] = (
     _SQL_COMPLIANCE_AUDIT,
     _SQL_BM25_TOKENS,
     _SQL_CONFIG,
+    _SQL_DOMAIN_MAPPING,   # Phase 2: entity→domain mapping
     # V2 migration cleanup — drop stale triggers/FTS before recreating
     _SQL_V2_MIGRATION_CLEANUP,
     # FTS5 must come after atomic_facts (content table) AND after cleanup
