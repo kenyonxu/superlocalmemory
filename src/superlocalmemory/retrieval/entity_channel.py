@@ -122,7 +122,8 @@ class EntityGraphChannel:
         adj: dict[str, list[tuple[str, float]]] = defaultdict(list)
         try:
             rows = self._db.execute(
-                "SELECT source_id, target_id, weight FROM graph_edges WHERE profile_id = ?",
+                "SELECT source_id, target_id, weight FROM graph_edges "
+                "WHERE profile_id = ? OR scope = 'global'",
                 (profile_id,),
             )
         except Exception:
@@ -150,7 +151,8 @@ class EntityGraphChannel:
         """Fast edge count for staleness check (~1ms)."""
         try:
             rows = self._db.execute(
-                "SELECT COUNT(*) as cnt FROM graph_edges WHERE profile_id = ?",
+                "SELECT COUNT(*) as cnt FROM graph_edges "
+                "WHERE profile_id = ? OR scope = 'global'",
                 (profile_id,),
             )
             if rows:
@@ -162,8 +164,7 @@ class EntityGraphChannel:
     def _load_entity_maps(self, profile_id: str) -> None:
         """Pre-load entity→fact and fact→entity maps into memory.
 
-        Eliminates per-entity and per-fact SQL in the spreading activation loop.
-        Same data, same algorithm — zero quality change.
+        Includes global-scope facts so cross-agent entity links are visible.
         """
         # entity_id -> [fact_id, ...]
         self._entity_to_facts: dict[str, list[str]] = defaultdict(list)
@@ -173,7 +174,8 @@ class EntityGraphChannel:
         try:
             rows = self._db.execute(
                 "SELECT fact_id, canonical_entities_json FROM atomic_facts "
-                "WHERE profile_id = ? AND canonical_entities_json IS NOT NULL "
+                "WHERE (profile_id = ? OR scope = 'global') "
+                "AND canonical_entities_json IS NOT NULL "
                 "AND canonical_entities_json != ''",
                 (profile_id,),
             )

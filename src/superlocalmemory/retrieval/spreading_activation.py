@@ -225,13 +225,13 @@ class SpreadingActivation:
             rows = self._db.execute(
                 """
                 SELECT target_id AS neighbor_id, weight FROM graph_edges
-                    WHERE source_id = ? AND profile_id = ?
+                    WHERE source_id = ? AND (profile_id = ? OR scope = 'global')
                 UNION ALL
                 SELECT target_fact_id AS neighbor_id, weight FROM association_edges
                     WHERE source_fact_id = ? AND profile_id = ?
                 UNION ALL
                 SELECT source_id AS neighbor_id, weight FROM graph_edges
-                    WHERE target_id = ? AND profile_id = ?
+                    WHERE target_id = ? AND (profile_id = ? OR scope = 'global')
                 UNION ALL
                 SELECT source_fact_id AS neighbor_id, weight FROM association_edges
                     WHERE target_fact_id = ? AND profile_id = ?

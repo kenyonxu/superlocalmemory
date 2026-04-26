@@ -248,9 +248,6 @@ class HopfieldChannel:
         # Stage 2: Load candidate facts
         candidate_ids = [fid for fid, _ in knn_results]
         candidates = self._db.get_facts_by_ids(candidate_ids, profile_id)
-        # Scope filter: only keep facts matching the requested scope
-        if scope != "personal":
-            candidates = [f for f in candidates if getattr(f, "scope", "personal") == scope]
         if not candidates:
             return []
 
