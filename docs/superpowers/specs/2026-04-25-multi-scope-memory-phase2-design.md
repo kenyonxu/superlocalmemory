@@ -39,7 +39,7 @@ Out of scope:
 | Decision | Resolution |
 |----------|-----------|
 | Tag source | Rule-based: entity name → domain mapping table |
-| Agent skill declaration | `skill_tags` field in profile `config_json` |
+| Agent skill declaration | `skill_tags` in profile `config` dict (`config_json` column) |
 | Domain matching mechanism | Reuse Phase 1 shared scope channel (weight=0.7) |
 | Schema change | New `domain_mapping` table + `domain_tags` column on 5 core tables |
 | Seed data | ~50 built-in tech entity mappings, extensible via MCP tool |
@@ -70,24 +70,25 @@ Out of scope:
 └──────────────────┴──────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
-│  profiles.config_json                                    │
+│  profiles.config_json (stored as JSON, parsed to dict)  │
 ├─────────────────────────────────────────────────────────┤
 │  {"skill_tags": ["backend", "devops"]}                   │
+│  Profile.config: dict = {"skill_tags": [...]}            │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ### Store Flow
 
 ```
-content → entity_resolver → ["React", "TypeScript"]
-                ↓
-         resolve_domain_tags(["React", "TypeScript"])
-                ↓
-         domain_mapping lookup → ["frontend"]
-                ↓
-         domain_tags = ["frontend"]
-                ↓
-         Write to atomic_facts.domain_tags
+content → entity_resolver → canonical entities: {"React": "react_01", "TypeScript": "ts_01"}
+                                    ↓
+                             resolve_domain_tags(["React", "TypeScript"])
+                                    ↓
+                             domain_mapping lookup → ["frontend"]
+                                    ↓
+                             domain_tags = ["frontend"]
+                                    ↓
+                             Write to atomic_facts.domain_tags
 ```
 
 ### Recall Flow (Extended Shared Scope)
@@ -98,10 +99,10 @@ Phase 1 shared scope WHERE:
 
 Phase 2 extended shared scope WHERE:
   (? IN json_each(shared_with))
-  OR EXISTS (
+  OR (domain_tags IS NOT NULL AND EXISTS (
       SELECT 1 FROM json_each(domain_tags)
       WHERE value IN (agent_skill_tags)
-  )
+  ))
 ```
 
 ---
@@ -120,13 +121,14 @@ CREATE TABLE IF NOT EXISTS domain_mapping (
 
 ### New Column: domain_tags
 
-The following 5 tables gain a `domain_tags` column:
+The following 4 tables gain a `domain_tags` column (tables involved in recall WHERE clauses):
 
-- `memories`
 - `atomic_facts`
 - `canonical_entities`
 - `graph_edges`
 - `temporal_events`
+
+Note: `memories` is excluded — the recall pipeline never applies `_scope_where` to it.
 
 ```sql
 ALTER TABLE atomic_facts ADD COLUMN domain_tags TEXT;  -- JSON array or NULL
@@ -137,9 +139,16 @@ ALTER TABLE atomic_facts ADD COLUMN domain_tags TEXT;  -- JSON array or NULL
 
 - `storage/migrations/M015_add_domain_tags.py`
 - Creates `domain_mapping` table
-- Adds `domain_tags` column to 5 core tables
-- Inserts seed data from `storage/seed_domain_mapping.py`
+- Adds `domain_tags` column to 4 core tables
+- Seeds `domain_mapping` via `post_ddl_hook` (see M002 for precedent)
 - All existing data gets `domain_tags = NULL` (no behavior change)
+
+Migration registration (in `storage/migration_runner.py`):
+1. Import M015 at top
+2. Add to `_MODULES` dict: `"M015": M015_add_domain_tags`
+3. Add `Migration("M015", ...)` to `DEFERRED_MIGRATIONS` list
+
+Migration must include a `verify(conn)` function for crash-recovery idempotency (matches M014/M011 convention).
 
 ---
 
@@ -171,11 +180,13 @@ if include_shared:
     params.append(profile_id)
 
 # Phase 2: domain tag overlap matching
+# Guard: domain_tags IS NOT NULL prevents json_each(NULL) error
 if include_shared and skill_tags:
     domain_placeholders = ",".join("?" * len(skill_tags))
     conditions.append(
-        f"EXISTS (SELECT 1 FROM json_each({prefix}domain_tags) "
-        f"WHERE value IN ({domain_placeholders}))"
+        f"({prefix}domain_tags IS NOT NULL AND EXISTS ("
+        f"SELECT 1 FROM json_each({prefix}domain_tags) "
+        f"WHERE value IN ({domain_placeholders})))"
     )
     params.extend(skill_tags)
 ```
@@ -199,15 +210,21 @@ All callers that pass `include_shared=True` should also pass `skill_tags` when a
 
 ## StorePipeline Changes (~20 lines)
 
-After entity resolution in `run_store()`, add domain tag lookup:
+Domain tag lookup happens **after entity resolution** in `enrich_fact()`, where canonical entity names are available:
 
 ```python
-# After: entities = entity_resolver.resolve(content, ...)
-# New:
-domain_tags = db.resolve_domain_tags(list(entities.keys())) if entities else []
+# In enrich_fact() (~line 74), after entity_resolver.resolve() returns:
+canonical = entity_resolver.resolve(fact.entities, profile_id)
+fact.canonical_entities = list(canonical.values())
+
+# Phase 2: resolve domain tags from canonical entity names
+if canonical:
+    fact.domain_tags = db.resolve_domain_tags(list(canonical.keys()))
 ```
 
-Then propagate `domain_tags` to `MemoryRecord`, `AtomicFact`, etc.
+`run_store()` then propagates `domain_tags` from enriched facts to `MemoryRecord` and DB INSERT statements.
+
+Note: `enrich_fact()` currently doesn't receive `db` as a parameter. It must be added as a keyword argument, passed from `run_store()` which already has it.
 
 ---
 
@@ -215,36 +232,50 @@ Then propagate `domain_tags` to `MemoryRecord`, `AtomicFact`, etc.
 
 ### Skill Tags Propagation
 
-```python
-# engine.recall() reads skill_tags from profile config
-skill_tags = self._profile_config.get("skill_tags", [])
+`skill_tags` flows from the active profile through the recall chain:
 
-# Pass through recall_pipeline → retrieval_engine → _run_channels → DB methods
 ```
-
-The `_run_channels(scope="shared")` pass needs `skill_tags` to reach `_scope_where`. This flows through:
-- `retrieval_engine.recall()` → `_run_channels()` → channel `.search()` → DB methods
-
-Each channel's DB calls that pass `include_shared=True` should also pass `skill_tags`.
-
-### RetrievalEngine._run_channels
-
-The `_run_channels` method passes `skill_tags` to channel search calls when `scope="shared"`:
-
-```python
-if scope == "shared":
-    # Channels pass skill_tags to DB methods with include_shared=True
-    channel_kwargs = {"skill_tags": self._skill_tags}
-else:
-    channel_kwargs = {}
+SLMConfig.skill_tags → engine.recall()
+  → recall_pipeline.run_recall()
+    → retrieval_engine.recall()
+      → stored as self._skill_tags at engine init
 ```
 
 ### RetrievalEngine Constructor
 
-Store `skill_tags` from config:
+Add `skill_tags` as a constructor parameter (not from RetrievalConfig, which is a separate dataclass):
+
 ```python
-self._skill_tags: list[str] = config.get("skill_tags", [])
+def __init__(
+    self,
+    config: RetrievalConfig,
+    db: DatabaseManager,
+    # ... existing params ...
+    skill_tags: list[str] | None = None,  # NEW
+):
+    self._skill_tags = skill_tags or []
 ```
+
+### How skill_tags reach _scope_where
+
+Channels don't accept `skill_tags` directly. Instead, `_run_channels()` passes `skill_tags` to DB method calls **inside** each channel when `scope="shared"`. The cleanest approach:
+
+1. `_run_channels(scope="shared")` stores `skill_tags` in a temporary attribute before calling channels
+2. Channels that call DB methods with `include_shared=True` read `self._db._current_skill_tags` (thread-local)
+3. DB methods pass it to `_scope_where()`
+
+**Simpler alternative** (recommended for Phase 2): Add `skill_tags` as a keyword argument to each channel's `search()` method (same pattern as `scope` in Phase 1). Channels pass it to DB calls that use `include_shared=True`.
+
+```python
+# In each channel's search():
+def search(self, query, profile_id, top_k=50, *, scope="personal", skill_tags=None):
+    # When calling DB methods with include_shared=True:
+    facts = self._db.get_all_facts(profile_id, include_shared=True, skill_tags=skill_tags)
+```
+
+### BM25 Channel Limitation
+
+The BM25 channel currently ignores scope filtering entirely (it loads all facts for a profile). Domain tag matching will NOT affect BM25 results in Phase 2. This is acceptable — BM25 results still get RRF-fused with other channels that do support domain filtering. A future PR can add scope-aware BM25.
 
 ---
 
@@ -252,7 +283,7 @@ self._skill_tags: list[str] = config.get("skill_tags", [])
 
 ### Profile Dataclass
 
-Add a convenience property that parses `skill_tags` from `config_json`:
+The existing `Profile` dataclass (`core/profiles.py`) has a `config: dict[str, Any]` field (not a JSON string). Add a convenience property:
 
 ```python
 @dataclass(frozen=True)
@@ -260,14 +291,11 @@ class Profile:
     profile_id: str
     name: str
     # ... existing fields ...
-    config_json: str = "{}"
+    config: dict[str, Any] = field(default_factory=dict)
 
     @property
     def skill_tags(self) -> list[str]:
-        try:
-            return json.loads(self.config_json).get("skill_tags", [])
-        except (json.JSONDecodeError, AttributeError):
-            return []
+        return self.config.get("skill_tags", [])
 ```
 
 ### SLMConfig
@@ -280,7 +308,7 @@ class SLMConfig:
     skill_tags: list[str] = field(default_factory=list)
 ```
 
-Loaded from the active profile's `config_json.skill_tags`.
+Loaded from the active profile's `config.get("skill_tags", [])`.
 
 ---
 
@@ -344,14 +372,14 @@ Inserted during M015 migration.
 | Category | Test | Validates |
 |----------|------|-----------|
 | Schema | `domain_mapping` table exists | Migration ran |
-| Schema | `domain_tags` column on 5 tables | Schema updated |
+| Schema | `domain_tags` column on 4 tables | Schema updated |
 | Store | Entity matches → tag written | `resolve_domain_tags()` works |
 | Store | No match → domain_tags is NULL | Graceful fallback |
 | Store | Multiple entities same domain → deduplicated tag | `["frontend"]` not `["frontend","frontend"]` |
 | Recall | Agent skill overlaps memory domain → visible | `_scope_where` domain condition |
 | Recall | Agent skill doesn't overlap → invisible | Isolation preserved |
 | Recall | Both shared_with and domain match → both visible | Two sharing mechanisms coexist |
-| Profile | `skill_tags` parsed from config_json | Profile property works |
+| Profile | `skill_tags` parsed from `config` dict | Profile property works |
 | Seed | Seed data inserted after migration | ~50 rows in domain_mapping |
 
 ---
@@ -360,14 +388,14 @@ Inserted during M015 migration.
 
 | Module | Lines |
 |--------|-------|
-| Schema + migration + seed | ~80 |
-| DatabaseManager (new method + _scope_where) | ~30 |
-| StorePipeline (domain tag lookup) | ~20 |
-| RecallPipeline + RetrievalEngine (skill_tags flow) | ~30 |
-| Profile (skill_tags property + config) | ~15 |
+| Schema + migration + seed + registration | ~90 |
+| DatabaseManager (new method + _scope_where + callers) | ~40 |
+| StorePipeline (domain tag lookup in enrich_fact) | ~25 |
+| RecallPipeline + RetrievalEngine (skill_tags flow) | ~40 |
+| Profile (skill_tags property + SLMConfig) | ~15 |
 | MCP tool (add_domain_mapping) | ~20 |
-| Tests | ~80 |
-| **Total** | **~275** |
+| Tests | ~90 |
+| **Total** | **~320** |
 
 ---
 
