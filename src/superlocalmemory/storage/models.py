@@ -109,6 +109,10 @@ class Profile:
     last_used: str | None = None
     config: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def skill_tags(self) -> list[str]:
+        return self.config.get("skill_tags", [])
+
 
 @dataclass
 class MemoryRecord:
@@ -143,6 +147,7 @@ class AtomicFact:
     profile_id: str = "default"
     scope: str = "personal"
     shared_with: list[str] | None = None
+    domain_tags: list[str] | None = None
     content: str = ""              # Atomic fact statement
     fact_type: FactType = FactType.SEMANTIC
 
