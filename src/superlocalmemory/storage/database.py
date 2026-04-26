@@ -648,13 +648,25 @@ class DatabaseManager:
         profile_id: str,
         scope: str = "personal",
     ) -> list[CanonicalEntity]:
-        """List all entities for a profile with the given scope."""
-        rows = self.execute(
-            "SELECT * FROM canonical_entities "
-            "WHERE profile_id = ? AND scope = ? "
-            "ORDER BY canonical_name COLLATE NOCASE",
-            (profile_id, scope),
-        )
+        """List entities for a profile with the given scope.
+
+        When scope='global', returns global entities from ALL profiles
+        (since global entities are shared across agents).
+        """
+        if scope == "global":
+            rows = self.execute(
+                "SELECT * FROM canonical_entities "
+                "WHERE scope = 'global' "
+                "ORDER BY canonical_name COLLATE NOCASE",
+                (),
+            )
+        else:
+            rows = self.execute(
+                "SELECT * FROM canonical_entities "
+                "WHERE profile_id = ? AND scope = ? "
+                "ORDER BY canonical_name COLLATE NOCASE",
+                (profile_id, scope),
+            )
         return [
             CanonicalEntity(
                 entity_id=d["entity_id"],
@@ -753,7 +765,13 @@ class DatabaseManager:
             )
             count_as_source = dict(src_count[0])["c"] if src_count else 0
 
-            # Delete self-loop edges BEFORE updating
+            # Delete self-loop edges BEFORE updating — count for accurate reporting
+            del_forward = self.execute(
+                "SELECT COUNT(*) AS c FROM graph_edges "
+                "WHERE source_id = ? AND target_id = ? AND profile_id = ?",
+                (source_entity_id, target_entity_id, profile_id),
+            )
+            forward_deleted = dict(del_forward[0])["c"] if del_forward else 0
             self.execute(
                 "DELETE FROM graph_edges WHERE source_id = ? AND target_id = ? "
                 "AND profile_id = ?",
@@ -764,7 +782,7 @@ class DatabaseManager:
                 "WHERE source_id = ? AND profile_id = ?",
                 (target_entity_id, source_entity_id, profile_id),
             )
-            edges_updated += count_as_source
+            edges_updated += count_as_source - forward_deleted
 
             # Count target_id references
             tgt_count = self.execute(
@@ -774,18 +792,24 @@ class DatabaseManager:
             )
             count_as_target = dict(tgt_count[0])["c"] if tgt_count else 0
 
-            # Delete reverse self-loop edges
+            # Delete reverse self-loop edges — subtract from reported count
+            del_reverse = self.execute(
+                "SELECT COUNT(*) AS c FROM graph_edges "
+                "WHERE target_id = ? AND source_id = ? AND profile_id = ?",
+                (source_entity_id, target_entity_id, profile_id),
+            )
             self.execute(
                 "DELETE FROM graph_edges WHERE target_id = ? AND source_id = ? "
                 "AND profile_id = ?",
                 (source_entity_id, target_entity_id, profile_id),
             )
+            reverse_deleted = dict(del_reverse[0])["c"] if del_reverse else 0
             self.execute(
                 "UPDATE graph_edges SET target_id = ? "
                 "WHERE target_id = ? AND profile_id = ?",
                 (target_entity_id, source_entity_id, profile_id),
             )
-            edges_updated += count_as_target
+            edges_updated += count_as_target - reverse_deleted
             result["edges_updated"] = edges_updated
 
             # 4. Rewrite dependent tables with entity_id FK references

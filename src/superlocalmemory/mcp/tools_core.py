@@ -591,17 +591,11 @@ def register_core_tools(server, get_engine: Callable) -> None:
     async def merge_entities(
         source_entity_id: str,
         target_entity_id: str,
-        profile_id: str = "",
     ) -> dict:
         """Merge source entity into target entity. Consolidates duplicate entities.
 
         Moves all aliases, rewrites facts and graph edges, deletes source entity.
-        Use to merge pre-Phase 3 personal entities into global entities.
-
-        Args:
-            source_entity_id: Entity ID to merge from (will be deleted).
-            target_entity_id: Entity ID to merge into (kept).
-            profile_id: Profile ID (optional, uses default).
+        Uses the engine's active profile.
         """
         try:
             engine = get_engine()
