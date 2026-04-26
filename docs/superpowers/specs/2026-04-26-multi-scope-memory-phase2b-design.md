@@ -21,7 +21,8 @@ Phase 2B adds LLM-based classification as a fallback: entities that miss the rul
 ### Scope
 
 Phase 2B is limited to:
-- LLM fallback in `enrich_fact()` when `resolve_domain_tags()` returns empty
+- LLM fallback in `enrich_fact()` for entities with no domain_mapping row
+- New `get_unmapped_entities()` DB method to identify partial misses
 - Single-entity LLM calls with known-domain validation
 - Caching results in `domain_mapping` table
 - `remove_domain_mapping` MCP tool for correcting misclassifications
@@ -61,13 +62,15 @@ enrich_fact() after entity resolution:
                     ↓
   returns ["backend"]  (Redis hits seed, Celery misses)
                     ↓
-  unresolved = ["Celery"]  (entities whose names produced no domain tag)
+  db.get_unmapped_entities(["Celery", "Redis"])
+                    ↓
+  returns ["Celery"]  (only entities with zero rows in domain_mapping)
                     ↓
   Mode B/C + LLM available?
-    YES → for each unresolved entity:
+    YES → for each unmapped entity:
             llm_classify("Celery") → "backend"
             validate: "backend" in KNOWN_DOMAINS → OK
-            INSERT INTO domain_mapping ("Celery", "backend")
+            INSERT OR IGNORE INTO domain_mapping ("Celery", "backend")
     NO  → skip (domain_tags stays as-is)
                     ↓
   Re-resolve: db.resolve_domain_tags(["Celery", "Redis"]) → ["backend"]
@@ -103,9 +106,28 @@ KNOWN_DOMAINS: list[str] = ["frontend", "backend", "devops", "mobile", "data"]
 
 Added alongside the existing `SEED_DOMAIN_MAPPINGS` list.
 
-### 2. DatabaseManager: `classify_and_cache_domain()` (~25 lines)
+### 2. DatabaseManager: Two New Methods (~40 lines)
 
 File: `src/superlocalmemory/storage/database.py`
+
+**`get_unmapped_entities()`** — returns entity names with zero rows in domain_mapping:
+
+```python
+def get_unmapped_entities(self, entity_names: list[str]) -> list[str]:
+    """Return entity names that have no row in domain_mapping."""
+    if not entity_names:
+        return []
+    placeholders = ",".join("?" * len(entity_names))
+    rows = self.execute(
+        f"SELECT DISTINCT entity_name FROM domain_mapping "
+        f"WHERE entity_name IN ({placeholders})",
+        tuple(entity_names),
+    )
+    mapped = {r["entity_name"] for r in rows}
+    return [e for e in entity_names if e not in mapped]
+```
+
+**`classify_and_cache_domain()`** — LLM classify + cache:
 
 ```python
 def classify_and_cache_domain(
@@ -114,6 +136,9 @@ def classify_and_cache_domain(
     """Use LLM to classify entity, cache result in domain_mapping.
 
     Returns the domain string if classified successfully, None otherwise.
+    INSERT OR IGNORE ensures idempotency — if the entity already has a
+    mapping for the classified domain, the insert is silently skipped.
+    Users can correct misclassifications via remove_domain_mapping tool.
     """
 ```
 
@@ -136,40 +161,44 @@ domain_tags = None
 if db and canonical:
     domain_tags = db.resolve_domain_tags(list(canonical.keys()))
 
-    # Phase 2B: LLM fallback for unresolved entities
-    if llm and not domain_tags and canonical:
+    # Phase 2B: LLM fallback for unmapped entities (handles partial matches)
+    if llm:
         from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
-        for entity_name in canonical:
-            result = db.classify_and_cache_domain(entity_name, llm, KNOWN_DOMAINS)
-        # Re-resolve with newly cached mappings
-        domain_tags = db.resolve_domain_tags(list(canonical.keys()))
+        unmapped = db.get_unmapped_entities(list(canonical.keys()))
+        for entity_name in unmapped:
+            db.classify_and_cache_domain(entity_name, llm, KNOWN_DOMAINS)
+        if unmapped:
+            # Re-resolve with newly cached mappings
+            domain_tags = db.resolve_domain_tags(list(canonical.keys()))
 ```
 
 `enrich_fact()` signature gains `llm: Any = None` keyword argument, passed from `run_store()`.
 
-### 4. `run_store()` LLM Propagation (~3 lines)
+### 4. LLM Propagation Chain (~8 lines across 3 files)
 
-File: `src/superlocalmemory/core/store_pipeline.py`
+The LLM backbone threads through 3 call sites:
 
-`run_store()` already has no direct LLM parameter but has access to `config`. The LLM backbone is on the engine. Add `llm: Any = None` to `run_store()` signature, pass through to `enrich_fact()`.
+1. **`engine.py::store()`** — passes `llm=self._llm` to `run_store()`
+2. **`store_pipeline.py::run_store()`** — gains `llm: Any = None` parameter, passes to `enrich_fact()`
+3. **`store_pipeline.py::enrich_fact()`** — gains `llm: Any = None` parameter
 
-Engine already has `self._llm` initialized in `_init_heavy_layer()`. Pass it to `run_store()` call in `engine.py`.
+Engine already has `self._llm` initialized in `_init_heavy_layer()`. The LLM is None in Mode A and LIGHT capabilities, so the `if llm:` guard in enrich_fact() naturally skips classification.
 
 ### 5. MCP Tool: `remove_domain_mapping` (~15 lines)
 
 File: `src/superlocalmemory/mcp/tools_core.py`
 
 ```python
-@server.tool()
+@server.tool(annotations=ToolAnnotations(destructiveHint=True))
 async def remove_domain_mapping(entity_name: str, domain: str) -> dict:
     """Remove an entity-to-domain mapping.
 
     Use this to correct LLM misclassifications.
-    Example: remove_domain_mapping("Celery", "frontend")
+    Example: remove_domain_mapping("Celery", "backend")
     """
 ```
 
-Logic: `DELETE FROM domain_mapping WHERE entity_name=? AND domain=?`
+Logic: `DELETE FROM domain_mapping WHERE entity_name=? AND domain=?`. Returns `success=False` if 0 rows deleted (mapping didn't exist).
 
 ### 6. `classify_and_cache_domain` LLM Prompt
 
@@ -194,13 +223,16 @@ result = llm.generate(prompt=prompt, temperature=0.0, max_tokens=20)
 
 | Category | Test | Validates |
 |----------|------|-----------|
+| Unit | `get_unmapped_entities` with partial match | Returns only unmapped entity names |
+| Unit | `get_unmapped_entities` with all mapped | Returns empty list |
+| Unit | `get_unmapped_entities` with empty input | Returns empty list |
 | Unit | `classify_and_cache_domain` with mock LLM returning valid domain | Inserts into domain_mapping, returns domain |
 | Unit | `classify_and_cache_domain` with mock LLM returning unknown | Returns None, no insert |
 | Unit | `classify_and_cache_domain` with mock LLM returning garbage | Returns None, no insert |
 | Unit | `classify_and_cache_domain` with LLM raising exception | Returns None, logged warning |
-| Unit | `enrich_fact` with LLM fallback triggers classification | domain_tags populated after LLM call |
-| Unit | `enrich_fact` with no LLM skips classification | domain_tags stays None |
-| Unit | `enrich_fact` rule hit skips LLM | LLM never called when rule matches |
+| Unit | `enrich_fact` with LLM fallback on partial match | Only unmapped entities trigger LLM |
+| Unit | `enrich_fact` with no LLM skips classification | domain_tags stays as rule-based result |
+| Unit | `enrich_fact` all entities already mapped | LLM never called |
 | Integration | Store → LLM classify → recall with domain overlap | E2E domain sharing after LLM classification |
 | MCP | `remove_domain_mapping` removes entry | Subsequent resolve returns empty |
 | MCP | `remove_domain_mapping` non-existent entry | Returns success=False gracefully |
@@ -212,12 +244,13 @@ result = llm.generate(prompt=prompt, temperature=0.0, max_tokens=20)
 | Module | Lines |
 |--------|-------|
 | KNOWN_DOMAINS constant | ~3 |
+| `get_unmapped_entities()` | ~12 |
 | `classify_and_cache_domain()` | ~25 |
 | `enrich_fact()` LLM fallback | ~10 |
-| `run_store()` + `engine.py` LLM propagation | ~5 |
+| LLM propagation chain (engine → run_store → enrich_fact) | ~8 |
 | `remove_domain_mapping` MCP tool | ~15 |
-| Tests | ~80 |
-| **Total** | **~138** |
+| Tests | ~100 |
+| **Total** | **~173** |
 
 ---
 
