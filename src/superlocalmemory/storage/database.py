@@ -859,16 +859,31 @@ class DatabaseManager:
         self,
         fact_ids: list[str],
         profile_id: str,
+        *,
+        include_global: bool = True,
     ) -> list[AtomicFact]:
-        """Get multiple facts by their IDs, scoped to a profile."""
+        """Get multiple facts by their IDs, scoped to a profile.
+
+        Args:
+            fact_ids: Fact IDs to load.
+            profile_id: Owner profile for personal-scope facts.
+            include_global: Also load global-scope facts regardless of profile_id.
+        """
         if not fact_ids:
             return []
         placeholders = ",".join("?" for _ in fact_ids)
-        rows = self.execute(
-            f"SELECT * FROM atomic_facts WHERE fact_id IN ({placeholders}) "
-            f"AND profile_id = ? ORDER BY created_at DESC",
-            (*fact_ids, profile_id),
-        )
+        if include_global:
+            rows = self.execute(
+                f"SELECT * FROM atomic_facts WHERE fact_id IN ({placeholders}) "
+                f"AND (profile_id = ? OR scope = 'global') ORDER BY created_at DESC",
+                (*fact_ids, profile_id),
+            )
+        else:
+            rows = self.execute(
+                f"SELECT * FROM atomic_facts WHERE fact_id IN ({placeholders}) "
+                f"AND profile_id = ? ORDER BY created_at DESC",
+                (*fact_ids, profile_id),
+            )
         return [self._row_to_fact(r) for r in rows]
 
     def store_entity_profile(self, ep: EntityProfile) -> str:

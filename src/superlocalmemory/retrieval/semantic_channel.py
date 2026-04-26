@@ -182,10 +182,6 @@ class SemanticChannel:
         if not facts:
             return [(fid, score) for fid, score in knn_results[:top_k]]
 
-        # Scope filter: only keep facts matching the requested scope
-        if scope != "personal":
-            facts = [f for f in facts if getattr(f, "scope", "personal") == scope]
-
         # Step 3: Fisher-Rao re-scoring on the subset
         q_mean: np.ndarray | None = None
         q_var: np.ndarray | None = None

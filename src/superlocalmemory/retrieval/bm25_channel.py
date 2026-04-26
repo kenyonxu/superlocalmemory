@@ -69,6 +69,7 @@ class BM25Channel:
         self._fact_ids: list[str] = []
         self._fact_id_set: set[str] = set()
         self._raw_texts: list[str] = []  # V3.3.12: raw content for phrase matching
+        self._fact_scopes: dict[str, str] = {}  # fact_id -> scope
         self._bm25: BM25Plus | None = None
         self._dirty: bool = False
         self._loaded_profiles: set[str] = set()
@@ -98,14 +99,17 @@ class BM25Channel:
                     self._fact_ids.append(fact.fact_id)
                     self._fact_id_set.add(fact.fact_id)
                     self._raw_texts.append(fact.content)
+                    self._fact_scopes[fact.fact_id] = getattr(fact, "scope", "personal")
                     # Persist for next cold start
                     self._db.store_bm25_tokens(fact.fact_id, profile_id, tokens)
         else:
-            # Load raw texts for phrase matching (V3.3.12)
-            fact_content_map = {}
+            # Load raw texts and scopes for phrase matching / scope filtering (V3.3.12)
+            fact_content_map: dict[str, str] = {}
             try:
                 facts = self._db.get_all_facts(profile_id)
                 fact_content_map = {f.fact_id: f.content for f in facts}
+                for f in facts:
+                    self._fact_scopes[f.fact_id] = getattr(f, "scope", "personal")
             except Exception:
                 pass
             for fid, tokens in token_map.items():
@@ -123,13 +127,21 @@ class BM25Channel:
             len(token_map) if token_map else 0, profile_id,
         )
 
-    def add(self, fact_id: str, content: str, profile_id: str) -> None:
+    def add(
+        self,
+        fact_id: str,
+        content: str,
+        profile_id: str,
+        *,
+        scope: str = "personal",
+    ) -> None:
         """Add a single fact to the index and persist tokens.
 
         Args:
             fact_id: Unique fact identifier.
             content: Raw text content to index.
             profile_id: Owner profile.
+            scope: Fact scope (personal, global, shared).
         """
         tokens = tokenize(content)
         if not tokens:
@@ -141,6 +153,7 @@ class BM25Channel:
         if not hasattr(self, '_raw_texts'):
             self._raw_texts = []
         self._raw_texts.append(content)
+        self._fact_scopes[fact_id] = scope
         self._dirty = True
 
         # Persist for cold start
@@ -188,12 +201,17 @@ class BM25Channel:
         query_lower = query.lower().strip()
         for i, score in enumerate(scores):
             if score > 0.0:
+                fid = self._fact_ids[i]
+                # Scope filtering: BM25 needs full corpus for IDF, so filter post-score
+                fact_scope = self._fact_scopes.get(fid, "personal")
+                if scope != "personal" and fact_scope != scope:
+                    continue
                 bonus = score
                 # Exact phrase match bonus: if the query appears as a substring in the document
                 if len(query_lower) >= 5 and i < len(self._raw_texts):
                     if query_lower in self._raw_texts[i].lower():
                         bonus *= 1.5  # 50% boost for exact phrase match
-                scored.append((self._fact_ids[i], bonus))
+                scored.append((fid, bonus))
 
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:top_k]
@@ -203,6 +221,7 @@ class BM25Channel:
         self._corpus = []
         self._fact_ids = []
         self._fact_id_set = set()
+        self._fact_scopes = {}
         self._bm25 = None
         self._dirty = False
         self._loaded_profiles = set()
