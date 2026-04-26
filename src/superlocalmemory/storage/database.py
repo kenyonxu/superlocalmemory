@@ -35,6 +35,7 @@ from superlocalmemory.storage.models import (
     SignalType,
     TemporalEvent,
     TrustScore,
+    _new_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -641,6 +642,182 @@ class DatabaseManager:
             )
             for r in rows
         ]
+
+    def get_entities_by_scope(
+        self,
+        profile_id: str,
+        scope: str = "personal",
+    ) -> list[CanonicalEntity]:
+        """List all entities for a profile with the given scope."""
+        rows = self.execute(
+            "SELECT * FROM canonical_entities "
+            "WHERE profile_id = ? AND scope = ? "
+            "ORDER BY canonical_name COLLATE NOCASE",
+            (profile_id, scope),
+        )
+        return [
+            CanonicalEntity(
+                entity_id=d["entity_id"],
+                profile_id=d["profile_id"],
+                scope=d.get("scope", "personal"),
+                shared_with=json.loads(d["shared_with"]) if d.get("shared_with") else None,
+                canonical_name=d["canonical_name"],
+                entity_type=d["entity_type"],
+                first_seen=d["first_seen"],
+                last_seen=d["last_seen"],
+                fact_count=d["fact_count"],
+            )
+            for r in rows
+            for d in (dict(r),)
+        ]
+
+    def merge_entities(
+        self,
+        source_entity_id: str,
+        target_entity_id: str,
+        profile_id: str,
+    ) -> dict[str, int | bool]:
+        """Merge source entity into target entity (atomic via transaction)."""
+        if source_entity_id == target_entity_id:
+            raise ValueError("Cannot merge an entity into itself (same entity_id)")
+
+        target_rows = self.execute(
+            "SELECT entity_id FROM canonical_entities WHERE entity_id = ?",
+            (target_entity_id,),
+        )
+        if not target_rows:
+            raise ValueError(f"Target entity {target_entity_id} not found")
+
+        result: dict[str, int | bool] = {}
+
+        with self.transaction():
+            # 1. Move aliases from source to target
+            alias_rows = self.execute(
+                "SELECT alias_id, alias, confidence, source FROM entity_aliases "
+                "WHERE entity_id = ?",
+                (source_entity_id,),
+            )
+            aliases_moved = 0
+            for r in alias_rows:
+                d = dict(r)
+                existing = self.execute(
+                    "SELECT alias_id FROM entity_aliases "
+                    "WHERE entity_id = ? AND LOWER(alias) = LOWER(?)",
+                    (target_entity_id, d["alias"]),
+                )
+                if not existing:
+                    self.execute(
+                        "INSERT OR REPLACE INTO entity_aliases "
+                        "(alias_id, entity_id, alias, confidence, source) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (_new_id(), target_entity_id, d["alias"], d["confidence"], d["source"]),
+                    )
+                    aliases_moved += 1
+            self.execute("DELETE FROM entity_aliases WHERE entity_id = ?", (source_entity_id,))
+            result["aliases_moved"] = aliases_moved
+
+            # 2. Rewrite atomic_facts canonical_entities_json
+            facts = self.execute(
+                "SELECT fact_id, canonical_entities_json FROM atomic_facts "
+                "WHERE profile_id = ? AND canonical_entities_json LIKE ?",
+                (profile_id, f'%"{source_entity_id}"%'),
+            )
+            facts_updated = 0
+            for r in facts:
+                d = dict(r)
+                try:
+                    entities = json.loads(d["canonical_entities_json"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if source_entity_id in entities:
+                    entities = [
+                        target_entity_id if eid == source_entity_id else eid
+                        for eid in entities
+                    ]
+                    self.execute(
+                        "UPDATE atomic_facts SET canonical_entities_json = ? "
+                        "WHERE fact_id = ?",
+                        (json.dumps(entities), d["fact_id"]),
+                    )
+                    facts_updated += 1
+            result["facts_updated"] = facts_updated
+
+            # 3. Rewrite graph_edges — SELECT-then-UPDATE counting
+            edges_updated = 0
+
+            # Count source_id references
+            src_count = self.execute(
+                "SELECT COUNT(*) AS c FROM graph_edges "
+                "WHERE source_id = ? AND profile_id = ?",
+                (source_entity_id, profile_id),
+            )
+            count_as_source = dict(src_count[0])["c"] if src_count else 0
+
+            # Delete self-loop edges BEFORE updating
+            self.execute(
+                "DELETE FROM graph_edges WHERE source_id = ? AND target_id = ? "
+                "AND profile_id = ?",
+                (source_entity_id, target_entity_id, profile_id),
+            )
+            self.execute(
+                "UPDATE graph_edges SET source_id = ? "
+                "WHERE source_id = ? AND profile_id = ?",
+                (target_entity_id, source_entity_id, profile_id),
+            )
+            edges_updated += count_as_source
+
+            # Count target_id references
+            tgt_count = self.execute(
+                "SELECT COUNT(*) AS c FROM graph_edges "
+                "WHERE target_id = ? AND profile_id = ?",
+                (source_entity_id, profile_id),
+            )
+            count_as_target = dict(tgt_count[0])["c"] if tgt_count else 0
+
+            # Delete reverse self-loop edges
+            self.execute(
+                "DELETE FROM graph_edges WHERE target_id = ? AND source_id = ? "
+                "AND profile_id = ?",
+                (source_entity_id, target_entity_id, profile_id),
+            )
+            self.execute(
+                "UPDATE graph_edges SET target_id = ? "
+                "WHERE target_id = ? AND profile_id = ?",
+                (target_entity_id, source_entity_id, profile_id),
+            )
+            edges_updated += count_as_target
+            result["edges_updated"] = edges_updated
+
+            # 4. Rewrite dependent tables with entity_id FK references
+            self.execute(
+                "UPDATE temporal_events SET entity_id = ? WHERE entity_id = ?",
+                (target_entity_id, source_entity_id),
+            )
+            self.execute(
+                "UPDATE entity_profiles SET entity_id = ? WHERE entity_id = ?",
+                (target_entity_id, source_entity_id),
+            )
+
+            # 5. Update target fact_count
+            source_entity = self.execute(
+                "SELECT fact_count FROM canonical_entities WHERE entity_id = ?",
+                (source_entity_id,),
+            )
+            source_fc = dict(source_entity[0])["fact_count"] if source_entity else 0
+            self.execute(
+                "UPDATE canonical_entities SET fact_count = fact_count + ? "
+                "WHERE entity_id = ?",
+                (source_fc, target_entity_id),
+            )
+
+            # 6. Delete source entity
+            self.execute(
+                "DELETE FROM canonical_entities WHERE entity_id = ?",
+                (source_entity_id,),
+            )
+            result["source_deleted"] = True
+
+        return result
 
     def get_memory_content_batch(self, memory_ids: list[str]) -> dict[str, str]:
         """Batch-fetch original memory text. Returns {memory_id: content}."""
