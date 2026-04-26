@@ -104,6 +104,8 @@ class _DictRow(dict):
 def _mock_db_with_events(events: list[dict]) -> MagicMock:
     db = MagicMock()
     db.execute.return_value = [_DictRow(ev) for ev in events]
+    # Mock _scope_where to return a simple WHERE clause like the old raw SQL did
+    db._scope_where.return_value = ("profile_id = ? AND scope = ?", ["default", "personal"])
     return db
 
 
@@ -111,6 +113,7 @@ class TestTemporalChannelSearch:
     def test_no_temporal_signal_returns_empty(self) -> None:
         db = MagicMock()
         db.execute.return_value = []
+        db._scope_where.return_value = ("profile_id = ? AND scope = ?", ["default", "personal"])
         ch = TemporalChannel(db)
         # "tell me about cats" has no date/temporal words
         results = ch.search("tell me about cats", "default")
@@ -252,6 +255,7 @@ class TestTemporalChannelSearch:
     def test_empty_events_table(self) -> None:
         db = MagicMock()
         db.execute.return_value = []
+        db._scope_where.return_value = ("profile_id = ? AND scope = ?", ["default", "personal"])
         ch = TemporalChannel(db)
 
         with patch(
