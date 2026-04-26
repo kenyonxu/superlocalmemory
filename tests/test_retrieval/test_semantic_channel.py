@@ -215,7 +215,7 @@ class TestSemanticChannelSearch:
         channel.search([1.0], "work_profile")
         db.get_all_facts.assert_called_once_with(
             "work_profile", scope="personal",
-            include_global=False, include_shared=False,
+            include_global=False, include_shared=False, skill_tags=None,
         )
 
     def test_fisher_variance_wrong_length_falls_back(self) -> None:

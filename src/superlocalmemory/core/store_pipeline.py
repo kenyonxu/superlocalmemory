@@ -61,6 +61,7 @@ def enrich_fact(
     embedder: Any,
     entity_resolver: Any,
     temporal_parser: Any,
+    db: Any = None,
 ) -> AtomicFact:
     """Enrich fact with embeddings, entities, temporal, emotional data."""
     from superlocalmemory.encoding.emotional import tag_emotion, emotional_importance_boost
@@ -74,6 +75,11 @@ def enrich_fact(
     canonical = {}
     if entity_resolver and fact.entities:
         canonical = entity_resolver.resolve(fact.entities, profile_id)
+
+    # Phase 2: resolve domain tags from canonical entity names
+    domain_tags = None
+    if db and canonical:
+        domain_tags = db.resolve_domain_tags(list(canonical.keys()))
 
     temporal = {}
     if temporal_parser:
@@ -113,6 +119,7 @@ def enrich_fact(
         created_at=fact.created_at,
         scope=fact.scope,
         shared_with=fact.shared_with,
+        domain_tags=domain_tags,
     )
 
 
@@ -274,6 +281,7 @@ def run_store(
             embedder=embedder,
             entity_resolver=entity_resolver,
             temporal_parser=temporal_parser,
+            db=db,
         )
 
         if consolidator:

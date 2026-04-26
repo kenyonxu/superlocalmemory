@@ -98,6 +98,7 @@ class SpreadingActivation:
         top_k: int = 7,
         *,
         scope: str = "personal",
+        skill_tags: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Channel-compatible interface: (query, top_k) -> [(fact_id, score)].
 

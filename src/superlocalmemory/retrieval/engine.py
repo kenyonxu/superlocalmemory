@@ -74,6 +74,7 @@ class RetrievalEngine:
         profile_channel: Any | None = None,
         bridge_discovery: Any | None = None,
         trust_scorer: TrustScorer | None = None,
+        skill_tags: list[str] | None = None,
     ) -> None:
         self._db = db
         self._config = config
@@ -92,6 +93,7 @@ class RetrievalEngine:
         self._profile_channel = profile_channel
         self._bridge = bridge_discovery
         self._trust_scorer = trust_scorer
+        self._skill_tags = skill_tags or []
 
         # V3.3.4: LRU cache for query embeddings (avoids redundant Ollama API calls)
         self._query_embedding_cache: dict[str, list[float]] = {}
@@ -182,7 +184,9 @@ class RetrievalEngine:
 
         # Shared scope
         if include_shared:
-            shared_ch = self._run_channels(query, profile_id, strat, scope="shared")
+            shared_ch = self._run_channels(
+                query, profile_id, strat, scope="shared", skill_tags=self._skill_tags,
+            )
             for ch_name, results in shared_ch.items():
                 key = f"{ch_name}:shared"
                 all_ch_results[key] = results
@@ -528,6 +532,7 @@ class RetrievalEngine:
         strat: QueryStrategy,
         *,
         scope: str = "personal",
+        skill_tags: list[str] | None = None,
     ) -> dict[str, list[tuple[str, float]]]:
         """Run active retrieval channels. Respects disabled_channels config for ablation.
 
@@ -535,6 +540,9 @@ class RetrievalEngine:
         so channels can filter results by scope.  For multi-scope retrieval the
         ``recall()`` method calls this once per active scope and merges with
         weighted RRF.
+
+        ``skill_tags`` is forwarded to channels that perform scope-aware DB
+        queries so domain-tag matching works at recall time.
         """
         out: dict[str, list[tuple[str, float]]] = {}
         # Skip channels listed in disabled_channels (ablation support)
@@ -561,7 +569,8 @@ class RetrievalEngine:
         if self._semantic is not None and q_emb is not None and "semantic" not in disabled:
             try:
                 r = self._semantic.search(
-                    q_emb, profile_id, self._config.semantic_top_k, scope=scope
+                    q_emb, profile_id, self._config.semantic_top_k,
+                    scope=scope, skill_tags=skill_tags,
                 )
                 if r:
                     out["semantic"] = r
@@ -583,7 +592,8 @@ class RetrievalEngine:
         if self._temporal is not None and "temporal" not in disabled:
             try:
                 r = self._temporal.search(
-                    query, profile_id, top_k=self._config.bm25_top_k, scope=scope
+                    query, profile_id, top_k=self._config.bm25_top_k,
+                    scope=scope, skill_tags=skill_tags,
                 )
                 if r:
                     out["temporal"] = r
@@ -594,7 +604,8 @@ class RetrievalEngine:
         if self._hopfield is not None and q_emb is not None and "hopfield" not in disabled:
             try:
                 r = self._hopfield.search(
-                    q_emb, profile_id, self._config.hopfield_top_k, scope=scope
+                    q_emb, profile_id, self._config.hopfield_top_k,
+                    scope=scope, skill_tags=skill_tags,
                 )
                 if r:
                     out["hopfield"] = r
@@ -609,7 +620,8 @@ class RetrievalEngine:
         ):
             try:
                 r = self._spreading_activation.search(
-                    q_emb, profile_id, self._config.bm25_top_k, scope=scope
+                    q_emb, profile_id, self._config.bm25_top_k,
+                    scope=scope, skill_tags=skill_tags,
                 )
                 if r:
                     out["spreading_activation"] = r

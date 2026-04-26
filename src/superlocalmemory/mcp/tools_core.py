@@ -522,6 +522,31 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("update_memory failed")
             return {"success": False, "error": str(exc)}
 
+    @server.tool(annotations=ToolAnnotations(idempotentHint=True))
+    async def add_domain_mapping(entity_name: str, domain: str) -> dict:
+        """Add an entity-to-domain mapping for skill-domain tagging.
+
+        Maps an entity name (e.g. 'SolidJS', 'Kubernetes') to a skill domain
+        (e.g. 'frontend', 'devops'). Facts mentioning this entity will
+        automatically receive the domain tag for cross-profile visibility.
+        Duplicate mappings are silently ignored (idempotent).
+        """
+        try:
+            engine = get_engine()
+            engine._db.execute(
+                "INSERT OR IGNORE INTO domain_mapping (entity_name, domain) "
+                "VALUES (?, ?)",
+                (entity_name, domain),
+            )
+            engine._db.commit()
+            return {
+                "success": True,
+                "mapping": {"entity_name": entity_name, "domain": domain},
+            }
+        except Exception as exc:
+            logger.exception("add_domain_mapping failed")
+            return {"success": False, "error": str(exc)}
+
     @server.tool()
     async def get_attribution() -> dict:
         """Get system attribution: author, version, license, and provenance metadata."""
