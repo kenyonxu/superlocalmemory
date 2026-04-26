@@ -105,6 +105,7 @@ class SemanticChannel:
         top_k: int = 50,
         *,
         scope: str = "personal",
+        skill_tags: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Search for semantically similar facts.
 
@@ -129,14 +130,16 @@ class SemanticChannel:
         # --- FAST PATH: sqlite-vec KNN ---
         if self._vector_store and self._vector_store.available:
             results = self._search_via_vector_store(
-                query_embedding, q_vec, profile_id, top_k, scope=scope,
+                query_embedding, q_vec, profile_id, top_k,
+                scope=scope, skill_tags=skill_tags,
             )
             if results:  # If vec0 returned results, use them
                 return results
             # If vec0 is empty (cold start), fall through to full scan
 
         # --- FALLBACK: full-table scan (original code, unchanged) ---
-        return self._search_full_scan(query_embedding, q_vec, profile_id, top_k, scope=scope)
+        return self._search_full_scan(query_embedding, q_vec, profile_id, top_k,
+                                      scope=scope, skill_tags=skill_tags)
 
     def _search_via_vector_store(
         self,
@@ -146,6 +149,7 @@ class SemanticChannel:
         top_k: int,
         *,
         scope: str = "personal",
+        skill_tags: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """KNN via VectorStore (or QAS 3-tier), then Fisher-Rao re-scoring."""
         # V3.3.19: Try TurboQuant 3-tier search first (float32 + int8 + polar)
@@ -229,6 +233,7 @@ class SemanticChannel:
         top_k: int,
         *,
         scope: str = "personal",
+        skill_tags: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Original full-table-scan search. Used as fallback when VectorStore
         is unavailable or empty (cold start).
@@ -247,6 +252,7 @@ class SemanticChannel:
         facts = self._db.get_all_facts(
             profile_id, scope="personal",
             include_global=include_global, include_shared=include_shared,
+            skill_tags=skill_tags,
         )
 
         scored: list[tuple[str, float]] = []

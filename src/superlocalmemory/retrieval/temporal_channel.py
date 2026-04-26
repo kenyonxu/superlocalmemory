@@ -59,6 +59,7 @@ class TemporalChannel:
         top_k: int = 30,
         *,
         scope: str = "personal",
+        skill_tags: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Search for temporally relevant facts.
 
@@ -78,7 +79,9 @@ class TemporalChannel:
 
         # Strategy 1: Entity-temporal metadata search
         # "When did Alice...?" → find all temporal events for Alice
-        entity_results = self._entity_temporal_search(query, profile_id, scope=scope)
+        entity_results = self._entity_temporal_search(
+            query, profile_id, scope=scope, skill_tags=skill_tags,
+        )
 
         # Strategy 2: Date proximity search
         if query_dt is None and not entity_results:
@@ -122,6 +125,7 @@ class TemporalChannel:
 
     def _entity_temporal_search(
         self, query: str, profile_id: str, *, scope: str = "personal",
+        skill_tags: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Metadata-first: find temporal events for entities mentioned in query.
 
@@ -154,6 +158,7 @@ class TemporalChannel:
             entity = self._db.get_entity_by_name(
                 name, profile_id, scope="personal",
                 include_global=include_global, include_shared=include_shared,
+                skill_tags=skill_tags,
             )
             if entity is None:
                 continue

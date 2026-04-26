@@ -90,6 +90,7 @@ class HopfieldChannel:
         top_k: int = 50,
         *,
         scope: str = "personal",
+        skill_tags: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Search for facts using Hopfield associative retrieval.
 
@@ -108,7 +109,8 @@ class HopfieldChannel:
             return []
 
         try:
-            return self._search_inner(query, profile_id, top_k, scope=scope)
+            return self._search_inner(query, profile_id, top_k, scope=scope,
+                                      skill_tags=skill_tags)
         except Exception as exc:
             # HR-06: Return [] on any error
             logger.warning("Hopfield channel error: %s", exc)
@@ -123,6 +125,7 @@ class HopfieldChannel:
         top_k: int,
         *,
         scope: str = "personal",
+        skill_tags: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Core search logic, separated for clean error handling."""
         # Step 2: Convert query to numpy
@@ -151,7 +154,9 @@ class HopfieldChannel:
             return []
 
         # Step 4: Get memory matrix
-        memory_matrix, fact_ids = self._get_memory_matrix(profile_id, scope=scope)
+        memory_matrix, fact_ids = self._get_memory_matrix(
+            profile_id, scope=scope, skill_tags=skill_tags,
+        )
 
         # Step 5: Empty check
         if memory_matrix is None or len(fact_ids) == 0:
@@ -273,6 +278,7 @@ class HopfieldChannel:
 
     def _get_memory_matrix(
         self, profile_id: str, *, scope: str = "personal",
+        skill_tags: list[str] | None = None,
     ) -> tuple[np.ndarray | None, list[str]]:
         """Build or retrieve cached memory matrix X (n x d).
 
@@ -304,6 +310,7 @@ class HopfieldChannel:
         facts = self._db.get_all_facts(
             profile_id, scope="personal",
             include_global=include_global, include_shared=include_shared,
+            skill_tags=skill_tags,
         )[:5000]
         if not facts:
             return (None, [])

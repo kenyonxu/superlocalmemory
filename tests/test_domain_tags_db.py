@@ -153,6 +153,18 @@ def test_enrich_fact_resolves_domain_tags(dbm_with_mappings):
     assert enriched.domain_tags == ["frontend"]
 
 
+def test_retrieval_engine_stores_skill_tags():
+    """RetrievalEngine constructor stores skill_tags."""
+    from unittest.mock import MagicMock
+    from superlocalmemory.retrieval.engine import RetrievalEngine
+
+    engine = RetrievalEngine(
+        db=MagicMock(), config=MagicMock(), channels={},
+        skill_tags=["backend"],
+    )
+    assert engine._skill_tags == ["backend"]
+
+
 def test_domain_and_shared_with_coexist(in_memory_db):
     """Both shared_with and domain matching return results."""
     in_memory_db.execute(
