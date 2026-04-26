@@ -202,3 +202,56 @@ def test_domain_and_shared_with_coexist(in_memory_db):
     contents = [r["content"] for r in rows]
     assert "shared fact" in contents
     assert "domain fact" in contents
+
+
+def test_add_domain_mapping_tool():
+    """add_domain_mapping MCP tool inserts mapping."""
+    from unittest.mock import MagicMock
+    from superlocalmemory.mcp.tools_core import register_core_tools
+
+    server = MagicMock()
+    tools = {}
+
+    def capture_tool(annotations=None):
+        def decorator(fn):
+            tools[fn.__name__] = fn
+            return fn
+        return decorator
+
+    server.tool = capture_tool
+
+    mock_engine = MagicMock()
+    mock_engine.profile_id = "test"
+    register_core_tools(server, lambda: mock_engine)
+
+    import asyncio
+    result = asyncio.get_event_loop().run_until_complete(
+        tools["add_domain_mapping"](entity_name="SolidJS", domain="frontend")
+    )
+
+    assert result["success"] is True
+    assert "SolidJS" in result["mapping"]["entity_name"]
+
+
+def test_add_domain_mapping_duplicate():
+    """Adding duplicate is idempotent."""
+    from unittest.mock import MagicMock
+    from superlocalmemory.mcp.tools_core import register_core_tools
+
+    server = MagicMock()
+    tools = {}
+    server.tool = lambda annotations=None: (lambda fn: (tools.update({fn.__name__: fn}), fn)[1])
+
+    mock_engine = MagicMock()
+    mock_engine.profile_id = "test"
+    register_core_tools(server, lambda: mock_engine)
+
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(
+        tools["add_domain_mapping"](entity_name="SolidJS", domain="frontend")
+    )
+    result = asyncio.get_event_loop().run_until_complete(
+        tools["add_domain_mapping"](entity_name="SolidJS", domain="frontend")
+    )
+
+    assert result["success"] is True
