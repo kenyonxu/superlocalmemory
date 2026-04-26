@@ -1,4 +1,5 @@
 """DatabaseManager domain tag tests — resolve_domain_tags + _scope_where."""
+
 import pytest
 from superlocalmemory.storage.database import DatabaseManager
 from superlocalmemory.storage import schema
@@ -10,15 +11,11 @@ def dbm_with_mappings(tmp_path):
     db_path = tmp_path / "test.db"
     dbm = DatabaseManager(db_path)
     dbm.initialize(schema)
-    dbm.execute(
-        "INSERT INTO domain_mapping (entity_name, domain) VALUES ('React', 'frontend')"
-    )
+    dbm.execute("INSERT INTO domain_mapping (entity_name, domain) VALUES ('React', 'frontend')")
     dbm.execute(
         "INSERT INTO domain_mapping (entity_name, domain) VALUES ('TypeScript', 'frontend')"
     )
-    dbm.execute(
-        "INSERT INTO domain_mapping (entity_name, domain) VALUES ('PostgreSQL', 'backend')"
-    )
+    dbm.execute("INSERT INTO domain_mapping (entity_name, domain) VALUES ('PostgreSQL', 'backend')")
     return dbm
 
 
@@ -48,7 +45,12 @@ def test_resolve_domain_tags_no_match(dbm_with_mappings):
 
 def test_scope_where_with_skill_tags():
     clause, params = DatabaseManager._scope_where(
-        "alice", "personal", False, True, "", skill_tags=["backend", "devops"],
+        "alice",
+        "personal",
+        False,
+        True,
+        "",
+        skill_tags=["backend", "devops"],
     )
     assert "domain_tags IS NOT NULL" in clause
     assert "json_each" in clause
@@ -58,19 +60,19 @@ def test_scope_where_with_skill_tags():
 
 def test_scope_where_without_skill_tags():
     clause, params = DatabaseManager._scope_where(
-        "alice", "personal", False, True, "",
+        "alice",
+        "personal",
+        False,
+        True,
+        "",
     )
     assert "domain_tags" not in clause
 
 
 def test_domain_recall_visibility(in_memory_db):
     """Agent with matching skill_tags sees domain-tagged facts."""
-    in_memory_db.execute(
-        "INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('a', 'A')"
-    )
-    in_memory_db.execute(
-        "INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('b', 'B')"
-    )
+    in_memory_db.execute("INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('a', 'A')")
+    in_memory_db.execute("INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('b', 'B')")
     in_memory_db.execute(
         "INSERT INTO memories (memory_id, profile_id, content, scope) "
         "VALUES ('m1', 'a', 'src', 'personal')"
@@ -83,19 +85,31 @@ def test_domain_recall_visibility(in_memory_db):
     in_memory_db.commit()
 
     clause, params = DatabaseManager._scope_where(
-        "b", "personal", False, True, "", skill_tags=["frontend"],
+        "b",
+        "personal",
+        False,
+        True,
+        "",
+        skill_tags=["frontend"],
     )
     rows = in_memory_db.execute(
-        f"SELECT content FROM atomic_facts WHERE {clause}", params,
+        f"SELECT content FROM atomic_facts WHERE {clause}",
+        params,
     )
     contents = [r["content"] for r in rows]
     assert "react tip" in contents
 
     clause2, params2 = DatabaseManager._scope_where(
-        "b", "personal", False, True, "", skill_tags=["backend"],
+        "b",
+        "personal",
+        False,
+        True,
+        "",
+        skill_tags=["backend"],
     )
     rows2 = in_memory_db.execute(
-        f"SELECT content FROM atomic_facts WHERE {clause2}", params2,
+        f"SELECT content FROM atomic_facts WHERE {clause2}",
+        params2,
     )
     contents2 = [r["content"] for r in rows2]
     assert "react tip" not in contents2
@@ -103,24 +117,28 @@ def test_domain_recall_visibility(in_memory_db):
 
 def test_slm_config_skill_tags():
     from superlocalmemory.core.config import SLMConfig
+
     config = SLMConfig(skill_tags=["backend", "devops"])
     assert config.skill_tags == ["backend", "devops"]
 
 
 def test_slm_config_skill_tags_default():
     from superlocalmemory.core.config import SLMConfig
+
     config = SLMConfig()
     assert config.skill_tags == []
 
 
 def test_profile_skill_tags():
     from superlocalmemory.storage.models import Profile
+
     p = Profile(profile_id="x", name="X", config={"skill_tags": ["frontend"]})
     assert p.skill_tags == ["frontend"]
 
 
 def test_profile_skill_tags_default():
     from superlocalmemory.storage.models import Profile
+
     p = Profile(profile_id="x", name="X")
     assert p.skill_tags == []
 
@@ -144,7 +162,9 @@ def test_enrich_fact_resolves_domain_tags(dbm_with_mappings):
     embedder.embed.return_value = None
 
     enriched = enrich_fact(
-        fact, record, "test",
+        fact,
+        record,
+        "test",
         embedder=embedder,
         entity_resolver=entity_resolver,
         temporal_parser=None,
@@ -159,7 +179,9 @@ def test_retrieval_engine_stores_skill_tags():
     from superlocalmemory.retrieval.engine import RetrievalEngine
 
     engine = RetrievalEngine(
-        db=MagicMock(), config=MagicMock(), channels={},
+        db=MagicMock(),
+        config=MagicMock(),
+        channels={},
         skill_tags=["backend"],
     )
     assert engine._skill_tags == ["backend"]
@@ -167,12 +189,8 @@ def test_retrieval_engine_stores_skill_tags():
 
 def test_domain_and_shared_with_coexist(in_memory_db):
     """Both shared_with and domain matching return results."""
-    in_memory_db.execute(
-        "INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('a', 'A')"
-    )
-    in_memory_db.execute(
-        "INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('b', 'B')"
-    )
+    in_memory_db.execute("INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('a', 'A')")
+    in_memory_db.execute("INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('b', 'B')")
     in_memory_db.execute(
         "INSERT INTO memories (memory_id, profile_id, content, scope) "
         "VALUES ('m1', 'a', 'src', 'personal')"
@@ -194,10 +212,16 @@ def test_domain_and_shared_with_coexist(in_memory_db):
     in_memory_db.commit()
 
     clause, params = DatabaseManager._scope_where(
-        "b", "personal", False, True, "", skill_tags=["backend"],
+        "b",
+        "personal",
+        False,
+        True,
+        "",
+        skill_tags=["backend"],
     )
     rows = in_memory_db.execute(
-        f"SELECT content FROM atomic_facts WHERE {clause}", params,
+        f"SELECT content FROM atomic_facts WHERE {clause}",
+        params,
     )
     contents = [r["content"] for r in rows]
     assert "shared fact" in contents
@@ -216,6 +240,7 @@ def test_add_domain_mapping_tool():
         def decorator(fn):
             tools[fn.__name__] = fn
             return fn
+
         return decorator
 
     server.tool = capture_tool
@@ -225,6 +250,7 @@ def test_add_domain_mapping_tool():
     register_core_tools(server, lambda: mock_engine)
 
     import asyncio
+
     result = asyncio.get_event_loop().run_until_complete(
         tools["add_domain_mapping"](entity_name="SolidJS", domain="frontend")
     )
@@ -240,13 +266,14 @@ def test_add_domain_mapping_duplicate():
 
     server = MagicMock()
     tools = {}
-    server.tool = lambda annotations=None: (lambda fn: (tools.update({fn.__name__: fn}), fn)[1])
+    server.tool = lambda annotations=None: lambda fn: (tools.update({fn.__name__: fn}), fn)[1]
 
     mock_engine = MagicMock()
     mock_engine.profile_id = "test"
     register_core_tools(server, lambda: mock_engine)
 
     import asyncio
+
     asyncio.get_event_loop().run_until_complete(
         tools["add_domain_mapping"](entity_name="SolidJS", domain="frontend")
     )

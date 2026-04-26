@@ -1,5 +1,6 @@
 # tests/test_domain_tags_schema.py
 """Verify domain_mapping table and domain_tags columns exist after schema creation."""
+
 import sqlite3
 import pytest
 
@@ -14,6 +15,7 @@ DOMAIN_TAGS_TABLES = [
 @pytest.fixture
 def fresh_db():
     from superlocalmemory.storage import schema
+
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     schema.create_all_tables(conn)
@@ -55,9 +57,7 @@ def test_domain_tags_column_exists(fresh_db, table):
 
 def test_domain_tags_default_is_null(fresh_db):
     """New rows default to domain_tags=NULL."""
-    fresh_db.execute(
-        "INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('alice', 'Alice')"
-    )
+    fresh_db.execute("INSERT OR IGNORE INTO profiles (profile_id, name) VALUES ('alice', 'Alice')")
     fresh_db.execute(
         "INSERT INTO memories (memory_id, profile_id, content) "
         "VALUES ('m1', 'alice', 'parent memory')"
