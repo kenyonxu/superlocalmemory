@@ -125,6 +125,17 @@ SLM 注册到 Hermes Agent 后，可直接调用以下工具：
 | `delete_memory` | 删除记忆 | "删除记忆 abc123" |
 | `update_memory` | 更新记忆 | "更新记忆 abc123 的内容" |
 
+**remember 工具参数**：
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `content` | string | 必填 | 要存储的内容 |
+| `tags` | string | `""` | 逗号分隔的标签 |
+| `scope` | string | `"personal"` | 作用域：`personal` / `global` / `shared` |
+| `shared_with` | string | `""` | 仅在 `scope="shared"` 时有效，逗号分隔的 Agent ID |
+| `importance` | int | `5` | 重要性评分（1-10） |
+| `session_id` | string | `""` | 会话 ID，用于关联同一对话的记忆 |
+
 ### 会话与上下文
 
 | 工具 | 功能 |
@@ -145,6 +156,8 @@ SLM 注册到 Hermes Agent 后，可直接调用以下工具：
 直接发送自然语言指令即可：
 
 > 调用 remember 存储："用户偏好 TypeScript + Tailwind，项目代号 Phoenix，部署在 Vercel"
+
+> 调用 remember 存储："团队 API 规范 v2"，scope 设为 "shared"，shared_with 设为 "backend_agent,frontend_agent"
 
 > 调用 recall："Phoenix 项目部署在哪里"
 
@@ -208,14 +221,14 @@ SLM 自动将实体映射到技术领域（frontend / backend / devops / mobile 
 ```
 
 ```
-调用 remember，存储 "后端 API 规范 v2"，scope 设为 "personal"，shared_with 设为 "backend_agent,frontend_agent"
+调用 remember，存储 "后端 API 规范 v2"，scope 设为 "shared"，shared_with 设为 "backend_agent,frontend_agent"
 ```
 
 | `scope` 值 | 含义 | 可见范围 |
 | --- | --- | --- |
 | `personal` | 仅自己可见 | 当前 profile_id |
 | `global` | 全员可见 | 所有 Agent |
-| `personal` + `shared_with` | 指定共享 | profile_id + 列表中的 Agent |
+| `shared` + `shared_with` | 指定共享 | profile_id + 列表中的 Agent |
 
 **检索记忆时控制范围**：
 
@@ -227,20 +240,38 @@ SLM 自动将实体映射到技术领域（frontend / backend / devops / mobile 
 | --- | --- | --- |
 | `include_global` | 是否包含全局 scope 的记忆 | `true` |
 | `include_shared` | 是否包含共享 scope 的记忆 | `true` |
+| `scope` | 限制检索到指定 scope（`personal`/`global`/`shared`） | 不限制，三层都查 |
 
-默认两个参数都为 `true`，即检索结果自动包含三层作用域的记忆。
+默认 `include_global` 和 `include_shared` 都为 `true`，即检索结果自动包含三层作用域的记忆。如需严格限制，可传入 `scope` 参数。
 
 ### 5.5 多 Agent 协作示例
 
 **场景**：Agent A（zhihui）存储了一条关于 React 的记忆，Agent B（xiaoming）可以自动检索到。
 
 ```
-# Agent A 存储
+# Agent A 存储全局知识
 调用 remember：存储 "React 18 支持并发特性"，scope = "global"
 
 # Agent B 检索（自动找到 Agent A 存储的全局记忆）
 调用 recall：查询 "React 有什么新特性"
 → 返回 Agent A 存储的 "React 18 支持并发特性"
+```
+
+**场景**：Agent A 只想与特定 Agent 共享敏感信息（如 API 密钥规范）。
+
+```
+# Agent A 存储共享记忆（仅 backend_agent 和 frontend_agent 可见）
+调用 remember：存储 "内部 API 密钥轮换规则：每 30 天一次"
+  scope = "shared"
+  shared_with = "backend_agent,frontend_agent"
+
+# Agent B（backend_agent）检索
+调用 recall：查询 "API 密钥轮换"
+→ 返回 "内部 API 密钥轮换规则：每 30 天一次"
+
+# Agent C（devops_agent）检索
+调用 recall：查询 "API 密钥轮换"
+→ 无结果（不在 shared_with 列表中）
 ```
 
 **关键特性**：
@@ -310,6 +341,8 @@ slm dashboard       # 打开 http://localhost:8765
 ```bash
 # 最常用
 slm remember "内容" --tags "标签1,标签2"
+slm remember "内容" --scope global               # 存入全局作用域
+slm remember "内容" --scope shared --shared-with "agent1,agent2"  # 指定共享
 slm recall "查询" --limit 10
 slm list -n 20
 slm status
@@ -321,6 +354,8 @@ slm quantize --execute        # 嵌入量化（节省空间）
 
 # 实体管理
 slm entity list --scope personal   # 列出个人作用域的实体
+slm entity list --scope shared     # 列出共享作用域的实体
+slm entity list --scope global     # 列出全局作用域的实体
 slm entity merge <源ID> <目标ID>   # 合并重复实体（源被删除，目标保留）
 
 # 诊断
