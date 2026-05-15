@@ -1776,6 +1776,23 @@ def _start_pending_materializer() -> None:
                              _json.dumps(shared_with) if shared_with else None,
                              _json.dumps(md)),
                         )
+                        # Extract entities so entity resolver + graph builder
+                        # can produce KG edges (materializer was skipping both).
+                        entities: list[str] = []
+                        _fact_extractor = getattr(engine, '_fact_extractor', None)
+                        if _fact_extractor:
+                            try:
+                                extracted = _fact_extractor.extract_facts(
+                                    [content], session_id="",
+                                )
+                                if extracted:
+                                    for ef in extracted:
+                                        entities.extend(
+                                            getattr(ef, 'entities', [])
+                                        )
+                                    entities = list(set(entities))
+                            except Exception:
+                                pass  # entity extraction is best-effort
                         fact = AtomicFact(
                             content=content,
                             fact_type=FactType.EPISODIC,
@@ -1783,6 +1800,7 @@ def _start_pending_materializer() -> None:
                             profile_id=engine._profile_id,
                             scope=scope,
                             shared_with=shared_with,
+                            entities=entities,
                         )
                         engine.store_fact_direct(fact)
                         mark_done(item["id"])
