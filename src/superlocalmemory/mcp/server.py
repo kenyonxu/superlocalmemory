@@ -26,6 +26,7 @@ _os.environ.setdefault('SLM_SKIP_DEP_CHECK', '1')
 
 import logging
 import sys
+import time
 
 from mcp.server.fastmcp import FastMCP
 
@@ -38,10 +39,16 @@ server = FastMCP("SuperLocalMemory V3")
 import threading as _threading
 _engine = None
 _engine_lock = _threading.Lock()
+_last_engine_failure: float = 0.0
+_ENGINE_FAILURE_COOLDOWN_S = 5.0
 
 
 def get_engine():
     """Return (or create) the singleton LIGHT MemoryEngine.
+
+    After a failed init, a 5s cooldown prevents re-attempting on every
+    tool call. Callers catch RuntimeError and return error to the client
+    instead of blocking indefinitely.
 
     FastMCP may call tools concurrently from multiple threads. The
     double-checked lock keeps construction single-shot even if two
@@ -49,28 +56,45 @@ def get_engine():
     double-run the schema migrations and build two ``AdaptiveLearner``
     instances over the same DB file.
     """
-    global _engine
+    global _engine, _last_engine_failure
+
     if _engine is not None:
         return _engine
+
+    now = time.monotonic()
+    if _last_engine_failure and (now - _last_engine_failure) < _ENGINE_FAILURE_COOLDOWN_S:
+        raise RuntimeError(
+            f"Engine temporarily unavailable (cooldown {_ENGINE_FAILURE_COOLDOWN_S:.0f}s)"
+        )
+
     with _engine_lock:
         if _engine is not None:
             return _engine
-        from superlocalmemory.core.config import SLMConfig
-        from superlocalmemory.core.engine import MemoryEngine
-        from superlocalmemory.core.engine_capabilities import Capabilities
+        try:
+            from superlocalmemory.core.config import SLMConfig
+            from superlocalmemory.core.engine import MemoryEngine
+            from superlocalmemory.core.engine_capabilities import Capabilities
 
-        config = SLMConfig.load()
-        new_engine = MemoryEngine(config, capabilities=Capabilities.LIGHT)
-        new_engine.initialize()
-        _engine = new_engine
-    return _engine
+            config = SLMConfig.load()
+            new_engine = MemoryEngine(config, capabilities=Capabilities.LIGHT)
+            new_engine.initialize()
+            _engine = new_engine
+            _last_engine_failure = 0.0
+            return _engine
+        except Exception:
+            logger.exception("MCP engine init failed")
+            _last_engine_failure = time.monotonic()
+            raise RuntimeError(
+                f"Engine init failed, cooling down for {_ENGINE_FAILURE_COOLDOWN_S:.0f}s"
+            ) from None
 
 
 def reset_engine():
     """Reset engine singleton (for testing or mode switch)."""
-    global _engine
+    global _engine, _last_engine_failure
     with _engine_lock:
         _engine = None
+        _last_engine_failure = 0.0
 
 
 # Register tools and resources -------------------------------------------------
