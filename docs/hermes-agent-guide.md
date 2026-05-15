@@ -71,7 +71,6 @@ slm mcp
       "command": "slm",
       "args": ["mcp"],
       "env": {
-        "SLM_DATA_DIR": "/home/YOURNAME/.superlocalmemory",
         "SLM_MODE": "a",
         "SLM_MCP_ALL_TOOLS": "0"
       }
@@ -84,10 +83,11 @@ slm mcp
 
 | 变量 | 说明 | 推荐值 |
 |------|------|--------|
-| `SLM_DATA_DIR` | 数据存储目录 | `~/.superlocalmemory` |
 | `SLM_MODE` | 运行模式：`a` / `b` / `c` | `a` |
 | `SLM_MCP_ALL_TOOLS` | `1` 启用全部 75 个工具，`0` 仅 33 个核心工具 | `0` |
 | `SLM_MCP_MESH_TOOLS` | `1` 启用 8 个 Mesh P2P 工具 | 按需 |
+
+> **关于数据目录**：SLM 默认使用 `~/.superlocalmemory/` 存储所有数据（config.json、memory.db、pending.db）。如需自定义路径，请确保 MCP 和 daemon（`slm serve start`）使用**相同的** `SLM_DATA_DIR` 环境变量，否则记忆会写入两个不同的数据库。最简单的做法是不设置 `SLM_DATA_DIR`，使用默认路径。
 
 > **提示**：Hermes Agent 对工具数量有限制时，建议保持 `SLM_MCP_ALL_TOOLS=0`，仅使用 33 个核心工具。
 
@@ -240,9 +240,8 @@ SLM 自动将实体映射到技术领域（frontend / backend / devops / mobile 
 | --- | --- | --- |
 | `include_global` | 是否包含全局 scope 的记忆 | `true` |
 | `include_shared` | 是否包含共享 scope 的记忆 | `true` |
-| `scope` | 限制检索到指定 scope（`personal`/`global`/`shared`） | 不限制，三层都查 |
 
-默认 `include_global` 和 `include_shared` 都为 `true`，即检索结果自动包含三层作用域的记忆。如需严格限制，可传入 `scope` 参数。
+> **注意**：当前版本 `include_global` / `include_shared` 参数已被接受（不再报错），但检索结果始终包含三层 scope 的记忆。精细的逐 scope 过滤将在后续版本（scope-r2）中启用。
 
 ### 5.5 多 Agent 协作示例
 
@@ -372,7 +371,7 @@ slm health
 | 冷启动慢 | 先运行 `slm serve start` 启动守护进程 |
 | 检索质量差 | 运行 `slm health` 检查 Fisher-Rao / Sheaf 状态 |
 | 工具调用失败 | 检查 `slm doctor` 输出，确认 MCP 服务器正常 |
-| 数据目录冲突 | 确认 `SLM_DATA_DIR` 环境变量指向正确位置 |
+| 数据目录冲突 | MCP 和 daemon 必须使用相同的 `SLM_DATA_DIR`，建议不设此变量使用默认 `~/.superlocalmemory/` |
 
 ---
 

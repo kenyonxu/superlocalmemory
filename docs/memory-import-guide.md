@@ -81,10 +81,12 @@ remember(
 recall(
     query: str,             # 查询文本（必填）
     limit: int = 10,        # 返回条数
-    include_global: bool = True,   # 是否包含 global scope
-    include_shared: bool = True,   # 是否包含 shared scope
+    include_global: bool = True,   # 是否包含 global scope（scope-r2 启用精细过滤）
+    include_shared: bool = True,   # 是否包含 shared scope（scope-r2 启用精细过滤）
 )
 ```
+
+> **注意**：当前版本 `include_global` / `include_shared` 参数已被接受（不再报 TypeError），但检索结果始终包含三层 scope 的记忆。精细的逐 scope 过滤将在 scope-r2 中启用。
 
 ### 批量导入示例
 
