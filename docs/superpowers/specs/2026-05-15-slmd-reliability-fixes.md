@@ -142,7 +142,7 @@ def _handle_recall(query: str, limit: int, session_id: str = "",
     )
 ```
 
-**设计说明**: `include_global` / `include_shared` 参数（布尔语义：是否额外包含此 scope）与 retrieval channels 的 `scope` 参数（字符串语义：主搜索 scope）概念不完全对应。当前 retrieval channels 在 `scope="personal"` 时已默认搜索所有 scope。外层保留布尔参数签名以匹配 MCP 工具接口和 WorkerPool 协议，内层统一转为 scope 字符串。精细的逐 scope 过滤由 scope-r2 完成。
+**设计说明**: `include_global` / `include_shared` 参数（布尔语义：是否额外包含此 scope）与 retrieval channels 的 `scope` 参数（字符串语义：主搜索 scope）概念不完全对应。当前 retrieval channels 在 `scope="personal"` 时已默认搜索所有 scope。外层保留布尔参数签名以匹配 MCP 工具接口和 WorkerPool 协议，内层统一转为 scope 字符串。**注意**: `_handle_recall()` 签名中两个布尔参数保留不动——它们用于 WorkerPool 协议兼容，scope-r2 时将启用语义区分。实施时不应移除此二参数。
 
 **engine.py** `recall()` — 签名加 `scope` 参数：
 
@@ -186,7 +186,9 @@ def run_recall(
 ) -> RecallResponse:
 ```
 
-在调用各 retrieval channel 时传入 `scope=scope`。Channels 已支持此参数，无需修改。
+`run_recall()` 当前通过 `RetrievalEngine.recall()` 间接调用各 channel。scope 参数**暂不转发**到 `retrieval_engine.recall()`（该方法不接受 scope）。`run_recall()` 接受并存储 scope 参数，为 scope-r2 做准备；当前所有 channel 以 `scope="personal"` 的默认行为运行，与修复前行为一致。
+
+不修改 `src/superlocalmemory/retrieval/engine.py`。
 
 ### 4. 崩溃日志完整 traceback
 
@@ -224,7 +226,7 @@ async def health():
 
 `get_engine_lazy()` 已有 5s 冷却机制，反复调用 `/health` 不会造成性能问题。
 
-**unified_daemon.py** `create_app()` — 在 HealthMonitor 启动后，从 daemon 侧注册引擎健康检查（作为 closure 捕获 `application`）：
+**unified_daemon.py** `create_app()` — 在 HealthMonitor 启动后，从 daemon 侧注册引擎健康检查（作为 closure 捕获 `application`）。需添加 `register_health_check` 到已有的 `from superlocalmemory.core.health_monitor import HealthMonitor` 导入行。
 
 ```python
 # 在 HealthMonitor 启动后（约 line 565），注册 engine 健康检查
