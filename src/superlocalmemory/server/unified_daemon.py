@@ -1722,6 +1722,10 @@ def _start_pending_materializer() -> None:
                             md = {}
                         if item.get("tags"):
                             md.setdefault("tags", item["tags"])
+                        # T1: extract scope and shared_with from metadata
+                        scope = md.pop("scope", "personal")
+                        shared_with_raw = md.pop("shared_with", None)
+                        shared_with = shared_with_raw if isinstance(shared_with_raw, list) else None
                         # Create memory row (FK target for atomic_facts)
                         from datetime import datetime, timezone
                         from superlocalmemory.storage.models import (
@@ -1732,10 +1736,12 @@ def _start_pending_materializer() -> None:
                             "INSERT OR IGNORE INTO memories "
                             "(memory_id, profile_id, content, "
                             "session_id, speaker, role, created_at, "
-                            "metadata_json) VALUES (?,?,?,?,?,?,?,?)",
+                            "scope, shared_with, metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
                             (mem_id, engine._profile_id, content,
                              "", "", "user",
                              datetime.now(timezone.utc).isoformat(),
+                             scope,
+                             _json.dumps(shared_with) if shared_with else None,
                              _json.dumps(md)),
                         )
                         fact = AtomicFact(
@@ -1743,6 +1749,8 @@ def _start_pending_materializer() -> None:
                             fact_type=FactType.EPISODIC,
                             memory_id=mem_id,
                             profile_id=engine._profile_id,
+                            scope=scope,
+                            shared_with=shared_with,
                         )
                         engine.store_fact_direct(fact)
                         mark_done(item["id"])
