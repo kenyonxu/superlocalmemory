@@ -235,7 +235,7 @@ else:
 | 入口 | 校验方式 |
 | ------- | ---------- |
 | CLI `--scope` | argparse `choices=["personal", "global", "shared"]` |
-| Daemon `/remember` | Pydantic validator 或端点内检查，非法值返回 400 |
+| Daemon `/remember` | Pydantic `@field_validator`，非法值返回 422 |
 | Dashboard `/api/import` | 逐条检查，非法 scope 记入 errors 列表跳过 |
 | 材质化线程 | 不校验（信任上游已校验），未知 scope 保留原值 |
 
