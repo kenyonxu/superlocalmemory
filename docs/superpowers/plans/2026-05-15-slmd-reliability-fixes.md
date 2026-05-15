@@ -43,29 +43,30 @@
 - [ ] **Step 1: Write the test**
 
 ```python
-# tests/test_storage/test_database.py — add to existing class or new test
+# tests/test_storage/test_database.py — add test or extend existing
 
-import sqlite3
 from pathlib import Path
+from superlocalmemory.storage.database import DatabaseManager
 
-def test_enable_wal_sets_busy_timeout_before_wal(in_memory_db):
-    """_enable_wal() must set busy_timeout BEFORE PRAGMA journal_mode=WAL."""
-    # Verify that both PRAGMAs are executed and in the correct order.
-    # We can't directly verify order, but we can verify both effects are present.
-    conn = sqlite3.connect(str(in_memory_db.db_path))
-    # WAL mode is persistent
-    cursor = conn.execute("PRAGMA journal_mode")
-    journal_mode = cursor.fetchone()[0]
-    assert journal_mode.lower() == "wal", f"Expected wal, got {journal_mode}"
-    # busy_timeout is connection-scoped; verify it's set on new connections
-    timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+def test_enable_wal_sets_busy_timeout(tmp_path):
+    """_enable_wal() sets busy_timeout so subsequent connections inherit WAL mode safely."""
+    db_path = tmp_path / "test.db"
+    db = DatabaseManager(db_path)
+    db.initialize(__import__("superlocalmemory.storage.schema", fromlist=["schema"]))
+    # Verify busy_timeout is correctly configured on DatabaseManager-managed connections
+    timeout = db.execute("PRAGMA busy_timeout")[0][0]
     assert timeout == 10000, f"Expected busy_timeout=10000, got {timeout}"
-    conn.close()
+    # Verify WAL mode is active
+    journal = db.execute("PRAGMA journal_mode")[0][0]
+    assert journal.lower() == "wal", f"Expected wal, got {journal}"
 ```
 
-- [ ] **Step 2: Run test to verify it fails (if WAL ordering is wrong)**
+Note: The test verifies the *effect* (busy_timeout is 10s on DatabaseManager connections) using the `DatabaseManager.execute()` path, matching the pattern in `test_concurrent_db.py:65-69`. The existing connection path always sets `busy_timeout` via `_connect()`, so the assertion holds regardless of `_enable_wal()`'s internal ordering. The code fix is a correctness improvement: even the raw `sqlite3.connect()` in `_enable_wal()` will now use the configured timeout before attempting `PRAGMA journal_mode=WAL`.
 
-Run: `pytest tests/test_storage/test_database.py::test_enable_wal_sets_busy_timeout_before_wal -v`
+- [ ] **Step 2: Run test to verify it passes (test validates existing behavior)**
+
+Run: `pytest tests/test_storage/test_database.py::test_enable_wal_sets_busy_timeout -v`
+Expected: PASS (DatabaseManager._connect already sets busy_timeout before querying)
 
 - [ ] **Step 3: Fix the code**
 
@@ -97,7 +98,7 @@ def _enable_wal(self) -> None:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/test_storage/test_database.py::test_enable_wal_sets_busy_timeout_before_wal -v`
+Run: `pytest tests/test_storage/test_database.py::test_enable_wal_sets_busy_timeout -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -228,19 +229,54 @@ def test_get_engine_retry_after_cooldown(monkeypatch):
     assert engine is not None
     
     mcp_server.reset_engine()
+
+
+def test_get_engine_repeated_failure_resets_cooldown(monkeypatch):
+    """Each failed init attempt resets the cooldown timer."""
+    from superlocalmemory.mcp import server as mcp_server
+    
+    mcp_server.reset_engine()
+    monkeypatch.setattr(mcp_server, '_ENGINE_FAILURE_COOLDOWN_S', 0.1)
+    
+    def _always_fail(*args, **kwargs):
+        raise RuntimeError("persistent init failure")
+    monkeypatch.setattr(
+        "superlocalmemory.core.engine.MemoryEngine.initialize", _always_fail
+    )
+    
+    # First failure
+    with pytest.raises(RuntimeError, match="Engine init failed"):
+        mcp_server.get_engine()
+    first_failure = mcp_server._last_engine_failure
+    
+    # Cooldown not yet expired
+    with pytest.raises(RuntimeError, match="temporarily unavailable"):
+        mcp_server.get_engine()
+    
+    # After cooldown, retry fails again — cooldown timer resets
+    time.sleep(0.15)
+    with pytest.raises(RuntimeError, match="Engine init failed"):
+        mcp_server.get_engine()
+    assert mcp_server._last_engine_failure > first_failure
+    
+    mcp_server.reset_engine()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pytest tests/test_mcp/test_mcp_light_engine.py::test_get_engine_cooldown_on_failure -v`
-Expected: FAIL (no cooldown mechanism yet)
+Run: `pytest tests/test_mcp/test_mcp_light_engine.py::test_get_engine_cooldown_on_failure tests/test_mcp/test_mcp_light_engine.py::test_get_engine_retry_after_cooldown tests/test_mcp/test_mcp_light_engine.py::test_get_engine_repeated_failure_resets_cooldown -v`
+Expected: all FAIL (no cooldown mechanism yet)
 
 - [ ] **Step 3: Implement the cooldown**
 
-Replace `src/superlocalmemory/mcp/server.py:32-69`:
+**File edit plan:**
+
+1. Add `import time` to the module-level imports (next to `import threading as _threading` at line 34, NOT at the start of `get_engine()`)
+2. Add module-level variables `_last_engine_failure` and `_ENGINE_FAILURE_COOLDOWN_S` after `_engine_lock`
+3. Replace `get_engine()` and `reset_engine()` functions
 
 ```python
-import time
+import time  # Add to existing module-level imports (~line 32, near 'import threading as _threading')
 
 _engine = None
 _engine_lock = _threading.Lock()
@@ -586,27 +622,57 @@ to:
 from superlocalmemory.core.health_monitor import HealthMonitor, register_health_check
 ```
 
-- [ ] **Step 3: Verify health endpoint behavior**
+- [ ] **Step 3: Write automated tests**
 
-```bash
-# Start daemon, verify /health recovers engine
-curl -s http://127.0.0.1:8765/health | python3 -m json.tool
+```python
+# tests/test_api/test_health.py — new file or add to existing test_api tests
+# (use the existing FastAPI TestClient pattern from tests/test_api/)
+
+from fastapi.testclient import TestClient
+
+def test_health_endpoint_triggers_engine_recovery(client):
+    """GET /health attempts engine recovery when engine is None."""
+    # Set engine to None on app state to simulate daemon crash
+    client.app.state.engine = None
+    response = client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    # get_engine_lazy() should have re-initialized the engine
+    assert data["engine"] == "initialized"
+    assert data["status"] == "ok"
+
+
+def test_health_check_includes_engine_item():
+    """run_all_health_checks() includes the engine health check item."""
+    from superlocalmemory.core.health_monitor import run_all_health_checks
+    results = run_all_health_checks()
+    engine_checks = [r for r in results if r["name"] == "engine"]
+    assert len(engine_checks) == 1, f"Expected 1 engine check, got {len(engine_checks)}"
+    ec = engine_checks[0]
+    assert ec["status"] in ("ok", "critical", "unknown", "error")
+    assert "detail" in ec
 ```
 
-Expected: `"engine": "initialized"` if daemon running normally, or attempts recovery if engine was None.
+- [ ] **Step 4: Run tests to verify**
 
-- [ ] **Step 4: Run existing daemon tests**
+```bash
+pytest tests/test_api/test_health.py -v --tb=short
+```
+
+Expected: all PASS (health endpoint triggers recovery, engine health check present)
+
+- [ ] **Step 5: Run existing daemon tests (no regressions)**
 
 ```bash
 pytest tests/ -k "health or daemon" -v --tb=short
 ```
 
-Expected: all PASS (health endpoint response format unchanged).
+Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/superlocalmemory/server/unified_daemon.py
+git add src/superlocalmemory/server/unified_daemon.py tests/test_api/test_health.py
 git commit -m "feat: add engine recovery to /health endpoint and health check
 
 /health now calls get_engine_lazy() when engine is None to attempt
@@ -635,34 +701,32 @@ Dispatch plan-document-reviewer for Chunk 4 before proceeding.
 # tests/test_process_health/test_process_reaper.py — add to existing
 
 import os
+import sys
 import time
-import signal
-import subprocess
 import pytest
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="fork/proc is Linux-specific")
 def test_check_once_reaps_zombie_children():
     """_check_once() reaps zombie child processes."""
     # Create a zombie: fork, child exits immediately, parent doesn't wait
     pid = os.fork()
     if pid == 0:
-        os._exit(0)  # child exits
-    
-    # Give child time to become zombie
+        os._exit(0)  # child exits — becomes zombie until parent reaps
+
+    # Give child time to exit and become zombie
     time.sleep(0.1)
-    
-    # Verify child is zombie
+
+    # Verify child is zombie via /proc (read-only, does NOT reap it)
     try:
-        wpid, status = os.waitpid(pid, os.WNOHANG)
-        if wpid == 0:
-            # Still running (unlikely since child exits immediately)
-            # Check /proc/pid/status for zombie state
-            with open(f"/proc/{pid}/status") as f:
-                status_line = [l for l in f if l.startswith("State:")]
-                assert "Z" in status_line[0], f"Expected zombie, got {status_line}"
-    except ChildProcessError:
-        pytest.skip("Cannot verify zombie state")
-    
-    # Trigger a health check cycle (reaps the zombie)
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("State:"):
+                    assert "Z" in line, f"Expected zombie state, got {line.strip()}"
+                    break
+    except FileNotFoundError:
+        pytest.skip(f"Child PID {pid} disappeared before check — /proc not readable")
+
+    # Trigger a health check cycle — this should reap the zombie
     from superlocalmemory.core.health_monitor import HealthMonitor
     monitor = HealthMonitor(
         global_rss_budget_mb=5000,
@@ -671,24 +735,24 @@ def test_check_once_reaps_zombie_children():
         enable_structured_logging=False,
     )
     monitor._check_once()
-    
-    # Verify zombie is gone
+
+    # Verify zombie was reaped
     try:
-        os.kill(pid, 0)  # Should raise ProcessLookupError
-        # If we get here, process still exists (maybe not zombie anymore)
+        os.kill(pid, 0)  # Signal 0 = permission check, raises if process gone
+        # If kill succeeds, process still exists — waitpid to clean up
         wpid, _ = os.waitpid(pid, os.WNOHANG)
         if wpid == 0:
-            pytest.fail("Zombie was not reaped by _check_once()")
+            pytest.fail("Zombie was NOT reaped by _check_once() — PID still exists")
     except ProcessLookupError:
-        pass  # Expected: zombie was reaped
+        pass  # Expected: zombie was reaped, PID no longer exists
     except ChildProcessError:
-        pass  # Also expected
+        pass  # Also expected on some systems
 ```
 
-- [ ] **Step 2: Run test to verify it fails (no zombie reaping yet)**
+- [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_process_health/test_process_reaper.py::test_check_once_reaps_zombie_children -v`
-Expected: FAIL (no zombie reaping in _check_once yet)
+Expected: FAIL or SKIP (if not Linux) — no zombie reaping in _check_once yet
 
 - [ ] **Step 3: Add zombie reaping code**
 
@@ -770,12 +834,16 @@ Expected: same pass/fail count as before (no regressions).
 
 If existing tests fail due to our changes, diagnose and fix before proceeding.
 
-- [ ] **Step 3: Final commit (if any fixes needed)**
+- [ ] **Step 3: Final commit (only if regression fixes needed)**
+
+If Step 2 found any regressions, stage and commit the fix files individually:
 
 ```bash
-git add -A
+git add <specific-fixed-files>
 git commit -m "fix: address test regressions from reliability fixes"
 ```
+
+If no regressions, skip this step.
 
 ---
 
