@@ -627,7 +627,7 @@ async def lifespan(application: FastAPI):
 
     # Phase B: Start health monitor
     try:
-        from superlocalmemory.core.health_monitor import HealthMonitor
+        from superlocalmemory.core.health_monitor import HealthMonitor, register_health_check
         health_config = getattr(config, 'health', None)
         monitor = HealthMonitor(
             global_rss_budget_mb=getattr(health_config, 'global_rss_budget_mb', 2500) if health_config else 2500,
@@ -637,6 +637,14 @@ async def lifespan(application: FastAPI):
         )
         monitor.start()
         application.state.health_monitor = monitor
+
+        # Register engine health check from daemon side (avoids core→server reverse dep)
+        def _check_engine():
+            engine = getattr(application.state, "engine", None)
+            if engine is None:
+                return {"name": "engine", "status": "critical", "detail": "Engine unavailable"}
+            return {"name": "engine", "status": "ok", "detail": "Engine initialized"}
+        register_health_check(_check_engine)
     except Exception as exc:
         logger.debug("Health monitor init: %s", exc)
         application.state.health_monitor = None
@@ -1337,8 +1345,9 @@ def _register_daemon_routes(application: FastAPI) -> None:
     @application.get("/health")
     async def health():
         _update_activity()
-        # Non-blocking peek: report status without forcing a re-init.
         engine = getattr(application.state, "engine", None)
+        if engine is None:
+            engine = get_engine_lazy(application.state)  # attempts recovery, 5s cooldown
         return {
             "status": "ok",
             "pid": os.getpid(),
