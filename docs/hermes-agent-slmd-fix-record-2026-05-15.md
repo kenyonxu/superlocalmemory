@@ -130,11 +130,68 @@ commit 6b7aa65
 
 ---
 
+### 9. Embed Worker 模型加载超时
+
+**文件**: `src/superlocalmemory/core/embeddings.py:467-478`
+
+**问题**: 环境变量 `HF_ENDPOINT=https://hf-mirror.com`（HuggingFace 镜像站）SSL 连接失败。Embed worker 子进程继承父进程环境，模型加载时 `SentenceTransformer` 向镜像站发起 HTTPS 请求，每个文件重试 5 轮（指数退避: 1s+2s+4s+8s+8s = ~23s），多文件累计超 180s 后被 SIGKILL。
+
+**修复**: 在 `_ensure_worker()` 的子进程环境字典中 `env.pop("HF_ENDPOINT", None)`，worker 默认使用 `huggingface.co`（直连可达）。模型加载从 >180s（超时 kill）降至 ~110s（成功）。
+
+```
+commit 4ac0d5d
+```
+
+---
+
+### 10. Materializer 实体提取
+
+**文件**: `src/superlocalmemory/server/unified_daemon.py:1500-1524`
+
+**问题**: Daemon 的 materializer 线程创建 `AtomicFact` 时不填充 `entities` 字段，导致 `run_store_fact_direct()` 中实体解析被跳过（条件 `if fact.entities:` 为 False），98 条旧事实无实体、无 graph edges。
+
+**修复**: 创建 `AtomicFact` 前调用 `engine._fact_extractor.extract_facts()` 提取实体，传入 `AtomicFact(entities=entities)`。实体解析和 KG 构建管线随之激活。
+
+```
+commit 4b4375b
+```
+
+---
+
+### 11. 旧事实实体回溯
+
+**文件**: `src/superlocalmemory/core/engine.py:326-387`
+
+**问题**: 98 条旧事实的 `canonical_entities_json` 均为空数组，需要一次性回溯填充。
+
+**修复**: `MemoryEngine._backfill_entities_for_existing_facts()` — 引擎初始化时查询所有 `canonical_entities_json = '[]'` 的事实，提取实体 → 解析规范 ID → 更新行 → 构建图边。跨所有 profile 处理，幂等。
+
+**效果**: 62/99 事实成功填充实体，生成 3 条图边。剩余 37 条事实内容中无可提取的实体提及（预期行为）。
+
+```
+commit 0b6a505, 8499653
+```
+
+---
+
+### 12. NULL Embedding 定时回溯
+
+**文件**: `src/superlocalmemory/core/maintenance.py:317-340`, `maintenance_scheduler.py:37-55`
+
+**问题**: 旧事实和 materializer 创建的事实在 embed worker 就绪前已存储，`embedding` 列为 NULL，无法参与语义搜索。
+
+**修复**: 维护调度器（30 分钟间隔）新增 `embedder` 参数，每周期处理最多 50 条 `embedding IS NULL` 的事实，批量调用 `embedder.embed_batch()` 填充。
+
+```
+commit 402ed9a
+```
+
+---
+
 ## 剩余问题
 
 | 问题 | 状态 | 备注 |
 |------|------|------|
-| Embed worker 模型加载超时 | ✅ 已修复 | `HF_ENDPOINT=https://hf-mirror.com` SSL 失败→每次 API 调用重试 5 轮(~23s)→多文件累计 >180s。修复: worker 子进程清除 `HF_ENDPOINT`，默认 huggingface.co。加载时间 180s+→110s |
 | Recall 按 scope 过滤 | Deferred (scope-r2) | 当前 `include_global`/`include_shared` 保留签名但未启用区分语义 |
 | `test_recall_with_all_channels_mock` 失败 | 预存 | Channel mock 未更新以接收 `scope` 参数，非本次引入 |
 
@@ -143,14 +200,19 @@ commit 6b7aa65
 ## 合并记录
 
 ```
-6930709 chore: add .worktrees to gitignore
-b8f847f fix: set busy_timeout before journal_mode=WAL in _enable_wal
-deec6e0 fix: use logger.exception for engine init failure to capture traceback
-bb7c811 feat: add 5s failure cooldown to MCP get_engine()
-f75600a fix: add scope parameter to engine.recall()/run_recall() to fix TypeError
-b617819 feat: add engine recovery to /health endpoint and health check
-6b7aa65 feat: reap zombie child processes in HealthMonitor._check_once()
+4b4375b fix: extract entities in daemon materializer for KG edge building
+402ed9a feat: backfill NULL embeddings during scheduled maintenance
+8499653 fix: backfill entities across all profiles, not just engine profile
+0b6a505 feat: backfill entities + graph edges for existing facts on engine init
 4ac0d5d fix: remove HF_ENDPOINT from embedding worker environment
+7592179 docs: update fix record with embed worker HF_ENDPOINT fix
+6b7aa65 feat: reap zombie child processes in HealthMonitor._check_once()
+b617819 feat: add engine recovery to /health endpoint and health check
+f75600a fix: add scope parameter to engine.recall()/run_recall() to fix TypeError
+bb7c811 feat: add 5s failure cooldown to MCP get_engine()
+deec6e0 fix: use logger.exception for engine init failure to capture traceback
+b8f847f fix: set busy_timeout before journal_mode=WAL in _enable_wal
+6930709 chore: add .worktrees to gitignore
 ```
 
 全部已合并至 `main` 并推送至 `origin/main`。
