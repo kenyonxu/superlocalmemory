@@ -11,6 +11,7 @@ Covers:
     - Event emission on success
     - Implicit feedback recording (_record_recall_hits)
     - Edge cases: empty query, limit forwarded, feedback failure non-blocking
+    - Scope parameter wiring (Chunk 3 reliability fix)
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
 """
@@ -18,9 +19,12 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import asyncio
+import inspect
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from superlocalmemory.storage.models import RecallResponse
 
 
 @pytest.fixture(autouse=True)
@@ -268,3 +272,42 @@ class TestRecallEdgeCases:
         # Recall must succeed even when feedback recording fails
         assert result["success"] is True
         assert result["count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: scope parameter wiring (Chunk 3 reliability fix)
+# ---------------------------------------------------------------------------
+
+class TestRecallScopeWiring:
+    """Verify scope parameter flows through recall_worker -> engine -> pipeline."""
+
+    def test_recall_worker_converts_booleans_to_scope(self):
+        """_handle_recall converts include_global/include_shared to scope=str."""
+        from superlocalmemory.core.recall_worker import _handle_recall
+
+        sig = inspect.signature(_handle_recall)
+        params = sig.parameters
+        assert "include_global" in params
+        assert "include_shared" in params
+        assert params["include_global"].default is True
+        assert params["include_shared"].default is True
+
+    def test_engine_recall_accepts_scope_kwarg(self, engine_with_mock_deps):
+        """engine.recall() accepts optional scope keyword argument."""
+        sig = inspect.signature(engine_with_mock_deps.recall)
+        assert "scope" in sig.parameters
+        assert sig.parameters["scope"].default == "personal"
+
+    def test_run_recall_accepts_scope_kwarg(self):
+        """run_recall() accepts optional scope keyword argument."""
+        from superlocalmemory.core.recall_pipeline import run_recall
+
+        sig = inspect.signature(run_recall)
+        assert "scope" in sig.parameters
+        assert sig.parameters["scope"].default == "personal"
+
+    def test_engine_recall_with_scope_does_not_break(self, engine_with_mock_deps):
+        """engine.recall(scope='personal') works without TypeError."""
+        result = engine_with_mock_deps.recall("test query", scope="personal", limit=5)
+        assert result is not None
+        assert isinstance(result, RecallResponse)

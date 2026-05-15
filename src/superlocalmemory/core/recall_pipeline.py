@@ -581,6 +581,7 @@ def run_recall(
     access_log: Any = None,
     auto_linker: Any = None,
     fast: bool = False,
+    scope: str = "personal",
 ) -> RecallResponse:
     """Recall relevant facts for a query.
 

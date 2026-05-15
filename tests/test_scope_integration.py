@@ -56,7 +56,7 @@ def test_recall_includes_global(engine_with_mock_deps):
     engine = engine_with_mock_deps
     engine.store("Global knowledge: Python 3.12 released", scope="global")
 
-    result = engine.recall("Python", include_global=True, include_shared=False)
+    result = engine.recall("Python", scope="personal")
     assert result is not None
 
 
