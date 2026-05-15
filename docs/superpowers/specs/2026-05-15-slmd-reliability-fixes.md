@@ -48,18 +48,72 @@ def _enable_wal(self) -> None:
 
 **问题**: MCP 的 `get_engine()` 无失败冷却机制——每次工具调用都重试初始化，反复撞同一个锁/错误。daemon 的 `get_engine_lazy()`（`routes/helpers.py:85-139`）已有 5s 冷却 + 跨线程锁 + 返回 None 的实现模式。
 
-**修改**: 参考 `get_engine_lazy()` 模式，增加：
+**修改**: 参考 `get_engine_lazy()` 模式，增加冷却和超时保护：
 
-- 模块级 `_last_engine_failure` 时间戳 + 5s 冷却
-- 冷却期内返回 None（调用方工具返回 error 而非永久阻塞）
-- `logger.exception()` 记录完整 traceback
-- 保持现有 `_engine_lock` 双检锁模式不变
+```python
+import time
+
+_engine: MemoryEngine | None = None
+_engine_lock = threading.Lock()
+_last_engine_failure: float = 0.0
+_ENGINE_FAILURE_COOLDOWN_S = 5.0
+
+
+def get_engine() -> MemoryEngine:
+    """Return cached LIGHT engine, initializing on first call.
+
+    After a failed init, a 5s cooldown prevents re-attempting on every
+    tool call. Callers catch RuntimeError and return error to the client
+    instead of blocking indefinitely.
+    """
+    global _engine, _last_engine_failure
+
+    if _engine is not None:
+        return _engine
+
+    now = time.monotonic()
+    if _last_engine_failure and (now - _last_engine_failure) < _ENGINE_FAILURE_COOLDOWN_S:
+        raise RuntimeError(
+            f"Engine temporarily unavailable (cooldown {_ENGINE_FAILURE_COOLDOWN_S:.0f}s)"
+        )
+
+    with _engine_lock:
+        if _engine is not None:
+            return _engine
+        try:
+            from superlocalmemory.core.config import SLMConfig
+            from superlocalmemory.core.engine import MemoryEngine
+            from superlocalmemory.core.engine_capabilities import Capabilities
+
+            config = SLMConfig.load()
+            new_engine = MemoryEngine(config, capabilities=Capabilities.LIGHT)
+            new_engine.initialize()
+            _engine = new_engine
+            _last_engine_failure = 0.0
+            return _engine
+        except Exception:
+            logger.exception("MCP engine init failed")
+            _last_engine_failure = time.monotonic()
+            raise RuntimeError(
+                f"Engine init failed, cooling down for {_ENGINE_FAILURE_COOLDOWN_S:.0f}s"
+            ) from None
+
+
+def reset_engine():
+    """Reset engine singleton (for testing or mode switch)."""
+    global _engine, _last_engine_failure
+    with _engine_lock:
+        _engine = None
+        _last_engine_failure = 0.0
+```
+
+工具调用方的异常处理保持不变（`try/except` 已存在），`RuntimeError` 会被捕获并返回 `{"success": False, "error": "..."}`。
 
 失败行为对比：
 
 | 场景 | 修复前 | 修复后 |
 |------|--------|--------|
-| engine init 失败 | 每次工具调用重试，反复阻塞 | 5s 冷却期内直接返回 error |
+| engine init 失败 | 每次工具调用重试，反复阻塞 | 5s 冷却期内返回 error（不阻塞） |
 | 冷却期过后 | 无冷却 | 自动重试一次，成功则恢复 |
 
 ### 3. Recall Scope 参数贯通
@@ -76,16 +130,19 @@ def _enable_wal(self) -> None:
 def _handle_recall(query: str, limit: int, session_id: str = "",
                    include_global: bool = True, include_shared: bool = True) -> dict:
     engine = _get_engine()
-    # Convert booleans to scope string (retrieval channels already support scope)
-    if include_global:
-        scope = "personal"  # "personal" mode already includes global+shared by default
-    else:
-        scope = "personal"  # TODO: future scope filtering
+    # Convert include_global/include_shared to scope parameter.
+    # Retrieval channels already search all scopes by default when scope="personal"
+    # (personal queries include global+shared rows in _scope_where).
+    # Per-scope recall filtering on the read path is deferred to scope-r2;
+    # the immediate fix is eliminating the TypeError crash.
+    scope = "personal"
     response = engine.recall(
         query, limit=limit, session_id=session_id or None,
         scope=scope,
     )
 ```
+
+**设计说明**: `include_global` / `include_shared` 参数（布尔语义：是否额外包含此 scope）与 retrieval channels 的 `scope` 参数（字符串语义：主搜索 scope）概念不完全对应。当前 retrieval channels 在 `scope="personal"` 时已默认搜索所有 scope。外层保留布尔参数签名以匹配 MCP 工具接口和 WorkerPool 协议，内层统一转为 scope 字符串。精细的逐 scope 过滤由 scope-r2 完成。
 
 **engine.py** `recall()` — 签名加 `scope` 参数：
 
@@ -146,7 +203,7 @@ except Exception as exc:
 
 ### 5. Health 端点被动恢复 + HealthMonitor engine 检查
 
-**文件**: `src/superlocalmemory/server/unified_daemon.py:1077-1087` 和 `src/superlocalmemory/core/health_monitor.py`
+**文件**: `src/superlocalmemory/server/unified_daemon.py` (health 端点 + 闭包注册 engine 检查)
 
 **unified_daemon.py `/health` 端点** — 发现 engine 为 None 时调用 `get_engine_lazy()` 尝试恢复：
 
@@ -167,25 +224,20 @@ async def health():
 
 `get_engine_lazy()` 已有 5s 冷却机制，反复调用 `/health` 不会造成性能问题。
 
-**health_monitor.py** — 新增 `_check_engine_health()` 并注册：
+**unified_daemon.py** `create_app()` — 在 HealthMonitor 启动后，从 daemon 侧注册引擎健康检查（作为 closure 捕获 `application`）：
 
 ```python
-def _check_engine_health(self) -> dict:
-    """Check if the daemon engine is alive (accesses app state)."""
-    try:
-        import superlocalmemory.server.unified_daemon as _daemon
-        app = getattr(_daemon, '_application', None)
-        if app is None:
-            return {"name": "engine", "status": "unknown", "detail": "Application not found"}
-        engine = getattr(app.state, "engine", None)
+# 在 HealthMonitor 启动后（约 line 565），注册 engine 健康检查
+if application.state.health_monitor:
+    def _check_engine():
+        engine = getattr(application.state, "engine", None)
         if engine is None:
             return {"name": "engine", "status": "critical", "detail": "Engine unavailable"}
         return {"name": "engine", "status": "ok", "detail": "Engine initialized"}
-    except Exception as exc:
-        return {"name": "engine", "status": "error", "detail": str(exc)}
+    register_health_check(_check_engine)
 ```
 
-在 `start()` 中注册：`register_health_check(self._check_engine_health)`
+**设计说明**: `health_monitor.py` 属于 `core/` 层，不应反向依赖 `server/` 层。将闭包注册放在 daemon 启动流程中，保持分层清晰。`health_monitor.py` 本身不需要修改。
 
 ### 6. 僵尸子进程回收
 
@@ -195,16 +247,22 @@ def _check_engine_health(self) -> dict:
 
 ```python
 # Reap zombie child processes
-import os as _os
 try:
     while True:
-        wpid, status = _os.waitpid(-1, _os.WNOHANG)
+        wpid, status = os.waitpid(-1, os.WNOHANG)
         if wpid == 0:
             break
-        logger.info("Reaped zombie child PID %d (exit code=%d)", wpid, status >> 8)
+        if os.WIFSIGNALED(status):
+            logger.info("Reaped zombie child PID %d (killed by signal %d)",
+                        wpid, os.WTERMSIG(status))
+            exit_detail = f"signal={os.WTERMSIG(status)}"
+        else:
+            logger.info("Reaped zombie child PID %d (exit code=%d)",
+                        wpid, os.WEXITSTATUS(status))
+            exit_detail = f"exit_code={os.WEXITSTATUS(status)}"
         log_structured(
             level="info", operation="reap_zombie",
-            pid=wpid, exit_code=status >> 8,
+            pid=wpid, detail=exit_detail,
         )
 except ChildProcessError:
     pass  # No children at all
