@@ -47,9 +47,73 @@
 
 ---
 
-## 方式一：Python 脚本批量导入（推荐）
+## 方式一：MCP 工具调用（推荐）
 
-适合大量导入，可精确控制每条记忆的 scope。
+适合 Agent 运行时动态导入，**完整支持三层作用域**。
+
+### 核心工具
+
+Agent 通过 MCP 协议调用以下工具：
+
+| 工具 | 作用 | scope 支持 |
+| --- | --- | --- |
+| `remember` | 存储记忆 | `scope` + `shared_with` 参数 |
+| `recall` | 检索记忆 | `include_global` + `include_shared` 布尔开关 |
+| `entity list` | 查看实体 | `--scope` 过滤 |
+| `entity merge` | 合并实体 | 自动处理跨 scope 冲突 |
+
+### remember 参数
+
+```python
+remember(
+    content: str,           # 记忆内容（必填）
+    tags: str = "",         # 逗号分隔标签
+    scope: str = "personal",  # personal | global | shared
+    shared_with: str = "",  # scope=shared 时，逗号分隔的 agent_id 列表
+    agent_id: str = "mcp_client",  # 来源 Agent 标识
+    importance: int = 5,    # 重要性 1-10
+)
+```
+
+### recall 参数
+
+```python
+recall(
+    query: str,             # 查询文本（必填）
+    limit: int = 10,        # 返回条数
+    include_global: bool = True,   # 是否包含 global scope
+    include_shared: bool = True,   # 是否包含 shared scope
+)
+```
+
+### 批量导入示例
+
+```python
+import json
+
+memories = json.load(open("exported_memories.json"))
+
+for mem in memories:
+    scope = mem.get("scope", "personal")
+    shared_with = ",".join(mem.get("shared_with", []))
+
+    # 通过 MCP 调用（以 Claude Code 为例）
+    mcp_call("superlocalmemory", "remember", {
+        "content": mem["content"],
+        "tags": mem.get("tags", ""),
+        "scope": scope,
+        "shared_with": shared_with,
+        "agent_id": "import_batch",
+    })
+
+    time.sleep(0.1)  # 避免 pending queue 过载
+```
+
+---
+
+## 方式二：Python 脚本批量导入
+
+适合大量离线导入，可精确控制每条记忆的 scope。
 
 ### 基本脚本
 
@@ -61,12 +125,8 @@ import json
 import sys
 import time
 
-# 方式 A：通过 SLM Python API 导入
 from superlocalmemory.core.engine import MemoryEngine
 from superlocalmemory.core.config import SLMConfig
-from superlocalmemory.storage.database import DatabaseManager
-from superlocalmemory.storage import schema
-from pathlib import Path
 
 
 def import_memories(data_file: str, profile_id: str = "default") -> None:
@@ -84,7 +144,7 @@ def import_memories(data_file: str, profile_id: str = "default") -> None:
         print("没有找到记忆数据")
         return
 
-    # 初始化引擎
+    # 初始化引擎：SLMConfig 接受 active_profile 参数
     config = SLMConfig(active_profile=profile_id)
     engine = MemoryEngine(config=config)
     engine.initialize()
@@ -138,46 +198,9 @@ python import_memories.py exported_memories.json zhihui
 
 ---
 
-## 方式二：通过 MCP 工具逐条导入
-
-适合 Hermes Agent 运行时动态导入。在 Hermes Agent 中直接调用 `remember` 工具。
-
-### 单条导入
-
-```
-调用 remember：
-  content = "React 18 引入了 useId Hook 用于生成唯一 ID"
-  scope = "global"
-  tags = "react,frontend,hooks"
-```
-
-### 批量导入（伪代码）
-
-```python
-import json
-
-memories = json.load(open("exported_memories.json"))
-
-for mem in memories:
-    scope = mem.get("scope", "personal")
-    shared_with = ",".join(mem.get("shared_with", []))
-
-    # 通过 Hermes Agent 的 MCP 调用
-    hermes.call_tool("remember", {
-        "content": mem["content"],
-        "scope": scope,
-        "shared_with": shared_with,
-        "tags": mem.get("tags", ""),
-    })
-
-    time.sleep(0.1)  # 避免 pending queue 过载
-```
-
----
-
 ## 方式三：通过 Dashboard API 导入
 
-适合通过 HTTP 接口批量导入。
+适合通过 HTTP 接口批量导入，**不支持 scope 参数**（默认 personal）。
 
 ### 启动 Dashboard
 
@@ -209,9 +232,8 @@ curl -X POST http://localhost:8765/api/import \
   -F "file=@memories.json"
 ```
 
-> **注意**：Dashboard API 的 `/api/import` 当前不直接支持 scope 参数。
-> 导入的记忆默认为 `personal` scope。
-> 如需指定 scope，请使用方式一（Python 脚本）或方式二（MCP remember）。
+> **限制**：Dashboard `/api/import` 仅支持 `content`、`tags`、`project_name`、`category` 字段，
+> 不支持 `scope`/`shared_with`。如需三层作用域，请使用方式一（MCP 工具）或方式二（Python 脚本）。
 
 ---
 
@@ -232,7 +254,8 @@ def import_from_mem0(mem0_export_file: str, profile_id: str = "default"):
     with open(mem0_export_file) as f:
         mem0_data = json.load(f)
 
-    engine = MemoryEngine(profile_id=profile_id)
+    config = SLMConfig(active_profile=profile_id)
+    engine = MemoryEngine(config=config)
     engine.initialize()
 
     for item in mem0_data:
@@ -274,7 +297,8 @@ def import_markdown_notes(
     profile_id: str = "default",
 ):
     """扫描目录下所有 .md 文件，按段落拆分后导入。"""
-    engine = MemoryEngine(profile_id=profile_id)
+    config = SLMConfig(active_profile=profile_id)
+    engine = MemoryEngine(config=config)
     engine.initialize()
 
     md_files = list(Path(notes_dir).glob("**/*.md"))
@@ -330,7 +354,8 @@ TEAM_KNOWLEDGE = [
 ]
 
 def bootstrap_team_knowledge(profile_id: str = "default"):
-    engine = MemoryEngine(profile_id=profile_id)
+    config = SLMConfig(active_profile=profile_id)
+    engine = MemoryEngine(config=config)
     engine.initialize()
 
     for knowledge in TEAM_KNOWLEDGE:
