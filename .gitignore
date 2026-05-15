@@ -177,7 +177,5 @@ test-results/
 70%
 .gitnexus/
 .claude/skills/generated/
-graphify-out/
-
 # graphify cache (heavy, not needed in repo)
-graphify-out/cache
+graphify-out/cache/

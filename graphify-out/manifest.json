@@ -1,0 +1,4066 @@
+{
+  "/home/kai-remote/github/superlocalmemory/conftest.py": {
+    "mtime": 1777018056.6925516,
+    "hash": "41e364f5ec0c7d3c3b8980791abc5f15"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/integrations/llamaindex/llama_index/storage/chat_store/superlocalmemory/base.py": {
+    "mtime": 1777018056.7335098,
+    "hash": "948a541d5780df04e0345b3d5dcac233"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/integrations/llamaindex/llama_index/storage/chat_store/superlocalmemory/__init__.py": {
+    "mtime": 1777018056.7334783,
+    "hash": "90670703aef80dcfc376782882ed2256"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/integrations/llamaindex/tests/test_chat_store.py": {
+    "mtime": 1777018056.733597,
+    "hash": "d16215ec834776dc1c09986f61df2231"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/integrations/llamaindex/tests/__init__.py": {
+    "mtime": 1777018056.7335098,
+    "hash": "4d28b967a0b6140751245bfea13b6926"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/integrations/llamaindex/tests/test_security.py": {
+    "mtime": 1777018056.733597,
+    "hash": "3a964070d4764090b83cb4db0855464c"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/integrations/langchain/langchain_superlocalmemory/chat_message_history.py": {
+    "mtime": 1777018056.7332838,
+    "hash": "9cbc03885a4a08d4d8c6cc5ad659844f"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/integrations/langchain/langchain_superlocalmemory/__init__.py": {
+    "mtime": 1777018056.733261,
+    "hash": "f7acd4ef5851c26420bfc724e8aef2fc"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/integrations/langchain/tests/__init__.py": {
+    "mtime": 1777018056.7332838,
+    "hash": "4d28b967a0b6140751245bfea13b6926"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/integrations/langchain/tests/test_chat_message_history.py": {
+    "mtime": 1777018056.7333643,
+    "hash": "c27cb378617669df3437c51327fb6b9c"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/integrations/langchain/tests/test_security.py": {
+    "mtime": 1777018056.7333643,
+    "hash": "466aac018d0ac091bc2129c49e110ebf"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/hooks/memory-remember-skill.js": {
+    "mtime": 1777018056.7329614,
+    "hash": "bb7628917eeba3899b6fbf05373c118b"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/hooks/context-hook.js": {
+    "mtime": 1777018056.7327507,
+    "hash": "3f65c6c874bcdeb8f5504c160e94ad7f"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/hooks/memory-recall-skill.js": {
+    "mtime": 1777018056.7329614,
+    "hash": "9b1a0e2e8053dfecc862803cddd498c0"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/hooks/memory-profile-skill.js": {
+    "mtime": 1777018056.7329614,
+    "hash": "8c18e22e6bc80e6ac86c3e2e7b219be3"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/hooks/memory-reset-skill.js": {
+    "mtime": 1777018056.7329614,
+    "hash": "c24be85742363739311f0f4431c0bdce"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/hooks/memory-list-skill.js": {
+    "mtime": 1777018056.7329614,
+    "hash": "d55c09b9c49235d7e5f1e9a3130de3cb"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/hooks/post-recall-hook.js": {
+    "mtime": 1777018056.7329614,
+    "hash": "72a8fb64deb6b10efebe3f444b671430"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/example_graph_usage.py": {
+    "mtime": 1777018056.7314913,
+    "hash": "c5dd6bee69baceb6316b9d79e31801ed"
+  },
+  "/home/kai-remote/github/superlocalmemory/bin/slm-npm": {
+    "mtime": 1777018056.6925516,
+    "hash": "3990b5b98e605ff7e48315c5f3c372c7"
+  },
+  "/home/kai-remote/github/superlocalmemory/bin/slm": {
+    "mtime": 1777018056.6924393,
+    "hash": "39b98039899c0225163ea32488bd3527"
+  },
+  "/home/kai-remote/github/superlocalmemory/integrations/langchain_memory.py": {
+    "mtime": 1777018056.7341769,
+    "hash": "06b1a8b889865458dc9b4f34c217cf98"
+  },
+  "/home/kai-remote/github/superlocalmemory/integrations/__init__.py": {
+    "mtime": 1777018056.733689,
+    "hash": "98a9e1cd0a9202131e7d517f598e4de9"
+  },
+  "/home/kai-remote/github/superlocalmemory/integrations/crewai_memory.py": {
+    "mtime": 1777018056.7341769,
+    "hash": "2abfde59acf9093d0400c4fac1cc0665"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/graph-filters.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "adbb02620af8af96b4aa70411afa42e6"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/core.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "d5f0705d774bd1e61a81de4fbf9059b2"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/modal.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "1b69e54b00fa346ec511e7c77082a8c1"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/timeline.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "929fc11ad98f3858f783bd67f597886f"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/behavioral.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "b670d4ad52cc62f5a85385fd5ad001e1"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/search.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "78d483c290c464232de952284ace1311"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/graph-ui.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "adc14bbadd207e6b3d4bc26a49e5245e"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/patterns.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "1c5f81cc47cbc1390440cb3271440600"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/ide-status.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "aa5a0b7ecf6b6f9bea1b55bb3714faa7"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/fact-detail.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "1b1331e16a384173ab4d240e49e7c706"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/feedback.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "0c837de1c5b7551168b058ec02c47d80"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/dashboard.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "b2e3cee2cfba054abf6b01182a120646"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/graph-core.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "66d274d5b0d880744e47e2e33d9b52c7"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/recall-lab.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "7f3764df2e5c7cc7ee779955259e0123"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/clusters.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "cae7e4a81d2facf4945c07f201871a38"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/math-health.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "4ff4dec32e8143806cd722744bdc77f8"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/init.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "da84d9c3ffb4febff3b447807c2e4f5d"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/memories.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "50b5180cf9a62137aa17826ed45b177f"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/agents.js": {
+    "mtime": 1777018056.7763183,
+    "hash": "5e18c9c2daf1e6a5742f8d2e5b568cfa"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/profiles.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "167dec1d759ca344673d4b80b9d98446"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/compliance.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "0ed2e2a6dc4bfc7124f1995eb704ea4e"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/graph-interactions.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "b36a4711f8890f608e9b350d10c5ff86"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/trust-dashboard.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "c5173bbf400d737aa4fb29b60e018429"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/settings.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "4169d332c46d47e3900e7701881e53d3"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/events.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "57d3e5b91c43ae04710963be19c6064c"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/learning.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "dea61e67104c7344ee0bba01d2a6f025"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/auto-settings.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "77035e96170640460d7e0b4b1e0f76e5"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/js/lifecycle.js": {
+    "mtime": 1777018056.7763395,
+    "hash": "282e4e2c04d1d1b606a6a0e696a49ca7"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/build_entry.py": {
+    "mtime": 1777018056.734418,
+    "hash": "01ac52e3eca5e025c29d53b2097f21a2"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/generate-thumbnails.py": {
+    "mtime": 1777018056.734418,
+    "hash": "e5ca22811e767a54c9c5edd6cb2050c5"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/sync-wiki.ps1": {
+    "mtime": 1777018056.734418,
+    "hash": "d6d7ba63ccc2207feb44e7db9b3883ad"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/verify-v27.ps1": {
+    "mtime": 1777018056.734418,
+    "hash": "0a30c26a5329912b2221b3448156982d"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/prepack.js": {
+    "mtime": 1777018056.734418,
+    "hash": "c32a0845932c3e3b4b19d6a7265ad19f"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/postinstall-interactive.js": {
+    "mtime": 1777018056.734418,
+    "hash": "0005389ac768c2195866790a9216f3c0"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/start-dashboard.ps1": {
+    "mtime": 1777018056.734418,
+    "hash": "f95967d59432adb8e332c2f2f292a27b"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/postinstall_binary.js": {
+    "mtime": 1777018056.734418,
+    "hash": "bd27e76f7eef0744cb86fc418cf3de5f"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/release_manifest.py": {
+    "mtime": 1777018056.734418,
+    "hash": "c3aea605c96aec196638bc72c7b5af31"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/postinstall.js": {
+    "mtime": 1777018056.734418,
+    "hash": "316c1e1e6344372b0deeb8947f739fda"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/preuninstall.js": {
+    "mtime": 1777018056.734418,
+    "hash": "5c407db8a718287f36391f532f49c2f3"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/install-skills.ps1": {
+    "mtime": 1777018056.734418,
+    "hash": "4bb3b5b1524dc428228cc33eb078e4bf"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/install.ps1": {
+    "mtime": 1777018056.734418,
+    "hash": "b1620f0ea56251574ad9aa6ab4c6d61c"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/verify-install.ps1": {
+    "mtime": 1777018056.734418,
+    "hash": "5eb02ae7d2a72b0a1a6f3b0b4344612d"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/build-slm-hook.ps1": {
+    "mtime": 1777018056.734418,
+    "hash": "a7344c56622cb3a4bab557e9cc38babf"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/test-npm-package.ps1": {
+    "mtime": 1777018056.734418,
+    "hash": "01e8647f8a7496770a491eda46c62b13"
+  },
+  "/home/kai-remote/github/superlocalmemory/scripts/postinstall/validation.js": {
+    "mtime": 1777018056.734418,
+    "hash": "b9703ae9c857775af3e99daa520c6014"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_domain_tags_schema.py": {
+    "mtime": 1777175898.1944485,
+    "hash": "00b7b278c61dfbcace3d3ba14b27369d"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_claude_hooks.py": {
+    "mtime": 1777018056.764851,
+    "hash": "80294071428e08770a779fedf9cdfd05"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_global_entities.py": {
+    "mtime": 1777185585.4781544,
+    "hash": "e969307b5f8ad9f301335fc4fc440e95"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_domain_tags_db.py": {
+    "mtime": 1777181360.5620732,
+    "hash": "20eacd7554be361fcc6bf5c067f20661"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_scope_integration.py": {
+    "mtime": 1777175898.195007,
+    "hash": "5b0c9bc1956e05ddfa1c731372d9a628"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_auto_hooks.py": {
+    "mtime": 1777018056.7628043,
+    "hash": "465e624409ad93cb2d457036a05d4727"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_ranker.py": {
+    "mtime": 1777018056.7740226,
+    "hash": "fa23d8685053008423c223bbf8010d95"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_post_install.py": {
+    "mtime": 1777018056.7735884,
+    "hash": "933f8094d4208d343162d54308af940a"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_features.py": {
+    "mtime": 1777018056.7692363,
+    "hash": "cd83a8fa20b3891916c26f3183a144ec"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning_advanced.py": {
+    "mtime": 1777018056.77125,
+    "hash": "aa1a5bab8c480040f799303f9921df4b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/conftest.py": {
+    "mtime": 1777018056.7620547,
+    "hash": "ad4db3023db4197579b5d460f7f12d6d"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning_collectors.py": {
+    "mtime": 1777018056.77125,
+    "hash": "91ea6455d19c175891e0a82f98a0bab9"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_llm_provider.py": {
+    "mtime": 1777018056.77125,
+    "hash": "5cee61e9de3eb6369e235eacd3ab5522"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_config_system.py": {
+    "mtime": 1777018056.7663593,
+    "hash": "e8027a88cfae5ae8dacddc4f45969da4"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_scope_weights.py": {
+    "mtime": 1777198539.8654637,
+    "hash": "1aa513d3b2e8cb0f0a2d16ca0fbbf363"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_cli.py": {
+    "mtime": 1777018056.764851,
+    "hash": "fd9da0f3e5526b5c8cf436479cdfaffc"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_behavioral_full.py": {
+    "mtime": 1777018056.7628043,
+    "hash": "f69a77af89b38e97a28b176e7afafea4"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_domain_tags_integration.py": {
+    "mtime": 1777181360.5622222,
+    "hash": "a0f607739c6f994ecde3b693a31d1c64"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_v3_api.py": {
+    "mtime": 1777018056.7759216,
+    "hash": "df1c414d2c8a931d52ccd84d21aa1557"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_compliance_full.py": {
+    "mtime": 1777018056.7663593,
+    "hash": "2037700b563d8a64549a2d5f51964cc3"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_cli_json.py": {
+    "mtime": 1777018056.764851,
+    "hash": "0754ca83e7b6c5692576c05a73ea7684"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_ide_connector.py": {
+    "mtime": 1777018056.7697377,
+    "hash": "402569736a2bfdc70f89bc510133fa33"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_final_locomo_mini.py": {
+    "mtime": 1777018056.7692363,
+    "hash": "2d5876f28ac774f898ab3f5b89f56816"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/__init__.py": {
+    "mtime": 1777018056.76025,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_event_bus.py": {
+    "mtime": 1777018056.768362,
+    "hash": "8207cbf20ce3773dc4bb55e159e783ac"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_entity_merge.py": {
+    "mtime": 1777206362.6293516,
+    "hash": "b64e4408e6051c6e77535f60ea7a66a0"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_scope_db.py": {
+    "mtime": 1777175898.1949494,
+    "hash": "1a76ffdb01393abd7c2dabbe346a4d5b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_migration.py": {
+    "mtime": 1777018056.773161,
+    "hash": "85a2bd87222ba4a683b3d9294ff30252"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_mcp_server.py": {
+    "mtime": 1777018056.773161,
+    "hash": "d1b07329e6352f9136107e31827e6226"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_cli_v33.py": {
+    "mtime": 1777018056.7650392,
+    "hash": "03c6f8e821e9fab8e78b61571f1fa72c"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_engine_hooks.py": {
+    "mtime": 1777018056.768362,
+    "hash": "e2cf52071b4e421687e0d12aa2bd6915"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_trust_full.py": {
+    "mtime": 1777018056.7757874,
+    "hash": "5b3195442b3add7e9b838184ca574125"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_scope_schema.py": {
+    "mtime": 1777175898.1950588,
+    "hash": "19337a3ad61cb55c0830f449c1c0485b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hook_handlers.py": {
+    "mtime": 1777018056.7692363,
+    "hash": "b5c728a1d812945aa55857c63b17720f"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_infra.py": {
+    "mtime": 1777018056.7697377,
+    "hash": "2d85c48abee21996207f215546ee3aab"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_adapters/test_extra_coverage.py": {
+    "mtime": 1777018056.7625582,
+    "hash": "c6ee0661a97c0caca78ec81d1021e7e0"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_adapters/conftest.py": {
+    "mtime": 1777018056.7625582,
+    "hash": "61794aa4344094329a0dec86ba5e3091"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_adapters/test_sync_loop.py": {
+    "mtime": 1777018056.7625582,
+    "hash": "9a5a9c6bb08aed6627896b94935869a3"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_adapters/test_copilot_adapter.py": {
+    "mtime": 1777018056.7625582,
+    "hash": "994c5d5ba7627afd3f1ce33c05108bcb"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_adapters/__init__.py": {
+    "mtime": 1777018056.7624912,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_adapters/test_cursor_adapter.py": {
+    "mtime": 1777018056.7625582,
+    "hash": "094f0444238c54ec08299c2d1c57f455"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_adapters/test_antigravity_adapter.py": {
+    "mtime": 1777018056.7625582,
+    "hash": "2b39f5ebd03d2e899e71aeca444540ab"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_adapters/test_cross_platform_connector.py": {
+    "mtime": 1777018056.7625582,
+    "hash": "e5aec618dfe6e29a0a98dbfc1ec7d2b6"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_adapters/test_content_builder.py": {
+    "mtime": 1777018056.7625582,
+    "hash": "94bc942754bfaf8e7d8eb994f0acad89"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_cli_subparsers/test_wizard_v3426_options.py": {
+    "mtime": 1777018056.7650392,
+    "hash": "e658218d33a4f4d3548369bb6ff3f471"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_cli_subparsers/test_db_migrate.py": {
+    "mtime": 1777018056.7650392,
+    "hash": "cf1c9dae59f641048f0e30efae91c5bf"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_cli_subparsers/test_escape_hatch.py": {
+    "mtime": 1777018056.7650392,
+    "hash": "be4a017f094c338a564126030333e1fa"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_cli_subparsers/__init__.py": {
+    "mtime": 1777018056.764851,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_cli_subparsers/test_version_banner.py": {
+    "mtime": 1777018056.7650392,
+    "hash": "fa8d773648694969a06ab3fefd5d16e4"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_cli_subparsers/test_connect_and_prestage.py": {
+    "mtime": 1777018056.7650392,
+    "hash": "463024a9ae0c557a25a7aaee6a295fad"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_cli_subparsers/test_doctor.py": {
+    "mtime": 1777018056.7650392,
+    "hash": "ef0ee3857c9edaf0017dccb0f9e1246e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_process_health/conftest.py": {
+    "mtime": 1777018056.7740226,
+    "hash": "388ce4cbf75d8755e5e84195a4fca838"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_process_health/test_process_reaper.py": {
+    "mtime": 1777018056.7740226,
+    "hash": "9e026e89ce2c78778cf7f08063837beb"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_process_health/__init__.py": {
+    "mtime": 1777018056.7739327,
+    "hash": "e98c88e9c3437f9422868977b2942240"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_process_health/test_heartbeat_monitor.py": {
+    "mtime": 1777018056.7740226,
+    "hash": "a881904ca04e2b45324c5377f7aa1a7e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_process_health/test_pid_manager.py": {
+    "mtime": 1777018056.7740226,
+    "hash": "c8fd533c6d68a534c079e54b448d3681"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_api/test_engine_lifecycle.py": {
+    "mtime": 1777018056.7628043,
+    "hash": "2d3b591873a984394f2297d4fd756060"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_api/test_brain_endpoint.py": {
+    "mtime": 1777018056.7628043,
+    "hash": "6e41f260d80182592d3215870daa0ecd"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_api/test_s9_w4_brain_contract.py": {
+    "mtime": 1777018056.7628043,
+    "hash": "c5d16e8648217b0bfe383faaba719d28"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_api/conftest.py": {
+    "mtime": 1777018056.7628043,
+    "hash": "e5dee24cbed5d40391362402b5aa4697"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_api/test_dashboard_phase_truth.py": {
+    "mtime": 1777018056.7628043,
+    "hash": "56ad260d39a54d583f3a7c246bca120c"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_api/test_worker_idle_config.py": {
+    "mtime": 1777986344.8378074,
+    "hash": "7ff682f7f4c7ccf4e22acdbdef7827d3"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_api/test_api_auto_invoke.py": {
+    "mtime": 1777018056.7628043,
+    "hash": "0d458e6971732617ad7d73f80599ab4a"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_api/test_api_v33.py": {
+    "mtime": 1777018056.7628043,
+    "hash": "96c8fa142c7cd6fc55b64c96fb8537c4"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_api/__init__.py": {
+    "mtime": 1777018056.7625582,
+    "hash": "e639fcb48bbd4ac67597402e49b4a7f8"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_api/test_api_associations.py": {
+    "mtime": 1777018056.7628043,
+    "hash": "9fc72ff1751cf7d36f7822224c0c3405"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_api/test_token_endpoint.py": {
+    "mtime": 1777018056.7628043,
+    "hash": "57bc3d4df80943486ae4e850fddb6f13"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_api/test_api_consolidation.py": {
+    "mtime": 1777018056.7628043,
+    "hash": "93d0e559ef5459d00bda39756038b611"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_binary/test_manifest_generator.py": {
+    "mtime": 1777018056.7646844,
+    "hash": "00bdbc0285f17cac6b41b085b550fc4d"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_binary/test_entry_generator.py": {
+    "mtime": 1777018056.7646844,
+    "hash": "c49def803668473800013ed111543be6"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_binary/test_dispatcher_fallback.py": {
+    "mtime": 1777018056.7646844,
+    "hash": "45e5fba00f550990a9d71cf6e8f5a749"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_binary/conftest.py": {
+    "mtime": 1777018056.7646844,
+    "hash": "4691a232df2916894d2d8767bc0fa60e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_binary/__init__.py": {
+    "mtime": 1777018056.7644837,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/postinstall/test_postinstall_validation.js": {
+    "mtime": 1777018056.7622676,
+    "hash": "cbbe2044c64d8fd8ad504f12ffd7d964"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/property/test_queue_invariants.py": {
+    "mtime": 1777018056.7624912,
+    "hash": "197a1fb019778e504362d3a11e4f3206"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/property/__init__.py": {
+    "mtime": 1777018056.7622676,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_trust/test_provenance.py": {
+    "mtime": 1777018056.7757874,
+    "hash": "899aff509a7eaaf434ae98bac648e9f0"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_trust/__init__.py": {
+    "mtime": 1777018056.775222,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_trust/test_scorer.py": {
+    "mtime": 1777018056.7757874,
+    "hash": "237bffda8f680b34857c35cd3609d139"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/fixtures/__init__.py": {
+    "mtime": 1777018056.7620547,
+    "hash": "dfd8645c77978e358f02d52ef72dcf7b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/fixtures/benchmark_data.py": {
+    "mtime": 1777018056.7622142,
+    "hash": "632158af6c831637603563c6d5c01003"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_evolution/test_evolution.py": {
+    "mtime": 1777018056.7692363,
+    "hash": "b478015efde073a85a185b186f4df904"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_evolution/__init__.py": {
+    "mtime": 1777018056.768362,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_evolution/test_evolution_budget.py": {
+    "mtime": 1777018056.7692363,
+    "hash": "1fd1f305cf78787959517151aea02db3"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_evolution/test_skill_evolver_firing.py": {
+    "mtime": 1777018056.7692363,
+    "hash": "2f3a1bd4ce0d47f78be28d6aeb6f5d3a"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_evolution/test_llm_dispatch.py": {
+    "mtime": 1777018056.7692363,
+    "hash": "88ffc8b32728b04a0276e34ff48c6889"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_extractor_typescript.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "b26e0ecc5f65ad763822ddb417630717"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_fact_enricher.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "9d81d2710572fec318fecc9e7efc494e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_blast_radius.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "da58d1acb826c9863c52e3a3b2425471"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_models.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "94686e875d9a7368b1dbd3775e745932"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_changes.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "6106063a4a4bfc66f4ad2bc9906a195a"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_incremental.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "33f51df4ad69d1ad952b979fc50d6a8b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/conftest.py": {
+    "mtime": 1777018056.7653372,
+    "hash": "6fa2bbf844366018b7871b96fa0c839b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_search.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "802043341d9afddc28df966f6cd32531"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_watcher.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "e1796e6f7af18787c98da307c1ea82bc"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_config.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "028b063e07d668fa14768b8d660d45e1"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/__init__.py": {
+    "mtime": 1777018056.7650392,
+    "hash": "02cc90ee15df0ccd6d2b73095cd3e47b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_graph_engine.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "fd2f2a360616b6b42d491b1f7dd965e1"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_communities.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "98f6d52b4e4791b208a84b5feda71760"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_entity_resolver.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "710d4eed832863a3dbc3fe081af91916"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_graph_store.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "e7f44e1e32f341a2948004223e01ea21"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_git_hooks.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "1a925cebe319aa3c1893276b05230aa5"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_hebbian_linker.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "3e72b9c15505423e32cf388f472afedc"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_service.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "cf54860c993249d5a7f92b87e13311da"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_event_listeners.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "aa0a4218394ada09eb3f0162b40b7916"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_mcp_tools.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "063eb7866230e3686d948606288c2fe1"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_schema.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "400ccf6d1e168b2bbf4fb2ca238a334c"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_temporal_checker.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "e83d60a819fba1a648d218db96a1df06"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_flows.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "d33872ac84ce0cd900712656a4aec6cf"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_extractor_python.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "017691241bb4c0d65d3d9996f356af7d"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_database.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "3e8d75d08893a33df744183f03bcc030"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_resolver.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "5ad4903a4cd4777ae8a35c184f3ee76e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/test_parser.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "c83031169a312a56017be38dc467dac6"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/fixtures/sample_python.py": {
+    "mtime": 1777018056.7653372,
+    "hash": "4ba824889bf9f445a897c8e5c253285b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_code_graph/fixtures/sample_typescript.ts": {
+    "mtime": 1777018056.7653837,
+    "hash": "eb940951c4311efc02fb2b459a17e9c5"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/integration/test_mesh.py": {
+    "mtime": 1777018056.7622676,
+    "hash": "a74a0f4b5f5fe87635c44845f89cbe9f"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/integration/test_unified_daemon.py": {
+    "mtime": 1777018056.7622676,
+    "hash": "cb56c512b0c34c380b4e171e366629b0"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/integration/__init__.py": {
+    "mtime": 1777018056.7622142,
+    "hash": "fdce3a5136b76680592e26298a1d5c7d"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/integration/test_entity_compilation.py": {
+    "mtime": 1777018056.7622676,
+    "hash": "d63b33512f755a3cfd4351696fe7a963"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/integration/test_ingestion.py": {
+    "mtime": 1777018056.7622676,
+    "hash": "f06acb108e4df89980bf0bae63fb968c"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/integration/test_health_monitor.py": {
+    "mtime": 1777018056.7622676,
+    "hash": "78b31a648af1cccaf51563b12d2ccefa"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_temporal_parser.py": {
+    "mtime": 1777018056.768362,
+    "hash": "0aca786ab4630a85347bef7757ff581c"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_fact_extractor.py": {
+    "mtime": 1777018056.768362,
+    "hash": "2a1d8ea2c21830814a8e215f7bfe70d4"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_cognitive_consolidator.py": {
+    "mtime": 1777018056.768362,
+    "hash": "49f43003d07562dcc03b5ea06f0110a5"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_type_router.py": {
+    "mtime": 1777018056.768362,
+    "hash": "06155cd47204e5c8c41c742d589c0840"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_entropy_gate.py": {
+    "mtime": 1777018056.768362,
+    "hash": "9bc26b9d9d1ad44aaa5c0e56db0067a5"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_temporal_filter.py": {
+    "mtime": 1777018056.768362,
+    "hash": "75cf6359c239d832c6e3af00ab64e742"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_consolidator.py": {
+    "mtime": 1777018056.768362,
+    "hash": "3d24f5caaab5f299043e92f8239aba49"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/__init__.py": {
+    "mtime": 1777018056.768148,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_scene_builder.py": {
+    "mtime": 1777018056.768362,
+    "hash": "729e2bfbba0cb1af4b3c60ea4ff5f546"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_temporal_validator.py": {
+    "mtime": 1777018056.768362,
+    "hash": "76a38a4941cec71944e2a9582432a969"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_foresight.py": {
+    "mtime": 1777018056.768362,
+    "hash": "012827c29e15a49f4aeaadcb1af35d56"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_entity_resolver.py": {
+    "mtime": 1777018056.768362,
+    "hash": "50a5549c617b96b00e9c13c98b847917"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_emotional.py": {
+    "mtime": 1777018056.768362,
+    "hash": "fc09b6f592ea32218a3c4d0e48bfce48"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_auto_linker.py": {
+    "mtime": 1777018056.768362,
+    "hash": "09aa04b972fa37542c201c64373ad4b7"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_observation_builder.py": {
+    "mtime": 1777018056.768362,
+    "hash": "5ebcc402ac9e8410aec931c7d80eeb6b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_graph_builder.py": {
+    "mtime": 1777018056.768362,
+    "hash": "fa99a11cb5727ecbecbf444be635ab7b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_signal_inference.py": {
+    "mtime": 1777018056.768362,
+    "hash": "d24b36ed92948c933a18908ff7cf43cf"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_encoding/test_context_generator.py": {
+    "mtime": 1777018056.768362,
+    "hash": "42c5b4650c4e12bcb4a615ff887c75cb"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_dynamics/test_eap_scheduler.py": {
+    "mtime": 1777018056.768148,
+    "hash": "8d0c3f064dab1e6964866d00dc6089a6"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_dynamics/__init__.py": {
+    "mtime": 1777018056.76725,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_dynamics/test_sagq.py": {
+    "mtime": 1777018056.768148,
+    "hash": "5001aec49213ea541db09dcfa37215b9"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_dynamics/test_ebbinghaus_langevin.py": {
+    "mtime": 1777018056.768148,
+    "hash": "fbdc1f6d9c0f327ca3bbff2d19cace15"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_storage/test_concurrent_db.py": {
+    "mtime": 1777018056.775222,
+    "hash": "2e4b6aad7bb185d404190ea10b15e292"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_storage/test_quantized_store.py": {
+    "mtime": 1777018056.775222,
+    "hash": "f9ed2e23b200bee09415c56d4f69b101"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_storage/test_models.py": {
+    "mtime": 1777018056.775222,
+    "hash": "a9d705666869f07c132024e3f7aa3d55"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_storage/test_s9_w1_data_integrity.py": {
+    "mtime": 1777018056.775222,
+    "hash": "16a3e07066ec60c52d3a0c96b2d11dd8"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_storage/test_access_log.py": {
+    "mtime": 1777018056.775222,
+    "hash": "6a0e5db9ed1c2b2baf5bca3e10f84018"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_storage/__init__.py": {
+    "mtime": 1777018056.7751365,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_storage/test_migration_runner.py": {
+    "mtime": 1777018056.775222,
+    "hash": "aaef3cf78648209b69d30dbec01e5e67"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_storage/test_migrations.py": {
+    "mtime": 1777018056.775222,
+    "hash": "951349713855f69731e008469745c196"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_storage/test_embedding_migrator.py": {
+    "mtime": 1777018056.775222,
+    "hash": "ef1b7c6d2a1e820abd0855e98662d05d"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_storage/test_access_control.py": {
+    "mtime": 1777018056.775222,
+    "hash": "325b7396bbc058420ddf4e6720e1a0b0"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_storage/test_schema.py": {
+    "mtime": 1777018056.775222,
+    "hash": "5b789624e72400739ea7d8ca553b4747"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_storage/test_migrations_content.py": {
+    "mtime": 1777018056.775222,
+    "hash": "ed5f04b0b96a0188065ea551dfbb768a"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_storage/test_database.py": {
+    "mtime": 1777018056.775222,
+    "hash": "dadf08bd0941e4e2cbd1878a018ba70a"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hooks/test_auto_recall_hook.py": {
+    "mtime": 1777986344.8379376,
+    "hash": "6d67c94a1cad0e095aa53a43ac0e531d"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hooks/test_multi_signal_scoring.py": {
+    "mtime": 1777018056.7697377,
+    "hash": "1a829af42c31590f2198ca445c44f3dd"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hooks/test_auto_invoker.py": {
+    "mtime": 1777018056.7697377,
+    "hash": "de2722123f928e094339b8e784d5014e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hooks/test_stage8_outcome_common_security.py": {
+    "mtime": 1777018056.7697377,
+    "hash": "9c559aa86ac6d8a698e59dda895a3bba"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hooks/test_user_prompt_hook_entity_detection.py": {
+    "mtime": 1777018056.7697377,
+    "hash": "154e0c34842c199042981d5f9909d2c8"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hooks/test_prewarm_auth.py": {
+    "mtime": 1777018056.7697377,
+    "hash": "8bab2ec7298f6aeec77bf123553029db"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hooks/test_hooks_callable_injection.py": {
+    "mtime": 1777018056.7697377,
+    "hash": "3787f3bb360d427fda1111e46d8d7ada"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hooks/test_outcome_hooks.py": {
+    "mtime": 1777018056.7697377,
+    "hash": "00d07d6b69f79b8d20e1ca576ce5d8a1"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hooks/__init__.py": {
+    "mtime": 1777018056.7692363,
+    "hash": "85dba8a7d293bddd66be91d59563a3ae"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hooks/test_stage8_post_tool_marker_regex.py": {
+    "mtime": 1777018056.7697377,
+    "hash": "fee2ceb74cf57f1c5f5adc35018be1ae"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hooks/test_fok_gating.py": {
+    "mtime": 1777018056.7697377,
+    "hash": "42e092cfaa3a4d09eb7160cd0f70926f"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hooks/test_auto_parameterize.py": {
+    "mtime": 1777018056.7697377,
+    "hash": "04714e985f7e2ff664edb9f81612a071"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hooks/test_hook_daemon.py": {
+    "mtime": 1777986344.8379793,
+    "hash": "13350381e683727b3efe0a23e70f2887"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_hooks/test_hook_handlers.py": {
+    "mtime": 1777018056.7697377,
+    "hash": "ec64bde6bfaa90706baa476ccfb86b8f"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_agentic.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "fb5a071ef9a89a59eb16d70184d0a191"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_bm25_channel.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "3e74a53a5ac3c027bf36903cbd445629"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_semantic_channel_with_vec.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "325cbaeaab0b43d42ede36f775323ab2"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/__init__.py": {
+    "mtime": 1777018056.7740226,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_ann_index_lifecycle.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "6303188671fe9a8b3b1f5608b67d7972"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_forgetting_filter.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "c4fbcfd6140db3e2499919bbe51bef9d"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_quant_aware_search.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "40b304f91a40109878195d9452e20f6f"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_entity_channel.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "4119aca9eb8c4c11b44de5589c42fc3f"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_ann_index.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "f8147f48d0d887946f6bd390eeb1d110"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_temporal_channel.py": {
+    "mtime": 1777175898.1948938,
+    "hash": "13c695fef4823fa77195d7e13c200278"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_spreading_activation.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "41769c4253b2fff4dbd14a5ec02fbc00"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_semantic_channel.py": {
+    "mtime": 1777175898.1948197,
+    "hash": "935493ea0b3728689750452f91bce5b6"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_hopfield_channel.py": {
+    "mtime": 1777175898.1946597,
+    "hash": "e973dcc97209ce0e755b43c2baed17b2"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_fusion.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "5635438cbd669a2384d84e40318e1e44"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_vector_store.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "9e3420359f53d5368454566b0e50583d"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_retrieval_integration.py": {
+    "mtime": 1777175898.194749,
+    "hash": "92194d8e75c0ba6a5b1ac7c424fea7e6"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_strategy.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "461632bb25c268ce09ada8d7de827969"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_reranker.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "e0605d6df20a1c1f817abd88cd94cc47"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_semantic_channel_performance.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "11ecb8afc04b78bcfcd87f9b0006da31"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_retrieval/test_engine.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "4b1b39a41c5800b0f55e54ed487fa038"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/chaos/__init__.py": {
+    "mtime": 1777018056.7620378,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/chaos/test_chaos_queue.py": {
+    "mtime": 1777018056.7620547,
+    "hash": "1e4dfd3e188acd13bb26062e05d39287"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_arm_catalog.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "f7d3526ce7ae34a0c85d678249ef7b28"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_adaptive.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "7c8a466eca3c29aae8ccfd228ba8dfe1"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_consolidation_quantization_worker.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "f12819d1eeff19cb17f0694d01682c5a"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_s9_dash_outcome_queue.py": {
+    "mtime": 1777018056.77125,
+    "hash": "8fb7389e214f8bf226f267a140731346"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_learning_db.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "e0897750d0e563050878d2ebf0ca2f13"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_engagement_reward_model.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "49119d8a6e9914ed1f5ae237db26ff2c"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_shadow_test.py": {
+    "mtime": 1777018056.77125,
+    "hash": "afb47c96d565e9eb1f31422f7f6c5ccf"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_consolidation_online_retrain_wiring.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "ad5ca043d9a5e8efe0db20817a7e4378"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_ensemble.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "c1bc1bfe7931385b5f7dab85ad87fe11"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_forgetting_scheduler.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "a4442ad83ed7f07de59e5d7a6a1f3af0"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_online_retrain.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "cce612f6004ed2f5c0976bdc44d9b919"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_outcomes.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "0398595d7bade7cc6c6601e97634acac"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_trigram_index.py": {
+    "mtime": 1777018056.77125,
+    "hash": "e7fc0f05bb05e787abaaccba827af9ff"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_behavioral.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "f78bbbaf7fad388a5e9e1ce287217a44"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_memory_merge.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "633bc692c6633ef33de83d692de687e9"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_hnsw_dedup.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "fd52ff6aaae6ecaa3e9bd2d324236cdd"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/__init__.py": {
+    "mtime": 1777018056.7702277,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_f4a_refactor.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "ff2becd298be110222428ba94afc2918"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_stage8_trigram_rebuild_bound.py": {
+    "mtime": 1777018056.77125,
+    "hash": "d3c887481f3b9d11a87a32470daa6297"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_reward_proxy.py": {
+    "mtime": 1777018056.77125,
+    "hash": "02b1dcb57f8ccae52691e5ff37b1ca5e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_stage8_reward_signal_typecheck.py": {
+    "mtime": 1777018056.77125,
+    "hash": "c476667324b50ecb5eb87a6c1c47079c"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_s9_w6_skeptic.py": {
+    "mtime": 1777018056.77125,
+    "hash": "4660c9920b9e7b7eccb76d2c3cf664cd"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_feature_extraction_wired.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "5c0b58ed29fccdc8275089bab5540d4a"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_signals_pipeline.py": {
+    "mtime": 1777018056.77125,
+    "hash": "15dff0c2dafdd42cf595a853e9a3b998"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_stage8_reward_archive_payload_cap.py": {
+    "mtime": 1777018056.77125,
+    "hash": "bea0d4e70b86ed6268fbb3ab0374abf8"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_bandit_in_recall.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "69b0e3e70a342c36b0c0e26842b63d89"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_reward_gated_archive.py": {
+    "mtime": 1777018056.77125,
+    "hash": "239d85047f08d03bd877baf8378e379f"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_s9_dash_orphan_entity.py": {
+    "mtime": 1777018056.77125,
+    "hash": "90d907e5e93031687251b8b6cfb88361"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_labeler.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "ce9c22d9305e9603b6e3266ef7f9ea1c"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_ranker_v2.py": {
+    "mtime": 1777018056.77125,
+    "hash": "fe681bce89b6eeae0a0adbe680e7c294"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_quant_scheduler.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "7e98f216370cc777fdb331751ae93538"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_bandit_core.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "5a576f05df8326b76b8dc199e5c9226c"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_retention_sweep.py": {
+    "mtime": 1777018056.77125,
+    "hash": "43775e041c395024ba8f249e4c36e7cb"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/_signal_fixtures.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "a0b5c6c1aa961211c264a34b76b6281f"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_fact_outcome_joins.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "bf8dc3c84b12be9e33ce781fe2d583f8"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_signal_worker.py": {
+    "mtime": 1777018056.77125,
+    "hash": "dd780874236f08ac24dac7982133d80b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_lightgbm_training.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "8e412d32be5395cb193403c5be9bd280"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_bandit_supplementary.py": {
+    "mtime": 1777018056.7710044,
+    "hash": "bddba6571faefd1d6a371b6442b2b603"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_learning/test_s9_w1_lld10_wiring.py": {
+    "mtime": 1777018056.77125,
+    "hash": "aa1e3d6283a7ba6729d8f7cb399f34c8"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_benchmarks/chart_export.py": {
+    "mtime": 1777018056.7633462,
+    "hash": "dead7eb6d9a8b76e8c018acc2a38699d"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_benchmarks/evo_memory_multiseed.py": {
+    "mtime": 1777018056.7633462,
+    "hash": "c49cb79ae6e536a827add4bec9190302"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_benchmarks/evo_memory.py": {
+    "mtime": 1777018056.7633462,
+    "hash": "ac15b63e2118375be4c697bac3ee5d2b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_benchmarks/test_evo_memory_runner.py": {
+    "mtime": 1777018056.7644837,
+    "hash": "982475a8438fbf55b30d765205f6edcc"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_benchmarks/test_hook_cold_start.py": {
+    "mtime": 1777018056.7644837,
+    "hash": "87e071a838e2ac33810cbe450d701d6f"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_benchmarks/__init__.py": {
+    "mtime": 1777018056.7628043,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_benchmarks/fixtures/generate_synthetic_fixture.py": {
+    "mtime": 1777018056.7635508,
+    "hash": "2611a9d80b780d46787498b416a3c513"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_benchmarks/fixtures/__init__.py": {
+    "mtime": 1777018056.7633462,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_benchmarks/locomo/run_locomo.py": {
+    "mtime": 1777018056.7644837,
+    "hash": "0d2dfa84253222f88eb5f66aacf1ba5e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_benchmarks/locomo/__init__.py": {
+    "mtime": 1777018056.7644837,
+    "hash": "0d58e5762e57081ef4321bf1421513d2"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_benchmarks/locomo/score.py": {
+    "mtime": 1777018056.7644837,
+    "hash": "fda15431c68475acd0e8b0c5dd3a1957"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_ci_guards/__init__.py": {
+    "mtime": 1777018056.7646844,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_ci_guards/test_stage5b_gate.py": {
+    "mtime": 1777018056.764851,
+    "hash": "f5636006e463f469b242a7b2cb5c6c88"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_integration/test_cross_platform_learning.py": {
+    "mtime": 1777018056.7702277,
+    "hash": "27f4a6302e5a1a4787037e604047e8ed"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_integration/test_async_remember_materializer.py": {
+    "mtime": 1777986344.8380873,
+    "hash": "129fdfacccb6f90ffcab6bb8f8cd0a48"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_integration/test_trust_compliance_wiring.py": {
+    "mtime": 1777018056.7702277,
+    "hash": "f309b69bdb2aa9cd52d43d75b28c3c44"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_integration/test_encoding_wiring.py": {
+    "mtime": 1777018056.7702277,
+    "hash": "50b7e007913c0856c5d60753debd28fa"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_integration/test_upgrade_v3_4_25_to_v3_4_26.py": {
+    "mtime": 1777018056.7702277,
+    "hash": "e5e81f6b34e098f8370fb5bdbd0a36bb"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_integration/__init__.py": {
+    "mtime": 1777018056.7697377,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_integration/test_mode_b_ollama.py": {
+    "mtime": 1777018056.7702277,
+    "hash": "6550f73a668b5d8eb7841f8c8767d303"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_integration/test_e2e_v32.py": {
+    "mtime": 1777018056.7702277,
+    "hash": "3e3325512197a5c1a81f5e415253774d"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_integration/test_e2e.py": {
+    "mtime": 1777018056.7702277,
+    "hash": "c9b561ec3d698fdd41f060cf9d891d07"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_integration/test_e2e_v33.py": {
+    "mtime": 1777018056.7702277,
+    "hash": "5aa12d572320b27addfdb9525903d62b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_integration/test_async_remember_e2e.py": {
+    "mtime": 1777986344.8380394,
+    "hash": "b18faedb76e297611bfa90c36239a226"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_parameterization/test_prompt_lifecycle.py": {
+    "mtime": 1777018056.7735884,
+    "hash": "a9804918f519b8e52a86b0410b0ad411"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_parameterization/test_pattern_extractor.py": {
+    "mtime": 1777018056.7735884,
+    "hash": "f393b4db043cf029a335815d0e51ee84"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_parameterization/__init__.py": {
+    "mtime": 1777018056.773161,
+    "hash": "3dda224b2246f31badd9ff008c8e12a4"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_parameterization/test_soft_prompt_generator.py": {
+    "mtime": 1777018056.7735884,
+    "hash": "f0d0bbdec57c61aa5ceac83633c207cc"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_parameterization/test_prompt_injector.py": {
+    "mtime": 1777018056.7735884,
+    "hash": "d2e403b42add8f9d2bb20e2fcf7a6dca"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_parameterization/test_pii_filter.py": {
+    "mtime": 1777018056.7735884,
+    "hash": "3a5a7b8e01150e88024cc32eede41446"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_ui/test_brain_render.py": {
+    "mtime": 1777018056.7759216,
+    "hash": "c60ee4e2bbd5e82fe743ea7029137c74"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_ui/__init__.py": {
+    "mtime": 1777018056.7757874,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_compliance/__init__.py": {
+    "mtime": 1777018056.7653837,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_compliance/test_eu_ai_act.py": {
+    "mtime": 1777018056.7663593,
+    "hash": "d9289da85a595c406e36b4850b71d1ae"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_compliance/test_gdpr.py": {
+    "mtime": 1777018056.7663593,
+    "hash": "180a7a7b7d64024845a93eb230c7cbf0"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_compliance/test_lifecycle.py": {
+    "mtime": 1777018056.7663593,
+    "hash": "7ffa7d53687a4919f7cbd73e49d9c82d"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_shadow_router.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "e1be4302a2366fa41aea4301af1a06b3"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_engine_recall_path.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "3dfc7996902c009c8e330eee3ad01a3e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_safe_fs.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "5972b3f570703112295cc932d3b2b8e4"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_s9_dash_recall_perf.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "a0f3880605fb08af81fb88612dce40e9"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_priority_queue.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "e01a54f3af94fa33a501d0047f04d460"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_profiles.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "eb97903fd6db82293474a54c6f239e65"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_recall_markers.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "5f4210d553e168bc490a675c5b33bd14"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_engine_lock.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "d129beed9046cc7978a4e6e1ab6ddea8"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_security_primitives.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "eb28b50ee4ef428be73915bde04213d2"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_loop_watchdog.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "399a375fcad0c0269b36ee404c2190aa"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_slm_disabled.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "da48124b4800bf40f8c24bab2dd39212"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_migration_v3_4_26.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "5e0162ed67d977308de5bb6097c5ffe1"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_consolidation_engine.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "577730e0386fc74317259c026576ba68"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_langevin_init.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "b1a407057ed8feeb64744d9335d32282"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_engine_session_lifecycle.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "1f4ad033482ee46de679bdfc40bbffca"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_clock_monitor.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "5b0999df9b53b37c9ac31814ddea0951"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_registry.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "f9fd127fc92212733e8c8a140a85d37e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_context_cache.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "c5988c7cb607dedb4f019addd9a26078"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_rate_limit.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "f43d9dce7e771a9849d05d5ea966e8d5"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_recall_queue.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "db72be1c0ddc68aacdb489dd970fcb26"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_config.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "6f3de45cd1d003a76fe444d58f30cba7"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_platform_utils.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "5f812e3f80333033e29a9c35c4c7b110"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/__init__.py": {
+    "mtime": 1777018056.7663593,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_topic_signature.py": {
+    "mtime": 1777018056.76725,
+    "hash": "aa0184eca0fee18fe6597f00c4afbb6b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_silent_failure_elevation.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "5e4db9acab5fa99cbf7e57ab964cea82"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_engine_store_path.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "a71c8b38b136ca4d81c79f25313472e2"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_db_pool.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "e6a487ab97d9a2cf988e21273e30b319"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_queue_dispatcher.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "55761be0982779f7048fd5c29de13b44"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_s9_w2_security.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "c6d5e0bddc3c8917b8fe9c31a1f0fd56"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_engine_capabilities.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "2d1f3ea508e7bd4ae484aab4104f9dd6"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_error_catalog.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "e38b8343ff312069fafbb1780812aeff"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_slmignore.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "d89b018b0ea032f560f818ce1c60acff"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_core_memory_blocks.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "e86b9f334ad9b3a5f7d13e3e626c1f10"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_ollama_embedder.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "3d5be5713b0eb31218088ef4b7647957"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_migration_daemon_safety.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "2f36738cb96d41b4df7fc29b0ae9e3dd"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_error_envelope.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "0dcd64a6e68a0c74f8a7507e38a84f99"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_queue_consumer.py": {
+    "mtime": 1777986344.8378744,
+    "hash": "67800d3ac010164ca2b677d0b2ee7ed0"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_openai_embeddings.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "050fe2b4ab4c8ec6417eba23c1aad5a4"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_graph_analyzer.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "fcf6ef0760fe597e5f42cc42ff419d01"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_stage8_ram_lock_parent_perms.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "cb5488e6cba84080b748589ff04b62e3"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_modes.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "a2aba197817e57d3ab271b9d3c3b2bcb"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_embedding_fallback.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "5921be022e672bb0cd63ee3a533426a7"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_ram_lock.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "6fe21a75bde1133a8445d952bccf1215"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_core/test_file_lock.py": {
+    "mtime": 1777018056.7666059,
+    "hash": "dbfc00a26ce39510ed5b6fe2873414bb"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_math/test_hopfield.py": {
+    "mtime": 1777018056.7726786,
+    "hash": "f2bd2335af77c0ff8c978ac69ac7e886"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_math/test_qjl.py": {
+    "mtime": 1777018056.7726786,
+    "hash": "2eca24bde02f80853617046963cc73de"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_math/__init__.py": {
+    "mtime": 1777018056.77125,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_math/test_sheaf.py": {
+    "mtime": 1777018056.7726786,
+    "hash": "35ffeacf3318c72c2b161082dfec1473"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_math/test_ebbinghaus.py": {
+    "mtime": 1777018056.7726786,
+    "hash": "07723a4d0b50c6a702a4f95d8219bec6"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_math/test_fisher_quantized.py": {
+    "mtime": 1777018056.7726786,
+    "hash": "89c374cb9e7bfdbc884f99bd66e080d2"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_math/test_polar_quant.py": {
+    "mtime": 1777018056.7726786,
+    "hash": "f35af21ca68e0f1d31dc491408de7ece"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_math/test_langevin.py": {
+    "mtime": 1777018056.7726786,
+    "hash": "d7383ac18ba6fa700e7151506891c80a"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_math/test_fisher.py": {
+    "mtime": 1777018056.7726786,
+    "hash": "72cbdf227ef9d8636a17f2b7b584960f"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_math/test_turbo_quant.py": {
+    "mtime": 1777018056.7726786,
+    "hash": "95dde9ad4c993b7466c09571c513ef98"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_postinstall/__init__.py": {
+    "mtime": 1777018056.7735884,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_postinstall/test_interactive_installer.py": {
+    "mtime": 1777018056.7739327,
+    "hash": "1966dabbc1bfd8974291692ff4ecbdc4"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_security/__init__.py": {
+    "mtime": 1777018056.7743618,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_security/test_headers.py": {
+    "mtime": 1777018056.7751365,
+    "hash": "139fefa4bcc2f7e170de4df99483cd68"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_security/test_preference_redaction.py": {
+    "mtime": 1777018056.7751365,
+    "hash": "75e600ccc9fe93f77bf5b182db7312cd"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_mcp/test_mcp_tools_registration.py": {
+    "mtime": 1777018056.773161,
+    "hash": "8f33296728cfccb5b1b5f8c28ef41d2c"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_mcp/test_mcp_remember_tool.py": {
+    "mtime": 1777018056.773161,
+    "hash": "71ec591df25caf1ed0840f36d084b45c"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_mcp/test_mcp_recall_tool.py": {
+    "mtime": 1777175898.1945393,
+    "hash": "6f50ae35df9b443d5affb14d7597367c"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_mcp/test_mcp_v33_tools.py": {
+    "mtime": 1777018056.773161,
+    "hash": "78610fbdb0a50cb3ac6d8c3aa09b391b"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_mcp/test_mcp_daemon_proxy.py": {
+    "mtime": 1777018056.773161,
+    "hash": "4659448c66385e6c11184749dbb8fa09"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_mcp/test_mcp_tool_annotations.py": {
+    "mtime": 1777018056.773161,
+    "hash": "484e5f3ef9595dd964c1239634875015"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_mcp/test_mcp_pool_adapter.py": {
+    "mtime": 1777018056.773161,
+    "hash": "6c67129cc1b12af267fac948c1eec425"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_mcp/__init__.py": {
+    "mtime": 1777018056.7726786,
+    "hash": "602d4ad08f8bac71149d5ce40deb4e5a"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_mcp/test_mcp_light_engine.py": {
+    "mtime": 1777018056.773161,
+    "hash": "5467618e761f7bbc9d435cea80d8bb08"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_mcp/test_mcp_session_init_tool.py": {
+    "mtime": 1777986344.8382072,
+    "hash": "f8d572eb47754bded6278dd4b338ccf5"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_mcp/test_prestage_context_tool.py": {
+    "mtime": 1777018056.773161,
+    "hash": "3ffcf19b16339f04c1d6d4e929adc289"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/__init__.py": {
+    "mtime": 1777986344.8322315,
+    "hash": "cb2a1094fd1cd1504b6ba21095dfa3ac"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/quantized_store.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "7abd8c0ec25ad843d5519b74cbefc384"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/access_log.py": {
+    "mtime": 1777018056.7524216,
+    "hash": "633cef4ee5b3eae10fcb8bc7516b0cd5"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/schema_v3410.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "0747d5eb3f9e190895534f94545b009e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/schema_v347.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "f01cb9817281957f19133e6dd2a7da91"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/schema_code_graph.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "78314c3c8b9fa23d1bf79a54b4cbc3ab"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migration_v33.py": {
+    "mtime": 1777018056.7524216,
+    "hash": "6d78ac3cd80db7a738107c343eb37e00"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/schema.py": {
+    "mtime": 1777175898.1942153,
+    "hash": "cc185d6aa1687bb04e3dce46e8783cf7"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/access_control.py": {
+    "mtime": 1777018056.7524216,
+    "hash": "da9415490ef9b21b7cbe37b83fda9ab3"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/embedding_migrator.py": {
+    "mtime": 1777018056.7524216,
+    "hash": "b67861cf1d6c4eaa0a2b861671352bcc"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations.py": {
+    "mtime": 1777018056.7524216,
+    "hash": "473e31a826bf4753d68615f1720e8014"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/seed_domain_mapping.py": {
+    "mtime": 1777181360.561917,
+    "hash": "f4a05d3f61eed515dd108fb80c48ef0c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/__init__.py": {
+    "mtime": 1777018056.7520897,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/schema_v343.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "7d72ef8698ab27f3cfdb070f00bb640e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/schema_v32.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "fd87256d1b937c0a594b579fd2e230fe"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/database.py": {
+    "mtime": 1777210796.9479015,
+    "hash": "b0483173f91b0256d6dbac022fec6e6a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/schema_v3411.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "a4c517c8c29d9bbbc2e164d20facfb3e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migration_runner.py": {
+    "mtime": 1777175898.193901,
+    "hash": "f90084234c05c43cf157ea85cbd4a92d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/v2_migrator.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "8003e384f03fe974ed68207c9cd755ab"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/models.py": {
+    "mtime": 1777175898.1940825,
+    "hash": "0053591400ac55a5e600de10712dc023"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/M005_bandit_tables.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "52697b05e9664f8502e5f6a7206fff2c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/M010_evolution_config.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "0cd3e6df004b8c5797eda92879bfd2bf"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/M006_action_outcomes_reward.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "920accdb13ce2e72f4ac72fc46f0834d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/M003_migration_log.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "edf43c2b719e7b5a8da23cdfbf598fb6"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/M004_cross_platform_sync_log.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "5050dfb2f9c8c43e85650a05856d2c75"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/M012_shadow_observations.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "87e29d5e1c23fa7979d5a5fb04fe0cf8"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/M013_bi_temporal_columns.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "d1143cf3ea23632b1776dfed2217af40"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/__init__.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "8d2254f78f886a6815d3aac8301bf200"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/M009_model_lineage.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "041b714985f665d47115064ee829216b"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/M011_archive_and_merge.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "3bf7e8e4213a4b8d4952be0983dffa66"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/M015_add_domain_tags.py": {
+    "mtime": 1777175898.193996,
+    "hash": "ad0cf3590d06fe46d7a7c42bcc6c2324"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/M001_add_signal_features_columns.py": {
+    "mtime": 1777018056.7524216,
+    "hash": "04de255df1ee7f0c7c69e753bcf5bf45"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/M014_add_scope_support.py": {
+    "mtime": 1777175898.1939578,
+    "hash": "cfded338d597df5350d38c2d3822f2a6"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/M007_pending_outcomes.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "f6c794b4e2d4198a69ae44892554baaf"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/storage/migrations/M002_model_state_history.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "1513929065f1be67f0b4cbd353bdb8ba"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/migrations/__init__.py": {
+    "mtime": 1777018056.7479107,
+    "hash": "2c9ad23699139993a9f49e114de5af36"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/migrations/v3_4_25_to_v3_4_26.py": {
+    "mtime": 1777018056.7480347,
+    "hash": "1eb2188b0c4afbdd03f065b017672863"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mesh/broker.py": {
+    "mtime": 1777018056.7479107,
+    "hash": "b14893c52d57edb9f3c3572c6f9fa419"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mesh/__init__.py": {
+    "mtime": 1777018056.746988,
+    "hash": "7d6a57e89fce6313b9c3cb5169520ceb"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/parameterization/pattern_extractor.py": {
+    "mtime": 1777018056.7481022,
+    "hash": "e3ecb6e110ca65369a351637c6517e9c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/parameterization/__init__.py": {
+    "mtime": 1777018056.7480347,
+    "hash": "9f26abc6b8a89ef5471c11203c1a0b5f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/parameterization/prompt_injector.py": {
+    "mtime": 1777018056.7481022,
+    "hash": "12eb09bf8caa9a451bc5eecfb658e089"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/parameterization/soft_prompt_generator.py": {
+    "mtime": 1777018056.7481022,
+    "hash": "f4c1da6f35115d3dc291ea351b9d78b3"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/parameterization/pii_filter.py": {
+    "mtime": 1777018056.7481022,
+    "hash": "66f1b40dd12b28d7ac546e5a32026710"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/parameterization/prompt_lifecycle.py": {
+    "mtime": 1777018056.7481022,
+    "hash": "31aa35711231f38199bade605849cc49"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/vector_store.py": {
+    "mtime": 1777018056.748449,
+    "hash": "bf686f5f20b861c43e7ccf5979b8abf8"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/spreading_activation.py": {
+    "mtime": 1777187233.8564122,
+    "hash": "9b69b87defc59f19fa4b2ee077e1e0fd"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/quantization_aware_search.py": {
+    "mtime": 1777018056.748449,
+    "hash": "0017401db47dd62e6d533887701fdc50"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/entity_channel.py": {
+    "mtime": 1777187172.0441513,
+    "hash": "81952de439d956e5d08ba5e4ce77f105"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/temporal_channel.py": {
+    "mtime": 1777175898.193193,
+    "hash": "3589e0732eb878573f21905bbc6dc1b9"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/bridge_discovery.py": {
+    "mtime": 1777018056.748449,
+    "hash": "ff2e0b8b6ac5e3946c75d7baccb60a8d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/__init__.py": {
+    "mtime": 1777018056.7481022,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/bm25_channel.py": {
+    "mtime": 1777210699.238583,
+    "hash": "a262063fc99c215f10d84166d95e3acb"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/channel_registry.py": {
+    "mtime": 1777018056.748449,
+    "hash": "5ab5332d693c7788d2c9e9a73d124de8"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/strategy.py": {
+    "mtime": 1777018056.748449,
+    "hash": "82bb41b5fbdb0e31c1bd658fa6f85785"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/semantic_channel.py": {
+    "mtime": 1777186915.573054,
+    "hash": "874318916fe7a9226936b5c0cc3ddcbf"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/fusion.py": {
+    "mtime": 1777018056.748449,
+    "hash": "13ee7b8faa0605c0a0ad1ef175bfffc7"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/hopfield_channel.py": {
+    "mtime": 1777186938.7801545,
+    "hash": "5b3bfa699ac048034e3ad48f61181bc3"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/engine.py": {
+    "mtime": 1777197707.179619,
+    "hash": "27566e3b2352a9891a0b0d34553f8ab9"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/forgetting_filter.py": {
+    "mtime": 1777018056.748449,
+    "hash": "8ce8d1a042e54da1788b517ef9a4f991"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/profile_channel.py": {
+    "mtime": 1777175898.1929173,
+    "hash": "cdf54541120f899f2cc48e6e3b96d29a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/agentic.py": {
+    "mtime": 1777018056.748449,
+    "hash": "6030370514e7b6e3bc2e87cbdf77a027"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/ann_index.py": {
+    "mtime": 1777018056.748449,
+    "hash": "31139a58b746f92e0b16ee9cf5115e36"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/retrieval/reranker.py": {
+    "mtime": 1777986344.8367903,
+    "hash": "02c65fb8d979ab6149f882d8406347f2"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/version_banner.py": {
+    "mtime": 1777018056.7360034,
+    "hash": "6b8509dafb59d17b07c5d4321a3d235a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/ingest_cmd.py": {
+    "mtime": 1777018056.7360034,
+    "hash": "5df36cea34542767e73af7c43b690488"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/db_migrate.py": {
+    "mtime": 1777018056.7360034,
+    "hash": "51d55fd474be16b833b353c267279766"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/json_output.py": {
+    "mtime": 1777018056.7360034,
+    "hash": "00a49df3d744b0e8a2c8983d68c61205"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/__init__.py": {
+    "mtime": 1777018056.7358816,
+    "hash": "cd0051afe09df0fe969752e403e7bacd"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/daemon.py": {
+    "mtime": 1777018056.7360034,
+    "hash": "aaf6d99280c0a36ced93f8351cfe2f5d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/main.py": {
+    "mtime": 1777202193.3436863,
+    "hash": "39d3c3ffa2a2a57e6f31b57e777db56a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/wizard_v3426_options.py": {
+    "mtime": 1777018056.7360034,
+    "hash": "8ca4f0aee17cc3cd57d8e250e8e2789f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/escape_hatch.py": {
+    "mtime": 1777018056.7360034,
+    "hash": "fed40b1993393d770943d0b13d5ad678"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/doctor_cmd.py": {
+    "mtime": 1777018056.7360034,
+    "hash": "28fed1fd45de6df967a817193f3e6358"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/migrate_cmd.py": {
+    "mtime": 1777018056.7360034,
+    "hash": "1db964c9b1be4081dcfa9aad29dcd56f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/context_commands.py": {
+    "mtime": 1777018056.7360034,
+    "hash": "30f938219cdab51c11a726a833563d5a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/post_install.py": {
+    "mtime": 1777018056.7360034,
+    "hash": "f8720195e23ad0d3c5c47d177216986e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/commands.py": {
+    "mtime": 1777986344.8330674,
+    "hash": "c722d22d48ecb9446500ff3440adb654"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/service_installer.py": {
+    "mtime": 1777018056.7360034,
+    "hash": "101327b378a76ac57f86c83fc612443a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/pending_store.py": {
+    "mtime": 1777986344.8332644,
+    "hash": "079cee6ac8524ebeaa500c42b530be9a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/cli/setup_wizard.py": {
+    "mtime": 1777986344.8335118,
+    "hash": "2293e87204e69570d2b00a5e30704473"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/api.py": {
+    "mtime": 1777018056.7496374,
+    "hash": "62dd9a54b23e1fedf51dd07047d592de"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/__init__.py": {
+    "mtime": 1777018056.748449,
+    "hash": "642a3516cf193fc14048c0e52f5b877f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/unified_daemon.py": {
+    "mtime": 1777986344.8376968,
+    "hash": "dd162863a39d127f2881dc43d3e2eddf"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/bandit_loops.py": {
+    "mtime": 1777018056.7496374,
+    "hash": "4735936cf270c95e86b800fc95890dcb"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/security_middleware.py": {
+    "mtime": 1777018056.75025,
+    "hash": "5e9c97424c88a177ec4bcae6c02b4c4a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/ui.py": {
+    "mtime": 1777018056.75025,
+    "hash": "f6df153904200ee5dbf00e2bde6b148a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/middleware/security_headers.py": {
+    "mtime": 1777018056.749776,
+    "hash": "667e6b48b6c48bd8de677f0918d876cd"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/middleware/__init__.py": {
+    "mtime": 1777018056.7496374,
+    "hash": "b0a14399c030bbcefc784547f2fd50dd"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/agents.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "45780053b3685ac57ebb62398d90d895"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/prewarm.py": {
+    "mtime": 1777018056.75025,
+    "hash": "30b48a5dc0eb3bc9ad7b9cb00a1f4caa"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/mesh.py": {
+    "mtime": 1777018056.75025,
+    "hash": "2ff74c63d37714d0976efa1278ec0be0"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/behavioral.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "4e468f6569c4645b8b1fca74b5e2a08f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/learning.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "3b5bc09359c222efdf1d6edab3e110ed"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/ws.py": {
+    "mtime": 1777018056.75025,
+    "hash": "a2c0aa4dc40f19640481e1c5e033c3f6"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/events.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "659fbac2f5f93d59ea52c9a17a7a514b"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/tiers.py": {
+    "mtime": 1777018056.75025,
+    "hash": "25b6c6adec96ed5b00ad6629e68ded5e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/memories.py": {
+    "mtime": 1777018056.75025,
+    "hash": "7ab663d90def3d5220a806c71127b943"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/insights.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "48aa3621b1348cfb0eb883769b24e362"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/ingest.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "c531dc63e0aab0921568ddef952d5259"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/__init__.py": {
+    "mtime": 1777018056.749776,
+    "hash": "e4e8a0d0270fd57f6632de67bd6b8ebb"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/timeline.py": {
+    "mtime": 1777018056.75025,
+    "hash": "3b05f9e4b5c54948e3e8fe5bf7a05161"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/brain.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "96d1aec991891d58f97ba97548214610"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/adapters.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "8fc1e9603a4f490439221630ce8d1473"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/v3_api.py": {
+    "mtime": 1777986344.837305,
+    "hash": "31c7ae268340067c16b438dcaa9a800f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/data_io.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "4701d291e67e0df74ad70e2b0e26f04e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/backup.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "eef23cfbbb27dd0f37492f3655d249dc"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/lifecycle.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "00e4db4e7d04cf016c87e4ccf4b94cfa"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/compliance.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "2dc0f59351fdd7573c10f914581855d6"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/stats.py": {
+    "mtime": 1777018056.75025,
+    "hash": "d4327da7b705ba45461079a359a54bf2"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/entity.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "35116d8ee7a4e151002872370df687a2"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/profiles.py": {
+    "mtime": 1777018056.75025,
+    "hash": "af2bcb4f5d373f11ded0393e165f102e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/evolution.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "35354065896168d47e0ed75a86bc629c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/helpers.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "4ce6846b7926c7fd373be7d59b43d7c4"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/server/routes/chat.py": {
+    "mtime": 1777018056.7498639,
+    "hash": "4f226a3510f68d186d7122605822b4ba"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/trust/scorer.py": {
+    "mtime": 1777018056.7536774,
+    "hash": "fb069e30c8caf98de3268ac9559e75ea"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/trust/gate.py": {
+    "mtime": 1777018056.7536774,
+    "hash": "74a30058362032eb2b9157580a4da40f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/trust/signals.py": {
+    "mtime": 1777018056.7536774,
+    "hash": "97cd941794b35ec37efebd32dd631b99"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/trust/__init__.py": {
+    "mtime": 1777018056.7528954,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/trust/provenance.py": {
+    "mtime": 1777018056.7536774,
+    "hash": "f5d2010ec48aba45482201661103cfbe"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/vendor/sigma.min.js": {
+    "mtime": 1777018056.76025,
+    "hash": "1c8fdac8d8d632ca6e9430f4b87abe8e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/vendor/bootstrap.bundle.min.js": {
+    "mtime": 1777018056.756721,
+    "hash": "849e6db145f2905ce210f628bddd9de5"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/vendor/graphology-library.min.js": {
+    "mtime": 1777018056.75825,
+    "hash": "2b94553b775449f2cfe8bd31e7a85539"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/vendor/d3.v7.min.js": {
+    "mtime": 1777018056.75725,
+    "hash": "69faba9d2fffc70c04f5620e7076efb0"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/vendor/graphology.umd.min.js": {
+    "mtime": 1777018056.75825,
+    "hash": "cfc35a5ec76c9953d7a65d72f1e6c5c2"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/graph-filters.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "26ce205765cf6658af224d1ceb28a078"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/core.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "34d89c069f49d8cda534977b51cf152e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/ng-ingestion.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "95deb88287f4bec3d5a1df554e4ae9c7"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/quick-actions.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "f6984e52a3be2217445368e4ef912141"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/modal.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "5f4895f11a599662ebfdd10c74ba82f8"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/timeline.js": {
+    "mtime": 1777018056.75525,
+    "hash": "929fc11ad98f3858f783bd67f597886f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/search.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "de0d3746a5cd718db439a7bad203dc78"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/graph-ui.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "adc14bbadd207e6b3d4bc26a49e5245e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/graph-event-bus.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "aaf1879807fb2bcdd96ca409587621ef"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/ng-shell.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "475c39be756ed75c2086b9018e983afa"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/ide-status.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "aa5a0b7ecf6b6f9bea1b55bb3714faa7"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/fact-detail.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "9b6b89b6eee5a08552ab83f9d1f1ca51"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/feedback.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "0c837de1c5b7551168b058ec02c47d80"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/ng-mesh.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "b9922e9ee3757f9ad014da52b084ca65"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/ng-skills.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "5686d98c37918c418ad63c9fa8eac620"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/dashboard.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "b2e3cee2cfba054abf6b01182a120646"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/recall-lab.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "7f3764df2e5c7cc7ee779955259e0123"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/memory-chat.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "7d0a966d8c219e29420c0662eb075a31"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/brain.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "4da5c6ab69921af53f07c74c0dba598d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/clusters.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "863adbf56abf90f1877eeebec1d7069b"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/math-health.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "4ff4dec32e8143806cd722744bdc77f8"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/init.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "97264d4f9c4911a6ab8dd43ae94cf9f9"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/memories.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "0cade17841418e8db5a4ea6374483e8d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/agents.js": {
+    "mtime": 1777018056.7538853,
+    "hash": "5e18c9c2daf1e6a5742f8d2e5b568cfa"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/profiles.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "167dec1d759ca344673d4b80b9d98446"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/compliance.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "0ed2e2a6dc4bfc7124f1995eb704ea4e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/trust-dashboard.js": {
+    "mtime": 1777018056.75525,
+    "hash": "4534a5721524b42ca57bf687c055da0c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/ng-health.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "1b56230bd0d6ba22aa252843bf1af8f0"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/knowledge-graph.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "8f6f6798b9ef5efc5f1e3bddcc21618d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/settings.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "45ed475ff6fcb5b18fcfba94cc85bfb1"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/events.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "57d3e5b91c43ae04710963be19c6064c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/memory-timeline.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "0ef42c2fa6a80143731714b7afa8db85"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/ng-entities.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "ca26a019e13dddfff55c8332699de720"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/auto-settings.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "181157cd35b9758011309d3ee5305548"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/js/lifecycle.js": {
+    "mtime": 1777018056.7543364,
+    "hash": "c04b9247708d496b363b36764472fba6"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/dynamics/eap_scheduler.py": {
+    "mtime": 1777018056.7402613,
+    "hash": "ffb4526d5847f319aacead9a3bad1cc1"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/dynamics/activation_guided_quantization.py": {
+    "mtime": 1777018056.7402613,
+    "hash": "a220b17a4f0450e50a6c77148e6f8d10"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/dynamics/ebbinghaus_langevin_coupling.py": {
+    "mtime": 1777018056.7402613,
+    "hash": "66a850d398cdc849a39b2ec0777bd722"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/dynamics/__init__.py": {
+    "mtime": 1777018056.73925,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/dynamics/fisher_langevin_coupling.py": {
+    "mtime": 1777018056.7402613,
+    "hash": "2174f34ae4b67fa54add815e55b69b75"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/resources.py": {
+    "mtime": 1777018056.746988,
+    "hash": "18a8ce8052e654beba1c6b2cb1520429"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/tools_mesh.py": {
+    "mtime": 1777018056.746988,
+    "hash": "bdd5ea529796b800a5c190dbd1a85d2d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/tools_v28.py": {
+    "mtime": 1777018056.746988,
+    "hash": "dbe9ae1a56080b37087376ea118629f4"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/tools_context.py": {
+    "mtime": 1777018056.746988,
+    "hash": "bc272391b786954b9b4b8470956cfde3"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/tools_v3.py": {
+    "mtime": 1777986344.8366275,
+    "hash": "e4ad9fe413ae94c2b7e3528b243c020d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/__init__.py": {
+    "mtime": 1777018056.7464871,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/_pool_adapter.py": {
+    "mtime": 1777018056.746988,
+    "hash": "94b1861a767dfe85c5ccd8db3f7eca6f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/tools_code_graph.py": {
+    "mtime": 1777018056.746988,
+    "hash": "ce43282c68dd3ba5af9b6ec0e91b0858"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/shared.py": {
+    "mtime": 1777018056.746988,
+    "hash": "91a172b53849155cda0495281b591cd9"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/_daemon_proxy.py": {
+    "mtime": 1777018056.746988,
+    "hash": "0ad9b5c63ba52732252ffc8cf79bf25b"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/server.py": {
+    "mtime": 1777206062.7039843,
+    "hash": "e7562fb522e59f88177e446bd59d0535"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/tools.py": {
+    "mtime": 1777018056.746988,
+    "hash": "8caa7252c0052ead4e59f54e6fe1570c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/tools_evolution.py": {
+    "mtime": 1777018056.746988,
+    "hash": "5a60ae8b4298e66250ab12fd8344429e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/tools_learning.py": {
+    "mtime": 1777018056.746988,
+    "hash": "def1fe8ec8fad8e35115040979f0948d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/tools_core.py": {
+    "mtime": 1777210770.5728173,
+    "hash": "89909c32a71790ce790d57fd1adf4352"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/tools_active.py": {
+    "mtime": 1777986344.8364816,
+    "hash": "bdffa6b6cc605353b293cf1ad65cb9c2"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/mcp/tools_v33.py": {
+    "mtime": 1777018056.746988,
+    "hash": "8f4a424e2c5f1f638246582a45300f7a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/auto_recall_hook.py": {
+    "mtime": 1777986344.8356357,
+    "hash": "ab1eedda6de047ef5eb476593631e681"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/post_tool_outcome_hook.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "f3ea109e8ec743ffb3f445e84519062c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/auto_capture.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "5d29a9b57510bb62d00b5d5f4c10c9f5"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/prewarm_auth.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "270a741708a1b40c52396d77f426431c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/hook_handlers.py": {
+    "mtime": 1777986344.8359141,
+    "hash": "d06f0707d3fb2abddc83247b0de50d99"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/antigravity_adapter.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "ff1ac2147ecf5cef6d2d8317e7b26c11"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/post_tool_async_hook.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "206fd9050f3caccbfb718eeb60dbef00"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/user_prompt_hook.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "7b9045bd1a3af74324da51138877c4ef"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/ide_connector.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "0328427d2652083372938332918452b1"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/stop_outcome_hook.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "193457453d5ab3990ea1d2a59c6ca6a1"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/adapter_base.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "25e9e4cdf3662eb945021453fc5dfd20"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/cross_platform_connector.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "cc07d3008a26545ec90d2110195d6512"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/__init__.py": {
+    "mtime": 1777018056.7413368,
+    "hash": "e98c88e9c3437f9422868977b2942240"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/user_prompt_rehash_hook.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "111bb7ce6aa978aa0a59b5d3613773d3"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/auto_recall.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "741d24a7e4eb63ecb59a751f5238c4f9"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/session_registry.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "e4cbea24c7c1412351121f778927fbe9"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/auto_invoker.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "d13936aa3393c2931ca65f2a4534b319"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/sync_loop.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "a0b02f5f06e549f0cd5dfc543e06bbe1"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/hook_daemon.py": {
+    "mtime": 1777986344.835723,
+    "hash": "4efb445f1545ecaa422607bdb0296649"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/claude_code_hooks.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "730512024f667a218fed039285f43e00"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/context_payload.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "9141034baf2c89fc0e2c2859797ad19a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/auto_parameterize.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "2e9006efb15969a90bae7fd434470188"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/cursor_adapter.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "b7d1ea7989a105fd0067db75d699936f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/rules_engine.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "c2252bd7a79dd163ad0420ed1ad9d14c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/_outcome_common.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "9134433f60fa4cdf07341751a4e480af"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/hooks/copilot_adapter.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "918b99ed9ccd000a50cbff757f6b3c18"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/infra/process_reaper.py": {
+    "mtime": 1777018056.7427049,
+    "hash": "aba872b1da6035021b623253b8cae1e8"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/infra/rate_limiter.py": {
+    "mtime": 1777018056.7427049,
+    "hash": "f271f14ca890d5e8e744fb6938463bb1"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/infra/auth_middleware.py": {
+    "mtime": 1777018056.7427049,
+    "hash": "7dbcf8a7996608cd0bc979a569fdbf18"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/infra/heartbeat_monitor.py": {
+    "mtime": 1777018056.7427049,
+    "hash": "65203042f75259edec23a790515f9c6c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/infra/__init__.py": {
+    "mtime": 1777018056.7417638,
+    "hash": "e98c88e9c3437f9422868977b2942240"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/infra/event_bus.py": {
+    "mtime": 1777018056.7427049,
+    "hash": "03f35cf6e1720941539bfc64095f75c2"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/infra/webhook_dispatcher.py": {
+    "mtime": 1777018056.7427049,
+    "hash": "37281abaf2ad2e8ae918793661d91e56"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/infra/backup.py": {
+    "mtime": 1777018056.7427049,
+    "hash": "6ae66bb8ff97822e70149feffe3f0844"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/infra/cloud_backup.py": {
+    "mtime": 1777018056.7427049,
+    "hash": "b15689f6615acea45cbad55199948ba9"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/infra/cache_manager.py": {
+    "mtime": 1777018056.7427049,
+    "hash": "23f1231369271bf119477217a2ab7bbb"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/infra/pid_manager.py": {
+    "mtime": 1777018056.7427049,
+    "hash": "ed03e7c30ab23d5e25e6ae01b7732de8"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/graph_store.py": {
+    "mtime": 1777018056.7373323,
+    "hash": "fdb2c7117d950d24099c538862350437"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/git_hooks.py": {
+    "mtime": 1777018056.7373323,
+    "hash": "6a75d648e47f63101f504899d4a7e5b6"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/blast_radius.py": {
+    "mtime": 1777018056.7368972,
+    "hash": "dbe0e2f0670c2e9a7cfdd42c79524e30"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/search.py": {
+    "mtime": 1777018056.7373323,
+    "hash": "7d12c5c1aaa47c28dc1de56c289347c8"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/flows.py": {
+    "mtime": 1777018056.7373323,
+    "hash": "833b4fa622c848cdf4d2066c55f1db93"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/__init__.py": {
+    "mtime": 1777018056.7360034,
+    "hash": "448a1cf65929f9af5256d1f1128500f4"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/parser.py": {
+    "mtime": 1777018056.7373323,
+    "hash": "8947f7cea2daa0160848bc27f61209b4"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/incremental.py": {
+    "mtime": 1777018056.7373323,
+    "hash": "91d50b798c7e48ac72223ad674d5773b"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/changes.py": {
+    "mtime": 1777018056.7369561,
+    "hash": "293c14ee32267feae273bff1b50e4119"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/watcher.py": {
+    "mtime": 1777018056.7373323,
+    "hash": "bc7b868ea0e37e1e66b81742f64bac8c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/service.py": {
+    "mtime": 1777018056.7373323,
+    "hash": "9569825249dfdd6ff816f0fc438b0818"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/database.py": {
+    "mtime": 1777018056.7369561,
+    "hash": "fd78615223165101bc1a5dd41673c9f6"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/config.py": {
+    "mtime": 1777018056.7369561,
+    "hash": "ceb066970fd069b83341a91df5e9c872"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/graph_engine.py": {
+    "mtime": 1777018056.7373323,
+    "hash": "bde232c735b54aeee96973b80de36d49"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/communities.py": {
+    "mtime": 1777018056.7369561,
+    "hash": "c7bbc74e884e4a1eefb942d7e9ccface"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/models.py": {
+    "mtime": 1777018056.7373323,
+    "hash": "3dbe6072577712f0a2f9da634c3b4076"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/resolver.py": {
+    "mtime": 1777018056.7373323,
+    "hash": "f33d09e24102d6f550be5bdd49e8d39f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/bridge/fact_enricher.py": {
+    "mtime": 1777018056.7369561,
+    "hash": "2fe412966d860d08a1f7b3ab97499cde"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/bridge/event_listeners.py": {
+    "mtime": 1777018056.7369561,
+    "hash": "13b1edd5e14311bce2973d6f62f66ddb"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/bridge/temporal_checker.py": {
+    "mtime": 1777018056.7369561,
+    "hash": "46a4e85c471a5759cf150913acd763ab"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/bridge/hebbian_linker.py": {
+    "mtime": 1777018056.7369561,
+    "hash": "7600e703dc516a9ec79ae72805f8bad6"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/bridge/__init__.py": {
+    "mtime": 1777018056.7368972,
+    "hash": "4706bc0a6bcbe17d577a530b2e19f1ed"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/bridge/entity_resolver.py": {
+    "mtime": 1777018056.7369561,
+    "hash": "c650b6322046c6ee640a927c470db961"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/extractors/typescript.py": {
+    "mtime": 1777018056.7373323,
+    "hash": "5780393cbeebc701684ab42228d8414a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/extractors/python.py": {
+    "mtime": 1777018056.7373323,
+    "hash": "c11942f6da3d325700d327babd67f5ac"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/code_graph/extractors/__init__.py": {
+    "mtime": 1777018056.7369561,
+    "hash": "3ac5366a704b75d18ed3f64b6d55384b"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ingestion/adapter_manager.py": {
+    "mtime": 1777018056.7432432,
+    "hash": "d3e5770d55f61472c83b22f080ed5d5d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ingestion/parsers.py": {
+    "mtime": 1777018056.7432432,
+    "hash": "503d7f2832a27641e33be4e9173c2ed5"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ingestion/__init__.py": {
+    "mtime": 1777018056.7427049,
+    "hash": "ebcbcb4d36dc14f003c680085946cd8f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ingestion/transcript_adapter.py": {
+    "mtime": 1777018056.7432432,
+    "hash": "089b4e249dcdaf7b4826d938358bd414"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ingestion/calendar_adapter.py": {
+    "mtime": 1777018056.7432432,
+    "hash": "67afcae38115bb3cc02e797e5cb16244"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ingestion/base_adapter.py": {
+    "mtime": 1777018056.7432432,
+    "hash": "db0d39acb25163164715aec402e39f0f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ingestion/gmail_adapter.py": {
+    "mtime": 1777018056.7432432,
+    "hash": "307c1aaf494ac5c7d8f5a26aa2d9f1ea"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/evolution/triggers.py": {
+    "mtime": 1777018056.7413368,
+    "hash": "2fe38c96b2be96fb56f2ca86fc9e15bb"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/evolution/mutation_generator.py": {
+    "mtime": 1777018056.7413368,
+    "hash": "7e5f6722351dcccebfff5f0d9fd426c9"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/evolution/__init__.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "1c638ec0e1fd0de175cbd86bf60a70cb"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/evolution/skill_evolver.py": {
+    "mtime": 1777018056.7413368,
+    "hash": "4648c33683b325bd21b653e2b6d25330"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/evolution/blind_verifier.py": {
+    "mtime": 1777018056.7413368,
+    "hash": "5bbb54e48882ed45d57d418018a83695"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/evolution/types.py": {
+    "mtime": 1777018056.7413368,
+    "hash": "c713a547095130ff1dba016a49363fbb"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/evolution/llm_dispatch.py": {
+    "mtime": 1777018056.7413368,
+    "hash": "90a10f383098103179e6c8485c687d2d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/evolution/evolution_store.py": {
+    "mtime": 1777018056.7413368,
+    "hash": "af869d0321417bec4fe23a9e59682e99"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/evolution/budget.py": {
+    "mtime": 1777018056.7413368,
+    "hash": "9b92dd3cdc8ed2880c3c5b77a6ff94ed"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/fact_extractor.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "a90cdde4d28a3ea16f35d26f6d19bc54"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/temporal_parser.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "9a670eba4442a116ae6c4c4860b81f55"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/scene_builder.py": {
+    "mtime": 1777986344.835491,
+    "hash": "6a9372874d94c1fee0872c98dcd8b14f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/graph_builder.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "03c354391e3fff2287963e80c1031aa7"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/__init__.py": {
+    "mtime": 1777018056.7402613,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/temporal_validator.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "41bf3341bb61ffccbc73b7de360166c5"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/signal_inference.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "358de1a55ffc1c7fb990becdd64ff791"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/cognitive_consolidator.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "26cb2cceb756bb6c13d9d53a1350bcba"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/consolidator.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "8c20a2d34bee1fe828a5300cca13aa0a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/emotional.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "56983cfb0f75a15b0d85def4acff45bd"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/context_generator.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "f0bc1a09d1e0537727da7c29f85a3b49"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/foresight.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "f2962751c274d713e637570e452a405b"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/type_router.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "74383329782455f29ded7567b6aa3d1c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/auto_linker.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "a82d67ff8b54a0cc92e57bf5449ff9cc"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/observation_builder.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "c672bd5b5f32ce5ffcd80fdd14225614"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/entity_resolver.py": {
+    "mtime": 1777185585.4779809,
+    "hash": "0b801ebc15393245d31c3e7f211ac539"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/encoding/entropy_gate.py": {
+    "mtime": 1777018056.7404513,
+    "hash": "910c43eaba866b14a8578b54fb2bb29d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/math/fisher_quantized.py": {
+    "mtime": 1777018056.7464871,
+    "hash": "188a0470040396ccfd276b82343cd4f2"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/math/fisher.py": {
+    "mtime": 1777018056.7464871,
+    "hash": "1d01d495d77aa0bd87c66156bce584a5"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/math/polar_quant.py": {
+    "mtime": 1777018056.7464871,
+    "hash": "c0e547d179f5cfd37ad0e134d93e215a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/math/sheaf.py": {
+    "mtime": 1777018056.7464871,
+    "hash": "cccac95770e1da28b3d5f522267e61dc"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/math/__init__.py": {
+    "mtime": 1777018056.7463958,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/math/langevin.py": {
+    "mtime": 1777018056.7464871,
+    "hash": "67e29b2625a170438441998196f8e8a6"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/math/hopfield.py": {
+    "mtime": 1777018056.7464871,
+    "hash": "7cb8b2bb52f46e1465a54d9720b20a8a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/math/qjl.py": {
+    "mtime": 1777018056.7464871,
+    "hash": "17a2418fd6cfb176decc49af7e4840ad"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/math/ebbinghaus.py": {
+    "mtime": 1777018056.7464871,
+    "hash": "c936217ccfee799ae6e772b88cc9057f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/math/turbo_quant.py": {
+    "mtime": 1777018056.7464871,
+    "hash": "40edd4c97491be9a5a937823d212e584"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/tier_manager.py": {
+    "mtime": 1777018056.73925,
+    "hash": "08522914ae3421164e91c09756c287d0"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/clock_monitor.py": {
+    "mtime": 1777018056.7381983,
+    "hash": "e87e9a4114d8eb4f565db96e27085cec"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/registry.py": {
+    "mtime": 1777018056.73825,
+    "hash": "cd504f6c09826b0039c7c7ec57e7f2db"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/engine_wiring.py": {
+    "mtime": 1777198367.3256721,
+    "hash": "b4eb17e74869a97507d9ddfc8093d48e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/rate_limit.py": {
+    "mtime": 1777018056.73825,
+    "hash": "53f164dccaed1cb8feb585c2b2bbb2c4"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/reranker_worker.py": {
+    "mtime": 1777018056.73825,
+    "hash": "64f8a8460887b21ac3f29447df59af76"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/topic_signature.py": {
+    "mtime": 1777018056.73925,
+    "hash": "e83f4375b1d84b956c73c2de00f2dfab"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/modes.py": {
+    "mtime": 1777018056.73825,
+    "hash": "70a8bf6f8f5e541b43630bdca5d34544"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/slm_disabled.py": {
+    "mtime": 1777018056.73825,
+    "hash": "4c7335c7f3b92466b1340664b31b08e5"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/summarizer.py": {
+    "mtime": 1777018056.73925,
+    "hash": "81bb94b43d04bea2973ddb79dff54d18"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/engine_capabilities.py": {
+    "mtime": 1777018056.7381983,
+    "hash": "fc0a747f9f51f1b14dd6f713dae72b33"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/graph_pruner.py": {
+    "mtime": 1777018056.73825,
+    "hash": "63f237a08a4cca1170550d1829e70cdc"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/error_catalog.py": {
+    "mtime": 1777018056.7381983,
+    "hash": "99537fec1d921676d55185e4c6a24c1e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/fact_consolidator.py": {
+    "mtime": 1777018056.7381983,
+    "hash": "ec6e60a0d895b887503275e619e3ec11"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/recall_gate.py": {
+    "mtime": 1777018056.73825,
+    "hash": "11e436af6e0f07226041195de773bf4a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/embedding_worker.py": {
+    "mtime": 1777986344.8341167,
+    "hash": "31c29d0a140cd519aa4aae6090c41a28"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/embeddings.py": {
+    "mtime": 1777986344.834367,
+    "hash": "40a153866a5f8670937f153015720d7c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/shadow_router.py": {
+    "mtime": 1777018056.73825,
+    "hash": "df5df351b8a33f2dc01a5d405fbcf8af"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/hooks.py": {
+    "mtime": 1777018056.73825,
+    "hash": "917a48b8a49fec7b68801ab923bc9ddf"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/recall_worker.py": {
+    "mtime": 1777986344.8349895,
+    "hash": "932099ade8c5e2ee93c66100c65a5e02"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/consolidation_engine.py": {
+    "mtime": 1777018056.7381983,
+    "hash": "58995f117e82841a48c80045fe30b0b7"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/security_primitives.py": {
+    "mtime": 1777018056.73825,
+    "hash": "4f7bb989a2d821d5a9c03c77c2fec035"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/__init__.py": {
+    "mtime": 1777018056.7378895,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/queue_dispatcher.py": {
+    "mtime": 1777018056.73825,
+    "hash": "ae0d7090f0fdd5198c199fae1ec7230c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/queue_consumer.py": {
+    "mtime": 1777986344.8346226,
+    "hash": "e39290cace0054b07142ed13c3d05b53"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/worker_pool.py": {
+    "mtime": 1777175898.192276,
+    "hash": "6f378977110c3a7b24c8c875990969c4"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/priority_queue.py": {
+    "mtime": 1777018056.73825,
+    "hash": "255aec5b36e012d67eb70b223f6755fb"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/recall_pipeline.py": {
+    "mtime": 1777175898.1919732,
+    "hash": "8b45915d0ef441d3e1c8ee2609921a27"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/db_pool.py": {
+    "mtime": 1777018056.7381983,
+    "hash": "1b9ac639e76efa8f0de49d1239417296"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/store_pipeline.py": {
+    "mtime": 1777986344.8352966,
+    "hash": "14ef6feeea1cc83b4a4ecf698cf76a38"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/context_cache.py": {
+    "mtime": 1777018056.7381983,
+    "hash": "8f97e7bea25624f7ca22a54e00bae822"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/config.py": {
+    "mtime": 1777986344.8339272,
+    "hash": "af33b597e3848b03f1a43ad83f6a3fbc"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/ollama_embedder.py": {
+    "mtime": 1777018056.73825,
+    "hash": "b5b1e9873c5c32a0671b209819f5bd56"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/slmignore.py": {
+    "mtime": 1777018056.73825,
+    "hash": "a5afd6c9c738789c962fc4407d203edd"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/recall_queue.py": {
+    "mtime": 1777986344.8347688,
+    "hash": "d5e91aad5a4a343d4e9cc0dde244e3ae"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/ram_lock.py": {
+    "mtime": 1777018056.73825,
+    "hash": "9d00ab46ba719318f7198a26b3a03a96"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/file_lock.py": {
+    "mtime": 1777018056.7381983,
+    "hash": "3242441a6974225a2af506caa7cb5271"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/maintenance.py": {
+    "mtime": 1777018056.73825,
+    "hash": "dae46a5c0bdab91ea0dabb3be6a6dae1"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/engine.py": {
+    "mtime": 1777200969.911896,
+    "hash": "85bc8ab91ce28feb36732bce0c3372e2"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/safe_fs.py": {
+    "mtime": 1777018056.73825,
+    "hash": "3ea0d0a366b64ad74c786325cc612322"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/maintenance_scheduler.py": {
+    "mtime": 1777018056.73825,
+    "hash": "d7b444d2c733c1a3ae3b60baccb4be3c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/health_monitor.py": {
+    "mtime": 1777986344.834527,
+    "hash": "dee1e45399606af85fc5790e9c7376b2"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/profiles.py": {
+    "mtime": 1777018056.73825,
+    "hash": "8b43493d93f5935de7b31c0c31450cd1"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/graph_analyzer.py": {
+    "mtime": 1777018056.7381983,
+    "hash": "b8c47c7b8bd4e28b6477b77270b9eee7"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/loop_watchdog.py": {
+    "mtime": 1777018056.73825,
+    "hash": "71c0577288e04263fe29b94c4aba60df"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/error_envelope.py": {
+    "mtime": 1777018056.7381983,
+    "hash": "a5646f54189df18389e45cfb62eb0a38"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/engine_lock.py": {
+    "mtime": 1777018056.7381983,
+    "hash": "1829dc07c3a924a54dc767cc05887314"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/core/platform_utils.py": {
+    "mtime": 1777018056.73825,
+    "hash": "969fee5e0d5f45106dda1dc32cccf029"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/attribution/__init__.py": {
+    "mtime": 1777018056.7358644,
+    "hash": "7a3fca1218ae21ed84b812c3a8aded7b"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/attribution/watermark.py": {
+    "mtime": 1777018056.7358816,
+    "hash": "e77160a22448925efed567191d3c00bc"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/attribution/signer.py": {
+    "mtime": 1777018056.7358816,
+    "hash": "7fe1a9c55d335807b086b65373d7be56"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/attribution/mathematical_dna.py": {
+    "mtime": 1777018056.7358816,
+    "hash": "94afa154a4404726466c734720eaf45b"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/llm/__init__.py": {
+    "mtime": 1777018056.74525,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/llm/backbone.py": {
+    "mtime": 1777018056.7463958,
+    "hash": "51ca9094943ad5be81e22baf563191e0"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/compliance/scheduler.py": {
+    "mtime": 1777018056.7378895,
+    "hash": "a2460f5249f61e725cd9a92f3708a976"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/compliance/retention.py": {
+    "mtime": 1777018056.7378895,
+    "hash": "ebe45511f8d89d90cc2c8a743c68f0b4"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/compliance/__init__.py": {
+    "mtime": 1777018056.7373323,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/compliance/eu_ai_act.py": {
+    "mtime": 1777018056.7378895,
+    "hash": "d2d03f8f811c05a879d6d7bf57f68ab8"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/compliance/gdpr.py": {
+    "mtime": 1777018056.7378895,
+    "hash": "21a0f14c4448321d74b3d059b26cb804"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/compliance/abac.py": {
+    "mtime": 1777018056.7378895,
+    "hash": "b3d11abebb9b761c6420dfc091754346"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/compliance/audit.py": {
+    "mtime": 1777018056.7378895,
+    "hash": "d4753aa7e25c22430bd5fa0833913b2c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/compliance/lifecycle.py": {
+    "mtime": 1777018056.7378895,
+    "hash": "0a5722ecab9d4fb167502a1584c93397"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/fact_outcome_joins.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "1449f0b549acff64cfc4c7daee5b316a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/reward_archive.py": {
+    "mtime": 1777018056.74425,
+    "hash": "da1a01b2977725de68cbf14a50486d93"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/behavioral.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "846df5dc8957551de51a584be0b7ed88"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/legacy_migration.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "a0caca694363974d96fbf8fc15dd0c2a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/feedback.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "385c4ba6bea67b24cd59c00e3c471911"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/signals.py": {
+    "mtime": 1777018056.74425,
+    "hash": "cfab4d3026a5d0b1650cf3840224738c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/reward.py": {
+    "mtime": 1777018056.74425,
+    "hash": "6c57778509044eee2db8142a30b0d097"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/source_quality.py": {
+    "mtime": 1777018056.74525,
+    "hash": "4c7d884a11b933a2d2e66988ee92aa61"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/outcomes.py": {
+    "mtime": 1777018056.74425,
+    "hash": "c0d881c721b41545fa01e59895f339a4"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/quantization_scheduler.py": {
+    "mtime": 1777018056.74425,
+    "hash": "03a1370da86a8c435f0ac58326361757"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/shadow_test.py": {
+    "mtime": 1777018056.74425,
+    "hash": "75a14a8d3cf4acba7a2509135a4a54ef"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/project_context.py": {
+    "mtime": 1777018056.74425,
+    "hash": "2aff9259dd4f65c35fb97e9a4e9b4594"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/cross_project.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "b61cf69bfdf65363dae319cdd4d77f91"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/hnsw_dedup.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "f06a018732030f1729dda4c5a5fe093d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/reward_proxy.py": {
+    "mtime": 1777986344.8363137,
+    "hash": "8624019fefc9c7bde89d7f70a0ee5966"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/pattern_miner.py": {
+    "mtime": 1777018056.74425,
+    "hash": "fc8b2e347bbce3e04f8a22dee32ea68b"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/behavioral_listener.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "6cc97ae23972a23c94fb828c629d50ac"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/engagement.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "6a03e35dbfa1308fdc2daee2607262fa"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/bootstrap.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "05e1572a50137641365f89523046fcf6"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/model_cache.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "f7c9fe0d45dbbf5a0f47b233b08eae90"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/arm_catalog.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "8572ea47b1573211174967afe11c6328"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/adaptive.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "eeecceb919e2dcafe3b78c4140a81640"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/reward_boost.py": {
+    "mtime": 1777018056.74425,
+    "hash": "c72508c89a64fa6c5082a9c6b0378348"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/bandit.py": {
+    "mtime": 1777986344.8361554,
+    "hash": "2b077d473f9df8b21283a165396c83e5"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/ranker_common.py": {
+    "mtime": 1777018056.74425,
+    "hash": "ac9a9680cd09badfb2fc17bc3998dc41"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/__init__.py": {
+    "mtime": 1777018056.7432432,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/dedup_hnsw.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "7ccc69b46074cd91eff29f49209f3b17"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/entity_compiler.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "04dfd56fe1c405df9157320450db2f83"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/ensemble.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "9d5ca1769cd6883d739c486dc03a239a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/forgetting_scheduler.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "0676efc13e5347d1150327eaab6adc1f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/consolidation_worker.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "8a20f0ebe22b4dab2407cce297df0ec3"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/ranker_retrain_legacy.py": {
+    "mtime": 1777018056.74425,
+    "hash": "1b8849594eb7679bf2a060700d8a3a7a"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/assertion_miner.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "bfc8c5f6eaefda4791aa296d83c1e8d5"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/memory_merge.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "e4e4ab5747ac9883fd0c1c7007205a45"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/pattern_miner_constants.py": {
+    "mtime": 1777018056.74425,
+    "hash": "c52a7292e6de346f8e6d8a379170a3cb"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/database.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "6c905ef39c0711880fbf34cde93eed01"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/consolidation_quantization_worker.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "43eaefe3e1eb212633389d47eca07215"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/model_rollback.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "e8ad9cdd63f3cf16d875e815c5c22606"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/consolidation_cycle.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "743267a3d7f019bd97fb86c5e1658439"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/ranker.py": {
+    "mtime": 1777018056.74425,
+    "hash": "dac577babbef88ec0208f9dc939eaebd"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/trigram_index.py": {
+    "mtime": 1777018056.74525,
+    "hash": "a585fadee086cbd53ab9f5f2041acdcc"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/workflows.py": {
+    "mtime": 1777018056.74525,
+    "hash": "718547174abed9c5af291659ff39d52f"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/outcome_queue.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "2d2612605c65f85c2449b83459fd2896"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/signal_worker.py": {
+    "mtime": 1777018056.74425,
+    "hash": "fe076d21015432a59a794b6615ecebe9"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/bandit_cache.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "f85d1de163114725d9744dcf3e54d971"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/skill_performance_miner.py": {
+    "mtime": 1777018056.74525,
+    "hash": "cdbc316ed710ec00303cf6d1c3aa0cb6"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/features.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "8a3a8b42c84ee99b50156dfb6f1ba20c"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/ranker_retrain_online.py": {
+    "mtime": 1777018056.74425,
+    "hash": "05f65b9739289b1d4f2ca462fdfdebd4"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/learning/labeler.py": {
+    "mtime": 1777018056.7435021,
+    "hash": "5a8602a31ec7d95dad8c8ad9d3b5f6d8"
+  },
+  "/home/kai-remote/github/superlocalmemory/examples/langchain_example.py": {
+    "mtime": 1777018056.7314913,
+    "hash": "cb80a0bdfa85e7ff70a7b6a3530d20c5"
+  },
+  "/home/kai-remote/github/superlocalmemory/examples/llamaindex_example.py": {
+    "mtime": 1777018056.7325912,
+    "hash": "f3e7a574f6d834b9fe4819ace72b68b3"
+  },
+  "/home/kai-remote/github/superlocalmemory/SLM-V3-\u67b6\u6784\u5206\u6790.md": {
+    "mtime": 1778117126.596931,
+    "hash": "1bd9441542a525907b84d186d030a342"
+  },
+  "/home/kai-remote/github/superlocalmemory/SKILL.md": {
+    "mtime": 1777018056.6622503,
+    "hash": "baaf89b0bea6dfb5a4f34fddb366cd05"
+  },
+  "/home/kai-remote/github/superlocalmemory/CONTRIBUTING.md": {
+    "mtime": 1777018056.6609724,
+    "hash": "7aeb90d06d7e50d6f40961b5268b0d05"
+  },
+  "/home/kai-remote/github/superlocalmemory/CHANGELOG.md": {
+    "mtime": 1777986344.831947,
+    "hash": "cf512ddda67ce5016573cd6c43564b42"
+  },
+  "/home/kai-remote/github/superlocalmemory/CLAUDE.md": {
+    "mtime": 1777020526.0131276,
+    "hash": "184119486e36cdf178b68f3bccf38098"
+  },
+  "/home/kai-remote/github/superlocalmemory/AUTHORS.md": {
+    "mtime": 1777018056.6609724,
+    "hash": "3e4ecf504d1918cea37d0e202851dd7b"
+  },
+  "/home/kai-remote/github/superlocalmemory/COMMERCIAL-LICENSE.md": {
+    "mtime": 1777018056.6609724,
+    "hash": "5771813428149b07e596aac3e4e1e2d9"
+  },
+  "/home/kai-remote/github/superlocalmemory/ATTRIBUTION.md": {
+    "mtime": 1777018056.6609724,
+    "hash": "5b0423e680c27873ca991961071ee063"
+  },
+  "/home/kai-remote/github/superlocalmemory/README.md": {
+    "mtime": 1777018056.6612504,
+    "hash": "76590b034bce982d5d65e3ac09e8f5f7"
+  },
+  "/home/kai-remote/github/superlocalmemory/SECURITY.md": {
+    "mtime": 1777018056.6612504,
+    "hash": "35c692b464686a4573878015d2f13aab"
+  },
+  "/home/kai-remote/github/superlocalmemory/demo-title-ending.html": {
+    "mtime": 1777018056.6925516,
+    "hash": "4081a9026b29b12e7862efcf41069e38"
+  },
+  "/home/kai-remote/github/superlocalmemory/demo-title-opening.html": {
+    "mtime": 1777018056.6925516,
+    "hash": "a5531e57cc6ba7bdeaefadba4134b57a"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/skills/slm-recall/SKILL.md": {
+    "mtime": 1777018056.733689,
+    "hash": "04c55cfc46bb9157633522c776fc2ceb"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/skills/slm-build-graph/SKILL.md": {
+    "mtime": 1777018056.733689,
+    "hash": "60244eada5eb43c4dcb0973fed28577a"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/skills/slm-remember/SKILL.md": {
+    "mtime": 1777018056.733689,
+    "hash": "911acd597d2ed5b8c82cbe5c55b55d6c"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/skills/slm-status/SKILL.md": {
+    "mtime": 1777018056.733689,
+    "hash": "25a2340d48aa3d8b2f6874cdcc0de8ac"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/skills/slm-show-patterns/SKILL.md": {
+    "mtime": 1777018056.733689,
+    "hash": "cdd38cd6653a1d1e882706f6ac5750f7"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/skills/slm-list-recent/SKILL.md": {
+    "mtime": 1777018056.733689,
+    "hash": "ff601250b8a4f21ae49af36f089fc485"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/skills/slm-switch-profile/SKILL.md": {
+    "mtime": 1777018056.733689,
+    "hash": "35b56f219815524440d61f1b825f3acc"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/integrations/llamaindex/README.md": {
+    "mtime": 1777018056.7333643,
+    "hash": "f073c4ee97e63db17171bbf7b7e127fc"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/integrations/langchain/README.md": {
+    "mtime": 1777018056.7332232,
+    "hash": "aa1ba839baeafcc09a2fa60e6b448ae6"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/configs/continue-skills.yaml": {
+    "mtime": 1777018056.7327507,
+    "hash": "db953d7e61580667e12c100f882cb4b0"
+  },
+  "/home/kai-remote/github/superlocalmemory/ide/configs/continue-mcp.yaml": {
+    "mtime": 1777018056.7327507,
+    "hash": "bd886caa87d7597991805b3c00674c62"
+  },
+  "/home/kai-remote/github/superlocalmemory/skills/slm-recall/SKILL.md": {
+    "mtime": 1777018056.7356694,
+    "hash": "2c7ded5cc7219901aaef790d43abcde3"
+  },
+  "/home/kai-remote/github/superlocalmemory/skills/slm-build-graph/SKILL.md": {
+    "mtime": 1777018056.7356694,
+    "hash": "cf1edc27836b768e46345c7020f283da"
+  },
+  "/home/kai-remote/github/superlocalmemory/skills/slm-remember/SKILL.md": {
+    "mtime": 1777018056.7356694,
+    "hash": "72ed1927616b520cdcf02e502c183186"
+  },
+  "/home/kai-remote/github/superlocalmemory/skills/slm-status/SKILL.md": {
+    "mtime": 1777018056.7356694,
+    "hash": "fb97827c38dfd8aa804c9a5afb0be64e"
+  },
+  "/home/kai-remote/github/superlocalmemory/skills/slm-show-patterns/SKILL.md": {
+    "mtime": 1777018056.7356694,
+    "hash": "38c1fcbe4755020fbecff6928bc03ba7"
+  },
+  "/home/kai-remote/github/superlocalmemory/skills/slm-list-recent/SKILL.md": {
+    "mtime": 1777018056.7356694,
+    "hash": "20937d57fdfbd890bef98f1d017da333"
+  },
+  "/home/kai-remote/github/superlocalmemory/skills/slm-switch-profile/SKILL.md": {
+    "mtime": 1777018056.7356694,
+    "hash": "2e6407fb4b56c3e156cc19a501ef3149"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/auto-memory.md": {
+    "mtime": 1777018056.7220447,
+    "hash": "1c26d86c1c7c4d89deab7331f4ca5ce3"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/api-reference.md": {
+    "mtime": 1777018056.7220447,
+    "hash": "d8848df5e65c06462d7b80263ac3fe01"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/cloud-backup.md": {
+    "mtime": 1777018056.7223382,
+    "hash": "6ae0a316f9a8b1899da1d33089ea41c5"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/DASHBOARD-COVERAGE.md": {
+    "mtime": 1777018056.7220447,
+    "hash": "611eb103da4b04288a5fbe729c3bc524"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/mcp-tools.md": {
+    "mtime": 1777018056.7223382,
+    "hash": "141c93745e37260992dd82cde0af038b"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/configuration.md": {
+    "mtime": 1777018056.7223382,
+    "hash": "c2811d8acb8b98064eb4b5c1f49b09f6"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/ARCHITECTURE.md": {
+    "mtime": 1777018056.7202501,
+    "hash": "36aafddc44849b56be01ac8fe126c97a"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/compliance.md": {
+    "mtime": 1777018056.7223382,
+    "hash": "80efb6b3d56f610cd5181d6c999847cc"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/ide-setup.md": {
+    "mtime": 1777018056.7223382,
+    "hash": "40ea93788022af31c3f1a089c5f693dc"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/migration-from-v2.md": {
+    "mtime": 1777018056.7223382,
+    "hash": "9605292e022054e79f7874a1e349ac83"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/memory-import-guide.md": {
+    "mtime": 1777210832.3760123,
+    "hash": "af6d6ad49aeefb3bb74d8f667ee6427c"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/troubleshooting.md": {
+    "mtime": 1777018056.7302501,
+    "hash": "1eef6eeb36115f21fe40b8503aec560f"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/profiles.md": {
+    "mtime": 1777018056.7223382,
+    "hash": "d7a8627df9cbc6adc1a02a23a21fe292"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/cli-reference.md": {
+    "mtime": 1777018056.7223382,
+    "hash": "4acae57908692c6da93abf25a0201245"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/skill-evolution.md": {
+    "mtime": 1777018056.7302501,
+    "hash": "bf00c70f19f4916e7e2a1ef772352028"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/multi-scope-memory-roadmap.md": {
+    "mtime": 1777175898.1906984,
+    "hash": "e78ab30c766ee1b9487335e994914b68"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/hermes-agent-guide.md": {
+    "mtime": 1777207853.6275764,
+    "hash": "447083167fa27374f8c791e3c7fff9ad"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/errors.md": {
+    "mtime": 1777018056.7223382,
+    "hash": "b0c329dd21d5530bc8173128af159ef7"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/getting-started.md": {
+    "mtime": 1777018056.7223382,
+    "hash": "0b37bc879f9169482879c924ec9d6303"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/benchmarks/EVO-MEMORY.md": {
+    "mtime": 1777018056.7220447,
+    "hash": "bdc6133c9fa9a6e8773d6cbfe2415e4e"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/benchmarks/HOOK-COLDSTART.md": {
+    "mtime": 1777018056.7223382,
+    "hash": "67816049bdb9339517028be09f81ac06"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/RESET-GUIDE.md": {
+    "mtime": 1777018056.7314913,
+    "hash": "84cf441b33287f8e5239d7c30b7bd6ab"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/WINDOWS-POST-INSTALL.txt": {
+    "mtime": 1777018056.7314913,
+    "hash": "17eeccab90006bb9a551a3afd37afa7a"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/MCP-TROUBLESHOOTING.md": {
+    "mtime": 1777018056.7314913,
+    "hash": "595356d28bde6113df335f85bc2fb33b"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/ARCHITECTURE.md": {
+    "mtime": 1777018056.7314913,
+    "hash": "1e6aa76902b7d0ed660fabfef7a3e984"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/COMPRESSION-README.md": {
+    "mtime": 1777018056.7314913,
+    "hash": "7627085c427b912078596f76e7c42336"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/WINDOWS-INSTALL-README.txt": {
+    "mtime": 1777018056.7314913,
+    "hash": "d741390c58500cb644038986a4dfecc9"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/SEARCH-INTEGRATION-GUIDE.md": {
+    "mtime": 1777018056.7314913,
+    "hash": "c64fd9cbdf05576f4a2195c09dc83e80"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/PROFILES-GUIDE.md": {
+    "mtime": 1777018056.7314913,
+    "hash": "9ac1888116c918ee29c8a817bc175894"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/CLI-COMMANDS-REFERENCE.md": {
+    "mtime": 1777018056.7314913,
+    "hash": "2770f14b1bccffd5be485e65c7661a5b"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/ACCESSIBILITY.md": {
+    "mtime": 1777018056.7302501,
+    "hash": "9092bc43230ac18d76dba8190479da5d"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/MCP-MANUAL-SETUP.md": {
+    "mtime": 1777018056.7314913,
+    "hash": "0d7ee9c8b8c347f1901d4feb2ca3b6f2"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/SEARCH-ENGINE-V2.2.0.md": {
+    "mtime": 1777018056.7314913,
+    "hash": "b9acf28a214ec0c0123110b25fd83e6b"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/FRAMEWORK-INTEGRATIONS.md": {
+    "mtime": 1777018056.7314913,
+    "hash": "7e86c862392e1427bdcd3a0f0ef98a52"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/PATTERN-LEARNING.md": {
+    "mtime": 1777018056.7314913,
+    "hash": "d6bfb05a9c5a6b2e60f7e1c9b6b0ba5b"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/UNIVERSAL-INTEGRATION.md": {
+    "mtime": 1777018056.7314913,
+    "hash": "4665dd877a46acb67e51602178f52457"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/UI-SERVER.md": {
+    "mtime": 1777018056.7314913,
+    "hash": "45956a8d26fbcf0b593c241400e0951a"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/v2-archive/V2.2.0-OPTIONAL-SEARCH.md": {
+    "mtime": 1777018056.7314913,
+    "hash": "e6c1a976f33dce8557ee0fe2ab556fb1"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/superpowers/plans/2026-04-25-multi-scope-memory-phase2.md": {
+    "mtime": 1777175898.1907926,
+    "hash": "ee1308519e69c5143f7f80793915e167"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/superpowers/plans/2026-04-26-multi-scope-memory-phase3.md": {
+    "mtime": 1777183132.860781,
+    "hash": "ad5c98d20e468d3a4cab655b4bcde9e2"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/superpowers/plans/2026-04-25-multi-scope-memory.md": {
+    "mtime": 1777175898.1909914,
+    "hash": "998fe59a6adfb1177e4d0cf84cf46a69"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/superpowers/plans/2026-05-07-slm-rewrite-workload-analysis.md": {
+    "mtime": 1778117925.1451879,
+    "hash": "76b94fb862d0c46d348580500cf51177"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/superpowers/plans/2026-04-26-scope-weights-and-entity-merge.md": {
+    "mtime": 1777196747.9312298,
+    "hash": "cc3523c71c94153e92578aa75a8d0a37"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/superpowers/plans/2026-04-26-multi-scope-memory-phase2b.md": {
+    "mtime": 1777178900.1928816,
+    "hash": "f722c37e882a1afbdc2208be8b0f6990"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/superpowers/plans/2026-05-09-slm-improvements-from-memory-benchmark.md": {
+    "mtime": 1778298929.7345297,
+    "hash": "344283932615f949aad474c122b13d5d"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/superpowers/specs/2026-04-25-multi-scope-memory-design.md": {
+    "mtime": 1777175898.1909914,
+    "hash": "2a603be271eda64785cdf90b1d994468"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/superpowers/specs/2026-04-25-multi-scope-memory-phase2-design.md": {
+    "mtime": 1777175898.1913147,
+    "hash": "647c89944aadd49c6a628372b5fbe14a"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/superpowers/specs/2026-04-26-multi-scope-memory-phase2b-design.md": {
+    "mtime": 1777176980.2741704,
+    "hash": "9d2a30dc3e589bddba0ea76c9f6f30f9"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/superpowers/specs/2026-04-26-multi-scope-memory-phase3-design.md": {
+    "mtime": 1777181992.495358,
+    "hash": "9a42f4e57e6c79e85fa1fb4b9bd2c406"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/CONTACT-SHEET-README.md": {
+    "mtime": 1777018056.6622503,
+    "hash": "582e6f304bc7f271728ca1a521e1665d"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/README.md": {
+    "mtime": 1777018056.6633759,
+    "hash": "6adc478dffb54e168961e9337fdfc3eb"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/contact-sheet.html": {
+    "mtime": 1777018056.6633759,
+    "hash": "747c3ef6151a7ff81fe612d804ac5d01"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/gifs/USAGE.md": {
+    "mtime": 1777018056.6637123,
+    "hash": "b1f0ababbdd1730d51b6cc5cca169b43"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/gifs/QUICK-REFERENCE.md": {
+    "mtime": 1777018056.6637123,
+    "hash": "39ff6ab134f2a92723db56ec5a6a5573"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/gifs/README.md": {
+    "mtime": 1777018056.6637123,
+    "hash": "60ffa68bddc2885562b77a9e0af0a320"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/README.md": {
+    "mtime": 1777018056.6654952,
+    "hash": "6f1e8092938071927e90aca548da3eaa"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/cli/README.md": {
+    "mtime": 1777018056.6656485,
+    "hash": "951df16a2d7c1a22c181beccb6458080"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/README.md": {
+    "mtime": 1777018056.669561,
+    "hash": "cb5045b670fe85fada7d36a0f07f5012"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/videos/README.md": {
+    "mtime": 1777018056.6924393,
+    "hash": "fe423f5224a1a2c9420738542435dd1e"
+  },
+  "/home/kai-remote/github/superlocalmemory/ui/index.html": {
+    "mtime": 1777018056.7759216,
+    "hash": "fbff1c51ce5fe602aa5c6ee485f4af39"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/Compliance.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "58ff5a2efcb847a981c79ef7e8e09fa2"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/Quick-Start-Tutorial.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "ddc9df0f7cac9c3197035830be105e52"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/Getting-Started.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "e7c4f5d7aa43669b0cef54406c0f2938"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/V3-Architecture.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "bd6db9bc6f20c4f4a56d57f5afcec289"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/Home.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "b7e9df3df3de38057f57931184f117a4"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/Modes-Explained.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "863af8bb147ae55a003318e8cf0c1330"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/Installation.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "cc609f9f50e16508c490c8ff0bb26872"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/CLI-Reference.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "9ab8fa1cb612a04bcf22735f66c8f1c5"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/_Footer.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "3d0b94e3449735e03df65353cbaba9cf"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/FAQ.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "4d6515d950eb53b67a0ac0510b5e05c4"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/V3-Mathematical-Foundations.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "51161f63c6388fc1da8e0741f9199581"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/Active-Memory.md": {
+    "mtime": 1777018056.7763395,
+    "hash": "0c8bcc563edb599be0415a9457b47139"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/_Sidebar.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "fbde122197be1aa831a481332ca7a9ab"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/IDE-Setup.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "e0c3c351db4016ec9ede8b5e72a8e672"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/Auto-Memory.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "dffad0568a1152336d7c8c81d75b9d36"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/MCP-Tools.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "4d329fbe9d412b82e0a930a5ad120a6a"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/Migration-from-V2.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "3caceaed7c42c013c507b7c9037f8b44"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/LangChain-Integration.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "0ef38891b22cf6a949aad14969db5a2e"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Using-Interactive-Graph.md": {
+    "mtime": 1777018056.77825,
+    "hash": "051d5fb84020c4fd1662f4f1ee561fae"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Knowledge-Graph-Guide.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "cb47b2187df11eb8d7f4da807fe94d8a"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Behavioral-Learning.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "61fa0282e6ec0ad0b4a3c5e529288387"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/LlamaIndex-Integration.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "f4c1cffcd5432e9b901ff6d7312ac655"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Quick-Start-Tutorial.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "f543297fda5d9364575399f3e82f936f"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Roadmap.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "e5ecbf1d7b6cab1770843eb3dc86d857"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Why-Local-Matters.md": {
+    "mtime": 1777018056.77825,
+    "hash": "6f04d9c225ef1f9408d9ba4ab421a253"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Pattern-Learning-Explained.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "a0e1639d41e1a586b6fda4d53fe444fb"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Comparison-Deep-Dive.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "4dce3dac640c6c668da162f02f5fe59b"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Upgrading-to-v2.8.md": {
+    "mtime": 1777018056.77825,
+    "hash": "7145bfc5aaa81295c79d8fec8295b7e7"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Universal-Architecture.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "3d22df2f161598a52f291f4fc275a33e"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Home.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "6dcfd7738692479c81fd6692697b4b75"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Multi-Profile-Workflows.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "86939b4500130331aa5d795e37521a04"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Memory-Lifecycle.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "22c300d9c76804657fb2c7239a006fc5"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Installation.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "a19b631472a981023bc0a172576fd22a"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Configuration.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "3f5887b333add52974b7ecd18fdbd648"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/_Footer.md": {
+    "mtime": 1777018056.77825,
+    "hash": "64dd0d71765a5069b66ba63cfbd5f009"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Advanced-Search.md": {
+    "mtime": 1777018056.7770648,
+    "hash": "df7d5caad5b7b61028db7a30478ae75a"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Enterprise-Compliance.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "9af9dfb41c08a3a0d631c8e29f0d8e32"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/FAQ.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "1d93d84399fd2d8cc25148c635c5b1b0"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Performance-Benchmarks.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "0148a7f16b6f6e8c094ad25e332e479a"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Visualization-Dashboard.md": {
+    "mtime": 1777018056.77825,
+    "hash": "fd44d3f0b27ad5093362cdb0589f16b7"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Python-API.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "ab016846d81e3afaa5fb1bb967bb44a8"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/DEPLOYMENT-CHECKLIST.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "b0d4221957781ad0d77f01f22296185e"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Architecture-V2.5.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "9b96af3021800f76b6925552087fd702"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/_Sidebar.md": {
+    "mtime": 1777018056.77825,
+    "hash": "81a4f51bd7e6d647d2d8badf339ab597"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Learning-System.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "babfa2891c18bd9466b99c3be5779803"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/README.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "3d562c8fb85d06c0cf6134bc0b3fbabb"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Real-Time-Event-System.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "4256acff08f16341bb62ef78fac8c53b"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/NEW-PAGES-SUMMARY.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "cfd94af91bf2fa713c342efa49fe4226"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Universal-Skills.md": {
+    "mtime": 1777018056.77825,
+    "hash": "a4698faf5ad6c93cae2e83800e226a84"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/MCP-Integration.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "da808727ec5e1ade63740a65c586852d"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/Upgrading-to-v2.7.md": {
+    "mtime": 1777018056.77825,
+    "hash": "1f1afe43e964c7d358bacd7783c5c427"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/WIKI-UPDATE-SUMMARY.md": {
+    "mtime": 1777018056.77825,
+    "hash": "300888b2a54dd014b856e90d591082fe"
+  },
+  "/home/kai-remote/github/superlocalmemory/wiki-content/v2-archive/CLI-Cheatsheet.md": {
+    "mtime": 1777018056.7776945,
+    "hash": "85509df09af9c0bfa165ac9765e3e5e1"
+  },
+  "/home/kai-remote/github/superlocalmemory/tests/test_benchmarks/locomo/README.md": {
+    "mtime": 1777018056.7635508,
+    "hash": "8c583144d793ef6eb4a30caa92bd230b"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/skills/slm-recall/SKILL.md": {
+    "mtime": 1777018056.7520897,
+    "hash": "758deedb64e501d2ce947833b5c17888"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/skills/slm-build-graph/SKILL.md": {
+    "mtime": 1777018056.7520897,
+    "hash": "7a9585d16ed7489affd968c848bf38b8"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/skills/slm-remember/SKILL.md": {
+    "mtime": 1777018056.7520897,
+    "hash": "94928d19495155ca02fa0e040b9a5e27"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/skills/slm-status/SKILL.md": {
+    "mtime": 1777018056.7520897,
+    "hash": "c7017b7efb01a6d086a9fcb9f1811310"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/skills/slm-show-patterns/SKILL.md": {
+    "mtime": 1777018056.7520897,
+    "hash": "38c1fcbe4755020fbecff6928bc03ba7"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/skills/slm-list-recent/SKILL.md": {
+    "mtime": 1777018056.7520897,
+    "hash": "3789e4931fe2c675e5d8240e45884318"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/skills/slm-switch-profile/SKILL.md": {
+    "mtime": 1777018056.7520897,
+    "hash": "c0a5f9fbf80907fa3d1e307d0a89e17d"
+  },
+  "/home/kai-remote/github/superlocalmemory/src/superlocalmemory/ui/index.html": {
+    "mtime": 1777018056.7538853,
+    "hash": "04c685bf1ea748db31a773aad56d8df9"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/screenshots/03-math-health.png": {
+    "mtime": 1777018056.72525,
+    "hash": "58e5404968c8fa432ee54207b606b788"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/screenshots/05-trust-dashboard.png": {
+    "mtime": 1777018056.72825,
+    "hash": "52fe80c0ef0c8b6d2258b234a3a7e6be"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/screenshots/04-learning-dashboard.png": {
+    "mtime": 1777018056.72725,
+    "hash": "11b1434c97a037ca4e75703a24bfa3ce"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/screenshots/02-knowledge-graph.png": {
+    "mtime": 1777018056.72425,
+    "hash": "8956b64f6505ec106db59296554d3098"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/screenshots/05-behavioral-analysis.png": {
+    "mtime": 1777018056.72725,
+    "hash": "3c06cc1682e5bf17d26bad66bf204d53"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/screenshots/06-graph-communities.png": {
+    "mtime": 1777018056.72825,
+    "hash": "77b0394f15e0b0164a7d2dc596144a77"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/screenshots/03-patterns-learning.png": {
+    "mtime": 1777018056.72525,
+    "hash": "cb361a79f31f7459dfecb635d42a5e7a"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/screenshots/04-recall-lab.png": {
+    "mtime": 1777018056.72725,
+    "hash": "6acacd99bcaaa330dd2409fb9c450e99"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/screenshots/07-memories-blurred.png": {
+    "mtime": 1777018056.7302501,
+    "hash": "a61f9d63afc69cee57a37d282c3dcccb"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/screenshots/06-settings.png": {
+    "mtime": 1777018056.72925,
+    "hash": "5ebad0f66a78536d3a03515899fb29af"
+  },
+  "/home/kai-remote/github/superlocalmemory/docs/screenshots/01-dashboard-main.png": {
+    "mtime": 1777018056.7232502,
+    "hash": "d561e20dc6f519c71f6485e276220a71"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/icon-white-32.png": {
+    "mtime": 1777018056.6637123,
+    "hash": "8aae2418f6e11c3a38dd572d2d3bc357"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/icon.svg": {
+    "mtime": 1777018056.6642501,
+    "hash": "9592bd06490beb1d0b8164241d01638e"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/icon-white-16.png": {
+    "mtime": 1777018056.6637123,
+    "hash": "df4af54d0c8f0107cb72a4446cf6aa80"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/contact-sheet.png": {
+    "mtime": 1777018056.6633759,
+    "hash": "3801b5d990d232d7ee45c34ae713f004"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/icon-white-512.png": {
+    "mtime": 1777018056.6642501,
+    "hash": "f465c7e26c92fc493d18fef318572de9"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/icon-512.png": {
+    "mtime": 1777018056.6637123,
+    "hash": "08f7cc42fb87c61574603caf193a3a30"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/icon-white-1024.png": {
+    "mtime": 1777018056.6637123,
+    "hash": "9ca6bb4fa8d87c4d74cd138cbc1ea41e"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/icon-white-192.png": {
+    "mtime": 1777018056.6637123,
+    "hash": "7e86055f58c7986fa2ed72d6c0d85edc"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/icon-white.svg": {
+    "mtime": 1777018056.6642501,
+    "hash": "6fdb1e70d6c6675358adeca3069bdda4"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/gifs/event-stream.gif": {
+    "mtime": 1777018056.6637123,
+    "hash": "b458508061092e8240e8de437e9ef108"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/gifs/graph-interaction.gif": {
+    "mtime": 1777018056.6637123,
+    "hash": "8c50967211a36657def6150f54b63d6d"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/gifs/dashboard-tabs.gif": {
+    "mtime": 1777018056.6637123,
+    "hash": "57726d13a0f922aa5b55a7c4a1e898c5"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/gifs/dashboard-search.gif": {
+    "mtime": 1777018056.6637123,
+    "hash": "67171ae72a655e2e310438469f5fbfe6"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/gifs/cli-demo.gif": {
+    "mtime": 1777018056.6637123,
+    "hash": "33b5f6a2f2fc78862e085ad90352869a"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/v25/v25-agents-tab.png": {
+    "mtime": 1777018056.6895733,
+    "hash": "51aae6721b8ca224fa0935eacd254b3e"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/v25/v25-live-events-working.png": {
+    "mtime": 1777018056.69125,
+    "hash": "c8bc74796fdd9890de292295fa0ed08f"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/cli/cli-list.png": {
+    "mtime": 1777018056.6662502,
+    "hash": "3e49a6977d6cebef84966c8a5a3b439b"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/cli/cli-status.png": {
+    "mtime": 1777018056.6682503,
+    "hash": "bcba1e4b8cd9dc86a0debfe96585fc71"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/cli/cli-profile-switch.png": {
+    "mtime": 1777018056.6672502,
+    "hash": "d5be5efbb96133206f73895a0b2f9b6e"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/cli/cli-help.png": {
+    "mtime": 1777018056.6662502,
+    "hash": "b67d3f75e6080db614d2a0a179eb9ea9"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/cli/cli-remember.png": {
+    "mtime": 1777018056.6682503,
+    "hash": "f7bc93538312a96b1260101d10670188"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/cli/cli-recall.png": {
+    "mtime": 1777018056.6672502,
+    "hash": "e3dd1f3d984609a6ce4e1e3cb9662816"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/cli/cli-build-graph.png": {
+    "mtime": 1777018056.6656485,
+    "hash": "193da49c9b153bde5e646f86bc2faf31"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-behavioral.png": {
+    "mtime": 1777018056.6722503,
+    "hash": "3c06cc1682e5bf17d26bad66bf204d53"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-overview.png": {
+    "mtime": 1777018056.6872501,
+    "hash": "d561e20dc6f519c71f6485e276220a71"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-live-events-dark.png": {
+    "mtime": 1777018056.6832502,
+    "hash": "d25687b811387f8273711ad2bd9b5d3b"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-clusters.png": {
+    "mtime": 1777018056.6732502,
+    "hash": "80891996a68c82d4b9ae587328fb01b2"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-filtered.png": {
+    "mtime": 1777018056.6752503,
+    "hash": "2627dcbe9aadc775a6114f360e78e797"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-overview-dark.png": {
+    "mtime": 1777018056.6862502,
+    "hash": "00ad50c6184754b07bbdf556b87caa55"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-agents.png": {
+    "mtime": 1777018056.669561,
+    "hash": "f7c5c6912186439bdce2a96709621d97"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-timeline.png": {
+    "mtime": 1777018056.68825,
+    "hash": "4082a6e17d2b8ac97ced8de05047e723"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-patterns.png": {
+    "mtime": 1777018056.68825,
+    "hash": "cb361a79f31f7459dfecb635d42a5e7a"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-learning.png": {
+    "mtime": 1777018056.6822503,
+    "hash": "11b1434c97a037ca4e75703a24bfa3ce"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-live-events.png": {
+    "mtime": 1777018056.68425,
+    "hash": "d25687b811387f8273711ad2bd9b5d3b"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-graph.png": {
+    "mtime": 1777018056.6792502,
+    "hash": "77b0394f15e0b0164a7d2dc596144a77"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-memories-dark.png": {
+    "mtime": 1777018056.6852503,
+    "hash": "2627dcbe9aadc775a6114f360e78e797"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-agents-annotated.png": {
+    "mtime": 1777018056.669561,
+    "hash": "cd382769c4933233230c47f89721ceb6"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-memories-annotated.png": {
+    "mtime": 1777018056.68425,
+    "hash": "6952c38fe9e4d69704604230bd26bc1e"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-memories.png": {
+    "mtime": 1777018056.6862502,
+    "hash": "2627dcbe9aadc775a6114f360e78e797"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-live-events-annotated.png": {
+    "mtime": 1777018056.6822503,
+    "hash": "add709cababb992e1e527e3375d9e810"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-graph-annotated.png": {
+    "mtime": 1777018056.6782503,
+    "hash": "8956b64f6505ec106db59296554d3098"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/screenshots/dashboard/dashboard-overview-annotated.png": {
+    "mtime": 1777018056.6862502,
+    "hash": "def61b6f9ea8e04152bcd3981281542c"
+  },
+  "/home/kai-remote/github/superlocalmemory/demo-v344-neural-glass.mp4": {
+    "mtime": 1777018056.7202501,
+    "hash": "c180ecae4e74a51258ad3e1ddb443489"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/videos/dashboard-tour.mp4": {
+    "mtime": 1777018056.6924393,
+    "hash": "187ae888d0064bad7f41305fca8b6a06"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/videos/quick-start.mp4": {
+    "mtime": 1777018056.6924393,
+    "hash": "9867fe0ef25185a2712f97e87fb3d1f3"
+  },
+  "/home/kai-remote/github/superlocalmemory/assets/videos/installation-walkthrough.mp4": {
+    "mtime": 1777018056.6924393,
+    "hash": "6d6cac6873239c700e8cfda601dca438"
+  }
+}
