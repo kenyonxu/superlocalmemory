@@ -270,6 +270,31 @@ class HealthMonitor:
         except Exception:
             pass  # WorkerPool not initialized yet — fine
 
+        # Reap zombie child processes (non-blocking)
+        try:
+            while True:
+                wpid, status = os.waitpid(-1, os.WNOHANG)
+                if wpid == 0:
+                    break
+                if os.WIFSIGNALED(status):
+                    logger.info("Reaped zombie child PID %d (killed by signal %d)",
+                                wpid, os.WTERMSIG(status))
+                else:
+                    logger.info("Reaped zombie child PID %d (exit code=%d)",
+                                wpid, os.WEXITSTATUS(status))
+                log_structured(
+                    level="info", operation="reap_zombie",
+                    pid=wpid,
+                    detail=(
+                        f"signal={os.WTERMSIG(status)}" if os.WIFSIGNALED(status)
+                        else f"exit_code={os.WEXITSTATUS(status)}"
+                    ),
+                )
+        except ChildProcessError:
+            pass  # No children at all
+        except Exception:
+            pass  # Non-critical
+
     # -- Built-in health checks for registry --
 
     def _check_daemon_health(self) -> dict:
