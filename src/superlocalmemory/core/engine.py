@@ -345,10 +345,10 @@ class MemoryEngine:
             return 0
         try:
             rows = self._db.execute(
-                "SELECT fact_id, content, fact_type, memory_id, embedding "
+                "SELECT fact_id, content, fact_type, memory_id, embedding, "
+                "profile_id "
                 "FROM atomic_facts "
-                "WHERE profile_id = ? AND canonical_entities_json = '[]'",
-                (self._profile_id,),
+                "WHERE canonical_entities_json = '[]'",
             )
             if not rows:
                 return 0
@@ -356,12 +356,14 @@ class MemoryEngine:
             entity_resolver = self._entity_resolver
             graph_builder = self._graph_builder
             fact_extractor = self._fact_extractor
-            embedder = self._embedder
-            profile_id = self._profile_id
+
+            import json as _json
+            from superlocalmemory.storage.models import AtomicFact
 
             for row in rows:
                 fact_id = row["fact_id"]
                 content = row["content"]
+                row_profile_id = row["profile_id"]
                 try:
                     # Extract entities from content
                     extracted = fact_extractor.extract_facts([content], session_id="")
@@ -373,12 +375,13 @@ class MemoryEngine:
                     if not entities:
                         continue
                     # Resolve to canonical entity IDs
-                    canonical_map = entity_resolver.resolve(entities, profile_id)
+                    canonical_map = entity_resolver.resolve(
+                        entities, row_profile_id,
+                    )
                     canonical_ids = list(canonical_map.values())
                     if not canonical_ids:
                         continue
                     # Update fact row with entities and canonical entities
-                    import json as _json
                     self._db.execute(
                         "UPDATE atomic_facts "
                         "SET entities_json = ?, canonical_entities_json = ? "
@@ -390,18 +393,17 @@ class MemoryEngine:
                         ),
                     )
                     # Build graph edges
-                    from superlocalmemory.storage.models import AtomicFact
                     fact = AtomicFact(
                         content=content,
                         fact_type=row.get("fact_type", "episodic"),
                         memory_id=row.get("memory_id", ""),
-                        profile_id=profile_id,
+                        profile_id=row_profile_id,
                         entities=entities,
                         canonical_entities=canonical_ids,
                     )
                     if row.get("embedding"):
                         fact.embedding = _json.loads(row["embedding"])
-                    graph_builder.build_edges(fact, profile_id)
+                    graph_builder.build_edges(fact, row_profile_id)
                     count += 1
                 except Exception:
                     pass  # best-effort per fact
