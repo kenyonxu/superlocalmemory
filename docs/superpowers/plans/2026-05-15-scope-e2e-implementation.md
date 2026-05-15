@@ -17,25 +17,23 @@
 
 | 编号 | 任务 | 涉及文件 | 依赖 |
 |:---:|:---|:---|:---:|
-| T1 | 材质化线程 `_loop()` 提取 scope/shared_with | `server/unified_daemon.py` | — |
-| T2 | Daemon `/remember` 端点传递 scope | `server/unified_daemon.py` | T1 |
-| T3 | CLI `main.py` 新增 `--scope`/`--shared-with` 参数 | `cli/main.py` | — |
-| T4 | CLI `commands.py` 三条路径传递 scope | `cli/commands.py` | T3 |
-| T5 | Dashboard `/api/import` 读取 scope 并传递 | `server/routes/data_io.py` | — |
-| T6 | 材质化线程单元测试 | `tests/` | T1 |
-| T7 | CLI 集成测试 + Dashboard 导入测试 | `tests/` | T2, T4, T5 |
-| T8 | 回归测试 + MCP 异步测试 | `tests/` | T1, T2 |
+| T1 | 材质化线程 `_loop()` 提取 scope/shared_with + **单元测试** | `server/unified_daemon.py`, `tests/test_unified_daemon_materializer.py` | — |
+| T2 | Daemon `/remember` 端点传递 scope + **daemon scope 测试** | `server/unified_daemon.py`, `tests/test_daemon_remember_scope.py` | T1 |
+| T3 | CLI `main.py` 新增 `--scope`/`--shared-with` 参数 + `commands.py` 三条路径传递 scope + **CLI 集成测试** | `cli/main.py`, `cli/commands.py`, `tests/test_cli_scope.py` | — |
+| T4 | Dashboard `/api/import` 读取 scope 并传递 + **Dashboard import 测试** | `server/routes/data_io.py`, `tests/test_dashboard_import_scope.py` | — |
+| T5 | 回归测试 + MCP 全链路集成测试 | `tests/test_scope_regression.py` | T1, T2, T3, T4 |
 
 ---
 
 ## 任务详情
 
-### T1：材质化线程 `_loop()` 提取 scope/shared_from
+### T1：材质化线程 `_loop()` 提取 scope/shared_from + 单元测试
 
 **目标：** 在材质化线程从 `pending_memories.metadata` JSON 中读取 `scope` 和 `shared_with`，写入 `AtomicFact` 和 `memories` 表。
 
 **涉及文件：**
 - `src/superlocalmemory/server/unified_daemon.py`（1 处修改）
+- `tests/test_unified_daemon_materializer.py`（新建，T6 原测试文件）
 
 **具体修改范围：**
 
@@ -77,18 +75,38 @@ engine._db.execute(
 )
 ```
 
-**验证方式：**
-- 单元测试：mock `get_pending` 返回带 `{"scope": "global"}` metadata 的记录 → 断言 `AtomicFact.scope == "global"`
-- 回归：不传 scope 的 pending 记录 → 默认 `personal`
+**验证方式（代码修改后立即执行）：**
+
+> 测试文件：`tests/test_unified_daemon_materializer.py`（原 T6）
+
+```python
+def test_materializer_extracts_scope_from_metadata():
+    """pending 记录带 scope=global metadata → 材质化后 AtomicFact.scope=global"""
+    # mock get_pending 返回 {"metadata": '{"scope": "global"}'}
+    # 调用 _loop() 一次迭代
+    # 断言 engine.store_fact_direct 被调用时 fact.scope == "global"
+
+def test_materializer_extracts_shared_with():
+    """pending 记录带 shared_with metadata → 材质化后 fact.shared_with 正确"""
+
+def test_materializer_default_scope_personal():
+    """pending 记录无 scope → 默认 personal"""
+
+def test_materializer_unknown_scope_preserved():
+    """上游未校验的未知 scope → 保留原值（材质化线程不校验）"""
+```
+
+运行：`pytest tests/test_unified_daemon_materializer.py -v`
 
 ---
 
-### T2：Daemon `/remember` 端点传递 scope
+### T2：Daemon `/remember` 端点传递 scope + daemon scope 测试
 
 **目标：** 在 `RememberRequest` 模型新增字段，并在 sync/async 两条分支中传递 scope。
 
 **涉及文件：**
 - `src/superlocalmemory/server/unified_daemon.py`（2 处修改）
+- `tests/test_daemon_remember_scope.py`（新建，原 T7 中 daemon 部分）
 
 **具体修改范围：**
 
@@ -142,23 +160,37 @@ if isinstance(extra, dict):
 pending_id = store_pending(req.content, tags=req.tags or "", metadata=meta)
 ```
 
-**验证方式：**
-- 启动 daemon，POST `/remember` 带 `{"scope": "global"}` → 断言返回 `ok: true`
-- 检查 `pending_memories.metadata` JSON 包含 `"scope": "global"`
-- 材质化后查询 `atomic_facts.scope = "global"`
+**验证方式（代码修改后立即执行）：**
+
+> 测试文件：`tests/test_daemon_remember_scope.py`（原 T7 中 daemon 部分）
+
+```python
+def test_remember_post_scope_global():
+    """POST /remember 带 scope=global → 返回 ok，pending metadata 含 scope"""
+
+def test_remember_post_invalid_scope_422():
+    """POST /remember 带非法 scope → HTTP 422"""
+
+def test_remember_post_async_scope_preserved():
+    """POST /remember async 路径 → pending metadata 含 scope，材质化后 atomic_facts.scope 正确"""
+```
+
+运行：`pytest tests/test_daemon_remember_scope.py -v`
 
 ---
 
-### T3：CLI `main.py` 新增参数
+### T3：CLI 参数 + 命令传递 scope + CLI 集成测试
 
-**目标：** `slm remember` 子命令新增 `--scope` 和 `--shared-with` 参数。
+**目标：** `slm remember` 新增 `--scope`/`--shared-with` 参数，三条路径均传递 scope。
 
 **涉及文件：**
-- `src/superlocalmemory/cli/main.py`（1 处修改）
+- `src/superlocalmemory/cli/main.py`（1 处修改，原 T3）
+- `src/superlocalmemory/cli/commands.py`（1 处修改，原 T4）
+- `tests/test_cli_scope.py`（新建，原 T7 中 CLI 部分）
 
 **具体修改范围：**
 
-在 `remember_p.add_argument("--tags", ...)` 之后新增：
+1. `main.py` 在 `remember_p.add_argument("--tags", ...)` 之后新增：
 
 ```python
 remember_p.add_argument(
@@ -170,22 +202,7 @@ remember_p.add_argument(
     help="Comma-separated agent IDs (only with scope=shared)")
 ```
 
-**验证方式：**
-- `slm remember --help` 显示新增参数
-- `slm remember --scope invalid "test"` 报错并提示合法值
-
----
-
-### T4：CLI `commands.py` 三条路径传递 scope
-
-**目标：** `cmd_remember()` 的 daemon 路径、pending 路径、sync 路径均传递 scope。
-
-**涉及文件：**
-- `src/superlocalmemory/cli/commands.py`（1 处修改）
-
-**具体修改范围：**
-
-1. **daemon 路径**（`daemon_request` 调用处）：
+2. `commands.py` **daemon 路径**：
 
 ```python
 result = daemon_request("POST", "/remember", {
@@ -196,7 +213,7 @@ result = daemon_request("POST", "/remember", {
 })
 ```
 
-2. **pending 路径**（`store_pending` 调用处）：
+3. `commands.py` **pending 路径**：
 
 ```python
 metadata = {}
@@ -214,7 +231,7 @@ row_id = store_pending(
 )
 ```
 
-3. **sync 路径**（`engine.store()` 调用处）：
+4. `commands.py` **sync 路径**：
 
 ```python
 shared_with = [s.strip() for s in args.shared_with.split(",") if s.strip()] if args.shared_with else None
@@ -226,19 +243,35 @@ fact_ids = engine.store(
 )
 ```
 
-**验证方式：**
-- `slm remember --scope global "test"` → daemon 路径 → `atomic_facts.scope = "global"`
-- `slm remember --scope shared --shared-with agent1 "test"` → pending 路径 → `shared_with` 正确
-- `slm remember --scope global --sync "test"` → sync 路径 → 直接写入
+**验证方式（代码修改后立即执行）：**
+
+> 测试文件：`tests/test_cli_scope.py`（原 T7 中 CLI 部分）
+
+```python
+def test_remember_cli_scope_global():
+    """slm remember --scope global → recall 结果 scope=global"""
+
+def test_remember_cli_scope_shared():
+    """slm remember --scope shared --shared-with a1,a2 → shared_with 正确"""
+
+def test_remember_cli_default_scope():
+    """不传 --scope → 默认 personal"""
+
+def test_remember_cli_invalid_scope():
+    """slm remember --scope invalid → argparse 报错"""
+```
+
+运行：`pytest tests/test_cli_scope.py -v`
 
 ---
 
-### T5：Dashboard `/api/import` 读取 scope
+### T4：Dashboard `/api/import` 读取 scope + Dashboard import 测试
 
 **目标：** 从导入 JSON 中读取 `scope` 和 `shared_with`，传给 `engine.store()`。
 
 **涉及文件：**
-- `src/superlocalmemory/server/routes/data_io.py`（1 处修改）
+- `src/superlocalmemory/server/routes/data_io.py`（1 处修改，原 T5）
+- `tests/test_dashboard_import_scope.py`（新建，原 T7 中 Dashboard 部分）
 
 **具体修改范围：**
 
@@ -268,62 +301,9 @@ engine.store(
 )
 ```
 
-**验证方式：**
-- POST `/api/import` 上传含 `"scope": "global"` 的 JSON → 断言 `atomic_facts.scope = "global"`
-- 上传含 `"scope": "invalid"` 的 JSON → 断言返回 errors 列表包含该错误
+**验证方式（代码修改后立即执行）：**
 
----
-
-### T6：材质化线程单元测试
-
-**目标：** 验证材质化线程正确提取 metadata 中的 scope。
-
-**涉及文件：**
-- `tests/test_unified_daemon_materializer.py`（新建）
-
-**测试用例：**
-
-```python
-def test_materializer_extracts_scope_from_metadata():
-    """pending 记录带 scope=global metadata → 材质化后 AtomicFact.scope=global"""
-    # mock get_pending 返回 {"metadata": '{"scope": "global"}'}
-    # 调用 _loop() 一次迭代
-    # 断言 engine.store_fact_direct 被调用时 fact.scope == "global"
-
-def test_materializer_extracts_shared_with():
-    """pending 记录带 shared_with metadata → 材质化后 fact.shared_with 正确"""
-
-def test_materializer_default_scope_personal():
-    """pending 记录无 scope → 默认 personal"""
-
-def test_materializer_unknown_scope_preserved():
-    """上游未校验的未知 scope → 保留原值（材质化线程不校验）"""
-```
-
-**验证方式：** `pytest tests/test_unified_daemon_materializer.py -v`
-
----
-
-### T7：CLI 集成测试 + Dashboard 导入测试
-
-**涉及文件：**
-- `tests/test_cli_scope.py`（新建）
-- `tests/test_dashboard_import_scope.py`（新建）
-
-**CLI 测试用例：**
-
-```python
-def test_remember_cli_scope_global():
-    """slm remember --scope global → recall 结果 scope=global"""
-
-def test_remember_cli_scope_shared():
-    """slm remember --scope shared --shared-with a1,a2 → shared_with 正确"""
-
-def test_remember_cli_default_scope():
-    """不传 --scope → 默认 personal"""
-```
-
-**Dashboard 测试用例：**
+> 测试文件：`tests/test_dashboard_import_scope.py`（原 T7 中 Dashboard 部分）
 
 ```python
 def test_import_with_scope():
@@ -333,14 +313,16 @@ def test_import_invalid_scope_skipped():
     """非法 scope → 记入 errors，不写入"""
 ```
 
-**验证方式：** `pytest tests/test_cli_scope.py tests/test_dashboard_import_scope.py -v`
+运行：`pytest tests/test_dashboard_import_scope.py -v`
 
 ---
 
-### T8：回归测试 + MCP 异步测试
+### T5：回归测试 + MCP 全链路集成测试
+
+**目标：** 验证旧调用不破坏，以及 MCP → pending → 材质化完整链路。
 
 **涉及文件：**
-- `tests/test_scope_regression.py`（新建或追加到现有）
+- `tests/test_scope_regression.py`（新建或追加到现有，原 T8）
 
 **测试用例：**
 
@@ -353,6 +335,9 @@ def test_mcp_remember_async_scope_preserved():
     # mock mcp/tools_core.py 的 remember 调用（已写入 metadata）
     # 触发材质化
     # 断言 atomic_facts.scope 正确
+
+def test_cross_module_scope_consistency():
+    """CLI/Daemon/Dashboard 三条路径写入同 scope → 数据库结果一致"""
 ```
 
 **验证方式：** `pytest tests/test_scope_regression.py -v`
@@ -362,20 +347,35 @@ def test_mcp_remember_async_scope_preserved():
 ## 依赖关系
 
 ```
-T3 ──→ T4
-       ↓
-T1 ──→ T2 ──→ T6 ──→ T8
-       ↓
-      T7 ←── T5
+T1 ──→ T2
+ │
+ └────→ T5（回归测试需要 T1+T2+T3+T4 全部完成）
+
+T3 ──→ T5
+
+T4 ──→ T5
 ```
 
 - **T1 必须先于 T2**：材质化线程必须先能读取 scope，端点传递才有意义。
-- **T3 必须先于 T4**：参数定义后命令逻辑才能读取 `args.scope`。
-- **T6 依赖 T1、T2**：测试材质化线程和端点。
-- **T7 依赖 T2、T4、T5**：集成测试需要 CLI 和 Dashboard 都完成。
-- **T8 依赖 T1、T2**：回归测试覆盖完整链路。
+- **T5 依赖 T1、T2、T3、T4**：回归和 MCP 全链路测试需要所有代码模块完成。
 
-**推荐执行顺序：** T1 → T3 → T2 → T4 → T5 → T6 → T7 → T8
+**每个代码任务的测试不依赖其他任务**（T1 的测试只测材质化线程，T2 的测试 mock daemon，T3 的测试 mock CLI，T4 的测试 mock Dashboard），可独立运行。
+
+**推荐执行顺序：** T1 → T2 → T3 → T4 → T5
+
+---
+
+## 测试文件说明
+
+以下测试文件在计划中按任务分散执行，但物理上仍是独立文件：
+
+| 文件 | 所属任务 | 说明 |
+|:---|:---:|:---|
+| `tests/test_unified_daemon_materializer.py` | T1 | 材质化线程单元测试 |
+| `tests/test_daemon_remember_scope.py` | T2 | Daemon `/remember` scope 测试 |
+| `tests/test_cli_scope.py` | T3 | CLI 集成测试 |
+| `tests/test_dashboard_import_scope.py` | T4 | Dashboard import 测试 |
+| `tests/test_scope_regression.py` | T5 | 回归 + MCP 全链路集成测试 |
 
 ---
 
@@ -420,17 +420,16 @@ T1 ──→ T2 ──→ T6 ──→ T8
 ## 提交规范
 
 ```bash
-# 每个任务完成后独立 commit
+# 每个任务完成后独立 commit（代码 + 对应测试一起提交）
 git add <files>
 git commit -m "plan: <任务编号> <简短描述>"
 
 # 示例
-git commit -m "plan: T1 materializer extracts scope/shared_with from metadata"
-git commit -m "plan: T2 daemon /remember endpoint passes scope in sync+async branches"
-git commit -m "plan: T3 CLI main.py adds --scope and --shared-with args"
-git commit -m "plan: T4 CLI commands.py passes scope in all three remember paths"
-git commit -m "plan: T5 Dashboard /api/import reads scope from JSON"
-git commit -m "plan: T6-T8 add unit and integration tests for scope e2e"
+git commit -m "plan: T1 materializer extracts scope/shared_with from metadata + unit tests"
+git commit -m "plan: T2 daemon /remember endpoint passes scope in sync+async branches + daemon tests"
+git commit -m "plan: T3 CLI adds --scope/--shared-with args, commands.py passes scope in all paths + CLI tests"
+git commit -m "plan: T4 Dashboard /api/import reads scope from JSON + import tests"
+git commit -m "plan: T5 regression tests + MCP async full-pipeline integration tests"
 ```
 
 ---
