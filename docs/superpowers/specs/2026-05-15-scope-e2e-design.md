@@ -11,8 +11,7 @@ SLM 支持三层记忆作用域（personal / global / shared），但 scope 参�
 | 入口 | scope 参数 | 到达 atomic_facts |
 |------|-----------|------------------|
 | Python API `engine.store()` | 有 | 正确 |
-| MCP `remember` (`?wait=true`) | 有，在 metadata | 正确（走 `engine.store`） |
-| MCP `remember`（默认异步） | 有，在 metadata | **丢失** |
+| MCP `remember` | 有，写入 metadata JSON | **丢失**（材质化线程不提取） |
 | CLI `slm remember` | **无参数** | **丢失** |
 | Dashboard `/api/import` | **无参数** | **丢失** |
 
@@ -61,18 +60,19 @@ fact = AtomicFact(
 )
 ```
 
-`memories` INSERT 加上 `scope` 列（第 9 个占位符）：
+`memories` INSERT 加上 `scope` 和 `shared_with` 列：
 
 ```python
 engine._db.execute(
     "INSERT OR IGNORE INTO memories "
     "(memory_id, profile_id, content, "
     "session_id, speaker, role, created_at, "
-    "scope, metadata_json) VALUES (?,?,?,?,?,?,?,?,?)",
+    "scope, shared_with, metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
     (mem_id, engine._profile_id, content,
      "", "", "user",
      datetime.now(timezone.utc).isoformat(),
      scope,
+     _json.dumps(shared_with) if shared_with else None,
      _json.dumps(md)),
 )
 ```
@@ -88,16 +88,37 @@ class RememberRequest(BaseModel):
     metadata: dict | None = None
 ```
 
-**`/remember` 端点**（异步分支），写入 pending metadata 时包含 scope：
+**`/remember` 端点**，两条分支均传递 scope：
 
 ```python
+# 解析 shared_with（两端点共用）
+parsed_shared = (
+    [s.strip() for s in req.shared_with.split(",") if s.strip()]
+    if req.shared_with else None
+)
+
+# Sync 分支（wait=True）
+if wait:
+    metadata = {"tags": req.tags} if req.tags else {}
+    extra = getattr(req, "metadata", None)
+    if isinstance(extra, dict):
+        metadata.update(extra)
+    fact_ids = engine.store(
+        req.content,
+        metadata=metadata,
+        scope=req.scope,              # 新增
+        shared_with=parsed_shared,    # 新增
+    )
+    return {"ok": True, "fact_ids": fact_ids, "count": len(fact_ids)}
+
+# Async 分支（默认）
 meta = {}
 if req.tags:
     meta["tags"] = req.tags
 if req.scope and req.scope != "personal":
     meta["scope"] = req.scope
-if req.shared_with:
-    meta["shared_with"] = [s.strip() for s in req.shared_with.split(",") if s.strip()]
+if parsed_shared:
+    meta["shared_with"] = parsed_shared
 extra = getattr(req, "metadata", None)
 if isinstance(extra, dict):
     meta.update(extra)
@@ -167,20 +188,47 @@ fact_ids = engine.store(
 
 ```python
 scope = memory.get("scope", "personal")
+if scope not in ("personal", "global", "shared"):
+    errors.append(f"Memory {idx}: invalid scope '{scope}'")
+    continue
 shared_with = memory.get("shared_with")
 
-engine.store(
-    content=memory_content,
-    session_id=memory.get("session_id", ''),
-    scope=scope,
-    shared_with=shared_with,
-    metadata={
-        "project_name": memory.get("project_name"),
-        "category": memory.get("category"),
-        "tags": memory.get("tags", ''),
-    },
-)
+if engine:
+    engine.store(
+        content=memory_content,
+        session_id=memory.get("session_id", ''),
+        scope=scope,
+        shared_with=shared_with,
+        metadata={
+            "project_name": memory.get("project_name"),
+            "category": memory.get("category"),
+            "tags": memory.get("tags", ''),
+        },
+    )
+else:
+    # Fallback: 直接 DB INSERT（不含 scope 处理，记录警告）
+    errors.append(f"Memory {idx}: engine unavailable, stored as personal scope")
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO atomic_facts (content, profile_id, session_id, scope) "
+        "VALUES (?, ?, ?, 'personal')",
+        (memory_content, get_active_profile(), memory.get('session_id', '')),
+    )
+    conn.commit()
+    conn.close()
 ```
+
+## scope 值校验
+
+所有入口均需校验 scope 合法值（`personal` / `global` / `shared`）：
+
+| 入口 | 校验方式 |
+| ------- | ---------- |
+| CLI `--scope` | argparse `choices=["personal", "global", "shared"]` |
+| Daemon `/remember` | Pydantic validator 或端点内检查，非法值返回 400 |
+| Dashboard `/api/import` | 逐条检查，非法 scope 记入 errors 列表跳过 |
+| 材质化线程 | 不校验（信任上游已校验），未知 scope 保留原值 |
 
 ## 不修改的部分
 
