@@ -925,6 +925,8 @@ def cmd_remember(args: Namespace) -> None:
                 result = daemon_request("POST", "/remember", {
                     "content": args.content,
                     "tags": args.tags or "",
+                    "scope": args.scope,
+                    "shared_with": args.shared_with or "",
                 })
                 if result and "fact_ids" in result:
                     if use_json:
@@ -940,9 +942,18 @@ def cmd_remember(args: Namespace) -> None:
         # NO subprocess spawn. Daemon's background loop picks up pending memories.
         from superlocalmemory.cli.pending_store import store_pending
 
+        metadata = {}
+        if args.tags:
+            metadata["tags"] = args.tags
+        if args.scope and args.scope != "personal":
+            metadata["scope"] = args.scope
+        if args.shared_with:
+            metadata["shared_with"] = [s.strip() for s in args.shared_with.split(",") if s.strip()]
+
         row_id = store_pending(
             content=args.content,
             tags=args.tags or "",
+            metadata=metadata,
         )
 
         if use_json:
@@ -961,7 +972,13 @@ def cmd_remember(args: Namespace) -> None:
         engine.initialize()
 
         metadata = {"tags": args.tags} if args.tags else {}
-        fact_ids = engine.store(args.content, metadata=metadata)
+        shared_with = [s.strip() for s in args.shared_with.split(",") if s.strip()] if args.shared_with else None
+        fact_ids = engine.store(
+            args.content,
+            metadata=metadata,
+            scope=args.scope,
+            shared_with=shared_with,
+        )
     except Exception as exc:
         if use_json:
             from superlocalmemory.cli.json_output import json_print

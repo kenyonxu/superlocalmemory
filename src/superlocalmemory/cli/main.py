@@ -177,6 +177,15 @@ def main() -> None:
     remember_p = sub.add_parser("remember", help="Store a memory (extracts facts, builds graph)")
     remember_p.add_argument("content", help="Content to remember")
     remember_p.add_argument("--tags", default="", help="Comma-separated tags")
+    remember_p.add_argument(
+        "--scope", default="personal",
+        choices=["personal", "global", "shared"],
+        help="Memory scope (default: personal)",
+    )
+    remember_p.add_argument(
+        "--shared-with", default="",
+        help="Comma-separated agent IDs (only with scope=shared)",
+    )
     remember_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
     remember_p.add_argument(
         "--sync", dest="sync_mode", action="store_true",
