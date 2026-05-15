@@ -326,6 +326,7 @@ class MemoryEngine:
                     self._db,
                     self._config,
                     self._profile_id,
+                    embedder=self._embedder,
                 )
                 self._maintenance_scheduler.start()
             except Exception as exc:
