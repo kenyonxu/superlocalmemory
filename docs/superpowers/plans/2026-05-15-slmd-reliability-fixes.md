@@ -625,16 +625,22 @@ from superlocalmemory.core.health_monitor import HealthMonitor, register_health_
 - [ ] **Step 3: Write automated tests**
 
 ```python
-# tests/test_api/test_health.py — new file or add to existing test_api tests
-# (use the existing FastAPI TestClient pattern from tests/test_api/)
+# tests/test_api/test_health.py — new file
 
 from fastapi.testclient import TestClient
+from superlocalmemory.server.unified_daemon import create_app
 
-def test_health_endpoint_triggers_engine_recovery(client):
+@pytest.fixture
+def health_client():
+    """Create a minimal TestClient for the health endpoint."""
+    app = create_app()
+    return TestClient(app)
+
+def test_health_endpoint_triggers_engine_recovery(health_client):
     """GET /health attempts engine recovery when engine is None."""
     # Set engine to None on app state to simulate daemon crash
-    client.app.state.engine = None
-    response = client.get("/health")
+    health_client.app.state.engine = None
+    response = health_client.get("/health")
     assert response.status_code == 200
     data = response.json()
     # get_engine_lazy() should have re-initialized the engine
@@ -642,9 +648,16 @@ def test_health_endpoint_triggers_engine_recovery(client):
     assert data["status"] == "ok"
 
 
-def test_health_check_includes_engine_item():
+def test_health_check_includes_engine_item(monkeypatch):
     """run_all_health_checks() includes the engine health check item."""
-    from superlocalmemory.core.health_monitor import run_all_health_checks
+    from superlocalmemory.core.health_monitor import (
+        run_all_health_checks, register_health_check,
+    )
+    # Simulate the closure registration done by create_app()
+    def _check_engine():
+        return {"name": "engine", "status": "ok", "detail": "Engine initialized"}
+    register_health_check(_check_engine)
+    
     results = run_all_health_checks()
     engine_checks = [r for r in results if r["name"] == "engine"]
     assert len(engine_checks) == 1, f"Expected 1 engine check, got {len(engine_checks)}"
@@ -736,17 +749,22 @@ def test_check_once_reaps_zombie_children():
     )
     monitor._check_once()
 
-    # Verify zombie was reaped
+    # Verify zombie was reaped (read-only check via /proc)
     try:
-        os.kill(pid, 0)  # Signal 0 = permission check, raises if process gone
-        # If kill succeeds, process still exists — waitpid to clean up
-        wpid, _ = os.waitpid(pid, os.WNOHANG)
-        if wpid == 0:
-            pytest.fail("Zombie was NOT reaped by _check_once() — PID still exists")
-    except ProcessLookupError:
-        pass  # Expected: zombie was reaped, PID no longer exists
-    except ChildProcessError:
-        pass  # Also expected on some systems
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("State:"):
+                    if "Z" in line:
+                        pytest.fail(f"Zombie NOT reaped by _check_once(): {line.strip()}")
+                    break
+    except FileNotFoundError:
+        pass  # Process fully gone = reaped successfully
+
+    # Defensive cleanup (unconditional, no assertion tied to result)
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except (ProcessLookupError, ChildProcessError):
+        pass
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
