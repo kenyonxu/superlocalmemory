@@ -474,6 +474,10 @@ class EmbeddingService:
                 "TORCH_DEVICE": "cpu",
                 "ORT_DISABLE_COREML": "1",
             }
+            # v3.4.45+: Remove HF mirror endpoint — hf-mirror.com has SSL issues
+            # that cause model loading to hang >180s (5 retries × ~23s per API call).
+            # Worker defaults to huggingface.co which works via proxy.
+            env.pop("HF_ENDPOINT", None)
             from superlocalmemory.core.platform_utils import popen_platform_kwargs
             self._worker_proc = subprocess.Popen(
                 [sys.executable, "-m", worker_module],
