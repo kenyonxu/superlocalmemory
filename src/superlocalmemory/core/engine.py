@@ -141,6 +141,14 @@ class MemoryEngine:
         if self._capabilities is Capabilities.FULL:
             # Replay pending async writes only when heavy layer is available.
             self._process_pending_memories()
+            # One-shot: backfill entities + graph edges for facts that
+            # were created before the materializer entity-extraction fix.
+            _backfilled = self._backfill_entities_for_existing_facts()
+            if _backfilled:
+                logger.info(
+                    "Entity backfill: %d facts enriched with entities + graph edges",
+                    _backfilled,
+                )
 
     def _init_db_layer(self) -> None:
         from superlocalmemory.storage import schema
@@ -322,6 +330,85 @@ class MemoryEngine:
                 self._maintenance_scheduler.start()
             except Exception as exc:
                 logger.debug("Maintenance scheduler init failed: %s", exc)
+
+    def _backfill_entities_for_existing_facts(self) -> int:
+        """One-shot: populate entities + graph edges for facts that lack them.
+
+        Historical facts created before the materializer entity-extraction fix
+        have empty ``canonical_entities_json`` and zero graph edges.
+        This function extracts entities, resolves canonical IDs, updates the
+        fact row, and builds graph edges — using the same pipeline as new facts.
+
+        Returns the number of facts backfilled.
+        """
+        if not self._fact_extractor or not self._entity_resolver or not self._graph_builder:
+            return 0
+        try:
+            rows = self._db.execute(
+                "SELECT fact_id, content, fact_type, memory_id, embedding "
+                "FROM atomic_facts "
+                "WHERE profile_id = ? AND canonical_entities_json = '[]'",
+                (self._profile_id,),
+            )
+            if not rows:
+                return 0
+            count = 0
+            entity_resolver = self._entity_resolver
+            graph_builder = self._graph_builder
+            fact_extractor = self._fact_extractor
+            embedder = self._embedder
+            profile_id = self._profile_id
+
+            for row in rows:
+                fact_id = row["fact_id"]
+                content = row["content"]
+                try:
+                    # Extract entities from content
+                    extracted = fact_extractor.extract_facts([content], session_id="")
+                    entities: list[str] = []
+                    if extracted:
+                        for ef in extracted:
+                            entities.extend(getattr(ef, "entities", []))
+                        entities = list(set(entities))
+                    if not entities:
+                        continue
+                    # Resolve to canonical entity IDs
+                    canonical_map = entity_resolver.resolve(entities, profile_id)
+                    canonical_ids = list(canonical_map.values())
+                    if not canonical_ids:
+                        continue
+                    # Update fact row with entities and canonical entities
+                    import json as _json
+                    self._db.execute(
+                        "UPDATE atomic_facts "
+                        "SET entities_json = ?, canonical_entities_json = ? "
+                        "WHERE fact_id = ?",
+                        (
+                            _json.dumps(entities),
+                            _json.dumps(canonical_ids),
+                            fact_id,
+                        ),
+                    )
+                    # Build graph edges
+                    from superlocalmemory.storage.models import AtomicFact
+                    fact = AtomicFact(
+                        content=content,
+                        fact_type=row.get("fact_type", "episodic"),
+                        memory_id=row.get("memory_id", ""),
+                        profile_id=profile_id,
+                        entities=entities,
+                        canonical_entities=canonical_ids,
+                    )
+                    if row.get("embedding"):
+                        fact.embedding = _json.loads(row["embedding"])
+                    graph_builder.build_edges(fact, profile_id)
+                    count += 1
+                except Exception:
+                    pass  # best-effort per fact
+            return count
+        except Exception as exc:
+            logger.debug("Entity backfill skipped: %s", exc)
+            return 0
 
     def _process_pending_memories(self) -> None:
         """Process pending memories from store-first async pattern.
