@@ -42,7 +42,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 logger = logging.getLogger("superlocalmemory.unified_daemon")
 
@@ -59,7 +59,16 @@ _PORT_FILE = Path.home() / ".superlocalmemory" / "daemon.port"
 class RememberRequest(BaseModel):
     content: str
     tags: str = ""
+    scope: str = "personal"
+    shared_with: str = ""
     metadata: dict | None = None  # v3.4.26: pass-through from MCP pool_store
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, v: str) -> str:
+        if v not in ("personal", "global", "shared"):
+            raise ValueError(f"Invalid scope '{v}', must be personal/global/shared")
+        return v
 
 
 class ObserveRequest(BaseModel):
@@ -1451,13 +1460,24 @@ def _register_daemon_routes(application: FastAPI) -> None:
         _update_activity()
         engine = _get_engine_or_503()
 
+        # Parse shared_with comma-separated string into list
+        parsed_shared = (
+            [s.strip() for s in req.shared_with.split(",") if s.strip()]
+            if req.shared_with else None
+        )
+
         if wait:
             try:
                 metadata = {"tags": req.tags} if req.tags else {}
                 extra = getattr(req, "metadata", None)
                 if isinstance(extra, dict):
                     metadata.update(extra)
-                fact_ids = engine.store(req.content, metadata=metadata)
+                fact_ids = engine.store(
+                    req.content,
+                    metadata=metadata,
+                    scope=req.scope,
+                    shared_with=parsed_shared,
+                )
                 return {"ok": True, "fact_ids": fact_ids, "count": len(fact_ids)}
             except Exception as exc:
                 raise HTTPException(500, detail=str(exc))
@@ -1467,6 +1487,9 @@ def _register_daemon_routes(application: FastAPI) -> None:
             meta = {}
             if req.tags:
                 meta["tags"] = req.tags
+            meta["scope"] = req.scope
+            if parsed_shared:
+                meta["shared_with"] = parsed_shared
             extra = getattr(req, "metadata", None)
             if isinstance(extra, dict):
                 meta.update(extra)
