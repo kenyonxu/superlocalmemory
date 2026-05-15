@@ -67,7 +67,7 @@ engine._db.execute(
     "INSERT OR IGNORE INTO memories "
     "(memory_id, profile_id, content, "
     "session_id, speaker, role, created_at, "
-    "scope, shared_with, metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    "scope, shared_with, metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
     (mem_id, engine._profile_id, content,
      "", "", "user",
      datetime.now(timezone.utc).isoformat(),
@@ -86,6 +86,13 @@ class RememberRequest(BaseModel):
     scope: str = "personal"          # 新增
     shared_with: str = ""            # 新增
     metadata: dict | None = None
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, v: str) -> str:
+        if v not in ("personal", "global", "shared"):
+            raise ValueError(f"Invalid scope '{v}', must be personal/global/shared")
+        return v
 ```
 
 **`/remember` 端点**，两条分支均传递 scope：
@@ -115,8 +122,7 @@ if wait:
 meta = {}
 if req.tags:
     meta["tags"] = req.tags
-if req.scope and req.scope != "personal":
-    meta["scope"] = req.scope
+meta["scope"] = req.scope
 if parsed_shared:
     meta["shared_with"] = parsed_shared
 extra = getattr(req, "metadata", None)
@@ -206,8 +212,11 @@ if engine:
         },
     )
 else:
-    # Fallback: 直接 DB INSERT（不含 scope 处理，记录警告）
-    errors.append(f"Memory {idx}: engine unavailable, stored as personal scope")
+    # Fallback: 直接 DB INSERT。
+    # 注意：此路径缺少 fact_id/memory_id（预存 bug，非本次引入），
+    # 实际运行时 engine 不可用时此分支大概率也会失败。
+    # 此处保持与现有代码一致的最低限度处理。
+    errors.append(f"Memory {idx}: engine unavailable, scope not applied")
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
