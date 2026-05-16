@@ -545,6 +545,20 @@ class EvolutionConfig:
     max_evolutions_per_cycle: int = 3            # Budget cap per consolidation
 
 
+@dataclass
+class ProxyConfig:
+    """HTTP/HTTPS proxy for embedding worker subprocess.
+
+    The daemon process has a stripped environment (no shell proxy vars).
+    When the embedding worker needs to reach huggingface.co to verify
+    model files, it must go through a proxy if the network is restricted.
+    Empty strings mean no proxy (direct connection or env-var fallback).
+    """
+
+    http: str = ""
+    https: str = ""
+
+
 @dataclass(frozen=True)
 class AutoInvokeConfig:
     """Configuration for the Auto-Invoke Engine (Phase 2).
@@ -638,6 +652,7 @@ class SLMConfig:
         default_factory=ParameterizationConfig,
     )
     evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
+    proxy: ProxyConfig = field(default_factory=ProxyConfig)
 
     # v3.4.3: Daemon configuration
     daemon_idle_timeout: int = 0       # 0 = 24/7 (no auto-kill). >0 = seconds before auto-kill.
@@ -725,6 +740,14 @@ class SLMConfig:
                 if k in EvolutionConfig.__dataclass_fields__
             })
 
+        # V3.4.45+: Proxy config for embedding worker
+        proxy = data.get("proxy", {})
+        if proxy:
+            config.proxy = ProxyConfig(
+                http=proxy.get("http", ""),
+                https=proxy.get("https", ""),
+            )
+
         # Multi-scope memory: scope weights
         sw = data.get("scope_weights", {})
         if sw:
@@ -805,6 +828,12 @@ class SLMConfig:
             "enabled": self.evolution.enabled,
             "backend": self.evolution.backend,
             "max_evolutions_per_cycle": self.evolution.max_evolutions_per_cycle,
+        }
+
+        # Proxy config for embedding worker
+        data["proxy"] = {
+            "http": self.proxy.http,
+            "https": self.proxy.https,
         }
 
         # Multi-scope memory: scope weights
