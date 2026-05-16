@@ -478,6 +478,13 @@ class EmbeddingService:
             # that cause model loading to hang >180s (5 retries × ~23s per API call).
             # Worker defaults to huggingface.co which works via proxy.
             env.pop("HF_ENDPOINT", None)
+            # Preserve proxy settings so the worker can reach huggingface.co.
+            # Without proxy, both endpoints fail: hf-mirror.com (SSL), huggingface.co (unreachable).
+            for _proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+                               "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY"):
+                _pv = os.environ.get(_proxy_var)
+                if _pv:
+                    env[_proxy_var] = _pv
             from superlocalmemory.core.platform_utils import popen_platform_kwargs
             self._worker_proc = subprocess.Popen(
                 [sys.executable, "-m", worker_module],
