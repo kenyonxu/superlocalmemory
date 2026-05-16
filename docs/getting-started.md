@@ -73,27 +73,37 @@ curl -s http://127.0.0.1:8765/health | python3 -m json.tool
 
 ## 4. 接入 Hermes Agent（MCP）
 
-### 4.1 MCP 配置
+### 4.1 注册 MCP 服务
 
-在 Hermes Agent 的 MCP 配置中添加：
+Hermes Agent 通过 `hermes mcp add` 命令注册 MCP 服务器：
 
-```json
-{
-  "mcpServers": {
-    "superlocalmemory": {
-      "command": "slm",
-      "args": ["mcp"],
-      "env": {
-        "SLM_MODE": "a"
-      }
-    }
-  }
-}
+```bash
+hermes mcp add superlocalmemory --command slm --args mcp
 ```
 
-> **注意**：不推荐设置 `SLM_DATA_DIR`。SLM 默认使用 `~/.superlocalmemory/`，如果 MCP 和 daemon 使用不同的数据目录，记忆会写入两个数据库、互相不可见。
+这会启动 `slm mcp` 作为 MCP 子进程，Hermes 自动发现 SLM 的全部工具。
 
-### 4.2 验证连接
+如需指定环境变量（如运行模式）：
+
+```bash
+hermes mcp add superlocalmemory \
+  --command slm --args mcp \
+  --env SLM_MODE=a
+```
+
+### 4.2 管理 MCP 服务
+
+```bash
+hermes mcp list                    # 列出已注册的 MCP 服务器
+hermes mcp test superlocalmemory   # 测试连通性
+hermes mcp remove superlocalmemory # 移除
+```
+
+在 Hermes 会话内修改配置后，运行 `/reload-mcp` 即可生效，无需重启。
+
+> **注意**：不推荐设置 `SLM_DATA_DIR` 环境变量。SLM 默认使用 `~/.superlocalmemory/`，如果 MCP 和 daemon 使用不同的数据目录，记忆会写入两个数据库、互相不可见。
+
+### 4.3 验证连接
 
 在 Hermes Agent 中测试：
 
@@ -104,7 +114,7 @@ curl -s http://127.0.0.1:8765/health | python3 -m json.tool
 
 返回正确结果即表示成功。
 
-### 4.3 核心工具速查
+### 4.4 核心工具速查
 
 | 工具 | 功能 | 关键参数 |
 |------|------|---------|
