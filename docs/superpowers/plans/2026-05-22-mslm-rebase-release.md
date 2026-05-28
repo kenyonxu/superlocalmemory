@@ -160,7 +160,9 @@ git log upstream/main..develop --oneline > /tmp/mslm-commit-list.txt
 # Manually identify boundaries and save to /tmp/mslm-group-boundaries.txt
 ```
 
-### Task 5: Build clean main branch with 6 squash commits
+### Task 5: Build clean main branch with 7 squash commits
+
+**Note:** The spec references 6 functional groups; the plan produces 7 commits (6 functional + 1 docs/cleanup).
 
 **Files:**
 - None (git operations, squash commits only)
@@ -174,7 +176,8 @@ git checkout -b new-main upstream/main
 - [ ] **Step 2: Apply Group 1 — core infrastructure**
 
 ```bash
-git diff upstream/main..<group-1-last-sha> -- . > /tmp/mslm-group1.patch
+git diff --binary --full-index upstream/main..<group-1-last-sha> -- . > /tmp/mslm-group1.patch
+git apply --check /tmp/mslm-group1.patch   # dry-run first
 git apply --index /tmp/mslm-group1.patch
 git commit -m "$(cat <<'EOF'
 feat(multiscope): core infrastructure
@@ -325,10 +328,13 @@ Expected: all passing.
 **Files:**
 - None (git operations only)
 
-- [ ] **Step 1: Replace main with new-main**
+- [ ] **Step 1: Verify backup and replace main with new-main**
 
 ```bash
+# Verify backup target doesn't already exist
+git branch -D old-main 2>/dev/null; true
 git branch -M main old-main        # backup current main
+git rev-parse old-main             # verify backup exists
 git branch -M new-main main        # promote new-main to main
 ```
 
@@ -339,12 +345,16 @@ git push origin main --force       # force-push clean main
 git push origin develop            # push develop with full history
 ```
 
-- [ ] **Step 3: Verify remote state**
+- [ ] **Step 3: Verify remote state and cleanup**
 
 ```bash
 git log origin/main --oneline -5
+# Cleanup temp files and stale branches
+rm -f /tmp/mslm-*.patch /tmp/mslm-*.txt
+git branch -D old-main 2>/dev/null; true
+git branch -D new-main 2>/dev/null; true
 ```
-Expected: 7 squashed commits on top of upstream/main.
+Expected: 7 squashed commits on top of upstream/main. Temp branches removed.
 
 ---
 
