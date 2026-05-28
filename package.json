@@ -1,8 +1,9 @@
 {
-  "name": "superlocalmemory",
-  "version": "3.4.56",
-  "description": "Information-geometric agent memory with mathematical guarantees. 4-channel retrieval, Fisher-Rao similarity, zero-LLM mode, EU AI Act compliant. Works with Claude, Cursor, Windsurf, and 17+ AI tools.",
+  "name": "mslm",
+  "version": "4.0.0",
+  "description": "Multi-Scope Local Memory — local-first AI agent memory with personal/global/shared scopes. 7-channel retrieval, Fisher-Rao similarity, multi-scope RRF fusion.",
   "keywords": [
+    "multi-scope",
     "ai-memory",
     "claude-ai",
     "cursor-ide",
@@ -34,16 +35,16 @@
   "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "https://github.com/qualixar/superlocalmemory.git"
+    "url": "https://github.com/kenyonxu/superlocalmemory.git"
   },
-  "homepage": "https://superlocalmemory.com",
-  "mcpName": "io.github.qualixar/superlocalmemory",
+  "homepage": "https://github.com/kenyonxu/superlocalmemory#readme",
+  "mcpName": "io.github.kenyonxu/superlocalmemory",
   "bugs": {
-    "url": "https://github.com/qualixar/superlocalmemory/issues"
+    "url": "https://github.com/kenyonxu/superlocalmemory/issues"
   },
   "bin": {
-    "slm": "./bin/slm-npm",
-    "superlocalmemory": "./bin/slm-npm"
+    "mslm": "./bin/slm-npm",
+    "slm": "./bin/slm-npm"
   },
   "scripts": {
     "prepack": "node scripts/prepack.js",

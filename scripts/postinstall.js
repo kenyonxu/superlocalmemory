@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * SuperLocalMemory V3 - NPM Postinstall Script
+ * MSLM (Multi-Scope Local Memory) - NPM Postinstall Script
  *
  * ONE COMMAND INSTALL. Everything the user needs.
  * Python deps auto-installed. Embeddings auto-downloaded.
@@ -15,9 +15,9 @@ const os = require('os');
 const fs = require('fs');
 
 console.log('\n════════════════════════════════════════════════════════════');
-console.log('  SuperLocalMemory V3 — The Unified Brain');
+console.log('  MSLM (Multi-Scope Local Memory) — The Unified Brain');
 console.log('  by Varun Pratap Bhardwaj / Qualixar');
-console.log('  https://github.com/qualixar/superlocalmemory');
+console.log('  https://github.com/kenyonxu/superlocalmemory');
 console.log('════════════════════════════════════════════════════════════\n');
 
 // --- Step 1: Create data directory ---
@@ -56,7 +56,7 @@ if (!pythonParts) {
     console.log('║  ⚠  Python 3.11+ Required                              ║');
     console.log('╚══════════════════════════════════════════════════════════╝');
     console.log('');
-    console.log('  SuperLocalMemory V3 requires Python 3.11+');
+    console.log('  MSLM (Multi-Scope Local Memory) requires Python 3.11+');
     console.log('  Install from: https://python.org/downloads/');
     console.log('  After installing Python, run: slm setup');
     console.log('');
@@ -246,7 +246,7 @@ if (setupResult.status === 0) {
 
 // --- Done ---
 console.log('\n════════════════════════════════════════════════════════════');
-console.log('  ✓ SuperLocalMemory V3 — The Unified Brain installed!');
+console.log('  ✓ MSLM (Multi-Scope Local Memory) — The Unified Brain installed!');
 console.log('');
 console.log('  Quick start:');
 console.log('    slm remember "..."        # Store a memory');
@@ -262,13 +262,13 @@ console.log('    • SLM Mesh (agent-to-agent P2P built in)');
 console.log('    • Entity compilation (auto knowledge summaries)');
 console.log('    • Ingestion adapters (Gmail, Calendar, Transcripts)');
 console.log('');
-console.log('  Docs: https://github.com/qualixar/superlocalmemory');
+console.log('  Docs: https://github.com/kenyonxu/superlocalmemory');
 console.log('════════════════════════════════════════════════════════════\n');
 
 console.log('────────────────────────────────────────────────────────────');
 console.log('  ⭐ Help us grow!');
 console.log('  If this saves you time, please star the repo:');
-console.log('    https://github.com/qualixar/superlocalmemory');
+console.log('    https://github.com/kenyonxu/superlocalmemory');
 console.log('  Part of the Qualixar AI Agent Reliability Platform:');
 console.log('    https://qualixar.com  (7 OSS products, 19K+ monthly downloads)');
 console.log('────────────────────────────────────────────────────────────\n');

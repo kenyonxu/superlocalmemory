@@ -1,15 +1,15 @@
 [project]
-name = "superlocalmemory"
-version = "3.4.56"
-description = "Information-geometric agent memory with mathematical guarantees"
+name = "mslm"
+version = "4.0.0"
+description = "Multi-Scope Local Memory — local-first AI agent memory with personal/global/shared scopes"
 readme = "README.md"
 license = {text = "AGPL-3.0-or-later"}
 requires-python = ">=3.11,<3.15"
 authors = [
-    {name = "Varun Pratap Bhardwaj", email = "admin@superlocalmemory.com"},
+    {name = "Kenyon Xu", email = "kenyon1977@gmail.com"},
 ]
 keywords = [
-    "ai-memory", "mcp-server", "local-first", "agent-memory",
+    "multi-scope", "ai-memory", "mcp-server", "local-first", "agent-memory",
     "information-geometry", "privacy-first", "eu-ai-act",
 ]
 classifiers = [
@@ -102,7 +102,7 @@ ingestion = [
     "icalendar>=6.0.0",
 ]
 full = [
-    "superlocalmemory[search,ui,learning,performance,ingestion]",
+    "mslm[search,ui,learning,performance,ingestion]",
 ]
 dev = [
     "pytest>=8.0",
@@ -112,12 +112,13 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://superlocalmemory.com"
-Repository = "https://github.com/qualixar/superlocalmemory"
+Homepage = "https://github.com/kenyonxu/superlocalmemory"
+Repository = "https://github.com/kenyonxu/superlocalmemory"
 Documentation = "https://github.com/qualixar/superlocalmemory/wiki"
 Issues = "https://github.com/qualixar/superlocalmemory/issues"
 
 [project.scripts]
+mslm = "superlocalmemory.cli.main:main"
 slm = "superlocalmemory.cli.main:main"
 
 [build-system]
