@@ -119,7 +119,7 @@ def test_memory_record_has_scope_field():
 
 def test_m014_migration_adds_columns():
     """M014 migration should add scope/shared_with to an existing DB without them."""
-    from superlocalmemory.storage.migrations.M014_add_scope_support import DDL, verify
+    from superlocalmemory.storage.migrations.M016_add_scope_support import DDL, verify
 
     # Create a minimal DB with tables but WITHOUT scope columns
     conn = sqlite3.connect(":memory:")
