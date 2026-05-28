@@ -177,6 +177,15 @@ def main() -> None:
     remember_p = sub.add_parser("remember", help="Store a memory (extracts facts, builds graph)")
     remember_p.add_argument("content", help="Content to remember")
     remember_p.add_argument("--tags", default="", help="Comma-separated tags")
+    remember_p.add_argument(
+        "--scope", default="personal",
+        choices=["personal", "global", "shared"],
+        help="Memory scope (default: personal)",
+    )
+    remember_p.add_argument(
+        "--shared-with", default="",
+        help="Comma-separated agent IDs (only with scope=shared)",
+    )
     remember_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
     remember_p.add_argument(
         "--sync", dest="sync_mode", action="store_true",
@@ -444,6 +453,23 @@ def main() -> None:
         "rotate-token",
         help="Rotate the SLM install token (run `slm restart` afterwards)",
     )
+
+    # Entity management (multi-scope memory)
+    entity_sp = sub.add_parser("entity", help="Entity management commands")
+    entity_sub = entity_sp.add_subparsers(dest="entity_command")
+
+    merge_p = entity_sub.add_parser("merge", help="Merge source entity into target")
+    merge_p.add_argument("source", help="Source entity ID (will be deleted)")
+    merge_p.add_argument("target", help="Target entity ID (kept)")
+    merge_p.add_argument("--profile", default="default", help="Profile ID")
+    merge_p.add_argument("--json", action="store_true")
+
+    list_p = entity_sub.add_parser("list", help="List entities by scope")
+    list_p.add_argument("--scope", default="personal",
+                        choices=["personal", "global", "shared"])
+    list_p.add_argument("--profile", default="default")
+    list_p.add_argument("--limit", type=int, default=50)
+    list_p.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
 

@@ -39,10 +39,13 @@ class MaintenanceScheduler:
         db: DatabaseManager,
         config: SLMConfig,
         profile_id: str = "default",
+        *,
+        embedder: Any = None,
     ) -> None:
         self._db = db
         self._config = config
         self._profile_id = profile_id
+        self._embedder = embedder
         self._timer: threading.Timer | None = None
         self._running = False
         self._interval = config.forgetting.scheduler_interval_minutes * 60.0
@@ -80,7 +83,10 @@ class MaintenanceScheduler:
             return
         try:
             from superlocalmemory.core.maintenance import run_maintenance
-            counts = run_maintenance(self._db, self._config, self._profile_id)
+            counts = run_maintenance(
+                self._db, self._config, self._profile_id,
+                embedder=self._embedder,
+            )
             logger.info("Scheduled maintenance complete: %s", counts)
         except Exception as exc:
             logger.warning("Scheduled maintenance failed: %s", exc)

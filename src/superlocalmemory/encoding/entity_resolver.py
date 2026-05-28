@@ -279,6 +279,13 @@ class EntityResolver:
             if re.match(r"^[\d.v\-/]+$", name):
                 continue
 
+            # Tier 0 (Phase 3): global authoritative entity lookup
+            global_entity = self._get_global_entity(name)
+            if global_entity is not None:
+                resolution[raw] = global_entity.entity_id
+                self._touch_last_seen(global_entity.entity_id)
+                continue
+
             # Tier a: exact match on canonical_name
             entity = self._db.get_entity_by_name(name, profile_id)
             if entity is not None:
@@ -456,7 +463,7 @@ class EntityResolver:
         rows = self._db.execute(
             "SELECT ea.entity_id FROM entity_aliases ea "
             "JOIN canonical_entities ce ON ce.entity_id = ea.entity_id "
-            "WHERE LOWER(ea.alias) = LOWER(?) AND ce.profile_id = ?",
+            "WHERE LOWER(ea.alias) = LOWER(?) AND (ce.profile_id = ? OR ce.scope = 'global')",
             (name, profile_id),
         )
         if rows:
@@ -477,7 +484,7 @@ class EntityResolver:
         # Check canonical names
         rows = self._db.execute(
             "SELECT entity_id, canonical_name FROM canonical_entities "
-            "WHERE profile_id = ?",
+            "WHERE profile_id = ? OR scope = 'global'",
             (profile_id,),
         )
         for row in rows:
@@ -491,7 +498,7 @@ class EntityResolver:
         alias_rows = self._db.execute(
             "SELECT ea.entity_id, ea.alias FROM entity_aliases ea "
             "JOIN canonical_entities ce ON ce.entity_id = ea.entity_id "
-            "WHERE ce.profile_id = ?",
+            "WHERE ce.profile_id = ? OR ce.scope = 'global'",
             (profile_id,),
         )
         for row in alias_rows:
@@ -517,6 +524,7 @@ class EntityResolver:
         entity = CanonicalEntity(
             entity_id=_new_id(),
             profile_id=profile_id,
+            scope="global",
             canonical_name=name,
             entity_type=etype,
             first_seen=now,
@@ -564,6 +572,29 @@ class EntityResolver:
         self._db.execute(
             "UPDATE canonical_entities SET last_seen = ? WHERE entity_id = ?",
             (_now(), entity_id),
+        )
+
+    def _get_global_entity(self, name: str) -> CanonicalEntity | None:
+        """Look up entity in global scope only (Phase 3)."""
+        rows = self._db.execute(
+            "SELECT * FROM canonical_entities "
+            "WHERE LOWER(canonical_name) = LOWER(?) AND scope = 'global' "
+            "LIMIT 1",
+            (name,),
+        )
+        if not rows:
+            return None
+        d = dict(rows[0])
+        return CanonicalEntity(
+            entity_id=d["entity_id"],
+            profile_id=d["profile_id"],
+            scope=d.get("scope", "personal"),
+            shared_with=json.loads(d["shared_with"]) if d.get("shared_with") else None,
+            canonical_name=d["canonical_name"],
+            entity_type=d["entity_type"],
+            first_seen=d["first_seen"],
+            last_seen=d["last_seen"],
+            fact_count=d.get("fact_count", 0),
         )
 
     # -- Internal: LLM disambiguation (Mode B/C) ---------------------------

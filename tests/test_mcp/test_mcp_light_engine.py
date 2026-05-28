@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -124,3 +125,97 @@ def test_subprocess_does_not_import_onnxruntime():
     assert "ONNX_LOADED=False" in out, f"ONNX was loaded into MCP process: {out}"
     assert "EMBEDDER_NONE=True" in out, f"Embedder leaked: {out}"
     assert "CAPS=light" in out, f"Engine not LIGHT: {out}"
+
+
+# ── failure cooldown tests ────────────────────────────────────────────────
+
+
+def test_get_engine_cooldown_on_failure(monkeypatch):
+    """get_engine() raises RuntimeError during cooldown after init failure."""
+    from superlocalmemory.mcp import server as mcp_server
+
+    # Reset state
+    mcp_server.reset_engine()
+
+    # Force init to fail
+    def _fail(*args, **kwargs):
+        raise RuntimeError("simulated init failure")
+    monkeypatch.setattr(
+        "superlocalmemory.core.engine.MemoryEngine.initialize", _fail
+    )
+
+    # First call: should raise RuntimeError
+    with pytest.raises(RuntimeError, match="Engine init failed"):
+        mcp_server.get_engine()
+
+    # Second call within cooldown: should raise RuntimeError with "cooldown"
+    with pytest.raises(RuntimeError, match="temporarily unavailable"):
+        mcp_server.get_engine()
+
+    # Reset for cleanup
+    mcp_server.reset_engine()
+
+
+def test_get_engine_retry_after_cooldown(monkeypatch):
+    """get_engine() retries successfully after cooldown expires."""
+    from superlocalmemory.mcp import server as mcp_server
+
+    mcp_server.reset_engine()
+
+    # Override cooldown to 0.1s for fast test
+    monkeypatch.setattr(mcp_server, '_ENGINE_FAILURE_COOLDOWN_S', 0.1)
+
+    call_count = [0]
+    def _fail_once_then_succeed(self, *args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise RuntimeError("simulated init failure")
+        # succeed on retry
+
+    monkeypatch.setattr(
+        "superlocalmemory.core.engine.MemoryEngine.initialize", _fail_once_then_succeed
+    )
+
+    # First call fails
+    with pytest.raises(RuntimeError):
+        mcp_server.get_engine()
+
+    # Wait for cooldown
+    time.sleep(0.15)
+
+    # Second call should succeed
+    engine = mcp_server.get_engine()
+    assert engine is not None
+
+    mcp_server.reset_engine()
+
+
+def test_get_engine_repeated_failure_resets_cooldown(monkeypatch):
+    """Each failed init attempt resets the cooldown timer."""
+    from superlocalmemory.mcp import server as mcp_server
+
+    mcp_server.reset_engine()
+    monkeypatch.setattr(mcp_server, '_ENGINE_FAILURE_COOLDOWN_S', 0.1)
+
+    def _always_fail(*args, **kwargs):
+        raise RuntimeError("persistent init failure")
+    monkeypatch.setattr(
+        "superlocalmemory.core.engine.MemoryEngine.initialize", _always_fail
+    )
+
+    # First failure
+    with pytest.raises(RuntimeError, match="Engine init failed"):
+        mcp_server.get_engine()
+    first_failure = mcp_server._last_engine_failure
+
+    # Cooldown not yet expired
+    with pytest.raises(RuntimeError, match="temporarily unavailable"):
+        mcp_server.get_engine()
+
+    # After cooldown, retry fails again — cooldown timer resets
+    time.sleep(0.15)
+    with pytest.raises(RuntimeError, match="Engine init failed"):
+        mcp_server.get_engine()
+    assert mcp_server._last_engine_failure > first_failure
+
+    mcp_server.reset_engine()

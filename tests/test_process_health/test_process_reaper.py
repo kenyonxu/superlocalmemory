@@ -1306,3 +1306,54 @@ class TestCleanupForceSkipsSelf:
         # Self should NOT be killed
         assert os.getpid() not in killed_pids
         assert 88888 in killed_pids
+
+
+# ---------------------------------------------------------------------------
+# test_check_once_reaps_zombie_children — Hermes Agent diagnosis Fix #6
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="fork/proc is Linux-specific")
+def test_check_once_reaps_zombie_children():
+    """_check_once() reaps zombie child processes."""
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+
+    time.sleep(0.1)
+
+    # Verify child is zombie via /proc (read-only, does NOT reap it)
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("State:"):
+                    assert "Z" in line, f"Expected zombie state, got {line.strip()}"
+                    break
+    except FileNotFoundError:
+        pytest.skip(f"Child PID {pid} disappeared before check")
+
+    # Trigger a health check cycle
+    from superlocalmemory.core.health_monitor import HealthMonitor
+    monitor = HealthMonitor(
+        global_rss_budget_mb=5000,
+        heartbeat_timeout_sec=600,
+        check_interval_sec=60,
+        enable_structured_logging=False,
+    )
+    monitor._check_once()
+
+    # Verify zombie was reaped (read-only via /proc)
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("State:"):
+                    if "Z" in line:
+                        pytest.fail(f"Zombie NOT reaped by _check_once(): {line.strip()}")
+                    break
+    except FileNotFoundError:
+        pass  # Process fully gone = reaped successfully
+
+    # Defensive cleanup (no assertion tied to result)
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except (ProcessLookupError, ChildProcessError):
+        pass

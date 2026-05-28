@@ -24,7 +24,10 @@ from superlocalmemory.core.config import SLMConfig
 from superlocalmemory.core.engine_capabilities import Capabilities, CapabilityError
 from superlocalmemory.core.modes import get_capabilities
 from superlocalmemory.storage.models import (
-    AtomicFact, MemoryRecord, Mode, RecallResponse,
+    AtomicFact,
+    MemoryRecord,
+    Mode,
+    RecallResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -130,13 +133,22 @@ class MemoryEngine:
         self._initialized = True
         logger.info(
             "MemoryEngine initialized: mode=%s profile=%s capabilities=%s",
-            self._config.mode.value, self._profile_id,
+            self._config.mode.value,
+            self._profile_id,
             self._capabilities.value,
         )
 
         if self._capabilities is Capabilities.FULL:
             # Replay pending async writes only when heavy layer is available.
             self._process_pending_memories()
+            # One-shot: backfill entities + graph edges for facts that
+            # were created before the materializer entity-extraction fix.
+            _backfilled = self._backfill_entities_for_existing_facts()
+            if _backfilled:
+                logger.info(
+                    "Entity backfill: %d facts enriched with entities + graph edges",
+                    _backfilled,
+                )
 
     def _init_db_layer(self) -> None:
         from superlocalmemory.storage import schema
@@ -149,6 +161,7 @@ class MemoryEngine:
         # Idempotent — safe to call on every init. Skips if already applied.
         try:
             from superlocalmemory.storage.schema_v343 import apply_v343_schema
+
             apply_v343_schema(str(self._db.db_path))
         except Exception as exc:
             logger.warning("V3.4.3 schema migration failed: %s", exc)
@@ -156,6 +169,7 @@ class MemoryEngine:
         # V3.4.6: Apply "Connected Brain" mesh enhancements (broadcast, project routing, offline queue)
         try:
             from superlocalmemory.storage.schema_v343 import apply_v346_schema
+
             apply_v346_schema(str(self._db.db_path))
         except Exception as exc:
             logger.warning("V3.4.6 schema migration failed: %s", exc)
@@ -163,6 +177,7 @@ class MemoryEngine:
         # V3.4.7: Apply "Learning Brain" schema (tool_events, behavioral_assertions)
         try:
             from superlocalmemory.storage.schema_v347 import apply_v347_schema
+
             apply_v347_schema(str(self._db.db_path))
         except Exception as exc:
             logger.warning("V3.4.7 schema migration failed: %s", exc)
@@ -170,6 +185,7 @@ class MemoryEngine:
         # V3.4.10: Apply "Fortress" schema (backup_destinations, entity_blacklist)
         try:
             from superlocalmemory.storage.schema_v3410 import apply_v3410_schema
+
             apply_v3410_schema(str(self._db.db_path))
         except Exception as exc:
             logger.warning("V3.4.10 schema migration failed: %s", exc)
@@ -177,6 +193,7 @@ class MemoryEngine:
         # V3.4.11: Apply "Scale-Ready" schema (pinned_facts, backend_status, fact_consolidations)
         try:
             from superlocalmemory.storage.schema_v3411 import apply_v3411_schema
+
             apply_v3411_schema(str(self._db.db_path))
         except Exception as exc:
             logger.warning("V3.4.11 schema migration failed: %s", exc)
@@ -185,13 +202,18 @@ class MemoryEngine:
         # LIGHT so MCP report_feedback and session_init phase counters
         # work on the MCP process without loading the heavy layer.
         from superlocalmemory.learning.adaptive import AdaptiveLearner
+
         self._adaptive_learner = AdaptiveLearner(self._db)
 
     def _init_heavy_layer(self) -> None:
         from superlocalmemory.llm.backbone import LLMBackbone
         from superlocalmemory.core.engine_wiring import (
-            init_embedder, init_encoding, init_retrieval, wire_hooks,
-            _init_auto_invoker, _init_consolidation,
+            init_embedder,
+            init_encoding,
+            init_retrieval,
+            wire_hooks,
+            _init_auto_invoker,
+            _init_consolidation,
         )
 
         self._embedder = init_embedder(self._config)
@@ -211,7 +233,10 @@ class MemoryEngine:
         self._trust_scorer = TrustScorer(self._db)
 
         enc = init_encoding(
-            self._config, self._db, self._embedder, self._llm,
+            self._config,
+            self._db,
+            self._embedder,
+            self._llm,
         )
         self._ann_index = enc["ann_index"]
         self._fact_extractor = enc["fact_extractor"]
@@ -231,9 +256,22 @@ class MemoryEngine:
         self._auto_linker = enc.get("auto_linker")
         self._graph_analyzer = enc.get("graph_analyzer")
 
+        # Phase 2: load skill_tags from active profile config
+        try:
+            from superlocalmemory.core.profiles import ProfileManager
+            pm = ProfileManager(self._config.base_dir)
+            profile = pm.get_active_profile()
+            if profile and profile.skill_tags:
+                self._config.skill_tags = profile.skill_tags
+        except Exception:
+            pass  # skill_tags defaults to []
+
         self._retrieval_engine = init_retrieval(
-            self._config, self._db, self._embedder,
-            self._entity_resolver, self._trust_scorer,
+            self._config,
+            self._db,
+            self._embedder,
+            self._entity_resolver,
+            self._trust_scorer,
             vector_store=self._vector_store,
         )
 
@@ -243,23 +281,31 @@ class MemoryEngine:
         self._compliance_checker = EUAIActChecker()
 
         hook_result = wire_hooks(
-            self._hooks, self._config, self._db,
-            self._trust_scorer, self._profile_id,
+            self._hooks,
+            self._config,
+            self._db,
+            self._trust_scorer,
+            self._profile_id,
         )
         self._signal_recorder = hook_result["signal_recorder"]
         self._audit_chain = hook_result["audit_chain"]
 
         # V3.2: AutoInvoker (Phase 2) -- multi-signal auto-recall
         self._auto_invoker = _init_auto_invoker(
-            self._config, self._db, self._vector_store,
-            self._trust_scorer, self._embedder,
+            self._config,
+            self._db,
+            self._vector_store,
+            self._trust_scorer,
+            self._embedder,
         )
 
         # V3.2: ConsolidationEngine (Phase 5) -- sleep-time consolidation
         from superlocalmemory.core.summarizer import Summarizer
+
         summarizer = Summarizer(self._config)
         self._consolidation_engine = _init_consolidation(
-            self._config, self._db,
+            self._config,
+            self._db,
             auto_linker=self._auto_linker,
             graph_analyzer=self._graph_analyzer,
             temporal_validator=self._temporal_validator,
@@ -275,12 +321,97 @@ class MemoryEngine:
         if self._config.forgetting.enabled:
             try:
                 from superlocalmemory.core.maintenance_scheduler import MaintenanceScheduler
+
                 self._maintenance_scheduler = MaintenanceScheduler(
-                    self._db, self._config, self._profile_id,
+                    self._db,
+                    self._config,
+                    self._profile_id,
+                    embedder=self._embedder,
                 )
                 self._maintenance_scheduler.start()
             except Exception as exc:
                 logger.debug("Maintenance scheduler init failed: %s", exc)
+
+    def _backfill_entities_for_existing_facts(self) -> int:
+        """One-shot: populate entities + graph edges for facts that lack them.
+
+        Historical facts created before the materializer entity-extraction fix
+        have empty ``canonical_entities_json`` and zero graph edges.
+        This function extracts entities, resolves canonical IDs, updates the
+        fact row, and builds graph edges — using the same pipeline as new facts.
+
+        Returns the number of facts backfilled.
+        """
+        if not self._fact_extractor or not self._entity_resolver or not self._graph_builder:
+            return 0
+        try:
+            rows = self._db.execute(
+                "SELECT fact_id, content, fact_type, memory_id, embedding, "
+                "profile_id "
+                "FROM atomic_facts "
+                "WHERE canonical_entities_json = '[]'",
+            )
+            if not rows:
+                return 0
+            count = 0
+            entity_resolver = self._entity_resolver
+            graph_builder = self._graph_builder
+            fact_extractor = self._fact_extractor
+
+            import json as _json
+            from superlocalmemory.storage.models import AtomicFact
+
+            for row in rows:
+                fact_id = row["fact_id"]
+                content = row["content"]
+                row_profile_id = row["profile_id"]
+                try:
+                    # Extract entities from content
+                    extracted = fact_extractor.extract_facts([content], session_id="")
+                    entities: list[str] = []
+                    if extracted:
+                        for ef in extracted:
+                            entities.extend(getattr(ef, "entities", []))
+                        entities = list(set(entities))
+                    if not entities:
+                        continue
+                    # Resolve to canonical entity IDs
+                    canonical_map = entity_resolver.resolve(
+                        entities, row_profile_id,
+                    )
+                    canonical_ids = list(canonical_map.values())
+                    if not canonical_ids:
+                        continue
+                    # Update fact row with entities and canonical entities
+                    self._db.execute(
+                        "UPDATE atomic_facts "
+                        "SET entities_json = ?, canonical_entities_json = ? "
+                        "WHERE fact_id = ?",
+                        (
+                            _json.dumps(entities),
+                            _json.dumps(canonical_ids),
+                            fact_id,
+                        ),
+                    )
+                    # Build graph edges
+                    fact = AtomicFact(
+                        content=content,
+                        fact_type=row.get("fact_type", "episodic"),
+                        memory_id=row.get("memory_id", ""),
+                        profile_id=row_profile_id,
+                        entities=entities,
+                        canonical_entities=canonical_ids,
+                    )
+                    if row.get("embedding"):
+                        fact.embedding = _json.loads(row["embedding"])
+                    graph_builder.build_edges(fact, row_profile_id)
+                    count += 1
+                except Exception:
+                    pass  # best-effort per fact
+            return count
+        except Exception as exc:
+            logger.debug("Entity backfill skipped: %s", exc)
+            return 0
 
     def _process_pending_memories(self) -> None:
         """Process pending memories from store-first async pattern.
@@ -291,7 +422,9 @@ class MemoryEngine:
         """
         try:
             from superlocalmemory.cli.pending_store import (
-                get_pending, mark_done, mark_failed,
+                get_pending,
+                mark_done,
+                mark_failed,
             )
         except ImportError:
             return
@@ -320,17 +453,27 @@ class MemoryEngine:
         speaker: str = "",
         role: str = "user",
         metadata: dict[str, Any] | None = None,
+        scope: str = "personal",
+        shared_with: list[str] | None = None,
     ) -> list[str]:
         """Store content and extract structured facts. Returns fact_ids."""
         self._require_full("store")
         self._ensure_init()
 
         from superlocalmemory.core.store_pipeline import run_store
+
         return run_store(
-            content, self._profile_id,
-            session_id=session_id, session_date=session_date,
-            speaker=speaker, role=role, metadata=metadata,
-            config=self._config, db=self._db,
+            content,
+            self._profile_id,
+            session_id=session_id,
+            session_date=session_date,
+            speaker=speaker,
+            role=role,
+            metadata=metadata,
+            scope=scope,
+            shared_with=shared_with,
+            config=self._config,
+            db=self._db,
             embedder=self._embedder,
             fact_extractor=self._fact_extractor,
             entity_resolver=self._entity_resolver,
@@ -351,6 +494,7 @@ class MemoryEngine:
             temporal_validator=self._temporal_validator,
             auto_linker=self._auto_linker,
             consolidation_engine=self._consolidation_engine,
+            llm=self._llm,
         )
 
     def store_fact_direct(self, fact: AtomicFact) -> str:
@@ -359,9 +503,12 @@ class MemoryEngine:
         self._ensure_init()
 
         from superlocalmemory.core.store_pipeline import run_store_fact_direct
+
         return run_store_fact_direct(
-            fact, self._profile_id,
-            db=self._db, embedder=self._embedder,
+            fact,
+            self._profile_id,
+            db=self._db,
+            embedder=self._embedder,
             entity_resolver=self._entity_resolver,
             ann_index=self._ann_index,
             graph_builder=self._graph_builder,
@@ -369,14 +516,43 @@ class MemoryEngine:
             vector_store=self._vector_store,
         )
 
+    def merge_entities(
+        self,
+        source_entity_id: str,
+        target_entity_id: str,
+    ) -> dict[str, int | bool]:
+        """Merge source entity into target entity.
+
+        Moves aliases, rewrites facts and edges, deletes source.
+        Typically used to consolidate pre-Phase 3 personal entities
+        into global authoritative entities.
+
+        Args:
+            source_entity_id: Entity to merge from (will be deleted).
+            target_entity_id: Entity to merge into (kept).
+
+        Returns:
+            Dict with aliases_moved, facts_updated, edges_updated, source_deleted.
+        """
+        return self._db.merge_entities(
+            source_entity_id=source_entity_id,
+            target_entity_id=target_entity_id,
+            profile_id=self._profile_id,
+        )
+
     # -- Recall operations --------------------------------------------------
 
     def recall(
-        self, query: str, profile_id: str | None = None,
-        mode: Mode | None = None, limit: int = 20,
+        self,
+        query: str,
+        profile_id: str | None = None,
+        mode: Mode | None = None,
+        limit: int = 20,
         agent_id: str = "unknown",
         session_id: str | None = None,
         fast: bool = False,
+        include_global: bool = True,
+        include_shared: bool = True,
     ) -> RecallResponse:
         """Recall relevant facts for a query.
 
@@ -398,13 +574,21 @@ class MemoryEngine:
         pid = profile_id or self._profile_id
 
         from superlocalmemory.core.recall_pipeline import run_recall
+
         response = run_recall(
-            query, pid, mode=mode, limit=limit, agent_id=agent_id,
+            query,
+            pid,
+            mode=mode,
+            limit=limit,
+            agent_id=agent_id,
+            include_global=include_global,
+            include_shared=include_shared,
             config=self._config,
             retrieval_engine=self._retrieval_engine,
             trust_scorer=self._trust_scorer,
             embedder=self._embedder,
-            db=self._db, llm=self._llm,
+            db=self._db,
+            llm=self._llm,
             hooks=self._hooks,
             access_log=self._access_log,
             auto_linker=self._auto_linker,
@@ -417,8 +601,10 @@ class MemoryEngine:
         if session_id:
             try:
                 from superlocalmemory.learning.outcome_queue import (
-                    RecallEvent, enqueue_recall,
+                    RecallEvent,
+                    enqueue_recall,
                 )
+
                 fact_ids = tuple(
                     getattr(r.fact, "fact_id", "") or ""
                     for r in getattr(response, "results", [])
@@ -426,13 +612,15 @@ class MemoryEngine:
                 )
                 fact_ids = tuple(f for f in fact_ids if f)
                 if fact_ids:
-                    enqueue_recall(RecallEvent(
-                        session_id=session_id,
-                        profile_id=pid,
-                        query=query,
-                        fact_ids=fact_ids,
-                        query_id=getattr(response, "query_id", "") or "",
-                    ))
+                    enqueue_recall(
+                        RecallEvent(
+                            session_id=session_id,
+                            profile_id=pid,
+                            query=query,
+                            fact_ids=fact_ids,
+                            query_id=getattr(response, "query_id", "") or "",
+                        )
+                    )
             except Exception as _outcome_exc:
                 # Engagement-signal enqueue is non-blocking; recall
                 # correctness does not depend on it. Log so the failure
@@ -447,14 +635,18 @@ class MemoryEngine:
     # -- Session operations -------------------------------------------------
 
     def create_speaker_entities(
-        self, speaker_a: str, speaker_b: str,
+        self,
+        speaker_a: str,
+        speaker_b: str,
     ) -> None:
         """Pre-create canonical entities for conversation speakers."""
         self._require_full("create_speaker_entities")
         self._ensure_init()
         if self._entity_resolver:
             self._entity_resolver.create_speaker_entities(
-                speaker_a, speaker_b, self._profile_id,
+                speaker_a,
+                speaker_b,
+                self._profile_id,
             )
 
     def close_session(self, session_id: str) -> int:
@@ -462,8 +654,11 @@ class MemoryEngine:
         self._ensure_init()
 
         from superlocalmemory.core.store_pipeline import run_close_session
+
         return run_close_session(
-            session_id, self._profile_id, db=self._db,
+            session_id,
+            self._profile_id,
+            db=self._db,
         )
 
     # -- Lifecycle ----------------------------------------------------------
@@ -500,13 +695,17 @@ class MemoryEngine:
                 check_embedding_migration,
                 run_embedding_migration,
             )
+
             if check_embedding_migration(self._config):
                 count = run_embedding_migration(
-                    self._config, self._db, self._embedder,
+                    self._config,
+                    self._db,
+                    self._embedder,
                 )
                 if count > 0:
                     logger.info(
-                        "Embedding migration: %d facts re-embedded", count,
+                        "Embedding migration: %d facts re-embedded",
+                        count,
                     )
         except Exception as exc:
             logger.warning("Embedding migration check failed: %s", exc)

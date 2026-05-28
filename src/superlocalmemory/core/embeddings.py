@@ -165,8 +165,16 @@ class EmbeddingService:
     ~3 sec (model reload). Subsequent embeds are instant (<100ms).
     """
 
-    def __init__(self, config: EmbeddingConfig) -> None:
+    def __init__(
+        self,
+        config: EmbeddingConfig,
+        *,
+        proxy_http: str = "",
+        proxy_https: str = "",
+    ) -> None:
         self._config = config
+        self._proxy_http = proxy_http
+        self._proxy_https = proxy_https
         self._lock = threading.Lock()
         self._worker_proc: subprocess.Popen | None = None
         self._available = True
@@ -474,6 +482,22 @@ class EmbeddingService:
                 "TORCH_DEVICE": "cpu",
                 "ORT_DISABLE_COREML": "1",
             }
+            # v3.4.45+: Remove HF mirror endpoint — hf-mirror.com has SSL issues
+            # that cause model loading to hang >180s (5 retries × ~23s per API call).
+            # Worker defaults to huggingface.co which works via proxy.
+            env.pop("HF_ENDPOINT", None)
+            # Wire proxy from config (SLMConfig.proxy) so the worker can reach
+            # huggingface.co in network-restricted environments.
+            if self._proxy_http:
+                env["http_proxy"] = self._proxy_http
+            if self._proxy_https:
+                env["https_proxy"] = self._proxy_https
+            # Also forward any proxy vars from the parent environment as fallback
+            for _proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+                               "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY"):
+                _pv = os.environ.get(_proxy_var)
+                if _pv:
+                    env.setdefault(_proxy_var, _pv)
             from superlocalmemory.core.platform_utils import popen_platform_kwargs
             self._worker_proc = subprocess.Popen(
                 [sys.executable, "-m", worker_module],

@@ -514,6 +514,55 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("update_memory failed")
             return {"success": False, "error": str(exc)}
 
+    @server.tool(annotations=ToolAnnotations(idempotentHint=True))
+    async def add_domain_mapping(entity_name: str, domain: str) -> dict:
+        """Add an entity-to-domain mapping for skill-domain tagging.
+
+        Maps an entity name (e.g. 'SolidJS', 'Kubernetes') to a skill domain
+        (e.g. 'frontend', 'devops'). Facts mentioning this entity will
+        automatically receive the domain tag for cross-profile visibility.
+        Duplicate mappings are silently ignored (idempotent).
+        """
+        try:
+            engine = get_engine()
+            engine._db.execute(
+                "INSERT OR IGNORE INTO domain_mapping (entity_name, domain) "
+                "VALUES (?, ?)",
+                (entity_name, domain),
+            )
+            engine._db.commit()
+            return {
+                "success": True,
+                "mapping": {"entity_name": entity_name, "domain": domain},
+            }
+        except Exception as exc:
+            logger.exception("add_domain_mapping failed")
+            return {"success": False, "error": str(exc)}
+
+    @server.tool(annotations=ToolAnnotations(destructiveHint=True))
+    async def remove_domain_mapping(entity_name: str, domain: str) -> dict:
+        """Remove an entity-to-domain mapping.
+
+        Use this to correct misclassifications from LLM-based domain tagging.
+        Example: remove_domain_mapping("Celery", "backend")
+        """
+        try:
+            engine = get_engine()
+            cursor = engine._db.execute(
+                "DELETE FROM domain_mapping WHERE entity_name = ? AND domain = ?",
+                (entity_name, domain),
+            )
+            engine._db.commit()
+            if cursor.rowcount == 0:
+                return {
+                    "success": False,
+                    "error": f"No mapping found for '{entity_name}' -> '{domain}'",
+                }
+            return {"success": True, "removed": {"entity_name": entity_name, "domain": domain}}
+        except Exception as exc:
+            logger.exception("remove_domain_mapping failed")
+            return {"success": False, "error": str(exc)}
+
     @server.tool()
     async def get_attribution() -> dict:
         """Get system attribution: author, version, license, and provenance metadata."""
@@ -530,6 +579,45 @@ def register_core_tools(server, get_engine: Callable) -> None:
             },
         }
 
+    @server.tool()
+    async def merge_entities(
+        source_entity_id: str,
+        target_entity_id: str,
+    ) -> dict:
+        """Merge source entity into target entity. Consolidates duplicate entities.
+
+        Moves all aliases, rewrites facts and graph edges, deletes source entity.
+        Uses the engine's active profile.
+        """
+        try:
+            engine = get_engine()
+            result = engine.merge_entities(
+                source_entity_id=source_entity_id,
+                target_entity_id=target_entity_id,
+            )
+            return {
+                "success": True,
+                "data": result,
+                "message": (
+                    f"Merged {source_entity_id} -> {target_entity_id}: "
+                    f"{result.get('aliases_moved', 0)} aliases, "
+                    f"{result.get('facts_updated', 0)} facts, "
+                    f"{result.get('edges_updated', 0)} edges"
+                ),
+            }
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        except Exception as e:
+            return {"success": False, "error": f"Merge failed: {e}"}
+
+    # Module-level reference for testability
+    import superlocalmemory.mcp.tools_core as _tc
+    _tc._tool_merge_entities = merge_entities
+
+
+# -- Module-level references for testability ----------------------------------
+
+_tool_merge_entities = None
 
 # -- Helpers ------------------------------------------------------------------
 

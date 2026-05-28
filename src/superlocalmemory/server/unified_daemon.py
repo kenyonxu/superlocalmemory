@@ -42,7 +42,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 logger = logging.getLogger("superlocalmemory.unified_daemon")
 
@@ -59,7 +59,16 @@ _PORT_FILE = Path.home() / ".superlocalmemory" / "daemon.port"
 class RememberRequest(BaseModel):
     content: str
     tags: str = ""
+    scope: str = "personal"
+    shared_with: str = ""
     metadata: dict | None = None  # v3.4.26: pass-through from MCP pool_store
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, v: str) -> str:
+        if v not in ("personal", "global", "shared"):
+            raise ValueError(f"Invalid scope '{v}', must be personal/global/shared")
+        return v
 
 
 class ObserveRequest(BaseModel):
@@ -618,7 +627,7 @@ async def lifespan(application: FastAPI):
 
     # Phase B: Start health monitor
     try:
-        from superlocalmemory.core.health_monitor import HealthMonitor
+        from superlocalmemory.core.health_monitor import HealthMonitor, register_health_check
         health_config = getattr(config, 'health', None)
         monitor = HealthMonitor(
             global_rss_budget_mb=getattr(health_config, 'global_rss_budget_mb', 2500) if health_config else 2500,
@@ -628,6 +637,14 @@ async def lifespan(application: FastAPI):
         )
         monitor.start()
         application.state.health_monitor = monitor
+
+        # Register engine health check from daemon side (avoids core→server reverse dep)
+        def _check_engine():
+            engine = getattr(application.state, "engine", None)
+            if engine is None:
+                return {"name": "engine", "status": "critical", "detail": "Engine unavailable"}
+            return {"name": "engine", "status": "ok", "detail": "Engine initialized"}
+        register_health_check(_check_engine)
     except Exception as exc:
         logger.debug("Health monitor init: %s", exc)
         application.state.health_monitor = None
@@ -1328,8 +1345,9 @@ def _register_daemon_routes(application: FastAPI) -> None:
     @application.get("/health")
     async def health():
         _update_activity()
-        # Non-blocking peek: report status without forcing a re-init.
         engine = getattr(application.state, "engine", None)
+        if engine is None:
+            engine = get_engine_lazy(application.state)  # attempts recovery, 5s cooldown
         return {
             "status": "ok",
             "pid": os.getpid(),
@@ -1451,13 +1469,24 @@ def _register_daemon_routes(application: FastAPI) -> None:
         _update_activity()
         engine = _get_engine_or_503()
 
+        # Parse shared_with comma-separated string into list
+        parsed_shared = (
+            [s.strip() for s in req.shared_with.split(",") if s.strip()]
+            if req.shared_with else None
+        )
+
         if wait:
             try:
                 metadata = {"tags": req.tags} if req.tags else {}
                 extra = getattr(req, "metadata", None)
                 if isinstance(extra, dict):
                     metadata.update(extra)
-                fact_ids = engine.store(req.content, metadata=metadata)
+                fact_ids = engine.store(
+                    req.content,
+                    metadata=metadata,
+                    scope=req.scope,
+                    shared_with=parsed_shared,
+                )
                 return {"ok": True, "fact_ids": fact_ids, "count": len(fact_ids)}
             except Exception as exc:
                 raise HTTPException(500, detail=str(exc))
@@ -1467,6 +1496,9 @@ def _register_daemon_routes(application: FastAPI) -> None:
             meta = {}
             if req.tags:
                 meta["tags"] = req.tags
+            meta["scope"] = req.scope
+            if parsed_shared:
+                meta["shared_with"] = parsed_shared
             extra = getattr(req, "metadata", None)
             if isinstance(extra, dict):
                 meta.update(extra)
@@ -1722,6 +1754,10 @@ def _start_pending_materializer() -> None:
                             md = {}
                         if item.get("tags"):
                             md.setdefault("tags", item["tags"])
+                        # T1: extract scope and shared_with from metadata
+                        scope = md.pop("scope", "personal")
+                        shared_with_raw = md.pop("shared_with", None)
+                        shared_with = shared_with_raw if isinstance(shared_with_raw, list) else None
                         # Create memory row (FK target for atomic_facts)
                         from datetime import datetime, timezone
                         from superlocalmemory.storage.models import (
@@ -1732,17 +1768,39 @@ def _start_pending_materializer() -> None:
                             "INSERT OR IGNORE INTO memories "
                             "(memory_id, profile_id, content, "
                             "session_id, speaker, role, created_at, "
-                            "metadata_json) VALUES (?,?,?,?,?,?,?,?)",
+                            "scope, shared_with, metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
                             (mem_id, engine._profile_id, content,
                              "", "", "user",
                              datetime.now(timezone.utc).isoformat(),
+                             scope,
+                             _json.dumps(shared_with) if shared_with else None,
                              _json.dumps(md)),
                         )
+                        # Extract entities so entity resolver + graph builder
+                        # can produce KG edges (materializer was skipping both).
+                        entities: list[str] = []
+                        _fact_extractor = getattr(engine, '_fact_extractor', None)
+                        if _fact_extractor:
+                            try:
+                                extracted = _fact_extractor.extract_facts(
+                                    [content], session_id="",
+                                )
+                                if extracted:
+                                    for ef in extracted:
+                                        entities.extend(
+                                            getattr(ef, 'entities', [])
+                                        )
+                                    entities = list(set(entities))
+                            except Exception:
+                                pass  # entity extraction is best-effort
                         fact = AtomicFact(
                             content=content,
                             fact_type=FactType.EPISODIC,
                             memory_id=mem_id,
                             profile_id=engine._profile_id,
+                            scope=scope,
+                            shared_with=shared_with,
+                            entities=entities,
                         )
                         engine.store_fact_direct(fact)
                         mark_done(item["id"])

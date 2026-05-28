@@ -159,10 +159,19 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
                     errors.append(f"Memory {idx}: missing 'content' field")
                     continue
 
+                # Extract and validate scope
+                scope = memory.get("scope", "personal")
+                if scope not in ("personal", "global", "shared"):
+                    errors.append(f"Memory {idx}: invalid scope '{scope}'")
+                    continue
+                shared_with = memory.get("shared_with")
+
                 if engine:
                     engine.store(
                         content=memory_content,
                         session_id=memory.get('session_id', ''),
+                        scope=scope,
+                        shared_with=shared_with,
                         metadata={
                             "project_name": memory.get('project_name'),
                             "category": memory.get('category'),
@@ -170,7 +179,7 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
                         },
                     )
                 else:
-                    # Fallback: direct DB insert
+                    # Fallback: direct DB insert (minimal scope handling)
                     conn = get_db_connection()
                     cursor = conn.cursor()
                     cursor.execute(

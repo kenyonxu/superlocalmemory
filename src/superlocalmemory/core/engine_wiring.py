@@ -535,6 +535,8 @@ def init_retrieval(
         profile_channel=profile_ch,
         bridge_discovery=bridge,
         trust_scorer=trust_scorer,
+        skill_tags=config.skill_tags,
+        scope_weights=config.scope_weights,
     )
 
     # V3.3.13: Ensure reranker warmup is in progress.

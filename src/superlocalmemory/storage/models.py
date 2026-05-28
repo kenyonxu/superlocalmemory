@@ -109,6 +109,10 @@ class Profile:
     last_used: str | None = None
     config: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def skill_tags(self) -> list[str]:
+        return self.config.get("skill_tags", [])
+
 
 @dataclass
 class MemoryRecord:
@@ -119,6 +123,8 @@ class MemoryRecord:
 
     memory_id: str = field(default_factory=_new_id)
     profile_id: str = "default"
+    scope: str = "personal"
+    shared_with: list[str] | None = None
     content: str = ""
     session_id: str = ""
     speaker: str = ""              # Who said this
@@ -139,6 +145,9 @@ class AtomicFact:
     fact_id: str = field(default_factory=_new_id)
     memory_id: str = ""            # Source memory this was extracted from
     profile_id: str = "default"
+    scope: str = "personal"
+    shared_with: list[str] | None = None
+    domain_tags: list[str] | None = None
     content: str = ""              # Atomic fact statement
     fact_type: FactType = FactType.SEMANTIC
 
@@ -190,6 +199,8 @@ class CanonicalEntity:
 
     entity_id: str = field(default_factory=_new_id)
     profile_id: str = "default"
+    scope: str = "personal"
+    shared_with: list[str] | None = None
     canonical_name: str = ""
     entity_type: str = ""          # person / place / org / concept / event
     first_seen: str = field(default_factory=_now)
@@ -248,6 +259,8 @@ class TemporalEvent:
 
     event_id: str = field(default_factory=_new_id)
     profile_id: str = "default"
+    scope: str = "personal"
+    shared_with: list[str] | None = None
     entity_id: str = ""            # FK to CanonicalEntity
     fact_id: str = ""              # FK to AtomicFact
     observation_date: str | None = None
@@ -263,6 +276,8 @@ class GraphEdge:
 
     edge_id: str = field(default_factory=_new_id)
     profile_id: str = "default"
+    scope: str = "personal"
+    shared_with: list[str] | None = None
     source_id: str = ""            # Fact ID or Entity ID
     target_id: str = ""            # Fact ID or Entity ID
     edge_type: EdgeType = EdgeType.ENTITY

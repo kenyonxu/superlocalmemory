@@ -90,6 +90,8 @@ def run_maintenance(
     db: DatabaseManager,
     config: SLMConfig,
     profile_id: str = "default",
+    *,
+    embedder: Any = None,
 ) -> dict[str, int]:
     """Run background maintenance on mathematical layers.
 
@@ -306,11 +308,37 @@ def run_maintenance(
     except Exception as exc:
         logger.warning("Entity summary consolidation failed: %s", exc)
 
+    # 4. NULL embedding backfill: re-embed facts that were stored before
+    #    embed worker was ready (e.g., materializer-created facts).
+    counts["embedding_backfilled"] = 0
+    if embedder is not None:
+        try:
+            null_rows = db.execute(
+                "SELECT fact_id, content FROM atomic_facts "
+                "WHERE embedding IS NULL LIMIT 50",
+            )
+            if null_rows:
+                batch_texts = [r["content"] for r in null_rows]
+                batch_ids = [r["fact_id"] for r in null_rows]
+                vectors = embedder.embed_batch(batch_texts)
+                if vectors:
+                    import json as _json
+                    for fid, vec in zip(batch_ids, vectors):
+                        if vec is not None:
+                            db.execute(
+                                "UPDATE atomic_facts SET embedding = ? "
+                                "WHERE fact_id = ?",
+                                (_json.dumps(vec), fid),
+                            )
+                            counts["embedding_backfilled"] += 1
+        except Exception as exc:
+            logger.debug("Embedding backfill skipped: %s", exc)
+
     logger.info(
         "Maintenance complete: %d backfilled, %d Langevin, %d Fisher-coupled, "
-        "%d Sheaf, %d entity-summaries",
+        "%d Sheaf, %d entity-summaries, %d embedding",
         counts["langevin_backfilled"], counts["langevin_updated"],
         counts["fisher_coupled"], counts["sheaf_checked"],
-        counts["entity_summaries_consolidated"],
+        counts["entity_summaries_consolidated"], counts["embedding_backfilled"],
     )
     return counts

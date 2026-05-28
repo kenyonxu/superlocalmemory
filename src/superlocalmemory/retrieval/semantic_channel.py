@@ -103,6 +103,9 @@ class SemanticChannel:
         query_embedding: list[float],
         profile_id: str,
         top_k: int = 50,
+        *,
+        scope: str = "personal",
+        skill_tags: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Search for semantically similar facts.
 
@@ -113,6 +116,7 @@ class SemanticChannel:
             query_embedding: Dense vector for the query.
             profile_id: Scope to this profile.
             top_k: Maximum results to return.
+            scope: Memory scope to search (personal, global, shared).
 
         Returns:
             List of (fact_id, score) sorted by score descending.
@@ -127,13 +131,15 @@ class SemanticChannel:
         if self._vector_store and self._vector_store.available:
             results = self._search_via_vector_store(
                 query_embedding, q_vec, profile_id, top_k,
+                scope=scope, skill_tags=skill_tags,
             )
             if results:  # If vec0 returned results, use them
                 return results
             # If vec0 is empty (cold start), fall through to full scan
 
         # --- FALLBACK: full-table scan (original code, unchanged) ---
-        return self._search_full_scan(query_embedding, q_vec, profile_id, top_k)
+        return self._search_full_scan(query_embedding, q_vec, profile_id, top_k,
+                                      scope=scope, skill_tags=skill_tags)
 
     def _search_via_vector_store(
         self,
@@ -141,6 +147,9 @@ class SemanticChannel:
         q_vec: np.ndarray,
         profile_id: str,
         top_k: int,
+        *,
+        scope: str = "personal",
+        skill_tags: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """KNN via VectorStore (or QAS 3-tier), then Fisher-Rao re-scoring."""
         # V3.3.19: Try TurboQuant 3-tier search first (float32 + int8 + polar)
@@ -218,6 +227,9 @@ class SemanticChannel:
         q_vec: np.ndarray,
         profile_id: str,
         top_k: int,
+        *,
+        scope: str = "personal",
+        skill_tags: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Original full-table-scan search. Used as fallback when VectorStore
         is unavailable or empty (cold start).
@@ -230,7 +242,14 @@ class SemanticChannel:
             q_mean = np.array(qm, dtype=np.float32)
             q_var = np.array(qv, dtype=np.float32)
 
-        facts = self._db.get_all_facts(profile_id)
+        # Scope-aware fact loading: pass scope to DB for filtered retrieval
+        include_global = (scope == "global")
+        include_shared = (scope == "shared")
+        facts = self._db.get_all_facts(
+            profile_id, scope="personal",
+            include_global=include_global, include_shared=include_shared,
+            skill_tags=skill_tags,
+        )
 
         scored: list[tuple[str, float]] = []
         for fact in facts:

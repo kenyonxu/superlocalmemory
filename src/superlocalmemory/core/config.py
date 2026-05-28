@@ -120,6 +120,28 @@ class ChannelWeights:
 
 
 # ---------------------------------------------------------------------------
+# Scope Weights
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ScopeWeights:
+    """RRF fusion weights for multi-scope retrieval."""
+
+    personal: float = 1.0
+    shared: float = 0.7
+    global_: float = 0.5  # trailing underscore avoids Python keyword
+
+    def __post_init__(self) -> None:
+        for name in ("personal", "shared", "global_"):
+            val = getattr(self, name)
+            if val < 0:
+                raise ValueError(f"ScopeWeights values must be non-negative, got {name}={val}")
+
+    def as_dict(self) -> dict[str, float]:
+        return {"personal": self.personal, "shared": self.shared, "global": self.global_}
+
+
+# ---------------------------------------------------------------------------
 # Encoding Config
 # ---------------------------------------------------------------------------
 
@@ -523,6 +545,20 @@ class EvolutionConfig:
     max_evolutions_per_cycle: int = 3            # Budget cap per consolidation
 
 
+@dataclass
+class ProxyConfig:
+    """HTTP/HTTPS proxy for embedding worker subprocess.
+
+    The daemon process has a stripped environment (no shell proxy vars).
+    When the embedding worker needs to reach huggingface.co to verify
+    model files, it must go through a proxy if the network is restricted.
+    Empty strings mean no proxy (direct connection or env-var fallback).
+    """
+
+    http: str = ""
+    https: str = ""
+
+
 @dataclass(frozen=True)
 class AutoInvokeConfig:
     """Configuration for the Auto-Invoke Engine (Phase 2).
@@ -590,10 +626,12 @@ class SLMConfig:
     base_dir: Path = DEFAULT_BASE_DIR
     db_path: Path | None = None    # Computed from base_dir if None
     active_profile: str = "default"
+    skill_tags: list[str] = field(default_factory=list)
 
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     channel_weights: ChannelWeights = field(default_factory=ChannelWeights)
+    scope_weights: ScopeWeights = field(default_factory=ScopeWeights)
     encoding: EncodingConfig = field(default_factory=EncodingConfig)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     math: MathConfig = field(default_factory=MathConfig)
@@ -614,6 +652,7 @@ class SLMConfig:
         default_factory=ParameterizationConfig,
     )
     evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
+    proxy: ProxyConfig = field(default_factory=ProxyConfig)
 
     # v3.4.3: Daemon configuration
     daemon_idle_timeout: int = 0       # 0 = 24/7 (no auto-kill). >0 = seconds before auto-kill.
@@ -701,6 +740,22 @@ class SLMConfig:
                 if k in EvolutionConfig.__dataclass_fields__
             })
 
+        # V3.4.45+: Proxy config for embedding worker
+        proxy = data.get("proxy", {})
+        if proxy:
+            config.proxy = ProxyConfig(
+                http=proxy.get("http", ""),
+                https=proxy.get("https", ""),
+            )
+
+        # Multi-scope memory: scope weights
+        sw = data.get("scope_weights", {})
+        if sw:
+            config.scope_weights = ScopeWeights(**{
+                k: v for k, v in sw.items()
+                if k in ScopeWeights.__dataclass_fields__
+            })
+
         return config
 
     def save(
@@ -773,6 +828,19 @@ class SLMConfig:
             "enabled": self.evolution.enabled,
             "backend": self.evolution.backend,
             "max_evolutions_per_cycle": self.evolution.max_evolutions_per_cycle,
+        }
+
+        # Proxy config for embedding worker
+        data["proxy"] = {
+            "http": self.proxy.http,
+            "https": self.proxy.https,
+        }
+
+        # Multi-scope memory: scope weights
+        data["scope_weights"] = {
+            "personal": self.scope_weights.personal,
+            "shared": self.scope_weights.shared,
+            "global_": self.scope_weights.global_,
         }
 
         # Preserve existing V3.3 config sections that aren't in for_mode()

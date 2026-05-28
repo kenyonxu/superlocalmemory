@@ -66,6 +66,8 @@ class RetrievalEngine:
         profile_channel: Any | None = None,
         bridge_discovery: Any | None = None,
         trust_scorer: TrustScorer | None = None,
+        skill_tags: list[str] | None = None,
+        scope_weights: Any | None = None,
     ) -> None:
         self._db = db
         self._config = config
@@ -84,6 +86,8 @@ class RetrievalEngine:
         self._profile_channel = profile_channel
         self._bridge = bridge_discovery
         self._trust_scorer = trust_scorer
+        self._skill_tags = skill_tags or []
+        self._scope_weights = scope_weights
 
         # V3.3.4: LRU cache for query embeddings (avoids redundant Ollama API calls)
         # V3.4.40 (2026-05-09): bumped 64 -> 512. Each cached embedding is ~3KB
@@ -117,8 +121,13 @@ class RetrievalEngine:
         mode: Mode = Mode.A, limit: int = 20,
         *,
         extra_disabled_channels: set[str] | None = None,
+        include_global: bool = True,
+        include_shared: bool = True,
     ) -> RecallResponse:
         """Full retrieval pipeline: strategy -> channels -> RRF -> rerank.
+
+        Multi-scope: include_global/include_shared control which scopes
+        participate in retrieval.
 
         V3.4.40 (2026-05-09): ``extra_disabled_channels`` allows callers to
         skip specific channels for a single recall (e.g. SpreadingActivation
