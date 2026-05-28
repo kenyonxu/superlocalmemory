@@ -582,6 +582,8 @@ def run_recall(
     auto_linker: Any = None,
     fast: bool = False,
     scope: str = "personal",
+    include_global: bool = True,
+    include_shared: bool = True,
 ) -> RecallResponse:
     """Recall relevant facts for a query.
 

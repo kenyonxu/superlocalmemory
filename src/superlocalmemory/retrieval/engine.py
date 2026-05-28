@@ -119,8 +119,13 @@ class RetrievalEngine:
         mode: Mode = Mode.A, limit: int = 20,
         *,
         extra_disabled_channels: set[str] | None = None,
+        include_global: bool = True,
+        include_shared: bool = True,
     ) -> RecallResponse:
         """Full retrieval pipeline: strategy -> channels -> RRF -> rerank.
+
+        Multi-scope: include_global/include_shared control which scopes
+        participate in retrieval.
 
         V3.4.40 (2026-05-09): ``extra_disabled_channels`` allows callers to
         skip specific channels for a single recall (e.g. SpreadingActivation
