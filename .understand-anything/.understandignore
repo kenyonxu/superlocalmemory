@@ -1,0 +1,143 @@
+# .understandignore — 要排除分析的文件/目录模式
+# 语法：与 .gitignore 相同（glob、# 注释、! 否定、尾部 / 表示目录）
+# 下面的行是建议 — 取消注释以激活。
+# 使用 ! 前缀强制包含被默认排除的内容。
+#
+# 内置默认值（始终排除，除非被否定）：
+#   node_modules/, .git/, dist/, build/, obj/, *.lock, *.min.js 等
+#
+# --- 来自 .gitignore （取消注释以排除） ---
+
+# memory.db
+# *.db
+# !demo-memory.db
+# backups/
+# profiles/
+# /benchmarks/
+# tests/benchmarks/
+# docs/plans/
+# vectors/
+# cold-storage/
+# jobs/
+# profiles.json
+# .backup/
+# .claude/
+# .agent/
+# .cursor/
+# .github/copilot-instructions.md
+# <MagicMock*
+# /x
+# *STRATEGY*.md
+# *SCREENSHOT*.md
+# *THUMBNAIL*.md
+# *QUALITY-CHECK*.md
+# *GIF-CREATION*.md
+# *OPTIMIZATION-REPORT*.md
+# *QUICK-REFERENCE*.md
+# SEO-*.md
+# MARKETING-*.md
+# AGENT-*.md
+# TASK-*.md
+# annotate_screenshots.py
+# capture-screenshots.py
+# add_attribution.py
+# /*.png
+# /*.jpg
+# /*.jpeg
+# *.egg-info/
+# *.egg
+# *.dmg
+# *.exe
+# *.tgz
+# *.sha256
+# !tests/test_benchmarks/fixtures/*.sha256
+# *.md5
+# package/
+# *.pyc
+# *.pyo
+# *.pyd
+# .Python
+# *.so
+# env/
+# ENV/
+# uv.lock
+# .mcpregistry_github_token
+# .mcpregistry_registry_token
+# *_token
+# *_secret
+# *.token
+# .DS_Store
+# .DS_Store?
+# ._*
+# .Spotlight-V100
+# .Trashes
+# Thumbs.db
+# *.swp
+# *.swo
+# *~
+# website/node_modules/
+# website/dist/
+# website/.astro/
+# CLAUDE.md
+# FIXES-*.md
+# STATUS-SUMMARY-*.md
+# TASK-*.md
+# TASKS-*.md
+# TASK_*.md
+# COMPLETION*.md
+# AGENT-*.md
+# AGENT_*.md
+# TEST_REPORT.md
+# GAPS-AND-ISSUES.md
+# *STRATEGY*.md
+# SEO-*.md
+# MARKETING-*.md
+# DIRECTORY-SUBMISSIONS.md
+# REDDIT-POSTS.md
+# HACKER-NEWS-POST.md
+# DEVTO-*.md
+# BLOG-POSTS.md
+# blog-posts/
+# NPM-PUBLISHING-GUIDE.md
+# NPM-DEPLOYMENT-CHECKLIST.md
+# NPM-README-UPDATE.md
+# NPM-PACKAGE-SUMMARY.md
+# NPM-FILES-REFERENCE.md
+# DMG-BUILD-*.md
+# DMG-QUICK-REFERENCE.md
+# INSTALLER-*.md
+# BUILD-INSTALLER.md
+# WINDOWS-INSTALLER-*.md
+# README-WINDOWS-INSTALLER.md
+# website/DEPLOY-NOW.md
+# website/DEPLOYMENT.md
+# website/VERIFICATION-CHECKLIST.md
+# test-output/
+# test-results/
+# <superlocalmemory.*
+# .env
+# .env.*
+# .env.local
+# .coverage
+# 65%.
+# 70%
+# .gitnexus/
+# .claude/skills/generated/
+# graphify-out/cache/
+# graphify-out/.graphify_python
+# graphify-out/.graphify_root
+# graphify-out/.rebuild.lock
+# .worktrees
+
+# --- 检测到的目录 （取消注释以排除） ---
+
+# tests/
+# docs/
+# examples/
+# scripts/
+
+# --- 测试文件模式 （取消注释以排除） ---
+
+# *.test.*
+# *.spec.*
+# *.snap

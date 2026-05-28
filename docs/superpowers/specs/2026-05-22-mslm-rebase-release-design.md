@@ -26,20 +26,43 @@ main      → 干净历史（6 squash 提交 + upstream/main），tag 发布，�
 develop   → 完整 101 提交历史 + 未来开发，日常开发 + 追上游
 ```
 
-### Step 1: 保留完整历史到 develop
+### Step 0: 确保上游 remote 已配置
+
+```bash
+git remote add upstream https://github.com/qualixar/superlocalmemory.git 2>/dev/null || true
+git fetch upstream
+```
+
+### Step 1: 将 develop rebase 到上游最新
+
+初始统一使用 rebase（非 merge），确保后续追上游时 rebase 不会重复已合并的提交：
 
 ```bash
 git branch develop main          # 快照当前 main 为 develop
 git checkout develop
-git merge upstream/main          # 合并 upstream v3.4.56，解决冲突
+git rebase upstream/main         # rebase 到 v3.4.56，解决冲突
 pytest tests/ -q --tb=short      # 验证测试全过
 ```
 
 ### Step 2: 构建干净的 main
 
 ```bash
-git checkout --orphan new-main upstream/main
-# 从 develop 逐个 cherry-pick squash 后的 6 个分组
+# 基于 upstream/main 建新 main（非 orphan，保留 upstream/main 作为父提交）
+git checkout -b new-main upstream/main
+```
+
+然后将 101 个提交 squash 为 6 个分组，逐个应用到 new-main：
+
+```bash
+# 对每个分组，用 git diff 从 develop 中提取代码变更，作为单个提交写入 new-main
+# 分组 1: multi-scope core infrastructure
+git diff upstream/main..<group-1-last-commit> -- . > /tmp/group1.patch
+git checkout new-main
+git apply --index /tmp/group1.patch
+git commit -m "feat(multiscope): core infrastructure"
+
+# ... 对每个分组重复上述过程
+# 具体每组包含的提交范围在实施阶段精确确定
 ```
 
 **main 分支的 6 个提交（从 develop squash-cherry-pick）：**
@@ -160,7 +183,12 @@ pytest tests/ -q --tb=short
 slm health                     # 功能烟雾测试
 
 # 4. squash 新增变更到 main
-#    将 develop 上 rebase 后产生的新提交按主题 squash 到 main 的对应提交
+#    通过 diff 生成合并 patch（用 main 的 HEAD 作为上次同步点）：
+PREV_SYNC=$(git rev-parse main)
+git diff $PREV_SYNC..develop -- . > /tmp/upstream-sync.patch
+git checkout main
+git apply --index /tmp/upstream-sync.patch
+git commit -m "chore: sync upstream v4.x.xx — <变更摘要>"
 
 # 5. 打 tag，推送
 git tag v4.x.0
