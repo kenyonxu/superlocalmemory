@@ -309,8 +309,8 @@ class DatabaseManager:
                 embedding, fisher_mean, fisher_variance,
                 lifecycle, langevin_position,
                 emotional_valence, emotional_arousal, signal_type, created_at,
-                scope, shared_with)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                scope, shared_with, domain_tags)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (fact.fact_id, fact.memory_id, fact.profile_id, fact.content,
              fact.fact_type.value,
              json.dumps(fact.entities), json.dumps(fact.canonical_entities),
@@ -321,7 +321,8 @@ class DatabaseManager:
              _jd(fact.embedding), _jd(fact.fisher_mean), _jd(fact.fisher_variance),
              fact.lifecycle.value, _jd(fact.langevin_position),
              fact.emotional_valence, fact.emotional_arousal,
-             fact.signal_type.value, fact.created_at, _scope, _shared),
+             fact.signal_type.value, fact.created_at, _scope, _shared,
+             _jd(getattr(fact, 'domain_tags', None))),
         )
         return fact.fact_id
 
@@ -353,8 +354,84 @@ class DatabaseManager:
             pinned=bool(d.get("pinned", 0)),
             scope=d.get("scope", "personal"),
             shared_with=_jl(d.get("shared_with"), None),
+            domain_tags=_jl(d.get("domain_tags"), None),
             created_at=d["created_at"],
         )
+
+    # -- domain tags (Phase 2B) -----------------------------------------------
+
+    def resolve_domain_tags(self, entity_names: list[str]) -> list[str]:
+        """Batch lookup entity names -> deduplicated domain tags."""
+        if not entity_names:
+            return []
+        placeholders = ",".join("?" * len(entity_names))
+        rows = self.execute(
+            f"SELECT DISTINCT domain FROM domain_mapping "
+            f"WHERE entity_name IN ({placeholders})",
+            tuple(entity_names),
+        )
+        return [r["domain"] for r in rows]
+
+    def get_unmapped_entities(self, entity_names: list[str]) -> list[str]:
+        """Return entity names that have no row in domain_mapping."""
+        if not entity_names:
+            return []
+        placeholders = ",".join("?" * len(entity_names))
+        rows = self.execute(
+            f"SELECT DISTINCT entity_name FROM domain_mapping "
+            f"WHERE entity_name IN ({placeholders})",
+            tuple(entity_names),
+        )
+        mapped = {r["entity_name"] for r in rows}
+        return [e for e in entity_names if e not in mapped]
+
+    def classify_and_cache_domain(
+        self,
+        entity_name: str,
+        llm: Any,
+        known_domains: list[str] | None = None,
+    ) -> str | None:
+        """Classify entity via LLM, cache in domain_mapping.
+
+        Returns domain string on success, None on failure or unknown.
+        """
+        if known_domains is None:
+            from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+            known_domains = KNOWN_DOMAINS
+
+        # Early return: already cached (avoid LLM call)
+        existing = self.execute(
+            "SELECT domain FROM domain_mapping WHERE entity_name = ?",
+            (entity_name,),
+        )
+        if existing:
+            return existing[0]["domain"]
+
+        prompt = (
+            f"Classify the following technology entity into a domain category.\n\n"
+            f"Entity: {entity_name}\n"
+            f"Available domains: {', '.join(known_domains)}\n\n"
+            f"Rules:\n"
+            f"- Respond with exactly one domain name from the list above.\n"
+            f"- If the entity doesn't fit any domain, respond: unknown\n"
+            f"- Do not explain. Only output the domain name."
+        )
+        try:
+            response = llm.generate(prompt=prompt, temperature=0.0, max_tokens=20)
+        except Exception as exc:
+            logger.warning("LLM domain classification failed for '%s': %s", entity_name, exc)
+            return None
+
+        domain = response.strip().lower()
+        if domain not in known_domains:
+            logger.debug("LLM returned unknown domain '%s' for entity '%s'", domain, entity_name)
+            return None
+
+        self.execute(
+            "INSERT OR IGNORE INTO domain_mapping (entity_name, domain) VALUES (?, ?)",
+            (entity_name, domain),
+        )
+        return domain
 
     def set_pinned(self, fact_id: str, pinned: bool) -> None:
         """Set or clear the pinned flag on a fact (v3.4.65 core-memory)."""

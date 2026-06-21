@@ -185,6 +185,9 @@ class AtomicFact:
     # v3.4.65: Core Memory Block explicit pin (M015)
     pinned: bool = False
 
+    # Phase 2: domain tags for technology-domain classification (frontend/backend/devops/…)
+    domain_tags: list[str] | None = None
+
     created_at: str = field(default_factory=_now)
 
 

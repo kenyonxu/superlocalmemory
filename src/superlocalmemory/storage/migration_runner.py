@@ -52,6 +52,7 @@ from superlocalmemory.storage.migrations import (
     M014_v345_scale_ready as _M014,
     M015_add_pinned_column as _M015,
     M016_add_scope_support as _M016,
+    M017_add_domain_tags as _M017,
 )
 
 # Map migration name → module (used for the optional ``verify(conn)`` hook
@@ -73,6 +74,7 @@ _MODULES = {
     _M014.NAME: _M014,
     _M015.NAME: _M015,
     _M016.NAME: _M016,
+    _M017.NAME: _M017,
 }
 
 logger = logging.getLogger(__name__)
@@ -139,6 +141,9 @@ DEFERRED_MIGRATIONS: list[Migration] = [
     # M016 adds scope and shared_with columns to 5 core tables for
     # multi-scope memory support (personal/global/shared).
     Migration(name=_M016.NAME, db_target="memory", ddl=_M016.DDL),
+    # M017 adds domain_mapping table and domain_tags columns for
+    # technology-domain classification (frontend/backend/devops/…).
+    Migration(name=_M017.NAME, db_target="memory", ddl=_M017.DDL),
 ]
 
 

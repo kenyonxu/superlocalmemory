@@ -71,6 +71,18 @@ def enrich_fact(
     if entity_resolver and fact.entities:
         canonical = entity_resolver.resolve(fact.entities, profile_id)
 
+    # Phase 2B: domain tags from canonical entity names (seed mapping + LLM fallback)
+    domain_tags = None
+    if db and canonical:
+        domain_tags = db.resolve_domain_tags(list(canonical.keys()))
+        if llm:
+            from superlocalmemory.storage.seed_domain_mapping import KNOWN_DOMAINS
+            unmapped = db.get_unmapped_entities(list(canonical.keys()))
+            for entity_name in unmapped:
+                db.classify_and_cache_domain(entity_name, llm, KNOWN_DOMAINS)
+            if unmapped:
+                domain_tags = db.resolve_domain_tags(list(canonical.keys()))
+
     temporal = {}
     if temporal_parser:
         temporal = temporal_parser.extract_dates_from_text(fact.content)
@@ -110,6 +122,7 @@ def enrich_fact(
         shared_with=(getattr(record, 'shared_with', None)
                      if getattr(record, 'scope', None) in ('shared', 'global')
                      else getattr(fact, 'shared_with', None)),
+        domain_tags=domain_tags,
     )
 
 

@@ -652,6 +652,17 @@ CREATE TABLE IF NOT EXISTS bm25_tokens (
 """
 
 # ---------------------------------------------------------------------------
+# Domain Mapping (Phase 2: technology-domain classification)
+# ---------------------------------------------------------------------------
+
+_SQL_DOMAIN_MAPPING: Final[str] = """
+CREATE TABLE IF NOT EXISTS domain_mapping (
+    entity_name TEXT NOT NULL,
+    domain      TEXT NOT NULL,
+    PRIMARY KEY (entity_name, domain)
+);
+"""
+
 # Key-Value Config Store
 # ---------------------------------------------------------------------------
 
@@ -686,6 +697,7 @@ _DDL_ORDERED: Final[tuple[str, ...]] = (
     _SQL_ACTION_OUTCOMES,
     _SQL_COMPLIANCE_AUDIT,
     _SQL_BM25_TOKENS,
+    _SQL_DOMAIN_MAPPING,
     _SQL_CONFIG,
     # V2 migration cleanup — drop stale triggers/FTS before recreating
     _SQL_V2_MIGRATION_CLEANUP,
