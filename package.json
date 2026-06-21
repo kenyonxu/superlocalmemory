@@ -1,7 +1,7 @@
 {
-  "name": "superlocalmemory",
-  "version": "3.6.16",
-  "description": "Information-geometric agent memory with mathematical guarantees. 4-channel retrieval, Fisher-Rao similarity, zero-LLM mode, EU AI Act compliant. Works with Claude, Cursor, Windsurf, and 17+ AI tools.",
+  "name": "mslm-memory",
+  "version": "4.1.0",
+  "description": "Multi-Scope Local Memory for AI agents — powered by SuperLocalMemory. Personal / shared / global scope, 6-channel retrieval, Fisher-Rao similarity, zero-LLM mode.",
   "keywords": [
     "ai-memory",
     "claude-ai",
@@ -13,6 +13,9 @@
     "knowledge-graph",
     "privacy-first",
     "windsurf",
+    "mslm",
+    "multi-scope",
+    "shared-memory",
     "continue-dev",
     "cody",
     "claude-desktop",
@@ -42,6 +45,7 @@
     "url": "https://github.com/qualixar/superlocalmemory/issues"
   },
   "bin": {
+    "mslm": "./bin/slm-npm",
     "slm": "./bin/slm-npm",
     "superlocalmemory": "./bin/slm-npm"
   },

@@ -1,7 +1,7 @@
 [project]
-name = "superlocalmemory"
-version = "3.6.16"
-description = "Information-geometric agent memory with mathematical guarantees"
+name = "mslm-memory"
+version = "4.1.0"
+description = "Multi-Scope Local Memory for AI agents — powered by SuperLocalMemory"
 readme = "README.md"
 license = {text = "AGPL-3.0-or-later"}
 requires-python = ">=3.11,<3.15"
