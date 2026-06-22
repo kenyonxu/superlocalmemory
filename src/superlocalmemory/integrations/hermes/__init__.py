@@ -590,14 +590,282 @@ class SuperLocalMemoryProvider(MemoryProvider):
         with self._prefetch_lock:
             self._prefetch_cache = ""
 
+    # -- System prompt block -------------------------------------------------
+
+    def system_prompt_block(self) -> str:
+        """Return a status block describing MSLM connection and available tools.
+
+        Injects dynamic profile name, mode, and fact count into the system
+        prompt so the model is aware of the memory backend.
+        """
+        if not self._ensure_engine():
+            return ""
+        try:
+            cursor = self._engine.db.execute(
+                "SELECT COUNT(*) FROM atomic_facts "
+                "WHERE profile_id = ?",
+                (self._slm_config.active_profile,),
+            )
+            row = cursor.fetchone()
+            fact_count = row[0] if row else 0
+        except Exception:
+            fact_count = 0
+
+        return (
+            f"[SuperLocalMemory Status]\n"
+            f"Profile: {self._mslm_profile} | "
+            f"Mode: {getattr(self._slm_config.mode, 'name', '?')} | "
+            f"Facts: {fact_count}\n\n"
+            f"Available tools:\n"
+            f"- slm_recall(query, limit=10, fast=false): 语义搜索本地记忆库。"
+            f"7通道检索 + RRF融合排序。\n"
+            f"- slm_remember(content, scope=\"personal\"): 显式存储信息到本地记忆库。"
+            f"scope 可选 \"personal\"(仅当前profile) 或 \"global\"(跨profile共享)。\n"
+            f"- slm_status(): 查看记忆库统计信息"
+            f"（事实数、实体数、数据库大小等）。\n"
+        )
+
     # -- Tool schemas --------------------------------------------------------
 
-    def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        """Return tool schemas for ``slm_recall``, ``slm_remember``, ``slm_status``.
+    _RECALL_SCHEMA = {
+        "name": "slm_recall",
+        "description": "语义搜索本地记忆库。7 通道检索 + RRF 融合排序。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "自然语言搜索查询",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "最大返回数",
+                    "default": 10,
+                },
+                "fast": {
+                    "type": "boolean",
+                    "description": "跳过扩散激活通道以加速",
+                    "default": False,
+                },
+            },
+            "required": ["query"],
+        },
+    }
 
-        (Stub for Chunk 1 — full implementation in Chunk 5.)
+    _REMEMBER_SCHEMA = {
+        "name": "slm_remember",
+        "description": "显式存储信息到本地记忆库。自动实体提取 + 图谱构建 + 向量嵌入。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "要记住的信息，写成清晰的事实陈述",
+                },
+                "scope": {
+                    "type": "string",
+                    "description": "作用域: personal (默认) | global",
+                    "default": "personal",
+                    "enum": ["personal", "global"],
+                },
+            },
+            "required": ["content"],
+        },
+    }
+
+    _STATUS_SCHEMA = {
+        "name": "slm_status",
+        "description": "查看本地记忆库状态（事实数、实体数、数据库大小等）。",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+        },
+    }
+
+    _V1_TOOL_SCHEMAS = [_RECALL_SCHEMA, _REMEMBER_SCHEMA, _STATUS_SCHEMA]
+
+    def get_tool_schemas(self) -> List[Dict[str, Any]]:
+        """Return tool schemas for ``slm_recall``, ``slm_remember``, ``slm_status``."""
+        return list(self._V1_TOOL_SCHEMAS)
+
+    # -- Tool call dispatch --------------------------------------------------
+
+    def handle_tool_call(
+        self, tool_name: str, args: Dict[str, Any], **kwargs,
+    ) -> str:
+        """Dispatch a tool call to the appropriate handler.
+
+        Returns a JSON string (result or error).  All exceptions are caught
+        and returned as ``tool_error`` so the calling agent never crashes.
         """
-        return []
+        try:
+            if tool_name == "slm_recall":
+                return self._tool_recall(args)
+            if tool_name == "slm_remember":
+                return self._tool_remember(args)
+            if tool_name == "slm_status":
+                return self._tool_status(args)
+            return tool_error(f"Unknown tool: {tool_name}")
+        except Exception as exc:
+            logger.debug("MSLM tool call '%s' failed: %s", tool_name, exc)
+            return tool_error(f"Tool {tool_name} failed: {exc}")
+
+    # -- Tool implementations ------------------------------------------------
+
+    def _tool_recall(self, params: Dict[str, Any]) -> str:
+        """Handle ``slm_recall`` tool call."""
+        if not self._ensure_engine():
+            return tool_error("SuperLocalMemory engine not ready")
+
+        query = params.get("query", "").strip()
+        if not query:
+            return tool_error("query is required")
+
+        limit = min(int(params.get("limit", 10)), _MAX_RECALL_LIMIT)
+        fast = bool(params.get("fast", False))
+
+        try:
+            response = self._engine.recall(
+                query, limit=limit, fast=fast,
+                include_global=self._include_global,
+                include_shared=self._include_shared,
+            )
+        except Exception as exc:
+            logger.debug("MSLM recall failed: %s", exc)
+            return tool_error(f"Recall failed: {exc}")
+
+        results_json = []
+        for r in response.results:
+            results_json.append({
+                "fact_id": r.fact.fact_id,
+                "content": r.fact.content,
+                "score": round(r.score, 4),
+                "confidence": round(r.confidence, 4),
+                "channel_scores": r.channel_scores,
+            })
+
+        result_obj = {
+            "results": results_json,
+            "count": len(results_json),
+            "query_type": response.query_type,
+            "retrieval_time_ms": response.retrieval_time_ms,
+        }
+        return json.dumps(result_obj, ensure_ascii=False)
+
+    def _tool_remember(self, params: Dict[str, Any]) -> str:
+        """Handle ``slm_remember`` tool call."""
+        if not self._ensure_engine():
+            return tool_error("SuperLocalMemory engine not ready")
+
+        content = (params.get("content") or "").strip()
+        if not content:
+            return tool_error("content is required")
+
+        scope = params.get("scope", "personal")
+        if scope not in ("personal", "global"):
+            scope = "personal"
+
+        try:
+            fact_ids = self._engine.store(
+                content, session_id=self._session_id, scope=scope,
+            )
+        except Exception as exc:
+            logger.debug("MSLM store failed: %s", exc)
+            return tool_error(f"Store failed: {exc}")
+
+        if not fact_ids:
+            return json.dumps(
+                {"status": "noop", "message": "No new facts extracted (content may be redundant)."},
+                ensure_ascii=False,
+            )
+
+        return json.dumps(
+            {
+                "status": "stored",
+                "fact_ids": fact_ids,
+                "message": f"Stored {len(fact_ids)} facts from your content.",
+            },
+            ensure_ascii=False,
+        )
+
+    def _tool_status(self, params: Dict[str, Any]) -> str:
+        """Handle ``slm_status`` tool call."""
+        if not self._ensure_engine():
+            return tool_error("SuperLocalMemory engine not ready")
+
+        profile = self._mslm_profile
+        mode = getattr(self._slm_config.mode, "name", "?")
+        db = self._engine.db
+
+        facts_total = 0
+        entities = 0
+        graph_edges = 0
+        db_size_mb = 0.0
+        embedding_model = ""
+        embedding_dim = 0
+
+        try:
+            cur = db.execute(
+                "SELECT COUNT(*) FROM atomic_facts WHERE profile_id = ?",
+                (self._slm_config.active_profile,),
+            )
+            row = cur.fetchone()
+            facts_total = row[0] if row else 0
+        except Exception:
+            pass
+
+        try:
+            cur = db.execute("SELECT COUNT(*) FROM kg_nodes")
+            row = cur.fetchone()
+            entities = row[0] if row else 0
+        except Exception:
+            pass
+
+        try:
+            cur = db.execute("SELECT COUNT(*) FROM memory_edges")
+            row = cur.fetchone()
+            graph_edges = row[0] if row else 0
+        except Exception:
+            pass
+
+        try:
+            import os
+            db_path = getattr(db, "_db_path", None) or str(
+                self._slm_config.base_dir / "memory.db",
+            )
+            if os.path.exists(db_path):
+                db_size_mb = round(os.path.getsize(db_path) / (1024 * 1024), 1)
+        except Exception:
+            pass
+
+        try:
+            emb_cfg = self._slm_config.embedding
+            if emb_cfg:
+                _m = emb_cfg.model_name
+                if _m is not None:
+                    embedding_model = str(_m)
+                _d = emb_cfg.dim
+                if _d is not None:
+                    embedding_dim = int(_d)
+        except Exception:
+            pass
+
+        result_obj = {
+            "profile": profile,
+            "mode": mode,
+            "facts": {"total": int(facts_total)},
+            "entities": int(entities),
+            "graph_edges": int(graph_edges),
+            "db_size_mb": float(db_size_mb),
+            "embedding_model": str(embedding_model),
+            "embedding_dim": int(embedding_dim),
+        }
+        try:
+            return json.dumps(result_obj, ensure_ascii=False)
+        except TypeError:
+            # Last-resort sanitisation: stringify everything
+            sanitised = {k: str(v) for k, v in result_obj.items()}
+            return json.dumps(sanitised, ensure_ascii=False)
 
     # -- Plugin registration -------------------------------------------------
 
