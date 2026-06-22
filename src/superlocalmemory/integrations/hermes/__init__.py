@@ -284,6 +284,8 @@ class SuperLocalMemoryProvider(MemoryProvider):
 
             init_error: Optional[Exception] = None
 
+            self._init_cancelled = False
+
             def _do_init() -> None:
                 nonlocal init_error
                 try:
@@ -766,9 +768,10 @@ class SuperLocalMemoryProvider(MemoryProvider):
             scope = "personal"
 
         try:
-            fact_ids = self._engine.store(
-                content, session_id=self._session_id, scope=scope,
-            )
+            with self._write_lock:
+                fact_ids = self._engine.store(
+                    content, session_id=self._session_id, scope=scope,
+                )
         except Exception as exc:
             logger.debug("MSLM store failed: %s", exc)
             return tool_error(f"Store failed: {exc}")

@@ -147,6 +147,10 @@ Hermes profile "default" ──auto──►  MSLM active_profile = "default"
 | `on_memory_write` 镜像 | `personal` | 内置 memory tool 写入私有 |
 | `prefetch` / 工具 recall | `personal` + `include_global=True` + `include_shared=False` | 检索自己 + 全局共享 |
 
+> **speaker 字段说明**：`sync_turn` 中 `speaker="user"` 表示该事实的时序归属为 user turn，
+> 但内容中同时包含 assistant 的回复（`User: ...\nHermes: ...` 格式）。
+> v2 考虑拆成两次 `store()`（user 和 assistant 分别存储），或 MSLM 支持 `speaker="both"` 模式（审阅意见 #10）。
+
 ### 3.4 多 Profile 场景示意
 
 ```
@@ -205,6 +209,19 @@ Session 开始
 │
 ├─ ③ system_prompt_block()
 │     → 返回静态说明文本（Status 行 + 4 个工具简介）
+│     具体文本：
+│     ```
+│     [SuperLocalMemory Status]
+│     Profile: {profile_name} | Mode: {mode} | Facts: {fact_count}
+│     
+│     Available tools:
+│     - slm_recall(query, limit=10, fast=false): 语义搜索本地记忆库。7通道检索 + RRF融合排序。
+│     - slm_remember(content, scope="personal"): 显式存储信息到本地记忆库。scope 可选 "personal"(仅当前profile) 或 "global"(跨profile共享)。
+│     - slm_status(): 查看记忆库统计信息（事实数、实体数、数据库大小等）。
+│     - slm_report_feedback(fact_id, helpful): 反馈某条记忆是否有用，帮助系统调整检索权重。
+│     
+│     Note: scope="personal" 的记忆仅对当前 profile 可见；scope="global" 的记忆可被所有 profile 检索。
+│     ```
 │
 └─ 每个 Turn ─────────────────────────────────────────
     │
@@ -218,8 +235,8 @@ Session 开始
     ├─ [模型调用，可能触发工具调用]
     │     ├─ slm_recall          → engine.recall()
     │     ├─ slm_remember        → engine.store()
-    │     ├─ slm_status          → 直接查数据库
-    │     └─ slm_report_feedback → CLI 桥接或 trust 表操作
+    │     ├─ slm_status          → 直接查数据库（v2 改用 engine.get_status()）
+    │     └─ [v2] slm_report_feedback → engine.report_feedback()
     │
     ├─ ⑥ sync_turn(user_msg, asst_msg)            ← 合并存储
     │     后台线程: engine.store(combined, speaker="user", scope="personal")
@@ -281,6 +298,8 @@ def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
     t = threading.Thread(target=_flush, daemon=True, name="mslm-compress")
     t.start()
     return ""  # 不干扰 compression summary prompt（返回空字符串）
+    # 注意：MemoryProvider ABC 的 on_pre_compress 签名是 -> str，但返回值在 Hermes 中
+    # 被忽略（不注入 prompt），仅用于 side effect（将摘要存入 MSLM）。此行为已在文档中明确。
 ```
 
 ---
@@ -349,6 +368,8 @@ def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
 ### 5.3 `slm_status`
 
 > **实现说明**：通过 `engine.db`（DatabaseManager 公开属性）查询各类统计。
+> **注意**：v1 直接访问 `engine.db` 是临时方案，v2 应改用 `engine.get_status()` 封装 API（审阅意见 #9）。
+> MSLM 侧需提供 `get_status()` 方法，避免 provider 直接依赖内部数据库 schema。
 
 ```
 名称:       slm_status
@@ -393,7 +414,15 @@ def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
 
 > **注意**：v1 中 `slm_recall` 返回 `fact_id`，模型可据此调用 `slm_report_feedback`。
 > MSLM engine 目前不直接暴露 `report_feedback` 的 Python API——
-> 需要通过 `engine.db` 直接操作 trust 表，或调用 MCP 工具路径。v1 可先实现为调用 `slm mcp report_feedback` CLI。
+> 需要通过 `engine.db` 直接操作 trust 表，或调用 MCP 工具路径。
+> 
+> **审阅意见 #4**：v1 砍掉 `slm_report_feedback`，只保留 3 个核心工具（recall/remember/status）。
+> 原因：
+> - 规格第 85 行明确说"不做 REST API 方案"，CLI 桥接与之矛盾
+> - CLI 调用有进程开销和序列化成本，`subprocess` 在超时/错误处理上脆弱
+> - MSLM 侧需先暴露 Python API，provider 才能可靠实现
+> 
+> **决策**：v1 移除 `slm_report_feedback`，v2 待 MSLM 暴露 `engine.report_feedback()` 后恢复。
 
 ---
 
@@ -466,6 +495,9 @@ pip_dependencies:
   - mslm-memory>=4.0.0
 hooks:
   - on_session_end
+  - on_memory_write
+  - on_pre_compress
+  - on_session_switch
 ```
 
 ---
@@ -487,6 +519,16 @@ def _load_hermes_config(self, hermes_home: str) -> Dict[str, str]:
         return mem_config.get("superlocalmemory", {}) if isinstance(mem_config, dict) else {}
     except Exception:
         return {}
+
+def _parse_bool(value: Any, default: bool) -> bool:
+    """Parse a boolean value from YAML config, handling string forms like 'false'/'true'."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ("true", "1", "yes", "on")
+    return bool(value)
 ```
 
 **初始化完整流程**：
@@ -517,9 +559,9 @@ def initialize(self, session_id: str, **kwargs) -> None:
         except KeyError:
             logger.warning("MSLM unknown mode '%s' — using config default", mode_override)
 
-    # 3. 读取召回配置
-    self._include_global = config_override.get("include_global", True)
-    self._include_shared = config_override.get("include_shared", False)
+    # 3. 读取召回配置（显式处理 YAML 字符串布尔值，避免 "false" 被当 truthy）
+    self._include_global = _parse_bool(config_override.get("include_global"), True)
+    self._include_shared = _parse_bool(config_override.get("include_shared"), False)
 
     # 4. cron 守卫
     agent_context = kwargs.get("agent_context", "primary")
@@ -540,6 +582,8 @@ def initialize(self, session_id: str, **kwargs) -> None:
         def _do_init():
             nonlocal init_error
             try:
+                if getattr(self, '_init_cancelled', False):
+                    return
                 self._engine.initialize()
             except Exception as e:
                 init_error = e
@@ -549,6 +593,12 @@ def initialize(self, session_id: str, **kwargs) -> None:
         init_thread.join(timeout=30.0)  # 30s timeout
         if init_thread.is_alive():
             logger.warning("MSLM engine init timed out after 30s — provider disabled")
+            # 超时后显式清理：设置取消标志，等待线程结束，释放模型加载占用的内存
+            # 避免 daemon 线程在后台继续运行导致内存泄漏（审阅意见 #3）
+            self._init_cancelled = True
+            init_thread.join(timeout=5.0)  # 再给 5s 优雅退出
+            if init_thread.is_alive():
+                logger.warning("MSLM init thread did not terminate gracefully — may retain model RAM")
             self._engine = None
             return
         if init_error:
@@ -599,6 +649,11 @@ Timeline:
 Turn 1: [prefetch同步获取] [模型调用...] [sync_turn] [queue_prefetch启动后台]
 Turn 2:                [prefetch消费缓存] [模型调用...] [sync_turn] [queue_prefetch启动后台]
 Turn 3:                                  [prefetch消费缓存] [模型调用...]
+
+> **queue_prefetch 并发安全说明**：
+> `queue_prefetch` 启动的后台线程调用 `engine.recall()`，虽然读操作在 WAL 模式下可以并发，
+> 但如果 `recall` 内部有写（如更新访问时间戳、缓存统计），会和 `_write_lock` 保护的写冲突。
+> 需确认 MSLM `engine.recall()` 是否为纯读操作；如有写，需要纳入锁管理或明确文档（审阅意见 #2）。
 ```
 
 ### 7.3 sync_turn 合并存储（决策 2: A）
@@ -613,8 +668,9 @@ def sync_turn(self, user_content: str, assistant_content: str,
     clean_asst = sanitize_context(assistant_content or "").strip()
 
     # 太短的回合跳过（如 "ok", "yes", "thanks"）
-    # 3 字符阈值足以过滤纯确认消息，同时保留 "fix auth" 等简短指令
-    if len(clean_user) <= 3:
+    # 改为语义过滤：非空且非纯标点/空白，保留 "no"、"fix" 等简短但有意义的内容
+    # 审阅意见 #5：3 字符阈值会漏掉很多有意义的信息
+    if not clean_user or clean_user.strip() in {"", "ok", "yes", "thanks", "thx"}:
         return
 
     combined = f"User: {clean_user}\nHermes: {clean_asst}"
@@ -632,13 +688,16 @@ def sync_turn(self, user_content: str, assistant_content: str,
             logger.debug("MSLM sync_turn failed: %s", e)
 
     # 丢弃上一轮尚未完成的写入（daemon thread 保护，不阻塞主线程）
-    if self._sync_thread and self._sync_thread.is_alive():
-        logger.debug("MSLM sync_turn: prior write still in progress, dropping")
-        return
-    self._sync_thread = threading.Thread(
-        target=_sync, daemon=True, name="mslm-sync"
-    )
-    self._sync_thread.start()
+    # 使用 _sync_turn_lock 保护 is_alive() 检查和 thread.start() 之间的竞态条件，
+    # 防止两个 turn 连续快速触发时同时创建两个写线程。
+    with self._sync_turn_lock:
+        if self._sync_thread and self._sync_thread.is_alive():
+            logger.debug("MSLM sync_turn: prior write still in progress, dropping")
+            return
+        self._sync_thread = threading.Thread(
+            target=_sync, daemon=True, name="mslm-sync"
+        )
+        self._sync_thread.start()
 ```
 
 > **写并发策略变更**：原来的 `join(timeout=5.0)` 方案在上一个写入超过 5s 时会导致两个
@@ -646,6 +705,8 @@ def sync_turn(self, user_content: str, assistant_content: str,
 > - 提供一个 `threading.Lock`（`self._write_lock`）保护所有 `engine.store()` 调用
 > - 如果上一轮写入尚未完成，跳过本轮的 `sync_turn`（而非堆积写入队列）
 > - `on_memory_write`、`on_pre_compress` 也共用同一把锁
+> - 新增 `self._sync_turn_lock` 保护 `is_alive()` 检查和 `thread.start()` 之间的竞态窗口，
+>   防止两个 turn 连续快速触发时同时创建两个写线程（审阅意见 #1）
 
 ### 7.4 线程安全
 
@@ -658,6 +719,7 @@ Provider 内部状态：
 ```python
 self._engine: Optional[MemoryEngine] = None    # 主引擎实例
 self._write_lock = threading.Lock()            # 保护所有 engine.store() 调用
+self._sync_turn_lock = threading.Lock()        # 保护 sync_turn 的 is_alive() 检查和 thread 创建
 self._sync_thread: Optional[threading.Thread]  # sync_turn 后台线程
 self._prefetch_thread: Optional[threading.Thread]
 self._prefetch_lock: threading.Lock            # 保护 prefetch 缓存读写
@@ -673,7 +735,7 @@ self._prefetch_fired_at: int = -999            # 缓存对应的 turn 号
 | 场景 | 策略 |
 |------|------|
 | `SLMConfig.load()` 失败 | `initialize()` 静默 return，provider 不激活 |
-| `engine.initialize()` 超时 (>30s) | 记录 warning，`self._engine = None`，provider 不激活 |
+| `engine.initialize()` 超时 (>30s) | 记录 warning，设置取消标志，等待线程结束，`self._engine = None`，provider 不激活 |
 | `engine.initialize()` 抛异常 | 记录 warning，`self._engine = None`，provider 不激活 |
 | `engine.recall()` 失败 | 返回空字符串，记录 debug 日志 |
 | `engine.store()` 失败 | 记录 debug 日志，不影响主流程 |
@@ -681,6 +743,7 @@ self._prefetch_fired_at: int = -999            # 缓存对应的 turn 号
 | 超长内容 (>4000 chars) | sync_turn 中截断到 4000 字符：MSLM fact_extractor 处理超长文本时提取质量下降（噪声事实增加），4000 字符覆盖 >95% 的正常对话轮次 |
 | 空查询 | prefetch 直接返回 "" |
 | `create_speaker_entities()` 失败 | 非致命错误，记录 debug 日志后继续 |
+| **工具调用异常** | `handle_tool_call` 捕获异常，返回 `tool_error` 结构，不中断主流程（审阅意见 #12） |
 
 ---
 
@@ -748,11 +811,15 @@ superlocalmemory/
 
 ## 10. 待实现
 
-- [ ] v1: 核心 MemoryProvider（4 工具 + 完整生命周期）
+- [ ] v1: 核心 MemoryProvider（3 工具 + 完整生命周期）
 - [ ] v1: `hermes memory setup` 集成
+- [ ] v1: 确认 `engine.recall()` 是否为纯读（审阅意见 #2）
+- [ ] v2: `slm_report_feedback` 恢复（待 MSLM 暴露 Python API）
 - [ ] v2: `shared` scope 支持（多 agent mesh）
 - [ ] v2: `on_delegation` 钩子（子 agent 观察）
 - [ ] v2: MSLM 侧 `_create_entity()` 接受 scope 参数（speaker entities 改为 personal）
+- [ ] v2: MSLM 侧 `engine.get_status()` 封装 API（审阅意见 #9）
+- [ ] v2: `speaker="both"` 支持或拆分成两次 `store()`（审阅意见 #10）
 - [ ] v3: 连接方式支持 REST API fallback
 
 ---
@@ -806,3 +873,4 @@ engine.store(content, session_id, speaker, scope)
 | 2026-06-01 | `slm_report_feedback` 加入 v1 工具（参考 Holographic fact_feedback） |
 | 2026-06-01 | 标注 `create_speaker_entities` scope 问题（硬编码 global）和 ByteRover 10 条消息先例 |
 | 2026-06-02 | Provider 随 MSLM 发布（`src/superlocalmemory/integrations/hermes/`），文件清单更新 |
+| 2026-06-22 | 审阅意见修复（12条）：线程安全（`_sync_turn_lock`）、`queue_prefetch` 并发说明、init 超时清理（`_init_cancelled`）、`slm_report_feedback` 移至 v2、语义过滤替代字符阈值、`on_pre_compress` 返回值说明、`_parse_bool` 类型安全、`system_prompt_block()` 文本补充、`engine.db` 封装说明、`speaker` 字段说明、plugin.yaml 钩子补全、工具调用异常处理 |
