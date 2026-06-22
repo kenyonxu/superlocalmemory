@@ -238,6 +238,27 @@ curl -X POST http://localhost:8765/api/import \
 
 ---
 
+## Method 4: Import via Hermes MemoryProvider
+
+With the Hermes native plugin, you can import memories directly in a Hermes session — no MCP setup needed:
+
+```python
+# Batch import (call within Hermes session)
+memories = [
+    {"content": "Team convention: use snake_case for all API responses", "scope": "global"},
+    {"content": "Personal preference: use pnpm over npm", "scope": "personal"},
+    {"content": "Project key rotation policy", "scope": "shared", "shared_with": "backend_agent"},
+]
+for m in memories:
+    slm_remember(m["content"], scope=m.get("scope", "personal"),
+                 shared_with=m.get("shared_with", ""))
+```
+
+> MemoryProvider supports full `scope`/`shared_with` parameters — the simplest way to bulk-import three-tier scope memories.
+> See [Hermes Agent Integration Guide](hermes-agent-guide-en.md)
+
+---
+
 ## Common Import Scenarios
 
 ### Scenario 1: Migrate from Mem0 / LangChain Memory

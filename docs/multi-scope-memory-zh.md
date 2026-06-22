@@ -143,6 +143,22 @@ mslm entity list --scope global
 mslm entity merge <源ID> <目标ID>
 ```
 
+### Hermes MemoryProvider
+
+使用 Hermes MemoryProvider 插件时，scope 通过工具参数控制：
+
+```python
+# 存储不同作用域的记忆
+slm_remember("个人偏好：喜欢函数式编程", scope="personal")
+slm_remember("React 18 支持并发特性", scope="global")
+slm_remember("内部 API 密钥轮换规则", scope="shared", shared_with="backend_agent")
+
+# 检索时控制作用域范围
+slm_recall("React 并发特性", include_global=True, include_shared=False)
+```
+
+> 详见 [Hermes Agent 集成指南](hermes-agent-guide-zh.md#5-三层作用域记忆multi-scope-memory)
+
 ---
 
 ## 5. 多 Agent 协作示例

@@ -238,6 +238,27 @@ curl -X POST http://localhost:8765/api/import \
 
 ---
 
+## 方式四：通过 Hermes MemoryProvider 导入
+
+使用 Hermes 原生插件可在 Hermes 会话中直接导入记忆，无需额外配置 MCP：
+
+```python
+# 批量导入（在 Hermes 会话中调用）
+memories = [
+    {"content": "团队约定：所有 API 响应使用 snake_case 命名", "scope": "global"},
+    {"content": "个人偏好：使用 pnpm 而非 npm", "scope": "personal"},
+    {"content": "项目密钥轮换规则", "scope": "shared", "shared_with": "backend_agent"},
+]
+for m in memories:
+    slm_remember(m["content"], scope=m.get("scope", "personal"),
+                 shared_with=m.get("shared_with", ""))
+```
+
+> MemoryProvider 支持完整的 `scope`/`shared_with` 参数，是批量导入三层作用域记忆的最简方式。
+> 详见 [Hermes Agent 集成指南](hermes-agent-guide-zh.md)
+
+---
+
 ## 常见导入场景
 
 ### 场景一：从 Mem0 / LangChain Memory 迁移

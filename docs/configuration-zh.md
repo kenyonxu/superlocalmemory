@@ -111,6 +111,28 @@ export OPENAI_API_KEY="sk-..."
 
 ---
 
+### Hermes Agent MemoryProvider 配置
+
+MSLM 提供 Hermes Agent 原生插件，在 Hermes 配置文件 (`config.yaml`) 中配置：
+
+```yaml
+# ~/.hermes/profiles/<name>/config.yaml
+memory:
+  provider: superlocalmemory          # 启用 MSLM MemoryProvider
+  superlocalmemory:
+    mslm_profile: default             # 使用的 MSLM 配置文件
+    prefetch_limit: 10                # 每轮自动注入记忆数（默认 10）
+    include_global: true              # 是否检索全局作用域记忆
+    include_shared: true              # 是否检索共享记忆
+    mslm_data_dir: ""                 # 自定义数据目录（留空使用默认）
+```
+
+配置后 Hermes 启动时自动加载，无需额外 `hermes mcp add`。
+
+> 详见 [Hermes Agent 集成指南](hermes-agent-guide-zh.md)
+
+---
+
 ## 配置文件
 
 所有设置存储在：

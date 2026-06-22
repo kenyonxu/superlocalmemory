@@ -143,6 +143,22 @@ mslm entity list --scope global
 mslm entity merge <source_id> <target_id>
 ```
 
+### Hermes MemoryProvider
+
+With the Hermes MemoryProvider plugin, scope is controlled via tool parameters:
+
+```python
+# Store memories with different scopes
+slm_remember("Personal preference: prefer functional programming", scope="personal")
+slm_remember("React 18 supports concurrent features", scope="global")
+slm_remember("Internal API key rotation policy", scope="shared", shared_with="backend_agent")
+
+# Control scope visibility during recall
+slm_recall("React concurrent features", include_global=True, include_shared=False)
+```
+
+> See [Hermes Agent Integration Guide](hermes-agent-guide-en.md#5-multi-scope-memory) for details.
+
 ---
 
 ## 5. Multi-Agent Collaboration Examples

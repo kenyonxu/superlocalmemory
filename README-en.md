@@ -79,8 +79,13 @@ hermes mcp add mslm --command mslm --args mcp
 
 ### 🔌 MCP Native
 - **33 core tools**: memory storage, semantic retrieval, entity management, session tracking
-- **Hermes Agent integration**: one-command registration, natural language invocation
 - **Claude Code / Cursor / Windsurf**: works with any MCP-compatible client
+
+### 🧩 Hermes MemoryProvider Plugin
+- **Native integration**: no MCP subprocess, zero extra latency
+- **Auto context injection**: relevant memories prefetched each turn
+- **Scope-aware**: `slm_recall` / `slm_remember` / `slm_status` natively support three-tier scope
+- **Zero config**: one YAML line, auto-loaded on Hermes startup
 
 ### 📊 Web Dashboard
 - Memory network graph visualization
