@@ -137,6 +137,23 @@ hermes mcp remove mslm     # 移除
 | `global` | 所有 Agent | 通用知识、团队规范 |
 | `shared` | 指定 Agent 列表 | 协作信息 |
 
+### 4.5 Hermes MemoryProvider 插件方式（推荐）
+
+除 MCP 外，MSLM 提供 Hermes Agent 原生 MemoryProvider 插件，无需 MCP 进程通信，延迟更低：
+
+```yaml
+# ~/.hermes/profiles/<name>/config.yaml
+memory:
+  provider: superlocalmemory
+  superlocalmemory:
+    mslm_profile: my_profile        # MSLM 配置文件名称
+    prefetch_limit: 10              # 每轮自动注入记忆数
+```
+
+配置后无需 `hermes mcp add` — Hermes 启动时自动加载，提供 `slm_recall`、`slm_remember`、`slm_status` 三个原生工具。
+
+> 详见 [Hermes Agent 集成指南](hermes-agent-guide-zh.md)
+
 ---
 
 ## 5. 网络与代理

@@ -111,6 +111,28 @@ export OPENAI_API_KEY="sk-..."
 
 ---
 
+### Hermes Agent MemoryProvider Configuration
+
+MSLM ships with a native Hermes Agent plugin. Configure it in your Hermes `config.yaml`:
+
+```yaml
+# ~/.hermes/profiles/<name>/config.yaml
+memory:
+  provider: superlocalmemory          # Enable MSLM MemoryProvider
+  superlocalmemory:
+    mslm_profile: default             # MSLM profile to use
+    prefetch_limit: 10                # auto-injected memories per turn (default 10)
+    include_global: true              # include global-scope memories
+    include_shared: true              # include shared memories
+    mslm_data_dir: ""                 # custom data dir (empty = default)
+```
+
+Once configured, Hermes auto-loads the plugin on startup — no `hermes mcp add` needed.
+
+> See [Hermes Agent Integration Guide](hermes-agent-guide-en.md)
+
+---
+
 ## Config File
 
 All settings live in:

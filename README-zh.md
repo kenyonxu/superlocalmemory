@@ -79,8 +79,13 @@ hermes mcp add mslm --command mslm --args mcp
 
 ### 🔌 MCP 原生集成
 - **33 个核心工具**：记忆存储、语义检索、实体管理、会话追踪
-- **Hermes Agent 深度整合**：一键注册，自然语言调用
 - **Claude Code / Cursor / Windsurf**：所有 MCP 兼容客户端即装即用
+
+### 🧩 Hermes MemoryProvider 插件
+- **原生集成**：无需 MCP 子进程，零额外延迟
+- **自动上下文注入**：每轮自动预取相关记忆
+- **scope 感知**：`slm_recall` / `slm_remember` / `slm_status` 三工具原生支持三层作用域
+- **即配即用**：一行 YAML 配置，Hermes 启动自动加载
 
 ### 📊 Web 仪表盘
 - 记忆网络图可视化

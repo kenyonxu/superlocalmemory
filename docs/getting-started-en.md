@@ -137,6 +137,23 @@ Three-tier scope:
 | `global` | All Agents | Shared knowledge, team conventions |
 | `shared` | Specified Agent list | Collaborative information |
 
+### 4.5 Hermes MemoryProvider Plugin (Recommended)
+
+Beyond MCP, MSLM provides a native Hermes Agent MemoryProvider plugin — no MCP subprocess overhead, lower latency:
+
+```yaml
+# ~/.hermes/profiles/<name>/config.yaml
+memory:
+  provider: superlocalmemory
+  superlocalmemory:
+    mslm_profile: my_profile        # MSLM profile name
+    prefetch_limit: 10              # auto-injected memories per turn
+```
+
+Once configured, no `hermes mcp add` needed — Hermes auto-loads the plugin on startup, providing three native tools: `slm_recall`, `slm_remember`, `slm_status`.
+
+> See [Hermes Agent Integration Guide](hermes-agent-guide-en.md) for details.
+
 ---
 
 ## 5. Network & Proxy
