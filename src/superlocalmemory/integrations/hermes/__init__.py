@@ -873,10 +873,23 @@ class SuperLocalMemoryProvider(MemoryProvider):
     # -- Plugin registration -------------------------------------------------
 
 
-def register(ctx) -> None:
-    """Hermes plugin entry point — registers the provider."""
-    from hermes_cli.plugin_context import PluginContext
+def register(ctx: Any) -> None:
+    """Hermes plugin entry point — registers the provider.
 
-    if not isinstance(ctx, PluginContext):
-        raise TypeError("register() requires a PluginContext")
-    ctx.register_provider(SuperLocalMemoryProvider)
+    Works with both the real ``PluginContext`` (``register_provider``)
+    and the discovery-time ``_ProviderCollector``
+    (``register_memory_provider``).
+    """
+    provider = SuperLocalMemoryProvider()
+
+    # Hermes discovery path: _ProviderCollector.register_memory_provider()
+    if hasattr(ctx, "register_memory_provider"):
+        ctx.register_memory_provider(provider)
+        return
+
+    # Hermes runtime path: real PluginContext.register_provider()
+    if hasattr(ctx, "register_provider"):
+        ctx.register_provider(provider)
+        return
+
+    logger.warning("register() called with unknown context type: %s", type(ctx))
