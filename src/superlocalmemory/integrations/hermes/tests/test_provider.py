@@ -787,3 +787,131 @@ class TestToolCalls:
         assert "slm_recall" in block
         assert "slm_remember" in block
         assert "slm_status" in block
+
+
+class TestIntegration:
+    """Chunk 6: 集成测试."""
+
+    def test_full_turn_lifecycle(self, provider):
+        """完整 turn: initialize → prefetch → sync_turn → queue_prefetch → on_session_end."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            resp = MagicMock()
+            resp.results = []
+            mock_engine.recall.return_value = resp
+            mock_engine.store.return_value = ["f1"]
+            mock_engine.close_session.return_value = 0
+
+            # 1. Initialize
+            provider.initialize("session_1", agent_identity="tester")
+            assert provider._engine is not None
+            assert provider._session_id == "session_1"
+
+            # 2. Prefetch
+            result = provider.prefetch("what do I know?")
+            assert isinstance(result, str)
+
+            # 3. Sync turn
+            provider.sync_turn("hello", "world!")
+            time.sleep(0.15)
+            mock_engine.store.assert_called()
+
+            # 4. Queue prefetch
+            provider.queue_prefetch("next question")
+            time.sleep(0.2)
+            assert provider._prefetch_cache is not None
+
+            # 5. Session end
+            provider.on_session_end([])
+            mock_engine.close_session.assert_called_once_with("session_1")
+
+    def test_provider_disabled_gracefully(self, provider):
+        """engine 初始化失败后，所有方法静默返回不抛异常."""
+        # Don't initialize — engine stays None
+        assert provider._ensure_engine() is False
+
+        # prefetch should return empty
+        assert provider.prefetch("test") == ""
+
+        # sync_turn should not crash
+        provider.sync_turn("hello", "world")
+
+        # tools should return error
+        result = provider.handle_tool_call("slm_recall", {"query": "test"})
+        assert '"error"' in result
+
+        result = provider.handle_tool_call("slm_remember", {"content": "test"})
+        assert '"error"' in result
+
+        result = provider.handle_tool_call("slm_status", {})
+        assert '"error"' in result
+
+        # hooks should not crash
+        provider.on_memory_write("add", "memory", "test")
+        provider.on_session_end([])
+        provider.on_session_switch("new_session")
+        assert provider._session_id == "new_session"
+
+    def test_concurrent_sync_turn_and_prefetch(self, provider):
+        """sync_turn 写入和 prefetch 读取并发不冲突."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            resp = MagicMock()
+            resp.results = []
+            mock_engine.recall.return_value = resp
+            mock_engine.store.return_value = ["f1"]
+
+            provider.initialize("session_1", agent_identity="tester")
+
+            # Pre-populate cache
+            provider._prefetch_cache = "cached data"
+            provider._prefetch_fired_at = 1
+
+            # Simultanous prefetch (read cache) and sync_turn (write)
+            prefetch_result = provider.prefetch("query")
+            provider.sync_turn("user msg", "asst reply")
+            time.sleep(0.15)
+
+            assert prefetch_result == "cached data" or prefetch_result == ""
+            # Both operations should complete without error
+
+    def test_memory_write_mirror(self, provider):
+        """on_memory_write 镜像到 MSLM."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            provider.initialize("session_1", agent_identity="coder")
+            provider.on_memory_write("add", "memory", "mirror this")
+            time.sleep(0.15)
+            mock_engine.store.assert_called_once()
+
+
+class TestPluginYAML:
+    """Chunk 6: plugin.yaml 验证."""
+
+    def test_plugin_yaml_loads(self):
+        """plugin.yaml 可被解析，包含正确字段."""
+        import os
+        import yaml
+
+        yaml_path = os.path.join(
+            os.path.dirname(__file__), "..", "plugin.yaml",
+        )
+        assert os.path.exists(yaml_path), f"plugin.yaml not found at {yaml_path}"
+
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f)
+
+        assert data is not None
+        assert data.get("name") == "superlocalmemory"
+        assert "version" in data
+        assert "pip_dependencies" in data
+        assert "hooks" in data
