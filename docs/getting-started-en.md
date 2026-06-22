@@ -76,19 +76,38 @@ curl -s http://127.0.0.1:8765/health | python3 -m json.tool
 
 ---
 
-## 4. Connecting Hermes Agent (MCP)
+## 4. Connecting Hermes Agent
 
-### 4.1 Register MCP Server
+### 4.1 Hermes MemoryProvider Plugin (Recommended)
 
-Hermes Agent registers MCP servers via the `hermes mcp add` command:
+MSLM ships with a native Hermes Agent MemoryProvider plugin — **no MCP subprocess**, zero extra latency, auto-loaded on Hermes startup:
+
+```yaml
+# ~/.hermes/profiles/<name>/config.yaml
+memory:
+  provider: superlocalmemory
+  superlocalmemory:
+    mslm_profile: my_profile        # MSLM profile name
+    prefetch_limit: 10              # auto-injected memories per turn
+    include_global: true            # include global-scope memories
+    include_shared: true            # include shared memories
+```
+
+No extra commands needed — Hermes auto-loads the plugin on startup, providing three native tools: `slm_recall`, `slm_remember`, `slm_status`, with full three-tier scope support.
+
+> See [Hermes Agent Integration Guide](hermes-agent-guide-en.md) for details.
+
+### 4.2 MCP Method (Alternative)
+
+Compatible with Claude Code, Cursor, Windsurf, and any MCP client.
+
+#### Register
 
 ```bash
 hermes mcp add mslm --command mslm --args mcp
 ```
 
-This launches `mslm mcp` as an MCP child process. Hermes auto-discovers all MSLM tools.
-
-To specify environment variables (e.g., operating mode):
+With environment variables:
 
 ```bash
 hermes mcp add mslm \
@@ -96,7 +115,7 @@ hermes mcp add mslm \
   --env SLM_MODE=a
 ```
 
-### 4.2 Managing MCP Services
+#### Manage
 
 ```bash
 hermes mcp list            # List registered MCP servers
@@ -104,30 +123,18 @@ hermes mcp test mslm       # Test connectivity
 hermes mcp remove mslm     # Remove
 ```
 
-After modifying config within a Hermes session, run `/reload-mcp` to apply — no restart needed.
+Run `/reload-mcp` after config changes — no restart needed.
 
-> **Note**: Avoid setting `SLM_DATA_DIR`. MSLM defaults to `~/.superlocalmemory/`. If MCP and daemon use different data directories, memories will be written to two separate, invisible databases.
+> **Note**: Avoid `SLM_DATA_DIR`. MSLM defaults to `~/.superlocalmemory/`. Different directories = invisible databases.
 
-### 4.3 Verifying the Connection
-
-Test in Hermes Agent:
-
-```
-Call remember to store: "Test memory: I'm using Hermes Agent with MSLM"
-Call recall to search: "MSLM integration"
-```
-
-Correct results indicate success.
-
-### 4.4 Core Tools Quick Reference
+### 4.3 Core Tools Quick Reference
 
 | Tool | Function | Key Parameters |
 |------|----------|---------------|
-| `remember` | Store memory | `content` (required), `scope`, `tags`, `session_id` |
-| `recall` | Semantic retrieval | `query` (required), `limit` |
+| `remember` / `slm_remember` | Store memory | `content` (required), `scope`, `shared_with` |
+| `recall` / `slm_recall` | Semantic retrieval | `query` (required), `limit` |
 | `search` | Keyword search | `query` |
-| `list_recent` | Recent memories | `limit` |
-| `get_status` | System status | — |
+| `status` / `slm_status` | System status | — |
 
 Three-tier scope:
 
@@ -136,10 +143,6 @@ Three-tier scope:
 | `personal` | Self only | Personal preferences, private info |
 | `global` | All Agents | Shared knowledge, team conventions |
 | `shared` | Specified Agent list | Collaborative information |
-
-### 4.5 Hermes MemoryProvider Plugin (Recommended)
-
-Beyond MCP, MSLM provides a native Hermes Agent MemoryProvider plugin — no MCP subprocess overhead, lower latency:
 
 ```yaml
 # ~/.hermes/profiles/<name>/config.yaml

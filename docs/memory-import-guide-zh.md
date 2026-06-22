@@ -47,7 +47,7 @@
 
 ---
 
-## 方式一：MCP 工具调用（推荐）
+## 方式四_BACKUP_MCP_
 
 适合 Agent 运行时动态导入，**完整支持三层作用域**。
 
@@ -113,7 +113,7 @@ for mem in memories:
 
 ---
 
-## 方式二：Python 脚本批量导入
+## 方式三：Python 脚本批量导入
 
 适合大量离线导入，可精确控制每条记忆的 scope。
 
@@ -199,7 +199,7 @@ python import_memories.py exported_memories.json zhihui
 
 ---
 
-## 方式三：通过 Dashboard API 导入
+## 方式四：通过 Dashboard API 导入
 
 适合通过 HTTP 接口批量导入，**不支持 scope 参数**（默认 personal）。
 
@@ -234,11 +234,11 @@ curl -X POST http://localhost:8765/api/import \
 ```
 
 > **限制**：Dashboard `/api/import` 仅支持 `content`、`tags`、`project_name`、`category` 字段，
-> 不支持 `scope`/`shared_with`。如需三层作用域，请使用方式一（MCP 工具）或方式二（Python 脚本）。
+> 不支持 `scope`/`shared_with`。如需三层作用域，请使用方式一（MemoryProvider）或方式三（Python 脚本）。
 
 ---
 
-## 方式四：通过 Hermes MemoryProvider 导入
+## 方式一：Hermes MemoryProvider 导入（推荐）
 
 使用 Hermes 原生插件可在 Hermes 会话中直接导入记忆，无需额外配置 MCP：
 

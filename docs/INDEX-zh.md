@@ -20,7 +20,7 @@
 
 | 文档 | 说明 |
 |------|------|
-| [Hermes Agent 集成指南](hermes-agent-guide-zh.md) | 通过 MCP 协议将 MSLM 接入 Hermes Agent |
+| [Hermes Agent 集成指南](hermes-agent-guide-zh.md) | MemoryProvider 插件 + MCP 协议，原生工具与三层作用域 |
 
 ## ⚙️ 运维配置
 

@@ -77,15 +77,16 @@ hermes mcp add mslm --command mslm --args mcp
 - **CPU-only**: no GPU required, no Docker needed
 - **EU AI Act compliant**: your data never leaves your machine
 
-### 🔌 MCP Native
+### 🧩 Hermes MemoryProvider Plugin (Recommended)
+- **Native integration**: no MCP subprocess, zero extra latency, auto-loaded on Hermes startup
+- **Auto context injection**: relevant memories prefetched each turn via embedding + BM25 dual-channel
+- **Three-tier scope native**: `slm_recall` / `slm_remember` / `slm_status` fully support personal / shared / global
+- **Zero config**: one YAML line, no extra commands needed
+
+### 🔌 Universal MCP Integration
 - **33 core tools**: memory storage, semantic retrieval, entity management, session tracking
 - **Claude Code / Cursor / Windsurf**: works with any MCP-compatible client
-
-### 🧩 Hermes MemoryProvider Plugin
-- **Native integration**: no MCP subprocess, zero extra latency
-- **Auto context injection**: relevant memories prefetched each turn
-- **Scope-aware**: `slm_recall` / `slm_remember` / `slm_status` natively support three-tier scope
-- **Zero config**: one YAML line, auto-loaded on Hermes startup
+- **Hermes Agent**: `hermes mcp add mslm --command mslm --args mcp` one-liner
 
 ### 📊 Web Dashboard
 - Memory network graph visualization

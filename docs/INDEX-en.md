@@ -20,7 +20,7 @@
 
 | Document | Description |
 |----------|-------------|
-| [Hermes Agent Integration Guide](hermes-agent-guide-en.md) | Connect MSLM to Hermes Agent via MCP protocol |
+| [Hermes Agent Integration Guide](hermes-agent-guide-en.md) | MemoryProvider plugin + MCP protocol, native tools & three-tier scope |
 
 ## ⚙️ Operations
 

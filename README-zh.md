@@ -77,15 +77,16 @@ hermes mcp add mslm --command mslm --args mcp
 - **CPU 即可运行**：无需 GPU，无需 Docker
 - **EU AI Act 合规**：数据永不离开你的机器
 
-### 🔌 MCP 原生集成
+### 🧩 Hermes MemoryProvider 插件（推荐）
+- **原生集成**：无需 MCP 子进程，零额外延迟，Hermes 启动自动加载
+- **自动上下文注入**：每轮自动预取相关记忆，embedding + BM25 双通道
+- **三层作用域原生支持**：`slm_recall` / `slm_remember` / `slm_status` 完全支持 personal / shared / global
+- **即配即用**：一行 YAML，无需额外命令
+
+### 🔌 通用 MCP 集成
 - **33 个核心工具**：记忆存储、语义检索、实体管理、会话追踪
 - **Claude Code / Cursor / Windsurf**：所有 MCP 兼容客户端即装即用
-
-### 🧩 Hermes MemoryProvider 插件
-- **原生集成**：无需 MCP 子进程，零额外延迟
-- **自动上下文注入**：每轮自动预取相关记忆
-- **scope 感知**：`slm_recall` / `slm_remember` / `slm_status` 三工具原生支持三层作用域
-- **即配即用**：一行 YAML 配置，Hermes 启动自动加载
+- **Hermes Agent**：`hermes mcp add mslm --command mslm --args mcp` 一行注册
 
 ### 📊 Web 仪表盘
 - 记忆网络图可视化

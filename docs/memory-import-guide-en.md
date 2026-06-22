@@ -47,7 +47,7 @@ Decide which tier each memory belongs to before importing:
 
 ---
 
-## Method 1: MCP Tool Calls (Recommended)
+## Method 4: MCP Tool Calls
 
 Best for runtime dynamic import by Agents. **Full three-tier scope support.**
 
@@ -234,11 +234,11 @@ curl -X POST http://localhost:8765/api/import \
 ```
 
 > **Limitation**: Dashboard `/api/import` only supports `content`, `tags`, `project_name`, and `category` fields.
-> It does not support `scope`/`shared_with`. For three-tier scope, use Method 1 (MCP tools) or Method 2 (Python script).
+> It does not support `scope`/`shared_with`. For three-tier scope, use Method 1 (MemoryProvider) or Method 3 (Python script).
 
 ---
 
-## Method 4: Import via Hermes MemoryProvider
+## Method 1: Hermes MemoryProvider Import (Recommended)
 
 With the Hermes native plugin, you can import memories directly in a Hermes session — no MCP setup needed:
 

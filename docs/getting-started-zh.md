@@ -76,70 +76,11 @@ curl -s http://127.0.0.1:8765/health | python3 -m json.tool
 
 ---
 
-## 4. 接入 Hermes Agent（MCP）
+## 4. 接入 Hermes Agent
 
-### 4.1 注册 MCP 服务
+### 4.1 Hermes MemoryProvider 插件（推荐）
 
-Hermes Agent 通过 `hermes mcp add` 命令注册 MCP 服务器：
-
-```bash
-hermes mcp add mslm --command mslm --args mcp
-```
-
-这会启动 `mslm mcp` 作为 MCP 子进程，Hermes 自动发现 MSLM 的全部工具。
-
-如需指定环境变量（如运行模式）：
-
-```bash
-hermes mcp add mslm \
-  --command mslm --args mcp \
-  --env SLM_MODE=a
-```
-
-### 4.2 管理 MCP 服务
-
-```bash
-hermes mcp list            # 列出已注册的 MCP 服务器
-hermes mcp test mslm       # 测试连通性
-hermes mcp remove mslm     # 移除
-```
-
-在 Hermes 会话内修改配置后，运行 `/reload-mcp` 即可生效，无需重启。
-
-> **注意**：不推荐设置 `SLM_DATA_DIR` 环境变量。MSLM 默认使用 `~/.superlocalmemory/`，如果 MCP 和 daemon 使用不同的数据目录，记忆会写入两个数据库、互相不可见。
-
-### 4.3 验证连接
-
-在 Hermes Agent 中测试：
-
-```
-调用 remember 存储："测试记忆：我正在使用 Hermes Agent 集成 MSLM"
-调用 recall 搜索："集成 MSLM"
-```
-
-返回正确结果即表示成功。
-
-### 4.4 核心工具速查
-
-| 工具 | 功能 | 关键参数 |
-|------|------|---------|
-| `remember` | 存储记忆 | `content`（必填）, `scope`, `tags`, `session_id` |
-| `recall` | 语义检索 | `query`（必填）, `limit` |
-| `search` | 关键词搜索 | `query` |
-| `list_recent` | 最近记忆 | `limit` |
-| `get_status` | 系统状态 | — |
-
-三层作用域：
-
-| `scope` | 可见范围 | 适用场景 |
-|---------|---------|---------|
-| `personal` | 仅自己 | 个人偏好、私密信息 |
-| `global` | 所有 Agent | 通用知识、团队规范 |
-| `shared` | 指定 Agent 列表 | 协作信息 |
-
-### 4.5 Hermes MemoryProvider 插件方式（推荐）
-
-除 MCP 外，MSLM 提供 Hermes Agent 原生 MemoryProvider 插件，无需 MCP 进程通信，延迟更低：
+MSLM 提供 Hermes Agent 原生 MemoryProvider 插件，**无需 MCP 子进程**，零额外延迟，Hermes 启动自动加载：
 
 ```yaml
 # ~/.hermes/profiles/<name>/config.yaml
@@ -148,11 +89,60 @@ memory:
   superlocalmemory:
     mslm_profile: my_profile        # MSLM 配置文件名称
     prefetch_limit: 10              # 每轮自动注入记忆数
+    include_global: true            # 检索全局作用域
+    include_shared: true            # 检索共享记忆
 ```
 
-配置后无需 `hermes mcp add` — Hermes 启动时自动加载，提供 `slm_recall`、`slm_remember`、`slm_status` 三个原生工具。
+配置后无需任何额外命令 — Hermes 启动时自动加载，提供 `slm_recall`、`slm_remember`、`slm_status` 三个原生工具，完整支持三层作用域。
 
 > 详见 [Hermes Agent 集成指南](hermes-agent-guide-zh.md)
+
+### 4.2 MCP 方式（备选）
+
+兼容 Claude Code、Cursor、Windsurf 等所有 MCP 客户端。
+
+#### 注册
+
+```bash
+hermes mcp add mslm --command mslm --args mcp
+```
+
+如需指定环境变量：
+
+```bash
+hermes mcp add mslm \
+  --command mslm --args mcp \
+  --env SLM_MODE=a
+```
+
+#### 管理
+
+```bash
+hermes mcp list            # 列出已注册的 MCP 服务器
+hermes mcp test mslm       # 测试连通性
+hermes mcp remove mslm     # 移除
+```
+
+修改配置后运行 `/reload-mcp` 即可生效，无需重启。
+
+> **注意**：不推荐设置 `SLM_DATA_DIR` 环境变量。MSLM 默认使用 `~/.superlocalmemory/`，不同数据目录会导致 memory.db 互相不可见。
+
+### 4.3 核心工具速查
+
+| 工具 | 功能 | 关键参数 |
+|------|------|---------|
+| `remember` / `slm_remember` | 存储记忆 | `content`（必填）, `scope`, `shared_with` |
+| `recall` / `slm_recall` | 语义检索 | `query`（必填）, `limit` |
+| `search` | 关键词搜索 | `query` |
+| `status` / `slm_status` | 系统状态 | — |
+
+三层作用域：
+
+| `scope` | 可见范围 | 适用场景 |
+|---------|---------|---------|
+| `personal` | 仅自己 | 个人偏好、私密信息 |
+| `global` | 所有 Agent | 通用知识、团队规范 |
+| `shared` | 指定 Agent 列表 | 协作信息 |
 
 ---
 
