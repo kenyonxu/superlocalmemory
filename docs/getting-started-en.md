@@ -19,7 +19,7 @@ pip install mslm-memory
 Verify:
 
 ```bash
-mslm --version   # Should output 4.0.0+
+mslm --version   # Should output 4.1.0+
 mslm doctor      # Check dependency integrity
 ```
 
@@ -61,7 +61,7 @@ Verify after startup:
 
 ```bash
 curl -s http://127.0.0.1:8765/health | python3 -m json.tool
-# {"status":"ok","pid":12345,"engine":"initialized","version":"4.0.0"}
+# {"status":"ok","pid":12345,"engine":"initialized","version":"4.1.0"}
 ```
 
 ### Built-in Daemon Capabilities

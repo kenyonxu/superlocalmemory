@@ -19,7 +19,7 @@ pip install mslm-memory
 验证：
 
 ```bash
-mslm --version   # 应输出 4.0.0+
+mslm --version   # 应输出 4.1.0+
 mslm doctor      # 检查依赖完整性
 ```
 
@@ -61,7 +61,7 @@ mslm restart         # 一键重启（杀僵尸 + 清理 + 启动 + 健康检查
 
 ```bash
 curl -s http://127.0.0.1:8765/health | python3 -m json.tool
-# {"status":"ok","pid":12345,"engine":"initialized","version":"4.0.0"}
+# {"status":"ok","pid":12345,"engine":"initialized","version":"4.1.0"}
 ```
 
 ### Daemon 内置能力
