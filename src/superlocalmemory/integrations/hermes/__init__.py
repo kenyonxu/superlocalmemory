@@ -606,7 +606,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
             cursor = self._engine.db.execute(
                 "SELECT COUNT(*) FROM atomic_facts "
                 "WHERE profile_id = ?",
-                (self._slm_config.active_profile,),
+                (self._mslm_profile,),
             )
             row = cursor.fetchone()
             fact_count = row[0] if row else 0
@@ -810,7 +810,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
         try:
             cur = db.execute(
                 "SELECT COUNT(*) FROM atomic_facts WHERE profile_id = ?",
-                (self._slm_config.active_profile,),
+                (self._mslm_profile,),
             )
             row = cur.fetchone()
             facts_total = row[0] if row else 0
