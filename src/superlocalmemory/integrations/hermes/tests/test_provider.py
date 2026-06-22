@@ -613,3 +613,177 @@ class TestHooks:
 
             assert provider._session_id == "session_2"
             assert provider._prefetch_cache == ""
+
+
+class TestToolSchemas:
+    """Chunk 5: 工具 schemas."""
+
+    def test_get_tool_schemas_returns_three_tools(self, provider):
+        """返回 recall, remember, status 三个 schema."""
+        schemas = provider.get_tool_schemas()
+        assert len(schemas) == 3
+        names = {s["name"] for s in schemas}
+        assert names == {"slm_recall", "slm_remember", "slm_status"}
+
+    def test_recall_schema_has_required_query(self, provider):
+        """slm_recall 的 query 为 required."""
+        schemas = provider.get_tool_schemas()
+        recall = next(s for s in schemas if s["name"] == "slm_recall")
+        params = recall["parameters"]
+        assert "query" in params.get("required", [])
+
+    def test_remember_schema_has_optional_scope(self, provider):
+        """slm_remember 的 scope 默认 'personal'."""
+        schemas = provider.get_tool_schemas()
+        remember = next(s for s in schemas if s["name"] == "slm_remember")
+        scope_prop = remember["parameters"]["properties"]["scope"]
+        assert scope_prop.get("default") == "personal"
+
+
+class TestToolCalls:
+    """Chunk 5: 工具调用."""
+
+    def test_recall_routes_to_engine_recall(self, provider):
+        """调用 engine.recall()，返回格式化结果."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            from superlocalmemory.storage.models import AtomicFact
+            resp = MagicMock()
+            resp.query_type = "factual"
+            resp.retrieval_time_ms = 100.0
+            f = MagicMock(spec=AtomicFact, fact_id="f1", content="test fact", confidence=0.9, signals=[])
+            r = MagicMock(fact=f, score=0.9, confidence=0.9, channel_scores={})
+            resp.results = [r]
+            mock_engine.recall.return_value = resp
+
+            provider.initialize("session_1", agent_identity="coder")
+            result = provider.handle_tool_call("slm_recall", {"query": "test"})
+
+        assert isinstance(result, str)
+        assert "f1" in result or "test fact" in result
+
+    def test_recall_empty_query_returns_error(self, provider):
+        """query 为空返回 tool_error."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            MockEngine.return_value = MagicMock()
+
+            provider.initialize("session_1", agent_identity="coder")
+            result = provider.handle_tool_call("slm_recall", {"query": ""})
+        assert '"error"' in result
+
+    def test_recall_engine_not_ready_returns_error(self, provider):
+        """engine 未初始化返回 tool_error."""
+        result = provider.handle_tool_call("slm_recall", {"query": "test"})
+        assert '"error"' in result
+
+    def test_recall_limit_capped_at_20(self, provider):
+        """limit > 20 时截断到 20."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+            resp = MagicMock()
+            resp.results = []
+            mock_engine.recall.return_value = resp
+
+            provider.initialize("session_1", agent_identity="coder")
+            provider.handle_tool_call("slm_recall", {"query": "test", "limit": 50})
+        mock_engine.recall.assert_called_once()
+        _, kwargs = mock_engine.recall.call_args
+        assert kwargs.get("limit", 99) <= 20
+
+    def test_remember_calls_engine_store(self, provider):
+        """调用 engine.store()，返回 stored 状态."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+            mock_engine.store.return_value = ["f1", "f2"]
+
+            provider.initialize("session_1", agent_identity="coder")
+            result = provider.handle_tool_call("slm_remember", {"content": "remember this"})
+
+        assert isinstance(result, str)
+        assert "stored" in result.lower() or "f1" in result
+
+    def test_remember_engine_not_ready_returns_error(self, provider):
+        """engine 未初始化返回 tool_error."""
+        result = provider.handle_tool_call("slm_remember", {"content": "test"})
+        assert '"error"' in result
+
+    def test_remember_no_facts_returns_noop(self, provider):
+        """engine.store() 返回空 fact_ids 时返回 noop."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+            mock_engine.store.return_value = []
+
+            provider.initialize("session_1", agent_identity="coder")
+            result = provider.handle_tool_call("slm_remember", {"content": "redundant content"})
+
+        assert "noop" in result.lower()
+
+    def test_status_returns_profile_and_counts(self, provider):
+        """返回 profile, mode, facts, entities, db_size 等."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            # Mock db responses
+            mock_cursor = MagicMock()
+            mock_cursor.fetchone.return_value = (123,)
+            mock_engine.db.execute.return_value = mock_cursor
+
+            provider.initialize("session_1", agent_identity="coder")
+            result = provider.handle_tool_call("slm_status", {})
+
+        assert isinstance(result, str)
+        assert "123" in result or "profile" in result
+
+    def test_status_engine_not_ready_returns_error(self, provider):
+        """engine 未初始化返回 tool_error."""
+        result = provider.handle_tool_call("slm_status", {})
+        assert '"error"' in result
+
+    def test_unknown_tool_returns_error(self, provider):
+        """未知工具名返回 tool_error."""
+        result = provider.handle_tool_call("slm_unknown", {})
+        assert '"error"' in result
+
+    def test_exception_in_tool_returns_error(self, provider):
+        """工具内部异常被捕获，返回 tool_error."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+            mock_engine.recall.side_effect = RuntimeError("unexpected crash")
+
+            provider.initialize("session_1", agent_identity="coder")
+            result = provider.handle_tool_call("slm_recall", {"query": "test"})
+        assert '"error"' in result
+
+    def test_system_prompt_block_contains_status(self, provider):
+        """system_prompt_block() 包含动态 profile/mode."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+            mock_cursor = MagicMock()
+            mock_cursor.fetchone.return_value = (42,)
+            mock_engine.db.execute.return_value = mock_cursor
+
+            provider.initialize("session_1", agent_identity="test-agent")
+
+            block = provider.system_prompt_block()
+
+        assert "test-agent" in block
+        assert "slm_recall" in block
+        assert "slm_remember" in block
+        assert "slm_status" in block
