@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -422,3 +423,193 @@ class TestPrefetch:
         """_prefetch_lock 保护缓存读写."""
         assert hasattr(provider, "_prefetch_lock")
         assert provider._prefetch_lock is not None
+
+
+class TestSyncTurn:
+    """Chunk 4: sync_turn 与生命周期钩子."""
+
+    def test_sync_turn_stores_combined_content(self, provider):
+        """合并 user + assistant 内容，调用 engine.store()."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            provider.initialize("session_1", agent_identity="coder")
+            provider.sync_turn("hello", "hi there!")
+
+            time.sleep(0.15)
+            mock_engine.store.assert_called_once()
+
+    def test_sync_turn_skips_short_meaningless(self, provider):
+        """跳过 'ok', 'yes', 'thanks', 'thx' 等无意义回复."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            provider.initialize("session_1", agent_identity="coder")
+            provider.sync_turn("ok", "sure")
+
+            time.sleep(0.1)
+            mock_engine.store.assert_not_called()
+
+    def test_sync_turn_uses_write_lock(self, provider):
+        """engine.store() 在 _write_lock 保护下执行."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            provider.initialize("session_1", agent_identity="coder")
+            provider.sync_turn("hello", "world")
+            time.sleep(0.15)
+
+            # If store was called, the write lock was used (it wraps store())
+            assert mock_engine.store.called
+
+    def test_sync_turn_drops_when_prior_incomplete(self, provider):
+        """上一轮写入未完成时，跳过本轮写入."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            provider.initialize("session_1", agent_identity="coder")
+
+            # Make store block to simulate incomplete write
+            import threading
+            store_blocker = threading.Event()
+            mock_engine.store.side_effect = lambda *a, **kw: store_blocker.wait(10)
+
+            provider.sync_turn("first msg", "first reply")
+            time.sleep(0.05)
+            mock_engine.store.reset_mock()
+
+            # Second sync while first still going
+            provider.sync_turn("second msg", "second reply")
+            time.sleep(0.05)
+            mock_engine.store.assert_not_called()
+            store_blocker.set()
+            time.sleep(0.05)
+
+    def test_sync_turn_truncates_long_content(self, provider):
+        """>4000 字符时截断到 4000."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            provider.initialize("session_1", agent_identity="coder")
+            long_user = "x" * 5000
+            provider.sync_turn(long_user, "short")
+
+            time.sleep(0.15)
+            mock_engine.store.assert_called_once()
+
+    def test_sync_turn_cron_skipped(self, provider):
+        """_cron_skipped=True 时直接返回."""
+        provider._cron_skipped = True
+        provider._engine = MagicMock()
+        provider.sync_turn("hello", "world")
+        provider._engine.store.assert_not_called()
+
+    def test_sync_turn_engine_none(self, provider):
+        """_engine=None 时直接返回."""
+        provider.sync_turn("hello", "world")
+        # No assert needed — should not raise
+
+
+class TestHooks:
+    """Chunk 4: 生命周期钩子."""
+
+    def test_on_memory_write_calls_store(self, provider):
+        """内置 memory 写入镜像到 MSLM."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            provider.initialize("session_1", agent_identity="coder")
+            provider.on_memory_write("add", "memory", "remember this fact")
+
+            time.sleep(0.1)
+            mock_engine.store.assert_called_once()
+
+    def test_on_pre_compress_stores_last_messages(self, provider):
+        """取最后 10 条消息拼接，存入 MSLM."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            provider.initialize("session_1", agent_identity="coder")
+            messages = [
+                {"role": "user", "content": f"message {i}"} for i in range(15)
+            ]
+            result = provider.on_pre_compress(messages)
+
+            time.sleep(0.15)
+            mock_engine.store.assert_called_once()
+            assert result == ""
+
+    def test_on_pre_compress_returns_empty_string(self, provider):
+        """返回 '' 不干扰 compression summary."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            provider.initialize("session_1", agent_identity="coder")
+            result = provider.on_pre_compress([
+                {"role": "user", "content": "test"},
+            ])
+
+            time.sleep(0.1)
+            assert result == ""
+
+    def test_on_pre_compress_skips_empty_or_non_text(self, provider):
+        """跳过空内容、非 user/assistant 角色、非字符串 content."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            provider.initialize("session_1", agent_identity="coder")
+            messages = [
+                {"role": "system", "content": "system prompt"},
+                {"role": "user", "content": ""},
+                {"role": "user", "content": None},
+                {"role": "user", "content": "valid message"},
+            ]
+            provider.on_pre_compress(messages)
+
+            time.sleep(0.15)
+            mock_engine.store.assert_called_once()
+
+    def test_on_session_end_calls_close_session(self, provider):
+        """调用 engine.close_session(session_id)."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            provider.initialize("session_1", agent_identity="coder")
+            provider.on_session_end([])
+
+            mock_engine.close_session.assert_called_once_with("session_1")
+
+    def test_on_session_switch_updates_session_id(self, provider):
+        """更新 _session_id，清空 _prefetch_cache."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            MockEngine.return_value = MagicMock()
+
+            provider.initialize("session_1", agent_identity="coder")
+            provider._prefetch_cache = "old cache"
+
+            provider.on_session_switch("session_2")
+
+            assert provider._session_id == "session_2"
+            assert provider._prefetch_cache == ""

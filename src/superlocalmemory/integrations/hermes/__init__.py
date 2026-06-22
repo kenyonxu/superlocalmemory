@@ -26,6 +26,7 @@ import logging
 import threading
 from typing import Any, Dict, List, Optional
 
+from agent.memory_manager import sanitize_context
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 
@@ -440,6 +441,154 @@ class SuperLocalMemoryProvider(MemoryProvider):
             target=_do_prefetch, daemon=True, name="mslm-prefetch",
         )
         self._prefetch_thread.start()
+
+    # -- Lifecycle: sync_turn -------------------------------------------------
+
+    def sync_turn(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+        messages: Any = None,
+    ) -> None:
+        """Persist a completed turn as merged content.
+
+        Content is combined in ``User: ...\\nHermes: ...`` format, truncated to
+        ``_MAX_CONTENT_LENGTH`` (4000) characters.  Very short / noise-only
+        turns are skipped.  The actual ``engine.store()`` runs on a background
+        daemon thread protected by ``_write_lock``.
+
+        If the previous turn's store is still in progress, this turn is dropped
+        (no queue build-up).  The ``_sync_turn_lock`` prevents a race between
+        ``is_alive()`` and ``thread.start()``.
+        """
+        if self._cron_skipped or not self._engine:
+            return
+
+        clean_user = (sanitize_context(user_content) or "").strip()
+        clean_asst = (sanitize_context(assistant_content) or "").strip()
+
+        # Semantic noise filter — skip very short / templatic responses
+        if not clean_user or clean_user.strip().lower() in _SEMANTIC_NOISE:
+            return
+
+        combined = f"User: {clean_user}\nHermes: {clean_asst}"
+        if len(combined) > _MAX_CONTENT_LENGTH:
+            combined = combined[:_MAX_CONTENT_LENGTH]
+
+        session = session_id or self._session_id
+
+        def _sync() -> None:
+            try:
+                with self._write_lock:
+                    self._engine.store(
+                        combined,
+                        session_id=session,
+                        speaker="user",
+                        scope="personal",
+                    )
+            except Exception as exc:
+                logger.debug("MSLM sync_turn failed: %s", exc)
+
+        # Drop if prior write is still in progress
+        with self._sync_turn_lock:
+            if self._sync_thread and self._sync_thread.is_alive():
+                logger.debug("MSLM sync_turn: prior write in progress, dropping")
+                return
+            self._sync_thread = threading.Thread(
+                target=_sync, daemon=True, name="mslm-sync",
+            )
+            self._sync_thread.start()
+
+    # -- Lifecycle: on_memory_write ------------------------------------------
+
+    def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        metadata: Any = None,
+    ) -> None:
+        """Mirror built-in memory writes to MSLM (personal scope)."""
+        if not self._ensure_engine() or self._cron_skipped or not content:
+            return
+
+        def _write() -> None:
+            try:
+                with self._write_lock:
+                    self._engine.store(
+                        content, session_id=self._session_id,
+                        scope="personal",
+                    )
+            except Exception as exc:
+                logger.debug("MSLM on_memory_write failed: %s", exc)
+
+        t = threading.Thread(target=_write, daemon=True, name="mslm-memwrite")
+        t.start()
+
+    # -- Lifecycle: on_pre_compress ------------------------------------------
+
+    def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
+        """Store a summary of the last N messages before compression.
+
+        Returns an empty string (does not interfere with the compression
+        summary prompt).
+        """
+        if self._cron_skipped or not self._engine:
+            return ""
+
+        parts: List[str] = []
+        for msg in messages[-_PRE_COMPRESS_MSG_COUNT:]:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip() and role in {"user", "assistant"}:
+                parts.append(f"{role}: {content[:_PRE_COMPRESS_MSG_TRUNCATE]}")
+
+        if not parts:
+            return ""
+
+        combined = "[Pre-compression context]\n" + "\n".join(parts)
+
+        def _flush() -> None:
+            try:
+                with self._write_lock:
+                    self._engine.store(
+                        combined, session_id=self._session_id,
+                        speaker="system", scope="personal",
+                    )
+            except Exception as exc:
+                logger.debug("MSLM pre-compress store failed: %s", exc)
+
+        t = threading.Thread(target=_flush, daemon=True, name="mslm-compress")
+        t.start()
+        return ""
+
+    # -- Lifecycle: on_session_end -------------------------------------------
+
+    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+        """Close the MSLM session on session end."""
+        if self._ensure_engine() and not self._cron_skipped:
+            try:
+                self._engine.close_session(self._session_id)
+            except Exception as exc:
+                logger.debug("MSLM close_session failed: %s", exc)
+
+    # -- Lifecycle: on_session_switch ----------------------------------------
+
+    def on_session_switch(
+        self,
+        new_session_id: str,
+        *,
+        parent_session_id: str = "",
+        reset: bool = False,
+        rewound: bool = False,
+        **kwargs,
+    ) -> None:
+        """Update session ID and clear the prefetch cache."""
+        self._session_id = new_session_id
+        with self._prefetch_lock:
+            self._prefetch_cache = ""
 
     # -- Tool schemas --------------------------------------------------------
 
