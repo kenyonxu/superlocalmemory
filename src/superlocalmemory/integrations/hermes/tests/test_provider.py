@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import sys
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -112,3 +112,169 @@ class TestProviderSkeleton:
         assert provider._cron_skipped is False
         assert provider._init_cancelled is False
         assert provider._prefetch_cache == ""
+
+
+class TestInitialize:
+    """Chunk 2: 初始化与引擎生命周期."""
+
+    def test_initialize_loads_config_and_sets_profile(self, provider):
+        """从 kwargs['agent_identity'] 映射 profile."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            mock_config = MockConfig.load.return_value
+            mock_engine = MockEngine.return_value
+
+            provider.initialize("session_1", agent_identity="coder")
+
+        assert provider._mslm_profile == "coder"
+        assert provider._session_id == "session_1"
+        assert provider._slm_config is mock_config
+        assert mock_config.active_profile == "coder"
+        assert provider._engine is mock_engine
+
+    def test_initialize_uses_config_override(self, provider):
+        """Hermes config 中的 mslm_profile 覆盖 agent_identity."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            MockEngine.return_value = MagicMock()
+
+            with patch.object(provider, "_load_hermes_config", return_value={
+                "mslm_profile": "from-config",
+            }):
+                provider.initialize("session_1", agent_identity="coder")
+
+        assert provider._mslm_profile == "from-config"
+
+    def test_initialize_sets_mode_from_override(self, provider):
+        """config.yaml 中的 mode 覆盖 MSLM 默认值."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine, \
+             patch("superlocalmemory.storage.models.Mode") as MockMode:
+            mock_config = MockConfig.load.return_value
+            MockEngine.return_value = MagicMock()
+
+            class _FakeModeVal:
+                """Duck-typed Mode value with .name attribute."""
+                def __init__(self, name):
+                    self.name = name
+            MockMode.__getitem__.side_effect = _FakeModeVal
+
+            with patch.object(provider, "_load_hermes_config", return_value={
+                "mode": "B",
+            }):
+                provider.initialize("session_1", agent_identity="coder")
+
+        assert mock_config.mode.name == "B"
+
+    def test_initialize_cron_context_skips(self, provider):
+        """agent_context='cron' 时设置 _cron_skipped=True，不创建 engine."""
+        provider.initialize("session_1", agent_context="cron", agent_identity="coder")
+        assert provider._cron_skipped is True
+        assert provider._engine is None
+
+    def test_initialize_timeout_cleans_up(self, provider):
+        """engine.initialize() 超时后设置 _init_cancelled，释放 _engine."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine, \
+             patch("superlocalmemory.integrations.hermes._INIT_TIMEOUT", 0.01), \
+             patch("threading.Thread") as MockThread:
+
+            MockConfig.load.return_value = MagicMock()
+            MockEngine.return_value = MagicMock()
+
+            mock_thread = MagicMock()
+            mock_thread.is_alive.side_effect = [True, True, False]
+            MockThread.return_value = mock_thread
+
+            provider.initialize("session_1", agent_identity="coder")
+
+        assert provider._init_cancelled is True
+        assert provider._engine is None
+
+    def test_initialize_exception_disables_provider(self, provider):
+        """engine.initialize() 抛异常后 _engine = None."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+
+            with patch("threading.Thread", wraps=__import__("threading").Thread):
+                mock_engine = MockEngine.return_value
+                mock_engine.initialize.side_effect = RuntimeError("init failure")
+
+                provider.initialize("session_1", agent_identity="coder")
+
+        assert provider._engine is None
+
+    def test_initialize_creates_speaker_entities(self, provider):
+        """成功初始化后调用 create_speaker_entities('user', 'hermes')."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            provider.initialize("session_1", agent_identity="coder")
+
+        mock_engine.create_speaker_entities.assert_called_once_with("user", "hermes")
+
+    def test_initialize_speaker_entities_non_fatal(self, provider):
+        """create_speaker_entities 失败不中断初始化."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+            mock_engine.create_speaker_entities.side_effect = ValueError("bad entities")
+
+            provider.initialize("session_1", agent_identity="coder")
+
+        assert provider._engine is mock_engine
+        assert provider._session_id == "session_1"
+
+    def test_ensure_engine_returns_true_when_ready(self, provider):
+        """_ensure_engine 在 engine 就绪时返回 True."""
+        provider._engine = MagicMock()
+        assert provider._ensure_engine() is True
+
+    def test_ensure_engine_returns_false_when_none(self, provider):
+        """_ensure_engine 在 engine 为 None 时返回 False."""
+        provider._engine = None
+        assert provider._ensure_engine() is False
+
+    def test_shutdown_clears_engine(self, provider):
+        """shutdown 清除 _engine 引用."""
+        import threading
+        provider._engine = MagicMock()
+        provider._sync_thread = threading.Thread(target=lambda: None)
+        provider._sync_thread.start()
+
+        provider.shutdown()
+
+        assert provider._engine is None
+
+    def test_parse_bool_applied_to_include_global(self, provider):
+        """include_global 通过 _parse_bool 解析."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine, \
+             patch.object(provider, "_load_hermes_config", return_value={
+                 "include_global": "false",
+             }):
+            MockConfig.load.return_value = MagicMock()
+            MockEngine.return_value = MagicMock()
+
+            provider.initialize("session_1", agent_identity="coder")
+
+        assert provider._include_global is False
+
+    def test_parse_bool_applied_to_include_shared(self, provider):
+        """include_shared 通过 _parse_bool 解析."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine, \
+             patch.object(provider, "_load_hermes_config", return_value={
+                 "include_shared": "true",
+             }):
+            MockConfig.load.return_value = MagicMock()
+            MockEngine.return_value = MagicMock()
+
+            provider.initialize("session_1", agent_identity="coder")
+
+        assert provider._include_shared is True
