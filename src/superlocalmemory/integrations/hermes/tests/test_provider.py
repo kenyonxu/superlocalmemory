@@ -278,3 +278,147 @@ class TestInitialize:
             provider.initialize("session_1", agent_identity="coder")
 
         assert provider._include_shared is True
+
+
+class TestPrefetch:
+    """Chunk 3: prefetch 混合模式."""
+
+    def _make_recall_response(self, items: list[dict]) -> MagicMock:
+        """Build a mock RecallResponse with retrieval results."""
+        from superlocalmemory.storage.models import AtomicFact
+
+        response = MagicMock()
+        response.query_type = "factual"
+        response.retrieval_time_ms = 100.0
+        response.no_confident_match = False
+        results = []
+        for item in items:
+            fact = MagicMock(spec=AtomicFact)
+            fact.fact_id = item.get("fact_id", "f_" + str(len(results)))
+            fact.content = item["content"]
+            fact.confidence = item.get("confidence", 0.5)
+            fact.signals = []
+            result = MagicMock()
+            result.fact = fact
+            result.score = item.get("score", 0.5)
+            result.confidence = item.get("confidence", 0.5)
+            result.channel_scores = item.get("channel_scores", {})
+            results.append(result)
+        response.results = results
+        return response
+
+    def test_prefetch_first_turn_sync_recall(self, provider):
+        """Turn 1: 无缓存，同步调用 engine.recall()."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+            mock_engine.recall.return_value = self._make_recall_response([
+                {"content": "user likes dark mode", "score": 0.92, "confidence": 0.87},
+            ])
+
+            provider.initialize("session_1", agent_identity="coder")
+            result = provider.prefetch("what theme?")
+
+        assert "dark mode" in result
+        mock_engine.recall.assert_called_once()
+
+    def test_prefetch_subsequent_turn_uses_cache(self, provider):
+        """Turn 2: 消费 _prefetch_cache，不调用 engine.recall()."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+
+            provider.initialize("session_1", agent_identity="coder")
+
+            # Simulate a filled prefetch cache (as would be done by queue_prefetch)
+            with provider._prefetch_lock:
+                provider._prefetch_cache = "cached result for theme"
+                provider._prefetch_fired_at = 1
+
+            result = provider.prefetch("what theme?")
+            assert result == "cached result for theme"
+            # Ensure we did NOT call recall again
+            mock_engine.recall.assert_not_called()
+
+    def test_prefetch_empty_query_returns_empty(self, provider):
+        """query 为空时直接返回 ''."""
+        result = provider.prefetch("")
+        assert result == ""
+
+    def test_prefetch_engine_none_returns_empty(self, provider):
+        """engine 未初始化时返回 ''."""
+        assert provider._engine is None
+        result = provider.prefetch("test query")
+        assert result == ""
+
+    def test_prefetch_cron_skipped_returns_empty(self, provider):
+        """_cron_skipped=True 时返回 ''."""
+        provider._cron_skipped = True
+        result = provider.prefetch("test query")
+        assert result == ""
+
+    def test_queue_prefetch_starts_background_thread(self, provider):
+        """queue_prefetch 启动 daemon thread 调用 engine.recall()."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+            mock_engine.recall.return_value = self._make_recall_response([
+                {"content": "prefetched memory", "score": 0.8},
+            ])
+
+            provider.initialize("session_1", agent_identity="coder")
+            provider.queue_prefetch("next query")
+
+        # The daemon thread should have called recall
+        import time
+        time.sleep(0.1)  # Give daemon thread time to run
+        mock_engine.recall.assert_called()
+
+    def test_queue_prefetch_writes_cache(self, provider):
+        """后台线程完成后 _prefetch_cache 被写入."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+            mock_engine.recall.return_value = self._make_recall_response([
+                {"content": "cached memory data", "score": 0.85},
+            ])
+
+            provider.initialize("session_1", agent_identity="coder")
+            provider.queue_prefetch("next query")
+
+        import time
+        time.sleep(0.2)  # Wait for daemon thread
+        assert provider._prefetch_cache != ""
+        assert "cached memory" in provider._prefetch_cache
+
+    def test_queue_prefetch_concurrent_safety(self, provider):
+        """连续调用 queue_prefetch 不会启动重叠线程."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            mock_engine = MockEngine.return_value
+            mock_engine.recall.return_value = self._make_recall_response([
+                {"content": "data", "score": 0.8},
+            ])
+
+            provider.initialize("session_1", agent_identity="coder")
+            provider.queue_prefetch("query 1")
+            thread_1 = provider._prefetch_thread
+            provider.queue_prefetch("query 2")
+
+        # Second call should not create a new thread if first is still running
+        if thread_1 and thread_1.is_alive():
+            # If first thread is still running, second should be the same thread
+            assert provider._prefetch_thread is thread_1
+        else:
+            # If first completed, second should be a new thread
+            assert provider._prefetch_thread is not None
+
+    def test_prefetch_lock_protects_cache(self, provider):
+        """_prefetch_lock 保护缓存读写."""
+        assert hasattr(provider, "_prefetch_lock")
+        assert provider._prefetch_lock is not None

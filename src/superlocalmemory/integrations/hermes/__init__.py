@@ -347,6 +347,100 @@ class SuperLocalMemoryProvider(MemoryProvider):
             self._prefetch_thread.join(timeout=5.0)
         self._engine = None
 
+    # -- Lifecycle: on_turn_start --------------------------------------------
+
+    def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
+        """Track turn number for cache-cadence control."""
+        self._turn_count = turn_number
+
+    # -- Prefetch: hybrid mode -----------------------------------------------
+
+    def _format_recall_results(
+        self, response: Any,
+    ) -> str:
+        """Format a ``RecallResponse`` into a concise prompt-injection string.
+
+        Returns an empty string when there are no results.
+        """
+        if not response or not response.results:
+            return ""
+
+        lines = [f"[Memory recall: {response.query}]"]
+        for r in response.results[:10]:
+            content = (r.fact.content or "")[:200]
+            lines.append(
+                f"  • {content} "
+                f"(score={r.score:.3f}, conf={r.confidence:.3f})",
+            )
+        return "\n".join(lines)
+
+    def _sync_recall(self, query: str, **kwargs) -> str:
+        """Synchronous engine recall with exception handling.
+
+        Returns formatted string or empty string on failure.
+        """
+        try:
+            limit = kwargs.get("limit", _PREFETCH_RECALL_LIMIT)
+            fast = kwargs.get("fast", True)
+            response = self._engine.recall(
+                query, limit=limit, fast=fast,
+                include_global=self._include_global,
+                include_shared=self._include_shared,
+            )
+            return self._format_recall_results(response)
+        except Exception as exc:
+            logger.debug("MSLM recall failed: %s", exc)
+            return ""
+
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
+        """Hybrid prefetch: consume cache or fall back to synchronous recall.
+
+        - Turn 1 (cold start): no cache → synchronous ``engine.recall()``.
+        - Subsequent turns: consume ``_prefetch_cache`` written by the prior
+          turn's ``queue_prefetch()``.
+        """
+        if self._cron_skipped or not self._engine:
+            return ""
+        if not query.strip():
+            return ""
+
+        # Consume cached result if available
+        with self._prefetch_lock:
+            if self._prefetch_cache:
+                cached = self._prefetch_cache
+                self._prefetch_cache = ""
+                return cached
+
+        # Fall back to synchronous recall
+        return self._sync_recall(query)
+
+    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+        """Queue a background recall for the *next* turn's ``prefetch()``.
+
+        Results are written to ``_prefetch_cache`` under ``_prefetch_lock``.
+        """
+        if self._cron_skipped or not self._engine or not query.strip():
+            return
+
+        def _do_prefetch() -> None:
+            try:
+                response = self._engine.recall(
+                    query, limit=_PREFETCH_RECALL_LIMIT, fast=True,
+                    include_global=self._include_global,
+                    include_shared=self._include_shared,
+                )
+                formatted = self._format_recall_results(response)
+                with self._prefetch_lock:
+                    self._prefetch_cache = formatted
+                    self._prefetch_fired_at = self._turn_count
+            except Exception as exc:
+                logger.debug("MSLM queue_prefetch failed: %s", exc)
+
+        self._prefetch_thread = threading.Thread(
+            target=_do_prefetch, daemon=True, name="mslm-prefetch",
+        )
+        self._prefetch_thread.start()
+
     # -- Tool schemas --------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
