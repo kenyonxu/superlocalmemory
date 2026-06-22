@@ -120,7 +120,8 @@ class TestInitialize:
 
     def test_initialize_loads_config_and_sets_profile(self, provider):
         """从 kwargs['agent_identity'] 映射 profile."""
-        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+        with patch.object(provider, "_load_hermes_config", return_value={}), \
+             patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
              patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
             mock_config = MockConfig.load.return_value
             mock_engine = MockEngine.return_value
@@ -771,7 +772,8 @@ class TestToolCalls:
 
     def test_system_prompt_block_contains_status(self, provider):
         """system_prompt_block() 包含动态 profile/mode."""
-        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+        with patch.object(provider, "_load_hermes_config", return_value={}), \
+             patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
              patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
             MockConfig.load.return_value = MagicMock()
             mock_engine = MockEngine.return_value
