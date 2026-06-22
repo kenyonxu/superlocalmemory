@@ -47,15 +47,6 @@ _SEMANTIC_NOISE = frozenset({"", "ok", "yes", "thanks", "thx"})
 
 
 # ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Provider class
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # Provider class
 # ---------------------------------------------------------------------------
 
@@ -216,23 +207,144 @@ class SuperLocalMemoryProvider(MemoryProvider):
             },
         ]
 
+    # -- Engine health check -------------------------------------------------
+
+    def _ensure_engine(self) -> bool:
+        """Return ``True`` if the engine is available and initialised."""
+        return self._engine is not None
+
     # -- Lifecycle: initialize -----------------------------------------------
 
     def initialize(self, session_id: str, **kwargs) -> None:
-        """Initialize the provider for a Hermes session.
+        """Initialise the MSLM engine for a Hermes session.
 
-        (Stub for Chunk 1 — full implementation in Chunk 2.)
+        Configuration priority:
+          1. Hermes config.yaml overrides (``memory.superlocalmemory.*``)
+          2. MSLM native config (``~/.superlocalmemory/config.json``)
+          3. Code defaults
+
+        The engine initialisation runs in a daemon thread with a 30-second
+        timeout to prevent model-loading stalls from blocking the agent.
+        On timeout ``_init_cancelled`` is set and the engine is released.
         """
+        # 1. Resolve MSLM profile name
+        hermes_home = kwargs.get("hermes_home", "~/.hermes")
+        agent_identity = kwargs.get("agent_identity", "default")
+        config_override = self._load_hermes_config(hermes_home)
+        self._mslm_profile = (
+            config_override.get("mslm_profile")
+            or agent_identity
+            or "default"
+        )
+
+        # 2. Load MSLM config and apply overrides
+        try:
+            from superlocalmemory.core.config import SLMConfig
+
+            self._slm_config = SLMConfig.load()
+        except Exception:
+            logger.warning("MSLM config load failed — provider disabled")
+            return
+        self._slm_config.active_profile = self._mslm_profile
+
+        mode_override = config_override.get("mode")
+        if mode_override:
+            try:
+                from superlocalmemory.storage.models import Mode
+
+                self._slm_config.mode = Mode[mode_override]
+            except KeyError:
+                logger.warning(
+                    "MSLM unknown mode '%s' — using config default",
+                    mode_override,
+                )
+
+        # 3. Read recall-scope flags (type-safe bool parsing)
+        self._include_global = self._parse_bool(
+            config_override.get("include_global"), True,
+        )
+        self._include_shared = self._parse_bool(
+            config_override.get("include_shared"), False,
+        )
+
+        # 4. Cron / flush guard — skip model loading for non-interactive contexts
+        agent_context = kwargs.get("agent_context", "primary")
+        platform = kwargs.get("platform", "cli")
+        if agent_context in {"cron", "flush"} or platform == "cron":
+            self._cron_skipped = True
+            logger.debug("MSLM skipped: cron/flush context")
+            return
+
+        # 5. Create engine and initialise with timeout protection
+        try:
+            from superlocalmemory.core.engine import MemoryEngine
+
+            self._engine = MemoryEngine(self._slm_config)
+
+            init_error: Optional[Exception] = None
+
+            def _do_init() -> None:
+                nonlocal init_error
+                try:
+                    if self._init_cancelled:
+                        return
+                    self._engine.initialize()
+                except Exception as exc:
+                    init_error = exc
+
+            init_thread = threading.Thread(
+                target=_do_init, daemon=True, name="mslm-init",
+            )
+            init_thread.start()
+            init_thread.join(timeout=_INIT_TIMEOUT)
+
+            if init_thread.is_alive():
+                logger.warning(
+                    "MSLM engine init timed out after %ss — provider disabled",
+                    _INIT_TIMEOUT,
+                )
+                self._init_cancelled = True
+                init_thread.join(timeout=5.0)
+                if init_thread.is_alive():
+                    logger.warning(
+                        "MSLM init thread did not terminate gracefully "
+                        "— may retain model RAM",
+                    )
+                self._engine = None
+                return
+
+            if init_error:
+                raise init_error
+
+        except Exception as exc:
+            logger.warning("MSLM engine init failed: %s — provider disabled", exc)
+            self._engine = None
+            return
+
+        # 6. Pre-create speaker entities (non-fatal on failure)
+        try:
+            self._engine.create_speaker_entities("user", "hermes")
+        except Exception as exc:
+            logger.debug("MSLM create_speaker_entities failed (non-fatal): %s", exc)
+
         self._session_id = session_id
-        self._mslm_profile = kwargs.get("agent_identity", "default")
+        logger.info(
+            "MSLM provider ready — profile=%s mode=%s",
+            self._mslm_profile,
+            self._slm_config.mode.name,
+        )
 
     # -- Lifecycle: shutdown -------------------------------------------------
 
     def shutdown(self) -> None:
-        """Clean up resources.
+        """Clean shutdown — wait for background threads, then release engine.
 
-        (Stub for Chunk 1 — full implementation in Chunk 2.)
+        Called when the agent shuts down or the provider is replaced.
         """
+        if self._sync_thread and self._sync_thread.is_alive():
+            self._sync_thread.join(timeout=5.0)
+        if self._prefetch_thread and self._prefetch_thread.is_alive():
+            self._prefetch_thread.join(timeout=5.0)
         self._engine = None
 
     # -- Tool schemas --------------------------------------------------------
