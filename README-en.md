@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">MSLM</h1>
   <p align="center"><strong>Multi-Scope Local Memory</strong><br/><em>The multi-scope local memory system that keeps AI from forgetting.</em></p>
-  <p align="center"><code>v4.0.0</code> — Persistent memory for Claude Code, Cursor, Hermes Agent, and any MCP-compatible AI client.</p>
+  <p align="center"><code>v4.1.0</code> — Persistent memory for Claude Code, Cursor, Hermes Agent, and any MCP-compatible AI client.</p>
 </p>
 
 <p align="center">

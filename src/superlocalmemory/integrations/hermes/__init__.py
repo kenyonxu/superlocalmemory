@@ -621,7 +621,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
             f"- slm_recall(query, limit=10, fast=false): 语义搜索本地记忆库。"
             f"7通道检索 + RRF融合排序。\n"
             f"- slm_remember(content, scope=\"personal\"): 显式存储信息到本地记忆库。"
-            f"scope 可选 \"personal\"(仅当前profile) 或 \"global\"(跨profile共享)。\n"
+            f"scope 可选 \"personal\"(仅自己)、\"shared\"(指定Agent，需 shared_with) 或 \"global\"(跨profile共享)。\n"
             f"- slm_status(): 查看记忆库统计信息"
             f"（事实数、实体数、数据库大小等）。\n"
         )
@@ -665,9 +665,13 @@ class SuperLocalMemoryProvider(MemoryProvider):
                 },
                 "scope": {
                     "type": "string",
-                    "description": "作用域: personal (默认) | global",
+                    "description": "记忆作用域: personal (仅自己) | shared (指定 Agent) | global (所有 Agent)",
                     "default": "personal",
-                    "enum": ["personal", "global"],
+                    "enum": ["personal", "shared", "global"],
+                },
+                "shared_with": {
+                    "type": "string",
+                    "description": "scope=shared 时指定共享的 Agent ID，逗号分隔",
                 },
             },
             "required": ["content"],
@@ -763,13 +767,22 @@ class SuperLocalMemoryProvider(MemoryProvider):
             return tool_error("content is required")
 
         scope = params.get("scope", "personal")
-        if scope not in ("personal", "global"):
+        if scope not in ("personal", "shared", "global"):
             scope = "personal"
+
+        shared_with_raw = params.get("shared_with", "")
+        if isinstance(shared_with_raw, list):
+            shared_with = [s.strip() for s in shared_with_raw if s.strip()]
+        elif isinstance(shared_with_raw, str) and shared_with_raw.strip():
+            shared_with = [s.strip() for s in shared_with_raw.split(",") if s.strip()]
+        else:
+            shared_with = None
 
         try:
             with self._write_lock:
                 fact_ids = self._engine.store(
                     content, session_id=self._session_id, scope=scope,
+                    shared_with=shared_with,
                 )
         except Exception as exc:
             logger.debug("MSLM store failed: %s", exc)
