@@ -603,13 +603,12 @@ class SuperLocalMemoryProvider(MemoryProvider):
         if not self._ensure_engine():
             return ""
         try:
-            cursor = self._engine.db.execute(
+            rows = self._engine.db.execute(
                 "SELECT COUNT(*) FROM atomic_facts "
                 "WHERE profile_id = ?",
                 (self._mslm_profile,),
             )
-            row = cursor.fetchone()
-            fact_count = row[0] if row else 0
+            fact_count = rows[0][0] if rows else 0
         except Exception:
             fact_count = 0
 
@@ -808,26 +807,23 @@ class SuperLocalMemoryProvider(MemoryProvider):
         embedding_dim = 0
 
         try:
-            cur = db.execute(
+            rows = db.execute(
                 "SELECT COUNT(*) FROM atomic_facts WHERE profile_id = ?",
                 (self._mslm_profile,),
             )
-            row = cur.fetchone()
-            facts_total = row[0] if row else 0
+            facts_total = rows[0][0] if rows else 0
         except Exception:
             pass
 
         try:
-            cur = db.execute("SELECT COUNT(*) FROM kg_nodes")
-            row = cur.fetchone()
-            entities = row[0] if row else 0
+            rows = db.execute("SELECT COUNT(*) FROM kg_nodes")
+            entities = rows[0][0] if rows else 0
         except Exception:
             pass
 
         try:
-            cur = db.execute("SELECT COUNT(*) FROM memory_edges")
-            row = cur.fetchone()
-            graph_edges = row[0] if row else 0
+            rows = db.execute("SELECT COUNT(*) FROM memory_edges")
+            graph_edges = rows[0][0] if rows else 0
         except Exception:
             pass
 
