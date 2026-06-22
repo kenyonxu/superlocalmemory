@@ -2,7 +2,7 @@ name: superlocalmemory
 version: 1.0.0
 description: "MSLM — 信息几何学的本地 AI 记忆引擎，7通道检索，三层作用域，完全本地运行"
 pip_dependencies:
-  - mslm-memory>=4.0.0
+  - mslm-memory>=4.1.0
 hooks:
   - on_session_end
   - on_memory_write
