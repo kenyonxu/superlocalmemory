@@ -47,10 +47,14 @@ def _try_ollama_embedder(emb_cfg: Any) -> Any | None:
     return None
 
 
-def _try_service_embedder(cls: type, emb_cfg: Any) -> Any | None:
+def _try_service_embedder(
+    cls: type, emb_cfg: Any,
+    proxy_http: str = "",
+    proxy_https: str = "",
+) -> Any | None:
     """Try to create an EmbeddingService. Returns it or None."""
     try:
-        emb = cls(emb_cfg)
+        emb = cls(emb_cfg, proxy_http=proxy_http, proxy_https=proxy_https)
         if emb.is_available:
             return emb
         logger.warning("EmbeddingService not available. BM25-only mode. Run 'slm doctor' to diagnose.")
@@ -77,6 +81,11 @@ def init_embedder(config: SLMConfig) -> Any | None:
 
     emb_cfg = config.embedding
     provider = emb_cfg.provider
+    # Read proxy config for embedding worker (needed for HuggingFace access
+    # in network-restricted environments, e.g. mainland China).
+    _pxy = getattr(config, 'proxy', None)
+    _pxy_http = getattr(_pxy, 'http', '') or ''
+    _pxy_https = getattr(_pxy, 'https', '') or ''
 
     # v3.4.55: When provider is ollama, use Ollama's embedding API as
     # PRIMARY. The stored vectors were created by Ollama's nomic-embed-text;
@@ -89,7 +98,7 @@ def init_embedder(config: SLMConfig) -> Any | None:
         if result is not None:
             logger.info("Using Ollama embeddings (nomic-embed-text, local)")
             return result
-        st_emb = _try_service_embedder(EmbeddingService, emb_cfg)
+        st_emb = _try_service_embedder(EmbeddingService, emb_cfg, proxy_http=_pxy_http, proxy_https=_pxy_https)
         if st_emb is not None:
             logger.warning("Ollama unavailable; falling back to sentence-transformers subprocess")
             return st_emb
@@ -101,15 +110,15 @@ def init_embedder(config: SLMConfig) -> Any | None:
             "Using OpenAI-compatible embedding endpoint: %s (model=%s, dim=%d)",
             emb_cfg.api_endpoint, emb_cfg.model_name, emb_cfg.dimension,
         )
-        return _try_service_embedder(EmbeddingService, emb_cfg)
+        return _try_service_embedder(EmbeddingService, emb_cfg, proxy_http=_pxy_http, proxy_https=_pxy_https)
 
     # --- Explicit cloud provider ---
     if provider == "cloud" or emb_cfg.is_cloud:
-        return _try_service_embedder(EmbeddingService, emb_cfg)
+        return _try_service_embedder(EmbeddingService, emb_cfg, proxy_http=_pxy_http, proxy_https=_pxy_https)
 
     # --- Explicit sentence-transformers (subprocess-isolated) ---
     if provider == "sentence-transformers":
-        return _try_service_embedder(EmbeddingService, emb_cfg)
+        return _try_service_embedder(EmbeddingService, emb_cfg, proxy_http=_pxy_http, proxy_https=_pxy_https)
 
     # --- Auto-detect: try Ollama first (lightweight, <1s) ---
     ollama_emb = _try_ollama_embedder(emb_cfg)
@@ -120,7 +129,7 @@ def init_embedder(config: SLMConfig) -> Any | None:
     # --- Fallback: sentence-transformers subprocess ---
     # EmbeddingService ALWAYS uses subprocess isolation (see embeddings.py).
     # The main process never imports torch — safe for Mode A/B.
-    return _try_service_embedder(EmbeddingService, emb_cfg)
+    return _try_service_embedder(EmbeddingService, emb_cfg, proxy_http=_pxy_http, proxy_https=_pxy_https)
 
 
 # ---------------------------------------------------------------------------

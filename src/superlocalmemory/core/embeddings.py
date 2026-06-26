@@ -148,7 +148,7 @@ _IDLE_TIMEOUT_SECONDS = int(os.environ.get("SLM_EMBED_IDLE_TIMEOUT", _IDLE_TIMEO
 # V3.3.21: Configurable response timeout — 180s default, but batch ingestion
 # (2-turn chunks across 10 conversations) needs 600s+ to survive cold-start
 # model downloads and ARM64 ONNX compilation pauses.
-_SUBPROCESS_RESPONSE_TIMEOUT = int(os.environ.get("SLM_EMBED_RESPONSE_TIMEOUT", 180))
+_SUBPROCESS_RESPONSE_TIMEOUT = int(os.environ.get("SLM_EMBED_RESPONSE_TIMEOUT", 300))
 # V3.3.21: Increase recycle threshold to 5000 (was 1000). With 2-turn chunks,
 # a single conversation produces ~50-80 store calls. 10 conversations = 500-800.
 # Recycling at 1000 caused mid-ingestion worker death → timeout cascade.
@@ -165,8 +165,16 @@ class EmbeddingService:
     ~3 sec (model reload). Subsequent embeds are instant (<100ms).
     """
 
-    def __init__(self, config: EmbeddingConfig) -> None:
+    def __init__(
+        self,
+        config: EmbeddingConfig,
+        *,
+        proxy_http: str = "",
+        proxy_https: str = "",
+    ) -> None:
         self._config = config
+        self._proxy_http = proxy_http
+        self._proxy_https = proxy_https
         self._lock = threading.Lock()
         self._worker_proc: subprocess.Popen | None = None
         self._available = True
@@ -479,6 +487,24 @@ class EmbeddingService:
                 # so there is no collision risk and full parallelism is safe.
                 "OMP_NUM_THREADS": str(os.cpu_count() or 4),
             }
+            # Remove HF mirror endpoint — hf-mirror.com has SSL issues that
+            # cause model loading to hang >180s. Worker defaults to
+            # huggingface.co which works via proxy.
+            env.pop("HF_ENDPOINT", None)
+            # Wire proxy from config so the worker can reach huggingface.co
+            # in network-restricted environments (e.g. mainland China).
+            if self._proxy_http:
+                env["http_proxy"] = self._proxy_http
+                env["HTTP_PROXY"] = self._proxy_http
+            if self._proxy_https:
+                env["https_proxy"] = self._proxy_https
+                env["HTTPS_PROXY"] = self._proxy_https
+            # Also forward any proxy vars from the parent environment as fallback
+            for _proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+                               "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY"):
+                _pv = os.environ.get(_proxy_var)
+                if _pv:
+                    env.setdefault(_proxy_var, _pv)
             from superlocalmemory.core.platform_utils import popen_platform_kwargs
             self._worker_proc = subprocess.Popen(
                 [sys.executable, "-m", worker_module],
