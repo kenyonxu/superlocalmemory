@@ -864,6 +864,20 @@ class SLMConfig:
             embedding_dimension=int(emb_data.get("dimension", 0) or 0),
             base_dir=raw_base_dir,
         )
+        # Preserve Ollama-specific embedding settings from JSON (for_mode()
+        # only handles the generic provider/model_name — ollama_model and
+        # ollama_base_url use dataclass defaults otherwise).
+        if emb_data.get("ollama_model"):
+            config.embedding = EmbeddingConfig(
+                model_name=config.embedding.model_name,
+                dimension=config.embedding.dimension,
+                provider=config.embedding.provider,
+                api_endpoint=config.embedding.api_endpoint,
+                api_key=config.embedding.api_key,
+                deployment_name=config.embedding.deployment_name,
+                ollama_model=emb_data.get("ollama_model", config.embedding.ollama_model),
+                ollama_base_url=emb_data.get("ollama_base_url", config.embedding.ollama_base_url),
+            )
         config.active_profile = data.get("active_profile", "default")
 
         # V3.3 config fields (additive — defaults work if missing from JSON)
