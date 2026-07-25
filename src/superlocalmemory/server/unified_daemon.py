@@ -72,6 +72,22 @@ from superlocalmemory.learning.source_quality import (
     repair_historical_source_quality,
 )
 
+# D-02 fix: import at module load so the reference survives interpreter teardown.
+# A lazy import inside the shutdown path races the namespace-cleanup phase on
+# CPython and can raise ImportError: "cannot import name 'trigram_index'".
+try:
+    from superlocalmemory.learning import trigram_index as _trigram_index_mod
+except ImportError:  # pragma: no cover — defensive for stripped installs
+    _trigram_index_mod = None  # type: ignore[assignment]
+
+# D-03 fix: move this import to module top so the already-compiled .pyc object
+# is used at shutdown time. A lazy import of a source .py during interpreter
+# shutdown on macOS triggers TCC xattr checks and can raise PermissionError.
+try:
+    from superlocalmemory.hooks._outcome_common import _perf_log_flush as _perf_log_flush_fn
+except ImportError:  # pragma: no cover — defensive for stripped installs
+    _perf_log_flush_fn = None  # type: ignore[assignment]
+
 logger = logging.getLogger("superlocalmemory.unified_daemon")
 
 _DEFAULT_PORT = 8765
@@ -2156,18 +2172,23 @@ async def lifespan(application: FastAPI):
         logger.warning("evolution cost-conn cache close failed: %s", exc)
 
     # Drop the trigram cache conn symmetrically.
+    # D-02: use module-level reference (_trigram_index_mod) to avoid re-importing
+    # during interpreter teardown when the learning namespace may be gone.
     try:
-        from superlocalmemory.learning import trigram_index as _ti
-        _ti._reset_cache_conn()
+        if _trigram_index_mod is not None:
+            _trigram_index_mod._reset_cache_conn()
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning("trigram cache conn close failed: %s", exc)
 
     # Flush the perf-log fd explicitly (the atexit hook still fires
     # but explicit close here is cheap insurance against uvicorn
     # killing the process before atexit runs).
+    # D-03: use module-level reference (_perf_log_flush_fn) — a lazy import here
+    # triggers macOS TCC xattr checks on the source .py at shutdown time, causing
+    # PermissionError: "Operation not permitted: .../hooks/_outcome_common.py".
     try:
-        from superlocalmemory.hooks._outcome_common import _perf_log_flush
-        _perf_log_flush()
+        if _perf_log_flush_fn is not None:
+            _perf_log_flush_fn()
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning("perf_log flush failed: %s", exc)
 
@@ -2473,7 +2494,33 @@ def _register_dashboard_routes(application: FastAPI) -> None:
 
     Extracted from api.py's create_app() to avoid duplicate MemoryEngine.
     """
-    from superlocalmemory.server.api import UI_DIR
+    from superlocalmemory.server.api import UI_DIR as _source_ui_dir
+
+    # D-04: Copy UI assets to the data dir at daemon startup to avoid macOS
+    # xattr/TCC PermissionError on source-tree files in editable installs.
+    # The data dir has no quarantine attributes; the copy is idempotent (same
+    # content from the same package) so concurrent daemon starts are safe.
+    # Falls back to the source path with a WARNING — never crashes the daemon.
+    import shutil as _shutil
+    _data_ui_dir = state_path("ui")
+    try:
+        _data_ui_dir.mkdir(parents=True, exist_ok=True)
+        if _source_ui_dir.is_dir():
+            _shutil.copytree(
+                str(_source_ui_dir),
+                str(_data_ui_dir),
+                dirs_exist_ok=True,  # idempotent; safe under concurrent starts
+            )
+        UI_DIR = _data_ui_dir
+    except Exception as _ui_copy_exc:
+        # D-04 fallback: source path. Logged as WARNING (not DEBUG) so operators
+        # can diagnose PermissionError on editable installs. Never silently hidden.
+        logger.warning(
+            "D-04: UI copy to data dir failed; serving from source path %s: %s",
+            _source_ui_dir,
+            _ui_copy_exc,
+        )
+        UI_DIR = _source_ui_dir
 
     # Rate limiting (graceful)
     try:
@@ -2742,9 +2789,14 @@ def _register_dashboard_routes(application: FastAPI) -> None:
                 )
             return await call_next(request)
 
-    # Static files
+    # Static files — UI_DIR is already the effective path (data-dir or source
+    # fallback) set by the D-04 copy block above; mkdir is a no-op for
+    # the data-dir path (already created) and guarded in the source-fallback case.
     from fastapi.staticfiles import StaticFiles
-    UI_DIR.mkdir(exist_ok=True)
+    try:
+        UI_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass  # source path may not be writable; StaticFiles reads, not writes
     application.mount("/static", StaticFiles(directory=str(UI_DIR)), name="static")
 
     # Route modules
