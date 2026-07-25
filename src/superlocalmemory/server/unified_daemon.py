@@ -3036,6 +3036,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
         # request is None only for direct internal/test calls (no HTTP client),
         # which are trusted; over HTTP FastAPI always injects the real Request.
         from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
+        from superlocalmemory.server.write_identity import _TEST_ISOLATION_ALLOWED
 
         client_host = request.client.host if (request and request.client) else ""
         _trusted = (

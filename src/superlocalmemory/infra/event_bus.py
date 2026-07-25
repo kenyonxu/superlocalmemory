@@ -512,30 +512,69 @@ class EventBus:
         archive_cutoff = (now - timedelta(hours=cold_hours)).isoformat()
         stats = {"hot_to_warm": 0, "warm_to_cold": 0, "archived": 0}
 
+        _PRUNE_BATCH = 5000  # max rows per transaction — keeps lock time bounded
+
         if self._db is not None:
             # Fix C: route tier-management writes through DatabaseManager.
-            # Use separate transactions (each is short) to avoid one long hold.
+            # Use separate short transactions per batch to avoid one long hold.
             try:
-                with self._db.transaction():
-                    self._db.execute(
-                        "UPDATE memory_events SET tier = 'warm' "
-                        "WHERE tier = 'hot' AND created_at < ? AND importance < 5",
-                        (warm_cutoff,),
-                    )
-                with self._db.transaction():
-                    self._db.execute(
-                        "DELETE FROM memory_events "
-                        "WHERE tier = 'warm' AND created_at < ?",
-                        (cold_cutoff,),
-                    )
-                with self._db.transaction():
-                    self._db.execute(
-                        "DELETE FROM memory_events WHERE created_at < ?",
-                        (archive_cutoff,),
-                    )
+                # Hot → warm (UPDATE, bounded loop)
+                while True:
+                    with self._db.transaction():
+                        self._db.execute(
+                            "UPDATE memory_events SET tier = 'warm' "
+                            "WHERE rowid IN ("
+                            "  SELECT rowid FROM memory_events "
+                            "  WHERE tier = 'hot' AND created_at < ? AND importance < 5 "
+                            "  LIMIT ?"
+                            ")",
+                            (warm_cutoff, _PRUNE_BATCH),
+                        )
+                        rows = self._db.execute("SELECT changes()")
+                        changed = rows[0][0] if rows else 0
+                    stats["hot_to_warm"] += changed
+                    if changed < _PRUNE_BATCH:
+                        break
+
+                # Warm → cold (DELETE, bounded loop)
+                while True:
+                    with self._db.transaction():
+                        self._db.execute(
+                            "DELETE FROM memory_events "
+                            "WHERE rowid IN ("
+                            "  SELECT rowid FROM memory_events "
+                            "  WHERE tier = 'warm' AND created_at < ? "
+                            "  LIMIT ?"
+                            ")",
+                            (cold_cutoff, _PRUNE_BATCH),
+                        )
+                        rows = self._db.execute("SELECT changes()")
+                        changed = rows[0][0] if rows else 0
+                    stats["warm_to_cold"] += changed
+                    if changed < _PRUNE_BATCH:
+                        break
+
+                # Archive prune (DELETE, bounded loop)
+                while True:
+                    with self._db.transaction():
+                        self._db.execute(
+                            "DELETE FROM memory_events "
+                            "WHERE rowid IN ("
+                            "  SELECT rowid FROM memory_events "
+                            "  WHERE created_at < ? "
+                            "  LIMIT ?"
+                            ")",
+                            (archive_cutoff, _PRUNE_BATCH),
+                        )
+                        rows = self._db.execute("SELECT changes()")
+                        changed = rows[0][0] if rows else 0
+                    stats["archived"] += changed
+                    if changed < _PRUNE_BATCH:
+                        break
+
                 logger.info(
-                    "Prune complete (via db): warm_cutoff=%s cold_cutoff=%s",
-                    warm_cutoff, cold_cutoff,
+                    "Prune complete (via db): hot->warm=%d warm->cold=%d archived=%d",
+                    stats["hot_to_warm"], stats["warm_to_cold"], stats["archived"],
                 )
                 return stats
             except Exception as exc:

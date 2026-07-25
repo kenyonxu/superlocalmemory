@@ -263,7 +263,10 @@ def _mesh_read_model(records: list[dict]) -> tuple[list[dict], list[dict]]:
             "stale_at": stale_at.isoformat(),
             "expires_at": expires_at.isoformat(),
         }
-        if str(record.get("host") or "").lower() in _LOOPBACK_HOSTS:
+        # display-only — not an auth decision; is_loopback() handles IPv4-mapped forms
+        # such as "::ffff:127.0.0.1" that _LOOPBACK_HOSTS misses.
+        from superlocalmemory.server.loopback import is_loopback as _is_loopback
+        if _is_loopback(str(record.get("host") or "").lower()):
             local.append(normalized)
         else:
             remote.append(normalized)

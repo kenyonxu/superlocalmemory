@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -135,6 +136,8 @@ class MemoryEngine:
         # Workstream D (3.8.4): single-worker pool reused across store_fast() calls.
         # Lazy-created on first warm-guard attempt; avoids per-call thread churn.
         self._store_fast_embed_pool: object | None = None
+        # Lock guards the lazy-init to prevent TOCTOU race on concurrent first calls.
+        self._store_fast_embed_pool_lock = threading.Lock()
 
     # -- Public properties (Phase 2+ access) --------------------------------
 
@@ -622,12 +625,18 @@ class MemoryEngine:
             import concurrent.futures as _cf
             # Lazy-init the pool once per engine instance — avoids per-call
             # thread churn and the associated resource leak from discard-on-exit.
+            # Double-checked locking guards against TOCTOU on concurrent first calls.
             if self._store_fast_embed_pool is None:
-                self._store_fast_embed_pool = _cf.ThreadPoolExecutor(
-                    max_workers=1,
-                    thread_name_prefix="slm-sg-embed",
-                )
-            _timeout_s = int(os.environ.get("SLM_STORE_FAST_EMBED_TIMEOUT_MS", 500)) / 1000.0
+                with self._store_fast_embed_pool_lock:
+                    if self._store_fast_embed_pool is None:
+                        self._store_fast_embed_pool = _cf.ThreadPoolExecutor(
+                            max_workers=1,
+                            thread_name_prefix="slm-sg-embed",
+                        )
+            try:
+                _timeout_s = int(os.environ.get("SLM_STORE_FAST_EMBED_TIMEOUT_MS", 500)) / 1000.0
+            except (ValueError, TypeError):
+                _timeout_s = 0.5  # default 500 ms
             try:
                 _future = self._store_fast_embed_pool.submit(_embedder_ref.embed, fact_text)
                 try:
