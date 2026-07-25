@@ -961,6 +961,29 @@ class HealthConfig:
 
 
 # ---------------------------------------------------------------------------
+# Graph Pruning Config (Workstream G — #84)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GraphPruningConfig:
+    """Graph thinning parameters.  Exposed via dashboard + CLI.
+
+    Defaults reproduce the previous hard-coded behaviour so existing
+    deployments see zero behavioural change after upgrade.
+    """
+
+    #: Maximum in- or out-degree per node.  Maps to the legacy module-level
+    #: ``_MAX_DEGREE_PER_NODE = 100`` in graph_pruner.py.
+    max_degree_per_node: int = 100
+    #: Discard edges with weight strictly below this floor.
+    #: 0.0 = no floor (current behaviour, always-safe default).
+    min_edge_weight: float = 0.0
+    #: Master kill-switch for all graph pruning.  ``False`` skips the entire
+    #: prune step (useful for debugging graph bloat).
+    enabled: bool = True
+
+
+# ---------------------------------------------------------------------------
 # Master Config
 # ---------------------------------------------------------------------------
 
@@ -1010,6 +1033,8 @@ class SLMConfig:
     scale_engine_state: str = "local_core"  # local_core | prepared | verified | promoted
     evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
     health: HealthConfig = field(default_factory=HealthConfig)
+    # v3.8.4-G: Graph thinning parameters (#84)
+    graph_pruning: GraphPruningConfig = field(default_factory=GraphPruningConfig)
 
     # v3.4.3: Daemon configuration
     daemon_idle_timeout: int = 0       # 0 = 24/7 (no auto-kill). >0 = seconds before auto-kill.
@@ -1174,6 +1199,31 @@ class SLMConfig:
                 if k in HealthConfig.__dataclass_fields__
             })
 
+        # v3.8.4-G: Graph pruning config (#84) — additive, no migration needed.
+        # Old configs without this section silently fall back to GraphPruningConfig()
+        # defaults, which reproduce the existing _MAX_DEGREE_PER_NODE=100 behaviour.
+        gp_raw = data.get("graph_pruning", {})
+        if gp_raw:
+            try:
+                gp_kwargs = {
+                    k: v for k, v in gp_raw.items()
+                    if k in GraphPruningConfig.__dataclass_fields__
+                }
+                gp = GraphPruningConfig(**gp_kwargs)
+                # Validate and clamp out-of-range values
+                max_deg = gp.max_degree_per_node if gp.max_degree_per_node >= 1 else 100
+                min_w = max(0.0, min(1.0, gp.min_edge_weight))
+                config.graph_pruning = GraphPruningConfig(
+                    max_degree_per_node=max_deg,
+                    min_edge_weight=min_w,
+                    enabled=gp.enabled,
+                )
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "graph_pruning config invalid (%s) — using defaults", exc
+                )
+                config.graph_pruning = GraphPruningConfig()
+
         # V3.4.65: Injection config (additive — defaults if missing from JSON)
         inj = data.get("injection", {}) or {}
         config.injection = InjectionConfig(
@@ -1328,6 +1378,14 @@ class SLMConfig:
 
         # Multi-scope memory: behaviour defaults
         data["scope"] = self.scope.as_dict()
+
+        # v3.8.4-G: Persist graph pruning config (#84).
+        # Always written — additive key, never overwrites unrelated sections.
+        data["graph_pruning"] = {
+            "max_degree_per_node": self.graph_pruning.max_degree_per_node,
+            "min_edge_weight": self.graph_pruning.min_edge_weight,
+            "enabled": self.graph_pruning.enabled,
+        }
 
         # Preserve existing V3.3 config sections that aren't in for_mode()
         for key in ("forgetting", "quantization", "sagq", "embedding_signature", "auto_invoke"):

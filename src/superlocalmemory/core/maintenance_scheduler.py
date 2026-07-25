@@ -125,9 +125,32 @@ class MaintenanceScheduler:
                     )
 
             # V3.4.11: Graph pruning (remove orphan edges)
+            # v3.8.4-G: thread GraphPruningConfig params so dashboard changes
+            # persist and take effect without a daemon restart.
             try:
                 from superlocalmemory.core.graph_pruner import prune_graph
-                # Fix A: pass DatabaseManager directly → writes serialised through _lock
+                gp = self._config.graph_pruning
+                if not gp.enabled:
+                    logger.debug(
+                        "Graph pruning disabled by config for %s — skipping",
+                        profile_id,
+                    )
+                else:
+                    # Fix A: pass DatabaseManager directly → writes serialised through _lock
+                    prune_stats = prune_graph(
+                        self._db,
+                        profile_id,
+                        max_degree=gp.max_degree_per_node,
+                        min_edge_weight=gp.min_edge_weight,
+                    )
+                    removed = prune_stats["total_before"] - prune_stats["total_after"]
+                    if removed > 0:
+                        logger.info(
+                            "Graph pruning for %s: %d edges removed", profile_id, removed
+                        )
+            except AttributeError:
+                # Older SLMConfig without graph_pruning field (upgrade safety)
+                from superlocalmemory.core.graph_pruner import prune_graph
                 prune_stats = prune_graph(self._db, profile_id)
                 removed = prune_stats["total_before"] - prune_stats["total_after"]
                 if removed > 0:

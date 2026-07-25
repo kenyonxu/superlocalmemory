@@ -49,6 +49,8 @@ def prune_graph(
     profile_id: str = "default",
     dry_run: bool = False,
     cap_degree: bool = True,
+    max_degree: int = _MAX_DEGREE_PER_NODE,
+    min_edge_weight: float = 0.0,
 ) -> dict:
     """Run all graph pruning strategies for a specific profile.
 
@@ -63,6 +65,11 @@ def prune_graph(
     rows) with a brief yield between batches.  This caps the WAL write-lock
     hold to < 10 ms per batch instead of potentially 30+ seconds for the
     full prune.
+
+    v3.8.4-G (#84): two new parameters for config-driven thinning:
+      - ``max_degree``: per-node in/out degree cap (default = _MAX_DEGREE_PER_NODE=100).
+      - ``min_edge_weight``: edges with weight strictly below this floor are
+        discarded before any other step.  Default 0.0 = no floor (current behaviour).
 
     NOTE (Flaw 2 from CRIT): orphan IDs are read once upfront, then deleted
     in batches.  New orphan edges created by the materialiser DURING a prune
@@ -91,6 +98,7 @@ def prune_graph(
         "duplicates_removed": 0,
         "hub_edges_removed": 0,
         "association_orphans_removed": 0,
+        "low_weight_removed": 0,
         "total_before": 0,
         "total_after": 0,
     }
@@ -105,6 +113,12 @@ def prune_graph(
         start = time.time()
 
         if not dry_run:
+            # v3.8.4-G: min_edge_weight floor — run FIRST so subsequent steps
+            # operate on the already-thinned edge set.
+            if min_edge_weight > 0.0:
+                stats["low_weight_removed"] = _remove_low_weight_edges_batched(
+                    db, profile_id, min_edge_weight,
+                )
             stats["orphans_removed"] = _remove_orphan_edges_batched(
                 db, profile_id,
             )
@@ -119,7 +133,7 @@ def prune_graph(
             )
             if cap_degree:
                 stats["hub_edges_removed"] = _cap_node_degree_batched(
-                    db, profile_id, _MAX_DEGREE_PER_NODE,
+                    db, profile_id, max_degree,
                 )
             stats["association_orphans_removed"] = (
                 _remove_orphan_association_edges_batched(db, profile_id)
@@ -364,14 +378,47 @@ def _cap_node_degree_batched(
     return removed
 
 
+def _remove_low_weight_edges_batched(
+    db: "DatabaseManager",
+    profile_id: str,
+    min_weight: float,
+) -> int:
+    """Remove graph_edges with weight strictly below ``min_weight``.
+
+    v3.8.4-G (#84): implements the ``min_edge_weight`` floor from
+    ``GraphPruningConfig``.  Runs before orphan/duplicate/degree pruning so
+    subsequent steps operate on the already-thinned set.
+
+    A ``min_weight`` of 0.0 means no floor — no edges are touched.  The
+    caller in ``prune_graph()`` guards the call with ``if min_edge_weight > 0.0``
+    so this function is only invoked when there is an actual floor to enforce.
+    """
+    rows = db.execute(
+        "SELECT edge_id FROM graph_edges WHERE profile_id = ? AND weight < ?",
+        (profile_id, min_weight),
+    )
+    ids = [dict(r)["edge_id"] for r in rows]
+    if not ids:
+        return 0
+    removed = _batch_delete_by_ids(db, "graph_edges", ids)
+    logger.info(
+        "_remove_low_weight_edges_batched: removed %d edges (min_weight=%.4f)",
+        removed, min_weight,
+    )
+    return removed
+
+
 def _remove_orphan_association_edges_batched(
     db: "DatabaseManager",
     profile_id: str,
 ) -> int:
-    """Remove association_edges whose source/target fact no longer exists."""
+    """Remove association_edges whose source/target fact no longer exists.
+
+    Fix: PK column is ``edge_id``, not ``id`` (schema_v32.py line 177).
+    """
     rows = db.execute(
         """
-        SELECT id FROM association_edges
+        SELECT edge_id FROM association_edges
         WHERE profile_id = ?
           AND (
             source_fact_id NOT IN (
@@ -384,10 +431,10 @@ def _remove_orphan_association_edges_batched(
         """,
         (profile_id, profile_id, profile_id),
     )
-    ids = [dict(r)["id"] for r in rows]
+    ids = [dict(r)["edge_id"] for r in rows]
     if not ids:
         return 0
-    return _batch_delete_by_ids(db, "association_edges", ids, id_col="id")
+    return _batch_delete_by_ids(db, "association_edges", ids, id_col="edge_id")
 
 
 # ---------------------------------------------------------------------------
