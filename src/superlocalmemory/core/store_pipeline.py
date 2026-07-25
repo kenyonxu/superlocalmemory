@@ -166,10 +166,24 @@ def enrich_fact(
     from superlocalmemory.encoding.emotional import emotional_importance_boost, tag_emotion
     from superlocalmemory.encoding.signal_inference import infer_signal
 
-    embedding = embedder.embed(fact.content) if embedder else None
-    fisher_mean, fisher_variance = (None, None)
-    if embedder and embedding:
-        fisher_mean, fisher_variance = embedder.compute_fisher_params(embedding)
+    # v3.8.4 D: if the fact already carries a sync-embedded vector (warm-guard
+    # path in store_fast), reuse it — avoids a redundant embed call in the
+    # materializer and keeps the vector consistent with the one indexed in the
+    # vector store at write time.
+    if fact.embedding is not None:
+        embedding = fact.embedding
+        fisher_mean = fact.fisher_mean
+        fisher_variance = fact.fisher_variance
+        # fisher_params are computed in the warm-guard path too, but guard
+        # against the edge case where they weren't (e.g. compute_fisher_params
+        # raised after embed succeeded).
+        if (fisher_mean is None or fisher_variance is None) and embedder and embedding:
+            fisher_mean, fisher_variance = embedder.compute_fisher_params(embedding)
+    else:
+        embedding = embedder.embed(fact.content) if embedder else None
+        fisher_mean, fisher_variance = (None, None)
+        if embedder and embedding:
+            fisher_mean, fisher_variance = embedder.compute_fisher_params(embedding)
 
     canonical = {}
     if entity_resolver and fact.entities:
