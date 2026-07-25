@@ -18,6 +18,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,34 @@ def _verify_ingestion_schema(memory_db: Path) -> bool:
         return bool(M018_ingestion_operations.verify(connection))
     finally:
         connection.close()
+
+
+# ---------------------------------------------------------------------------
+# Workstream D (3.8.4) — warm-guard sync embed helpers
+# ---------------------------------------------------------------------------
+
+def _is_remote_embedder(embedder: object) -> bool:
+    """Return True if *embedder* makes remote HTTP calls (cloud / OpenAI-compatible).
+
+    Remote embedders (100–400ms round-trip) must never block the store_fast()
+    write path synchronously — they stay on the async materializer path.
+
+    Local embedders:
+      - EmbeddingService (subprocess, local ONNX/sentence-transformers): has
+        ``_config`` with ``is_cloud=False`` and ``is_openai_compatible=False``.
+      - OllamaEmbedder (localhost HTTP, ~73ms): has NO ``_config`` attribute.
+
+    Remote embedders:
+      - EmbeddingService with ``_config.is_cloud=True`` (Azure, etc.)
+      - EmbeddingService with ``_config.is_openai_compatible=True``
+    """
+    cfg = getattr(embedder, "_config", None)
+    if cfg is None:
+        return False  # OllamaEmbedder — local
+    return bool(
+        getattr(cfg, "is_cloud", False)
+        or getattr(cfg, "is_openai_compatible", False)
+    )
 
 
 class MemoryEngine:
@@ -103,6 +132,9 @@ class MemoryEngine:
         self._consolidation_engine = None
         self._maintenance_scheduler = None
         self._hooks = HookRegistry()
+        # Workstream D (3.8.4): single-worker pool reused across store_fast() calls.
+        # Lazy-created on first warm-guard attempt; avoids per-call thread churn.
+        self._store_fast_embed_pool: object | None = None
 
     # -- Public properties (Phase 2+ access) --------------------------------
 
@@ -568,15 +600,58 @@ class MemoryEngine:
                 r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+){0,3})\b", fact_text)}
             | {m.group(1) for m in _re.finditer(r"\b([A-Z]{2,})\b", fact_text)}
         )
-        # Queryable admission must never acquire the embedding worker lock.
-        # On a warm daemon that looked cheap, but on a clean Mode A install the
-        # background model load owns that lock for up to 180s and turned the
-        # receipt-first path into a hidden synchronous wait.  The canonical
-        # materializer below runs the complete pipeline and promotes this same
-        # fact with its embedding, Fisher parameters, entities and graph edges.
-        # Until then it is deliberately BM25/entity/date recallable.
+        # Workstream D (3.8.4) — warm-guard synchronous embed.
+        #
+        # Original contract (3.8.2): queryable admission NEVER acquires the
+        # embedding worker lock. On a clean Mode-A install the background model
+        # load owns that lock for up to 180s, turning the receipt-first path into
+        # a hidden synchronous wait. The canonical materializer promotes this
+        # fact with its full pipeline (embedding, Fisher, entities, graph edges).
+        #
+        # 3.8.4 extension: when the embedder is PROVABLY warm (_available is True)
+        # AND is a local embedder (not a remote cloud/OpenAI endpoint), compute the
+        # embedding synchronously with a hard 500ms cap. On timeout or any
+        # exception, fall through to emb=None — the materializer fills it async.
+        # This preserves the 3.8.2 invariant for cold start while eliminating the
+        # semantic-channel blind spot on warm daemons (the top UX complaint).
         emb = None
         fmean = fvar = None
+        _embedder_ref = self._embedder
+        if (
+            _embedder_ref is not None
+            and getattr(_embedder_ref, "_available", None) is True
+            and not _is_remote_embedder(_embedder_ref)
+        ):
+            import concurrent.futures as _cf
+            # Lazy-init the pool once per engine instance — avoids per-call
+            # thread churn and the associated resource leak from discard-on-exit.
+            if self._store_fast_embed_pool is None:
+                self._store_fast_embed_pool = _cf.ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="slm-sg-embed",
+                )
+            _timeout_s = int(os.environ.get("SLM_STORE_FAST_EMBED_TIMEOUT_MS", 500)) / 1000.0
+            try:
+                _future = self._store_fast_embed_pool.submit(_embedder_ref.embed, fact_text)
+                try:
+                    emb = _future.result(timeout=_timeout_s)
+                    if emb:
+                        fmean, fvar = _embedder_ref.compute_fisher_params(emb)
+                except _cf.TimeoutError:
+                    logger.debug(
+                        "store_fast: warm-guard embed timed out (>%.0fms) — deferring to materializer",
+                        _timeout_s * 1000,
+                    )
+                    emb = None
+                except Exception as _exc:
+                    logger.debug(
+                        "store_fast: warm-guard embed failed (%s) — deferring to materializer",
+                        _exc,
+                    )
+                    emb = None
+            except Exception as _exc:
+                logger.debug("store_fast: warm-guard pool submit failed (%s)", _exc)
+                emb = None
         fact = AtomicFact(
             fact_id=_uuid.uuid4().hex[:16], memory_id=record.memory_id,
             profile_id=self._profile_id, content=fact_text,
