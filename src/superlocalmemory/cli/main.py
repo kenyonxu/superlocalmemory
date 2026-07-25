@@ -252,6 +252,36 @@ def main() -> None:
         "--dry-run", action="store_true", dest="dry_run", default=False,
         help="Show what would be written without making changes",
     )
+    # Workstream C — transport flexibility (3.8.4)
+    connect_p.add_argument(
+        "--transport",
+        choices=["stdio", "http", "http-mcp-remote"],
+        default="stdio",
+        dest="transport",
+        help=(
+            "MCP transport to write into the IDE config. "
+            "stdio (default, zero regression) | "
+            "http (native Streamable-HTTP, requires SLM daemon) | "
+            "http-mcp-remote (stdio bridge via mcp-remote for stdio-only clients)"
+        ),
+    )
+    connect_p.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        dest="daemon_port",
+        help="SLM daemon port for http/http-mcp-remote transport (default: 8765)",
+    )
+    connect_p.add_argument(
+        "--verify",
+        action="store_true",
+        default=False,
+        dest="verify",
+        help=(
+            "After writing the config, probe the daemon health endpoint to confirm "
+            "the transport is reachable (only meaningful for --transport http)"
+        ),
+    )
 
     migrate_p = sub.add_parser("migrate", help="Migrate data from V2 to V3 schema")
     migrate_p.add_argument(
