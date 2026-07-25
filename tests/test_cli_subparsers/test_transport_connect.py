@@ -30,8 +30,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Source is resolved via PYTHONPATH (the test harness sets it), NOT sys.path injection:
+# injecting the worktree src defeats RED isolation (tests would pass on 3.8.3 too).
+# val-C blocker fixed — do NOT re-add sys.path.insert here.
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
 from superlocalmemory.hooks.portable_kit import (  # noqa: E402
     IDE_MATRIX,
