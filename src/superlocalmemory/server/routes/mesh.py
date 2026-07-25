@@ -90,7 +90,9 @@ def _get_broker(request: Request):
     secret = getattr(broker, "_shared_secret", None)
     if secret:
         client_host = request.client.host if request.client else ""
-        if client_host not in ("127.0.0.1", "::1", "localhost"):
+        from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
+
+        if not _is_loopback_host(client_host):
             import hmac
 
             from superlocalmemory.core.security_primitives import verify_install_token

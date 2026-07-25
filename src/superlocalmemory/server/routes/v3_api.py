@@ -596,7 +596,9 @@ def _validate_provider_url(url: str, client_host: str) -> str | None:
     host = p.hostname or ""
     if host.lower() in ("169.254.169.254", "metadata.google.internal", "metadata"):
         return "Cloud metadata endpoints are not allowed"
-    if client_host in ("127.0.0.1", "::1", "localhost"):
+    from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
+
+    if _is_loopback_host(client_host):
         return None  # local dashboard may target its own local/LAN endpoints
     # SLM_REMOTE residue (#40): an allowlisted LAN dashboard is trusted exactly
     # like the loopback one and may probe its own LAN LLM endpoint. This does

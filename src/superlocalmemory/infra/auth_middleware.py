@@ -137,7 +137,9 @@ def authorize_http_mcp_request(
     peer must present the configured SLM API key.  The LAN allowlist limits
     reachability but deliberately does not grant a write identity.
     """
-    if client_host in ("127.0.0.1", "::1", "localhost"):
+    from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
+
+    if _is_loopback_host(client_host):
         return True
     provided = request_headers.get("x-slm-api-key", "")
     return verify_api_key(provided, key_file=key_file)

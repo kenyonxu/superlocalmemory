@@ -18,6 +18,8 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
+from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
+
 
 # H-04 (3.7.9): the test-client auth bypass must be impossible in a real daemon
 # even if SLM_TEST_ISOLATION=1 leaks into a production environment. Anchor it to
@@ -89,7 +91,7 @@ def require_write_actor(
         # missing peer address (e.g. behind a proxy that strips it) must not be
         # trusted just because an install token is presented. require_http_mutation_actor
         # already excludes "" from its loopback set; keep the two paths consistent.
-        if is_test_client or client_host in ("127.0.0.1", "::1", "localhost"):
+        if is_test_client or _is_loopback_host(client_host):
             from superlocalmemory.core.engine_ingestion import local_trusted_actor_id
 
             return local_trusted_actor_id(actor_kind)
@@ -103,7 +105,15 @@ def require_write_actor(
         ).hexdigest()
         return f"api-key:{actor_kind}:{fingerprint}"
 
-    raise HTTPException(403, detail="Authenticated write capability required")
+    raise HTTPException(
+        403,
+        detail=(
+            "Write rejected: this origin requires an API key (X-SLM-API-Key). "
+            "The install token (X-Install-Token) is accepted only from loopback "
+            "(127.x.x.x / ::1 / localhost). If calling from a container or "
+            "remote host, configure SLM_API_KEY and present it as X-SLM-API-Key."
+        ),
+    )
 
 
 def require_http_mutation_actor(
@@ -134,7 +144,7 @@ def require_http_mutation_actor(
 
     client_host = request.client.host if request.client else ""
     is_test_client = client_host == "testclient" and _TEST_ISOLATION_ALLOWED
-    loopback = client_host in ("127.0.0.1", "::1", "localhost")
+    loopback = _is_loopback_host(client_host)
     # H-01: the loopback trusted-actor bypass is suppressed when the operator
     # opts into SLM_REQUIRE_CREDENTIALS; in-process tests keep the bypass.
     if is_test_client or (loopback and not _REQUIRE_CREDENTIALS):
@@ -153,7 +163,15 @@ def require_http_mutation_actor(
             ).hexdigest()
             return f"mesh-secret:{fingerprint}"
 
-    raise HTTPException(403, detail="Authenticated mutation capability required")
+    raise HTTPException(
+        403,
+        detail=(
+            "Mutation rejected: present one of X-SLM-Daemon-Capability, "
+            "X-Install-Token (loopback only), or X-SLM-API-Key. "
+            "Uncredentialed writes are accepted only from loopback. "
+            "See SLM_API_KEY in the deployment guide for network access."
+        ),
+    )
 
 
 def authenticated_request_actor(
