@@ -127,7 +127,8 @@ class MaintenanceScheduler:
             # V3.4.11: Graph pruning (remove orphan edges)
             try:
                 from superlocalmemory.core.graph_pruner import prune_graph
-                prune_stats = prune_graph(self._db.db_path, profile_id)
+                # Fix A: pass DatabaseManager directly → writes serialised through _lock
+                prune_stats = prune_graph(self._db, profile_id)
                 removed = prune_stats["total_before"] - prune_stats["total_after"]
                 if removed > 0:
                     logger.info("Graph pruning for %s: %d edges removed", profile_id, removed)

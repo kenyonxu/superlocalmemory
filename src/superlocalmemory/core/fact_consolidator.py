@@ -32,6 +32,10 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, Union
+
+if TYPE_CHECKING:
+    from superlocalmemory.storage.database import DatabaseManager
 
 logger = logging.getLogger("superlocalmemory.fact_consolidator")
 
@@ -41,13 +45,30 @@ _MAX_CONSOLIDATED_CHARS = 2000
 
 
 def consolidate_facts(
-    db_path: str | Path,
+    db_or_path: "Union[DatabaseManager, str, Path]",
     profile_id: str = "default",
     max_clusters: int = 20,
     dry_run: bool = False,
     config: object | None = None,
 ) -> dict:
     """Find and consolidate clusters of related facts.
+
+    Fix A: accepts a DatabaseManager as the first argument (preferred) to
+    route all writes through the process-level serialisation lock.  For
+    backward compatibility a ``str | Path`` is also accepted; a temporary
+    connection is opened from it with a deprecation warning.
+
+    When a DatabaseManager is provided, ``db.raw_connection()`` is used so
+    that the underlying write lock is held for the full consolidation run.
+    This is intentional: fact_consolidator is a low-frequency maintenance
+    operation (called at most once per hour) and its workload is sequenced
+    by the maintenance scheduler — long lock holds here do NOT cause the
+    lock storm seen in frequent EventBus or ingestion writes.  The per-cluster
+    SAVEPOINT logic inside ``_consolidate_cluster`` is preserved unchanged.
+
+    TODO (v3.9): per-cluster ``db.transaction()`` calls with short lock holds,
+    similar to ``graph_pruner`` Fix A.  Requires refactoring ``_consolidate_cluster``
+    to use ``db.execute()`` instead of ``conn.cursor()``.
 
     Mode behavior:
       - Mode A: Extractive only (no LLM). Always available.
@@ -56,7 +77,9 @@ def consolidate_facts(
 
     Returns stats: consolidated, clusters_found, facts_archived, errors.
     """
-    stats = {
+    from superlocalmemory.storage.database import DatabaseManager
+
+    stats: dict = {
         "clusters_found": 0,
         "consolidated": 0,
         "facts_archived": 0,
@@ -71,7 +94,26 @@ def consolidate_facts(
             mode_str = getattr(mode, 'value', str(mode)).lower()
             stats["mode"] = mode_str
 
-    conn = sqlite3.connect(str(db_path))
+    if isinstance(db_or_path, DatabaseManager):
+        # Fix A: route all writes through the process-level lock.
+        # raw_connection() acquires _lock, sets _txn_state.conn, commits on
+        # clean exit, rolls back on exception, and always closes.
+        try:
+            with db_or_path.raw_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                _run_consolidation(conn, profile_id, max_clusters, dry_run, config, stats)
+        except Exception as exc:
+            logger.error("Fact consolidation failed: %s", exc, exc_info=True)
+            stats["errors"] += 1
+            stats["error_detail"] = str(exc)
+        return stats
+
+    # Backward-compat: str | Path — open own connection.
+    logger.warning(
+        "consolidate_facts: passing a db_path is deprecated — pass a "
+        "DatabaseManager instead (Fix A backward-compat shim active)"
+    )
+    conn = sqlite3.connect(str(db_or_path))
     wal_mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()
     if wal_mode and wal_mode[0] != "wal":
         logger.warning("WAL mode not active, got: %s", wal_mode[0])
@@ -79,33 +121,9 @@ def consolidate_facts(
     conn.row_factory = sqlite3.Row
 
     try:
-        clusters = _find_consolidation_clusters(conn, profile_id, max_clusters)
-        stats["clusters_found"] = len(clusters)
-
-        for entity_id, entity_name, fact_ids in clusters:
-            try:
-                result = _consolidate_cluster(
-                    conn, profile_id, entity_id, entity_name,
-                    fact_ids, dry_run, config,
-                )
-                if result:
-                    stats["consolidated"] += 1
-                    stats["facts_archived"] += len(fact_ids)
-            except Exception as exc:
-                logger.warning(
-                    "Consolidation failed for %s: %s",
-                    entity_name, exc, exc_info=True,
-                )
-                stats["errors"] += 1
-
+        _run_consolidation(conn, profile_id, max_clusters, dry_run, config, stats)
         if not dry_run:
             conn.commit()
-
-        if stats["consolidated"] > 0:
-            logger.info(
-                "Fact consolidation: %d clusters merged, %d facts archived",
-                stats["consolidated"], stats["facts_archived"],
-            )
     except Exception as exc:
         logger.error("Fact consolidation failed: %s", exc, exc_info=True)
         stats["errors"] += 1
@@ -114,6 +132,41 @@ def consolidate_facts(
         conn.close()
 
     return stats
+
+
+def _run_consolidation(
+    conn: sqlite3.Connection,
+    profile_id: str,
+    max_clusters: int,
+    dry_run: bool,
+    config: object | None,
+    stats: dict,
+) -> None:
+    """Core consolidation logic — connection-agnostic inner function."""
+    clusters = _find_consolidation_clusters(conn, profile_id, max_clusters)
+    stats["clusters_found"] = len(clusters)
+
+    for entity_id, entity_name, fact_ids in clusters:
+        try:
+            result = _consolidate_cluster(
+                conn, profile_id, entity_id, entity_name,
+                fact_ids, dry_run, config,
+            )
+            if result:
+                stats["consolidated"] += 1
+                stats["facts_archived"] += len(fact_ids)
+        except Exception as exc:
+            logger.warning(
+                "Consolidation failed for %s: %s",
+                entity_name, exc, exc_info=True,
+            )
+            stats["errors"] += 1
+
+    if stats["consolidated"] > 0:
+        logger.info(
+            "Fact consolidation: %d clusters merged, %d facts archived",
+            stats["consolidated"], stats["facts_archived"],
+        )
 
 
 def _find_consolidation_clusters(

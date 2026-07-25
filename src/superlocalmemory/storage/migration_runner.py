@@ -122,6 +122,9 @@ from superlocalmemory.storage.migrations import (
 from superlocalmemory.storage.migrations import (
     M030_entity_explorer_indexes as _M030,
 )
+from superlocalmemory.storage.migrations import (
+    M031_dead_letter_operations as _M031,
+)
 
 # Map migration name → module (used for the optional ``verify(conn)`` hook
 # that lets the runner detect "already applied" state when an idempotent
@@ -156,6 +159,7 @@ _MODULES = {
     _M028.NAME: _M028,
     _M029.NAME: _M029,
     _M030.NAME: _M030,
+    _M031.NAME: _M031,
 }
 
 logger = logging.getLogger(__name__)
@@ -216,6 +220,9 @@ MIGRATIONS: list[Migration] = [
     Migration(name=_M024.NAME, db_target="memory", ddl=_M024.DDL),
     Migration(name=_M019.NAME, db_target="memory", ddl=_M019.DDL,
               dependencies=(_M018.NAME,)),
+    # M031 creates dead_letter_operations — standalone table, no FK to engine-
+    # bootstrapped tables, so it can run during apply_all (before engine init).
+    Migration(name=_M031.NAME, db_target="memory", ddl=_M031.DDL),
     # M006 + M011 are deliberately NOT here — see DEFERRED_MIGRATIONS below.
 ]
 

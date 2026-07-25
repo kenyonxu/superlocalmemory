@@ -40,6 +40,13 @@ _MAX_RETRIES = 3
 _STUCK_DAYS = 7
 _MAX_RETRY_DELAY_SECONDS = 3600
 
+# Fix F: hard cap on pending.db retries. After this many failed attempts the
+# item transitions to status='dead_letter' (next_retry_at=NULL) so it is
+# permanently excluded from the work queue.  Value chosen to survive transient
+# engine unavailability (12h at 30-min drain intervals) while still providing
+# a definitive signal for genuinely poisoned content.
+_MAX_RETRY_COUNT: int = 20
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS pending_memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,9 +187,17 @@ def mark_done(row_id: int, base_dir: Path | None = None) -> None:
 def mark_failed(row_id: int, error: str, base_dir: Path | None = None) -> None:
     """Mark a pending memory as failed with error message.
 
-    Unprocessed evidence is never deleted or terminally hidden. Failures stay
-    pending with bounded exponential backoff; M018 idempotency makes repeated
-    replay safe once the canonical operation has been created.
+    Fix F: when the retry counter reaches _MAX_RETRY_COUNT the item transitions
+    to ``status='dead_letter'`` with ``next_retry_at=NULL``.  Dead-lettered
+    items are excluded from the work queue (``get_pending`` filters
+    ``status='pending'``) and are not resurrected by the startup
+    ``UPDATE…WHERE status='failed'`` sweep (which targets only 'failed', not
+    'dead_letter').  This gives operators a stable, inspectable record of
+    genuinely poisoned content instead of an infinite retry loop.
+
+    Below the cap, failures stay pending with bounded exponential backoff;
+    M018 idempotency makes repeated replay safe once the canonical operation
+    has been created.
     """
     conn = _get_db(base_dir)
     try:
@@ -193,17 +208,27 @@ def mark_failed(row_id: int, error: str, base_dir: Path | None = None) -> None:
         if row is None:
             return
         next_count = int(row[0] or 0) + 1
-        delay = 0 if next_count == 1 else min(
-            2 ** min(next_count - 1, 12),
-            _MAX_RETRY_DELAY_SECONDS,
-        )
-        conn.execute(
-            "UPDATE pending_memories SET error = ?, "
-            "retry_count = retry_count + 1, "
-            "status = 'pending', next_retry_at = ? "
-            "WHERE id = ?",
-            (error, time.time() + delay, row_id),
-        )
+        if next_count >= _MAX_RETRY_COUNT:
+            # Fix F: permanently exclude from work queue — dead-letter.
+            conn.execute(
+                "UPDATE pending_memories SET error = ?, "
+                "retry_count = retry_count + 1, "
+                "status = 'dead_letter', next_retry_at = NULL "
+                "WHERE id = ?",
+                (error, row_id),
+            )
+        else:
+            delay = 0 if next_count == 1 else min(
+                2 ** min(next_count - 1, 12),
+                _MAX_RETRY_DELAY_SECONDS,
+            )
+            conn.execute(
+                "UPDATE pending_memories SET error = ?, "
+                "retry_count = retry_count + 1, "
+                "status = 'pending', next_retry_at = ? "
+                "WHERE id = ?",
+                (error, time.time() + delay, row_id),
+            )
         conn.commit()
     finally:
         conn.close()
