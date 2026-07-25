@@ -158,7 +158,6 @@ def _require_authority_over_user(request: Request, target_user_id: str) -> None:
     shares at least one workspace on which the admin holds MANAGE.
     """
     from superlocalmemory.access.rbac import Permission
-    from superlocalmemory.server.rbac_enforce import resolve_principal
 
     principal = resolve_principal(request)
     if principal["kind"] == "owner":

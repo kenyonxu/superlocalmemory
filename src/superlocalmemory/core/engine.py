@@ -27,7 +27,7 @@ from superlocalmemory.core.engine_capabilities import Capabilities, CapabilityEr
 from superlocalmemory.core.modes import get_capabilities
 from superlocalmemory.learning.outcome_queue import RecallEvent, enqueue_recall
 from superlocalmemory.storage.models import (
-    AtomicFact, MemoryRecord, Mode, RecallResponse,
+    AtomicFact, FactType, MemoryRecord, Mode, RecallResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -557,9 +557,6 @@ class MemoryEngine:
         import re as _re
         import uuid as _uuid
         from datetime import datetime, timezone
-        from superlocalmemory.storage.models import (
-            AtomicFact, FactType, MemoryRecord,
-        )
         from superlocalmemory.core.engine_ingestion import content_passes_admission
         if not content_passes_admission(content):
             return []
