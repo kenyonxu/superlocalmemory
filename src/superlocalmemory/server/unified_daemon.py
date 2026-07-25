@@ -2523,7 +2523,8 @@ def _register_dashboard_routes(application: FastAPI) -> None:
         async def rate_limit_middleware(request, call_next):
             client_ip = request.client.host if request.client else "unknown"
             is_write = request.method in ("POST", "PUT", "DELETE", "PATCH")
-            loopback = client_ip in ("127.0.0.1", "::1")
+            from superlocalmemory.server.loopback import is_loopback as _is_lb_rl
+            loopback = _is_lb_rl(client_ip)
             if not loopback and is_rate_limit_exempt(client_ip):
                 return await call_next(request)
             if loopback:
@@ -2715,10 +2716,17 @@ def _register_dashboard_routes(application: FastAPI) -> None:
             "fallback; non-loopback writes will be rejected.", _auth_exc,
         )
         try:
-            from superlocalmemory.hooks.prewarm_auth import is_loopback as _is_lb
+            from superlocalmemory.server.loopback import is_loopback as _is_lb
         except Exception:
-            def _is_lb(h: str) -> bool:
-                return h in ("127.0.0.1", "::1", "localhost")
+            import ipaddress as _ipa_fb
+
+            def _is_lb(h: str) -> bool:  # type: ignore[misc]
+                if not h or h.lower() == "localhost":
+                    return bool(h)
+                try:
+                    return _ipa_fb.ip_address(h).is_loopback
+                except ValueError:
+                    return False
 
         @application.middleware("http")
         async def _failclosed_auth(request, call_next):
@@ -2975,9 +2983,13 @@ def _register_daemon_routes(application: FastAPI) -> None:
         }
         # request is None only for direct internal/test calls (no HTTP client),
         # which are trusted; over HTTP FastAPI always injects the real Request.
+        from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
+
         client_host = request.client.host if (request and request.client) else ""
-        _trusted = request is None or client_host in (
-            "127.0.0.1", "::1", "localhost", "testclient",
+        _trusted = (
+            request is None
+            or _is_loopback_host(client_host)
+            or (client_host == "testclient" and _TEST_ISOLATION_ALLOWED)
         )
         if not _trusted:
             return public
@@ -4007,7 +4019,12 @@ def start_server(port: int = _DEFAULT_PORT) -> None:
             "reachable from the network but SLM_REQUIRE_CREDENTIALS is not set "
             "and API-key auth may be off. A remote caller could write without "
             "credentials. Set SLM_REQUIRE_CREDENTIALS=1 and configure an API "
-            "key before exposing this instance.", bind_host,
+            "key before exposing this instance. "
+            "NOTE (issue #90): SLM 3.8.4 fixes IPv4-mapped loopback address "
+            "normalization — if curl/dashboard writes fail with 403 from a "
+            "container, upgrade to 3.8.4. Immediate workaround: set "
+            "SLM_DAEMON_HOST=127.0.0.1 (IPv4 only) or configure an API key.",
+            bind_host,
         )
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     # This handles a just-closed connection in TIME_WAIT.  It is safe only

@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
 
 
 def origin_is_loopback(origin: str) -> bool:
-    """Return whether an Origin is absent or an exact HTTP(S) loopback URL."""
+    """Return whether an Origin is absent or an exact HTTP(S) loopback URL.
+
+    Uses the centralized is_loopback helper so that IPv4-mapped loopback
+    addresses (::ffff:127.x.x.x) are accepted correctly (issue #90).
+    Note: browsers normalize Origin hostnames; the ::ffff: form would only
+    appear in synthetic requests. The helper is used for defense-in-depth.
+    """
     if not origin:
         return True
     try:
@@ -21,7 +26,7 @@ def origin_is_loopback(origin: str) -> bool:
     return (
         parsed.scheme in {"http", "https"}
         and parsed.hostname is not None
-        and parsed.hostname.lower() in _LOOPBACK_HOSTS
+        and _is_loopback_host(parsed.hostname.lower())
         and parsed.username is None
         and parsed.password is None
         and parsed.path in {"", "/"}

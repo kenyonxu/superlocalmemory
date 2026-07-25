@@ -131,7 +131,9 @@ def test_unified_daemon_blocks_remote_mutation_before_route_execution(
         json={"name": "must-not-be-created"},
     )
     assert response.status_code == 403
-    assert response.json()["error"] == "Authenticated mutation capability required"
+    # 3.8.4 (Workstream B): error message is now actionable (names required credential).
+    assert "Mutation rejected" in response.json()["error"]
+    assert "X-SLM-API-Key" in response.json()["error"]
 
 
 def test_unified_daemon_blocks_remote_recall_telemetry_without_principal(

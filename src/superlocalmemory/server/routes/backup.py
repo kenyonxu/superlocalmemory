@@ -87,9 +87,13 @@ def _require_oauth_start(request: Request) -> None:
             detail="OAuth initiation requires the local dashboard origin.",
         )
 
+    from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
+
     host = request.client.host if request.client else ""
-    is_loopback = host in {"127.0.0.1", "::1", "localhost", "testclient"}
-    if not is_loopback and principal.get("kind") != "user":
+    # "testclient" is included for in-process test compatibility (preserved
+    # from original behaviour; was in the original frozenset).
+    _from_loopback = _is_loopback_host(host) or host == "testclient"
+    if not _from_loopback and principal.get("kind") != "user":
         raise HTTPException(
             status_code=403,
             detail=(
