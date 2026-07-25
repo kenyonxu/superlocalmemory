@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 SLM_MARKER_START = "<!-- SLM-START -->"
 SLM_MARKER_END = "<!-- SLM-END -->"
 
+# Valid transport values for connect_ide() and slm connect --transport.
+# "stdio"           — default, zero regression; uses desc.server_block as-is.
+# "http"            — native MCP Streamable-HTTP; requires daemon at :daemon_port.
+# "http-mcp-remote" — mcp-remote stdio bridge for stdio-only clients.
+VALID_TRANSPORTS: frozenset[str] = frozenset({"stdio", "http", "http-mcp-remote"})
+
 CLAUDE_CODE_PLUGIN_POINTER = (
     "slm connect claude-code: Claude Code is configured via the SLM plugin (WP-06).\n"
     "Run: slm plugin install  OR  see plugin-src/ for manual installation.\n"
@@ -241,22 +247,40 @@ def connect_ide(
     profile: str | None = None,
     agents_md_source: Callable[[], str] | None = None,
     dry_run: bool = False,
+    transport: str = "stdio",
+    daemon_port: int = 8765,
 ) -> dict[str, Any]:
     """Wire SLM into the target IDE config via merge-not-clobber.
 
+    Args:
+        transport: MCP transport to write into the config.
+            "stdio" (default, zero regression) — uses the IDE's canonical server_block.
+            "http" — native MCP Streamable-HTTP block; requires SLM daemon at daemon_port.
+            "http-mcp-remote" — stdio bridge via mcp-remote for stdio-only clients.
+        daemon_port: Daemon listen port for http / http-mcp-remote (default 8765).
+
     Returns a result dict:
-        {ide, mcp_config: wrote|merged|unchanged|would_write|skipped|error,
+        {ide, transport, mcp_config: wrote|merged|unchanged|would_write|skipped|error,
          mcp_path, agents_md: wrote|skipped(...)|unchanged|error,
          servers_preserved: int, error: str|None}
     """
     result: dict[str, Any] = {
         "ide": ide_id,
+        "transport": transport,
         "mcp_config": "error",
         "mcp_path": "",
         "agents_md": "skipped(not-run)",
         "servers_preserved": 0,
         "error": None,
     }
+
+    # Step 0 — validate transport
+    if transport not in VALID_TRANSPORTS:
+        result["error"] = (
+            f"Invalid transport '{transport}'. "
+            f"Valid choices: {', '.join(sorted(VALID_TRANSPORTS))}"
+        )
+        return result
 
     # Step 1 — resolve
     desc = resolve_descriptor(ide_id)
@@ -303,9 +327,25 @@ def connect_ide(
         # File is untouched (we never wrote; abort)
         return result
 
-    # Step 4 — extract server container
-    # For continue (yaml list), special-case
+    # Step 4 — daemon health-check for HTTP transports (advisory, never blocks write)
+    if transport in ("http", "http-mcp-remote") and desc.fmt != "":
+        if not _check_daemon_health(daemon_port):
+            print(
+                f"[SLM] Warning: daemon not reachable at http://127.0.0.1:{daemon_port}/api/v3/health. "
+                f"Run `slm serve start` to start it, or `slm serve install` to register as an OS service.",
+                file=sys.stderr,
+            )
+
+    # Step 5 — extract server container and build block
+    # For YAML-format IDEs (continue.dev), transport is ignored — their block
+    # structure is list-based and incompatible with the JSON http/mcp-remote block.
     if desc.fmt == "yaml":
+        if transport != "stdio":
+            logger.warning(
+                "transport=%r is not supported for YAML-format IDE %r; using stdio fallback.",
+                transport,
+                ide_id,
+            )
         mcp_status, servers_preserved = _merge_yaml_list(
             data, desc, profile
         )
@@ -316,10 +356,8 @@ def connect_ide(
         pre_count = len(servers)
         pre_slm = copy.deepcopy(servers.get("superlocalmemory"))
 
-        # Step 5 — merge
-        block = copy.deepcopy(desc.server_block)
-        if profile:
-            block.setdefault("env", {})["SLM_MCP_PROFILE"] = profile
+        # Build the server block for the requested transport
+        block = _build_server_block(desc, transport, daemon_port, profile)
 
         servers["superlocalmemory"] = block
 
@@ -384,6 +422,8 @@ def connect_many(
     here: bool = False,
     profile: str | None = None,
     agents_md_source: Callable[[], str] | None = None,
+    transport: str = "stdio",
+    daemon_port: int = 8765,
 ) -> list[dict[str, Any]]:
     """Wire SLM into multiple IDE configs via non-destructive merge.
 
@@ -402,14 +442,17 @@ def connect_many(
         home: Override ``$HOME`` (test hook).
         project: Project root for ``here=True`` installs.
         here: When True, write to project-relative path instead of global.
-        profile: Inject ``SLM_MCP_PROFILE`` env-var into every server block.
+        profile: Inject ``SLM_MCP_PROFILE`` env-var (stdio) or URL param (http).
         agents_md_source: Callable returning AGENTS.md content to append.
+        transport: MCP transport to use for all IDEs ("stdio", "http",
+            "http-mcp-remote"). Default "stdio" preserves existing behavior.
+        daemon_port: Daemon listen port for http/http-mcp-remote (default 8765).
 
     Returns:
         List of per-IDE result dicts, one per input id.  Each dict has the
         same shape as :func:`connect_ide`'s return value::
 
-            {ide, mcp_config, mcp_path, agents_md, servers_preserved, error}
+            {ide, transport, mcp_config, mcp_path, agents_md, servers_preserved, error}
     """
     return [
         connect_ide(
@@ -419,6 +462,8 @@ def connect_many(
             here=here,
             profile=profile,
             agents_md_source=agents_md_source,
+            transport=transport,
+            daemon_port=daemon_port,
         )
         for ide_id in ide_ids
     ]
@@ -505,6 +550,57 @@ def _merge_yaml_list(
     else:
         providers.append(block)
         return "wrote", pre_count
+
+
+def _build_server_block(
+    desc: IDEDescriptor,
+    transport: str,
+    daemon_port: int,
+    profile: str | None,
+) -> dict[str, Any]:
+    """Return the server block for the requested transport.
+
+    YAML and TOML IDEs use a format-specific block structure that is
+    incompatible with the JSON http/mcp-remote block — caller should never
+    reach here for those (they take the yaml branch in connect_ide).
+    For JSON-format IDEs:
+      "stdio"           → copy of desc.server_block with optional SLM_MCP_PROFILE env
+      "http"            → native MCP HTTP block; profile goes as URL query param
+      "http-mcp-remote" → mcp-remote stdio bridge; profile appended to proxied URL
+    """
+    base_url = f"http://127.0.0.1:{daemon_port}/mcp/"
+
+    if transport == "http":
+        url = base_url + (f"?profile={profile}" if profile else "")
+        return {"type": "http", "url": url}
+
+    if transport == "http-mcp-remote":
+        url = base_url + (f"?profile={profile}" if profile else "")
+        return {"type": "stdio", "command": "mcp-remote", "args": [url]}
+
+    # Default: stdio — preserve existing behavior exactly
+    block = copy.deepcopy(desc.server_block)
+    if profile:
+        block.setdefault("env", {})["SLM_MCP_PROFILE"] = profile
+    return block
+
+
+def _check_daemon_health(daemon_port: int, timeout: float = 2.0) -> bool:
+    """Non-blocking probe of the SLM daemon health endpoint.
+
+    Returns True if the daemon responds with HTTP 200, False otherwise.
+    Never raises — all exceptions are caught and treated as "unreachable".
+    """
+    try:
+        import urllib.request
+        import urllib.error
+
+        url = f"http://127.0.0.1:{daemon_port}/api/v3/health"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
 
 def _atomic_write(path: Path, data: dict[str, Any], fmt: str) -> None:
