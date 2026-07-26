@@ -60,10 +60,31 @@ class MaintenanceScheduler:
             return
         self._running = True
         self._schedule_next()
+        # v3.8.5: one-shot activation-cache GC ~90s after boot so an upgrade
+        # backlog (observed 83k expired rows) clears promptly instead of waiting
+        # a full interval — delayed past boot warmup so it never competes for
+        # the write lock during the startup window.
+        self._initial_gc_timer = threading.Timer(90.0, self._initial_cache_gc)
+        self._initial_gc_timer.daemon = True
+        self._initial_gc_timer.start()
         logger.info(
             "Maintenance scheduler started (interval=%dm)",
             self._config.forgetting.scheduler_interval_minutes,
         )
+
+    def _initial_cache_gc(self) -> None:
+        """Best-effort one-shot activation-cache GC shortly after boot."""
+        if not self._running:
+            return
+        try:
+            deleted = self._db.cleanup_activation_cache()
+            if deleted > 0:
+                logger.info(
+                    "Activation-cache GC (startup): %d expired rows removed",
+                    deleted,
+                )
+        except Exception as exc:
+            logger.debug("Startup activation-cache GC skipped: %s", exc)
 
     def stop(self) -> None:
         """Stop the scheduler. Idempotent."""
@@ -71,6 +92,10 @@ class MaintenanceScheduler:
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
+        _gc_timer = getattr(self, "_initial_gc_timer", None)
+        if _gc_timer is not None:
+            _gc_timer.cancel()
+            self._initial_gc_timer = None
         logger.info("Maintenance scheduler stopped")
 
     def _schedule_next(self) -> None:
@@ -194,6 +219,17 @@ class MaintenanceScheduler:
                 logger.info("Pending cleanup: %s", stats)
         except Exception as exc:
             logger.debug("Pending cleanup skipped: %s", exc)
+
+        # v3.8.5: GC the spreading-activation result cache. Neither cleanup path
+        # was ever wired in, so activation_cache grew without bound (observed
+        # 83k expired rows, oldest ~3.5 months). Batched + DB-wide (expiry is
+        # not profile-scoped), so it runs once per cycle rather than per profile.
+        try:
+            deleted = self._db.cleanup_activation_cache()
+            if deleted > 0:
+                logger.info("Activation-cache GC: %d expired rows removed", deleted)
+        except Exception as exc:
+            logger.debug("Activation-cache GC skipped: %s", exc)
 
         self._schedule_next()
 

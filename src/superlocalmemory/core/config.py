@@ -1031,6 +1031,15 @@ class SLMConfig:
     # Scale Engine is installed separately from activation.  Existing roots
     # stay on SQLite until a staged parity check promotes these projections.
     scale_engine_state: str = "local_core"  # local_core | prepared | verified | promoted
+    # v3.8.5: auto-promote Cozo+LanceDB when a DB grows past the scale at which
+    # they actually help.  Below the threshold the well-indexed SQLite graph is
+    # faster (measured ~1.7ms/traversal at 208K edges), so normal installs stay
+    # on Local Core and never pay the projection/migration cost.  The threshold
+    # is deliberately high: the graph DB win appears at millions of edges, not
+    # hundreds of thousands.  Auto-promotion is background, uses the same staged
+    # parity gate as the manual path, and falls back to SQLite on any failure.
+    scale_auto_promote_enabled: bool = True
+    scale_auto_promote_min_edges: int = 1_000_000
     evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
     health: HealthConfig = field(default_factory=HealthConfig)
     # v3.8.4-G: Graph thinning parameters (#84)
@@ -1147,6 +1156,15 @@ class SLMConfig:
             state if state in {"local_core", "prepared", "verified", "promoted"}
             else "local_core"
         )
+        config.scale_auto_promote_enabled = bool(
+            data.get("scale_auto_promote_enabled", True)
+        )
+        try:
+            config.scale_auto_promote_min_edges = int(
+                data.get("scale_auto_promote_min_edges", 1_000_000)
+            )
+        except (TypeError, ValueError):
+            config.scale_auto_promote_min_edges = 1_000_000
 
         # V3.3 config fields (additive — defaults work if missing from JSON)
         fg = data.get("forgetting", {})
@@ -1321,6 +1339,8 @@ class SLMConfig:
             "graph_backend": self.graph_backend,
             "vector_backend": self.vector_backend,
             "scale_engine_state": self.scale_engine_state,
+            "scale_auto_promote_enabled": self.scale_auto_promote_enabled,
+            "scale_auto_promote_min_edges": self.scale_auto_promote_min_edges,
             "base_dir": str(self.base_dir),  # V3.5.9: persist so load() can restore custom paths
             "llm": {
                 "provider": self.llm.provider,
