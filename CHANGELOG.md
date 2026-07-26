@@ -5,6 +5,21 @@ All notable changes to SuperLocalMemory V3 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.4] - 2026-07-26
+
+### Fixed
+- Frequent "database is locked" errors under heavy or concurrent multi-agent use.
+- MCP connections dropping when idle; connections now stay stable and recover cleanly.
+- A just-saved memory is now instantly findable by meaning, not only by keyword (on a warm instance).
+- HTTP write endpoints (dashboard Save / API) were rejected on some networked/containerized setups (#90).
+- Background ingestion operations that failed no longer retry forever; failures move to a dead-letter queue (#77).
+- Stale agent locks are cleared on restart; daemon shutdown no longer logs spurious import errors; the dashboard UI serves reliably on restricted filesystems.
+### Added
+- A choice of connection transport (stdio or HTTP) when connecting IDEs.
+- Configurable graph-memory pruning (max edges per node, minimum edge weight) (#84).
+### Notes
+- Upgrades apply automatically on daemon start — no manual migration command needed.
+
 ## [3.8.3] - 2026-07-24 — Recall stays responsive under heavy load
 
 ### Fixed
