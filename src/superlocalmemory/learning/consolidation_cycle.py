@@ -32,6 +32,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from superlocalmemory.storage.write_lock import get_write_lock
+
 logger = logging.getLogger(__name__)
 
 __all__ = ("ConsolidationWorker",)
@@ -100,6 +102,10 @@ class ConsolidationWorker:
             conn_ga.execute("PRAGMA busy_timeout=5000")
             conn_ga.row_factory = sqlite3.Row
 
+            # Wrap _DBProxy.execute writes in the process-level write lock.
+            # Reads pass through without the lock (WAL-safe).
+            _ga_write_lock = get_write_lock(self._memory_db)
+
             class _DBProxy:
                 """Minimal DB proxy for GraphAnalyzer compatibility."""
 
@@ -107,13 +113,14 @@ class ConsolidationWorker:
                     self._conn = connection
 
                 def execute(self, sql: str, params: tuple = ()) -> list:
-                    cursor = self._conn.execute(sql, params)
                     if sql.strip().upper().startswith(
                         ("INSERT", "UPDATE", "DELETE", "ALTER", "CREATE"),
                     ):
-                        self._conn.commit()
+                        with _ga_write_lock:
+                            cursor = self._conn.execute(sql, params)
+                            self._conn.commit()
                         return []
-                    return cursor.fetchall()
+                    return self._conn.execute(sql, params).fetchall()
 
             ga = GraphAnalyzer(_DBProxy(conn_ga))
             if not dry_run:
@@ -238,15 +245,17 @@ class ConsolidationWorker:
             os.environ.get("SLM_LEGACY_DEDUP_SCAN_CAP", "100000")
         )
         try:
-            conn = sqlite3.connect(self._memory_db, timeout=10)
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.row_factory = sqlite3.Row
+            # READ phase — no write lock needed (WAL allows concurrent reads).
+            conn_r = sqlite3.connect(self._memory_db, timeout=10)
+            conn_r.execute("PRAGMA busy_timeout=5000")
+            conn_r.row_factory = sqlite3.Row
 
-            rows = conn.execute(
+            rows = conn_r.execute(
                 "SELECT fact_id, content FROM atomic_facts "
                 "WHERE profile_id = ? ORDER BY created_at LIMIT ?",
                 (profile_id, _LEGACY_DEDUP_SCAN_CAP),
             ).fetchall()
+            conn_r.close()
 
             seen_prefixes: dict[str, str] = {}
             duplicates = []
@@ -260,16 +269,24 @@ class ConsolidationWorker:
                     seen_prefixes[prefix] = d["fact_id"]
 
             if duplicates and not dry_run:
-                for fid in duplicates:
-                    conn.execute(
-                        "UPDATE atomic_facts "
-                        "SET confidence = MAX(0.1, confidence * 0.5) "
-                        "WHERE fact_id = ?",
-                        (fid,),
-                    )
-                conn.commit()
+                # WRITE phase — acquire the process-level write lock before
+                # opening the sqlite3 connection, so this UPDATE is serialised
+                # with all other in-process writers (DatabaseManager,
+                # VectorStore, adapter sync) and cannot cause SQLITE_BUSY.
+                with get_write_lock(self._memory_db):
+                    conn_w = sqlite3.connect(self._memory_db, timeout=10)
+                    try:
+                        for fid in duplicates:
+                            conn_w.execute(
+                                "UPDATE atomic_facts "
+                                "SET confidence = MAX(0.1, confidence * 0.5) "
+                                "WHERE fact_id = ?",
+                                (fid,),
+                            )
+                        conn_w.commit()
+                    finally:
+                        conn_w.close()
 
-            conn.close()
             return len(duplicates)
         except Exception:
             return 0

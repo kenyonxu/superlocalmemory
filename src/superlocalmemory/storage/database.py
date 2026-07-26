@@ -18,6 +18,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Generator
 
+from superlocalmemory.storage.write_lock import get_write_lock
 from superlocalmemory.storage.models import (
     AtomicFact, CanonicalEntity, ConsolidationAction, ConsolidationActionType,
     EdgeType, EntityAlias, EntityProfile, FactType, GraphEdge,
@@ -140,14 +141,17 @@ class DatabaseManager:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        # RLock instead of Lock: the same thread can re-enter without deadlock.
-        # Required because execute() now acquires _lock for standalone DML
-        # and transaction() also holds _lock — if the same thread calls
-        # execute() from inside a transaction() context, the txn-state guard
-        # fires first (no lock acquired), keeping re-entrancy safe even for
-        # code paths that mix both styles.  An RLock is a strictly safer
-        # superset; there is no performance difference in the uncontended case.
-        self._lock = threading.RLock()
+        # Shared write-serialisation lock for this db_path.
+        # get_write_lock() returns the SAME RLock for every caller that
+        # passes the same resolved path, so DatabaseManager, VectorStore,
+        # adapter_base, consolidation, and all other in-process writers
+        # all share ONE lock → zero cross-connection SQLite WAL contention.
+        #
+        # RLock (re-entrant) is required: the self-heal backfill pattern
+        #   with db._lock:        # acquires write lock (count: 1→2)
+        #       vs.upsert(...)    # re-acquires same lock (count: 2→3)
+        # is safe because the same thread re-enters the RLock.
+        self._lock = get_write_lock(self.db_path)
         # Transaction connections are thread-affine in sqlite3. A manager is
         # shared across HTTP, materializer, and worker threads, so a process-
         # global connection slot lets another thread accidentally execute on

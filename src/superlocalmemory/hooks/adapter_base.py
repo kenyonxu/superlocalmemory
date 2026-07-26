@@ -32,6 +32,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from superlocalmemory.storage.write_lock import get_write_lock
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -86,25 +88,31 @@ def _ensure_memory_log(db_path: Path) -> None:
     """Lazily create ``cross_platform_sync_log`` if a test-mode memory.db is
     fresh. Production code goes through the migration runner, but tests can
     hand us an empty DB; this keeps adapters usable without pre-running
-    migrations."""
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.executescript(
-            "CREATE TABLE IF NOT EXISTS cross_platform_sync_log ("
-            " adapter_name TEXT NOT NULL,"
-            " profile_id TEXT NOT NULL,"
-            " target_path_sha256 TEXT NOT NULL,"
-            " target_basename TEXT NOT NULL,"
-            " last_sync_at TEXT NOT NULL,"
-            " bytes_written INTEGER NOT NULL,"
-            " content_sha256 TEXT NOT NULL,"
-            " success INTEGER NOT NULL,"
-            " error_msg TEXT,"
-            " PRIMARY KEY (adapter_name, target_path_sha256));"
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    migrations.
+
+    Acquires the process-level write lock for *db_path* before opening
+    a sqlite3 connection so that this DDL write is serialised with all
+    other in-process writers (DatabaseManager, VectorStore, etc.).
+    """
+    with get_write_lock(db_path):
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.executescript(
+                "CREATE TABLE IF NOT EXISTS cross_platform_sync_log ("
+                " adapter_name TEXT NOT NULL,"
+                " profile_id TEXT NOT NULL,"
+                " target_path_sha256 TEXT NOT NULL,"
+                " target_basename TEXT NOT NULL,"
+                " last_sync_at TEXT NOT NULL,"
+                " bytes_written INTEGER NOT NULL,"
+                " content_sha256 TEXT NOT NULL,"
+                " success INTEGER NOT NULL,"
+                " error_msg TEXT,"
+                " PRIMARY KEY (adapter_name, target_path_sha256));"
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def sync_log_last_content_sha256(
@@ -156,31 +164,37 @@ def sync_log_record(
         )
     if os.sep in target_path_sha256 or "/" in target_path_sha256:
         raise ValueError("target_path_sha256 must be a hash, not a raw path")
-    _ensure_memory_log(db_path)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            "INSERT INTO cross_platform_sync_log ("
-            "adapter_name, profile_id, target_path_sha256, target_basename, "
-            "last_sync_at, bytes_written, content_sha256, success, error_msg"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(adapter_name, target_path_sha256) DO UPDATE SET "
-            " profile_id = excluded.profile_id,"
-            " target_basename = excluded.target_basename,"
-            " last_sync_at = excluded.last_sync_at,"
-            " bytes_written = excluded.bytes_written,"
-            " content_sha256 = excluded.content_sha256,"
-            " success = excluded.success,"
-            " error_msg = excluded.error_msg",
-            (
-                adapter_name, profile_id, target_path_sha256, target_basename,
-                _now_iso(), bytes_written, content_sha256,
-                1 if success else 0, error_msg,
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    # Acquire the process-level write lock BEFORE opening the sqlite3 connection.
+    # This ensures the INSERT/UPDATE below is serialised with all other in-process
+    # writers (DatabaseManager, VectorStore, consolidation) via the single shared
+    # RLock for memory.db, eliminating SQLITE_BUSY races at the WAL layer.
+    # _ensure_memory_log also acquires the same RLock (re-entrant — safe).
+    with get_write_lock(db_path):
+        _ensure_memory_log(db_path)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute(
+                "INSERT INTO cross_platform_sync_log ("
+                "adapter_name, profile_id, target_path_sha256, target_basename, "
+                "last_sync_at, bytes_written, content_sha256, success, error_msg"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(adapter_name, target_path_sha256) DO UPDATE SET "
+                " profile_id = excluded.profile_id,"
+                " target_basename = excluded.target_basename,"
+                " last_sync_at = excluded.last_sync_at,"
+                " bytes_written = excluded.bytes_written,"
+                " content_sha256 = excluded.content_sha256,"
+                " success = excluded.success,"
+                " error_msg = excluded.error_msg",
+                (
+                    adapter_name, profile_id, target_path_sha256, target_basename,
+                    _now_iso(), bytes_written, content_sha256,
+                    1 if success else 0, error_msg,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------
