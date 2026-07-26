@@ -955,7 +955,13 @@ class RetrievalEngine:
         Blended: alpha * sigmoid(CE_score) + (1 - alpha) * rrf_score.
         Speaker tags stripped before scoring (Bug 3 fix).
         """
-        # Bug 2 fix: score ALL candidates, not just top_k
+        # Bug 2 fix: score ALL candidates, not just top_k. v3.8.5: verified on
+        # the real DB that bounding the CE to the top-N fusion candidates both
+        # (a) gave NO latency win (the cross-encoder batches all pairs in one
+        # forward pass, so 60 vs 184 pairs is within noise) and (b) CHANGED the
+        # top-5 on 4/8 queries — the CE legitimately promotes items ranked below
+        # the fusion top-N into the answer. So exhaustive reranking stays: it is
+        # a quality feature, not the latency bottleneck.
         candidates = [
             (fact_map[fr.fact_id], fr.fused_score)
             for fr in fused if fr.fact_id in fact_map

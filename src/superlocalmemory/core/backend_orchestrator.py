@@ -100,6 +100,11 @@ class BackendOrchestrator:
                 "Scale Engine remains on Local Core (state=%s)",
                 getattr(self._config, "scale_engine_state", "local_core"),
             )
+            # v3.8.5: schedule a background check that auto-promotes to
+            # Cozo+LanceDB only once the DB is large enough that they beat the
+            # SQLite graph.  A no-op (and never even starts the build) for the
+            # vast majority of installs, which sit far below the threshold.
+            self._maybe_schedule_auto_promote()
             return
 
         # 3. Initialize CozoDB if available
@@ -128,6 +133,94 @@ class BackendOrchestrator:
         logger.info("BackendOrchestrator: daemon ready (cozo=%s, lancedb=%s)",
                      "active" if self._cozo and self._cozo_status() == "active" else "off",
                      "active" if self._lancedb and self._lancedb_status() == "active" else "off")
+
+    def _maybe_schedule_auto_promote(self) -> None:
+        """Schedule a delayed, one-shot scale auto-promote check (v3.8.5).
+
+        Fires well after boot warmup so it never competes for CPU / the write
+        lock during the startup window — the daemon keeps serving canonical
+        SQLite throughout.  A no-op (never even starts the build) unless
+        auto-promotion is enabled AND the DB has grown past the threshold where
+        a graph DB actually beats the well-indexed SQLite graph.
+        """
+        import os
+        import threading
+
+        cfg = self._config
+        if not getattr(cfg, "scale_auto_promote_enabled", True):
+            return
+        if getattr(cfg, "scale_engine_state", "local_core") != "local_core":
+            return
+        try:
+            delay = float(os.environ.get("SLM_AUTO_PROMOTE_DELAY_S", "300"))
+        except (TypeError, ValueError):
+            delay = 300.0
+        timer = threading.Timer(delay, self._auto_promote_if_at_scale)
+        timer.daemon = True
+        timer.start()
+
+    def _count_default_edges(self) -> int:
+        """graph_edges count for the default profile (fail-soft → 0)."""
+        try:
+            rows = self._db.execute(
+                "SELECT COUNT(*) AS c FROM graph_edges WHERE profile_id = 'default'"
+            )
+            return int(rows[0]["c"]) if rows else 0
+        except Exception:
+            return 0
+
+    def _auto_promote_if_at_scale(self) -> None:
+        """Build + promote the Cozo/Lance projection iff the DB is at scale.
+
+        Uses the SAME staged parity gate as the manual CLI path
+        (prepare → verify → promote).  Any failure leaves canonical SQLite
+        selected — the projection is derived data, never the source of truth.
+        The promoted backends only serve after the next daemon restart, so this
+        logs a clear, actionable message rather than swapping under a live
+        process.
+        """
+        try:
+            import os
+
+            cfg = self._config
+            if getattr(cfg, "scale_engine_state", "local_core") != "local_core":
+                return
+            threshold = int(
+                os.environ.get("SLM_AUTO_PROMOTE_MIN_EDGES", "")
+                or getattr(cfg, "scale_auto_promote_min_edges", 1_000_000)
+            )
+            edges = self._count_default_edges()
+            if edges < threshold:
+                logger.info(
+                    "Scale auto-promote: %d edges < threshold %d — Local Core "
+                    "(SQLite) stays optimal; no projection built.",
+                    edges, threshold,
+                )
+                return
+            logger.info(
+                "Scale auto-promote: %d edges >= threshold %d — building "
+                "Cozo+LanceDB projection in the background (SQLite keeps serving).",
+                edges, threshold,
+            )
+            from superlocalmemory.core.scale_engine import ScaleEngineManager
+
+            mgr = ScaleEngineManager(cfg, profile_id="default")
+            prepared = mgr.prepare()
+            stage_id = prepared.get("stage_id")
+            mgr.verify(stage_id)
+            mgr.promote(stage_id)
+            logger.warning(
+                "Scale Engine AUTO-PROMOTED to Cozo+LanceDB at %d edges. RESTART "
+                "the daemon (`slm restart`) to activate the backends; until then "
+                "it keeps serving canonical SQLite.",
+                edges,
+            )
+        except Exception as exc:
+            # Derived-data failure must never take down Local Core.
+            logger.warning(
+                "Scale auto-promote skipped — staying on Local Core / SQLite: %s",
+                exc,
+            )
 
     def _recover_interrupted_scale_promotion(self) -> None:
         """Repair an interrupted promotion; never auto-mutate a legacy root."""

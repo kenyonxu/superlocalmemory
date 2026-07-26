@@ -817,6 +817,29 @@ def _warm_spreading_activation(engine, runtime) -> bool:
                 sa.search(query_embedding, profile_id=active_pid, top_k=7)
         else:
             sa.search(query_embedding, profile_id=active_pid, top_k=7)
+        # v3.8.5: pre-load the per-profile graph-metrics cache (PageRank +
+        # community for every fact) here in the background, so the FIRST real
+        # recall does not pay the ~12k-row load on its hot path.  Observed as a
+        # large chunk of the 8-13s "cold first query" spike: the metrics cache
+        # was loading lazily during the user's first recall instead of at boot.
+        try:
+            sa._load_graph_metrics_cache(active_pid)
+        except Exception:
+            pass
+        # v3.8.5: warm the EntityGraphChannel's in-memory adjacency cache (ALL
+        # ~208K edges + entity maps + graph metrics, ~18 MB) at boot.  This was
+        # the dominant cause of the "cold first query" spike (8-13s): the cache
+        # loaded lazily on the FIRST real recall that routed to the entity
+        # channel, not during warmup.  Force it here via the channel's own
+        # search entry so it is warm before any user query.
+        try:
+            entity_channel = getattr(retr, "_entity", None)
+            if entity_channel is not None:
+                entity_channel.search(
+                    "memory graph adjacency warmup", active_pid, top_k=5,
+                )
+        except Exception:
+            pass
         logger.info(
             "Spreading-activation graph pre-warmed for profile %s", active_pid,
         )
@@ -1500,6 +1523,20 @@ async def lifespan(application: FastAPI):
                 # v3.8: the --fast recalls above skip spreading activation; warm
                 # that channel directly so the first FULL recall is not cold.
                 _warm_spreading_activation(engine, profile_runtime)
+                # v3.8.5: the fast recalls above do NOT exercise the full ranking
+                # path or the agentic round, so the FIRST real user query that
+                # takes the full path paid an 8-13s cold cost (ranking model +
+                # graph-metrics load).  Fire ONE full (fast=False) recall here in
+                # the background so those load at boot, not on a user's query.
+                # Best-effort; never blocks readiness.
+                try:
+                    with profile_runtime.operation_nowait() as _fsnap:
+                        if _fsnap is not None:
+                            engine.recall(
+                                "memory recall performance", limit=5, fast=False,
+                            )
+                except Exception as _fexc:
+                    logger.debug("Full-path warmup skipped (non-fatal): %s", _fexc)
                 elapsed = round((_t.monotonic() - t0) * 1000)
                 logger.info(
                     "Recall engine pre-warmed in %dms", elapsed,

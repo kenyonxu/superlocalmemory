@@ -1,6 +1,6 @@
 [project]
 name = "superlocalmemory"
-version = "3.8.4"
+version = "3.8.5"
 description = "Local-first agent memory with auditable hybrid retrieval"
 readme = "README.md"
 license = "AGPL-3.0-or-later"

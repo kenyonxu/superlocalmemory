@@ -1373,17 +1373,40 @@ class DatabaseManager:
         )
         return [dict(r) for r in rows]
 
-    def cleanup_activation_cache(self) -> int:
-        """Delete expired cache entries. Returns count deleted."""
-        before = self.execute(
-            "SELECT COUNT(*) AS c FROM activation_cache "
-            "WHERE expires_at < datetime('now')"
-        )
-        count = int(before[0]["c"]) if before else 0
-        self.execute(
-            "DELETE FROM activation_cache WHERE expires_at < datetime('now')"
-        )
-        return count
+    def cleanup_activation_cache(
+        self, batch_size: int = 5000, max_batches: int = 500,
+    ) -> int:
+        """Delete expired activation_cache rows in bounded batches.
+
+        Wired into MaintenanceScheduler.  Historically NEITHER cleanup path was
+        ever called, so activation_cache grew without bound — observed 83,518
+        rows on a real DB, all expired, oldest ~3.5 months old.  That bloats the
+        table and its ``idx_actcache_expires`` index and slows every cache
+        INSERT OR REPLACE / lookup.
+
+        Batched so clearing a large backlog never holds the write lock for one
+        long DELETE: each batch commits and yields, letting remember/materialize
+        writers interleave.  ``idx_actcache_expires`` makes the predicate
+        index-backed.  Steady state (30-min cycle) deletes only one cycle's
+        worth, so the loop exits after a single small batch.
+        """
+        total_deleted = 0
+        for _ in range(max_batches):
+            remaining = self.execute(
+                "SELECT COUNT(*) AS c FROM activation_cache "
+                "WHERE expires_at < datetime('now')"
+            )
+            n = int(remaining[0]["c"]) if remaining else 0
+            if n <= 0:
+                break
+            self.execute(
+                "DELETE FROM activation_cache WHERE cache_id IN ("
+                "  SELECT cache_id FROM activation_cache "
+                "  WHERE expires_at < datetime('now') LIMIT ?)",
+                (batch_size,),
+            )
+            total_deleted += min(n, batch_size)
+        return total_deleted
 
     def store_fact_importance(self, entry: dict) -> None:
         """Persist fact importance scores."""

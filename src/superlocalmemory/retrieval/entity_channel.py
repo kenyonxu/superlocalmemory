@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 from collections import defaultdict
@@ -30,6 +31,24 @@ if TYPE_CHECKING:
     from superlocalmemory.storage.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
+
+
+def _adj_ttl_seconds() -> float:
+    """In-memory adjacency-cache TTL (seconds), env-overridable.
+
+    v3.8.5: raised from a hard-coded 300s to 3600s. The TTL only exists to
+    catch edge-WEIGHT mutations (pruning / MAX-merge) that leave the edge COUNT
+    unchanged — new memories already force a reload via the count check. At 300s
+    a 208K-edge graph rebuilt on the recall hot path every 5 idle minutes,
+    causing a recurring multi-second latency spike. Weight drift is a minor
+    ranking refinement, so a longer TTL trades negligible staleness for a big
+    latency win. Set SLM_ENTITY_ADJ_TTL_S to tune (0 disables time-based reload;
+    the count-based correctness reload always remains).
+    """
+    try:
+        return max(0.0, float(os.environ.get("SLM_ENTITY_ADJ_TTL_S", "3600")))
+    except (TypeError, ValueError):
+        return 3600.0
 
 _PROPER_NOUN_RE = re.compile(r"\b[A-Z][a-z]{1,}\b")
 
@@ -156,7 +175,12 @@ class EntityGraphChannel:
         # count-stable window would otherwise serve a stale adjacency map.
         import time as _t_ec
         _now_ec = _t_ec.monotonic()
-        _fresh = (_now_ec - getattr(self, "_adj_loaded_at", 0.0)) < 300.0
+        _ttl = _adj_ttl_seconds()
+        # TTL=0 disables the time-based reload entirely (count-based correctness
+        # reload still applies); otherwise the cache is fresh within the TTL.
+        _fresh = _ttl <= 0.0 or (
+            (_now_ec - getattr(self, "_adj_loaded_at", 0.0)) < _ttl
+        )
         if (self._adj_scope_key == scope_key
                 and (self._adj or self._visible_fact_ids)
                 and self._adj_edge_count == current_count

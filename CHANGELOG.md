@@ -5,6 +5,33 @@ All notable changes to SuperLocalMemory V3 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.5] - 2026-07-26 — Reliable, full-quality recall
+
+### Fixed
+- Recall now consistently uses full-quality relevance ranking. The ranking model
+  warms up in the background with automatic retries, so recall no longer quietly
+  falls back to basic scoring when the model is slow to load, is recycled, or is
+  restarted. Full ranking resumes on its own within seconds if it is ever interrupted.
+- The first recall after startup is now fast. The memory graph is fully warmed in
+  the background before queries arrive, instead of the first query paying a
+  multi-second load — and the graph no longer reloads on the query path during
+  normal use, so recall latency stays consistent.
+- Recall stays responsive under heavy concurrent load. A startup contention issue
+  that could make the first queries slow on busy multi-agent systems has been removed.
+- The internal recall cache is now cleaned up automatically. It could previously
+  grow without bound over months of use; on upgrade, stale entries are compacted away.
+
+### Added
+- Automatic scale-up for very large memory graphs. A database that grows past
+  millions of connections switches to a high-performance graph backend on its own;
+  smaller databases stay on the fast built-in engine, which is quicker for them. The
+  switch runs in the background, is verified for correctness before it takes effect,
+  and falls back safely to the built-in engine if it cannot complete.
+
+### Notes
+- Upgrades apply automatically on daemon start — no manual migration command needed.
+- Recommended upgrade for all 3.8.x users.
+
 ## [3.8.4] - 2026-07-26
 
 ### Fixed
