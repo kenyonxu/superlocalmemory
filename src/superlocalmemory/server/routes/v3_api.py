@@ -596,7 +596,9 @@ def _validate_provider_url(url: str, client_host: str) -> str | None:
     host = p.hostname or ""
     if host.lower() in ("169.254.169.254", "metadata.google.internal", "metadata"):
         return "Cloud metadata endpoints are not allowed"
-    if client_host in ("127.0.0.1", "::1", "localhost"):
+    from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
+
+    if _is_loopback_host(client_host):
         return None  # local dashboard may target its own local/LAN endpoints
     # SLM_REMOTE residue (#40): an allowlisted LAN dashboard is trusted exactly
     # like the loopback one and may probe its own LAN LLM endpoint. This does
@@ -1808,7 +1810,7 @@ async def update_core_memory_block(block_id: str, request: Request):
             )
 
         from superlocalmemory.server.routes.helpers import DB_PATH, get_active_profile
-        import sqlite3
+        from superlocalmemory.storage.memory_write import memory_write
         from datetime import datetime, timezone
 
         if not DB_PATH.exists():
@@ -1827,46 +1829,38 @@ async def update_core_memory_block(block_id: str, request: Request):
             content_preview=str(content),
         )
 
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
-
-        # Verify block exists
-        existing = conn.execute(
-            "SELECT block_id, profile_id, block_type, version "
-            "FROM core_memory_blocks WHERE block_id = ? AND profile_id = ?",
-            (block_id, pid),
-        ).fetchone()
-
-        if not existing:
-            conn.close()
-            return JSONResponse(
-                {"error": f"Block {block_id} not found"},
-                status_code=404,
-            )
-
-        existing_dict = dict(existing)
-        new_version = existing_dict["version"] + 1
         now = datetime.now(timezone.utc).isoformat()
+        # memory_write: process write lock + busy_timeout.
+        # SELECT + UPDATE + read-back are atomic inside the same connection.
+        with memory_write(DB_PATH) as conn:
+            # Verify block exists
+            existing = conn.execute(
+                "SELECT block_id, profile_id, block_type, version "
+                "FROM core_memory_blocks WHERE block_id = ? AND profile_id = ?",
+                (block_id, pid),
+            ).fetchone()
 
-        conn.execute(
-            "UPDATE core_memory_blocks SET content = ?, char_count = ?, "
-            "version = ?, compiled_by = 'manual', updated_at = ? "
-            "WHERE block_id = ? AND profile_id = ?",
-            (content, len(content), new_version, now, block_id, pid),
-        )
-        conn.commit()
+            if not existing:
+                raise HTTPException(status_code=404, detail=f"Block {block_id} not found")
 
-        # Read back updated block
-        updated = conn.execute(
-            "SELECT block_id, block_type, content, char_count, version, "
-            "compiled_by, updated_at FROM core_memory_blocks "
-            "WHERE block_id = ? AND profile_id = ?",
-            (block_id, pid),
-        ).fetchone()
-        conn.close()
+            new_version = dict(existing)["version"] + 1
+            conn.execute(
+                "UPDATE core_memory_blocks SET content = ?, char_count = ?, "
+                "version = ?, compiled_by = 'manual', updated_at = ? "
+                "WHERE block_id = ? AND profile_id = ?",
+                (content, len(content), new_version, now, block_id, pid),
+            )
+            # Read back updated block while connection is still open.
+            updated = conn.execute(
+                "SELECT block_id, block_type, content, char_count, version, "
+                "compiled_by, updated_at FROM core_memory_blocks "
+                "WHERE block_id = ? AND profile_id = ?",
+                (block_id, pid),
+            ).fetchone()
+            updated_dict = dict(updated) if updated else {"block_id": block_id, "updated": True}
 
         authorization.complete()
-        return dict(updated) if updated else {"block_id": block_id, "updated": True}
+        return updated_dict
     except HTTPException:
         raise
     except Exception as e:
@@ -1990,7 +1984,7 @@ async def run_forgetting(request: Request):
         profile = body.get("profile", "")
 
         from superlocalmemory.server.routes.helpers import get_active_profile, DB_PATH
-        import sqlite3 as _sqlite3
+        from superlocalmemory.storage.memory_write import memory_write as _memory_write
         pid = _resolve_mutation_profile(profile)
         _require_manage_for_profile(request, pid)
 
@@ -2003,59 +1997,55 @@ async def run_forgetting(request: Request):
             source_agent_id="http-forgetting-run",
             profile_id=pid,
         )
-        conn = _sqlite3.connect(str(DB_PATH))
-        conn.row_factory = _sqlite3.Row
 
+        # memory_write: process write lock + busy_timeout — all UPDATEs atomic.
         updated = 0
         try:
-            # Apply Ebbinghaus decay: reduce retention for facts not accessed recently
-            # Formula: retention *= exp(-0.1) for each cycle (simplified batch decay)
-            conn.execute(
-                "UPDATE fact_retention "
-                "SET retention_score = MAX(0.0, retention_score * 0.9), "
-                "    last_computed_at = datetime('now') "
-                "WHERE profile_id = ? "
-                "AND lifecycle_zone NOT IN ('archive', 'forgotten')",
-                (pid,),
-            )
-            updated = conn.total_changes
-
-            # Transition zones based on new retention scores
-            zone_thresholds = [
-                ("forgotten", 0.05),
-                ("archive", 0.15),
-                ("cold", 0.35),
-                ("warm", 0.65),
-            ]
-            for zone, threshold in zone_thresholds:
+            with _memory_write(DB_PATH) as conn:
+                # Apply Ebbinghaus decay: reduce retention for facts not accessed recently
+                # Formula: retention *= exp(-0.1) for each cycle (simplified batch decay)
                 conn.execute(
                     "UPDATE fact_retention "
-                    "SET lifecycle_zone = ? "
+                    "SET retention_score = MAX(0.0, retention_score * 0.9), "
+                    "    last_computed_at = datetime('now') "
                     "WHERE profile_id = ? "
-                    "AND retention_score < ? "
                     "AND lifecycle_zone NOT IN ('archive', 'forgotten')",
-                    (zone, pid, threshold),
+                    (pid,),
+                )
+                updated = conn.total_changes
+
+                # Transition zones based on new retention scores
+                zone_thresholds = [
+                    ("forgotten", 0.05),
+                    ("archive", 0.15),
+                    ("cold", 0.35),
+                    ("warm", 0.65),
+                ]
+                for zone, threshold in zone_thresholds:
+                    conn.execute(
+                        "UPDATE fact_retention "
+                        "SET lifecycle_zone = ? "
+                        "WHERE profile_id = ? "
+                        "AND retention_score < ? "
+                        "AND lifecycle_zone NOT IN ('archive', 'forgotten')",
+                        (zone, pid, threshold),
+                    )
+
+                # Ensure high-retention facts are active
+                conn.execute(
+                    "UPDATE fact_retention "
+                    "SET lifecycle_zone = 'active' "
+                    "WHERE profile_id = ? AND retention_score >= 0.65 "
+                    "AND lifecycle_zone NOT IN ('archive', 'forgotten')",
+                    (pid,),
                 )
 
-            # Ensure high-retention facts are active
-            conn.execute(
-                "UPDATE fact_retention "
-                "SET lifecycle_zone = 'active' "
-                "WHERE profile_id = ? AND retention_score >= 0.65 "
-                "AND lifecycle_zone NOT IN ('archive', 'forgotten')",
-                (pid,),
-            )
-
-            from superlocalmemory.core.lifecycle_state import reconcile_profile_lifecycle
-            reconcile_profile_lifecycle(conn, pid)
-
-            conn.commit()
+                from superlocalmemory.core.lifecycle_state import reconcile_profile_lifecycle
+                reconcile_profile_lifecycle(conn, pid)
         except Exception as exc:
             logger.exception("run_forgetting decay failed")
-            conn.close()
             return {"success": False, "error": "internal error"}
 
-        conn.close()
         authorization.complete()
         return {"success": True, "facts_decayed": updated, "profile": pid}
     except HTTPException:

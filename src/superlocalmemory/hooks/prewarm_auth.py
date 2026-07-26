@@ -38,6 +38,8 @@ _ORIGIN_HEADER_VARIANTS: tuple[str, ...] = ("Origin", "origin")
 
 # Loopback addresses accepted by LLD-01. ``localhost`` is NOT included per
 # SEC-01-02 — we want literal IPs only to avoid DNS-based bypass tricks.
+# Note: ::ffff:127.x.x.x is handled dynamically via ipaddress.ip_address()
+# in is_loopback() below to cover dual-stack container deployments (#90).
 _LOOPBACK_ADDRS: frozenset[str] = frozenset({"127.0.0.1", "::1"})
 
 # Body-size cap: LLD-01 §4.5 step 4 → 8 KB.
@@ -65,10 +67,27 @@ class AuthDecision:
 
 
 def is_loopback(client_host: str) -> bool:
-    """Return True iff ``client_host`` is an accepted loopback literal."""
+    """Return True iff ``client_host`` is an accepted loopback literal.
+
+    Deliberately excludes ``"localhost"`` per SEC-01-02 — /internal/prewarm
+    callers are in-process hooks that always connect to a literal IP, so
+    hostname aliases are rejected to prevent DNS-based bypass tricks.
+
+    Accepts IPv4-mapped IPv6 loopback (``::ffff:127.x.x.x``) for dual-stack
+    correctness (issue #90), while still excluding ``"localhost"``.
+    """
     if not isinstance(client_host, str) or not client_host:
         return False
-    return client_host in _LOOPBACK_ADDRS
+    if client_host in _LOOPBACK_ADDRS:
+        return True
+    # Handle IPv4-mapped IPv6 loopback (::ffff:127.x.x.x) — dual-stack fix.
+    # Intentionally NOT accepting "localhost" (SEC-01-02 preserved).
+    try:
+        import ipaddress as _ipa
+        ip = _ipa.ip_address(client_host)
+        return ip.is_loopback
+    except ValueError:
+        return False
 
 
 # ---------------------------------------------------------------------------

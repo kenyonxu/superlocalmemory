@@ -1135,6 +1135,9 @@ def cmd_connect(args: Namespace) -> None:
         if ide_arg in IDE_MATRIX:
             here = getattr(args, "here", False)
             profile = getattr(args, "profile", None)
+            transport = getattr(args, "transport", "stdio")
+            daemon_port = getattr(args, "daemon_port", 8765)
+            verify = getattr(args, "verify", False)
             project = None
             if here:
                 import pathlib
@@ -1148,7 +1151,23 @@ def cmd_connect(args: Namespace) -> None:
                 profile=profile,
                 agents_md_source=_agents_md_source_factory(),
                 dry_run=getattr(args, "dry_run", False),
+                transport=transport,
+                daemon_port=daemon_port,
             )
+
+            # --verify: probe daemon health after writing
+            if verify and transport in ("http", "http-mcp-remote") and not result.get("error"):
+                from superlocalmemory.hooks.portable_kit import _check_daemon_health
+                reachable = _check_daemon_health(daemon_port)
+                if reachable:
+                    print(f"[verify] Daemon reachable at http://127.0.0.1:{daemon_port}/api/v3/health")
+                else:
+                    print(
+                        f"[verify] Warning: daemon NOT reachable at "
+                        f"http://127.0.0.1:{daemon_port}/api/v3/health. "
+                        f"Run `slm serve start` to start it.",
+                        file=sys.stderr,
+                    )
 
             if not result.get("error") and not getattr(args, "dry_run", False):
                 from superlocalmemory.infra.local_diagnostics import record_operation

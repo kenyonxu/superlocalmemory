@@ -14,9 +14,13 @@ import threading
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from superlocalmemory.infra.data_root import state_path
+from superlocalmemory.storage.write_lock import get_write_lock
+
+if TYPE_CHECKING:
+    from superlocalmemory.storage.database import DatabaseManager
 
 logger = logging.getLogger("superlocalmemory.events")
 
@@ -65,15 +69,25 @@ class EventBus:
     _instances_lock = threading.Lock()
 
     @classmethod
-    def get_instance(cls, db_path: Optional[Path] = None) -> "EventBus":
-        """Get or create the singleton EventBus for a database path."""
+    def get_instance(
+        cls,
+        db_path: Optional[Path] = None,
+        db: "DatabaseManager | None" = None,
+    ) -> "EventBus":
+        """Get or create the singleton EventBus for a database path.
+
+        Fix C: optional ``db`` forwarded to the constructor on first creation.
+        On subsequent calls for the same path the existing instance is returned;
+        callers that need to wire a DatabaseManager after construction should
+        call ``instance.set_db(db)`` separately.
+        """
         if db_path is None:
             db_path = state_path("memory.db")
 
         key = str(db_path)
         with cls._instances_lock:
             if key not in cls._instances:
-                cls._instances[key] = cls(db_path)
+                cls._instances[key] = cls(db_path, db=db)
             return cls._instances[key]
 
     @classmethod
@@ -87,9 +101,31 @@ class EventBus:
                 if key in cls._instances:
                     del cls._instances[key]
 
-    def __init__(self, db_path: Path) -> None:
-        """Initialize EventBus. Prefer get_instance() over direct construction."""
+    def __init__(
+        self,
+        db_path: Path,
+        db: "DatabaseManager | None" = None,
+    ) -> None:
+        """Initialize EventBus. Prefer get_instance() over direct construction.
+
+        Fix C: optional ``db`` parameter.  When provided, all write paths
+        (INSERT / UPDATE / DELETE) are routed through DatabaseManager.execute()
+        which acquires the process-level RLock before opening a connection.
+        This eliminates the EventBus write-storm contribution to the memory.db
+        lock contention: instead of 5 independent bare sqlite3.connect() calls
+        racing the materialiser, all writes queue through the single writer.
+
+        When ``db`` is None the fallback path is used — direct sqlite3.connect()
+        with ``PRAGMA busy_timeout=10000`` on every connection.  This is safe
+        for standalone / testing use but is NOT process-lock-serialised.
+        """
         self.db_path = Path(db_path)
+        self._db: "DatabaseManager | None" = db
+        if db is None:
+            logger.debug(
+                "EventBus operating in standalone mode — no DatabaseManager "
+                "provided; concurrency is unmanaged (busy_timeout=10000 applied)"
+            )
         self._buffer: deque = deque(maxlen=EVENT_BUFFER_SIZE)
         self._buffer_lock = threading.Lock()
         self._event_counter = 0
@@ -101,6 +137,15 @@ class EventBus:
         self._init_schema()
         logger.info("EventBus initialized: db=%s", self.db_path)
 
+    def set_db(self, db: "DatabaseManager") -> None:
+        """Wire EventBus to an already-initialised DatabaseManager.
+
+        For daemon start-up sequences where EventBus is constructed before
+        DatabaseManager is ready.  Call once from the daemon after both
+        are initialised.  Subsequent write calls will use ``db``.
+        """
+        self._db = db
+
     def _init_schema(self) -> None:
         """Create the memory_events table if it does not exist.
 
@@ -108,38 +153,46 @@ class EventBus:
         dashboard viewing profile A never sees profile B's events. This table is
         store-owned (created here, not by the migration runner), so the store
         owns its upgrade. Existing rows backfill to the 'default' profile.
+
+        Uses a direct connection here (before DatabaseManager may be available)
+        with busy_timeout=10000 for robustness during daemon start-up.
         """
-        conn = sqlite3.connect(str(self.db_path))
-        try:
-            cur = conn.cursor()
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS memory_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    profile_id TEXT NOT NULL DEFAULT 'default',
-                    event_type TEXT NOT NULL,
-                    memory_id INTEGER,
-                    source_agent TEXT DEFAULT 'user',
-                    source_protocol TEXT DEFAULT 'internal',
-                    payload TEXT,
-                    importance INTEGER DEFAULT 5,
-                    tier TEXT DEFAULT 'hot',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            existing = {r[1] for r in cur.execute(
-                "PRAGMA table_info(memory_events)").fetchall()}
-            if "profile_id" not in existing:
-                cur.execute(
-                    "ALTER TABLE memory_events "
-                    "ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'default'"
-                )
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON memory_events(event_type)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_events_created ON memory_events(created_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_events_tier ON memory_events(tier)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_events_profile ON memory_events(profile_id, id)")
-            conn.commit()
-        finally:
-            conn.close()
+        # Startup DDL is a memory.db write — serialise it with the process
+        # write lock so a bus created concurrently with active writers cannot
+        # race the schema create/migrate at the WAL layer.
+        with get_write_lock(self.db_path):
+            conn = sqlite3.connect(str(self.db_path))
+            conn.execute("PRAGMA busy_timeout=10000")
+            try:
+                cur = conn.cursor()
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        profile_id TEXT NOT NULL DEFAULT 'default',
+                        event_type TEXT NOT NULL,
+                        memory_id INTEGER,
+                        source_agent TEXT DEFAULT 'user',
+                        source_protocol TEXT DEFAULT 'internal',
+                        payload TEXT,
+                        importance INTEGER DEFAULT 5,
+                        tier TEXT DEFAULT 'hot',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                existing = {r[1] for r in cur.execute(
+                    "PRAGMA table_info(memory_events)").fetchall()}
+                if "profile_id" not in existing:
+                    cur.execute(
+                        "ALTER TABLE memory_events "
+                        "ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'default'"
+                    )
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON memory_events(event_type)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_events_created ON memory_events(created_at)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_events_tier ON memory_events(tier)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_events_profile ON memory_events(profile_id, id)")
+                conn.commit()
+            finally:
+                conn.close()
 
     @staticmethod
     def _resolve_profile(profile_id: Optional[str]) -> str:
@@ -246,26 +299,60 @@ class EventBus:
     publish = emit
 
     def _persist_event(self, event: dict) -> Optional[int]:
-        """Persist event to the memory_events table. Returns row id or None."""
+        """Persist event to the memory_events table. Returns row id or None.
+
+        Fix C: when a DatabaseManager is available, routes the INSERT through
+        db.execute() (which acquires the process-level RLock for the write).
+        The fallback path (no db) uses a direct connection with
+        busy_timeout=10000 for resilience against short lock holds.
+
+        Note: db.execute() returns list[sqlite3.Row] — for an INSERT the
+        return value is empty.  The ROWID of the inserted row is retrieved
+        with a follow-up SELECT last_insert_rowid() on the same connection.
+        Because db.execute() is a per-call connect/commit/close, the rowid
+        is obtained inside the same logical operation.
+        """
+        sql = (
+            "INSERT INTO memory_events (profile_id, event_type, memory_id,"
+            " source_agent, source_protocol, payload, importance, tier,"
+            " created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, 'hot', ?)"
+        )
+        params = (
+            event.get("profile_id", "default"),
+            event["event_type"],
+            event.get("memory_id"),
+            event["source_agent"],
+            event["source_protocol"],
+            json.dumps(event["payload"]),
+            event["importance"],
+            event["timestamp"],
+        )
+
         try:
-            conn = sqlite3.connect(str(self.db_path))
-            try:
-                cur = conn.cursor()
-                cur.execute(
-                    "INSERT INTO memory_events (profile_id, event_type, memory_id,"
-                    " source_agent, source_protocol, payload, importance, tier,"
-                    " created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, 'hot', ?)",
-                    (event.get("profile_id", "default"), event["event_type"],
-                     event.get("memory_id"),
-                     event["source_agent"], event["source_protocol"],
-                     json.dumps(event["payload"]), event["importance"],
-                     event["timestamp"]),
-                )
-                conn.commit()
-                return cur.lastrowid
-            finally:
-                conn.close()
+            if self._db is not None:
+                # Serialised path: routes through DatabaseManager's RLock.
+                # Use a transaction() context to get the lastrowid.
+                with self._db.transaction():
+                    self._db.execute(sql, params)
+                    rows = self._db.execute("SELECT last_insert_rowid() AS id")
+                    return int(rows[0]["id"]) if rows else None
+            else:
+                # Fallback: acquire the process write lock BEFORE opening the
+                # connection so this INSERT is serialised with every other
+                # memory.db writer even when no DatabaseManager was wired in
+                # (daemon/route/MCP callers construct via get_instance(path)).
+                # The write is a single tiny row — the lock is held for <1ms.
+                with get_write_lock(self.db_path):
+                    conn = sqlite3.connect(str(self.db_path))
+                    conn.execute("PRAGMA busy_timeout=10000")
+                    try:
+                        cur = conn.cursor()
+                        cur.execute(sql, params)
+                        conn.commit()
+                        return cur.lastrowid
+                    finally:
+                        conn.close()
         except Exception as exc:
             logger.error("Failed to persist event: %s", exc)
             return None
@@ -318,6 +405,7 @@ class EventBus:
 
         try:
             conn = sqlite3.connect(str(self.db_path))
+            conn.execute("PRAGMA busy_timeout=10000")
             try:
                 cur = conn.cursor()
 
@@ -379,6 +467,7 @@ class EventBus:
         scope = self._resolve_profile(profile_id)
         try:
             conn = sqlite3.connect(str(self.db_path))
+            conn.execute("PRAGMA busy_timeout=10000")
             try:
                 cur = conn.cursor()
 
@@ -427,42 +516,115 @@ class EventBus:
         surface. Tenant isolation of event CONTENT is enforced on read via the
         profile_id filter; this sweep only demotes/expires old rows by age.
         """
-        try:
-            conn = sqlite3.connect(str(self.db_path))
+        now = datetime.now()
+        warm_cutoff = (now - timedelta(hours=hot_hours)).isoformat()
+        cold_cutoff = (now - timedelta(hours=warm_hours)).isoformat()
+        archive_cutoff = (now - timedelta(hours=cold_hours)).isoformat()
+        stats = {"hot_to_warm": 0, "warm_to_cold": 0, "archived": 0}
+
+        _PRUNE_BATCH = 5000  # max rows per transaction — keeps lock time bounded
+
+        if self._db is not None:
+            # Fix C: route tier-management writes through DatabaseManager.
+            # Use separate short transactions per batch to avoid one long hold.
             try:
-                cur = conn.cursor()
-                now = datetime.now()
-                stats = {"hot_to_warm": 0, "warm_to_cold": 0, "archived": 0}
+                # Hot → warm (UPDATE, bounded loop)
+                while True:
+                    with self._db.transaction():
+                        self._db.execute(
+                            "UPDATE memory_events SET tier = 'warm' "
+                            "WHERE rowid IN ("
+                            "  SELECT rowid FROM memory_events "
+                            "  WHERE tier = 'hot' AND created_at < ? AND importance < 5 "
+                            "  LIMIT ?"
+                            ")",
+                            (warm_cutoff, _PRUNE_BATCH),
+                        )
+                        rows = self._db.execute("SELECT changes()")
+                        changed = rows[0][0] if rows else 0
+                    stats["hot_to_warm"] += changed
+                    if changed < _PRUNE_BATCH:
+                        break
 
-                # Hot -> Warm: older than hot_hours, importance < 5
-                warm_cutoff = (now - timedelta(hours=hot_hours)).isoformat()
-                cur.execute(
-                    "UPDATE memory_events SET tier = 'warm' "
-                    "WHERE tier = 'hot' AND created_at < ? AND importance < 5",
-                    (warm_cutoff,),
+                # Warm → cold (DELETE, bounded loop)
+                while True:
+                    with self._db.transaction():
+                        self._db.execute(
+                            "DELETE FROM memory_events "
+                            "WHERE rowid IN ("
+                            "  SELECT rowid FROM memory_events "
+                            "  WHERE tier = 'warm' AND created_at < ? "
+                            "  LIMIT ?"
+                            ")",
+                            (cold_cutoff, _PRUNE_BATCH),
+                        )
+                        rows = self._db.execute("SELECT changes()")
+                        changed = rows[0][0] if rows else 0
+                    stats["warm_to_cold"] += changed
+                    if changed < _PRUNE_BATCH:
+                        break
+
+                # Archive prune (DELETE, bounded loop)
+                while True:
+                    with self._db.transaction():
+                        self._db.execute(
+                            "DELETE FROM memory_events "
+                            "WHERE rowid IN ("
+                            "  SELECT rowid FROM memory_events "
+                            "  WHERE created_at < ? "
+                            "  LIMIT ?"
+                            ")",
+                            (archive_cutoff, _PRUNE_BATCH),
+                        )
+                        rows = self._db.execute("SELECT changes()")
+                        changed = rows[0][0] if rows else 0
+                    stats["archived"] += changed
+                    if changed < _PRUNE_BATCH:
+                        break
+
+                logger.info(
+                    "Prune complete (via db): hot->warm=%d warm->cold=%d archived=%d",
+                    stats["hot_to_warm"], stats["warm_to_cold"], stats["archived"],
                 )
-                stats["hot_to_warm"] = cur.rowcount
+                return stats
+            except Exception as exc:
+                logger.error("Event pruning failed (db path): %s", exc)
+                return {"error": str(exc)}
 
-                # Warm -> Cold: delete warm events older than warm_hours
-                cold_cutoff = (now - timedelta(hours=warm_hours)).isoformat()
-                cur.execute(
-                    "DELETE FROM memory_events "
-                    "WHERE tier = 'warm' AND created_at < ?",
-                    (cold_cutoff,),
-                )
-                stats["warm_to_cold"] = cur.rowcount
+        # Fallback: acquire the process write lock so this maintenance prune
+        # is serialised with all other memory.db writers even when no
+        # DatabaseManager was wired in. memory_events is a small bounded table
+        # (retention-capped) so the lock is held only briefly.
+        try:
+            with get_write_lock(self.db_path):
+                conn = sqlite3.connect(str(self.db_path))
+                conn.execute("PRAGMA busy_timeout=10000")
+                try:
+                    cur = conn.cursor()
 
-                # Archive: delete everything older than cold_hours
-                archive_cutoff = (now - timedelta(hours=cold_hours)).isoformat()
-                cur.execute(
-                    "DELETE FROM memory_events WHERE created_at < ?",
-                    (archive_cutoff,),
-                )
-                stats["archived"] = cur.rowcount
+                    cur.execute(
+                        "UPDATE memory_events SET tier = 'warm' "
+                        "WHERE tier = 'hot' AND created_at < ? AND importance < 5",
+                        (warm_cutoff,),
+                    )
+                    stats["hot_to_warm"] = cur.rowcount
 
-                conn.commit()
-            finally:
-                conn.close()
+                    cur.execute(
+                        "DELETE FROM memory_events "
+                        "WHERE tier = 'warm' AND created_at < ?",
+                        (cold_cutoff,),
+                    )
+                    stats["warm_to_cold"] = cur.rowcount
+
+                    cur.execute(
+                        "DELETE FROM memory_events WHERE created_at < ?",
+                        (archive_cutoff,),
+                    )
+                    stats["archived"] = cur.rowcount
+
+                    conn.commit()
+                finally:
+                    conn.close()
 
             logger.info(
                 "Prune complete: hot->warm=%d warm->cold=%d archived=%d",

@@ -148,14 +148,30 @@ class TestPersistence:
         assert len(agents) == 1
         assert agents[0]["agent_id"] == "persistent_agent"
 
-    def test_lock_persists_across_reload(self, tmp_path: Path) -> None:
-        path = tmp_path / "reg_lock.json"
-        reg1 = AgentRegistry(persist_path=path)
-        reg1.register_agent("a1", "p_locked")
+    def test_stale_lock_cleared_on_reload(self, tmp_path: Path) -> None:
+        """D-01 regression: locks from a prior process must NOT block new agents.
 
+        Before the fix, a lock saved by agent 'claude' in one process would
+        survive into the next daemon process, permanently preventing 'mcp_client'
+        from registering (log: "Profile 'default' is locked by agent 'claude'").
+        After the fix, _load() discards all stale write_locks so a fresh daemon
+        starts with no inherited locks.
+        """
+        path = tmp_path / "reg_lock.json"
+        # Simulate prior session: claude holds the lock.
+        reg1 = AgentRegistry(persist_path=path)
+        reg1.register_agent("claude", "default")
+        assert reg1._write_locks.get("default") == "claude"
+
+        # Daemon restarts → new AgentRegistry instance loads the file.
         reg2 = AgentRegistry(persist_path=path)
-        with pytest.raises(ProfileLockError):
-            reg2.register_agent("a2", "p_locked")
+        # Stale locks must be gone — prior process is dead.
+        assert reg2._write_locks == {}, (
+            "D-01: stale write_locks from prior process should be cleared on _load()"
+        )
+        # mcp_client must be able to register without ProfileLockError.
+        reg2.register_agent("mcp_client", "default")
+        assert reg2._write_locks.get("default") == "mcp_client"
 
     def test_in_memory_does_not_persist(self) -> None:
         reg1 = AgentRegistry(persist_path=None)

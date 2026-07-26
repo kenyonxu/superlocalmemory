@@ -23,6 +23,8 @@ from typing import Any
 
 import numpy as np
 
+from superlocalmemory.storage.write_lock import get_write_lock
+
 logger = logging.getLogger(__name__)
 
 
@@ -182,51 +184,62 @@ class VectorStore:
             )
             return False
 
+        # Embedding bytes computed OUTSIDE the lock — serialisation must not
+        # cover slow computation, only the sqlite3 write transaction itself.
         vec_bytes = self._serialize_f32(embedding)
 
-        with self._lock:
-            try:
-                conn = self._connect()
-                # Check if fact_id already exists in metadata
-                row = conn.execute(
-                    "SELECT vec_rowid FROM embedding_metadata "
-                    "WHERE fact_id = ?",
-                    (fact_id,),
-                ).fetchone()
+        # Acquire the process-level write lock for this db file BEFORE opening
+        # the sqlite3 connection.  This is the OUTERMOST lock (see write_lock.py
+        # ordering rule).  self._lock is INNER and acquired inside.  The write
+        # lock is the same RLock that DatabaseManager._lock references for this
+        # db_path, so the self-heal backfill pattern
+        #   with db._lock: vs.upsert()
+        # simply re-enters the RLock (same thread — always safe).
+        _wl = get_write_lock(self._db_path)
+        with _wl:            # OUTER: serialises all memory.db writers
+            with self._lock:  # INNER: VectorStore per-instance state
+                try:
+                    conn = self._connect()
+                    # Check if fact_id already exists in metadata
+                    row = conn.execute(
+                        "SELECT vec_rowid FROM embedding_metadata "
+                        "WHERE fact_id = ?",
+                        (fact_id,),
+                    ).fetchone()
 
-                if row is not None:
-                    # UPDATE existing
-                    rowid = row["vec_rowid"]
-                    conn.execute(
-                        "UPDATE fact_embeddings SET embedding = ? "
-                        "WHERE rowid = ?",
-                        (vec_bytes, rowid),
-                    )
-                else:
-                    # INSERT new
-                    conn.execute(
-                        "INSERT INTO fact_embeddings(profile_id, embedding) "
-                        "VALUES (?, ?)",
-                        (profile_id, vec_bytes),
-                    )
-                    rowid = conn.execute(
-                        "SELECT last_insert_rowid()"
-                    ).fetchone()[0]
-                    conn.execute(
-                        "INSERT INTO embedding_metadata "
-                        "(vec_rowid, fact_id, profile_id, model_name, dimension) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (rowid, fact_id, profile_id,
-                         model_name or self._config.model_name,
-                         self._config.dimension),
-                    )
+                    if row is not None:
+                        # UPDATE existing
+                        rowid = row["vec_rowid"]
+                        conn.execute(
+                            "UPDATE fact_embeddings SET embedding = ? "
+                            "WHERE rowid = ?",
+                            (vec_bytes, rowid),
+                        )
+                    else:
+                        # INSERT new
+                        conn.execute(
+                            "INSERT INTO fact_embeddings(profile_id, embedding) "
+                            "VALUES (?, ?)",
+                            (profile_id, vec_bytes),
+                        )
+                        rowid = conn.execute(
+                            "SELECT last_insert_rowid()"
+                        ).fetchone()[0]
+                        conn.execute(
+                            "INSERT INTO embedding_metadata "
+                            "(vec_rowid, fact_id, profile_id, model_name, dimension) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (rowid, fact_id, profile_id,
+                             model_name or self._config.model_name,
+                             self._config.dimension),
+                        )
 
-                conn.commit()
-                conn.close()
-                return True
-            except Exception as exc:
-                logger.debug("upsert failed for fact_id=%s: %s", fact_id, exc)
-                return False
+                    conn.commit()
+                    conn.close()
+                    return True
+                except Exception as exc:
+                    logger.debug("upsert failed for fact_id=%s: %s", fact_id, exc)
+                    return False
 
     def search(
         self,
@@ -302,40 +315,42 @@ class VectorStore:
     def delete(self, fact_id: str) -> bool:
         """Remove a vector from vec0 and metadata.
 
-        Thread-safe: acquires self._lock.
+        Thread-safe: acquires the process-level write lock then self._lock.
         Returns True if deleted, False if not found or error.
         """
         if not self._available:
             return False
 
-        with self._lock:
-            try:
-                conn = self._connect()
-                row = conn.execute(
-                    "SELECT vec_rowid FROM embedding_metadata "
-                    "WHERE fact_id = ?",
-                    (fact_id,),
-                ).fetchone()
+        _wl = get_write_lock(self._db_path)
+        with _wl:            # OUTER: process-level write serialisation
+            with self._lock:  # INNER: VectorStore per-instance state
+                try:
+                    conn = self._connect()
+                    row = conn.execute(
+                        "SELECT vec_rowid FROM embedding_metadata "
+                        "WHERE fact_id = ?",
+                        (fact_id,),
+                    ).fetchone()
 
-                if row is None:
+                    if row is None:
+                        conn.close()
+                        return False
+
+                    rowid = row["vec_rowid"]
+                    conn.execute(
+                        "DELETE FROM fact_embeddings WHERE rowid = ?",
+                        (rowid,),
+                    )
+                    conn.execute(
+                        "DELETE FROM embedding_metadata WHERE vec_rowid = ?",
+                        (rowid,),
+                    )
+                    conn.commit()
                     conn.close()
+                    return True
+                except Exception as exc:
+                    logger.debug("delete failed for fact_id=%s: %s", fact_id, exc)
                     return False
-
-                rowid = row["vec_rowid"]
-                conn.execute(
-                    "DELETE FROM fact_embeddings WHERE rowid = ?",
-                    (rowid,),
-                )
-                conn.execute(
-                    "DELETE FROM embedding_metadata WHERE vec_rowid = ?",
-                    (rowid,),
-                )
-                conn.commit()
-                conn.close()
-                return True
-            except Exception as exc:
-                logger.debug("delete failed for fact_id=%s: %s", fact_id, exc)
-                return False
 
     def count(self, profile_id: str | None = None) -> int:
         """Count vectors in the store.

@@ -101,17 +101,30 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path), timeout=5)
+def _connect_read(db_path: Path) -> sqlite3.Connection:
+    """Read-only connection with system-default busy_timeout.
+
+    Concurrency fix (v3.8.4): busy_timeout raised from 5 s to match the
+    system default (10 s, env SLM_DB_BUSY_TIMEOUT_MS).  Timeout raised from
+    5 s to 10 s for the same reason.  Write connections now go through
+    memory_write() so they acquire get_write_lock() and never use this helper.
+    """
+    import os
+
+    try:
+        ms = max(0, int(os.environ.get("SLM_DB_BUSY_TIMEOUT_MS", "10000")))
+    except (TypeError, ValueError):
+        ms = 10000
+    conn = sqlite3.connect(str(db_path), timeout=ms / 1000.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(f"PRAGMA busy_timeout={ms}")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
 def get_repair_status(db_path: Path) -> dict[str, int | str]:
     """Read durable backfill progress without inferring it from schema."""
-    conn = _connect(Path(db_path))
+    conn = _connect_read(Path(db_path))
     try:
         row = conn.execute(
             "SELECT state,target_fact_rowid,last_fact_rowid,scanned,inserted,"
@@ -142,58 +155,70 @@ def _entity_ids(raw: object) -> tuple[str, ...]:
 
 
 def _repair_batch(conn: sqlite3.Connection, batch_size: int) -> dict[str, int | bool]:
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        status = conn.execute(
-            "SELECT last_fact_rowid,target_fact_rowid "
-            "FROM fact_entity_association_repair_state "
-            "WHERE repair_key='historical-backfill'"
-        ).fetchone()
-        cursor = int(status["last_fact_rowid"] or 0)
-        target = int(status["target_fact_rowid"])
-        rows = conn.execute(
-            "SELECT rowid,fact_id,profile_id,canonical_entities_json "
-            "FROM atomic_facts WHERE rowid>? AND rowid<=? "
-            "ORDER BY rowid LIMIT ?",
-            (cursor, target, batch_size),
-        ).fetchall()
-        if not rows:
-            conn.execute(
-                "UPDATE fact_entity_association_repair_state "
-                "SET state='complete',last_error='',updated_at=? "
-                "WHERE repair_key='historical-backfill'",
-                (_now(),),
-            )
-            conn.commit()
-            return {"scanned": 0, "inserted": 0, "complete": True}
-        inserted = 0
-        for row in rows:
-            for entity_id in _entity_ids(row["canonical_entities_json"]):
-                result = conn.execute(
-                    "INSERT OR IGNORE INTO fact_entity_associations "
-                    "(profile_id,fact_id,entity_id,first_operation_id,"
-                    "count_applied) "
-                    "SELECT ?,?,?,?,? FROM canonical_entities "
-                    "WHERE profile_id=? AND entity_id=?",
-                    (
-                        row["profile_id"], row["fact_id"], entity_id,
-                        "migration-backfill", 0,
-                        row["profile_id"], entity_id,
-                    ),
-                )
-                inserted += max(0, result.rowcount)
+    """Execute one backfill batch on *conn*.
+
+    Concurrency fix (v3.8.4): caller MUST hold the write lock via
+    memory_write() before calling this function.  The explicit
+    ``conn.execute("BEGIN IMMEDIATE")`` has been removed because:
+
+    * memory_write() already acquired get_write_lock() (Python-level
+      serialisation) — no other in-process writer can start.
+    * SQLite's implicit deferred transaction is promoted to a write
+      transaction on the first INSERT, which is equivalent to BEGIN
+      IMMEDIATE for in-process serialisation.
+    * The explicit BEGIN IMMEDIATE previously bypassed get_write_lock()
+      and would retry at the SQLite layer only (busy_timeout=5 s, now
+      10 s) without respecting the Python-level write lock order.
+
+    Transaction boundary (commit/rollback) is managed by memory_write().
+    """
+    status = conn.execute(
+        "SELECT last_fact_rowid,target_fact_rowid "
+        "FROM fact_entity_association_repair_state "
+        "WHERE repair_key='historical-backfill'"
+    ).fetchone()
+    if status is None:
+        return {"scanned": 0, "inserted": 0, "complete": True}
+    cursor = int(status["last_fact_rowid"] or 0)
+    target = int(status["target_fact_rowid"])
+    rows = conn.execute(
+        "SELECT rowid,fact_id,profile_id,canonical_entities_json "
+        "FROM atomic_facts WHERE rowid>? AND rowid<=? "
+        "ORDER BY rowid LIMIT ?",
+        (cursor, target, batch_size),
+    ).fetchall()
+    if not rows:
         conn.execute(
-            "UPDATE fact_entity_association_repair_state SET "
-            "state='running',last_fact_rowid=?,scanned=scanned+?,"
-            "inserted=inserted+?,last_error='',updated_at=? "
+            "UPDATE fact_entity_association_repair_state "
+            "SET state='complete',last_error='',updated_at=? "
             "WHERE repair_key='historical-backfill'",
-            (int(rows[-1]["rowid"]), len(rows), inserted, _now()),
+            (_now(),),
         )
-        conn.commit()
-        return {"scanned": len(rows), "inserted": inserted, "complete": False}
-    except Exception:
-        conn.rollback()
-        raise
+        return {"scanned": 0, "inserted": 0, "complete": True}
+    inserted = 0
+    for row in rows:
+        for entity_id in _entity_ids(row["canonical_entities_json"]):
+            result = conn.execute(
+                "INSERT OR IGNORE INTO fact_entity_associations "
+                "(profile_id,fact_id,entity_id,first_operation_id,"
+                "count_applied) "
+                "SELECT ?,?,?,?,? FROM canonical_entities "
+                "WHERE profile_id=? AND entity_id=?",
+                (
+                    row["profile_id"], row["fact_id"], entity_id,
+                    "migration-backfill", 0,
+                    row["profile_id"], entity_id,
+                ),
+            )
+            inserted += max(0, result.rowcount)
+    conn.execute(
+        "UPDATE fact_entity_association_repair_state SET "
+        "state='running',last_fact_rowid=?,scanned=scanned+?,"
+        "inserted=inserted+?,last_error='',updated_at=? "
+        "WHERE repair_key='historical-backfill'",
+        (int(rows[-1]["rowid"]), len(rows), inserted, _now()),
+    )
+    return {"scanned": len(rows), "inserted": inserted, "complete": False}
 
 
 def repair_fact_entity_associations(
@@ -202,34 +227,44 @@ def repair_fact_entity_associations(
     batch_size: int = 250,
     max_batches: int = 1,
 ) -> dict[str, int | bool]:
-    """Run bounded, restartable short-transaction backfill batches."""
+    """Run bounded, restartable short-transaction backfill batches.
+
+    Concurrency fix (v3.8.4): each batch is now wrapped in memory_write()
+    which acquires get_write_lock() (process-level write serialisation) and
+    sets the system-default busy_timeout (10 s) before opening the SQLite
+    connection.  Previously the loop used a single raw _connect() (timeout=5,
+    busy_timeout=5000) without get_write_lock(), which bypassed in-process
+    write serialisation and could cause SQLITE_BUSY after only 5 s.
+    """
+    from superlocalmemory.storage.memory_write import memory_write
+
     if batch_size < 1 or max_batches < 1:
         raise ValueError("batch_size and max_batches must be positive")
-    totals = {"scanned": 0, "inserted": 0, "complete": False}
-    conn = _connect(Path(db_path))
-    try:
-        for _ in range(max_batches):
-            result = _repair_batch(conn, batch_size)
-            totals["scanned"] += int(result["scanned"])
-            totals["inserted"] += int(result["inserted"])
-            totals["complete"] = bool(result["complete"])
-            if totals["complete"]:
-                break
-        return totals
-    except sqlite3.Error as exc:
+    totals: dict[str, int | bool] = {"scanned": 0, "inserted": 0, "complete": False}
+    for _ in range(max_batches):
         try:
-            conn.execute(
-                "UPDATE fact_entity_association_repair_state SET "
-                "state='retrying',last_error=?,updated_at=? "
-                "WHERE repair_key='historical-backfill'",
-                (type(exc).__name__, _now()),
-            )
-            conn.commit()
-        except sqlite3.Error:
-            pass
-        raise
-    finally:
-        conn.close()
+            with memory_write(Path(db_path)) as conn:
+                conn.execute("PRAGMA foreign_keys=ON")
+                result = _repair_batch(conn, batch_size)
+                totals["scanned"] += int(result["scanned"])
+                totals["inserted"] += int(result["inserted"])
+                totals["complete"] = bool(result["complete"])
+        except sqlite3.Error as exc:
+            # On error, record the retrying state in a separate short write.
+            try:
+                with memory_write(Path(db_path)) as econn:
+                    econn.execute(
+                        "UPDATE fact_entity_association_repair_state SET "
+                        "state='retrying',last_error=?,updated_at=? "
+                        "WHERE repair_key='historical-backfill'",
+                        (type(exc).__name__, _now()),
+                    )
+            except sqlite3.Error:
+                pass
+            raise
+        if totals["complete"]:
+            break
+    return totals
 
 
 def verify(conn: sqlite3.Connection) -> bool:

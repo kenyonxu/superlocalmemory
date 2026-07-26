@@ -22,6 +22,7 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
 
 from superlocalmemory.infra.data_root import DynamicStatePath, canonical_data_root
+from superlocalmemory.storage.memory_write import memory_write
 
 
 _engine_logger = logging.getLogger("superlocalmemory.engine")
@@ -217,13 +218,23 @@ def log_mode_change(
 
 
 def get_db_connection() -> sqlite3.Connection:
-    """Get database connection."""
+    """Get database connection with busy_timeout set.
+
+    Used for READ-heavy callers. Writers should use ``memory_write(DB_PATH)``
+    instead to also acquire the process write lock.  This connection still gets
+    ``PRAGMA busy_timeout`` so a cross-process writer (hook / CLI) doing a short
+    write does not cause an immediate SQLITE_BUSY here.
+    """
     if not DB_PATH.exists():
         raise HTTPException(
             status_code=500,
             detail="Memory database not found. Run 'slm init' to initialize."
         )
-    return sqlite3.connect(str(DB_PATH))
+    import os as _os
+    _ms = max(0, int(_os.environ.get("SLM_DB_BUSY_TIMEOUT_MS", "10000")))
+    conn = sqlite3.connect(str(DB_PATH), timeout=_ms / 1000.0)
+    conn.execute(f"PRAGMA busy_timeout={_ms}")
+    return conn
 
 
 def dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
@@ -261,20 +272,22 @@ def validate_profile_name(name: str) -> bool:
 
 
 def ensure_profile_in_db(name: str, description: str = "") -> None:
-    """Ensure a profile row exists in SQLite (idempotent)."""
+    """Ensure a profile row exists in SQLite (idempotent).
+
+    Hot path: called on every authenticated request.  Uses ``memory_write()``
+    so in-process writers serialise through the write lock and cross-process
+    writers (hooks / CLI) wait via PRAGMA busy_timeout instead of getting
+    SQLITE_BUSY.
+    """
     if not DB_PATH.exists():
         return
-    conn = sqlite3.connect(str(DB_PATH))
-    try:
+    with memory_write(DB_PATH) as conn:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute(
             "INSERT OR IGNORE INTO profiles (profile_id, name, description) "
             "VALUES (?, ?, ?)",
             (name, name, description or f"Memory profile: {name}"),
         )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def ensure_profile_in_json(name: str, description: str = "") -> None:
@@ -347,11 +360,12 @@ def delete_profile_from_db(name: str) -> None:
     rbac_memberships has no FK to profiles, so CASCADE does not remove role
     grants — they would otherwise survive deletion and silently re-activate if
     a profile of the same name is later recreated. Remove them explicitly.
+    Uses ``memory_write()`` so the multi-statement DELETE is atomic and
+    serialised against other in-process writers.
     """
     if not DB_PATH.exists():
         return
-    conn = sqlite3.connect(str(DB_PATH))
-    try:
+    with memory_write(DB_PATH) as conn:
         conn.execute("PRAGMA foreign_keys=ON")
         # Purge role grants for this workspace (no FK CASCADE covers these).
         for tbl in ("rbac_memberships",):
@@ -360,9 +374,6 @@ def delete_profile_from_db(name: str) -> None:
             except sqlite3.OperationalError:
                 pass  # table may not exist on older installs
         conn.execute("DELETE FROM profiles WHERE profile_id = ?", (name,))
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def _get_db_profiles() -> list[dict]:

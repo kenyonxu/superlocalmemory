@@ -463,40 +463,141 @@ class IngestionOperationRepository:
         derivation_state: dict[str, bool] | None = None,
         last_error: str = "",
     ) -> IngestionOperation:
-        """Finish only work owned by the caller's durable lease."""
+        """Finish only work owned by the caller's durable lease.
+
+        Fix E: when transitioning to FAILED and the operation has exhausted
+        ``_MAX_AUTOMATIC_MATERIALIZATION_ATTEMPTS``, atomically INSERT a row
+        into ``dead_letter_operations`` and set ``next_retry_at=0`` (no further
+        retries scheduled).  The original row in ``ingestion_operations`` is
+        retained — the dead-letter row is a supplemental audit record, not a
+        replacement.  Both writes happen inside a single ``db.transaction()``.
+
+        NOTE (Flaw 1 from CRIT): M031 may not exist if the live database has
+        not run migration_runner against it yet.  The INSERT is therefore
+        wrapped in a try/except so that an absent table degrades gracefully to
+        the pre-3.8.4 silent-FAILED behaviour rather than breaking ingestion.
+        Operators who have run ``slm migrate`` will get the DLQ row.
+        """
         if target not in {IngestionState.COMPLETE, IngestionState.FAILED}:
             raise InvalidStateTransition(f"enriching -> {target.value}")
         current = self.get(operation_id)
-        retry_at = 0.0
-        if target is IngestionState.FAILED:
+        # Attempt count AFTER this transition = current + 1 (the UPDATE adds
+        # the delta via attempt_count+delta but here we compare the pre-update
+        # value + 1 to the cap).
+        next_attempt_count = current.attempt_count + 1
+        is_exhausted = (
+            target is IngestionState.FAILED
+            and next_attempt_count >= _MAX_AUTOMATIC_MATERIALIZATION_ATTEMPTS
+        )
+        # Fix E: exhausted → far-future retry_at so list_materializable's
+        # `next_retry_at <= now` clause never matches, excluding the
+        # dead-lettered op from the work queue permanently.
+        # 9_999_999_999 ≈ year 2286 — well beyond any reasonable operation window.
+        _NEVER_RETRY: float = 9_999_999_999.0
+        retry_at: float = _NEVER_RETRY if is_exhausted else 0.0
+        if target is IngestionState.FAILED and not is_exhausted:
             delay = min(2 ** min(max(current.attempt_count, 1), 10), 300)
             retry_at = time.time() + delay
-        rows = self.db.execute(
-            "UPDATE ingestion_operations SET state=?, "
-            "final_fact_ids_json=COALESCE(?, final_fact_ids_json), "
-            "derivation_version=COALESCE(?, derivation_version), "
-            "derivation_state_json=COALESCE(?, derivation_state_json), "
-            "lease_owner='', lease_expires_at=0, next_retry_at=?, last_error=?, "
-            "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-            "WHERE operation_id=? AND state='enriching' AND lease_owner=? "
-            "RETURNING *",
-            (
-                target.value,
-                _canonical_json(list(final_fact_ids))
-                if final_fact_ids is not None
-                else None,
-                derivation_version,
-                _canonical_json(derivation_state)
-                if derivation_state is not None
-                else None,
-                retry_at,
-                last_error,
-                operation_id,
-                owner,
-            ),
-        )
-        if not rows:
-            raise InvalidStateTransition("enriching lease ownership was lost")
+
+        try:
+            with self.db.transaction():
+                rows = self.db.execute(
+                    "UPDATE ingestion_operations SET state=?, "
+                    "final_fact_ids_json=COALESCE(?, final_fact_ids_json), "
+                    "derivation_version=COALESCE(?, derivation_version), "
+                    "derivation_state_json=COALESCE(?, derivation_state_json), "
+                    "lease_owner='', lease_expires_at=0, next_retry_at=?, last_error=?, "
+                    "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                    "WHERE operation_id=? AND state='enriching' AND lease_owner=? "
+                    "RETURNING *",
+                    (
+                        target.value,
+                        _canonical_json(list(final_fact_ids))
+                        if final_fact_ids is not None
+                        else None,
+                        derivation_version,
+                        _canonical_json(derivation_state)
+                        if derivation_state is not None
+                        else None,
+                        retry_at,
+                        last_error,
+                        operation_id,
+                        owner,
+                    ),
+                )
+                if not rows:
+                    raise InvalidStateTransition(
+                        "enriching lease ownership was lost"
+                    )
+                if is_exhausted:
+                    # Fix E: INSERT dead-letter row inside the same transaction.
+                    # Failure to write (e.g. M031 not yet migrated) must NOT
+                    # abort the state-machine UPDATE — catch at the outer level.
+                    self.db.execute(
+                        "INSERT INTO dead_letter_operations "
+                        "(original_op_id, operation_type, content, "
+                        " metadata_json, error, attempt_count, "
+                        " first_attempt_at, profile_id) "
+                        "VALUES (?, 'M018', ?, ?, ?, ?, "
+                        " (SELECT unixepoch(created_at) FROM ingestion_operations "
+                        "  WHERE operation_id=?), ?)",
+                        (
+                            operation_id,
+                            current.raw_content,
+                            json.dumps(current.metadata, separators=(",", ":"))
+                            if current.metadata else None,
+                            last_error or current.last_error,
+                            next_attempt_count,
+                            operation_id,
+                            current.profile_id,
+                        ),
+                    )
+                    logger.warning(
+                        "Operation %s exhausted %d attempts — moved to dead-letter. "
+                        "Last error: %s",
+                        operation_id,
+                        next_attempt_count,
+                        last_error or current.last_error,
+                    )
+        except InvalidStateTransition:
+            raise
+        except Exception as exc:
+            # Fix E graceful-degrade: if dead-letter INSERT fails (M031 absent),
+            # fall back to the pre-3.8.4 silent-FAILED state so ingestion
+            # continues unblocked.
+            logger.error(
+                "finish_enriching failed (dead-letter path): %s — retrying "
+                "without dead-letter INSERT",
+                exc,
+            )
+            rows = self.db.execute(
+                "UPDATE ingestion_operations SET state=?, "
+                "final_fact_ids_json=COALESCE(?, final_fact_ids_json), "
+                "derivation_version=COALESCE(?, derivation_version), "
+                "derivation_state_json=COALESCE(?, derivation_state_json), "
+                "lease_owner='', lease_expires_at=0, next_retry_at=?, last_error=?, "
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE operation_id=? AND state='enriching' AND lease_owner=? "
+                "RETURNING *",
+                (
+                    target.value,
+                    _canonical_json(list(final_fact_ids))
+                    if final_fact_ids is not None
+                    else None,
+                    derivation_version,
+                    _canonical_json(derivation_state)
+                    if derivation_state is not None
+                    else None,
+                    retry_at,
+                    last_error,
+                    operation_id,
+                    owner,
+                ),
+            )
+            if not rows:
+                raise InvalidStateTransition(
+                    "enriching lease ownership was lost"
+                ) from exc
         return self._from_row(rows[0])
 
 
@@ -624,9 +725,31 @@ class IngestionCommand:
         with _materialization_lock(operation_id):
             return self._materialize_locked(operation_id)
 
-    def _materialize_locked(self, operation_id: str) -> IngestionOperation:
+    def _materialize_locked(
+        self,
+        operation_id: str,
+        *,
+        force: bool = False,
+    ) -> IngestionOperation:
         operation = self.repository.get(operation_id)
         if operation.state is IngestionState.COMPLETE:
+            return operation
+        # Fix E: guard against re-attempting exhausted (dead-lettered) operations.
+        # attempt_count is incremented by claim_enriching BEFORE this method sees
+        # the new value, so the cap check uses the CURRENT (pre-claim) count.
+        # After the (cap-1)th attempt is claimed, attempt_count reaches cap-1;
+        # finish_enriching sees current.attempt_count=cap-1, next_attempt_count=cap
+        # and inserts the dead-letter row.  Any subsequent materialize() call
+        # (attempt_count already at cap-1 in FAILED state) would re-claim and
+        # insert a second dead-letter row — this guard prevents that.
+        # ``force=True`` is the operator escape hatch used by retry() — it bypasses
+        # this guard so an admin can manually re-enqueue a dead-lettered operation.
+        if (
+            not force
+            and operation.state is IngestionState.FAILED
+            and operation.attempt_count >= _MAX_AUTOMATIC_MATERIALIZATION_ATTEMPTS - 1
+        ):
+            # Already dead-lettered — return FAILED without re-claiming.
             return operation
         if operation.state not in {
             IngestionState.QUERYABLE,
@@ -757,9 +880,15 @@ class IngestionCommand:
             )
 
     def retry(self, operation_id: str) -> IngestionOperation:
+        """Operator escape hatch: force-retry a FAILED operation regardless of
+        attempt_count.  Bypasses the Fix E dead-letter guard so an admin can
+        manually re-enqueue an exhausted operation after configuration repair.
+        """
         operation = self.repository.get(operation_id)
         if operation.state is not IngestionState.FAILED:
             raise InvalidStateTransition(
                 f"cannot retry operation in {operation.state.value}"
             )
-        return self.materialize(operation_id)
+        # force=True bypasses the _MAX_AUTOMATIC_MATERIALIZATION_ATTEMPTS guard.
+        with _materialization_lock(operation_id):
+            return self._materialize_locked(operation_id, force=True)

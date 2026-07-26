@@ -25,6 +25,7 @@ from .helpers import (
     delete_profile_from_db,
     _load_profiles_json, _save_profiles_json,
 )
+from superlocalmemory.storage.memory_write import memory_write
 from superlocalmemory.server.profile_runtime import (
     commit_daemon_profile_switch,
     get_profile_runtime,
@@ -250,28 +251,26 @@ async def delete_profile(name: str, request: Request):
         # profile being deleted (not the active one).
         from superlocalmemory.server.rbac_enforce import require_manage as _rbac_manage
         _rbac_manage(request, profile=name)
-        # Move data to default before deleting (bypasses CASCADE)
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        # Move data to default before deleting (bypasses CASCADE).
+        # memory_write: write lock + busy_timeout — two UPDATEs are atomic.
         moved = 0
-        try:
-            cursor.execute(
-                "UPDATE atomic_facts SET profile_id = 'default' WHERE profile_id = ?",
-                (name,),
-            )
-            moved = cursor.rowcount
-        except Exception:
-            pass
-        try:
-            cursor.execute(
-                "UPDATE memories SET profile_id = 'default' WHERE profile_id = ?",
-                (name,),
-            )
-            moved += cursor.rowcount
-        except Exception:
-            pass
-        conn.commit()
-        conn.close()
+        with memory_write(DB_PATH) as conn:
+            try:
+                cur = conn.execute(
+                    "UPDATE atomic_facts SET profile_id = 'default' WHERE profile_id = ?",
+                    (name,),
+                )
+                moved = cur.rowcount
+            except Exception:
+                pass
+            try:
+                cur2 = conn.execute(
+                    "UPDATE memories SET profile_id = 'default' WHERE profile_id = ?",
+                    (name,),
+                )
+                moved += cur2.rowcount
+            except Exception:
+                pass
 
         # Delete from BOTH stores
         delete_profile_from_db(name)

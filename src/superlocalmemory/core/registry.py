@@ -110,7 +110,11 @@ class AgentRegistry:
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
             self._agents = data.get("agents", {})
-            self._write_locks = data.get("write_locks", {})
+            # D-01: write_locks from a prior process are meaningless after a
+            # process boundary — the agents that held them are dead.  Starting
+            # with no inherited locks prevents mcp_client (and any other agent)
+            # from being permanently blocked on every daemon restart.
+            self._write_locks = {}
         except (json.JSONDecodeError, KeyError):
             logger.warning("Corrupt registry file at %s — starting fresh.", self._path)
             self._agents = {}

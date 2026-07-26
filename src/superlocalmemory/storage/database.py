@@ -18,6 +18,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Generator
 
+from superlocalmemory.storage.write_lock import get_write_lock
 from superlocalmemory.storage.models import (
     AtomicFact, CanonicalEntity, ConsolidationAction, ConsolidationActionType,
     EdgeType, EntityAlias, EntityProfile, FactType, GraphEdge,
@@ -140,7 +141,17 @@ class DatabaseManager:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        # Shared write-serialisation lock for this db_path.
+        # get_write_lock() returns the SAME RLock for every caller that
+        # passes the same resolved path, so DatabaseManager, VectorStore,
+        # adapter_base, consolidation, and all other in-process writers
+        # all share ONE lock → zero cross-connection SQLite WAL contention.
+        #
+        # RLock (re-entrant) is required: the self-heal backfill pattern
+        #   with db._lock:        # acquires write lock (count: 1→2)
+        #       vs.upsert(...)    # re-acquires same lock (count: 2→3)
+        # is safe because the same thread re-enters the RLock.
+        self._lock = get_write_lock(self.db_path)
         # Transaction connections are thread-affine in sqlite3. A manager is
         # shared across HTTP, materializer, and worker threads, so a process-
         # global connection slot lets another thread accidentally execute on
@@ -155,6 +166,20 @@ class DatabaseManager:
             conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")  # FIRST — so WAL pragma below uses configured timeout
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
+            # Fix D: synchronous=NORMAL is safe under WAL — the WAL ensures
+            # atomicity independently of the fsync level.  Removing the
+            # fsync-on-every-commit penalty halves write latency under the
+            # 14 000+ edge-write bursts the materialiser produces per pass.
+            # Trade-off: on a power loss between COMMIT and WAL-checkpoint
+            # the last committed write to memory.db may be lost.  Acceptable
+            # for an LLM memory system; NOT acceptable for financial records.
+            conn.execute("PRAGMA synchronous=NORMAL")
+            # Fix D: reduce WAL auto-checkpoint from the default 1000 to 400
+            # frames.  Smaller checkpoints run more frequently and complete
+            # faster, preventing the WAL file growing unboundedly during
+            # high-ingestion bursts (which triggered checkpoint-starvation
+            # amplifying the lock storm).
+            conn.execute("PRAGMA wal_autocheckpoint=400")
             conn.commit()
         finally:
             conn.close()
@@ -231,15 +256,21 @@ class DatabaseManager:
                 self._txn_state.conn = None
                 conn.close()
 
-    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
-        """Execute SQL with automatic retry on SQLITE_BUSY.
+    # DML prefixes that require the single-writer lock when executed outside
+    # a transaction() context.  Checked case-insensitively against the first
+    # word of the stripped SQL statement.
+    _DML_PREFIXES: frozenset[str] = frozenset({
+        "INSERT", "UPDATE", "DELETE", "REPLACE", "UPSERT",
+        "CREATE", "DROP", "ALTER",
+    })
 
-        Uses shared conn inside transaction, else per-call with retry.
+    def _execute_one(self, sql: str, params: tuple[Any, ...]) -> list[sqlite3.Row]:
+        """Open a per-call connection, execute, commit, close — with retry.
+
+        Never called when inside a transaction() context (that path uses the
+        context's existing connection directly).  Factored out of execute() so
+        the RLock acquisition logic stays in one place.
         """
-        transaction_conn = getattr(self._txn_state, "conn", None)
-        if transaction_conn is not None:
-            return transaction_conn.execute(sql, params).fetchall()
-
         last_error: Exception | None = None
         for attempt in range(_MAX_RETRIES):
             conn = self._connect()
@@ -263,6 +294,42 @@ class DatabaseManager:
 
         logger.warning("DB operation failed after %d retries: %s", _MAX_RETRIES, last_error)
         raise last_error  # type: ignore[misc]
+
+    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
+        """Execute SQL with automatic retry on SQLITE_BUSY.
+
+        Fix B — single-writer serialisation:
+        • Inside a transaction(): uses the existing connection directly (no
+          lock acquisition — the transaction() context manager already holds
+          _lock for the duration of the whole transaction).
+        • Outside a transaction(), for DML (INSERT/UPDATE/DELETE/…): acquires
+          _lock before opening a per-call connection.  This ensures that
+          concurrent callers — including background workers that bypass
+          transaction() entirely — do not race at the SQLite WAL layer.
+        • Outside a transaction(), for SELECTs: no lock needed — WAL mode
+          allows concurrent readers without stalling writers.
+
+        ORDERING INVARIANT: the _txn_state.conn check MUST come before the
+        lock acquisition.  Reversing the order would deadlock threads that
+        call execute() from inside transaction() because threading.RLock is
+        re-entrant per-thread but a re-entering thread inside transaction()
+        would still try to re-acquire here (lock is already held by the same
+        thread, so RLock re-enters safely — but the old threading.Lock would
+        have deadlocked; that is exactly why we changed to RLock).
+        """
+        # Fast path: already inside a transaction — use its connection directly.
+        transaction_conn = getattr(self._txn_state, "conn", None)
+        if transaction_conn is not None:
+            return transaction_conn.execute(sql, params).fetchall()
+
+        # Determine if this is a write operation that needs serialisation.
+        first_word = sql.strip().upper().split(None, 1)[0] if sql.strip() else ""
+        if first_word in self._DML_PREFIXES:
+            with self._lock:
+                return self._execute_one(sql, params)
+        else:
+            # Read-only path: concurrent reads are safe in WAL mode.
+            return self._execute_one(sql, params)
 
     def store_memory(self, record: MemoryRecord) -> str:
         """Persist a raw memory record. Returns memory_id."""

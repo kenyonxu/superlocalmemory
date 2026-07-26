@@ -436,3 +436,86 @@ def put_forgetting_config(request: Request, body: ForgettingConfigUpdate):
     except Exception:
         logger.exception("put_forgetting_config failed")
         return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# Graph Pruning config (v3.8.4-G — GitHub #84)
+# Dedicated endpoint so the forgetting config partial-update contract stays
+# clean.  Callers that only want graph knobs do not need to know about the
+# Ebbinghaus curve, and vice-versa.
+# ---------------------------------------------------------------------------
+
+_GRAPH_PRUNING_DEFAULTS: dict = {
+    "max_degree_per_node": 100,
+    "min_edge_weight": 0.0,
+    "enabled": True,
+}
+
+
+class GraphPruningConfigUpdate(BaseModel):
+    """Partial update model for graph pruning configuration.
+
+    All fields are optional so a PUT with only ``max_degree_per_node`` does
+    NOT reset ``min_edge_weight`` back to the default.  Existing values are
+    preserved; only the supplied fields are overwritten.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_degree_per_node: Optional[int] = Field(None, ge=1)
+    min_edge_weight: Optional[float] = Field(None, ge=0.0, le=1.0)
+    enabled: Optional[StrictBool] = None
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v3/graph/config
+# ---------------------------------------------------------------------------
+
+
+@router.get("/graph/config")
+def get_graph_config():
+    """Return current graph thinning configuration.
+
+    Returns all three fields with their defaults when config.json has no
+    ``graph_pruning`` section (old installations).
+    """
+    try:
+        data = _read_config()
+        stored = data.get("graph_pruning", {})
+        result = {**_GRAPH_PRUNING_DEFAULTS, **stored}
+        # Return only known fields
+        return {k: result[k] for k in _GRAPH_PRUNING_DEFAULTS}
+    except Exception:
+        logger.exception("get_graph_config failed")
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/v3/graph/config
+# ---------------------------------------------------------------------------
+
+
+@router.put("/graph/config")
+def put_graph_config(request: Request, body: GraphPruningConfigUpdate):
+    """Update graph thinning configuration.
+
+    Only supplied fields are written; all other graph pruning fields are
+    preserved.  Changes take effect at the next maintenance cycle without
+    requiring a daemon restart (the scheduler reads graph_pruning live from
+    the config object, which the daemon reloads from disk on each cycle).
+    """
+    _require_admin(request)
+    try:
+        updates = body.model_dump(exclude_none=True)
+
+        def mutate(data: dict) -> None:
+            stored = data.get("graph_pruning", {})
+            merged = {**_GRAPH_PRUNING_DEFAULTS, **stored, **updates}
+            data["graph_pruning"] = merged
+
+        data = _update_config(mutate)
+        merged = data["graph_pruning"]
+        return {k: merged[k] for k in _GRAPH_PRUNING_DEFAULTS}
+    except Exception:
+        logger.exception("put_graph_config failed")
+        return JSONResponse({"error": "Internal server error"}, status_code=500)

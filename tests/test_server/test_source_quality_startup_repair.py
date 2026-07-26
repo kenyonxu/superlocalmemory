@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -103,9 +104,14 @@ def test_lifespan_schedules_repair_only_after_ready_publication() -> None:
     assert source.index('_publish_process_descriptor(') < source.index(
         '_schedule_source_quality_repair('
     )
-    assert source.index('_schedule_source_quality_repair(') < source.index(
-        'yield'
-    )
+    # Match the real ``yield`` STATEMENT (line-leading), not the word "yield"
+    # appearing earlier in a comment ("# yield between facts") or in the
+    # ``_yield_s`` cooperative-yield variable.  ``str.index('yield')`` matched
+    # that comment and produced a false negative even though the runtime order
+    # (publish -> schedule -> yield) is correct.
+    real_yield = re.search(r'\n\s+yield\b', source)
+    assert real_yield is not None
+    assert source.index('_schedule_source_quality_repair(') < real_yield.start()
     assert 'await _cancel_source_quality_repair(application)' in source
 
 

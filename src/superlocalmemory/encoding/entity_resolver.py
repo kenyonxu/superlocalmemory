@@ -563,18 +563,25 @@ class EntityResolver:
         self._db.store_alias(alias, profile_id)
 
     def _touch_last_seen(self, entity_id: str, profile_id: str = "default") -> None:
-        """Update last_seen timestamp on a canonical entity scoped to profile.
+        """Record a last_seen touch (DEFERRED, non-blocking).
 
-        L-01 fix: the original query had no profile_id guard. Since entity_ids are
-        UUIDs today the blast radius is theoretical, but the guard is required for
-        defense-in-depth against future import/sharing features that could introduce
-        UUID collisions across profiles.
+        last_seen is dashboard-only bookkeeping (entities/graph "last seen"
+        columns); it never feeds recall ranking.  Writing it INLINE made recall
+        a WRITER that waited on the global write lock — the root of the
+        "recall is 8 s" regression.  We now record it in memory and flush from a
+        single background thread in coalesced batches, so recall stays
+        READ-ONLY on its hot path.  The dashboard stays correct within the flush
+        interval (~2 s).  The profile_id guard (L-01) is preserved in the
+        deferred UPDATE (see storage/deferred_writes.py).
         """
-        self._db.execute(
-            "UPDATE canonical_entities SET last_seen = ? "
-            "WHERE entity_id = ? AND profile_id = ?",
-            (_now(), entity_id, profile_id),
-        )
+        try:
+            from superlocalmemory.storage.deferred_writes import (
+                get_deferred_last_seen,
+            )
+            get_deferred_last_seen(self._db).touch(entity_id, profile_id, _now())
+        except Exception:
+            # Bookkeeping must never break entity resolution.
+            pass
 
     # -- Internal: LLM disambiguation (Mode B/C) ---------------------------
 

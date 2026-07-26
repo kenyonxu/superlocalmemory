@@ -72,6 +72,22 @@ from superlocalmemory.learning.source_quality import (
     repair_historical_source_quality,
 )
 
+# D-02 fix: import at module load so the reference survives interpreter teardown.
+# A lazy import inside the shutdown path races the namespace-cleanup phase on
+# CPython and can raise ImportError: "cannot import name 'trigram_index'".
+try:
+    from superlocalmemory.learning import trigram_index as _trigram_index_mod
+except ImportError:  # pragma: no cover — defensive for stripped installs
+    _trigram_index_mod = None  # type: ignore[assignment]
+
+# D-03 fix: move this import to module top so the already-compiled .pyc object
+# is used at shutdown time. A lazy import of a source .py during interpreter
+# shutdown on macOS triggers TCC xattr checks and can raise PermissionError.
+try:
+    from superlocalmemory.hooks._outcome_common import _perf_log_flush as _perf_log_flush_fn
+except ImportError:  # pragma: no cover — defensive for stripped installs
+    _perf_log_flush_fn = None  # type: ignore[assignment]
+
 logger = logging.getLogger("superlocalmemory.unified_daemon")
 
 _DEFAULT_PORT = 8765
@@ -1362,11 +1378,15 @@ async def lifespan(application: FastAPI):
         # full sort.  Without them full recall takes 7-10s on
         # >1M edges (the SpreadingActivation 4-UNION query disk-sorts every
         # node's neighbor list on each call).  With them: sub-second.
+        #
+        # Concurrency fix (v3.8.4): wrapped in memory_write() so the process
+        # write lock is acquired before the connection is opened.  Previously
+        # the raw sqlite3.connect() bypassed get_write_lock() and had no
+        # busy_timeout, which risked SQLITE_BUSY at daemon startup when other
+        # writers (hook / CLI) were already active.
         try:
-            import sqlite3 as _sqlite3
-            _idx_conn = _sqlite3.connect(str(_memory_db))
-            try:
-                _idx_conn.execute("PRAGMA journal_mode=WAL")
+            from superlocalmemory.storage.memory_write import memory_write as _mw
+            with _mw(_memory_db) as _idx_conn:
                 _idx_conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_edges_source_weight "
                     "ON graph_edges(profile_id, source_id, weight DESC)"
@@ -1383,10 +1403,6 @@ async def lifespan(application: FastAPI):
                     "CREATE INDEX IF NOT EXISTS idx_assoc_target_weight "
                     "ON association_edges(profile_id, target_fact_id, weight DESC)"
                 )
-            finally:
-                # CP-09: close even if an execute() raises, so the connection
-                # (and its file handle / shared DB lock) never leaks.
-                _idx_conn.close()
         except Exception as _idx_exc:
             logger.debug("SpreadingActivation covering indexes skipped: %s", _idx_exc)
 
@@ -1413,14 +1429,36 @@ async def lifespan(application: FastAPI):
         _embedding_warm = False
         def _warmup_embedder():
             global _embedding_warm
-            try:
-                embedder = getattr(retrieval_eng, '_embedder', None) if retrieval_eng else None
-                if embedder and hasattr(embedder, 'embed'):
-                    embedder.embed("warmup")
-                    _embedding_warm = True
-                    logger.info("Embedding worker pre-warmed (model resident, keep_alive=-1)")
-            except Exception as exc:
-                logger.warning("Embedding warmup failed: %s", exc)
+            import time as _t
+            # RETRY: the retrieval engine / embedder can be created lazily a
+            # moment AFTER this thread starts.  The old one-shot attempt often
+            # captured a None embedder and left _embedding_warm stuck False
+            # forever — so /health reported not-ready even though on-demand
+            # embeds worked.  A stuck not-ready can make an auto-start hook
+            # believe the daemon is down and spawn a DUPLICATE daemon (two
+            # processes writing memory.db → cross-process SQLITE_BUSY).  Poll
+            # until the real embedder (retrieval_eng._embedder, the same one
+            # recall uses) is available, warm it, and flip the flag.
+            for _attempt in range(240):  # ~120s max at 0.5s steps
+                try:
+                    _re = retrieval_eng or getattr(engine, '_retrieval_engine', None)
+                    embedder = getattr(_re, '_embedder', None) if _re else None
+                    if embedder is not None and hasattr(embedder, 'embed'):
+                        embedder.embed("warmup")
+                        _embedding_warm = True
+                        logger.info(
+                            "Embedding worker pre-warmed (model resident, "
+                            "keep_alive=-1)"
+                        )
+                        return
+                except Exception as exc:
+                    logger.debug("Embedding warmup attempt %d failed: %s",
+                                 _attempt, exc)
+                _t.sleep(0.5)
+            logger.warning(
+                "Embedding warmup did not complete after retries; /health "
+                "may report not-ready even though on-demand embeds work"
+            )
 
         def _warmup_recall():
             """v3.4.62: Fire a full recall after embedding warms up.
@@ -1479,6 +1517,11 @@ async def lifespan(application: FastAPI):
             """
             import time as _t
             from pathlib import Path as _P
+            if os.environ.get("SLM_DISABLE_VS_BACKFILL") == "1":
+                logger.info(
+                    "VS backfill disabled via SLM_DISABLE_VS_BACKFILL=1"
+                )
+                return
             for _ in range(120):
                 if _embedding_warm:
                     break
@@ -1510,7 +1553,42 @@ async def lifespan(application: FastAPI):
                         continue
                     if vs.count(pid) >= int(len(with_emb) * 0.98):
                         continue  # already complete — no-op
-                    n = vs.rebuild_from_facts(with_emb)
+                    # Fix: route each upsert through db._lock with cooperative
+                    # yield between facts.  Previously called
+                    # vs.rebuild_from_facts() which opens its own sqlite3
+                    # connection (bypassing db._lock), causing concurrent
+                    # backfill_missing_embeddings writes to hit SQLITE_BUSY
+                    # while holding db._lock — starving user writes for ~50 s.
+                    import os as _selfheal_os
+                    # Stage 2 (write-queue plan): batch upserts so the write lock
+                    # is acquired a FEW times with a clear release window (pause)
+                    # between batches — instead of thousands of rapid
+                    # re-acquisitions.  threading.RLock is NOT fair, so on a
+                    # fresh boot a waiting user /remember could be starved for
+                    # ~50 s behind the per-fact churn.  A real pause between
+                    # bounded batches guarantees the waiting user write wins the
+                    # lock promptly.  One-time backfill; steady state no-ops.
+                    _batch = max(1, int(
+                        _selfheal_os.environ.get("SLM_SELFHEAL_BATCH", "50")))
+                    _pause = max(0.0, float(
+                        _selfheal_os.environ.get("SLM_SELFHEAL_BATCH_PAUSE_S", "0.05")))
+                    n = 0
+                    for _i in range(0, len(with_emb), _batch):
+                        _chunk = with_emb[_i:_i + _batch]
+                        with db._lock:
+                            for _fact_id, _profile_id, _embedding in _chunk:
+                                try:
+                                    if vs.upsert(_fact_id, _profile_id, _embedding):
+                                        n += 1
+                                except Exception as _upsert_exc:
+                                    logger.warning(
+                                        "VS backfill[%s]: upsert failed for %s: %s",
+                                        pid, str(_fact_id)[:16], _upsert_exc,
+                                    )
+                        # Release window: let any waiting user write through
+                        # before grabbing the lock again.
+                        if _pause > 0:
+                            _t.sleep(_pause)
                     logger.info(
                         "VS backfill[%s]: indexed %d of %d embedded facts",
                         pid, n, len(with_emb),
@@ -2156,18 +2234,23 @@ async def lifespan(application: FastAPI):
         logger.warning("evolution cost-conn cache close failed: %s", exc)
 
     # Drop the trigram cache conn symmetrically.
+    # D-02: use module-level reference (_trigram_index_mod) to avoid re-importing
+    # during interpreter teardown when the learning namespace may be gone.
     try:
-        from superlocalmemory.learning import trigram_index as _ti
-        _ti._reset_cache_conn()
+        if _trigram_index_mod is not None:
+            _trigram_index_mod._reset_cache_conn()
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning("trigram cache conn close failed: %s", exc)
 
     # Flush the perf-log fd explicitly (the atexit hook still fires
     # but explicit close here is cheap insurance against uvicorn
     # killing the process before atexit runs).
+    # D-03: use module-level reference (_perf_log_flush_fn) — a lazy import here
+    # triggers macOS TCC xattr checks on the source .py at shutdown time, causing
+    # PermissionError: "Operation not permitted: .../hooks/_outcome_common.py".
     try:
-        from superlocalmemory.hooks._outcome_common import _perf_log_flush
-        _perf_log_flush()
+        if _perf_log_flush_fn is not None:
+            _perf_log_flush_fn()
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning("perf_log flush failed: %s", exc)
 
@@ -2473,7 +2556,33 @@ def _register_dashboard_routes(application: FastAPI) -> None:
 
     Extracted from api.py's create_app() to avoid duplicate MemoryEngine.
     """
-    from superlocalmemory.server.api import UI_DIR
+    from superlocalmemory.server.api import UI_DIR as _source_ui_dir
+
+    # D-04: Copy UI assets to the data dir at daemon startup to avoid macOS
+    # xattr/TCC PermissionError on source-tree files in editable installs.
+    # The data dir has no quarantine attributes; the copy is idempotent (same
+    # content from the same package) so concurrent daemon starts are safe.
+    # Falls back to the source path with a WARNING — never crashes the daemon.
+    import shutil as _shutil
+    _data_ui_dir = state_path("ui")
+    try:
+        _data_ui_dir.mkdir(parents=True, exist_ok=True)
+        if _source_ui_dir.is_dir():
+            _shutil.copytree(
+                str(_source_ui_dir),
+                str(_data_ui_dir),
+                dirs_exist_ok=True,  # idempotent; safe under concurrent starts
+            )
+        UI_DIR = _data_ui_dir
+    except Exception as _ui_copy_exc:
+        # D-04 fallback: source path. Logged as WARNING (not DEBUG) so operators
+        # can diagnose PermissionError on editable installs. Never silently hidden.
+        logger.warning(
+            "D-04: UI copy to data dir failed; serving from source path %s: %s",
+            _source_ui_dir,
+            _ui_copy_exc,
+        )
+        UI_DIR = _source_ui_dir
 
     # Rate limiting (graceful)
     try:
@@ -2523,7 +2632,8 @@ def _register_dashboard_routes(application: FastAPI) -> None:
         async def rate_limit_middleware(request, call_next):
             client_ip = request.client.host if request.client else "unknown"
             is_write = request.method in ("POST", "PUT", "DELETE", "PATCH")
-            loopback = client_ip in ("127.0.0.1", "::1")
+            from superlocalmemory.server.loopback import is_loopback as _is_lb_rl
+            loopback = _is_lb_rl(client_ip)
             if not loopback and is_rate_limit_exempt(client_ip):
                 return await call_next(request)
             if loopback:
@@ -2715,10 +2825,17 @@ def _register_dashboard_routes(application: FastAPI) -> None:
             "fallback; non-loopback writes will be rejected.", _auth_exc,
         )
         try:
-            from superlocalmemory.hooks.prewarm_auth import is_loopback as _is_lb
+            from superlocalmemory.server.loopback import is_loopback as _is_lb
         except Exception:
-            def _is_lb(h: str) -> bool:
-                return h in ("127.0.0.1", "::1", "localhost")
+            import ipaddress as _ipa_fb
+
+            def _is_lb(h: str) -> bool:  # type: ignore[misc]
+                if not h or h.lower() == "localhost":
+                    return bool(h)
+                try:
+                    return _ipa_fb.ip_address(h).is_loopback
+                except ValueError:
+                    return False
 
         @application.middleware("http")
         async def _failclosed_auth(request, call_next):
@@ -2734,9 +2851,14 @@ def _register_dashboard_routes(application: FastAPI) -> None:
                 )
             return await call_next(request)
 
-    # Static files
+    # Static files — UI_DIR is already the effective path (data-dir or source
+    # fallback) set by the D-04 copy block above; mkdir is a no-op for
+    # the data-dir path (already created) and guarded in the source-fallback case.
     from fastapi.staticfiles import StaticFiles
-    UI_DIR.mkdir(exist_ok=True)
+    try:
+        UI_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass  # source path may not be writable; StaticFiles reads, not writes
     application.mount("/static", StaticFiles(directory=str(UI_DIR)), name="static")
 
     # Route modules
@@ -2975,9 +3097,14 @@ def _register_daemon_routes(application: FastAPI) -> None:
         }
         # request is None only for direct internal/test calls (no HTTP client),
         # which are trusted; over HTTP FastAPI always injects the real Request.
+        from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
+        from superlocalmemory.server.write_identity import _TEST_ISOLATION_ALLOWED
+
         client_host = request.client.host if (request and request.client) else ""
-        _trusted = request is None or client_host in (
-            "127.0.0.1", "::1", "localhost", "testclient",
+        _trusted = (
+            request is None
+            or _is_loopback_host(client_host)
+            or (client_host == "testclient" and _TEST_ISOLATION_ALLOWED)
         )
         if not _trusted:
             return public
@@ -4007,7 +4134,12 @@ def start_server(port: int = _DEFAULT_PORT) -> None:
             "reachable from the network but SLM_REQUIRE_CREDENTIALS is not set "
             "and API-key auth may be off. A remote caller could write without "
             "credentials. Set SLM_REQUIRE_CREDENTIALS=1 and configure an API "
-            "key before exposing this instance.", bind_host,
+            "key before exposing this instance. "
+            "NOTE (issue #90): SLM 3.8.4 fixes IPv4-mapped loopback address "
+            "normalization — if curl/dashboard writes fail with 403 from a "
+            "container, upgrade to 3.8.4. Immediate workaround: set "
+            "SLM_DAEMON_HOST=127.0.0.1 (IPv4 only) or configure an API key.",
+            bind_host,
         )
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     # This handles a just-closed connection in TIME_WAIT.  It is safe only

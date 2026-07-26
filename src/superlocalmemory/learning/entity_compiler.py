@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
@@ -50,27 +49,30 @@ class EntityCompiler:
         """Compile all entities that have new facts across all projects.
 
         Returns stats: {compiled: N, skipped: N, errors: N}
+
+        Concurrency fix (v3.8.4): each operation uses a scoped connection via
+        memory_read() / memory_write() so the process write lock is never held
+        across Ollama / network calls and no long raw connection is kept open.
         """
+        from superlocalmemory.storage.memory_write import memory_read
+
         if self._config and not getattr(self._config, 'entity_compilation_enabled', True):
             return {"compiled": 0, "skipped": 0, "errors": 0, "reason": "disabled"}
 
         stats = {"compiled": 0, "skipped": 0, "errors": 0}
-        conn = self._connect()
-        try:
-            # Get all distinct projects for this profile
+
+        with memory_read(self._db_path) as conn:
             projects = conn.execute(
                 "SELECT DISTINCT project_name FROM entity_profiles WHERE profile_id = ?",
                 (profile_id,),
             ).fetchall()
             project_names = [r[0] for r in projects] if projects else [""]
 
-            for project_name in project_names:
-                result = self._compile_project(conn, profile_id, project_name)
-                stats["compiled"] += result["compiled"]
-                stats["skipped"] += result["skipped"]
-                stats["errors"] += result["errors"]
-        finally:
-            conn.close()
+        for project_name in project_names:
+            result = self._compile_project(profile_id, project_name)
+            stats["compiled"] += result["compiled"]
+            stats["skipped"] += result["skipped"]
+            stats["errors"] += result["errors"]
 
         if stats["compiled"] > 0:
             logger.info("Entity compilation: %d compiled, %d skipped, %d errors",
@@ -80,57 +82,52 @@ class EntityCompiler:
     def compile_entity(self, profile_id: str, project_name: str,
                        entity_id: str, entity_name: str) -> dict | None:
         """Compile a single entity. Returns compiled truth or None."""
-        conn = self._connect()
-        try:
-            return self._compile_single(conn, profile_id, project_name,
-                                         entity_id, entity_name)
-        finally:
-            conn.close()
+        return self._compile_single(profile_id, project_name, entity_id, entity_name)
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _compile_project(self, profile_id: str, project_name: str) -> dict:
+        """Compile all entities needing update in a project.
 
-    def _compile_project(self, conn: sqlite3.Connection, profile_id: str,
-                          project_name: str) -> dict:
-        """Compile all entities needing update in a project."""
+        Uses scoped memory_read() for the entity query so no connection is
+        held across entity compilation iterations.
+        """
+        from superlocalmemory.storage.memory_write import memory_read
+
         stats = {"compiled": 0, "skipped": 0, "errors": 0}
 
-        # Find entities with new facts since last compilation
-        entities = conn.execute("""
-            SELECT DISTINCT ce.entity_id, ce.canonical_name, ce.entity_type
-            FROM canonical_entities ce
-            WHERE ce.profile_id = ?
-            AND (
-                EXISTS (
-                    SELECT 1 FROM atomic_facts af
-                    WHERE af.canonical_entities_json LIKE '%' || ce.entity_id || '%'
-                      AND af.profile_id = ?
-                      AND af.created_at > COALESCE(
-                        (SELECT last_compiled_at FROM entity_profiles
-                         WHERE entity_id = ce.entity_id
-                           AND profile_id = ?
-                           AND project_name = ?),
-                        '1970-01-01')
+        with memory_read(self._db_path) as conn:
+            entities = conn.execute("""
+                SELECT DISTINCT ce.entity_id, ce.canonical_name, ce.entity_type
+                FROM canonical_entities ce
+                WHERE ce.profile_id = ?
+                AND (
+                    EXISTS (
+                        SELECT 1 FROM atomic_facts af
+                        WHERE af.canonical_entities_json LIKE '%' || ce.entity_id || '%'
+                          AND af.profile_id = ?
+                          AND af.created_at > COALESCE(
+                            (SELECT last_compiled_at FROM entity_profiles
+                             WHERE entity_id = ce.entity_id
+                               AND profile_id = ?
+                               AND project_name = ?),
+                            '1970-01-01')
+                    )
+                    OR NOT EXISTS (
+                        SELECT 1 FROM entity_profiles
+                        WHERE entity_id = ce.entity_id
+                          AND profile_id = ?
+                          AND project_name = ?
+                          AND last_compiled_at IS NOT NULL
+                    )
                 )
-                OR NOT EXISTS (
-                    SELECT 1 FROM entity_profiles
-                    WHERE entity_id = ce.entity_id
-                      AND profile_id = ?
-                      AND project_name = ?
-                      AND last_compiled_at IS NOT NULL
-                )
-            )
-        """, (profile_id, profile_id, profile_id, project_name,
-              profile_id, project_name)).fetchall()
+            """, (profile_id, profile_id, profile_id, project_name,
+                  profile_id, project_name)).fetchall()
+            # Detach rows from the read connection before closing it
+            entities = [dict(e) for e in entities]
 
         for entity in entities:
             try:
                 result = self._compile_single(
-                    conn, profile_id, project_name,
+                    profile_id, project_name,
                     entity["entity_id"], entity["canonical_name"],
                     entity_type=entity["entity_type"],
                 )
@@ -145,30 +142,20 @@ class EntityCompiler:
 
         return stats
 
-    def _compile_single(self, conn: sqlite3.Connection, profile_id: str,
+    def _compile_single(self, profile_id: str,
                          project_name: str, entity_id: str, entity_name: str,
                          entity_type: str = "unknown") -> dict | None:
-        """Compile one entity. Returns the compiled truth dict or None."""
+        """Compile one entity. Returns the compiled truth dict or None.
 
-        # Gather atomic facts for this entity
-        facts = conn.execute("""
-            SELECT af.fact_id, af.content, af.confidence, af.created_at,
-                   fi.pagerank_score, fi.community_id
-            FROM atomic_facts af
-            LEFT JOIN fact_importance fi ON af.fact_id = fi.fact_id
-            WHERE af.canonical_entities_json LIKE ? AND af.profile_id = ?
-            ORDER BY fi.pagerank_score DESC NULLS LAST, af.confidence DESC
-            LIMIT 50
-        """, (f"%{entity_id}%", profile_id)).fetchall()
+        Concurrency fix (v3.8.4): reads use memory_read(), writes use
+        memory_write().  The Ollama call (Mode B) happens with NO lock held.
+        Lock-ordering invariant preserved: get_write_lock (outermost) →
+        sqlite BEGIN ... COMMIT.
+        """
+        from superlocalmemory.storage.memory_write import memory_read, memory_write
 
-        if not facts:
-            return None
-
-        # Compute PageRank if missing
-        has_pagerank = any(f["pagerank_score"] is not None for f in facts)
-        if not has_pagerank and len(facts) > 2:
-            self._compute_pagerank(conn, [f["fact_id"] for f in facts], profile_id)
-            # Re-fetch with scores
+        # ── Phase 1: read facts (no write lock) ──────────────────────────────
+        with memory_read(self._db_path) as conn:
             facts = conn.execute("""
                 SELECT af.fact_id, af.content, af.confidence, af.created_at,
                        fi.pagerank_score, fi.community_id
@@ -178,8 +165,31 @@ class EntityCompiler:
                 ORDER BY fi.pagerank_score DESC NULLS LAST, af.confidence DESC
                 LIMIT 50
             """, (f"%{entity_id}%", profile_id)).fetchall()
+            facts = [dict(f) for f in facts]
 
-        # Generate compiled truth
+        if not facts:
+            return None
+
+        has_pagerank = any(f["pagerank_score"] is not None for f in facts)
+
+        # ── Phase 2: PageRank (short write, NO Ollama) ────────────────────────
+        if not has_pagerank and len(facts) > 2:
+            self._compute_pagerank([f["fact_id"] for f in facts], profile_id)
+            # Re-fetch with updated scores
+            with memory_read(self._db_path) as conn:
+                facts = conn.execute("""
+                    SELECT af.fact_id, af.content, af.confidence, af.created_at,
+                           fi.pagerank_score, fi.community_id
+                    FROM atomic_facts af
+                    LEFT JOIN fact_importance fi ON af.fact_id = fi.fact_id
+                    WHERE af.canonical_entities_json LIKE ? AND af.profile_id = ?
+                    ORDER BY fi.pagerank_score DESC NULLS LAST, af.confidence DESC
+                    LIMIT 50
+                """, (f"%{entity_id}%", profile_id)).fetchall()
+                facts = [dict(f) for f in facts]
+
+        # ── Phase 3: generate compiled truth — NO write lock held ────────────
+        # Mode B calls Ollama (up to 30 s) — write lock MUST NOT be held here.
         if self._mode in ("b", "c") and len(facts) > 3:
             compiled = self._compile_mode_b(entity_name, facts)
             if not compiled:
@@ -187,10 +197,8 @@ class EntityCompiler:
         else:
             compiled = self._compile_mode_a(entity_name, entity_type, facts)
 
-        # Truncate to limit
         compiled = self._truncate(compiled, _MAX_COMPILED_TRUTH_CHARS)
 
-        # Build timeline entry
         now = datetime.now(timezone.utc).isoformat()
         timeline_entry = {
             "date": now,
@@ -199,50 +207,50 @@ class EntityCompiler:
             "mode": self._mode,
         }
 
-        # Load existing timeline
-        existing = conn.execute(
-            "SELECT timeline, profile_entry_id FROM entity_profiles "
-            "WHERE entity_id = ? AND profile_id = ? AND project_name = ?",
-            (entity_id, profile_id, project_name),
-        ).fetchone()
-
-        timeline = []
-        if existing and existing["timeline"]:
-            try:
-                timeline = json.loads(existing["timeline"])
-            except (json.JSONDecodeError, TypeError):
-                timeline = []
-        timeline.append(timeline_entry)
-        # Cap at 100 entries
-        if len(timeline) > _MAX_TIMELINE_ENTRIES:
-            timeline = timeline[-_MAX_TIMELINE_ENTRIES:]
-
         fact_ids = [f["fact_id"] for f in facts]
         avg_conf = sum(f["confidence"] or 0.5 for f in facts) / max(len(facts), 1)
 
-        # Upsert
-        if existing:
-            conn.execute("""
-                UPDATE entity_profiles SET
-                    compiled_truth = ?, timeline = ?, fact_ids_json = ?,
-                    last_compiled_at = ?, compilation_confidence = ?, last_updated = ?
-                WHERE entity_id = ? AND profile_id = ? AND project_name = ?
-            """, (compiled, json.dumps(timeline), json.dumps(fact_ids),
-                  now, round(avg_conf, 3), now,
-                  entity_id, profile_id, project_name))
-        else:
-            entry_id = str(uuid.uuid4())[:16]
-            conn.execute("""
-                INSERT INTO entity_profiles
-                    (profile_entry_id, entity_id, profile_id, project_name,
-                     knowledge_summary, compiled_truth, timeline, fact_ids_json,
-                     last_compiled_at, compilation_confidence, last_updated)
-                VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
-            """, (entry_id, entity_id, profile_id, project_name,
-                  compiled, json.dumps(timeline), json.dumps(fact_ids),
-                  now, round(avg_conf, 3), now))
+        # ── Phase 4: short write — hold write lock for INSERT/UPDATE only ────
+        with memory_write(self._db_path) as conn:
+            # Re-read inside the write lock for correct timeline merge and to
+            # decide INSERT vs UPDATE atomically (prevents lost-update race).
+            existing = conn.execute(
+                "SELECT timeline, profile_entry_id FROM entity_profiles "
+                "WHERE entity_id = ? AND profile_id = ? AND project_name = ?",
+                (entity_id, profile_id, project_name),
+            ).fetchone()
 
-        conn.commit()
+            timeline: list = []
+            if existing and existing["timeline"]:
+                try:
+                    timeline = json.loads(existing["timeline"])
+                except (json.JSONDecodeError, TypeError):
+                    timeline = []
+            timeline.append(timeline_entry)
+            if len(timeline) > _MAX_TIMELINE_ENTRIES:
+                timeline = timeline[-_MAX_TIMELINE_ENTRIES:]
+
+            if existing:
+                conn.execute("""
+                    UPDATE entity_profiles SET
+                        compiled_truth = ?, timeline = ?, fact_ids_json = ?,
+                        last_compiled_at = ?, compilation_confidence = ?,
+                        last_updated = ?
+                    WHERE entity_id = ? AND profile_id = ? AND project_name = ?
+                """, (compiled, json.dumps(timeline), json.dumps(fact_ids),
+                      now, round(avg_conf, 3), now,
+                      entity_id, profile_id, project_name))
+            else:
+                entry_id = str(uuid.uuid4())[:16]
+                conn.execute("""
+                    INSERT INTO entity_profiles
+                        (profile_entry_id, entity_id, profile_id, project_name,
+                         knowledge_summary, compiled_truth, timeline, fact_ids_json,
+                         last_compiled_at, compilation_confidence, last_updated)
+                    VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
+                """, (entry_id, entity_id, profile_id, project_name,
+                      compiled, json.dumps(timeline), json.dumps(fact_ids),
+                      now, round(avg_conf, 3), now))
 
         return {
             "entity_name": entity_name,
@@ -332,34 +340,42 @@ class EntityCompiler:
 
     # -- Helpers --
 
-    def _compute_pagerank(self, conn: sqlite3.Connection,
-                           fact_ids: list[str], profile_id: str) -> None:
-        """Compute PageRank for a set of facts. Stores in fact_importance."""
+    def _compute_pagerank(self, fact_ids: list[str], profile_id: str) -> None:
+        """Compute PageRank for a set of facts and store in fact_importance.
+
+        Concurrency fix (v3.8.4): uses memory_write() for the INSERT so the
+        process write lock is acquired and busy_timeout is set correctly.
+        Pure PageRank computation (networkx) happens BEFORE the write lock.
+        """
+        from superlocalmemory.storage.memory_write import memory_write
+
         try:
             import networkx as nx
             G = nx.Graph()
             for fid in fact_ids:
                 G.add_node(fid)
-            # Add edges based on shared entities
             for i, fid1 in enumerate(fact_ids):
                 for fid2 in fact_ids[i + 1:]:
-                    # Simple heuristic: facts about same entity are connected
                     G.add_edge(fid1, fid2, weight=0.5)
 
             if len(G.nodes) < 2:
                 return
 
+            # Compute scores in pure Python — no lock held yet.
             scores = nx.pagerank(G, alpha=0.85)
             now = datetime.now(timezone.utc).isoformat()
 
-            for fid, score in scores.items():
-                conn.execute("""
-                    INSERT INTO fact_importance (fact_id, profile_id, pagerank_score, computed_at)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(fact_id) DO UPDATE SET pagerank_score=excluded.pagerank_score,
-                                                       computed_at=excluded.computed_at
-                """, (fid, profile_id, round(score, 6), now))
-            conn.commit()
+            # Short write: lock held only for the INSERT batch.
+            with memory_write(self._db_path) as conn:
+                for fid, score in scores.items():
+                    conn.execute("""
+                        INSERT INTO fact_importance
+                            (fact_id, profile_id, pagerank_score, computed_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(fact_id) DO UPDATE
+                            SET pagerank_score = excluded.pagerank_score,
+                                computed_at    = excluded.computed_at
+                    """, (fid, profile_id, round(score, 6), now))
         except ImportError:
             logger.debug("NetworkX not available — skipping PageRank")
         except Exception as exc:

@@ -182,7 +182,9 @@ def is_rate_limit_exempt(client_host: str) -> bool:
     same rapid reads, so it is exempt too — otherwise normal dashboard polling
     trips the limiter (issue #40 Issue 3).
     """
-    if client_host in ("127.0.0.1", "::1", "localhost"):
+    from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
+
+    if _is_loopback_host(client_host):
         return True
     return is_lan_client_allowed(client_host)
 

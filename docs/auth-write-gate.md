@@ -119,4 +119,76 @@ full LAN setup guide.
 
 ---
 
+## v3.8.4 — IPv4-Mapped Loopback Fix (issue #90)
+
+**Symptom:** In a container or VM where `SLM_DAEMON_HOST=0.0.0.0`, curl
+commands using `X-Install-Token` fail with `403 Write rejected` even though
+the caller is on the same machine. This affects LXC, Docker, and any
+dual-stack Linux host.
+
+**Root cause:** When the daemon binds to `0.0.0.0`, the OS creates an IPv6
+socket. IPv4 clients connecting to `localhost` are reported to uvicorn as
+`::ffff:127.0.0.1` (IPv4-mapped IPv6 loopback, RFC 4291 §2.5.5.2). The
+auth gate's literal check `("127.0.0.1", "::1", "localhost")` did not
+include this form, so the connection was incorrectly treated as non-loopback
+and the install token was rejected.
+
+**Fix (3.8.4):** The centralized `is_loopback()` helper in
+`server/loopback.py` uses `ipaddress.ip_address(host).is_loopback`, which
+correctly returns `True` for all of:
+
+| Address form | Loopback? |
+|---|---|
+| `127.0.0.1` | True |
+| `127.0.0.2` … `127.255.255.255` | True (full 127.0.0.0/8) |
+| `::1` | True |
+| `::ffff:127.0.0.1` | True (fixes #90) |
+| `localhost` | True |
+| `::ffff:192.168.1.1` | **False** (private, not loopback) |
+| `192.168.1.1` | **False** |
+
+**Security invariants preserved:**
+- The install token is still accepted **only** from loopback addresses.
+  `::ffff:192.168.1.1` (IPv4-mapped LAN IP) is not loopback and is rejected.
+- `SLM_REQUIRE_CREDENTIALS=1` still forces credentials on all callers,
+  including loopback.
+- Non-loopback callers must use `X-SLM-API-Key` (the API key is the designed
+  credential for container/remote access).
+
+---
+
+## Networked Deployment Recipe (containers, VMs, LAN)
+
+Use this recipe when running the SLM daemon in a container or when the HTTP
+client is not on the same loopback interface:
+
+```bash
+# 1. Start the daemon accessible from the container/VM network:
+SLM_DAEMON_HOST=0.0.0.0 SLM_REQUIRE_CREDENTIALS=1 slm serve start
+
+# 2. Generate an API key (one-time setup):
+python3 -c "import secrets; print(secrets.token_urlsafe(32))" \
+  > ~/.superlocalmemory/api_key
+chmod 600 ~/.superlocalmemory/api_key
+
+# 3. Call from the container using the API key:
+curl -X POST http://localhost:8765/api/memories \
+     -H "X-SLM-API-Key: $(cat ~/.superlocalmemory/api_key)" \
+     -H "Content-Type: application/json" \
+     -d '{"content": "test"}'
+```
+
+**Why not use the install token from a container?**
+The install token is embedded in the dashboard JavaScript served over HTTP,
+so a LAN observer can read it. It is intentionally restricted to loopback
+peers. Use the API key (`X-SLM-API-Key`) for all container and remote access.
+
+**On SLM 3.8.4+:** If you upgrade to 3.8.4 without changing anything, the
+install token will now work from within the same container over
+`::ffff:127.0.0.1` (dual-stack loopback) when `SLM_REQUIRE_CREDENTIALS` is
+not set. For production deployments with `SLM_DAEMON_HOST=0.0.0.0`, always
+set `SLM_REQUIRE_CREDENTIALS=1` and use the API key.
+
+---
+
 *SuperLocalMemory V3 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*

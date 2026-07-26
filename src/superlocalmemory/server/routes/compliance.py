@@ -10,7 +10,6 @@ Uses V3 compliance modules: ABACEngine, AuditChain, RetentionEngine.
 """
 import json
 import logging
-import sqlite3
 from typing import Optional
 
 from fastapi import APIRouter, Query, Request
@@ -18,6 +17,7 @@ from fastapi.responses import JSONResponse
 
 from .helpers import get_active_profile, get_engine_lazy, MEMORY_DIR, DB_PATH
 from superlocalmemory.server.route_mutations import authorize_route_mutation
+from superlocalmemory.storage.memory_write import memory_write
 
 logger = logging.getLogger("superlocalmemory.routes.compliance")
 router = APIRouter()
@@ -61,13 +61,14 @@ async def compliance_status():
         except Exception as exc:
             logger.debug("audit chain: %s", exc)
 
-        # Retention policies (scoped to the active profile)
+        # Retention policies (scoped to the active profile).
+        # RetentionEngine.__init__ runs DDL (CREATE TABLE IF NOT EXISTS) so even
+        # list_rules() is a write at the constructor level — use memory_write().
         retention_policies = []
         try:
-            conn = sqlite3.connect(str(DB_PATH))
-            engine = RetentionEngine(conn)
-            retention_policies = engine.list_rules(profile)
-            conn.close()
+            with memory_write(DB_PATH) as conn:
+                engine = RetentionEngine(conn)
+                retention_policies = engine.list_rules(profile)
         except Exception as exc:
             logger.debug("retention engine: %s", exc)
 
@@ -163,15 +164,13 @@ async def create_retention_policy(data: dict):
 
     try:
         profile = get_active_profile()
-        conn = sqlite3.connect(str(DB_PATH))
-        engine = RetentionEngine(conn)
-
-        rule_id = engine.create_rule(
-            name=name, framework=framework,
-            retention_days=retention_days, action=action,
-            applies_to=applies_to, profile_id=profile,
-        )
-        conn.close()
+        with memory_write(DB_PATH) as conn:
+            engine = RetentionEngine(conn)
+            rule_id = engine.create_rule(
+                name=name, framework=framework,
+                retention_days=retention_days, action=action,
+                applies_to=applies_to, profile_id=profile,
+            )
 
         return {
             "success": True, "rule_id": rule_id,
@@ -190,10 +189,9 @@ async def delete_retention_policy(name: str = Query(...)):
         return {"success": False, "error": "Compliance engine not available"}
     try:
         profile = get_active_profile()
-        conn = sqlite3.connect(str(DB_PATH))
-        engine = RetentionEngine(conn)
-        removed = engine.delete_rule(profile, name)
-        conn.close()
+        with memory_write(DB_PATH) as conn:
+            engine = RetentionEngine(conn)
+            removed = engine.delete_rule(profile, name)
         if not removed:
             return {"success": False, "error": f"Policy '{name}' not found"}
         return {"success": True, "active_profile": profile,
@@ -214,10 +212,9 @@ async def enforce_retention():
         return {"success": False, "error": "Compliance engine not available"}
     try:
         profile = get_active_profile()
-        conn = sqlite3.connect(str(DB_PATH))
-        engine = RetentionEngine(conn)
-        result = engine.enforce(profile)
-        conn.close()
+        with memory_write(DB_PATH) as conn:
+            engine = RetentionEngine(conn)
+            result = engine.enforce(profile)
         return {"success": True, **result}
     except Exception:
         logger.exception("enforce_retention error")
