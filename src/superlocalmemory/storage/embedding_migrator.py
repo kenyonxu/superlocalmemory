@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os as _os
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +34,16 @@ logger = logging.getLogger(__name__)
 
 #: Default batch size for backfill_missing_embeddings.
 _BACKFILL_BATCH_SIZE = 50
+
+#: Cooperative yield between per-fact writes in backfill_missing_embeddings.
+#: After every fact's UPDATE + INSERT pair, the write-back loop releases
+#: db._lock for this many seconds, giving concurrent user writes a guaranteed
+#: acquisition window.  Tunable via SLM_SELFHEAL_WRITE_DELAY_S; set to 0 to
+#: disable (only do this on single-user dev databases with no concurrency).
+#: Default 5 ms is imperceptible for humans but visible to the OS scheduler.
+_SELFHEAL_WRITE_DELAY_S: float = float(
+    _os.environ.get("SLM_SELFHEAL_WRITE_DELAY_S", "0.005")
+)
 
 #: Max characters embedded per fact during backfill. The embedding model
 #: (nomic-embed-text-v1.5) truncates at ~8192 tokens anyway, but a raw
@@ -394,6 +406,13 @@ def backfill_missing_embeddings(
                     (fid, pid, current_model, current_dim),
                 )
                 embedded += 1
+                # Cooperative yield: release db._lock briefly so concurrent
+                # user writes can acquire it between facts.  Without this,
+                # the write-back loop holds db._lock in rapid succession
+                # (Python RLock has no fairness guarantee), potentially
+                # starving user POST /remember writes for seconds on large DBs.
+                if _SELFHEAL_WRITE_DELAY_S > 0:
+                    time.sleep(_SELFHEAL_WRITE_DELAY_S)
             except Exception as exc:
                 logger.warning(
                     "backfill: failed to write fact %s: %s", fid[:16], exc

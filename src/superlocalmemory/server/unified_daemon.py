@@ -1526,7 +1526,29 @@ async def lifespan(application: FastAPI):
                         continue
                     if vs.count(pid) >= int(len(with_emb) * 0.98):
                         continue  # already complete — no-op
-                    n = vs.rebuild_from_facts(with_emb)
+                    # Fix: route each upsert through db._lock with cooperative
+                    # yield between facts.  Previously called
+                    # vs.rebuild_from_facts() which opens its own sqlite3
+                    # connection (bypassing db._lock), causing concurrent
+                    # backfill_missing_embeddings writes to hit SQLITE_BUSY
+                    # while holding db._lock — starving user writes for ~50 s.
+                    import os as _selfheal_os
+                    _yield_s = float(
+                        _selfheal_os.environ.get("SLM_SELFHEAL_WRITE_DELAY_S", "0.005")
+                    )
+                    n = 0
+                    for _fact_id, _profile_id, _embedding in with_emb:
+                        try:
+                            with db._lock:
+                                if vs.upsert(_fact_id, _profile_id, _embedding):
+                                    n += 1
+                        except Exception as _upsert_exc:
+                            logger.warning(
+                                "VS backfill[%s]: upsert failed for %s: %s",
+                                pid, str(_fact_id)[:16], _upsert_exc,
+                            )
+                        if _yield_s > 0:
+                            _t.sleep(_yield_s)
                     logger.info(
                         "VS backfill[%s]: indexed %d of %d embedded facts",
                         pid, n, len(with_emb),
