@@ -53,22 +53,19 @@ def consolidate_facts(
 ) -> dict:
     """Find and consolidate clusters of related facts.
 
-    Fix A: accepts a DatabaseManager as the first argument (preferred) to
-    route all writes through the process-level serialisation lock.  For
-    backward compatibility a ``str | Path`` is also accepted; a temporary
-    connection is opened from it with a deprecation warning.
+    Concurrency fix (v3.8.4 — implements TODO from Fix-A comment):
+    When a DatabaseManager is provided the consolidation now uses per-cluster
+    short write transactions instead of one long raw_connection() that held
+    the write lock across Ollama / Cloud-LLM calls for every cluster after
+    the first.  The fix:
 
-    When a DatabaseManager is provided, ``db.raw_connection()`` is used so
-    that the underlying write lock is held for the full consolidation run.
-    This is intentional: fact_consolidator is a low-frequency maintenance
-    operation (called at most once per hour) and its workload is sequenced
-    by the maintenance scheduler — long lock holds here do NOT cause the
-    lock storm seen in frequent EventBus or ingestion writes.  The per-cluster
-    SAVEPOINT logic inside ``_consolidate_cluster`` is preserved unchanged.
+      1. Discover clusters with a short memory_read() (no write lock).
+      2. For each cluster: fetch fact content (memory_read()), generate the
+         summary OUTSIDE any lock (Ollama / Cloud LLM may take 30 s), then
+         do the SAVEPOINT write inside a short memory_write() block.
 
-    TODO (v3.9): per-cluster ``db.transaction()`` calls with short lock holds,
-    similar to ``graph_pruner`` Fix A.  Requires refactoring ``_consolidate_cluster``
-    to use ``db.execute()`` instead of ``conn.cursor()``.
+    SAVEPOINT atomicity per cluster is preserved: _consolidate_cluster still
+    uses SAVEPOINT / RELEASE / ROLLBACK TO internally.
 
     Mode behavior:
       - Mode A: Extractive only (no LLM). Always available.
@@ -78,6 +75,7 @@ def consolidate_facts(
     Returns stats: consolidated, clusters_found, facts_archived, errors.
     """
     from superlocalmemory.storage.database import DatabaseManager
+    from superlocalmemory.storage.memory_write import memory_read, memory_write
 
     stats: dict = {
         "clusters_found": 0,
@@ -95,13 +93,66 @@ def consolidate_facts(
             stats["mode"] = mode_str
 
     if isinstance(db_or_path, DatabaseManager):
-        # Fix A: route all writes through the process-level lock.
-        # raw_connection() acquires _lock, sets _txn_state.conn, commits on
-        # clean exit, rolls back on exception, and always closes.
+        db_path = db_or_path.db_path
         try:
-            with db_or_path.raw_connection() as conn:
-                conn.row_factory = sqlite3.Row
-                _run_consolidation(conn, profile_id, max_clusters, dry_run, config, stats)
+            # Step 1: discover clusters — short read, no write lock.
+            with memory_read(db_path) as rconn:
+                rconn.row_factory = sqlite3.Row
+                clusters = _find_consolidation_clusters(rconn, profile_id, max_clusters)
+            stats["clusters_found"] = len(clusters)
+
+            for entity_id, entity_name, fact_ids in clusters:
+                try:
+                    # Step 2: load fact content for this cluster (read, no write lock).
+                    placeholders = ",".join("?" * len(fact_ids))
+                    with memory_read(db_path) as rconn:
+                        rconn.row_factory = sqlite3.Row
+                        facts = rconn.execute(
+                            f"SELECT fact_id, content, confidence, created_at, "
+                            f"canonical_entities_json, scope, shared_with "
+                            f"FROM atomic_facts "
+                            f"WHERE fact_id IN ({placeholders}) ORDER BY created_at",
+                            fact_ids,
+                        ).fetchall()
+                        facts = [dict(f) for f in facts]
+
+                    if len(facts) < _MIN_CLUSTER_SIZE:
+                        continue
+
+                    # Step 3: generate summary OUTSIDE any write lock.
+                    # Ollama (Mode B) or Cloud LLM (Mode C) may take 30 s here.
+                    summary = _generate_summary(entity_name, facts, config)
+                    if not summary:
+                        continue
+
+                    if dry_run:
+                        stats["consolidated"] += 1
+                        stats["facts_archived"] += len(fact_ids)
+                        continue
+
+                    # Step 4: short per-cluster write — hold lock only for SQL.
+                    with memory_write(db_path) as conn:
+                        conn.row_factory = sqlite3.Row
+                        result = _consolidate_cluster(
+                            conn, profile_id, entity_id, entity_name,
+                            fact_ids, dry_run=False, config=None,
+                            _presummary=summary,
+                        )
+                    if result:
+                        stats["consolidated"] += 1
+                        stats["facts_archived"] += len(fact_ids)
+                except Exception as exc:
+                    logger.warning(
+                        "Consolidation failed for %s: %s",
+                        entity_name, exc, exc_info=True,
+                    )
+                    stats["errors"] += 1
+
+            if stats["consolidated"] > 0:
+                logger.info(
+                    "Fact consolidation: %d clusters merged, %d facts archived",
+                    stats["consolidated"], stats["facts_archived"],
+                )
         except Exception as exc:
             logger.error("Fact consolidation failed: %s", exc, exc_info=True)
             stats["errors"] += 1
@@ -232,15 +283,25 @@ def _consolidate_cluster(
     fact_ids: list[str],
     dry_run: bool,
     config: object | None = None,
+    *,
+    _presummary: str | None = None,
 ) -> dict | None:
     """Merge a cluster of facts into one consolidated fact.
 
     All writes are wrapped in a SAVEPOINT for atomicity — if any step fails,
     the entire cluster consolidation is rolled back.
+
+    _presummary (v3.8.4): when the caller supplies a pre-computed summary
+    (generated OUTSIDE the write lock), skip the _generate_summary() call.
+    This is the short-lock path used by the DatabaseManager branch of
+    consolidate_facts().  The str | Path backward-compat path still calls
+    _generate_summary() inline (legacy behaviour, no regression).
     """
     c = conn.cursor()
 
-    # Load fact contents including canonical_entities_json
+    # Load fact contents including canonical_entities_json.
+    # Even when _presummary is provided we still re-read from the DB inside
+    # the write lock so the SAVEPOINT has a fresh, authoritative facts list.
     placeholders = ",".join("?" * len(fact_ids))
     facts = c.execute(
         f"SELECT fact_id, content, confidence, created_at, canonical_entities_json, "
@@ -253,7 +314,11 @@ def _consolidate_cluster(
     if len(facts) < _MIN_CLUSTER_SIZE:
         return None
 
-    summary = _generate_summary(entity_name, facts, config)
+    if _presummary is not None:
+        summary = _presummary
+    else:
+        # Legacy path (str | Path caller) — may call Ollama with write lock held.
+        summary = _generate_summary(entity_name, facts, config)
     if not summary:
         return None
 

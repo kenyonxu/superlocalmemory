@@ -1378,11 +1378,15 @@ async def lifespan(application: FastAPI):
         # full sort.  Without them full recall takes 7-10s on
         # >1M edges (the SpreadingActivation 4-UNION query disk-sorts every
         # node's neighbor list on each call).  With them: sub-second.
+        #
+        # Concurrency fix (v3.8.4): wrapped in memory_write() so the process
+        # write lock is acquired before the connection is opened.  Previously
+        # the raw sqlite3.connect() bypassed get_write_lock() and had no
+        # busy_timeout, which risked SQLITE_BUSY at daemon startup when other
+        # writers (hook / CLI) were already active.
         try:
-            import sqlite3 as _sqlite3
-            _idx_conn = _sqlite3.connect(str(_memory_db))
-            try:
-                _idx_conn.execute("PRAGMA journal_mode=WAL")
+            from superlocalmemory.storage.memory_write import memory_write as _mw
+            with _mw(_memory_db) as _idx_conn:
                 _idx_conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_edges_source_weight "
                     "ON graph_edges(profile_id, source_id, weight DESC)"
@@ -1399,10 +1403,6 @@ async def lifespan(application: FastAPI):
                     "CREATE INDEX IF NOT EXISTS idx_assoc_target_weight "
                     "ON association_edges(profile_id, target_fact_id, weight DESC)"
                 )
-            finally:
-                # CP-09: close even if an execute() raises, so the connection
-                # (and its file handle / shared DB lock) never leaks.
-                _idx_conn.close()
         except Exception as _idx_exc:
             logger.debug("SpreadingActivation covering indexes skipped: %s", _idx_exc)
 
@@ -1429,14 +1429,36 @@ async def lifespan(application: FastAPI):
         _embedding_warm = False
         def _warmup_embedder():
             global _embedding_warm
-            try:
-                embedder = getattr(retrieval_eng, '_embedder', None) if retrieval_eng else None
-                if embedder and hasattr(embedder, 'embed'):
-                    embedder.embed("warmup")
-                    _embedding_warm = True
-                    logger.info("Embedding worker pre-warmed (model resident, keep_alive=-1)")
-            except Exception as exc:
-                logger.warning("Embedding warmup failed: %s", exc)
+            import time as _t
+            # RETRY: the retrieval engine / embedder can be created lazily a
+            # moment AFTER this thread starts.  The old one-shot attempt often
+            # captured a None embedder and left _embedding_warm stuck False
+            # forever — so /health reported not-ready even though on-demand
+            # embeds worked.  A stuck not-ready can make an auto-start hook
+            # believe the daemon is down and spawn a DUPLICATE daemon (two
+            # processes writing memory.db → cross-process SQLITE_BUSY).  Poll
+            # until the real embedder (retrieval_eng._embedder, the same one
+            # recall uses) is available, warm it, and flip the flag.
+            for _attempt in range(240):  # ~120s max at 0.5s steps
+                try:
+                    _re = retrieval_eng or getattr(engine, '_retrieval_engine', None)
+                    embedder = getattr(_re, '_embedder', None) if _re else None
+                    if embedder is not None and hasattr(embedder, 'embed'):
+                        embedder.embed("warmup")
+                        _embedding_warm = True
+                        logger.info(
+                            "Embedding worker pre-warmed (model resident, "
+                            "keep_alive=-1)"
+                        )
+                        return
+                except Exception as exc:
+                    logger.debug("Embedding warmup attempt %d failed: %s",
+                                 _attempt, exc)
+                _t.sleep(0.5)
+            logger.warning(
+                "Embedding warmup did not complete after retries; /health "
+                "may report not-ready even though on-demand embeds work"
+            )
 
         def _warmup_recall():
             """v3.4.62: Fire a full recall after embedding warms up.
@@ -1495,6 +1517,11 @@ async def lifespan(application: FastAPI):
             """
             import time as _t
             from pathlib import Path as _P
+            if os.environ.get("SLM_DISABLE_VS_BACKFILL") == "1":
+                logger.info(
+                    "VS backfill disabled via SLM_DISABLE_VS_BACKFILL=1"
+                )
+                return
             for _ in range(120):
                 if _embedding_warm:
                     break
@@ -1533,22 +1560,35 @@ async def lifespan(application: FastAPI):
                     # backfill_missing_embeddings writes to hit SQLITE_BUSY
                     # while holding db._lock — starving user writes for ~50 s.
                     import os as _selfheal_os
-                    _yield_s = float(
-                        _selfheal_os.environ.get("SLM_SELFHEAL_WRITE_DELAY_S", "0.005")
-                    )
+                    # Stage 2 (write-queue plan): batch upserts so the write lock
+                    # is acquired a FEW times with a clear release window (pause)
+                    # between batches — instead of thousands of rapid
+                    # re-acquisitions.  threading.RLock is NOT fair, so on a
+                    # fresh boot a waiting user /remember could be starved for
+                    # ~50 s behind the per-fact churn.  A real pause between
+                    # bounded batches guarantees the waiting user write wins the
+                    # lock promptly.  One-time backfill; steady state no-ops.
+                    _batch = max(1, int(
+                        _selfheal_os.environ.get("SLM_SELFHEAL_BATCH", "50")))
+                    _pause = max(0.0, float(
+                        _selfheal_os.environ.get("SLM_SELFHEAL_BATCH_PAUSE_S", "0.05")))
                     n = 0
-                    for _fact_id, _profile_id, _embedding in with_emb:
-                        try:
-                            with db._lock:
-                                if vs.upsert(_fact_id, _profile_id, _embedding):
-                                    n += 1
-                        except Exception as _upsert_exc:
-                            logger.warning(
-                                "VS backfill[%s]: upsert failed for %s: %s",
-                                pid, str(_fact_id)[:16], _upsert_exc,
-                            )
-                        if _yield_s > 0:
-                            _t.sleep(_yield_s)
+                    for _i in range(0, len(with_emb), _batch):
+                        _chunk = with_emb[_i:_i + _batch]
+                        with db._lock:
+                            for _fact_id, _profile_id, _embedding in _chunk:
+                                try:
+                                    if vs.upsert(_fact_id, _profile_id, _embedding):
+                                        n += 1
+                                except Exception as _upsert_exc:
+                                    logger.warning(
+                                        "VS backfill[%s]: upsert failed for %s: %s",
+                                        pid, str(_fact_id)[:16], _upsert_exc,
+                                    )
+                        # Release window: let any waiting user write through
+                        # before grabbing the lock again.
+                        if _pause > 0:
+                            _t.sleep(_pause)
                     logger.info(
                         "VS backfill[%s]: indexed %d of %d embedded facts",
                         pid, n, len(with_emb),

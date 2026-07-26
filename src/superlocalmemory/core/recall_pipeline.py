@@ -776,6 +776,9 @@ def run_recall(
     if access_log and response.results:
         try:
             fact_ids = [r.fact.fact_id for r in response.results]
+            # Recall exposure logging is a durable analytics contract (tested),
+            # so it stays synchronous — it is a single batched write, cheap
+            # relative to the deferred spreading-activation cache / last_seen.
             access_log.store_access_batch(
                 fact_ids=fact_ids,
                 profile_id=profile_id,

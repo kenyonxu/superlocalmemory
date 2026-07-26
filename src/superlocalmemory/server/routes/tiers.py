@@ -10,6 +10,7 @@ All connections use WAL mode + busy_timeout for concurrency safety.
 """
 
 import logging
+import os
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -19,6 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from superlocalmemory.server.route_mutations import authorize_route_mutation
+from superlocalmemory.storage.memory_write import memory_write
 
 from .helpers import DB_PATH, get_active_profile
 
@@ -34,12 +36,24 @@ class PinRequest(BaseModel):
     reason: str = Field(default="", max_length=_MAX_REASON_LENGTH)
 
 
+def _busy_ms() -> int:
+    try:
+        return max(0, int(os.environ.get("SLM_DB_BUSY_TIMEOUT_MS", "10000")))
+    except (TypeError, ValueError):
+        return 10000
+
+
 @contextmanager
 def _db():
-    """Context-managed DB connection with WAL + busy_timeout."""
-    conn = sqlite3.connect(str(DB_PATH))
+    """Context-managed DB connection with WAL + busy_timeout (READ paths only).
+
+    Write paths (pin, unpin) use ``memory_write()`` directly to also acquire
+    the process write lock and prevent in-process SQLITE_BUSY races.
+    """
+    ms = _busy_ms()
+    conn = sqlite3.connect(str(DB_PATH), timeout=ms / 1000.0)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(f"PRAGMA busy_timeout={ms}")
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -154,21 +168,20 @@ async def pin_fact_route(
         fact_id=body.fact_id,
     )
 
-    with _db() as conn:
-        try:
+    # memory_write: process write lock + busy_timeout.
+    # SELECT + INSERT + lifecycle update are atomic inside the same connection.
+    try:
+        with memory_write(DB_PATH) as conn:
             # Verify fact exists in this profile
-            c = conn.cursor()
-            c.execute(
+            if conn.execute(
                 "SELECT fact_id FROM atomic_facts "
                 "WHERE fact_id = ? AND profile_id = ?",
                 (body.fact_id, profile_id),
-            )
-            if c.fetchone() is None:
+            ).fetchone() is None:
                 raise HTTPException(
                     status_code=404,
                     detail=f"Fact {body.fact_id[:8]}... not found",
                 )
-
             now = datetime.now(UTC).isoformat()
             conn.execute(
                 "INSERT OR REPLACE INTO pinned_facts "
@@ -180,16 +193,15 @@ async def pin_fact_route(
             set_fact_lifecycle_zone(
                 conn, [body.fact_id], "active", profile_id=profile_id,
             )
-            conn.commit()
-            authorization.complete()
-            return {"success": True, "message": f"Fact {body.fact_id[:8]}... pinned"}
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error("pin_fact failed: %s", exc, exc_info=True)
-            raise HTTPException(
-                status_code=500, detail="Failed to pin fact",
-            ) from None
+        authorization.complete()
+        return {"success": True, "message": f"Fact {body.fact_id[:8]}... pinned"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("pin_fact failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=500, detail="Failed to pin fact",
+        ) from None
 
 
 @router.post("/api/tiers/unpin")
@@ -213,17 +225,17 @@ async def unpin_fact_route(
         fact_id=body.fact_id,
     )
 
-    with _db() as conn:
-        try:
+    # memory_write: process write lock + busy_timeout.
+    try:
+        with memory_write(DB_PATH) as conn:
             conn.execute(
                 "DELETE FROM pinned_facts WHERE fact_id = ? AND profile_id = ?",
                 (body.fact_id, profile_id),
             )
-            conn.commit()
-            authorization.complete()
-            return {"success": True, "unpinned": True}
-        except Exception as exc:
-            logger.error("unpin_fact failed: %s", exc, exc_info=True)
-            raise HTTPException(
-                status_code=500, detail="Failed to unpin fact",
-            ) from None
+        authorization.complete()
+        return {"success": True, "unpinned": True}
+    except Exception as exc:
+        logger.error("unpin_fact failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=500, detail="Failed to unpin fact",
+        ) from None

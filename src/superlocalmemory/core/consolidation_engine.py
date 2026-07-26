@@ -708,93 +708,99 @@ class ConsolidationEngine:
         Uses 'custom' category because the soft_prompt_templates CHECK
         constraint does not include 'skill_evolution'. The content is
         prefixed with [SKILL_EVOLUTION] for easy filtering.
+
+        Concurrency fix (v3.8.4): all writes routed through memory_write()
+        so the process write lock (get_write_lock) serialises in-process
+        writers and proper busy_timeout handles cross-process races.
+        No slow ops are held inside the write lock — this method has none.
         """
-        import sqlite3 as _sqlite3
+        from superlocalmemory.storage.memory_write import memory_read, memory_write
 
-        db_path = str(self._db.db_path)
+        db_path = self._db.db_path
 
-        conn = _sqlite3.connect(db_path, timeout=10)
-        conn.row_factory = _sqlite3.Row
-
-        # Fetch promoted evolutions
+        # Phase 1: read-only fetch — does NOT hold the write lock.
         try:
-            promoted_rows = conn.execute(
-                "SELECT id, skill_name, parent_skill_id, evolution_type, "
-                "mutation_summary, created_at "
-                "FROM skill_evolution_log "
-                "WHERE status = 'promoted' "
-                "ORDER BY created_at DESC LIMIT 20",
-            ).fetchall()
-        except _sqlite3.OperationalError:
+            with memory_read(db_path) as rconn:
+                promoted_rows = [
+                    dict(r)
+                    for r in rconn.execute(
+                        "SELECT id, skill_name, parent_skill_id, evolution_type, "
+                        "mutation_summary, created_at "
+                        "FROM skill_evolution_log "
+                        "WHERE status = 'promoted' "
+                        "ORDER BY created_at DESC LIMIT 20",
+                    ).fetchall()
+                ]
+        except Exception:
             # Table may not exist yet
-            conn.close()
             return {"created": 0, "message": "skill_evolution_log table not found"}
 
-        created_count = 0
+        if not promoted_rows:
+            return {"promoted_skills_found": 0, "soft_prompts_created": 0}
+
         now = datetime.now(timezone.utc).isoformat()
+        created_count = 0
 
-        for row in promoted_rows:
-            r = dict(row)
-            skill_name = r["skill_name"]
-            parent = r.get("parent_skill_id") or skill_name
-            evo_type = r["evolution_type"]
-            summary = r.get("mutation_summary", "")
-            evo_id = r["id"]
+        # Phase 2: short write transaction — hold the write lock for the
+        # INSERT/UPDATE loop only (pure SQL, no network / embed calls).
+        with memory_write(db_path) as conn:
+            for r in promoted_rows:
+                skill_name = r["skill_name"]
+                parent = r.get("parent_skill_id") or skill_name
+                evo_type = r["evolution_type"]
+                summary_txt = r.get("mutation_summary", "")
+                evo_id = r["id"]
 
-            # Build prompt content
-            content = (
-                f"[SKILL_EVOLUTION] Evolved skill: '{skill_name}' "
-                f"({'replaces' if evo_type == 'fix' else 'extends'} '{parent}' "
-                f"via {evo_type}). {summary}. "
-                f"Use the evolved version for better results."
-            )
+                content = (
+                    f"[SKILL_EVOLUTION] Evolved skill: '{skill_name}' "
+                    f"({'replaces' if evo_type == 'fix' else 'extends'} '{parent}' "
+                    f"via {evo_type}). {summary_txt}. "
+                    f"Use the evolved version for better results."
+                )
+                prompt_id = f"evo-{evo_id}"
 
-            # Use a deterministic prompt_id based on the evolution record
-            prompt_id = f"evo-{evo_id}"
+                existing = conn.execute(
+                    "SELECT prompt_id FROM soft_prompt_templates WHERE prompt_id = ?",
+                    (prompt_id,),
+                ).fetchone()
 
-            # Check if prompt already exists
-            existing = conn.execute(
-                "SELECT prompt_id FROM soft_prompt_templates WHERE prompt_id = ?",
-                (prompt_id,),
-            ).fetchone()
+                if existing:
+                    # M-REPLACE: Update existing record instead of INSERT OR REPLACE
+                    # to avoid silently dropping columns with defaults.
+                    try:
+                        conn.execute(
+                            "UPDATE soft_prompt_templates "
+                            "SET content = ?, updated_at = ? "
+                            "WHERE prompt_id = ?",
+                            (content, now, prompt_id),
+                        )
+                    except Exception as upd_exc:
+                        logger.debug(
+                            "Failed to update soft prompt %s: %s", prompt_id, upd_exc
+                        )
+                    continue
 
-            if existing:
-                # M-REPLACE: Update existing record instead of INSERT OR REPLACE
-                # to avoid silently dropping columns with defaults
                 try:
-                    conn.execute(
-                        "UPDATE soft_prompt_templates "
-                        "SET content = ?, updated_at = ? "
-                        "WHERE prompt_id = ?",
-                        (content, now, prompt_id),
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO soft_prompt_templates "
+                        "(prompt_id, profile_id, category, content, source_pattern_ids, "
+                        " confidence, effectiveness, token_count, retention_score, "
+                        " active, version, created_at, updated_at) "
+                        "VALUES (?, ?, 'custom', ?, ?, 0.8, 0.5, ?, 1.0, 1, 1, ?, ?)",
+                        (
+                            prompt_id, profile_id, content,
+                            json.dumps([evo_id]),
+                            len(content.split()),
+                            now, now,
+                        ),
                     )
-                except _sqlite3.OperationalError as upd_exc:
-                    logger.debug("Failed to update soft prompt %s: %s", prompt_id, upd_exc)
-                continue
-
-            try:
-                conn.execute(
-                    "INSERT OR IGNORE INTO soft_prompt_templates "
-                    "(prompt_id, profile_id, category, content, source_pattern_ids, "
-                    " confidence, effectiveness, token_count, retention_score, "
-                    " active, version, created_at, updated_at) "
-                    "VALUES (?, ?, 'custom', ?, ?, 0.8, 0.5, ?, 1.0, 1, 1, ?, ?)",
-                    (prompt_id, profile_id, content,
-                     json.dumps([evo_id]),
-                     len(content.split()),  # Rough token estimate
-                     now, now),
-                )
-                if conn.total_changes:
-                    created_count += 1
-            except _sqlite3.IntegrityError:
-                # Unique constraint on (profile_id, category) WHERE active=1
-                logger.debug(
-                    "Skipping soft prompt for %s: unique constraint on active custom",
-                    skill_name,
-                )
-
-        conn.commit()
-        conn.close()
+                    if cur.rowcount > 0:
+                        created_count += 1
+                except Exception as ins_exc:
+                    # Unique constraint on (profile_id, category) WHERE active=1
+                    logger.debug(
+                        "Skipping soft prompt for %s: %s", skill_name, ins_exc
+                    )
 
         return {
             "promoted_skills_found": len(promoted_rows),

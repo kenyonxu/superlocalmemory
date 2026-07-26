@@ -585,15 +585,18 @@ class TestL01UnscopedEntityUpdates:
         # Introduce a tiny delay so the updated timestamp is strictly later.
         time.sleep(0.01)
 
-        # Must not raise TypeError.
+        # Must not raise TypeError.  last_seen is now DEFERRED (recall must be
+        # read-only), so force the background flush before asserting the write.
         resolver._touch_last_seen("uuid-touch-001", "profile-a")
+        from superlocalmemory.storage.deferred_writes import get_deferred_last_seen
+        get_deferred_last_seen(db).flush()
 
         rows = db.execute(
             "SELECT last_seen FROM canonical_entities WHERE entity_id = ?",
             ("uuid-touch-001",),
         )
         assert rows[0]["last_seen"] > old_ts, (
-            "_touch_last_seen must update last_seen"
+            "_touch_last_seen must update last_seen (after deferred flush)"
         )
 
     def test_touch_last_seen_wrong_profile_is_noop(self, db) -> None:
@@ -610,6 +613,9 @@ class TestL01UnscopedEntityUpdates:
         resolver = EntityResolver(db)
         time.sleep(0.01)
         resolver._touch_last_seen("uuid-touch-002", "profile-x")  # wrong profile
+        # Deferred write: flush so the profile-guard is exercised against the DB.
+        from superlocalmemory.storage.deferred_writes import get_deferred_last_seen
+        get_deferred_last_seen(db).flush()
 
         rows = db.execute(
             "SELECT last_seen FROM canonical_entities WHERE entity_id = ?",

@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import os
 import secrets
 import sqlite3
 import uuid
@@ -39,9 +40,14 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 
+from superlocalmemory.storage.memory_write import memory_write
+
 logger = logging.getLogger("superlocalmemory.access.rbac")
 
-_BUSY_TIMEOUT_MS = 4000
+# Match the daemon's default (SLM_DB_BUSY_TIMEOUT_MS, default 10 000 ms).
+# Reads use this via _conn(); writes go through memory_write() which reads the
+# same env var internally, so in-process writers never see SQLITE_BUSY.
+_BUSY_TIMEOUT_MS: int = max(0, int(os.environ.get("SLM_DB_BUSY_TIMEOUT_MS", "10000")))
 _SESSION_TTL_HOURS = 12
 
 # scrypt cost parameters (OWASP-recommended interactive-login range).
@@ -155,16 +161,15 @@ class RbacEngine:
             raise RbacError("Username is required.")
         pw_hash = _hash_password(password)
         user_id = _uid()
-        conn = self._conn()
-        try:
+        # memory_write: process write lock + busy_timeout.
+        with memory_write(self._db_path) as conn:
             # The UNIQUE(username) constraint is the source of truth; the SELECT
             # is a fast path. Two concurrent creates can both pass the SELECT, so
             # the loser's INSERT hits the constraint — convert that to RbacError
             # (409) instead of leaking a raw IntegrityError as a 500.
-            exists = conn.execute(
+            if conn.execute(
                 "SELECT 1 FROM rbac_users WHERE username=?", (username,)
-            ).fetchone()
-            if exists:
+            ).fetchone():
                 raise RbacError(f"User '{username}' already exists.")
             try:
                 conn.execute(
@@ -174,19 +179,15 @@ class RbacEngine:
                     (user_id, username, display_name or username, pw_hash,
                      _now(), created_by),
                 )
-                conn.commit()
             except sqlite3.IntegrityError:
                 raise RbacError(f"User '{username}' already exists.")
-        finally:
-            conn.close()
         logger.info("RBAC: created user '%s' (%s)", username, user_id)
         return {"user_id": user_id, "username": username,
                 "display_name": display_name or username, "status": "active"}
 
     def set_password(self, user_id: str, password: str) -> None:
         pw_hash = _hash_password(password)
-        conn = self._conn()
-        try:
+        with memory_write(self._db_path) as conn:
             cur = conn.execute(
                 "UPDATE rbac_users SET password_hash=? WHERE user_id=?",
                 (pw_hash, user_id),
@@ -195,15 +196,11 @@ class RbacEngine:
                 raise RbacError("User not found.")
             # A password change invalidates every existing session.
             conn.execute("DELETE FROM rbac_sessions WHERE user_id=?", (user_id,))
-            conn.commit()
-        finally:
-            conn.close()
 
     def set_status(self, user_id: str, status: str) -> None:
         if status not in ("active", "disabled"):
             raise RbacError("status must be 'active' or 'disabled'.")
-        conn = self._conn()
-        try:
+        with memory_write(self._db_path) as conn:
             cur = conn.execute(
                 "UPDATE rbac_users SET status=? WHERE user_id=?", (status, user_id)
             )
@@ -211,21 +208,14 @@ class RbacEngine:
                 raise RbacError("User not found.")
             if status == "disabled":
                 conn.execute("DELETE FROM rbac_sessions WHERE user_id=?", (user_id,))
-            conn.commit()
-        finally:
-            conn.close()
 
     def delete_user(self, user_id: str) -> None:
-        conn = self._conn()
-        try:
+        with memory_write(self._db_path) as conn:
             conn.execute("DELETE FROM rbac_sessions WHERE user_id=?", (user_id,))
             conn.execute("DELETE FROM rbac_memberships WHERE user_id=?", (user_id,))
             cur = conn.execute("DELETE FROM rbac_users WHERE user_id=?", (user_id,))
             if cur.rowcount == 0:
                 raise RbacError("User not found.")
-            conn.commit()
-        finally:
-            conn.close()
 
     def get_user(self, user_id: str) -> dict | None:
         conn = self._conn()
@@ -277,25 +267,35 @@ class RbacEngine:
         raw = secrets.token_urlsafe(32)
         now = datetime.now(timezone.utc)
         expires = (now + timedelta(hours=ttl_hours)).isoformat()
-        conn = self._conn()
-        try:
+        with memory_write(self._db_path) as conn:
             conn.execute(
                 "INSERT INTO rbac_sessions (token_hash, user_id, created_at, "
                 "expires_at, last_seen) VALUES (?, ?, ?, ?, ?)",
                 (_hash_token(raw), user_id, now.isoformat(), expires, now.isoformat()),
             )
-            conn.commit()
-        finally:
-            conn.close()
         return raw
 
     def resolve_session(self, raw_token: str) -> dict | None:
         """Return the active user for a session token, or None if invalid /
-        expired / disabled. Updates last_seen. Constant-time by hash lookup."""
+        expired / disabled. Updates last_seen. Constant-time by hash lookup.
+
+        Concurrency design
+        ------------------
+        Phase 1 (read): WAL allows concurrent readers without blocking the
+        writer — ``_conn()`` with ``busy_timeout`` only.  The write lock is
+        NOT taken here so a burst of concurrent requests doesn't serialise
+        through the single writer on every call.
+
+        Phase 2 (conditional write): only if the session is expired/stale.
+        ``memory_write()`` is opened AFTER the read connection is closed
+        (lock-ordering invariant: get_write_lock is outermost).
+        """
         if not raw_token:
             return None
         token_hash = _hash_token(raw_token)
         now = datetime.now(timezone.utc)
+
+        # -- Phase 1: read-only lookup ----------------------------------------
         conn = self._conn()
         try:
             row = conn.execute(
@@ -310,48 +310,52 @@ class RbacEngine:
                 expired = datetime.fromisoformat(row["expires_at"]) <= now
             except ValueError:
                 expired = True
-            if expired or row["status"] != "active":
-                conn.execute("DELETE FROM rbac_sessions WHERE token_hash=?", (token_hash,))
-                conn.commit()
-                return None
-            # Debounce last_seen: only write when it is stale (>60s), so a burst
-            # of authenticated requests does not serialize through the single
-            # SQLite writer on every call.
+            row_status = row["status"]
+            row_last_seen = row["last_seen"]
+            user_dict = {
+                "user_id": row["user_id"],
+                "username": row["username"],
+                "display_name": row["display_name"],
+            }
+        finally:
+            conn.close()
+
+        # -- Phase 2: write if needed (read conn closed above) ----------------
+        if expired or row_status != "active":
+            with memory_write(self._db_path) as wconn:
+                wconn.execute(
+                    "DELETE FROM rbac_sessions WHERE token_hash=?", (token_hash,)
+                )
+            return None
+
+        # Debounce last_seen: only write when stale (>60 s), so a burst of
+        # authenticated requests does not serialise through the writer every call.
+        stale = True
+        try:
+            stale = (now - datetime.fromisoformat(row_last_seen)).total_seconds() > 60
+        except (ValueError, TypeError, KeyError):
             stale = True
-            try:
-                stale = (now - datetime.fromisoformat(row["last_seen"])).total_seconds() > 60
-            except (ValueError, TypeError, KeyError):
-                stale = True
-            if stale:
-                conn.execute(
+        if stale:
+            with memory_write(self._db_path) as wconn:
+                wconn.execute(
                     "UPDATE rbac_sessions SET last_seen=? WHERE token_hash=?",
                     (now.isoformat(), token_hash),
                 )
-                conn.commit()
-            return {"user_id": row["user_id"], "username": row["username"],
-                    "display_name": row["display_name"]}
-        finally:
-            conn.close()
+        return user_dict
 
     def revoke_session(self, raw_token: str) -> None:
-        conn = self._conn()
-        try:
-            conn.execute("DELETE FROM rbac_sessions WHERE token_hash=?",
-                         (_hash_token(raw_token),))
-            conn.commit()
-        finally:
-            conn.close()
+        with memory_write(self._db_path) as conn:
+            conn.execute(
+                "DELETE FROM rbac_sessions WHERE token_hash=?",
+                (_hash_token(raw_token),),
+            )
 
     def purge_expired_sessions(self) -> int:
-        conn = self._conn()
-        try:
+        with memory_write(self._db_path) as conn:
             cur = conn.execute(
                 "DELETE FROM rbac_sessions WHERE expires_at <= ?", (_now(),)
             )
-            conn.commit()
-            return cur.rowcount or 0
-        finally:
-            conn.close()
+        return cur.rowcount or 0
 
     # -- memberships ------------------------------------------------------
 
@@ -361,8 +365,7 @@ class RbacEngine:
             role_enum = Role(role)
         except ValueError:
             raise RbacError(f"Invalid role '{role}'. Use admin/member/viewer.")
-        conn = self._conn()
-        try:
+        with memory_write(self._db_path) as conn:
             if not conn.execute(
                 "SELECT 1 FROM rbac_users WHERE user_id=?", (user_id,)
             ).fetchone():
@@ -374,21 +377,14 @@ class RbacEngine:
                 "added_at=excluded.added_at, added_by=excluded.added_by",
                 (profile_id, user_id, role_enum.value, _now(), added_by),
             )
-            conn.commit()
-        finally:
-            conn.close()
         return {"profile_id": profile_id, "user_id": user_id, "role": role_enum.value}
 
     def remove_membership(self, profile_id: str, user_id: str) -> None:
-        conn = self._conn()
-        try:
+        with memory_write(self._db_path) as conn:
             conn.execute(
                 "DELETE FROM rbac_memberships WHERE profile_id=? AND user_id=?",
                 (profile_id, user_id),
             )
-            conn.commit()
-        finally:
-            conn.close()
 
     def get_role(self, user_id: str, profile_id: str) -> Role | None:
         conn = self._conn()
@@ -442,16 +438,12 @@ class RbacEngine:
             conn.close()
 
     def set_policy(self, key: str, value: str) -> None:
-        conn = self._conn()
-        try:
+        with memory_write(self._db_path) as conn:
             conn.execute(
                 "INSERT INTO rbac_settings (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
-            conn.commit()
-        finally:
-            conn.close()
 
     def require_login(self) -> bool:
         """Company mode: mutations require a valid user session (no owner

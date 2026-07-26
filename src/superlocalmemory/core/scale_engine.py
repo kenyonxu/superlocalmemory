@@ -349,7 +349,24 @@ class ScaleEngineManager:
             self._release_lifecycle_lock(lock_path)
 
     def _promote(self, stage_id: str) -> dict[str, Any]:
-        """Promote while the caller owns the lifecycle lock."""
+        """Promote while the caller owns the lifecycle lock.
+
+        Concurrency fix (v3.8.4): the original code held a SQLite
+        BEGIN IMMEDIATE lock across multiple fsync/rename filesystem operations
+        (mkdir_durable, replace_durable, write_promotion_journal) which could
+        starve other memory.db writers for 30+ seconds.
+
+        Fix: the fingerprint check runs inside a short memory_read() block
+        (consistent WAL snapshot, no write lock).  All filesystem operations
+        happen AFTER that block with no SQLite lock held.  The lifecycle lock
+        (file-based, acquired by the caller) already serialises concurrent
+        promote/rollback calls.
+
+        Lock-ordering invariant preserved: get_write_lock is OUTERMOST; no
+        SQLite write lock is held here at all (only a read snapshot).
+        """
+        from superlocalmemory.storage.memory_write import memory_read
+
         stage_dir, manifest = self._load_stage(stage_id)
         self._validate_manifest(manifest, state="verified")
         staged = (stage_dir / "cozo", stage_dir / "lance")
@@ -357,17 +374,30 @@ class ScaleEngineManager:
             raise ScaleEngineError("verified stage is incomplete; prepare a new stage")
         backup_dir = self.backup_root / f"{stage_id}-{uuid.uuid4().hex[:6]}"
         active = self.active_paths
-        gate = sqlite3.connect(self.db_path, timeout=30)
+
+        # ── Phase 1: fingerprint check (short read snapshot, no write lock) ──
+        # memory_read() gives a consistent WAL snapshot and closes the
+        # connection immediately on exit — no lock held after this block.
         try:
-            # The stage was built from a point-in-time SQLite snapshot. Hold a
-            # short writer fence for the final fingerprint check and directory
-            # swap so no successful promotion can trail a canonical write.
-            gate.execute("BEGIN IMMEDIATE")
-            canonical = self._canonical_counts(gate)
-            if manifest["source_fingerprint"] != self._projection_fingerprint(gate, canonical):
-                raise ScaleEngineError(
-                    "canonical SQLite changed after verification; prepare a new stage"
-                )
+            with memory_read(self.db_path) as gate:
+                canonical = self._canonical_counts(gate)
+                if manifest["source_fingerprint"] != self._projection_fingerprint(
+                    gate, canonical
+                ):
+                    raise ScaleEngineError(
+                        "canonical SQLite changed after verification; prepare a new stage"
+                    )
+        except ScaleEngineError:
+            raise
+        except Exception as exc:
+            raise ScaleEngineError(
+                f"fingerprint check failed: {exc}"
+            ) from exc
+
+        # ── Phase 2: filesystem operations — NO SQLite lock held ─────────────
+        # The lifecycle lock (file-based, held by the caller) serialises
+        # concurrent promotions; no SQLite fence is required for the swaps.
+        try:
             self._mkdir_durable(self.backup_root)
             journal = {
                 "schema_version": self.SCHEMA_VERSION,
@@ -409,13 +439,8 @@ class ScaleEngineManager:
             journal["state"] = "committed"
             self._write_promotion_journal(journal)
             self.promotion_journal_path.unlink(missing_ok=True)
-            gate.rollback()
             return manifest
         except Exception as exc:
-            try:
-                gate.rollback()
-            except sqlite3.Error:
-                pass
             try:
                 recovery = self._recover_interrupted_promotion()
             except Exception as recovery_error:
@@ -426,8 +451,6 @@ class ScaleEngineManager:
                 _, recovered_manifest = self._load_stage(stage_id)
                 return recovered_manifest
             raise ScaleEngineError(f"promotion rolled back: {exc}") from exc
-        finally:
-            gate.close()
 
     def rollback(self, backup_id: str) -> dict[str, Any]:
         """Restore an explicitly named pre-promotion backup."""

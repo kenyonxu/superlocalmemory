@@ -224,8 +224,13 @@ class SpreadingActivation:
             if not self._fok_check(activations):
                 return []
 
-            # Cache results
-            self._cache_results(query_hash, profile_id, activations)
+            # Cache results — DEFERRED so recall stays READ-ONLY on its hot
+            # path.  This is a perf cache for FUTURE recalls, not needed to
+            # return the current results.
+            from superlocalmemory.storage.deferred_writes import submit_background
+            submit_background(
+                lambda: self._cache_results(query_hash, profile_id, activations)
+            )
 
             # Return top-K sorted by activation
             results = sorted(
@@ -545,16 +550,19 @@ class SpreadingActivation:
     ) -> None:
         """Store results in activation_cache with 1-hour TTL."""
         try:
-            for node_id, value in activations.items():
-                self._db.execute(
-                    "INSERT OR REPLACE INTO activation_cache "
-                    "(cache_id, profile_id, query_hash, node_id, "
-                    " activation_value, iteration, created_at, expires_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, datetime('now'), "
-                    "datetime('now', '+1 hour'))",
-                    (_new_id(), profile_id, query_hash, node_id, value,
-                     self._config.max_iterations),
-                )
+            # One transaction => ONE write-lock acquisition for the whole
+            # activation cache, instead of N separately-locked writes.
+            with self._db.transaction():
+                for node_id, value in activations.items():
+                    self._db.execute(
+                        "INSERT OR REPLACE INTO activation_cache "
+                        "(cache_id, profile_id, query_hash, node_id, "
+                        " activation_value, iteration, created_at, expires_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, datetime('now'), "
+                        "datetime('now', '+1 hour'))",
+                        (_new_id(), profile_id, query_hash, node_id, value,
+                         self._config.max_iterations),
+                    )
         except Exception as exc:
             logger.debug("Cache write failed: %s", exc)
 

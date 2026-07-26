@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
 from .helpers import MEMORY_DIR, get_active_profile
+from superlocalmemory.storage.memory_write import memory_write
 
 logger = logging.getLogger("superlocalmemory.routes.behavioral")
 router = APIRouter()
@@ -385,10 +386,9 @@ def report_outcome(request: Request, data: ReportOutcomeRequest):
             "action_type": action_type,
             "source": "dashboard_report_outcome",
         }
-        conn = sqlite3.connect(str(memory_db_path), timeout=5.0)
-        try:
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("BEGIN IMMEDIATE")
+        # memory_write acquires the process write lock (serialises in-process)
+        # and sets PRAGMA busy_timeout (cross-process writers wait, not error).
+        with memory_write(memory_db_path) as conn:
             _validate_profile_fact_ids(
                 conn,
                 profile_id=profile,
@@ -407,9 +407,6 @@ def report_outcome(request: Request, data: ReportOutcomeRequest):
                     now_iso, reward, now_iso,
                 ),
             )
-            conn.commit()
-        finally:
-            conn.close()
 
         try:
             from superlocalmemory.learning.source_quality import (
@@ -589,8 +586,8 @@ def log_tool_event_api(request: Request, data: dict):
         input_summary = str(input_summary)[:500] if input_summary else ""
         output_summary = str(output_summary)[:500] if output_summary else ""
 
-        conn = _sqlite3.connect(str(MEMORY_DIR / "memory.db"))
-        try:
+        # memory_write: process write lock + busy_timeout for SQLITE_BUSY safety.
+        with memory_write(MEMORY_DIR / "memory.db") as conn:
             conn.execute(
                 "INSERT INTO tool_events "
                 "(session_id, profile_id, project_path, tool_name, event_type, "
@@ -599,9 +596,6 @@ def log_tool_event_api(request: Request, data: dict):
                 (session_id, profile, project_path, tool_name, event_type,
                  input_summary, output_summary, now),
             )
-            conn.commit()
-        finally:
-            conn.close()
         return {"ok": True}
     except Exception:
         logger.exception("behavioral route error")

@@ -15,6 +15,7 @@ from .helpers import (
     get_db_connection, dict_factory, get_active_profile, get_engine_lazy,
     SearchRequest, DB_PATH, MEMORY_DIR,
 )
+from superlocalmemory.storage.memory_write import memory_write
 
 logger = logging.getLogger("superlocalmemory.routes.memories")
 router = APIRouter()
@@ -997,45 +998,43 @@ async def forget_memory(request: Request, fact_id: str):
         request, "delete", fact_id,
     )
     try:
-        conn = get_db_connection()
-        conn.row_factory = dict_factory
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT fact_id, content, importance, confidence, "
-            "       canonical_entities_json, embedding, created_at "
-            "FROM atomic_facts WHERE fact_id = ? AND profile_id = ?",
-            (fact_id, active_profile),
-        )
-        row = cursor.fetchone()
-        if not row:
-            conn.close()
-            raise HTTPException(status_code=404, detail="Memory not found")
-        # Archive copy — payload_json small enough for the canonical row.
-        payload = {
-            "fact_id": row["fact_id"],
-            "content": row["content"],
-            "canonical_entities_json": row.get("canonical_entities_json"),
-            "importance": row.get("importance"),
-            "confidence": row.get("confidence"),
-            "created_at": row.get("created_at"),
-        }
         from datetime import datetime, timezone
-        archived_at = datetime.now(timezone.utc).isoformat()
         import uuid as _uuid
-        cursor.execute(
-            "INSERT INTO memory_archive "
-            "(archive_id, fact_id, profile_id, payload_json, archived_at, reason) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (str(_uuid.uuid4()), fact_id, active_profile,
-             _json.dumps(payload), archived_at, "user_forget_dashboard"),
-        )
-        cursor.execute(
-            "UPDATE atomic_facts SET archive_status = 'archived' "
-            "WHERE fact_id = ?",
-            (fact_id,),
-        )
-        conn.commit()
-        conn.close()
+        archived_at = datetime.now(timezone.utc).isoformat()
+        archive_id = str(_uuid.uuid4())
+        # memory_write: write lock (in-process) + busy_timeout (cross-process).
+        # SELECT + INSERT + UPDATE are atomic inside the same connection.
+        with memory_write(DB_PATH) as conn:
+            conn.row_factory = dict_factory
+            row = conn.execute(
+                "SELECT fact_id, content, importance, confidence, "
+                "       canonical_entities_json, embedding, created_at "
+                "FROM atomic_facts WHERE fact_id = ? AND profile_id = ?",
+                (fact_id, active_profile),
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Memory not found")
+            # Archive copy — payload_json small enough for the canonical row.
+            payload = {
+                "fact_id": row["fact_id"],
+                "content": row["content"],
+                "canonical_entities_json": row.get("canonical_entities_json"),
+                "importance": row.get("importance"),
+                "confidence": row.get("confidence"),
+                "created_at": row.get("created_at"),
+            }
+            conn.execute(
+                "INSERT INTO memory_archive "
+                "(archive_id, fact_id, profile_id, payload_json, archived_at, reason) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (archive_id, fact_id, active_profile,
+                 _json.dumps(payload), archived_at, "user_forget_dashboard"),
+            )
+            conn.execute(
+                "UPDATE atomic_facts SET archive_status = 'archived' "
+                "WHERE fact_id = ?",
+                (fact_id,),
+            )
         engine._hooks.run_post("delete", hook_context)
         return {"success": True, "fact_id": fact_id, "archived_at": archived_at}
     except HTTPException:
@@ -1067,39 +1066,39 @@ async def merge_memory(request: Request, fact_id: str):
             raise HTTPException(400, "'into' exceeds 200-char limit")
         if kept == fact_id:
             raise HTTPException(400, "Cannot merge a fact into itself")
-        conn = get_db_connection()
-        conn.row_factory = dict_factory
-        cursor = conn.cursor()
-        # Both must belong to the active profile.
-        cursor.execute(
-            "SELECT fact_id FROM atomic_facts "
-            "WHERE fact_id IN (?, ?) AND profile_id = ?",
-            (fact_id, kept, active_profile),
-        )
-        found = {r["fact_id"] for r in cursor.fetchall()}
-        if fact_id not in found or kept not in found:
-            conn.close()
-            raise HTTPException(
-                404,
-                "Both fact_ids must exist in the active profile",
-            )
         from datetime import datetime, timezone
         merged_at = datetime.now(timezone.utc).isoformat()
-        cursor.execute(
-            "INSERT INTO memory_merge_log "
-            "(kept_fact_id, merged_fact_id, profile_id, reason, merged_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (kept, fact_id, active_profile,
-             "user_merge_dashboard", merged_at),
-        )
-        cursor.execute(
-            "UPDATE atomic_facts "
-            "SET merged_into = ?, archive_status = 'archived' "
-            "WHERE fact_id = ?",
-            (kept, fact_id),
-        )
-        conn.commit()
-        conn.close()
+        # memory_write: write lock (in-process) + busy_timeout (cross-process).
+        # SELECT + INSERT + UPDATE are atomic inside the same connection.
+        with memory_write(DB_PATH) as conn:
+            conn.row_factory = dict_factory
+            # Both must belong to the active profile.
+            found = {
+                r["fact_id"]
+                for r in conn.execute(
+                    "SELECT fact_id FROM atomic_facts "
+                    "WHERE fact_id IN (?, ?) AND profile_id = ?",
+                    (fact_id, kept, active_profile),
+                ).fetchall()
+            }
+            if fact_id not in found or kept not in found:
+                raise HTTPException(
+                    404,
+                    "Both fact_ids must exist in the active profile",
+                )
+            conn.execute(
+                "INSERT INTO memory_merge_log "
+                "(kept_fact_id, merged_fact_id, profile_id, reason, merged_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (kept, fact_id, active_profile,
+                 "user_merge_dashboard", merged_at),
+            )
+            conn.execute(
+                "UPDATE atomic_facts "
+                "SET merged_into = ?, archive_status = 'archived' "
+                "WHERE fact_id = ?",
+                (kept, fact_id),
+            )
         engine._hooks.run_post("delete", hook_context)
         return {
             "success": True,

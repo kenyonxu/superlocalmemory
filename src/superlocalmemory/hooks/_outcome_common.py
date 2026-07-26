@@ -40,8 +40,15 @@ from typing import IO, Optional
 # Budget constants
 # ---------------------------------------------------------------------------
 
-#: Hot-path SQLite busy timeout (ms). Fail fast rather than block a host tool.
-BUSY_TIMEOUT_MS: int = 50
+#: Hot-path SQLite busy timeout (ms).
+#
+# Raised to 10 000 ms to match the daemon's SLM_DB_BUSY_TIMEOUT_MS default.
+# Hooks run as a SEPARATE OS process — the daemon's threading.RLock write-lock
+# cannot help cross-process — so PRAGMA busy_timeout is the ONLY lever that
+# prevents SQLITE_BUSY when the daemon or CLI holds the WAL write lock.
+# 10 s is long enough to outlast a typical daemon write cycle while staying
+# safely below Claude Code's hook-kill timeout.
+BUSY_TIMEOUT_MS: int = 10_000
 
 #: Cap on tool_response bytes scanned — bounds substring work to O(100 KB).
 SCAN_BYTES_CAP: int = 100_000
