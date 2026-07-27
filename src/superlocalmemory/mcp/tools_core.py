@@ -282,7 +282,6 @@ def register_core_tools(server, get_engine: Callable) -> None:
         import asyncio
         try:
             from superlocalmemory.mcp._daemon_proxy import choose_pool
-            pool = choose_pool()
             # S9-DASH-10: priority for session_id, so engagement
             # signals land on the right pending_outcome:
             #   1. Explicit ``session_id`` tool-call argument.
@@ -322,15 +321,25 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     pass
             if not effective_sid:
                 effective_sid = f"mcp:{agent_id}"
-            # V3.3.19: Run in thread pool to avoid blocking MCP event loop.
+            # Resolve the daemon proxy inside the worker too. ``choose_pool``
+            # verifies daemon ownership through a synchronous /health request;
+            # when this tool is served by the daemon's mounted HTTP MCP app,
+            # resolving it on Uvicorn's event-loop thread makes that loop wait
+            # on its own health response forever. Stdio did not exhibit this
+            # because its MCP process is external to the daemon.
+            #
             # V3.4.26: WorkerPool now concurrent — parallel calls no longer
             # block behind a single threading.Lock. See worker_pool.py.
+            def _recall_via_daemon_pool():
+                pool = choose_pool()
+                return pool.recall(
+                    query, limit=limit, session_id=effective_sid,
+                    fast=fast, include_global=include_global,
+                    include_shared=include_shared, window=window or None,
+                )
+
             result = await asyncio.to_thread(
-                pool.recall, query, limit=limit, session_id=effective_sid,
-                fast=fast,
-                include_global=include_global,
-                include_shared=include_shared,
-                window=window or None,
+                _recall_via_daemon_pool,
             )
             if result.get("ok"):
                 return {

@@ -736,6 +736,11 @@ def build_engine_ingestion_command(engine: MemoryEngine) -> IngestionCommand:
                 materialization_checkpoint=checkpoint_materialization,
             )
         except Exception as exc:
+            from superlocalmemory.core.materialization_control import (
+                MaterializationDeferred,
+            )
+            if isinstance(exc, MaterializationDeferred):
+                raise
             # ``run_store`` checkpoints the completed relational pipeline
             # immediately before post-hooks run.  Prefer that durable ledger
             # over rebuilding state from local variables: a one-time hook

@@ -34,6 +34,14 @@ logger = logging.getLogger(__name__)
 _INIT_LANGEVIN_RADIUS = 0.05
 
 
+def _reraise_materialization_deferral(exc: Exception) -> None:
+    """Keep explicit runtime preemption out of best-effort fallbacks."""
+    from superlocalmemory.core.materialization_control import MaterializationDeferred
+
+    if isinstance(exc, MaterializationDeferred):
+        raise exc
+
+
 def _ingestion_effect_id(operation_id: str, *parts: object) -> str:
     """Return a stable ID for a relational effect owned by one ingestion."""
     if not operation_id:
@@ -247,6 +255,7 @@ def _upsert_fact_vectors(fact, profile_id, ann_index, vector_store, embedder=Non
         try:
             fact.embedding = embedder.embed(fact.content)
         except Exception as _emb_exc:  # pragma: no cover - defensive
+            _reraise_materialization_deferral(_emb_exc)
             logger.debug("on-demand embed failed for %s: %s", fact.fact_id, _emb_exc)
             return
     if not getattr(fact, "embedding", None):
@@ -429,6 +438,7 @@ def run_store(
         )
         extraction_complete = facts is not None
     except Exception as _extract_exc:
+        _reraise_materialization_deferral(_extract_exc)
         # P0-1 (remember-write-04): an extractor EXCEPTION (transient LLM/embed
         # backend error) must NOT orphan the already-committed memory. The None
         # guard below only handled a None *return*, not a raise. Treat a raise

@@ -11,7 +11,7 @@ description: >
 tools: Bash, slm_recall, slm_remember, Read
 model: inherit
 target: vscode
-version: "3.8.8"
+version: "3.8.9"
 ---
 
 # Role

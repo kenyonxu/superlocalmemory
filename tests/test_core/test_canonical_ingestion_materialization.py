@@ -38,6 +38,7 @@ from superlocalmemory.core.ingestion_command import (
     IngestionRequest,
     IngestionState,
 )
+from superlocalmemory.core.materialization_control import MaterializationDeferred
 from superlocalmemory.core.store_pipeline import (
     _record_fact_entity_association,
     run_store,
@@ -771,6 +772,7 @@ def test_materialization_promotes_queryable_fact_without_duplicate_memory(
 
     assert completed.state is IngestionState.COMPLETE
     assert queryable_id in completed.final_fact_ids
+
     assert "derived-reliability" in completed.final_fact_ids
     assert graph_spy.call_count >= 2
 
@@ -793,6 +795,36 @@ def test_materialization_promotes_queryable_fact_without_duplicate_memory(
     assert {dict(row)["fact_id"] for row in provenance} == set(
         completed.final_fact_ids
     )
+
+
+def test_materialization_preemption_requeues_without_consuming_a_retry(
+    engine_with_mock_deps,
+) -> None:
+    """A runtime preemption is a deferral, never a failed memory ingestion."""
+    engine = engine_with_mock_deps
+    _install_m018(engine)
+    command = build_engine_ingestion_command(engine)
+    receipt = command.submit(IngestionRequest(
+        content=(
+            "Alice approved the bounded remote embedding guard for the "
+            "dashboard reconfigure path."
+        ),
+        profile_id=engine._profile_id,
+        source_type="http",
+        idempotency_key="preemption-is-not-failure",
+        trusted_actor_id="daemon-capability:owned-instance",
+    ))
+
+    with patch.object(
+        engine._fact_extractor,
+        "extract_facts",
+        side_effect=MaterializationDeferred("runtime transition requested"),
+    ):
+        deferred = command.materialize(receipt.operation_id)
+
+    assert deferred.state is IngestionState.QUERYABLE
+    assert deferred.attempt_count == 0
+    assert deferred.last_error == ""
 
 
 def test_queryable_admission_never_waits_for_embedding_warmup(
@@ -1004,6 +1036,65 @@ def test_materializer_operation_drains_before_profile_switch() -> None:
     assert seen == {"profile": "alpha"}
     assert switch_committed.is_set()
     assert runtime.snapshot.profile_id == "beta"
+
+
+def test_remote_background_embedding_yields_to_runtime_reconfigure() -> None:
+    """A slow remote materializer must release the runtime drain lease.
+
+    This is the production topology behind the dashboard config route: the
+    materializer already holds ``runtime.operation()`` when a remote embedder
+    stalls, then the reconfigure begins.  The HTTP call receives a bounded
+    background timeout, observes the transition, and exits before the five
+    second drain deadline.
+    """
+    import httpx
+
+    from superlocalmemory.core.config import EmbeddingConfig
+    from superlocalmemory.core.embeddings import EmbeddingService
+    from superlocalmemory.core.materialization_control import MaterializationDeferred
+    from superlocalmemory.server.profile_runtime import ProfileRuntime
+
+    runtime = ProfileRuntime("default")
+    service = EmbeddingService(EmbeddingConfig(
+        provider="openai",
+        api_endpoint="http://embedder.invalid/v1",
+        model_name="test-model",
+        dimension=1,
+    ))
+    remote_started = threading.Event()
+    outcome: list[str] = []
+    timeouts: list[object] = []
+
+    class _TransitionAwareClient:
+        def post(self, *args, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            remote_started.set()
+            deadline = threading.Event()
+            while not runtime.transitioning:
+                assert not deadline.wait(0.01)
+            raise httpx.ReadTimeout("reconfigure requested")
+
+    service._http_client = _TransitionAwareClient()
+
+    def _materialize(_engine) -> None:
+        try:
+            service.embed("yield to dashboard reconfigure")
+        except MaterializationDeferred:
+            outcome.append("deferred")
+
+    materializer = threading.Thread(
+        target=_run_materializer_operation,
+        args=(runtime, lambda: SimpleNamespace(_profile_id="default"), _materialize),
+    )
+    materializer.start()
+    assert remote_started.wait(2)
+
+    runtime.reconfigure(lambda _snapshot: outcome.append("reconfigured"))
+    materializer.join(2)
+
+    assert not materializer.is_alive()
+    assert outcome == ["deferred", "reconfigured"]
+    assert timeouts and float(timeouts[0]) < 5.0
 
 
 def test_legacy_pending_admission_rejects_profile_changed_after_fetch() -> None:

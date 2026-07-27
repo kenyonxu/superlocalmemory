@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
+from superlocalmemory.core.materialization_control import MaterializationDeferred
 from superlocalmemory.storage.database import DatabaseManager
 
 logger = logging.getLogger("superlocalmemory.ingestion_command")
@@ -606,6 +607,31 @@ class IngestionOperationRepository:
                 ) from exc
         return self._from_row(rows[0])
 
+    def defer_enriching(
+        self,
+        operation_id: str,
+        *,
+        owner: str,
+    ) -> IngestionOperation:
+        """Release a transition-preempted lease without consuming a retry.
+
+        Queryable evidence remains durable.  The compare-and-swap owner check
+        prevents a stale worker from requeueing work that another process has
+        already reclaimed.
+        """
+        rows = self.db.execute(
+            "UPDATE ingestion_operations SET state='queryable', "
+            "lease_owner='', lease_expires_at=0, next_retry_at=0, "
+            "attempt_count=CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, "
+            "last_error='', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE operation_id=? AND state='enriching' AND lease_owner=? "
+            "RETURNING *",
+            (operation_id, owner),
+        )
+        if not rows:
+            raise InvalidStateTransition("enriching lease ownership was lost")
+        return self._from_row(rows[0])
+
     def reap_stuck_enriching(
         self,
         *,
@@ -936,6 +962,11 @@ class IngestionCommand:
                 )
         except LeaseLost:
             raise
+        except MaterializationDeferred:
+            return self.repository.defer_enriching(
+                operation_id,
+                owner=self._owner,
+            )
         except Exception as exc:
             return self.repository.finish_enriching(
                 operation_id,
@@ -983,6 +1014,11 @@ class IngestionCommand:
             )
         except LeaseLost:
             raise
+        except MaterializationDeferred:
+            return self.repository.defer_enriching(
+                operation.operation_id,
+                owner=self._owner,
+            )
         except Exception as exc:
             return self.repository.finish_enriching(
                 operation.operation_id,

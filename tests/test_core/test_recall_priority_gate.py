@@ -6,8 +6,11 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from superlocalmemory.core.config import EmbeddingConfig
 from superlocalmemory.core.embeddings import EmbeddingService
+from superlocalmemory.core.materialization_control import MaterializationDeferred
 from superlocalmemory.core.recall_gate import (
     background_work,
     begin_recall,
@@ -65,6 +68,40 @@ def test_background_batch_is_sliced_for_preemption(monkeypatch) -> None:
             [1.0], [1.0], [1.0],
         ]
     assert batches == [["one"], ["two"], ["three"]]
+
+
+def test_background_remote_embedding_defers_after_runtime_preemption() -> None:
+    """A profile reconfigure must not wait behind a 30-second HTTP read.
+
+    Background materialization is allowed to defer its optional enrichment.
+    It is not allowed to turn a reconfiguration into a drain timeout or to
+    retry the request after the runtime has asked it to yield.
+    """
+    import httpx
+
+    service = EmbeddingService(EmbeddingConfig(
+        provider="openai",
+        api_endpoint="http://embedder.invalid/v1",
+        model_name="test-model",
+        dimension=1,
+    ))
+    preempted = threading.Event()
+    timeouts: list[object] = []
+
+    class _SlowClient:
+        def post(self, *args, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            preempted.set()
+            raise httpx.ReadTimeout("profile reconfigure requested")
+
+    service._http_client = _SlowClient()
+    with background_work(preempt_requested=preempted.is_set), pytest.raises(
+        MaterializationDeferred,
+    ):
+        service._openai_compatible_embed_batch(["must yield"])
+
+    assert len(timeouts) == 1
+    assert float(timeouts[0]) < 5.0
 
 
 def test_local_embedding_worker_is_warm_only_after_successful_request() -> None:

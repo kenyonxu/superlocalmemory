@@ -4060,7 +4060,9 @@ def _run_materializer_operation(
                 "resident engine does not match pending profile"
             )
         from superlocalmemory.core.recall_gate import background_work
-        with background_work():
+        with background_work(
+            preempt_requested=lambda: bool(runtime is not None and runtime.transitioning),
+        ):
             return operation(engine)
 
 

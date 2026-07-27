@@ -1,7 +1,7 @@
 ---
 name: slm-remember
 description: Capture durable facts, decisions, constraints, and gotchas into SuperLocalMemory. Use when the user says "remember that", "save this decision", "note this constraint", or when a session produces a conclusion worth persisting across sessions. Always recall first to avoid duplicates.
-version: "3.8.8"
+version: "3.8.9"
 agent: agent
 tools:
   - remember

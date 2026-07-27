@@ -5,6 +5,21 @@ All notable changes to SuperLocalMemory V3 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.9] - 2026-07-27 — Reliable MCP recall and background processing
+
+### Fixed
+- MCP recall is reliable through both supported connection methods: local
+  stdio and Streamable HTTP. HTTP tool calls no longer hang the daemon.
+- Changing dashboard memory or model settings no longer leaves background
+  processing stuck. Your saved memories stay available while processing resumes
+  safely with the updated settings.
+- Newly saved memories remain immediately searchable while their richer
+  background indexing completes.
+
+### Notes
+- Existing memories and configuration are preserved during upgrade. No manual
+  migration is required.
+
 ## [3.8.8] - 2026-07-27 — Live-database recall and vector integrity
 
 ### Fixed

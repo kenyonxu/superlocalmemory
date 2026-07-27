@@ -800,9 +800,32 @@ class EmbeddingService:
         client = self._get_http_client()
         last_error: Exception | None = None
         for attempt in range(max_retries):
+            from superlocalmemory.core.materialization_control import (
+                MaterializationDeferred,
+            )
+            from superlocalmemory.core.recall_gate import (
+                background_preempt_requested,
+                is_background_work,
+            )
+            if background_preempt_requested():
+                raise MaterializationDeferred(
+                    "background embedding yielded to runtime transition"
+                )
             try:
-                resp = client.post(endpoint, headers=headers, json=body)
+                request_kwargs = {"headers": headers, "json": body}
+                if is_background_work():
+                    # Runtime reconfigure drains admitted operations in five
+                    # seconds.  A background remote read must leave enough
+                    # scheduling margin to observe that transition and release
+                    # its lease, while interactive recall keeps the provider's
+                    # normal timeout budget.
+                    request_kwargs["timeout"] = 3.5
+                resp = client.post(endpoint, **request_kwargs)
                 resp.raise_for_status()
+                if background_preempt_requested():
+                    raise MaterializationDeferred(
+                        "background embedding yielded to runtime transition"
+                    )
                 data = resp.json()
                 if "data" not in data or not isinstance(data["data"], list):
                     raise ValueError(
@@ -818,6 +841,12 @@ class EmbeddingService:
                     )
                 return results
             except Exception as exc:
+                if isinstance(exc, MaterializationDeferred):
+                    raise
+                if background_preempt_requested():
+                    raise MaterializationDeferred(
+                        "background embedding yielded to runtime transition"
+                    ) from exc
                 last_error = exc
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
@@ -857,15 +886,39 @@ class EmbeddingService:
         client = self._get_http_client()
         last_error: Exception | None = None
         for attempt in range(max_retries):
+            from superlocalmemory.core.materialization_control import (
+                MaterializationDeferred,
+            )
+            from superlocalmemory.core.recall_gate import (
+                background_preempt_requested,
+                is_background_work,
+            )
+            if background_preempt_requested():
+                raise MaterializationDeferred(
+                    "background embedding yielded to runtime transition"
+                )
             try:
-                resp = client.post(url, headers=headers, json=body)
+                request_kwargs = {"headers": headers, "json": body}
+                if is_background_work():
+                    request_kwargs["timeout"] = 3.5
+                resp = client.post(url, **request_kwargs)
                 resp.raise_for_status()
+                if background_preempt_requested():
+                    raise MaterializationDeferred(
+                        "background embedding yielded to runtime transition"
+                    )
                 data = resp.json()
                 results = []
                 for item in sorted(data["data"], key=lambda d: d["index"]):
                     results.append(item["embedding"])
                 return results
             except Exception as exc:
+                if isinstance(exc, MaterializationDeferred):
+                    raise
+                if background_preempt_requested():
+                    raise MaterializationDeferred(
+                        "background embedding yielded to runtime transition"
+                    ) from exc
                 last_error = exc
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)

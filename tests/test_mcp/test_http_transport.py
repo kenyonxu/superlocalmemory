@@ -56,8 +56,11 @@ def _reset_slm_server_state():
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _sse_body_to_dict(body: str) -> dict:
-    """Parse the first 'data:' line from an SSE body into a dict."""
+def _mcp_response_to_dict(body: str) -> dict:
+    """Parse either permitted Streamable-HTTP response representation."""
+    body = body.strip()
+    if body.startswith("{"):
+        return json.loads(body)
     for line in body.splitlines():
         if line.startswith("data:"):
             return json.loads(line[len("data:"):].strip())
@@ -139,7 +142,7 @@ def test_mcp_initialize_returns_server_info():
     assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
     assert session_id, "mcp-session-id header missing"
 
-    body = _sse_body_to_dict(resp.text)
+    body = _mcp_response_to_dict(resp.text)
     server_info = body.get("result", {}).get("serverInfo", {})
     assert server_info.get("name"), f"serverInfo.name missing in: {body}"
     from superlocalmemory import __version__
@@ -195,7 +198,7 @@ def test_mcp_tools_list_returns_core_tools():
             if session_id:
                 _terminate_mcp_session(client, "/mcp", session_id)
     assert r2.status_code == 200
-    body = _sse_body_to_dict(r2.text)
+    body = _mcp_response_to_dict(r2.text)
     tools = body.get("result", {}).get("tools", [])
     tool_names = {t["name"] for t in tools}
 
@@ -273,7 +276,7 @@ def test_mcp_tools_call_recall_does_not_deadlock(monkeypatch):
                 _terminate_mcp_session(client, "/mcp", session_id)
 
     assert r2.status_code == 200, f"Expected 200, got {r2.status_code}: {r2.text[:300]}"
-    body = _sse_body_to_dict(r2.text)
+    body = _mcp_response_to_dict(r2.text)
     # Either a result or an error is acceptable — what we forbid is a hang.
     assert "result" in body or "error" in body, f"Unexpected body: {body}"
 
