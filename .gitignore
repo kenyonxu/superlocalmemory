@@ -146,6 +146,9 @@ website/.astro/
 
 # ==== INTERNAL DOCS (Not for public repo) ====
 CLAUDE.md
+# The Claude Code plugin rules are a generated public runtime artifact, not an
+# internal repository instruction file.
+!plugin/CLAUDE.md
 FIXES-*.md
 STATUS-SUMMARY-*.md
 TASK-*.md
@@ -216,3 +219,4 @@ SLM_3.6.15_DRAFTS.md
 
 # Working scratchpad — internal build/audit notes, screenshots (never ship)
 scratchpad/
+.playwright-cli/

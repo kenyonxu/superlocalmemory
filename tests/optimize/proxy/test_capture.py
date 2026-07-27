@@ -20,7 +20,10 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -37,6 +40,33 @@ from superlocalmemory.optimize.proxy.capture import (
 )
 from superlocalmemory.optimize.proxy.lifecycle import HookChain
 from superlocalmemory.optimize.proxy.server import ProxyApp, _load_hooks, build_proxy_router
+
+
+def _assert_capture_file_owner_only(path: Path) -> None:
+    """Assert the platform's actual owner-only capture-file contract."""
+    if os.name != "nt":
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        assert mode == 0o600
+        return
+
+    owner = subprocess.run(
+        ["whoami"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    acl = subprocess.run(
+        ["icacls", os.fspath(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    # The implementation removes inherited ACEs and grants full control only
+    # to the current Windows identity.  ``os.stat`` permission bits do not
+    # represent NTFS DACLs, so inspect the live ACL rather than pretending it
+    # is POSIX mode 0600.
+    assert owner.casefold() in acl.casefold()
+    assert "(I)" not in acl
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +103,10 @@ class TestExtractUsage:
         assert extract_usage("openai", body) == (7, 3, "gpt-x")
 
     def test_gemini(self) -> None:
-        body = b'{"modelVersion":"gemini-2","usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":4}}'
+        body = (
+            b'{"modelVersion":"gemini-2",'
+            b'"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":4}}'
+        )
         assert extract_usage("gemini", body) == (9, 4, "gemini-2")
 
     def test_gemini_openai_compat_uses_openai_fields(self) -> None:
@@ -119,9 +152,8 @@ class TestShadowCaptureRecord:
 
     def test_file_created_0600(self, tmp_path: Path) -> None:
         cap = ShadowCapture(path=tmp_path / "cap.jsonl")
-        cap.record({"x": 1})
-        mode = stat.S_IMODE(os.stat(tmp_path / "cap.jsonl").st_mode)
-        assert mode == 0o600
+        assert cap.record({"x": 1}) is True
+        _assert_capture_file_owner_only(tmp_path / "cap.jsonl")
 
     def test_creates_parent_dir(self, tmp_path: Path) -> None:
         cap = ShadowCapture(path=tmp_path / "nested" / "deep" / "cap.jsonl")
@@ -158,8 +190,192 @@ class TestShadowCaptureRecord:
         cap.record({"a": 1})
         cap.record({"b": 2})
         cap.record({"c": 3})
-        mode = stat.S_IMODE(os.stat(tmp_path / "cap.jsonl").st_mode)
-        assert mode == 0o600
+        _assert_capture_file_owner_only(tmp_path / "cap.jsonl")
+
+    def test_windows_capture_applies_owner_only_dacl_before_writing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The Windows path secures the verified open handle, never its path."""
+        cap = ShadowCapture(path=tmp_path / "cap.jsonl")
+        owner_sid = object()
+        token_closed: list[bool] = []
+        ace_calls: list[tuple[object, ...]] = []
+        descriptor_calls: list[tuple[object, ...]] = []
+        create_calls: list[tuple[object, ...]] = []
+        security_calls: list[tuple[object, ...]] = []
+        security_order: list[str] = []
+
+        class FakeToken:
+            def Close(self) -> None:
+                token_closed.append(True)
+
+        class FakeAcl:
+            def AddAccessAllowedAce(self, *args: object) -> None:
+                ace_calls.append(args)
+
+        class FakeSecurityDescriptor:
+            def SetSecurityDescriptorDacl(self, *args: object) -> None:
+                descriptor_calls.append(args)
+
+            def SetSecurityDescriptorControl(self, *args: object) -> None:
+                descriptor_calls.append(args)
+
+        class FakeSecurityAttributes:
+            def __init__(self) -> None:
+                self.bInheritHandle = True
+                self.SECURITY_DESCRIPTOR = FakeSecurityDescriptor()
+
+        class FakeHandle:
+            def __init__(self, fd: int) -> None:
+                self.fd = fd
+
+            def Detach(self) -> int:
+                security_order.append("detach")
+                fd = self.fd
+                self.fd = -1
+                return fd
+
+            def Close(self) -> None:
+                if self.fd >= 0:
+                    os.close(self.fd)
+                    self.fd = -1
+
+        def fake_create_file(*args: object) -> FakeHandle:
+            create_calls.append(args)
+            fd = os.open(args[0], os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+            return FakeHandle(fd)
+
+        def fake_open_osfhandle(handle: int, _flags: int) -> int:
+            security_order.append("crt")
+            return handle
+
+        fake_msvcrt = SimpleNamespace(
+            get_osfhandle=lambda fd: ("handle", fd),
+            open_osfhandle=fake_open_osfhandle,
+        )
+        fake_api = SimpleNamespace(
+            CloseHandle=os.close,
+            GetCurrentProcess=lambda: "process",
+        )
+        fake_con = SimpleNamespace(
+            FILE_ATTRIBUTE_NORMAL=1,
+            FILE_ATTRIBUTE_REPARSE_POINT=2,
+            FILE_SHARE_DELETE=8,
+            FILE_SHARE_READ=16,
+            FILE_SHARE_WRITE=32,
+            OPEN_ALWAYS=64,
+            TOKEN_QUERY=128,
+        )
+        fake_ntsecuritycon = SimpleNamespace(
+            FILE_ALL_ACCESS=256,
+            FILE_APPEND_DATA=512,
+            WRITE_DAC=1024,
+        )
+        fake_file = SimpleNamespace(
+            CreateFile=fake_create_file,
+            GetFileInformationByHandle=lambda handle: (0,),
+        )
+        fake_security = SimpleNamespace(
+            ACL=FakeAcl,
+            ACL_REVISION=3,
+            DACL_SECURITY_INFORMATION=4,
+            PROTECTED_DACL_SECURITY_INFORMATION=8,
+            SECURITY_ATTRIBUTES=FakeSecurityAttributes,
+            SE_DACL_PROTECTED=16,
+            SE_FILE_OBJECT=9,
+            TokenUser=10,
+            GetTokenInformation=lambda token, kind: (owner_sid, object()),
+            OpenProcessToken=lambda process, access: FakeToken(),
+            SetSecurityInfo=lambda *args: (
+                security_order.append("acl"),
+                security_calls.append(args),
+            )[-1],
+        )
+
+        monkeypatch.setattr(capture_mod, "_is_windows", lambda: True)
+        monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+        monkeypatch.setitem(sys.modules, "win32api", fake_api)
+        monkeypatch.setitem(sys.modules, "win32con", fake_con)
+        monkeypatch.setitem(sys.modules, "win32file", fake_file)
+        monkeypatch.setitem(sys.modules, "win32security", fake_security)
+        monkeypatch.setitem(sys.modules, "ntsecuritycon", fake_ntsecuritycon)
+
+        assert cap.record({"x": 1}) is True
+        assert token_closed == [True]
+        assert ace_calls == [(3, 256, owner_sid)]
+        assert len(descriptor_calls) == 2
+        assert descriptor_calls[0][0::2] == (1, 0)
+        assert isinstance(descriptor_calls[0][1], FakeAcl)
+        assert descriptor_calls[1] == (16, 16)
+        assert len(create_calls) == 1
+        assert create_calls[0][1] == 1536
+        assert create_calls[0][4] == 64
+        assert create_calls[0][5] == 0x00200001
+        assert create_calls[0][3].bInheritHandle is False
+        assert len(security_calls) == 1
+        handle, object_type, flags, owner, group, dacl, sacl = security_calls[0]
+        assert object_type == 9
+        assert flags == 12
+        assert owner is None and group is None and sacl is None
+        assert isinstance(dacl, FakeAcl)
+        assert security_order == ["acl", "detach", "crt"]
+        assert handle.fd == -1
+
+    def test_windows_acl_failure_closes_descriptor_and_drops_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A native ACL failure is fail-open and never leaves proxy data behind."""
+        cap = ShadowCapture(path=tmp_path / "cap.jsonl")
+        opened: list[int] = []
+        real_open = capture_mod._open_capture_append
+
+        def _tracked_open(path: Path) -> int:
+            fd = real_open(path)
+            opened.append(fd)
+            return fd
+
+        def _acl_failure(_fd: int) -> None:
+            raise OSError("native ACL failure")
+
+        monkeypatch.setattr(capture_mod, "_open_capture_append", _tracked_open)
+        monkeypatch.setattr(
+            capture_mod,
+            "_enforce_owner_only_permissions",
+            _acl_failure,
+        )
+
+        assert cap.record({"secret": "must not be written"}) is False
+        assert cap.count == 0
+        assert (tmp_path / "cap.jsonl").read_bytes() == b""
+        assert len(opened) == 1
+        with pytest.raises(OSError):
+            os.fstat(opened[0])
+
+    def test_fdopen_failure_closes_verified_descriptor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Descriptor ownership stays local until fdopen succeeds."""
+        cap = ShadowCapture(path=tmp_path / "cap.jsonl")
+        opened: list[int] = []
+        real_open = capture_mod._open_capture_append
+
+        def _tracked_open(path: Path) -> int:
+            fd = real_open(path)
+            opened.append(fd)
+            return fd
+
+        def _fdopen_failure(*_args: object, **_kwargs: object) -> None:
+            raise OSError("fdopen failed")
+
+        monkeypatch.setattr(capture_mod, "_open_capture_append", _tracked_open)
+        monkeypatch.setattr(capture_mod.os, "fdopen", _fdopen_failure)
+
+        assert cap.record({"secret": "must not be written"}) is False
+        assert cap.count == 0
+        assert (tmp_path / "cap.jsonl").read_bytes() == b""
+        assert len(opened) == 1
+        with pytest.raises(OSError):
+            os.fstat(opened[0])
 
     def test_symlink_at_path_is_refused(self, tmp_path: Path) -> None:
         # Audit fix LOW-2: O_NOFOLLOW refuses a pre-placed symlink (symlink-append).
