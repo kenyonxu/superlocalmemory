@@ -25,7 +25,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -164,19 +163,18 @@ class TestColdEmbedderFallsBack:
     ) -> None:
         """_available=None (cold/probe) or False (dead) → sync embed skipped.
 
-        The store must return quickly (< 100ms wall-clock on the no-embed path).
+        A 2-second embed side effect makes an accidental foreground call
+        observable without relying on runner-dependent SQLite wall time.
         """
         engine = _make_engine(tmp_path)
         # Embedder that would take 2s if called — proves we never call it
         embedder = _make_mock_embedder(available=available, vector=[1.0, 2.0], latency_s=2.0)
         engine._embedder = embedder
 
-        t0 = time.monotonic()
         fact_ids = engine.store_fast("cold test content")
-        elapsed = time.monotonic() - t0
 
         assert fact_ids, "store_fast must still return fact_ids when embedder is cold"
-        assert elapsed < 1.0, f"store_fast blocked {elapsed:.2f}s — warm-guard must not run on cold embedder"
+        embedder.embed.assert_not_called()
 
     @pytest.mark.parametrize("available", [None, False])
     def test_cold_embedder_leaves_embedding_null(
