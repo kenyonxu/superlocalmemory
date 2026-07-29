@@ -224,6 +224,7 @@ def test_prepare_refreshes_sqlite_budget_after_process_lock_wait(tmp_path, monke
     journal = AdmissionJournal(path, codec=_TestCodec())
     actor = Actor("daemon:test", frozenset({"default"}), frozenset({"personal"}))
     original_connection = journal._connection
+    initial_busy_timeout_ms: list[int] = []
     refreshed_busy_timeout_ms: list[int] = []
 
     class SlowAvailableLock:
@@ -256,6 +257,7 @@ def test_prepare_refreshes_sqlite_budget_after_process_lock_wait(tmp_path, monke
 
     @contextmanager
     def observed_connection(*, timeout: float = 1.0):
+        initial_busy_timeout_ms.append(max(1, int(timeout * 1_000)))
         with original_connection(timeout=timeout) as connection:
             yield BusyAfterLocalWaitConnection(connection)
 
@@ -274,8 +276,9 @@ def test_prepare_refreshes_sqlite_budget_after_process_lock_wait(tmp_path, monke
             deadline=started + 0.20,
         )
 
+    assert initial_busy_timeout_ms
     assert refreshed_busy_timeout_ms
-    assert 1 <= refreshed_busy_timeout_ms[-1] <= 160
+    assert 1 <= refreshed_busy_timeout_ms[-1] < initial_busy_timeout_ms[-1]
     assert time.monotonic() - started < 0.20
     assert journal.count() == 0
 
