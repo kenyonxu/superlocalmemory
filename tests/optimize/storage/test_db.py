@@ -314,9 +314,11 @@ def test_c06_aes_key_persisted_to_file(tmp_path: Path) -> None:
         assert key_file.exists(), "opt-key.bin must be created on first DB open"
         key_bytes = key_file.read_bytes()
         assert len(key_bytes) == 32, f"Persisted key must be 32 bytes, got {len(key_bytes)}"
-        # Permissions must be 0600
-        mode = oct(key_file.stat().st_mode & 0o777)
-        assert mode == "0o600", f"opt-key.bin must be 0600, got {mode}"
+        if os.name != "nt":
+            # POSIX permissions must be 0600. NTFS protection is represented
+            # by its DACL, not the compatibility bits returned by os.stat().
+            mode = oct(key_file.stat().st_mode & 0o777)
+            assert mode == "0o600", f"opt-key.bin must be 0600, got {mode}"
     finally:
         db_mod._KEY_FILE = original
 
