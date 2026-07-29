@@ -210,8 +210,19 @@ class TestShadowCaptureRecord:
                 token_closed.append(True)
 
         class FakeAcl:
+            def __init__(self) -> None:
+                self.aces: list[tuple[tuple[int, int], int, object]] = []
+
             def AddAccessAllowedAce(self, *args: object) -> None:
                 ace_calls.append(args)
+                _revision, access_mask, sid = args
+                self.aces.append(((0, 0), int(access_mask), sid))
+
+            def GetAceCount(self) -> int:
+                return len(self.aces)
+
+            def GetAce(self, index: int) -> tuple[tuple[int, int], int, object]:
+                return self.aces[index]
 
         class FakeSecurityDescriptor:
             def SetSecurityDescriptorDacl(self, *args: object) -> None:
@@ -224,6 +235,22 @@ class TestShadowCaptureRecord:
             def __init__(self) -> None:
                 self.bInheritHandle = True
                 self.SECURITY_DESCRIPTOR = FakeSecurityDescriptor()
+
+        class FakeLiveSecurityDescriptor:
+            def __init__(self, repaired: bool) -> None:
+                self.repaired = repaired
+
+            def GetSecurityDescriptorControl(self) -> tuple[int, int]:
+                return (16 if self.repaired else 0, 1)
+
+            def GetSecurityDescriptorOwner(self) -> object:
+                return owner_sid
+
+            def GetSecurityDescriptorDacl(self) -> FakeAcl:
+                live_dacl = FakeAcl()
+                if self.repaired:
+                    live_dacl.AddAccessAllowedAce(3, 256, owner_sid)
+                return live_dacl
 
         class FakeHandle:
             def __init__(self, fd: int) -> None:
@@ -276,6 +303,7 @@ class TestShadowCaptureRecord:
         fake_ntsecuritycon = SimpleNamespace(
             FILE_ALL_ACCESS=256,
             FILE_APPEND_DATA=512,
+            READ_CONTROL=2048,
             WRITE_DAC=1024,
         )
         fake_file = SimpleNamespace(
@@ -283,14 +311,20 @@ class TestShadowCaptureRecord:
             GetFileInformationByHandle=lambda handle: (0,),
         )
         fake_security = SimpleNamespace(
+            ACCESS_ALLOWED_ACE_TYPE=0,
             ACL=FakeAcl,
             ACL_REVISION=3,
             DACL_SECURITY_INFORMATION=4,
+            OWNER_SECURITY_INFORMATION=32,
             PROTECTED_DACL_SECURITY_INFORMATION=8,
             SECURITY_ATTRIBUTES=FakeSecurityAttributes,
             SE_DACL_PROTECTED=16,
             SE_FILE_OBJECT=9,
             TokenUser=10,
+            EqualSid=lambda left, right: left is right,
+            GetSecurityInfo=lambda handle, object_type, flags: (
+                FakeLiveSecurityDescriptor(bool(security_calls))
+            ),
             GetTokenInformation=lambda token, kind: (owner_sid, object()),
             OpenProcessToken=lambda process, access: FakeToken(),
             SetSecurityInfo=lambda *args: (
@@ -310,13 +344,16 @@ class TestShadowCaptureRecord:
         (tmp_path / "cap.jsonl").touch()
         assert cap.record({"x": 1}) is True
         assert token_closed == [True]
-        assert ace_calls == [(3, 256, owner_sid)]
+        assert ace_calls == [
+            (3, 256, owner_sid),
+            (3, 256, owner_sid),
+        ]
         assert len(descriptor_calls) == 2
         assert descriptor_calls[0][0::2] == (1, 0)
         assert isinstance(descriptor_calls[0][1], FakeAcl)
         assert descriptor_calls[1] == (16, 16)
         assert len(create_calls) == 2
-        assert create_calls[0][1] == 1536
+        assert create_calls[0][1] == 3584
         assert create_calls[0][4] == 1
         assert create_calls[0][5] == 0x00200001
         assert create_calls[0][3].bInheritHandle is False
@@ -343,8 +380,18 @@ class TestShadowCaptureRecord:
                 pass
 
         class FakeAcl:
+            def __init__(self) -> None:
+                self.aces: list[tuple[tuple[int, int], int, object]] = []
+
             def AddAccessAllowedAce(self, *_args: object) -> None:
-                pass
+                _revision, access_mask, sid = _args
+                self.aces.append(((0, 0), int(access_mask), sid))
+
+            def GetAceCount(self) -> int:
+                return len(self.aces)
+
+            def GetAce(self, index: int) -> tuple[tuple[int, int], int, object]:
+                return self.aces[index]
 
         class FakeSecurityDescriptor:
             def SetSecurityDescriptorDacl(self, *_args: object) -> None:
@@ -405,6 +452,7 @@ class TestShadowCaptureRecord:
         fake_ntsecuritycon = SimpleNamespace(
             FILE_ALL_ACCESS=256,
             FILE_APPEND_DATA=512,
+            READ_CONTROL=2048,
             WRITE_DAC=1024,
         )
         fake_msvcrt = SimpleNamespace(
@@ -421,6 +469,73 @@ class TestShadowCaptureRecord:
 
         assert cap.record({"x": 1}) is True
         assert security_calls == []
+
+    def test_windows_owner_only_descriptor_is_already_secure(self) -> None:
+        """A protected one-owner DACL is idempotent across later appends."""
+        owner_sid = object()
+
+        class FakeAcl:
+            def GetAceCount(self) -> int:
+                return 1
+
+            def GetAce(self, _index: int) -> tuple[tuple[int, int], int, object]:
+                return (0, 0), 256, owner_sid
+
+        class FakeSecurityDescriptor:
+            def GetSecurityDescriptorControl(self) -> tuple[int, int]:
+                return 16, 1
+
+            def GetSecurityDescriptorOwner(self) -> object:
+                return owner_sid
+
+            def GetSecurityDescriptorDacl(self) -> FakeAcl:
+                return FakeAcl()
+
+        assert capture_mod._windows_dacl_is_owner_only(
+            FakeSecurityDescriptor(),
+            owner_sid,
+            SimpleNamespace(FILE_ALL_ACCESS=256),
+            SimpleNamespace(
+                ACCESS_ALLOWED_ACE_TYPE=0,
+                EqualSid=lambda left, right: left is right,
+                SE_DACL_PROTECTED=16,
+            ),
+        )
+
+    def test_windows_unusual_ace_is_repaired_not_treated_as_secure(self) -> None:
+        """Object or malformed ACE layouts must fall through to DACL repair."""
+        owner_sid = object()
+
+        class FakeAcl:
+            def GetAceCount(self) -> int:
+                return 1
+
+            def GetAce(
+                self,
+                _index: int,
+            ) -> tuple[tuple[int, int], int, str, object]:
+                return (5, 0), 256, "object-guid", owner_sid
+
+        class FakeSecurityDescriptor:
+            def GetSecurityDescriptorControl(self) -> tuple[int, int]:
+                return 16, 1
+
+            def GetSecurityDescriptorOwner(self) -> object:
+                return owner_sid
+
+            def GetSecurityDescriptorDacl(self) -> FakeAcl:
+                return FakeAcl()
+
+        assert not capture_mod._windows_dacl_is_owner_only(
+            FakeSecurityDescriptor(),
+            owner_sid,
+            SimpleNamespace(FILE_ALL_ACCESS=256),
+            SimpleNamespace(
+                ACCESS_ALLOWED_ACE_TYPE=0,
+                EqualSid=lambda left, right: left is right,
+                SE_DACL_PROTECTED=16,
+            ),
+        )
 
     def test_windows_acl_failure_closes_descriptor_and_drops_entry(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

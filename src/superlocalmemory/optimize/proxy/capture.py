@@ -74,7 +74,7 @@ def _windows_owner_dacl(
     win32api: Any,
     win32con: Any,
     win32security: Any,
-) -> Any:
+) -> tuple[Any, Any]:
     """Build one protected owner-only DACL for a Windows capture file."""
     import ntsecuritycon
 
@@ -95,7 +95,44 @@ def _windows_owner_dacl(
         ntsecuritycon.FILE_ALL_ACCESS,
         owner_sid,
     )
-    return dacl
+    return owner_sid, dacl
+
+
+def _windows_dacl_is_owner_only(
+    security_descriptor: Any,
+    owner_sid: Any,
+    ntsecuritycon: Any,
+    win32security: Any,
+) -> bool:
+    """Return whether a live descriptor already matches the capture policy."""
+    control, _revision = security_descriptor.GetSecurityDescriptorControl()
+    if not control & win32security.SE_DACL_PROTECTED:
+        return False
+
+    descriptor_owner = security_descriptor.GetSecurityDescriptorOwner()
+    if descriptor_owner is None or not win32security.EqualSid(
+        descriptor_owner,
+        owner_sid,
+    ):
+        return False
+
+    dacl = security_descriptor.GetSecurityDescriptorDacl()
+    if dacl is None or dacl.GetAceCount() != 1:
+        return False
+
+    ace = dacl.GetAce(0)
+    if not isinstance(ace, tuple) or len(ace) != 3:
+        return False
+    ace_header, access_mask, ace_sid = ace
+    if (
+        not isinstance(ace_header, tuple)
+        or not ace_header
+        or ace_header[0] != win32security.ACCESS_ALLOWED_ACE_TYPE
+    ):
+        return False
+    if access_mask & ntsecuritycon.FILE_ALL_ACCESS != ntsecuritycon.FILE_ALL_ACCESS:
+        return False
+    return bool(win32security.EqualSid(ace_sid, owner_sid))
 
 
 def _open_windows_capture_append(path: Path) -> int:
@@ -117,7 +154,11 @@ def _open_windows_capture_append(path: Path) -> int:
         # ever inheriting a broader parent DACL. For an existing file Windows
         # ignores this descriptor; _enforce_owner_only_permissions replaces
         # that DACL through the same WRITE_DAC-capable handle before writing.
-        dacl = _windows_owner_dacl(win32api, win32con, win32security)
+        owner_sid, dacl = _windows_owner_dacl(
+            win32api,
+            win32con,
+            win32security,
+        )
         security_attributes = win32security.SECURITY_ATTRIBUTES()
         security_attributes.bInheritHandle = False
         security_attributes.SECURITY_DESCRIPTOR.SetSecurityDescriptorDacl(
@@ -129,7 +170,11 @@ def _open_windows_capture_append(path: Path) -> int:
             win32security.SE_DACL_PROTECTED,
             win32security.SE_DACL_PROTECTED,
         )
-        desired_access = ntsecuritycon.FILE_APPEND_DATA | ntsecuritycon.WRITE_DAC
+        desired_access = (
+            ntsecuritycon.FILE_APPEND_DATA
+            | ntsecuritycon.WRITE_DAC
+            | ntsecuritycon.READ_CONTROL
+        )
         share_mode = (
             win32con.FILE_SHARE_READ
             | win32con.FILE_SHARE_WRITE
@@ -185,20 +230,50 @@ def _open_windows_capture_append(path: Path) -> int:
             )
         if not created_new:
             try:
-                # Existing files ignore the creation security descriptor, so
-                # enforce the DACL while this is still the original CreateFile
-                # handle carrying WRITE_DAC. Transferring it into Python's CRT
-                # first can lose the authority SetSecurityInfo needs.
-                win32security.SetSecurityInfo(
+                query_flags = (
+                    win32security.OWNER_SECURITY_INFORMATION
+                    | win32security.DACL_SECURITY_INFORMATION
+                )
+                descriptor = win32security.GetSecurityInfo(
                     handle,
                     win32security.SE_FILE_OBJECT,
-                    win32security.DACL_SECURITY_INFORMATION
-                    | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
-                    None,
-                    None,
-                    dacl,
-                    None,
+                    query_flags,
                 )
+                if not _windows_dacl_is_owner_only(
+                    descriptor,
+                    owner_sid,
+                    ntsecuritycon,
+                    win32security,
+                ):
+                    # Existing files ignore the creation security descriptor,
+                    # so repair an unsafe DACL while this is still the original
+                    # CreateFile handle carrying WRITE_DAC. Avoid rewriting an
+                    # already-protected DACL: Windows may correctly deny that
+                    # redundant mutation even though append access is allowed.
+                    win32security.SetSecurityInfo(
+                        handle,
+                        win32security.SE_FILE_OBJECT,
+                        win32security.DACL_SECURITY_INFORMATION
+                        | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+                        None,
+                        None,
+                        dacl,
+                        None,
+                    )
+                    descriptor = win32security.GetSecurityInfo(
+                        handle,
+                        win32security.SE_FILE_OBJECT,
+                        query_flags,
+                    )
+                    if not _windows_dacl_is_owner_only(
+                        descriptor,
+                        owner_sid,
+                        ntsecuritycon,
+                        win32security,
+                    ):
+                        raise OSError(
+                            "Windows capture ACL verification failed after repair"
+                        )
             except Exception as exc:
                 raise OSError(
                     "Windows capture ACL could not be enforced "
