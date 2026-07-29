@@ -321,7 +321,7 @@ class TestShadowCaptureRecord:
             SE_DACL_PROTECTED=16,
             SE_FILE_OBJECT=9,
             TokenUser=10,
-            EqualSid=lambda left, right: left is right,
+            ConvertSidToStringSid=lambda sid: str(id(sid)),
             GetSecurityInfo=lambda handle, object_type, flags: (
                 FakeLiveSecurityDescriptor(bool(security_calls))
             ),
@@ -497,7 +497,7 @@ class TestShadowCaptureRecord:
             SimpleNamespace(FILE_ALL_ACCESS=256),
             SimpleNamespace(
                 ACCESS_ALLOWED_ACE_TYPE=0,
-                EqualSid=lambda left, right: left is right,
+                ConvertSidToStringSid=lambda sid: str(id(sid)),
                 SE_DACL_PROTECTED=16,
             ),
         )
@@ -532,7 +532,7 @@ class TestShadowCaptureRecord:
             SimpleNamespace(FILE_ALL_ACCESS=256),
             SimpleNamespace(
                 ACCESS_ALLOWED_ACE_TYPE=0,
-                EqualSid=lambda left, right: left is right,
+                ConvertSidToStringSid=lambda sid: str(id(sid)),
                 SE_DACL_PROTECTED=16,
             ),
         )

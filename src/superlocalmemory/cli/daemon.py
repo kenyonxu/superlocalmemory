@@ -52,6 +52,7 @@ _LEGACY_PORT = 8767   # backward-compat redirect
 _DEFAULT_IDLE_TIMEOUT = 0  # v3.4.3: 24/7 default (was 1800)
 _PID_FILE = None  # test-only override; runtime resolution stays dynamic
 _PORT_FILE = None  # test-only override; runtime resolution stays dynamic
+_EXPECTED_DESCRIPTOR_UNSET = object()
 
 
 # ---------------------------------------------------------------------------
@@ -96,11 +97,18 @@ def _is_port_available(port: int) -> bool:
     """Return whether the daemon port can be exclusively bound right now."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
-            # The server binds with address reuse. Mirror that contract here:
-            # a recently closed listener may leave TCP connections in
-            # TIME_WAIT, which must not be mistaken for an active owner and
-            # block a safe restart for the full TCP timeout.
-            candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if sys.platform == "win32":
+                # Winsock SO_REUSEADDR can bind an address that is still
+                # occupied, so it cannot prove shutdown completion. Request
+                # exclusive ownership where available and otherwise use the
+                # default non-reuse bind contract.
+                exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+                if exclusive is not None:
+                    candidate.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+            else:
+                # On POSIX, mirror Uvicorn's reuse contract so a closed
+                # listener's TIME_WAIT sockets do not block a safe restart.
+                candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             candidate.bind(("127.0.0.1", port))
         return True
     except OSError:
@@ -117,7 +125,13 @@ def _has_tcp_listener(port: int) -> bool:
         return False
 
 
-def wait_for_owned_daemon_shutdown(descriptor, timeout: float = 25.0) -> bool:
+def wait_for_owned_daemon_shutdown(
+    descriptor,
+    timeout: float = 25.0,
+    *,
+    legacy_pid: int | None = None,
+    legacy_port: int | None = None,
+) -> bool:
     """Wait for the stopped instance *and* its TCP listener to be gone.
 
     Restart must never spawn a replacement just because the descriptor was
@@ -126,11 +140,17 @@ def wait_for_owned_daemon_shutdown(descriptor, timeout: float = 25.0) -> bool:
     SLM worker cleanup. A descriptor carries process creation time, so PID
     reuse cannot make this wait target an unrelated process.
     """
-    port = descriptor.port if descriptor is not None else _DEFAULT_PORT
+    port = (
+        descriptor.port
+        if descriptor is not None
+        else legacy_port if legacy_port is not None else _DEFAULT_PORT
+    )
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        process_alive = (
-            descriptor is not None and _descriptor_process_is_alive(descriptor)
+        process_alive = bool(
+            _descriptor_process_is_alive(descriptor)
+            if descriptor is not None
+            else legacy_pid is not None and _is_verified_legacy_process(legacy_pid)
         )
         if not process_alive and _is_port_available(port):
             return True
@@ -238,10 +258,35 @@ def daemon_request(
     body: dict | None = None,
     *,
     timeout_seconds: float = 30.0,
+    expected_descriptor=_EXPECTED_DESCRIPTOR_UNSET,
+    expected_legacy: dict | None = None,
 ) -> dict | None:
     """Send a request only after validating the owned daemon identity."""
-    descriptor = read_descriptor()
+    legacy = None
+    if expected_legacy is not None:
+        # Legacy daemons have no capability header. Bind the compatibility
+        # request to the captured PID+port and refuse to adopt a replacement
+        # descriptor or a different legacy process during this stop.
+        if read_descriptor() is not None:
+            return None
+        current_legacy = _verified_legacy_health()
+        if current_legacy is None or (
+            int(current_legacy.get("pid", -1))
+            != int(expected_legacy.get("pid", -2))
+            or int(current_legacy.get("_legacy_port", -1))
+            != int(expected_legacy.get("_legacy_port", -2))
+        ):
+            return None
+        descriptor = None
+        legacy = current_legacy
+    else:
+        descriptor = (
+            read_descriptor()
+            if expected_descriptor is _EXPECTED_DESCRIPTOR_UNSET
+            else expected_descriptor
+        )
     capability: str | None = None
+    target_instance: str | None = None
     if descriptor is not None:
         health = _fetch_health(descriptor.port)
         if health is None or not descriptor_matches_health(descriptor, health):
@@ -250,10 +295,11 @@ def daemon_request(
             return health
         port = descriptor.port
         capability = descriptor.capability
+        target_instance = descriptor.instance_id
     elif descriptor_path().exists():
         return None
     else:
-        legacy = _verified_legacy_health()
+        legacy = legacy or _verified_legacy_health()
         if legacy is None:
             return None
         if method.upper() == "GET" and path == "/health":
@@ -264,9 +310,9 @@ def daemon_request(
         url = f"http://127.0.0.1:{port}{path}"
         data = json.dumps(body).encode() if body else None
         headers = {"Content-Type": "application/json"} if data else {}
-        if capability is not None:
+        if capability is not None and target_instance is not None:
             headers["X-SLM-Daemon-Capability"] = capability
-            headers["X-SLM-Target-Instance"] = descriptor.instance_id
+            headers["X-SLM-Target-Instance"] = target_instance
         # Daemon ownership proves that this CLI targets the local instance; it
         # does not replace a dashboard user's profile-scoped authorization in
         # governed workspaces. The user opts in by supplying an explicit
@@ -505,8 +551,35 @@ def stop_daemon() -> bool:
     Machine-wide process-name scans are forbidden: they can kill another SLM
     installation or a user's live workers during tests. V3.7 uses the owned
     HTTP capability; the daemon itself terminates its child process tree.
+    Success means the owned process exited and released its listener, not just
+    that the asynchronous stop request was accepted.
     """
-    if read_descriptor() is None and _verified_legacy_health() is None:
+    descriptor = read_descriptor()
+    legacy = _verified_legacy_health() if descriptor is None else None
+    if descriptor is None and legacy is None:
         return False
-    response = daemon_request("POST", "/stop")
-    return bool(response and response.get("status") == "stopping")
+    if descriptor is not None:
+        response = daemon_request(
+            "POST",
+            "/stop",
+            expected_descriptor=descriptor,
+        )
+    else:
+        if legacy is None:
+            return False
+        response = daemon_request(
+            "POST",
+            "/stop",
+            expected_legacy=legacy,
+        )
+    if not response or response.get("status") != "stopping":
+        return False
+    if descriptor is not None:
+        return wait_for_owned_daemon_shutdown(descriptor)
+    if legacy is None:
+        return False
+    return wait_for_owned_daemon_shutdown(
+        None,
+        legacy_pid=int(legacy["pid"]),
+        legacy_port=int(legacy["_legacy_port"]),
+    )

@@ -278,12 +278,20 @@ def test_stop_never_scans_or_kills_machine_wide_processes() -> None:
         patch.object(
             daemon, "daemon_request", return_value={"status": "stopping"},
         ) as request,
+        patch.object(
+            daemon, "wait_for_owned_daemon_shutdown", return_value=True,
+        ) as wait_for_shutdown,
         patch("psutil.process_iter") as process_iter,
         patch("subprocess.run") as subprocess_run,
     ):
         assert daemon.stop_daemon()
 
-    request.assert_called_once_with("POST", "/stop")
+    request.assert_called_once_with(
+        "POST",
+        "/stop",
+        expected_descriptor=descriptor,
+    )
+    wait_for_shutdown.assert_called_once_with(descriptor)
     process_iter.assert_not_called()
     subprocess_run.assert_not_called()
     assert descriptor.instance_id == "owned-instance"
@@ -300,6 +308,93 @@ def test_stop_without_owned_descriptor_fails_closed() -> None:
 
     process_iter.assert_not_called()
     subprocess_run.assert_not_called()
+
+
+def test_stop_waits_for_verified_legacy_pid_and_custom_port() -> None:
+    """The compatibility stop path must not wait on the default namespace."""
+    from superlocalmemory.cli import daemon
+
+    legacy = {"status": "ok", "pid": 7771, "_legacy_port": 43134}
+    with (
+        patch.object(daemon, "read_descriptor", return_value=None),
+        patch.object(daemon, "_verified_legacy_health", return_value=legacy),
+        patch.object(
+            daemon, "daemon_request", return_value={"status": "stopping"},
+        ) as request,
+        patch.object(
+            daemon, "wait_for_owned_daemon_shutdown", return_value=True,
+        ) as wait_for_shutdown,
+    ):
+        assert daemon.stop_daemon()
+
+    wait_for_shutdown.assert_called_once_with(
+        None,
+        legacy_pid=7771,
+        legacy_port=43134,
+    )
+    request.assert_called_once_with(
+        "POST",
+        "/stop",
+        expected_legacy=legacy,
+    )
+
+
+def test_legacy_stop_request_refuses_descriptor_replacement() -> None:
+    """A descriptor-backed replacement cannot be adopted by a legacy stop."""
+    from superlocalmemory.cli import daemon
+
+    captured = {"status": "ok", "pid": 7772, "_legacy_port": 43136}
+    replacement = _owned_descriptor(port=43136)
+    with (
+        patch.object(daemon, "read_descriptor", return_value=replacement),
+        patch("urllib.request.urlopen") as request,
+    ):
+        assert daemon.daemon_request(
+            "POST",
+            "/stop",
+            expected_legacy=captured,
+        ) is None
+
+    request.assert_not_called()
+
+
+def test_stop_request_stays_bound_to_captured_daemon_instance() -> None:
+    """A replacement descriptor cannot redirect an in-progress stop."""
+    from superlocalmemory.cli import daemon
+
+    captured = _owned_descriptor(port=43135)
+    replacement = build_descriptor(
+        data_root=Path(os.environ["SLM_DATA_DIR"]),
+        port=43135,
+        version="3.8.10",
+        pid=os.getpid(),
+        instance_id="replacement-instance",
+        capability="replacement-capability",
+        state="ready",
+    )
+    write_descriptor(
+        replacement,
+        data_root=Path(os.environ["SLM_DATA_DIR"]),
+    )
+    replacement_health = {
+        "status": "ok",
+        **replacement.public_health_fields(),
+    }
+
+    with patch(
+        "urllib.request.urlopen",
+        return_value=_HealthResponse(replacement_health),
+    ) as request:
+        assert daemon.daemon_request(
+            "POST",
+            "/stop",
+            expected_descriptor=captured,
+        ) is None
+
+    request.assert_called_once_with(
+        "http://127.0.0.1:43135/health",
+        timeout=2,
+    )
 
 
 def test_pytest_isolation_cannot_spawn_a_daemon_without_fixture_opt_in(

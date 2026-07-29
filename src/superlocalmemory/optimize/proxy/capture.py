@@ -105,12 +105,21 @@ def _windows_dacl_is_owner_only(
     win32security: Any,
 ) -> bool:
     """Return whether a live descriptor already matches the capture policy."""
+    def _same_sid(left: Any, right: Any) -> bool:
+        try:
+            return (
+                win32security.ConvertSidToStringSid(left)
+                == win32security.ConvertSidToStringSid(right)
+            )
+        except Exception:
+            return False
+
     control, _revision = security_descriptor.GetSecurityDescriptorControl()
     if not control & win32security.SE_DACL_PROTECTED:
         return False
 
     descriptor_owner = security_descriptor.GetSecurityDescriptorOwner()
-    if descriptor_owner is None or not win32security.EqualSid(
+    if descriptor_owner is None or not _same_sid(
         descriptor_owner,
         owner_sid,
     ):
@@ -132,7 +141,7 @@ def _windows_dacl_is_owner_only(
         return False
     if access_mask & ntsecuritycon.FILE_ALL_ACCESS != ntsecuritycon.FILE_ALL_ACCESS:
         return False
-    return bool(win32security.EqualSid(ace_sid, owner_sid))
+    return _same_sid(ace_sid, owner_sid)
 
 
 def _open_windows_capture_append(path: Path) -> int:
