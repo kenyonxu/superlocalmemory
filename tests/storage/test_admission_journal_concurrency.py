@@ -218,6 +218,62 @@ def test_prepare_deadline_caps_external_sqlite_busy_wait(tmp_path, monkeypatch) 
     assert journal.count() == 0
 
 
+def test_prepare_refreshes_sqlite_budget_after_process_lock_wait(tmp_path, monkeypatch) -> None:
+    """Local and external contention share one caller deadline."""
+    path = tmp_path / "admission_journal.db"
+    journal = AdmissionJournal(path, codec=_TestCodec())
+    actor = Actor("daemon:test", frozenset({"default"}), frozenset({"personal"}))
+    blocker = sqlite3.connect(path)
+    blocker.execute("BEGIN IMMEDIATE")
+    original_connection = journal._connection
+    refreshed_busy_timeout_ms: list[int] = []
+
+    class SlowAvailableLock:
+        def acquire(self, *, timeout: float = -1.0) -> bool:
+            assert timeout > 0
+            time.sleep(0.04)
+            return True
+
+        def release(self) -> None:
+            pass
+
+    @contextmanager
+    def observed_connection(*, timeout: float = 1.0):
+        with original_connection(timeout=timeout) as connection:
+            connection.set_trace_callback(
+                lambda sql: refreshed_busy_timeout_ms.append(
+                    int(sql.removeprefix("PRAGMA busy_timeout="))
+                )
+                if sql.startswith("PRAGMA busy_timeout=")
+                else None
+            )
+            yield connection
+
+    monkeypatch.setattr(journal, "_write_lock", SlowAvailableLock())
+    monkeypatch.setattr(journal, "_connection", observed_connection)
+    started = time.monotonic()
+    try:
+        with pytest.raises(AdmissionJournalUnavailable, match="busy"):
+            journal.prepare(
+                RememberRequest(
+                    content="One deadline covers local and external journal contention.",
+                    profile_id="default",
+                    source_type="test",
+                    idempotency_key="journal-deadline:combined-contention",
+                ),
+                actor,
+                deadline=started + 0.08,
+            )
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert refreshed_busy_timeout_ms
+    assert 1 <= refreshed_busy_timeout_ms[-1] <= 40
+    assert time.monotonic() - started < 0.14
+    assert journal.count() == 0
+
+
 def test_request_read_translates_sqlite_busy_to_typed_unavailable(
     tmp_path,
     monkeypatch,

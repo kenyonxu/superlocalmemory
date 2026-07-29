@@ -81,9 +81,9 @@ def test_idempotent_retries_do_not_open_redundant_write_transactions(
     dispatched = journal.mark_dispatched(prepared.journal_id)
 
     def fail_write(*_args, **_kwargs):
-        raise AssertionError("idempotent retry opened a write transaction")
+        raise AssertionError("idempotent retry acquired the writer slot")
 
-    monkeypatch.setattr(journal, "_write_transaction", fail_write)
+    monkeypatch.setattr(journal, "_write_slot", fail_write)
     assert journal.prepare(admission_request, actor) == dispatched
     assert journal.mark_dispatched(prepared.journal_id) == dispatched
 
@@ -95,7 +95,7 @@ def test_idempotent_retries_do_not_open_redundant_write_transactions(
         "commit_sequence": 3,
     }
     committed = journal.mark_committed(prepared.journal_id, receipt)
-    monkeypatch.setattr(journal, "_write_transaction", fail_write)
+    monkeypatch.setattr(journal, "_write_slot", fail_write)
 
     assert journal.prepare(admission_request, actor) == committed
     assert journal.mark_dispatched(prepared.journal_id) == committed
