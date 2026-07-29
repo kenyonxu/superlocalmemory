@@ -76,8 +76,12 @@ class Adapter(Protocol):
 
 def path_sha256(path: Path) -> str:
     """SHA-256 of the absolute path string, full 64-hex (never truncated)."""
-    return hashlib.sha256(str(path.resolve() if path.exists()
-                              else path).encode("utf-8")).hexdigest()
+    # The identity must not depend on whether the target exists.  On Windows,
+    # Path.resolve() can normalize an existing path differently from the same
+    # not-yet-created path, which changes the sync-log key after the first
+    # write and defeats the durable content-hash skip.
+    canonical = os.path.normcase(os.path.abspath(os.fspath(path)))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _now_iso() -> str:

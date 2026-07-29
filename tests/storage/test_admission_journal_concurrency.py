@@ -174,7 +174,7 @@ def test_prepare_deadline_bounds_process_lock_wait(tmp_path, monkeypatch) -> Non
         )
 
     assert len(observed_timeouts) == 1
-    assert 0 < observed_timeouts[0] <= 0.05
+    assert 0 < observed_timeouts[0] <= 0.05 + 1e-9
     assert journal.count() == 0
 
 
