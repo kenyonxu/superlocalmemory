@@ -26,7 +26,6 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,10 +75,9 @@ class Adapter(Protocol):
 
 def path_sha256(path: Path) -> str:
     """SHA-256 of the absolute path string, full 64-hex (never truncated)."""
-    # The identity must not depend on whether the target exists.  On Windows,
+    # The identity must not depend on whether the target exists. On Windows,
     # Path.resolve() can normalize an existing path differently from the same
-    # not-yet-created path, which changes the sync-log key after the first
-    # write and defeats the durable content-hash skip.
+    # not-yet-created path, changing the sync-log key after the first write.
     canonical = os.path.normcase(os.path.abspath(os.fspath(path)))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
