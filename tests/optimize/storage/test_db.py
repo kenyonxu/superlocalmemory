@@ -256,19 +256,44 @@ def test_get_default_returns_singleton(tmp_path: Path, monkeypatch) -> None:
 
 # ---- fail-open ----
 
-def test_get_fail_open_on_corrupt_db(tmp_path: Path) -> None:
+def test_get_fail_open_on_corrupt_db(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """get() must return None (not raise) for an unopenable DB."""
+    import sqlite3
+
     from superlocalmemory.optimize.storage.db import CacheDB
+
     db_path = tmp_path / "corrupt.db"
     db_path.write_bytes(b"not a sqlite file at all")
-    # CacheDB init may raise or open; either way, get() must not raise.
+    real_connect = sqlite3.connect
+    probe_closed = False
+    first_connect = True
+
+    class FailingProbe:
+        def execute(self, _sql: str) -> None:
+            raise sqlite3.DatabaseError("file is not a database")
+
+        def close(self) -> None:
+            nonlocal probe_closed
+            probe_closed = True
+
+    def connect_once_with_failing_probe(*args, **kwargs):
+        nonlocal first_connect
+        if first_connect:
+            first_connect = False
+            return FailingProbe()
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect_once_with_failing_probe)
+    db = CacheDB(db_path)
     try:
-        db = CacheDB(db_path)
-        row = db.get("any", "t1")
-        assert row is None
-    except RuntimeError:
-        # Acceptable: init refuses a corrupt file; proxy won't instantiate.
-        pass
+        assert probe_closed
+        assert db.get("any", "t1") is None
+        assert db_path.with_suffix(".db.corrupt").read_bytes() == b"not a sqlite file at all"
+    finally:
+        db.close()
 
 
 # ---- C-06: AES key persistence ----

@@ -212,8 +212,12 @@ class CacheDB:
             try:
                 import sqlite3 as _sq
                 test_conn = _sq.connect(str(self._db_path))
-                test_conn.execute("PRAGMA schema_version")
-                test_conn.close()
+                try:
+                    test_conn.execute("PRAGMA schema_version")
+                finally:
+                    # Windows will not rename an open SQLite file. Always
+                    # release the probe before corrupt-file recovery runs.
+                    test_conn.close()
             except Exception as exc:
                 corrupt_sidecar = self._db_path.with_suffix(
                     self._db_path.suffix + ".corrupt"
