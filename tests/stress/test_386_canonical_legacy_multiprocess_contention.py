@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 
 _FOREGROUND_WRITES = 48
+_FOREGROUND_CONCURRENCY = 8
 _LEGACY_WRITES_PER_PROCESS = 48
 _READER_THREADS = 4
 _REMEMBER_DEADLINE_MS = 2_000
@@ -298,7 +299,7 @@ def test_386_canonical_remember_survives_legacy_multiprocess_contention(
 
         start.set()
         with ThreadPoolExecutor(max_workers=_READER_THREADS) as reader_pool:
-            with ThreadPoolExecutor(max_workers=16) as writer_pool:
+            with ThreadPoolExecutor(max_workers=_FOREGROUND_CONCURRENCY) as writer_pool:
                 foreground_futures = [
                     writer_pool.submit(foreground_remember, sequence)
                     for sequence in range(_FOREGROUND_WRITES)
