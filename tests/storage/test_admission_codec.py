@@ -105,6 +105,51 @@ def test_machine_codec_rejects_invalid_or_non_regular_key(tmp_path: Path) -> Non
         MachineKeyCommandCodec(directory)
 
 
+def test_machine_codec_normalizes_windows_directory_creation_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows reports EACCES, not EEXIST, when O_EXCL targets a directory."""
+    directory = tmp_path / "directory-key"
+    directory.mkdir()
+    real_open = os.open
+
+    def windows_open(path, flags, mode=0o777):
+        if Path(path) == directory:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(
+        "superlocalmemory.storage.admission_codec.os.open",
+        windows_open,
+    )
+
+    with pytest.raises(AdmissionKeyError, match="regular file"):
+        MachineKeyCommandCodec(directory)
+
+
+@pytest.mark.parametrize("existing_key", [False, True])
+def test_machine_codec_normalizes_other_key_creation_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_key: bool,
+) -> None:
+    key_path = tmp_path / "admission-key.bin"
+    if existing_key:
+        key_path.write_bytes(os.urandom(32))
+
+    def denied_open(path, flags, mode=0o777):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(
+        "superlocalmemory.storage.admission_codec.os.open",
+        denied_open,
+    )
+
+    with pytest.raises(AdmissionKeyError, match="cannot be created"):
+        MachineKeyCommandCodec(key_path)
+
+
 def test_journal_reports_wrong_machine_key_as_bounded_payload_error(tmp_path: Path) -> None:
     journal_path = tmp_path / "admission.db"
     first = AdmissionJournal(
