@@ -412,29 +412,43 @@ def backfill_missing_embeddings(
                 continue
             try:
                 embedding_json = json.dumps(vec)
-                # Mirror run_embedding_migration's write path exactly.
-                db.execute(
-                    "UPDATE atomic_facts SET embedding = ? WHERE fact_id = ?",
-                    (embedding_json, fid),
-                )
                 # Metadata is not an independent record: it is the pointer to
                 # a sqlite-vec row. Creating it before the vector payload leaves
                 # semantic recall permanently blind while reporting success.
                 # VectorStore owns the atomic pair and repairs legacy orphans.
-                if (
-                    vector_store is not None
-                    and getattr(vector_store, "available", False)
-                    and not vector_store.upsert(
+                projection_written = False
+                if vector_store is not None and getattr(vector_store, "available", False):
+                    projection_written = vector_store.upsert(
                         fid,
                         pid,
                         vec,
                         model_name=current_model,
                     )
-                ):
-                    logger.warning(
-                        "backfill: vector projection failed for fact %s",
-                        fid[:16],
+                    if not projection_written:
+                        # Keep the canonical embedding NULL so the next
+                        # bounded self-heal pass retries this fact.  The old
+                        # order wrote JSON first, permanently removed the fact
+                        # from the backfill query, and silently stranded recall
+                        # without its sqlite-vec projection.
+                        logger.warning(
+                            "backfill: vector projection failed for fact %s; "
+                            "leaving it pending for retry",
+                            fid[:16],
+                        )
+                        continue
+
+                try:
+                    # Publish the canonical JSON only after the derived vector
+                    # projection is durable.  When sqlite-vec is unavailable,
+                    # this remains the supported JSON-only fallback path.
+                    db.execute(
+                        "UPDATE atomic_facts SET embedding = ? WHERE fact_id = ?",
+                        (embedding_json, fid),
                     )
+                except Exception:
+                    if projection_written and vector_store is not None:
+                        vector_store.delete(fid)
+                    raise
                 embedded += 1
                 # Cooperative yield: release db._lock briefly so concurrent
                 # user writes can acquire it between facts.  Without this,

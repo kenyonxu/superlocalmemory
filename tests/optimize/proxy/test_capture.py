@@ -240,9 +240,14 @@ class TestShadowCaptureRecord:
                     os.close(self.fd)
                     self.fd = -1
 
+        class FakeFileExistsError(OSError):
+            winerror = 80
+
         def fake_create_file(*args: object) -> FakeHandle:
             create_calls.append(args)
-            fd = os.open(args[0], os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+            if args[4] == 1:
+                raise FakeFileExistsError(80, "already exists")
+            fd = os.open(args[0], os.O_WRONLY | os.O_APPEND)
             return FakeHandle(fd)
 
         def fake_open_osfhandle(handle: int, _flags: int) -> int:
@@ -263,7 +268,9 @@ class TestShadowCaptureRecord:
             FILE_SHARE_DELETE=8,
             FILE_SHARE_READ=16,
             FILE_SHARE_WRITE=32,
-            OPEN_ALWAYS=64,
+            CREATE_NEW=1,
+            ERROR_FILE_EXISTS=80,
+            OPEN_EXISTING=3,
             TOKEN_QUERY=128,
         )
         fake_ntsecuritycon = SimpleNamespace(
@@ -300,6 +307,7 @@ class TestShadowCaptureRecord:
         monkeypatch.setitem(sys.modules, "win32security", fake_security)
         monkeypatch.setitem(sys.modules, "ntsecuritycon", fake_ntsecuritycon)
 
+        (tmp_path / "cap.jsonl").touch()
         assert cap.record({"x": 1}) is True
         assert token_closed == [True]
         assert ace_calls == [(3, 256, owner_sid)]
@@ -307,11 +315,13 @@ class TestShadowCaptureRecord:
         assert descriptor_calls[0][0::2] == (1, 0)
         assert isinstance(descriptor_calls[0][1], FakeAcl)
         assert descriptor_calls[1] == (16, 16)
-        assert len(create_calls) == 1
+        assert len(create_calls) == 2
         assert create_calls[0][1] == 1536
-        assert create_calls[0][4] == 64
+        assert create_calls[0][4] == 1
         assert create_calls[0][5] == 0x00200001
         assert create_calls[0][3].bInheritHandle is False
+        assert create_calls[1][3] is None
+        assert create_calls[1][4] == 3
         assert len(security_calls) == 1
         handle, object_type, flags, owner, group, dacl, sacl = security_calls[0]
         assert object_type == 9
@@ -320,6 +330,97 @@ class TestShadowCaptureRecord:
         assert isinstance(dacl, FakeAcl)
         assert security_order == ["acl", "detach", "crt"]
         assert handle.fd == -1
+
+    def test_windows_new_file_does_not_reapply_creation_dacl(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A new file already has the protected creation DACL."""
+        cap = ShadowCapture(path=tmp_path / "cap.jsonl")
+        security_calls: list[tuple[object, ...]] = []
+
+        class FakeToken:
+            def Close(self) -> None:
+                pass
+
+        class FakeAcl:
+            def AddAccessAllowedAce(self, *_args: object) -> None:
+                pass
+
+        class FakeSecurityDescriptor:
+            def SetSecurityDescriptorDacl(self, *_args: object) -> None:
+                pass
+
+            def SetSecurityDescriptorControl(self, *_args: object) -> None:
+                pass
+
+        class FakeSecurityAttributes:
+            def __init__(self) -> None:
+                self.bInheritHandle = False
+                self.SECURITY_DESCRIPTOR = FakeSecurityDescriptor()
+
+        class FakeHandle:
+            def __init__(self, fd: int) -> None:
+                self.fd = fd
+
+            def Detach(self) -> int:
+                fd = self.fd
+                self.fd = -1
+                return fd
+
+            def Close(self) -> None:
+                if self.fd >= 0:
+                    os.close(self.fd)
+
+        fake_api = SimpleNamespace(CloseHandle=os.close, GetCurrentProcess=lambda: "process")
+        fake_con = SimpleNamespace(
+            CREATE_NEW=1,
+            ERROR_FILE_EXISTS=80,
+            FILE_ATTRIBUTE_NORMAL=1,
+            FILE_ATTRIBUTE_REPARSE_POINT=2,
+            FILE_SHARE_DELETE=8,
+            FILE_SHARE_READ=16,
+            FILE_SHARE_WRITE=32,
+            OPEN_EXISTING=3,
+            TOKEN_QUERY=128,
+        )
+        fake_file = SimpleNamespace(
+            CreateFile=lambda *args: FakeHandle(
+                os.open(args[0], os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+            ),
+            GetFileInformationByHandle=lambda handle: (0,),
+        )
+        fake_security = SimpleNamespace(
+            ACL=FakeAcl,
+            ACL_REVISION=3,
+            DACL_SECURITY_INFORMATION=4,
+            PROTECTED_DACL_SECURITY_INFORMATION=8,
+            SECURITY_ATTRIBUTES=FakeSecurityAttributes,
+            SE_DACL_PROTECTED=16,
+            SE_FILE_OBJECT=9,
+            TokenUser=10,
+            GetTokenInformation=lambda token, kind: (object(), object()),
+            OpenProcessToken=lambda process, access: FakeToken(),
+            SetSecurityInfo=lambda *args: security_calls.append(args),
+        )
+        fake_ntsecuritycon = SimpleNamespace(
+            FILE_ALL_ACCESS=256,
+            FILE_APPEND_DATA=512,
+            WRITE_DAC=1024,
+        )
+        fake_msvcrt = SimpleNamespace(
+            open_osfhandle=lambda handle, flags: handle,
+        )
+
+        monkeypatch.setattr(capture_mod, "_is_windows", lambda: True)
+        monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+        monkeypatch.setitem(sys.modules, "win32api", fake_api)
+        monkeypatch.setitem(sys.modules, "win32con", fake_con)
+        monkeypatch.setitem(sys.modules, "win32file", fake_file)
+        monkeypatch.setitem(sys.modules, "win32security", fake_security)
+        monkeypatch.setitem(sys.modules, "ntsecuritycon", fake_ntsecuritycon)
+
+        assert cap.record({"x": 1}) is True
+        assert security_calls == []
 
     def test_windows_acl_failure_closes_descriptor_and_drops_entry(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

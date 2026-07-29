@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the server event loop, and the running daemon remains the sole writer.
 - Startup failures now preserve and report their original cause instead of
   being replaced by a secondary `profile_runtime` error.
+- Embedding repair now marks a fact complete only after its searchable vector
+  projection is durable. A failed projection remains pending and is retried
+  instead of silently reducing recall quality.
+- Windows shadow capture now preserves its owner-only file protection without
+  failing on newly created files on current Windows hosts.
 - Release builds now reject extra, missing, or byte-different Python modules
   across the npm package, Python wheel, and source distribution.
 

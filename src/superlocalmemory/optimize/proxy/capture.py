@@ -129,21 +129,53 @@ def _open_windows_capture_append(path: Path) -> int:
             win32security.SE_DACL_PROTECTED,
             win32security.SE_DACL_PROTECTED,
         )
-        handle = win32file.CreateFile(
-            os.fspath(path),
-            ntsecuritycon.FILE_APPEND_DATA | ntsecuritycon.WRITE_DAC,
+        desired_access = ntsecuritycon.FILE_APPEND_DATA | ntsecuritycon.WRITE_DAC
+        share_mode = (
             win32con.FILE_SHARE_READ
             | win32con.FILE_SHARE_WRITE
-            | win32con.FILE_SHARE_DELETE,
-            security_attributes,
-            win32con.OPEN_ALWAYS,
+            | win32con.FILE_SHARE_DELETE
+        )
+        file_flags = (
             win32con.FILE_ATTRIBUTE_NORMAL
             # pywin32 does not export this SDK constant from win32con on
             # every supported Python build. Keep the Microsoft-defined value
             # as a named fallback rather than silently following a reparse.
-            | getattr(win32con, "FILE_FLAG_OPEN_REPARSE_POINT", 0x00200000),
-            None,
+            | getattr(win32con, "FILE_FLAG_OPEN_REPARSE_POINT", 0x00200000)
         )
+        try:
+            # CREATE_NEW is the only race-safe proof that the protected
+            # SECURITY_ATTRIBUTES were applied to this exact file.  OPEN_ALWAYS
+            # would require trusting GetLastError after the pywin32 wrapper has
+            # returned, which is not a documented preservation boundary.
+            handle = win32file.CreateFile(
+                os.fspath(path),
+                desired_access,
+                share_mode,
+                security_attributes,
+                getattr(win32con, "CREATE_NEW", 1),
+                file_flags,
+                None,
+            )
+            created_new = True
+        except Exception as exc:
+            winerror = getattr(exc, "winerror", None)
+            if winerror is None and exc.args:
+                winerror = exc.args[0]
+            if winerror != getattr(win32con, "ERROR_FILE_EXISTS", 80):
+                raise
+            # The creation descriptor is ignored for existing files. Reopen
+            # the exact path without following a reparse point, then replace
+            # its DACL through this WRITE_DAC-capable handle before appending.
+            handle = win32file.CreateFile(
+                os.fspath(path),
+                desired_access,
+                share_mode,
+                None,
+                getattr(win32con, "OPEN_EXISTING", 3),
+                file_flags,
+                None,
+            )
+            created_new = False
         file_info = win32file.GetFileInformationByHandle(handle)
         if file_info[0] & win32con.FILE_ATTRIBUTE_REPARSE_POINT:
             raise OSError(
@@ -151,25 +183,27 @@ def _open_windows_capture_append(path: Path) -> int:
                 "capture path is a Windows reparse point",
                 path,
             )
-        try:
-            # Enforce the DACL while this is still the original CreateFile
-            # handle carrying WRITE_DAC. Transferring it into Python's CRT
-            # first can lose the authority SetSecurityInfo needs on Windows.
-            win32security.SetSecurityInfo(
-                handle,
-                win32security.SE_FILE_OBJECT,
-                win32security.DACL_SECURITY_INFORMATION
-                | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
-                None,
-                None,
-                dacl,
-                None,
-            )
-        except Exception as exc:
-            raise OSError(
-                "Windows capture ACL could not be enforced "
-                f"({type(exc).__name__}: {exc})"
-            ) from exc
+        if not created_new:
+            try:
+                # Existing files ignore the creation security descriptor, so
+                # enforce the DACL while this is still the original CreateFile
+                # handle carrying WRITE_DAC. Transferring it into Python's CRT
+                # first can lose the authority SetSecurityInfo needs.
+                win32security.SetSecurityInfo(
+                    handle,
+                    win32security.SE_FILE_OBJECT,
+                    win32security.DACL_SECURITY_INFORMATION
+                    | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+                    None,
+                    None,
+                    dacl,
+                    None,
+                )
+            except Exception as exc:
+                raise OSError(
+                    "Windows capture ACL could not be enforced "
+                    f"({type(exc).__name__}: {exc})"
+                ) from exc
 
         # Transfer the native handle to Python's CRT descriptor exactly once.
         raw_handle = handle.Detach()
