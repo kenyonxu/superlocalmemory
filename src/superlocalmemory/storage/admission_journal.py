@@ -348,14 +348,16 @@ class AdmissionJournal:
         journal_id: str,
         *,
         deadline: float | None = None,
+        known_prepared: bool = False,
     ) -> AdmissionEntry:
         # A concurrent retry may observe ``prepared`` and then lose the race to
         # another caller that commits the same idempotent command.  Treat that
         # terminal state as a successful no-op so the retry can return the
         # canonical receipt instead of surfacing a false transition failure.
-        existing = self._get_entry(journal_id, deadline=deadline)
-        if existing.state in {"dispatched", "committed"}:
-            return existing
+        if not known_prepared:
+            existing = self._get_entry(journal_id, deadline=deadline)
+            if existing.state in {"dispatched", "committed"}:
+                return existing
         return self._transition(
             journal_id,
             target="dispatched",

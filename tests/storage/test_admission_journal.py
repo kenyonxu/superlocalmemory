@@ -103,6 +103,35 @@ def test_idempotent_retries_do_not_open_redundant_write_transactions(
     assert journal.mark_committed(prepared.journal_id, receipt) == committed
 
 
+def test_known_prepared_dispatch_skips_redundant_read_connection(
+    tmp_path,
+    actor,
+    admission_request,
+    monkeypatch,
+) -> None:
+    journal = AdmissionJournal(tmp_path / "admission_journal.db", codec=_TestCodec())
+    prepared = journal.prepare(admission_request, actor)
+    original_connection = journal._connection
+    connection_count = 0
+
+    @contextmanager
+    def observed_connection(*, timeout: float = 1.0):
+        nonlocal connection_count
+        connection_count += 1
+        with original_connection(timeout=timeout) as connection:
+            yield connection
+
+    monkeypatch.setattr(journal, "_connection", observed_connection)
+
+    dispatched = journal.mark_dispatched(
+        prepared.journal_id,
+        known_prepared=True,
+    )
+
+    assert dispatched.state == "dispatched"
+    assert connection_count == 1
+
+
 def test_dispatched_transition_is_advisory_not_a_second_full_fsync(
     tmp_path, actor, admission_request, monkeypatch
 ) -> None:

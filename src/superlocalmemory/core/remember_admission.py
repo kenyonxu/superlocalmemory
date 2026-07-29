@@ -98,6 +98,7 @@ class RememberService:
         dispatched = self._journal.mark_dispatched(
             prepared.journal_id,
             deadline=deadline,
+            known_prepared=prepared.state == "prepared",
         )
         if dispatched.original_receipt is not None:
             return RememberReceipt.from_mapping(dispatched.original_receipt)
