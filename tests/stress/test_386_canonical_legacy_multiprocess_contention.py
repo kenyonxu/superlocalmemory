@@ -229,6 +229,25 @@ def test_386_canonical_remember_survives_legacy_multiprocess_contention(
     caused neither duplicated work nor silently lost writes.
     """
     harness = _new_harness(tmp_path, monkeypatch)
+    from superlocalmemory.core.remember_runtime import _CoordinatorAdapter
+
+    original_submit = _CoordinatorAdapter.submit
+    coordinator_entries: list[tuple[int, int]] = []
+    coordinator_entries_lock = threading.Lock()
+
+    def observed_submit(
+        adapter: _CoordinatorAdapter,
+        command: Any,
+        *,
+        wait_ms: int,
+    ) -> Any:
+        with coordinator_entries_lock:
+            coordinator_entries.append(
+                (wait_ms, adapter._coordinator._queued_count)
+            )
+        return original_submit(adapter, command, wait_ms=wait_ms)
+
+    monkeypatch.setattr(_CoordinatorAdapter, "submit", observed_submit)
     harness.runtime.start()
     context = multiprocessing.get_context("spawn")
     start = context.Event()
@@ -325,6 +344,7 @@ def test_386_canonical_remember_survives_legacy_multiprocess_contention(
                 pytest.fail(f"legacy worker did not report a result: {exc}")
 
         child_errors = [str(result["error"]) for result in child_results if not result["ok"]]
+        print(f"coordinator_entries={coordinator_entries!r}")
         assert not foreground_errors, (
             "foreground remember failures: "
             f"{[_exception_chain(error) for error in foreground_errors]!r}"
