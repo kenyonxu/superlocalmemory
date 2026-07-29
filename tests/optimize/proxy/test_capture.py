@@ -172,9 +172,10 @@ class TestShadowCaptureRecord:
         def _boom(*a: Any, **k: Any):
             raise OSError("disk full")
 
-        monkeypatch.setattr("builtins.open", _boom)
-        # first write uses os.open path; force that too
-        monkeypatch.setattr("os.open", _boom)
+        # Patch the platform-neutral secure-open boundary. Windows opens through
+        # CreateFile + open_osfhandle, while POSIX uses os.open; this contract
+        # must prove fail-open behavior on both implementations.
+        monkeypatch.setattr(capture_mod, "_open_capture_append", _boom)
         assert cap.record({"x": 1}) is False  # must not raise
 
     def test_singleton_get_instance(self) -> None:
