@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from superlocalmemory.core import remember_admission as admission_mod
 from superlocalmemory.core.remember_admission import (
     AdmissionRejected,
     RememberAdmissionCommand,
@@ -117,11 +118,19 @@ def test_coordinator_receives_only_the_remaining_end_to_end_budget(
         }
     )
     original_prepare = journal.prepare
+    real_monotonic = time.monotonic
+    elapsed = 0.0
+
+    def controlled_monotonic() -> float:
+        return real_monotonic() + elapsed
 
     def delayed_prepare(*args, **kwargs):
-        time.sleep(0.05)
-        return original_prepare(*args, **kwargs)
+        nonlocal elapsed
+        prepared = original_prepare(*args, **kwargs)
+        elapsed = 0.05
+        return prepared
 
+    monkeypatch.setattr(admission_mod.time, "monotonic", controlled_monotonic)
     monkeypatch.setattr(journal, "prepare", delayed_prepare)
     RememberService(journal, coordinator).remember(
         _request(),

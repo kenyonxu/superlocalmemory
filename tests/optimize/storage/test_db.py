@@ -36,6 +36,7 @@ def test_isolation_wrong_db_raises(tmp_path: Path) -> None:
 
 # ---- file permissions (SEC-C-01) ----
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits do not represent an NTFS ACL")
 def test_chmod_600_set(tmp_cache_db, tmp_path: Path) -> None:
     mode = stat_mode(tmp_path / "llmcache.db")
     assert mode is not None
