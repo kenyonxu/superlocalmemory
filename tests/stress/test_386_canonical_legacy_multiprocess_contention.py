@@ -205,6 +205,18 @@ def _assert_no_busy(errors: list[BaseException | str]) -> None:
     assert not leaked, f"SQLite contention leaked to a caller: {leaked!r}"
 
 
+def _exception_chain(error: BaseException) -> str:
+    """Render typed causal stages without exposing remembered content."""
+    stages: list[str] = []
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        stages.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+    return " <- ".join(stages)
+
+
 def test_386_canonical_remember_survives_legacy_multiprocess_contention(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -312,7 +324,10 @@ def test_386_canonical_remember_survives_legacy_multiprocess_contention(
                 pytest.fail(f"legacy worker did not report a result: {exc}")
 
         child_errors = [str(result["error"]) for result in child_results if not result["ok"]]
-        assert not foreground_errors, f"foreground remember failures: {foreground_errors!r}"
+        assert not foreground_errors, (
+            "foreground remember failures: "
+            f"{[_exception_chain(error) for error in foreground_errors]!r}"
+        )
         assert not reader_errors, f"strict read failures: {reader_errors!r}"
         assert not child_errors, f"legacy child failures: {child_errors!r}"
         _assert_no_busy([*foreground_errors, *reader_errors, *child_errors])

@@ -256,6 +256,11 @@ def atomic_write(
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     if hasattr(os, "O_NOFOLLOW") and _is_posix():
         flags |= os.O_NOFOLLOW  # SEC — POSIX refuses symlinks
+    if hasattr(os, "O_BINARY") and not _is_posix():
+        # Windows file descriptors default to text mode, which rewrites LF
+        # bytes as CRLF.  The sync log hashes the caller's original bytes, so
+        # text-mode conversion makes an unchanged file look modified forever.
+        flags |= os.O_BINARY
 
     mode = posix_mode if _is_posix() else windows_mode
     fd = os.open(str(tmp), flags, mode)
