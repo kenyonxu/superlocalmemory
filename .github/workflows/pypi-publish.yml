@@ -111,6 +111,14 @@ jobs:
           python3 scripts/release_evidence.py verify-npm \
             --tarball "${{ steps.artifacts.outputs.npm_tarball }}" \
             --version "${{ steps.version.outputs.version }}"
+          WHEEL=$(find dist/python -maxdepth 1 -type f -name '*.whl' -print -quit)
+          SDIST=$(find dist/python -maxdepth 1 -type f -name '*.tar.gz' -print -quit)
+          test -n "$WHEEL"
+          test -n "$SDIST"
+          python3 scripts/release_evidence.py verify-source-parity \
+            --wheel "$WHEEL" \
+            --sdist "$SDIST" \
+            --npm "${{ steps.artifacts.outputs.npm_tarball }}"
 
       - name: Test exact candidate artifacts
         env:

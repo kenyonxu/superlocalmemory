@@ -18,6 +18,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -234,6 +235,36 @@ class TestRememberEdgeCases:
         assert result["code"] == "DAEMON_UNAVAILABLE"
         assert result["retryable"] is True
 
+    def test_remember_resolves_offline_pool_outside_event_loop(self):
+        """Mounted HTTP fallback cannot synchronously probe its own daemon."""
+        remember = _get_remember_tool()
+        event_loop_threads: list[int] = []
+        choose_pool_threads: list[int] = []
+        pool = MagicMock()
+        pool.store.return_value = {
+            "ok": True,
+            "fact_ids": ["thread-safe-fact"],
+            "count": 1,
+        }
+
+        def choose_pool():
+            choose_pool_threads.append(threading.get_ident())
+            return pool
+
+        async def invoke():
+            event_loop_threads.append(threading.get_ident())
+            return await remember("offline thread-boundary witness")
+
+        with patch(
+            "superlocalmemory.mcp._daemon_proxy.choose_pool",
+            side_effect=choose_pool,
+        ):
+            result = asyncio.run(invoke())
+
+        assert result["success"] is True
+        assert choose_pool_threads
+        assert choose_pool_threads[0] != event_loop_threads[0]
+
     def test_remember_agent_id_is_untrusted_worker_metadata(self):
         """Caller agent ID is audit metadata, not the trusted actor."""
         remember = _get_remember_tool()
@@ -290,6 +321,32 @@ class TestRememberWriteThrough:
         assert result["success"] is False
         assert result["retryable"] is True
         assert "daemon" in result["error"].lower()
+
+    def test_remember_daemon_request_exception_never_falls_back_to_local_writer(
+        self, monkeypatch,
+    ) -> None:
+        """A timed-out owned daemon remains the sole canonical writer."""
+        import superlocalmemory.cli.daemon as _d
+
+        monkeypatch.setattr(_d, "is_daemon_running", lambda *a, **k: True)
+
+        def unavailable(*args, **kwargs):
+            raise TimeoutError("canonical daemon request timed out")
+
+        monkeypatch.setattr(_d, "daemon_request", unavailable)
+        choose_pool = MagicMock()
+
+        remember = _get_remember_tool()
+        with patch(
+            "superlocalmemory.mcp._daemon_proxy.choose_pool",
+            choose_pool,
+        ):
+            result = asyncio.run(remember("retain daemon ownership"))
+
+        assert result["success"] is False
+        assert result["code"] == "DAEMON_UNAVAILABLE"
+        assert result["retryable"] is True
+        choose_pool.assert_not_called()
 
     def test_complete_empty_write_never_fabricates_pending_fact_id(
         self, monkeypatch,

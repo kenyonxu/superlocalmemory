@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-import json
 import io
+import json
 import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
-
 from scripts.release_evidence import (
     build_cyclonedx_sbom,
     build_evidence,
     verify_evidence,
     verify_npm_tarball,
+    verify_python_source_parity,
     write_evidence,
 )
 
@@ -156,3 +157,96 @@ def test_npm_candidate_verifier_rejects_version_drift(tmp_path: Path) -> None:
     errors = verify_npm_tarball(tarball, "3.7.0")
 
     assert any("version mismatch" in error for error in errors)
+
+
+def _write_python_artifacts(
+    root: Path,
+    *,
+    wheel_sources: dict[str, bytes],
+    sdist_sources: dict[str, bytes],
+    npm_sources: dict[str, bytes],
+) -> tuple[Path, Path, Path]:
+    wheel = root / "superlocalmemory-3.8.10-py3-none-any.whl"
+    sdist = root / "superlocalmemory-3.8.10.tar.gz"
+    npm = root / "superlocalmemory-3.8.10.tgz"
+    root.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for path, payload in wheel_sources.items():
+            archive.writestr(f"superlocalmemory/{path}", payload)
+    with tarfile.open(sdist, "w:gz") as archive:
+        for path, payload in sdist_sources.items():
+            info = tarfile.TarInfo(
+                f"superlocalmemory-3.8.10/src/superlocalmemory/{path}"
+            )
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+    with tarfile.open(npm, "w:gz") as archive:
+        for path, payload in npm_sources.items():
+            info = tarfile.TarInfo(
+                f"package/src/superlocalmemory/{path}"
+            )
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+    return wheel, sdist, npm
+
+
+def test_python_source_parity_accepts_identical_release_archives(
+    tmp_path: Path,
+) -> None:
+    sources = {
+        "__init__.py": b'__version__ = "3.8.10"\n',
+        "core/runtime.py": b"READY = True\n",
+    }
+    wheel, sdist, npm = _write_python_artifacts(
+        tmp_path,
+        wheel_sources=sources,
+        sdist_sources=sources,
+        npm_sources=sources,
+    )
+
+    assert verify_python_source_parity(wheel, sdist, npm) == []
+
+
+def test_python_source_parity_rejects_stale_wheel_modules(
+    tmp_path: Path,
+) -> None:
+    sources = {"__init__.py": b'__version__ = "3.8.10"\n'}
+    wheel_sources = {**sources, "cli/deleted_module.py": b"STALE = True\n"}
+    wheel, sdist, npm = _write_python_artifacts(
+        tmp_path,
+        wheel_sources=wheel_sources,
+        sdist_sources=sources,
+        npm_sources=sources,
+    )
+
+    errors = verify_python_source_parity(wheel, sdist, npm)
+
+    assert any("cli/deleted_module.py" in error for error in errors)
+    assert any("source set mismatch" in error for error in errors)
+
+
+def test_python_source_parity_rejects_byte_drift(tmp_path: Path) -> None:
+    wheel, sdist, npm = _write_python_artifacts(
+        tmp_path,
+        wheel_sources={"core/runtime.py": b"READY = True\n"},
+        sdist_sources={"core/runtime.py": b"READY = False\n"},
+        npm_sources={"core/runtime.py": b"READY = True\n"},
+    )
+
+    errors = verify_python_source_parity(wheel, sdist, npm)
+
+    assert any("content mismatch" in error for error in errors)
+
+
+def test_python_source_parity_rejects_empty_archives(tmp_path: Path) -> None:
+    wheel, sdist, npm = _write_python_artifacts(
+        tmp_path,
+        wheel_sources={},
+        sdist_sources={},
+        npm_sources={},
+    )
+
+    errors = verify_python_source_parity(wheel, sdist, npm)
+
+    assert errors == ["release archives contain no SuperLocalMemory Python sources"]

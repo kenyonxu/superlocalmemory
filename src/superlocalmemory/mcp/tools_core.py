@@ -105,6 +105,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
         # recall window so a parallel/next agent finds memories saved seconds ago.
         # Falls back to the capability-owned worker only if the daemon is
         # unreachable. Raw pending.db writes are legacy replay input only.
+        daemon_owned = False
         try:
             import asyncio as _asyncio
             from superlocalmemory.cli.daemon import daemon_request, is_daemon_running
@@ -159,6 +160,15 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 }
         except Exception as dexc:
             logger.debug("MCP remember via daemon failed, pending fallback: %s", dexc)
+            if daemon_owned:
+                return {
+                    "success": False,
+                    "code": "DAEMON_UNAVAILABLE",
+                    "retryable": True,
+                    "error": (
+                        "DAEMON_UNAVAILABLE: owned daemon is unavailable; retry later."
+                    ),
+                }
 
         try:
             import asyncio as _asyncio
@@ -174,11 +184,12 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     or "mcp:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
                 ),
             }
-            stored = await _asyncio.to_thread(
-                choose_pool().store,
-                content,
-                worker_meta,
-            )
+
+            def _store_via_daemon_pool():
+                pool = choose_pool()
+                return pool.store(content, worker_meta)
+
+            stored = await _asyncio.to_thread(_store_via_daemon_pool)
             if not isinstance(stored, dict) or not stored.get("ok"):
                 if isinstance(stored, dict) and stored.get("code") == "DAEMON_UNAVAILABLE":
                     return {

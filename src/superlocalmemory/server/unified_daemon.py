@@ -1244,6 +1244,7 @@ async def lifespan(application: FastAPI):
     engine = None
     config = None
     canonical_remember_runtime = None
+    profile_runtime = None
 
     # The local dashboard obtains its short-lived browser credential from
     # ``/internal/token`` before its first write or token-gated read.  A
@@ -1916,11 +1917,17 @@ async def lifespan(application: FastAPI):
 
     except Exception:
         logger.exception("Engine init failed")  # auto-includes traceback
-        _release_canonical_remember_runtime(
+        writer_released = _release_canonical_remember_runtime(
             application, canonical_remember_runtime,
         )
         application.state.engine = None
         application.state.config = None
+        if engine is not None and writer_released:
+            try:
+                engine.close()
+            except Exception:
+                logger.debug("partially initialized engine cleanup failed", exc_info=True)
+        raise
 
     application.state.observe_buffer = _observe_buffer
 

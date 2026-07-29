@@ -209,6 +209,28 @@ def test_lifespan_cleanup_keeps_a_draining_canonical_writer_reachable(
     assert app.state.canonical_remember_runtime is writer
 
 
+def test_mandatory_engine_startup_failure_aborts_before_ready_publish() -> None:
+    """The original engine error must not be masked by an unbound runtime."""
+    import inspect
+
+    from superlocalmemory.server import unified_daemon
+
+    source = inspect.getsource(unified_daemon.lifespan)
+    initialization = source.index("\n    profile_runtime = None\n")
+    engine_try = source.index("try:", initialization)
+    engine_failure = source.index('logger.exception("Engine init failed")')
+    ready_publish = source.index("_publish_process_descriptor")
+
+    assert initialization < engine_try < engine_failure < ready_publish
+    failure_block = source[
+        engine_failure:source.index(
+            "application.state.observe_buffer = _observe_buffer",
+            engine_failure,
+        )
+    ]
+    assert "\n        raise\n" in failure_block
+
+
 def test_configured_daemon_port_honours_the_isolated_port(monkeypatch) -> None:
     """Operator-facing readiness text must name the port the process binds."""
     from superlocalmemory.server import unified_daemon
