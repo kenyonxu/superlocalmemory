@@ -248,6 +248,18 @@ class AdmissionJournal:
         now = _now_ms()
         journal_id = uuid.uuid4().hex
 
+        existing = self._get_by_idempotency_key(
+            request.profile_id,
+            request.idempotency_key,
+            deadline=deadline,
+        )
+        if existing is not None:
+            if existing.request_hash != request_hash:
+                raise IdempotencyConflict(
+                    "idempotency key belongs to a different immutable request"
+                )
+            return existing
+
         with self._write_transaction(deadline=deadline) as conn:
             existing = conn.execute(
                 "SELECT * FROM admission_journal "
@@ -324,6 +336,9 @@ class AdmissionJournal:
         # another caller that commits the same idempotent command.  Treat that
         # terminal state as a successful no-op so the retry can return the
         # canonical receipt instead of surfacing a false transition failure.
+        existing = self._get_entry(journal_id, deadline=deadline)
+        if existing.state in {"dispatched", "committed"}:
+            return existing
         return self._transition(
             journal_id,
             target="dispatched",
@@ -363,6 +378,9 @@ class AdmissionJournal:
             raise ValueError("receipt operation_id must be a string")
         if commit_sequence is not None and not isinstance(commit_sequence, int):
             raise ValueError("receipt commit_sequence must be an integer")
+        existing = self._get_entry(journal_id, deadline=deadline)
+        if existing.state == "committed":
+            return existing
         return self._transition(
             journal_id,
             target="committed",
@@ -374,24 +392,13 @@ class AdmissionJournal:
         )
 
     def get(self, journal_id: str) -> AdmissionEntry:
-        with self._read_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM admission_journal WHERE journal_id=?", (journal_id,)
-            ).fetchone()
-        if row is None:
-            raise KeyError(journal_id)
-        return self._entry_from_row(row)
+        return self._get_entry(journal_id)
 
     def get_by_idempotency_key(
         self, profile_id: str, idempotency_key: str
     ) -> AdmissionEntry | None:
         """Return a profile-scoped retry record, never a cross-profile match."""
-        with self._read_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM admission_journal WHERE profile_id=? AND idempotency_key=?",
-                (profile_id, idempotency_key),
-            ).fetchone()
-        return self._entry_from_row(row) if row is not None else None
+        return self._get_by_idempotency_key(profile_id, idempotency_key)
 
     def count(self) -> int:
         with self._read_connection() as conn:
@@ -489,6 +496,34 @@ class AdmissionJournal:
             ).fetchone()
         assert updated is not None
         return self._entry_from_row(updated)
+
+    def _get_entry(
+        self,
+        journal_id: str,
+        *,
+        deadline: float | None = None,
+    ) -> AdmissionEntry:
+        with self._read_connection(deadline=deadline) as conn:
+            row = conn.execute(
+                "SELECT * FROM admission_journal WHERE journal_id=?", (journal_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(journal_id)
+        return self._entry_from_row(row)
+
+    def _get_by_idempotency_key(
+        self,
+        profile_id: str,
+        idempotency_key: str,
+        *,
+        deadline: float | None = None,
+    ) -> AdmissionEntry | None:
+        with self._read_connection(deadline=deadline) as conn:
+            row = conn.execute(
+                "SELECT * FROM admission_journal WHERE profile_id=? AND idempotency_key=?",
+                (profile_id, idempotency_key),
+            ).fetchone()
+        return self._entry_from_row(row) if row is not None else None
 
     def _initialize(self) -> None:
         with self._connection() as conn:

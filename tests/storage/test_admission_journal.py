@@ -73,6 +73,35 @@ def test_same_idempotency_key_returns_original_receipt(tmp_path, actor, admissio
     assert journal.count() == 1
 
 
+def test_idempotent_retries_do_not_open_redundant_write_transactions(
+    tmp_path, actor, admission_request, monkeypatch
+) -> None:
+    journal = AdmissionJournal(tmp_path / "admission_journal.db", codec=_TestCodec())
+    prepared = journal.prepare(admission_request, actor)
+    dispatched = journal.mark_dispatched(prepared.journal_id)
+
+    def fail_write(*_args, **_kwargs):
+        raise AssertionError("idempotent retry opened a write transaction")
+
+    monkeypatch.setattr(journal, "_write_transaction", fail_write)
+    assert journal.prepare(admission_request, actor) == dispatched
+    assert journal.mark_dispatched(prepared.journal_id) == dispatched
+
+    monkeypatch.undo()
+    receipt = {
+        "operation_id": "operation-1",
+        "fact_ids": ["fact-1"],
+        "state": "queryable",
+        "commit_sequence": 3,
+    }
+    committed = journal.mark_committed(prepared.journal_id, receipt)
+    monkeypatch.setattr(journal, "_write_transaction", fail_write)
+
+    assert journal.prepare(admission_request, actor) == committed
+    assert journal.mark_dispatched(prepared.journal_id) == committed
+    assert journal.mark_committed(prepared.journal_id, receipt) == committed
+
+
 def test_changed_payload_with_same_key_conflicts(tmp_path, actor, admission_request) -> None:
     journal = AdmissionJournal(tmp_path / "admission_journal.db", codec=_TestCodec())
     journal.prepare(admission_request, actor)
