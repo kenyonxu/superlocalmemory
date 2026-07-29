@@ -227,7 +227,7 @@ class OllamaEmbedder:
         data = resp.json()
         # Ollama /api/embed returns {"embeddings": [[...]]}
         vec = data["embeddings"][0]
-        return self._normalize(vec)
+        return self._normalize_checked(vec)
 
     def _call_ollama_embed_batch(self, texts: list[str]) -> list[list[float] | None]:
         """Call Ollama embed endpoint with batch input.
@@ -245,7 +245,16 @@ class OllamaEmbedder:
         resp.raise_for_status()
         data = resp.json()
         vectors = data.get("embeddings", [])
-        return [self._normalize(v) for v in vectors]
+        return [self._normalize_checked(v) for v in vectors]
+
+    def _normalize_checked(self, vec: list[float]) -> list[float]:
+        """Reject provider drift before a vector can enter any durable store."""
+        actual = len(vec)
+        if actual != self._dimension:
+            raise ValueError(
+                f"Ollama embedding dimension {actual} != expected {self._dimension}"
+            )
+        return self._normalize(vec)
 
     @staticmethod
     def _normalize(vec: list[float]) -> list[float]:
