@@ -2,10 +2,12 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com
 
-"""Separate FULL-synchronous journal for durable remember admission.
+"""Separate journal for durable remember admission.
 
 The journal is intentionally not a memory store.  Its only mutable state is a
 small encrypted replay command and the canonical receipt associated with it.
+Durable prepare and terminal transitions are FULL-synchronous; the advisory
+dispatched marker may use NORMAL because both replay states are equivalent.
 Canonical facts, FTS, graph, vectors, and model work stay outside this module.
 """
 
@@ -213,9 +215,9 @@ class AdmissionJournal:
         self._codec = codec
         # The daemon is the sole journal owner, but many HTTP/MCP request
         # threads can prepare and transition entries concurrently. SQLite has
-        # one writer, so admit those tiny FULL-synchronous transactions through
-        # one process-local lock instead of letting BEGIN IMMEDIATE race and
-        # leak SQLITE_BUSY to remember callers.
+        # one writer, so admit those tiny journal transactions through one
+        # process-local lock instead of letting BEGIN IMMEDIATE race and leak
+        # SQLITE_BUSY to remember callers.
         self._write_lock = threading.RLock()
         self._initialize()
 
@@ -350,6 +352,7 @@ class AdmissionJournal:
             target="dispatched",
             allowed={"prepared", "dispatched", "committed"},
             deadline=deadline,
+            full_sync=False,
         )
 
     def mark_rejected(
@@ -464,8 +467,9 @@ class AdmissionJournal:
         operation_id: str | None = None,
         commit_sequence: int | None = None,
         deadline: float | None = None,
+        full_sync: bool = True,
     ) -> AdmissionEntry:
-        with self._write_transaction(deadline=deadline) as conn:
+        with self._write_transaction(deadline=deadline, full_sync=full_sync) as conn:
             row = conn.execute(
                 "SELECT * FROM admission_journal WHERE journal_id=?", (journal_id,)
             ).fetchone()
@@ -544,11 +548,19 @@ class AdmissionJournal:
         self,
         *,
         deadline: float | None = None,
+        full_sync: bool = True,
     ) -> Generator[sqlite3.Connection, None, None]:
         """Serialize and atomically commit one deadline-bounded mutation."""
         with self._write_slot(deadline=deadline):
             remaining = _remaining_seconds(deadline)
             with self._connection(timeout=remaining) as conn:
+                if not full_sync:
+                    # ``dispatched`` is advisory: both prepared and dispatched
+                    # entries replay through the same idempotent coordinator.
+                    # NORMAL avoids a second foreground fsync after the durable
+                    # FULL-synchronous prepare; a power loss can at worst
+                    # restore the safe prepared state.
+                    conn.execute("PRAGMA synchronous=NORMAL")
                 with self._sqlite_transaction(conn, deadline=deadline):
                     yield conn
 

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import pytest
@@ -100,6 +101,27 @@ def test_idempotent_retries_do_not_open_redundant_write_transactions(
     assert journal.prepare(admission_request, actor) == committed
     assert journal.mark_dispatched(prepared.journal_id) == committed
     assert journal.mark_committed(prepared.journal_id, receipt) == committed
+
+
+def test_dispatched_transition_is_advisory_not_a_second_full_fsync(
+    tmp_path, actor, admission_request, monkeypatch
+) -> None:
+    journal = AdmissionJournal(tmp_path / "admission_journal.db", codec=_TestCodec())
+    prepared = journal.prepare(admission_request, actor)
+    original_connection = journal._connection
+    statements: list[str] = []
+
+    @contextmanager
+    def observed_connection(*, timeout: float = 1.0):
+        with original_connection(timeout=timeout) as connection:
+            connection.set_trace_callback(statements.append)
+            yield connection
+
+    monkeypatch.setattr(journal, "_connection", observed_connection)
+    dispatched = journal.mark_dispatched(prepared.journal_id)
+
+    assert dispatched.state == "dispatched"
+    assert "PRAGMA synchronous=NORMAL" in statements
 
 
 def test_changed_payload_with_same_key_conflicts(tmp_path, actor, admission_request) -> None:
