@@ -118,16 +118,15 @@ def test_coordinator_receives_only_the_remaining_end_to_end_budget(
         }
     )
     original_prepare = journal.prepare
-    real_monotonic = time.monotonic
-    elapsed = 0.0
+    now = 1_000.0
 
     def controlled_monotonic() -> float:
-        return real_monotonic() + elapsed
+        return now
 
     def delayed_prepare(*args, **kwargs):
-        nonlocal elapsed
+        nonlocal now
         prepared = original_prepare(*args, **kwargs)
-        elapsed = 0.05
+        now += 0.05
         return prepared
 
     monkeypatch.setattr(admission_mod.time, "monotonic", controlled_monotonic)
