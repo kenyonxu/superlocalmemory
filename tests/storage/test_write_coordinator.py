@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -122,6 +125,185 @@ def test_typed_command_replays_prior_receipt_without_reexecuting_handler(tmp_pat
         assert coordinator.submit(command, timeout=0.5).receipt == expected
         assert calls == 1
     finally:
+        coordinator.release_ownership()
+
+
+def test_foreground_command_uses_its_remaining_deadline_for_sqlite_contention(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A legacy writer may release after SQLite's old fixed one-second wait."""
+    from superlocalmemory.storage.write_coordinator import (
+        CommandKind,
+        WriteCommand,
+        WriteCoordinator,
+        WriteResult,
+    )
+
+    db_path = tmp_path / "memory.db"
+    _install_write_commits(db_path)
+    coordinator = WriteCoordinator(db_path)
+    begin_attempted = threading.Event()
+    real_open_connection = coordinator._open_connection
+
+    class SignalingConnection:
+        def __init__(self, connection) -> None:
+            self._connection = connection
+
+        def execute(self, sql, *args):
+            if sql == "BEGIN IMMEDIATE":
+                begin_attempted.set()
+            return self._connection.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(
+        coordinator,
+        "_open_connection",
+        lambda: SignalingConnection(real_open_connection()),
+    )
+    assert coordinator.claim_ownership()
+    coordinator.register_handler(
+        CommandKind.ADMISSION,
+        lambda _conn, _capability, command: WriteResult.from_receipt(
+            command,
+            {"operation_id": "operation:deadline-contention"},
+        ),
+    )
+    coordinator.start()
+    blocker_ready = threading.Event()
+    release_blocker = threading.Event()
+
+    def hold_legacy_write() -> None:
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            blocker_ready.set()
+            assert release_blocker.wait(timeout=3.0)
+            connection.rollback()
+        finally:
+            connection.close()
+
+    blocker = threading.Thread(target=hold_legacy_write)
+    blocker.start()
+    assert blocker_ready.wait(timeout=1.0)
+    timer = None
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            result_future = pool.submit(
+                coordinator.submit,
+                WriteCommand.create(
+                    CommandKind.ADMISSION,
+                    _admission_payload("deadline-contention"),
+                ),
+                timeout=1.8,
+            )
+            assert begin_attempted.wait(timeout=1.0)
+            timer = threading.Timer(1.2, release_blocker.set)
+            timer.start()
+            result = result_future.result(timeout=2.5)
+        assert result.receipt["operation_id"] == "operation:deadline-contention"
+    finally:
+        release_blocker.set()
+        if timer is not None:
+            timer.cancel()
+        blocker.join(timeout=1.0)
+        coordinator.release_ownership()
+    assert not blocker.is_alive()
+
+
+def test_timed_out_command_cannot_commit_after_caller_returns(tmp_path) -> None:
+    from superlocalmemory.storage.write_coordinator import (
+        CommandKind,
+        WriteCommand,
+        WriteCoordinator,
+        WriteDeadlineExceededError,
+        WriteResult,
+    )
+
+    db_path = tmp_path / "memory.db"
+    _install_write_commits(db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE admissions (value TEXT NOT NULL)")
+    coordinator = WriteCoordinator(db_path)
+    assert coordinator.claim_ownership()
+    try:
+        def slow_handler(conn, _capability, command):
+            conn.execute("INSERT INTO admissions(value) VALUES ('must-rollback')")
+            time.sleep(0.2)
+            return WriteResult.from_receipt(
+                command,
+                {"operation_id": "operation:must-rollback"},
+            )
+
+        coordinator.register_handler(CommandKind.ADMISSION, slow_handler)
+        with pytest.raises(WriteDeadlineExceededError):
+            coordinator.submit(
+                WriteCommand.create(
+                    CommandKind.ADMISSION,
+                    _admission_payload("must-rollback"),
+                ),
+                timeout=0.05,
+            )
+
+        assert coordinator.execute("SELECT COUNT(*) FROM admissions")[0][0] == 0
+        assert coordinator.execute("SELECT COUNT(*) FROM write_commits")[0][0] == 0
+    finally:
+        coordinator.release_ownership()
+
+
+def test_stalled_commit_does_not_bypass_bounded_shutdown(tmp_path, monkeypatch) -> None:
+    """A commit in progress must not hold the coordinator control condition."""
+    from superlocalmemory.storage.write_coordinator import (
+        WriteCoordinator,
+        WriteCoordinatorError,
+    )
+
+    db_path = tmp_path / "memory.db"
+    _install_write_commits(db_path)
+    coordinator = WriteCoordinator(db_path)
+    commit_started = threading.Event()
+    release_commit = threading.Event()
+    real_open_connection = coordinator._open_connection
+
+    class BlockingCommitConnection:
+        def __init__(self, connection) -> None:
+            self._connection = connection
+
+        def commit(self) -> None:
+            commit_started.set()
+            assert release_commit.wait(timeout=3.0)
+            self._connection.commit()
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(
+        coordinator,
+        "_open_connection",
+        lambda: BlockingCommitConnection(real_open_connection()),
+    )
+    assert coordinator.claim_ownership()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            result_future = pool.submit(
+                coordinator.execute,
+                "CREATE TABLE admissions (value TEXT NOT NULL)",
+                timeout=1.0,
+            )
+            assert commit_started.wait(timeout=1.0)
+            started = time.monotonic()
+            with pytest.raises(
+                WriteCoordinatorError,
+                match="did not stop before its deadline",
+            ):
+                coordinator.stop(deadline_s=0.05)
+            assert time.monotonic() - started < 0.2
+            release_commit.set()
+            result_future.result(timeout=1.0)
+    finally:
+        release_commit.set()
         coordinator.release_ownership()
 
 

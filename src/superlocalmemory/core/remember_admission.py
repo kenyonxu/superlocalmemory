@@ -98,6 +98,7 @@ class RememberService:
         dispatched = self._journal.mark_dispatched(
             prepared.journal_id,
             deadline=deadline,
+            known_prepared=prepared.state == "prepared",
         )
         if dispatched.original_receipt is not None:
             return RememberReceipt.from_mapping(dispatched.original_receipt)
@@ -118,11 +119,19 @@ class RememberService:
         if state in {"committed", "duplicate"}:
             if not isinstance(receipt, Mapping):
                 raise AdmissionRejected("COMMAND_REJECTED: canonical result had no receipt")
-            committed = self._journal.mark_committed(
-                prepared.journal_id,
-                receipt,
-                deadline=deadline,
-            )
+            try:
+                committed = self._journal.mark_committed(
+                    prepared.journal_id,
+                    receipt,
+                    deadline=deadline,
+                )
+            except AdmissionJournalUnavailable:
+                # The canonical receipt is already durable and idempotent. Do
+                # not turn that committed write into an ambiguous client
+                # failure merely because the auxiliary journal exhausted the
+                # caller's remaining budget. The dispatched record is safe for
+                # retry/replay, which will recover the same immutable receipt.
+                return RememberReceipt.from_mapping(receipt)
             return RememberReceipt.from_mapping(committed.original_receipt or receipt)
 
         error_code = str(_result_value(result, "error_code") or "COMMAND_REJECTED")

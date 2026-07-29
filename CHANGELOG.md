@@ -5,6 +5,35 @@ All notable changes to SuperLocalMemory V3 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.10] - 2026-07-29 — Reliable startup and MCP writes
+
+### Fixed
+- Concurrent remember calls now share one bounded SQLite writer deadline
+  across local and database contention. Idempotent retries avoid redundant
+  journal writes, and the advisory dispatch marker no longer adds a second
+  full disk sync before the canonical write.
+- A remember that has already committed now returns its durable receipt even
+  if auxiliary journal reconciliation reaches the caller deadline. Retrying
+  returns the same fact instead of reporting an ambiguous failure.
+- Streamable HTTP `remember` calls no longer risk freezing the daemon when a
+  transient daemon request fails. Fallback discovery and storage now run away
+  from the server event loop, and the running daemon remains the sole writer.
+- Startup failures now preserve and report their original cause instead of
+  being replaced by a secondary `profile_runtime` error.
+- Embedding repair now marks a fact complete only after its searchable vector
+  projection is durable. A failed projection remains pending and is retried
+  instead of silently reducing recall quality.
+- Embedding providers that return the wrong vector dimension are rejected
+  before caching or storage, preventing mixed-dimension indexes.
+- Windows shadow capture now preserves its owner-only file protection without
+  failing on newly created files on current Windows hosts.
+- Release builds now reject extra, missing, or byte-different Python modules
+  across the npm package, Python wheel, and source distribution.
+
+### Notes
+- Existing memories and configuration are preserved. No database migration is
+  required.
+
 ## [3.8.9] - 2026-07-27 — Reliable MCP recall and background processing
 
 ### Fixed

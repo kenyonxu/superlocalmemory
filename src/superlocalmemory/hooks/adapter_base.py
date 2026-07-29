@@ -26,7 +26,6 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,8 +75,11 @@ class Adapter(Protocol):
 
 def path_sha256(path: Path) -> str:
     """SHA-256 of the absolute path string, full 64-hex (never truncated)."""
-    return hashlib.sha256(str(path.resolve() if path.exists()
-                              else path).encode("utf-8")).hexdigest()
+    # The identity must not depend on whether the target exists. On Windows,
+    # Path.resolve() can normalize an existing path differently from the same
+    # not-yet-created path, changing the sync-log key after the first write.
+    canonical = os.path.normcase(os.path.abspath(os.fspath(path)))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _now_iso() -> str:
@@ -252,6 +254,11 @@ def atomic_write(
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     if hasattr(os, "O_NOFOLLOW") and _is_posix():
         flags |= os.O_NOFOLLOW  # SEC — POSIX refuses symlinks
+    if hasattr(os, "O_BINARY") and not _is_posix():
+        # Windows file descriptors default to text mode, which rewrites LF
+        # bytes as CRLF.  The sync log hashes the caller's original bytes, so
+        # text-mode conversion makes an unchanged file look modified forever.
+        flags |= os.O_BINARY
 
     mode = posix_mode if _is_posix() else windows_mode
     fd = os.open(str(tmp), flags, mode)

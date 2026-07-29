@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import pytest
@@ -71,6 +72,85 @@ def test_same_idempotency_key_returns_original_receipt(tmp_path, actor, admissio
     assert duplicate.journal_id == first.journal_id
     assert duplicate.original_receipt == receipt
     assert journal.count() == 1
+
+
+def test_idempotent_retries_do_not_open_redundant_write_transactions(
+    tmp_path, actor, admission_request, monkeypatch
+) -> None:
+    journal = AdmissionJournal(tmp_path / "admission_journal.db", codec=_TestCodec())
+    prepared = journal.prepare(admission_request, actor)
+    dispatched = journal.mark_dispatched(prepared.journal_id)
+
+    def fail_write(*_args, **_kwargs):
+        raise AssertionError("idempotent retry acquired the writer slot")
+
+    monkeypatch.setattr(journal, "_write_slot", fail_write)
+    assert journal.prepare(admission_request, actor) == dispatched
+    assert journal.mark_dispatched(prepared.journal_id) == dispatched
+
+    monkeypatch.undo()
+    receipt = {
+        "operation_id": "operation-1",
+        "fact_ids": ["fact-1"],
+        "state": "queryable",
+        "commit_sequence": 3,
+    }
+    committed = journal.mark_committed(prepared.journal_id, receipt)
+    monkeypatch.setattr(journal, "_write_slot", fail_write)
+
+    assert journal.prepare(admission_request, actor) == committed
+    assert journal.mark_dispatched(prepared.journal_id) == committed
+    assert journal.mark_committed(prepared.journal_id, receipt) == committed
+
+
+def test_known_prepared_dispatch_skips_redundant_read_connection(
+    tmp_path,
+    actor,
+    admission_request,
+    monkeypatch,
+) -> None:
+    journal = AdmissionJournal(tmp_path / "admission_journal.db", codec=_TestCodec())
+    prepared = journal.prepare(admission_request, actor)
+    original_connection = journal._connection
+    connection_count = 0
+
+    @contextmanager
+    def observed_connection(*, timeout: float = 1.0):
+        nonlocal connection_count
+        connection_count += 1
+        with original_connection(timeout=timeout) as connection:
+            yield connection
+
+    monkeypatch.setattr(journal, "_connection", observed_connection)
+
+    dispatched = journal.mark_dispatched(
+        prepared.journal_id,
+        known_prepared=True,
+    )
+
+    assert dispatched.state == "dispatched"
+    assert connection_count == 1
+
+
+def test_dispatched_transition_is_advisory_not_a_second_full_fsync(
+    tmp_path, actor, admission_request, monkeypatch
+) -> None:
+    journal = AdmissionJournal(tmp_path / "admission_journal.db", codec=_TestCodec())
+    prepared = journal.prepare(admission_request, actor)
+    original_connection = journal._connection
+    statements: list[str] = []
+
+    @contextmanager
+    def observed_connection(*, timeout: float = 1.0):
+        with original_connection(timeout=timeout) as connection:
+            connection.set_trace_callback(statements.append)
+            yield connection
+
+    monkeypatch.setattr(journal, "_connection", observed_connection)
+    dispatched = journal.mark_dispatched(prepared.journal_id)
+
+    assert dispatched.state == "dispatched"
+    assert "PRAGMA synchronous=NORMAL" in statements
 
 
 def test_changed_payload_with_same_key_conflicts(tmp_path, actor, admission_request) -> None:

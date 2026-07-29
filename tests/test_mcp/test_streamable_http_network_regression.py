@@ -149,3 +149,58 @@ async def test_core_recall_resolves_daemon_proxy_off_event_loop(
     assert result.content
     assert factory_threads
     assert all(thread_id != event_loop_thread for thread_id in factory_threads)
+
+
+@pytest.mark.asyncio
+async def test_core_remember_resolves_daemon_proxy_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mounted HTTP remember fallback must not probe its own event loop."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    from superlocalmemory.cli import daemon as daemon_client
+    from superlocalmemory.mcp import _daemon_proxy
+    from superlocalmemory.mcp.tools_core import register_core_tools
+
+    event_loop_thread = threading.get_ident()
+    factory_threads: list[int] = []
+
+    class _Pool:
+        def store(
+            self,
+            content: str,
+            metadata: dict[str, object],
+        ) -> dict[str, object]:
+            return {
+                "ok": True,
+                "fact_ids": ["http-remember-witness"],
+                "count": 1,
+                "materialization_state": "complete",
+            }
+
+    def _choose_pool() -> _Pool:
+        factory_threads.append(threading.get_ident())
+        return _Pool()
+
+    monkeypatch.setattr(daemon_client, "is_daemon_running", lambda: False)
+    monkeypatch.setattr(_daemon_proxy, "choose_pool", _choose_pool)
+
+    async with _running_mcp_server(
+        lambda server: register_core_tools(server, lambda: None)
+    ) as endpoint:
+        async with streamable_http_client(endpoint) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await asyncio.wait_for(session.initialize(), timeout=5)
+                result = await asyncio.wait_for(
+                    session.call_tool(
+                        "remember",
+                        {"content": "HTTP remember thread-boundary witness"},
+                    ),
+                    timeout=5,
+                )
+
+    assert not result.isError
+    assert result.content
+    assert factory_threads
+    assert all(thread_id != event_loop_thread for thread_id in factory_threads)

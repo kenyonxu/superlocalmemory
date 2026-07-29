@@ -74,6 +74,16 @@ def _load_or_create_key(path: Path) -> bytes:
         )
     except FileExistsError:
         fd = -1
+    except OSError as exc:
+        try:
+            info = path.lstat()
+        except OSError:
+            raise AdmissionKeyError("admission key cannot be created") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise AdmissionKeyError(
+                "admission key path must be a regular file"
+            ) from exc
+        raise AdmissionKeyError("admission key cannot be created") from exc
     else:
         try:
             key = os.urandom(_KEY_BYTES)

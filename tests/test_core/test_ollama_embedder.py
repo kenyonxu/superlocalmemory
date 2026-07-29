@@ -11,14 +11,12 @@ fallback when Ollama is unreachable.
 
 from __future__ import annotations
 
-import json
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
 from superlocalmemory.core.ollama_embedder import OllamaEmbedder
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -137,6 +135,14 @@ class TestOllamaEmbedSingle:
             result = emb.embed("test")
         assert result is None
 
+    def test_embed_rejects_vector_with_unexpected_dimension(self) -> None:
+        emb = OllamaEmbedder(dimension=1024)
+        with patch(
+            "httpx.post",
+            return_value=_fake_embed_response([_random_vec(768)]),
+        ):
+            assert emb.embed("dimension integrity") is None
+
 
 # ---------------------------------------------------------------------------
 # Batch embed
@@ -165,6 +171,14 @@ class TestOllamaEmbedBatch:
         with patch("httpx.post", side_effect=ConnectionError("down")):
             results = emb.embed_batch(["a", "b", "c"])
         assert results == [None, None, None]
+
+    def test_batch_rejects_vectors_with_unexpected_dimension(self) -> None:
+        emb = OllamaEmbedder(dimension=1024)
+        with patch(
+            "httpx.post",
+            return_value=_fake_embed_response([_random_vec(768), _random_vec(768)]),
+        ):
+            assert emb.embed_batch(["a", "b"]) == [None, None]
 
 
 # ---------------------------------------------------------------------------

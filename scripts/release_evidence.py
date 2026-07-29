@@ -11,10 +11,10 @@ import tarfile
 import tomllib
 import urllib.parse
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterable
-
 
 EVIDENCE_SCHEMA = "superlocalmemory.release-evidence/v1"
 
@@ -175,6 +175,93 @@ def verify_npm_tarball(tarball: Path, expected_version: str) -> list[str]:
     return errors
 
 
+def _wheel_python_sources(wheel: Path) -> dict[str, bytes]:
+    """Return normalized package Python sources from a wheel."""
+    sources: dict[str, bytes] = {}
+    with zipfile.ZipFile(wheel) as archive:
+        for name in archive.namelist():
+            if not name.startswith("superlocalmemory/") or not name.endswith(".py"):
+                continue
+            normalized = name.removeprefix("superlocalmemory/")
+            if normalized in sources:
+                raise ValueError(f"duplicate wheel Python source: {normalized}")
+            sources[normalized] = archive.read(name)
+    return sources
+
+
+def _tar_python_sources(
+    archive_path: Path,
+    *,
+    marker: str,
+    label: str,
+) -> dict[str, bytes]:
+    """Return normalized package Python sources from an sdist/npm tarball."""
+    sources: dict[str, bytes] = {}
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive.getmembers():
+            name = member.name.removeprefix("./")
+            if marker not in name or not name.endswith(".py") or not member.isfile():
+                continue
+            normalized = name.split(marker, 1)[1]
+            if normalized in sources:
+                raise ValueError(f"duplicate {label} Python source: {normalized}")
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise ValueError(f"unreadable {label} Python source: {normalized}")
+            sources[normalized] = stream.read()
+    return sources
+
+
+def verify_python_source_parity(
+    wheel: Path,
+    sdist: Path,
+    npm_tarball: Path,
+) -> list[str]:
+    """Verify all three release archives contain identical Python sources."""
+    try:
+        sources = {
+            "wheel": _wheel_python_sources(wheel),
+            "sdist": _tar_python_sources(
+                sdist,
+                marker="/src/superlocalmemory/",
+                label="sdist",
+            ),
+            "npm": _tar_python_sources(
+                npm_tarball,
+                marker="package/src/superlocalmemory/",
+                label="npm",
+            ),
+        }
+    except (OSError, tarfile.TarError, zipfile.BadZipFile, ValueError) as exc:
+        return [f"invalid release source archive: {exc}"]
+
+    errors: list[str] = []
+    reference_paths = set(sources["npm"])
+    if not reference_paths:
+        errors.append("release archives contain no SuperLocalMemory Python sources")
+        return errors
+
+    for label in ("wheel", "sdist"):
+        candidate_paths = set(sources[label])
+        if candidate_paths == reference_paths:
+            continue
+        missing = sorted(reference_paths - candidate_paths)
+        extra = sorted(candidate_paths - reference_paths)
+        errors.append(
+            f"{label}/npm Python source set mismatch: "
+            f"missing={missing[:10]}, extra={extra[:10]}"
+        )
+
+    for path in sorted(set.intersection(*(set(items) for items in sources.values()))):
+        digests = {
+            label: hashlib.sha256(items[path]).hexdigest()
+            for label, items in sources.items()
+        }
+        if len(set(digests.values())) != 1:
+            errors.append(f"Python source content mismatch for {path}: {digests}")
+    return errors
+
+
 def build_evidence(
     *,
     version: str,
@@ -304,6 +391,11 @@ def main(argv: list[str] | None = None) -> int:
     npm.add_argument("--tarball", required=True, type=Path)
     npm.add_argument("--version", required=True)
 
+    parity = subparsers.add_parser("verify-source-parity")
+    parity.add_argument("--wheel", required=True, type=Path)
+    parity.add_argument("--sdist", required=True, type=Path)
+    parity.add_argument("--npm", required=True, type=Path)
+
     args = parser.parse_args(argv)
     if args.command == "create":
         evidence = build_evidence(
@@ -334,6 +426,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "verify-npm":
         errors = verify_npm_tarball(args.tarball, args.version)
+    elif args.command == "verify-source-parity":
+        errors = verify_python_source_parity(
+            args.wheel,
+            args.sdist,
+            args.npm,
+        )
     else:
         evidence = json.loads(args.manifest.read_text(encoding="utf-8"))
         errors = verify_evidence(evidence, args.artifact_root)

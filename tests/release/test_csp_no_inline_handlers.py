@@ -22,24 +22,31 @@ def _ui_files():
 def test_no_inline_event_handlers_in_ui():
     offenders = {}
     for f in _ui_files():
-        hits = _INLINE.findall(f.read_text())
+        hits = _INLINE.findall(f.read_text(encoding="utf-8"))
         if hits:
             offenders[f.name] = len(hits)
     assert not offenders, f"inline on*= handlers force script-src unsafe-inline: {offenders}"
 
 
 def test_script_src_has_no_unsafe_inline():
-    txt = MIDDLEWARE.read_text()
+    txt = MIDDLEWARE.read_text(encoding="utf-8")
     m = re.search(r'"script-src[^"]*"', txt)
     assert m, "script-src directive not found in security_middleware"
-    assert "unsafe-inline" not in m.group(0), f"script-src must not allow unsafe-inline: {m.group(0)}"
+    assert "unsafe-inline" not in m.group(0), (
+        f"script-src must not allow unsafe-inline: {m.group(0)}"
+    )
 
 
 def test_every_action_key_has_a_registry_entry():
     used = set()
     for f in _ui_files():
-        used |= set(re.findall(r'data-act-(?:click|change|input|keydown)="([a-z0-9-]+)"', f.read_text()))
-    reg = (UI / "js" / "event-delegation.js").read_text()
+        used |= set(
+            re.findall(
+                r'data-act-(?:click|change|input|keydown)="([a-z0-9-]+)"',
+                f.read_text(encoding="utf-8"),
+            )
+        )
+    reg = (UI / "js" / "event-delegation.js").read_text(encoding="utf-8")
     keys = set(re.findall(r"^\s*'([a-z0-9-]+)':\s*\(", reg, re.M))
     missing = used - keys
     assert not missing, f"data-act keys used in markup but missing from registry: {sorted(missing)}"

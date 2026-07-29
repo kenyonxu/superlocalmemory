@@ -289,8 +289,12 @@ def test_installed_wheel_two_home_daemon_lifecycle_is_root_local(
         assert descriptor_a["pid"] != descriptor_b["pid"]
         assert descriptor_a["instance_id"] != descriptor_b["instance_id"]
         assert descriptor_a["namespace_id"] != descriptor_b["namespace_id"]
-        assert json.loads((root_a / "daemon.json").read_text())["port"] == port_a
-        assert json.loads((root_b / "daemon.json").read_text())["port"] == port_b
+        assert json.loads((root_a / "daemon.json").read_text(encoding="utf-8"))[
+            "port"
+        ] == port_a
+        assert json.loads((root_b / "daemon.json").read_text(encoding="utf-8"))[
+            "port"
+        ] == port_b
         assert not [
             path
             for path in work_dir.rglob("*")

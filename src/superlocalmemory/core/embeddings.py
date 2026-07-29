@@ -24,8 +24,9 @@ import sys
 import threading
 import time
 import weakref
+from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterator
 
 import numpy as np
 
@@ -313,6 +314,38 @@ class EmbeddingService:
     # Public API
     # ------------------------------------------------------------------
 
+    @contextmanager
+    def _request_lock(self) -> Iterator[None]:
+        """Admit one model request without starving an interactive recall.
+
+        A background caller may pass the recall gate and then queue behind an
+        in-flight model request. If a recall arrives while it is queued, a
+        plain mutex can let that background caller retake the worker first.
+        Re-check the gate after acquiring the mutex so at most the already
+        running background request can delay a newly arrived recall.
+        """
+        from superlocalmemory.core.recall_gate import (
+            in_flight,
+            is_background_work,
+            wait_for_foreground_idle,
+        )
+
+        if not is_background_work():
+            with self._lock:
+                yield
+            return
+
+        while True:
+            wait_for_foreground_idle()
+            self._lock.acquire()
+            if in_flight() == 0:
+                break
+            self._lock.release()
+        try:
+            yield
+        finally:
+            self._lock.release()
+
     def embed(self, text: str) -> list[float] | None:
         """Embed a single text string. Returns list of floats or None."""
         if not text or not text.strip():
@@ -413,9 +446,7 @@ class EmbeddingService:
         Includes a timeout (_SUBPROCESS_RESPONSE_TIMEOUT seconds) so the CLI
         never hangs indefinitely on cold model loads or network issues.
         """
-        from superlocalmemory.core.recall_gate import wait_for_foreground_idle
-        wait_for_foreground_idle()
-        with self._lock:
+        with self._request_lock():
             # Only an explicit terminal disable (``False``) short-circuits. A
             # ``None`` availability is the recall-health self-heal's "re-probe"
             # signal (recall_health._heal_embedder) — it must fall through and

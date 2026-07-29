@@ -65,7 +65,12 @@ def test_wheel_contains_every_python_module_and_ui_asset(
         for path in (source_root / "ui").rglob("*")
         if path.is_file()
     }
-    assert expected_python <= names
+    packaged_python = {
+        name
+        for name in names
+        if name.startswith("superlocalmemory/") and name.endswith(".py")
+    }
+    assert expected_python == packaged_python
     assert expected_ui <= names
     assert "superlocalmemory/infra/daemon_identity.py" in names
 
@@ -76,12 +81,24 @@ def test_sdist_contains_every_python_module_and_ui_asset(
     names = sdist_names(built_artifacts.sdist)
     prefix = _sdist_prefix(built_artifacts)
     source_root = built_artifacts.snapshot / "src" / "superlocalmemory"
-    expected = {
+    expected_python = {
         f"{prefix}/src/{path.relative_to(source_root.parent).as_posix()}"
         for path in source_root.rglob("*")
-        if path.is_file() and (path.suffix == ".py" or "ui" in path.parts)
+        if path.is_file() and path.suffix == ".py"
     }
-    assert expected <= names
+    expected_ui = {
+        f"{prefix}/src/{path.relative_to(source_root.parent).as_posix()}"
+        for path in (source_root / "ui").rglob("*")
+        if path.is_file()
+    }
+    packaged_python = {
+        name
+        for name in names
+        if name.startswith(f"{prefix}/src/superlocalmemory/")
+        and name.endswith(".py")
+    }
+    assert expected_python == packaged_python
+    assert expected_ui <= names
 
 
 def test_wheel_contains_root_and_optimize_legal_notices(

@@ -124,6 +124,7 @@ class TestOwnedDaemonShutdownWait:
 
     def test_wait_requires_process_exit_and_port_release(self) -> None:
         from types import SimpleNamespace
+
         from superlocalmemory.cli import daemon as _daemon
 
         descriptor = SimpleNamespace(port=18765)
@@ -137,6 +138,7 @@ class TestOwnedDaemonShutdownWait:
 
     def test_wait_refuses_restart_when_port_remains_owned(self) -> None:
         from types import SimpleNamespace
+
         from superlocalmemory.cli import daemon as _daemon
 
         descriptor = SimpleNamespace(port=18765)
@@ -149,9 +151,54 @@ class TestOwnedDaemonShutdownWait:
         ):
             assert not _daemon.wait_for_owned_daemon_shutdown(descriptor, timeout=1)
 
+    def test_wait_tracks_verified_legacy_pid_and_custom_port(self) -> None:
+        from superlocalmemory.cli import daemon as _daemon
+
+        with patch.object(
+            _daemon,
+            "_is_verified_legacy_process",
+            side_effect=chain([True, False], repeat(False)),
+        ) as process_alive, patch.object(
+            _daemon, "_is_port_available", side_effect=[False, True],
+        ) as port_available, patch.object(_daemon.time, "sleep"):
+            assert _daemon.wait_for_owned_daemon_shutdown(
+                None,
+                timeout=1,
+                legacy_pid=7771,
+                legacy_port=18766,
+            )
+
+        process_alive.assert_called_with(7771)
+        port_available.assert_called_with(18766)
+
+    def test_windows_port_release_probe_requests_exclusive_bind(self) -> None:
+        from superlocalmemory.cli import daemon as _daemon
+
+        candidate = MagicMock()
+        candidate.__enter__.return_value = candidate
+        candidate.__exit__.return_value = False
+        with patch.object(_daemon.sys, "platform", "win32"), patch.object(
+            _daemon.socket,
+            "SO_EXCLUSIVEADDRUSE",
+            0x4,
+            create=True,
+        ), patch.object(
+            _daemon.socket, "socket", return_value=candidate,
+        ):
+            assert _daemon._is_port_available(18767)
+
+        candidate.setsockopt.assert_called_once_with(
+            _daemon.socket.SOL_SOCKET,
+            0x4,
+            1,
+        )
+        candidate.bind.assert_called_once_with(("127.0.0.1", 18767))
+
     def test_zombie_descriptor_process_is_not_treated_as_alive(self) -> None:
         from types import SimpleNamespace
+
         import psutil
+
         from superlocalmemory.cli import daemon as _daemon
 
         process = MagicMock()

@@ -17,7 +17,7 @@ REQUIRED_CMDS = {
 
 
 def _events_and_cmds(path):
-    d = json.loads(Path(path).read_text())
+    d = json.loads(Path(path).read_text(encoding="utf-8"))
     cmds = set()
     for arr in d["hooks"].values():
         for grp in arr:

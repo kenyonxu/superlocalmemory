@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from superlocalmemory.core import remember_admission as admission_mod
 from superlocalmemory.core.remember_admission import (
     AdmissionRejected,
     RememberAdmissionCommand,
@@ -117,11 +118,18 @@ def test_coordinator_receives_only_the_remaining_end_to_end_budget(
         }
     )
     original_prepare = journal.prepare
+    now = 1_000.0
+
+    def controlled_monotonic() -> float:
+        return now
 
     def delayed_prepare(*args, **kwargs):
-        time.sleep(0.05)
-        return original_prepare(*args, **kwargs)
+        nonlocal now
+        prepared = original_prepare(*args, **kwargs)
+        now += 0.05
+        return prepared
 
+    monkeypatch.setattr(admission_mod.time, "monotonic", controlled_monotonic)
     monkeypatch.setattr(journal, "prepare", delayed_prepare)
     RememberService(journal, coordinator).remember(
         _request(),
@@ -131,6 +139,45 @@ def test_coordinator_receives_only_the_remaining_end_to_end_budget(
 
     assert len(coordinator.wait_ms) == 1
     assert 0 < coordinator.wait_ms[0] < 225
+
+
+def test_committed_receipt_survives_auxiliary_journal_deadline(tmp_path, monkeypatch) -> None:
+    """A durable canonical commit must not become an ambiguous caller failure."""
+    journal = AdmissionJournal(tmp_path / "admission_journal.db", codec=_TestCodec())
+    receipt = {
+        "operation_id": "op-canonical",
+        "fact_ids": ["fact-canonical"],
+        "state": "queryable",
+        "commit_sequence": 1,
+    }
+    coordinator = _Coordinator({"state": "committed", "receipt": receipt})
+    original_mark_committed = journal.mark_committed
+
+    def expired_mark_committed(*_args, **_kwargs):
+        raise AdmissionJournalUnavailable("admission journal deadline expired")
+
+    monkeypatch.setattr(journal, "mark_committed", expired_mark_committed)
+    first = RememberService(journal, coordinator).remember(
+        _request(),
+        _actor(),
+        deadline_ms=_FUNCTIONAL_DEADLINE_MS,
+    )
+
+    assert first.payload == receipt
+    entry = journal.get_by_idempotency_key("default", _request().idempotency_key)
+    assert entry is not None
+    assert entry.state == "dispatched"
+
+    monkeypatch.setattr(journal, "mark_committed", original_mark_committed)
+    duplicate = RememberService(journal, coordinator).remember(
+        _request(),
+        _actor(),
+        deadline_ms=_FUNCTIONAL_DEADLINE_MS,
+    )
+
+    assert duplicate == first
+    assert len(coordinator.commands) == 2
+    assert journal.get(coordinator.commands[0].journal_id).state == "committed"
 
 
 def test_slow_codec_cannot_rebase_deadline_and_persist_after_expiry(tmp_path) -> None:

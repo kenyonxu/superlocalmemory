@@ -122,6 +122,78 @@ def test_embedding_service_shutdown_kills_worker_despite_active_embed_lock() -> 
     assert service._worker_proc is None
 
 
+def test_embedding_request_lock_gives_waiting_recall_priority() -> None:
+    """Queued enrichment must yield before it can retake the model worker."""
+    from superlocalmemory.core.embeddings import EmbeddingService
+    from superlocalmemory.core.recall_gate import (
+        background_work,
+        begin_recall,
+        end_recall,
+    )
+
+    background_waiting = threading.Event()
+
+    class TrackedLock:
+        def __init__(self) -> None:
+            self._inner = threading.Lock()
+
+        def acquire(
+            self,
+            blocking: bool = True,
+            timeout: float = -1,
+        ) -> bool:
+            if threading.current_thread().name == "background-embed":
+                background_waiting.set()
+            return self._inner.acquire(blocking, timeout)
+
+        def release(self) -> None:
+            self._inner.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            self.release()
+
+    service = EmbeddingService.__new__(EmbeddingService)
+    service._lock = TrackedLock()
+    assert service._lock.acquire(blocking=False)
+    order: list[str] = []
+
+    def run_background() -> None:
+        with background_work():
+            with service._request_lock():
+                order.append("background")
+
+    def run_foreground() -> None:
+        try:
+            with service._request_lock():
+                order.append("foreground")
+        finally:
+            end_recall()
+
+    background = threading.Thread(
+        target=run_background,
+        name="background-embed",
+    )
+    foreground = threading.Thread(
+        target=run_foreground,
+        name="foreground-embed",
+    )
+    background.start()
+    assert background_waiting.wait(timeout=1)
+    begin_recall()
+    foreground.start()
+    service._lock.release()
+    background.join(timeout=2)
+    foreground.join(timeout=2)
+
+    assert not background.is_alive()
+    assert not foreground.is_alive()
+    assert order == ["foreground", "background"]
+
+
 def test_embedding_config_uses_the_running_daemon_config(tmp_path: Path, monkeypatch) -> None:
     """The dashboard must not replace a running Mode B config with disk defaults."""
     from superlocalmemory.server.routes.v3_api import get_embedding_config

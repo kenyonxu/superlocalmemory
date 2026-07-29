@@ -2,10 +2,12 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com
 
-"""Separate FULL-synchronous journal for durable remember admission.
+"""Separate journal for durable remember admission.
 
 The journal is intentionally not a memory store.  Its only mutable state is a
 small encrypted replay command and the canonical receipt associated with it.
+Durable prepare and terminal transitions are FULL-synchronous; the advisory
+dispatched marker may use NORMAL because both replay states are equivalent.
 Canonical facts, FTS, graph, vectors, and model work stay outside this module.
 """
 
@@ -31,6 +33,7 @@ from cryptography.exceptions import InvalidTag
 _MAX_COMMAND_BYTES = 256 * 1024
 _MAX_RECEIPT_BYTES = 16 * 1024
 _MAX_METADATA_DEPTH = 8
+_MAX_PREOPENED_WRITE_CONNECTIONS = 8
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
 _STATES = frozenset({"prepared", "dispatched", "committed", "rejected"})
 
@@ -213,10 +216,13 @@ class AdmissionJournal:
         self._codec = codec
         # The daemon is the sole journal owner, but many HTTP/MCP request
         # threads can prepare and transition entries concurrently. SQLite has
-        # one writer, so admit those tiny FULL-synchronous transactions through
-        # one process-local lock instead of letting BEGIN IMMEDIATE race and
-        # leak SQLITE_BUSY to remember callers.
+        # one writer, so admit those tiny journal transactions through one
+        # process-local lock instead of letting BEGIN IMMEDIATE race and leak
+        # SQLITE_BUSY to remember callers.
         self._write_lock = threading.RLock()
+        self._write_connection_slots = threading.BoundedSemaphore(
+            _MAX_PREOPENED_WRITE_CONNECTIONS
+        )
         self._initialize()
 
     def prepare(
@@ -248,36 +254,59 @@ class AdmissionJournal:
         now = _now_ms()
         journal_id = uuid.uuid4().hex
 
-        with self._write_transaction(deadline=deadline) as conn:
+        # Keep existing retries read-only and outside mutation admission. A
+        # miss closes this short-lived reader before entering the bounded
+        # write lane, where the key is rechecked transactionally.
+        with self._read_connection(deadline=deadline) as conn:
             existing = conn.execute(
                 "SELECT * FROM admission_journal "
                 "WHERE profile_id=? AND idempotency_key=?",
                 (request.profile_id, request.idempotency_key),
             ).fetchone()
-            if existing is not None:
-                entry = self._entry_from_row(existing)
-                if entry.request_hash != request_hash:
-                    raise IdempotencyConflict(
-                        "idempotency key belongs to a different immutable request"
-                    )
-                return entry
-            conn.execute(
-                "INSERT INTO admission_journal "
-                "(journal_id, idempotency_key, request_hash, profile_id, command_json, state, "
-                "created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, 'prepared', ?, ?)",
-                (
-                    journal_id,
-                    request.idempotency_key,
-                    request_hash,
-                    request.profile_id,
-                    command_json,
-                    now,
-                    now,
-                ),
-            )
-            row = conn.execute(
-                "SELECT * FROM admission_journal WHERE journal_id=?", (journal_id,)
-            ).fetchone()
+        if existing is not None:
+            entry = self._entry_from_row(existing)
+            if entry.request_hash != request_hash:
+                raise IdempotencyConflict(
+                    "idempotency key belongs to a different immutable request"
+                )
+            return entry
+
+        with self._write_connection_slot(deadline=deadline):
+            remaining = _remaining_seconds(deadline)
+            with self._connection(timeout=remaining) as conn:
+                with self._write_slot(deadline=deadline):
+                    with self._sqlite_transaction(conn, deadline=deadline):
+                        existing = conn.execute(
+                            "SELECT * FROM admission_journal "
+                            "WHERE profile_id=? AND idempotency_key=?",
+                            (request.profile_id, request.idempotency_key),
+                        ).fetchone()
+                        if existing is not None:
+                            entry = self._entry_from_row(existing)
+                            if entry.request_hash != request_hash:
+                                raise IdempotencyConflict(
+                                    "idempotency key belongs to a different immutable request"
+                                )
+                            return entry
+                        conn.execute(
+                            "INSERT INTO admission_journal "
+                            "(journal_id, idempotency_key, request_hash, profile_id, "
+                            "command_json, state, created_at_ms, updated_at_ms) "
+                            "VALUES (?, ?, ?, ?, ?, 'prepared', ?, ?)",
+                            (
+                                journal_id,
+                                request.idempotency_key,
+                                request_hash,
+                                request.profile_id,
+                                command_json,
+                                now,
+                                now,
+                            ),
+                        )
+                        row = conn.execute(
+                            "SELECT * FROM admission_journal WHERE journal_id=?",
+                            (journal_id,),
+                        ).fetchone()
         assert row is not None
         return self._entry_from_row(row)
 
@@ -319,16 +348,22 @@ class AdmissionJournal:
         journal_id: str,
         *,
         deadline: float | None = None,
+        known_prepared: bool = False,
     ) -> AdmissionEntry:
         # A concurrent retry may observe ``prepared`` and then lose the race to
         # another caller that commits the same idempotent command.  Treat that
         # terminal state as a successful no-op so the retry can return the
         # canonical receipt instead of surfacing a false transition failure.
+        if not known_prepared:
+            existing = self._get_entry(journal_id, deadline=deadline)
+            if existing.state in {"dispatched", "committed"}:
+                return existing
         return self._transition(
             journal_id,
             target="dispatched",
             allowed={"prepared", "dispatched", "committed"},
             deadline=deadline,
+            full_sync=False,
         )
 
     def mark_rejected(
@@ -363,6 +398,9 @@ class AdmissionJournal:
             raise ValueError("receipt operation_id must be a string")
         if commit_sequence is not None and not isinstance(commit_sequence, int):
             raise ValueError("receipt commit_sequence must be an integer")
+        existing = self._get_entry(journal_id, deadline=deadline)
+        if existing.state == "committed":
+            return existing
         return self._transition(
             journal_id,
             target="committed",
@@ -374,24 +412,13 @@ class AdmissionJournal:
         )
 
     def get(self, journal_id: str) -> AdmissionEntry:
-        with self._read_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM admission_journal WHERE journal_id=?", (journal_id,)
-            ).fetchone()
-        if row is None:
-            raise KeyError(journal_id)
-        return self._entry_from_row(row)
+        return self._get_entry(journal_id)
 
     def get_by_idempotency_key(
         self, profile_id: str, idempotency_key: str
     ) -> AdmissionEntry | None:
         """Return a profile-scoped retry record, never a cross-profile match."""
-        with self._read_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM admission_journal WHERE profile_id=? AND idempotency_key=?",
-                (profile_id, idempotency_key),
-            ).fetchone()
-        return self._entry_from_row(row) if row is not None else None
+        return self._get_by_idempotency_key(profile_id, idempotency_key)
 
     def count(self) -> int:
         with self._read_connection() as conn:
@@ -451,8 +478,9 @@ class AdmissionJournal:
         operation_id: str | None = None,
         commit_sequence: int | None = None,
         deadline: float | None = None,
+        full_sync: bool = True,
     ) -> AdmissionEntry:
-        with self._write_transaction(deadline=deadline) as conn:
+        with self._write_transaction(deadline=deadline, full_sync=full_sync) as conn:
             row = conn.execute(
                 "SELECT * FROM admission_journal WHERE journal_id=?", (journal_id,)
             ).fetchone()
@@ -490,6 +518,34 @@ class AdmissionJournal:
         assert updated is not None
         return self._entry_from_row(updated)
 
+    def _get_entry(
+        self,
+        journal_id: str,
+        *,
+        deadline: float | None = None,
+    ) -> AdmissionEntry:
+        with self._read_connection(deadline=deadline) as conn:
+            row = conn.execute(
+                "SELECT * FROM admission_journal WHERE journal_id=?", (journal_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(journal_id)
+        return self._entry_from_row(row)
+
+    def _get_by_idempotency_key(
+        self,
+        profile_id: str,
+        idempotency_key: str,
+        *,
+        deadline: float | None = None,
+    ) -> AdmissionEntry | None:
+        with self._read_connection(deadline=deadline) as conn:
+            row = conn.execute(
+                "SELECT * FROM admission_journal WHERE profile_id=? AND idempotency_key=?",
+                (profile_id, idempotency_key),
+            ).fetchone()
+        return self._entry_from_row(row) if row is not None else None
+
     def _initialize(self) -> None:
         with self._connection() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
@@ -503,8 +559,52 @@ class AdmissionJournal:
         self,
         *,
         deadline: float | None = None,
+        full_sync: bool = True,
     ) -> Generator[sqlite3.Connection, None, None]:
         """Serialize and atomically commit one deadline-bounded mutation."""
+        with self._write_connection_slot(deadline=deadline):
+            remaining = _remaining_seconds(deadline)
+            with self._connection(timeout=remaining) as conn:
+                with self._write_slot(deadline=deadline):
+                    if not full_sync:
+                        # ``dispatched`` is advisory: both prepared and dispatched
+                        # entries replay through the same idempotent coordinator.
+                        # NORMAL avoids a second foreground fsync after the durable
+                        # FULL-synchronous prepare; a power loss can at worst
+                        # restore the safe prepared state.
+                        conn.execute("PRAGMA synchronous=NORMAL")
+                    with self._sqlite_transaction(conn, deadline=deadline):
+                        yield conn
+
+    @contextmanager
+    def _write_connection_slot(
+        self,
+        *,
+        deadline: float | None = None,
+    ) -> Generator[None, None, None]:
+        """Bound SQLite handles retained by mutations queued for the writer."""
+        if deadline is None:
+            acquired = self._write_connection_slots.acquire()
+        else:
+            acquired = self._write_connection_slots.acquire(
+                timeout=max(0.0, deadline - time.monotonic())
+            )
+        if not acquired:
+            raise AdmissionJournalUnavailable(
+                "admission journal deadline expired waiting for a connection"
+            )
+        try:
+            yield
+        finally:
+            self._write_connection_slots.release()
+
+    @contextmanager
+    def _write_slot(
+        self,
+        *,
+        deadline: float | None = None,
+    ) -> Generator[None, None, None]:
+        """Acquire the process-local SQLite writer slot within the caller budget."""
         if deadline is None:
             acquired = self._write_lock.acquire()
         else:
@@ -516,32 +616,47 @@ class AdmissionJournal:
                 "admission journal deadline expired waiting for its writer"
             )
         try:
-            remaining = _remaining_seconds(deadline)
-            with self._connection(timeout=remaining) as conn:
-                try:
-                    conn.execute("BEGIN IMMEDIATE")
-                    if deadline is not None and time.monotonic() >= deadline:
-                        raise AdmissionJournalUnavailable(
-                            "admission journal deadline expired before its mutation"
-                        )
-                    yield conn
-                    if deadline is not None and time.monotonic() >= deadline:
-                        raise AdmissionJournalUnavailable(
-                            "admission journal deadline expired during its mutation"
-                        )
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    if _is_sqlite_busy(exc):
-                        raise AdmissionJournalUnavailable(
-                            "admission journal is busy beyond its caller deadline"
-                        ) from exc
-                    raise
-                except BaseException:
-                    conn.rollback()
-                    raise
+            yield
         finally:
             self._write_lock.release()
+
+    @contextmanager
+    def _sqlite_transaction(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        deadline: float | None = None,
+    ) -> Generator[None, None, None]:
+        """Commit or roll back one SQLite mutation on an already-open connection."""
+        try:
+            # A reused prepare connection may have waited for the local writer
+            # slot after its optimistic read. Refresh SQLite's own wait budget
+            # immediately before BEGIN so combined local and external
+            # contention cannot exceed the caller's original deadline.
+            remaining = _remaining_seconds(deadline)
+            busy_timeout_ms = max(1, int(remaining * 1_000))
+            conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+            conn.execute("BEGIN IMMEDIATE")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise AdmissionJournalUnavailable(
+                    "admission journal deadline expired before its mutation"
+                )
+            yield
+            if deadline is not None and time.monotonic() >= deadline:
+                raise AdmissionJournalUnavailable(
+                    "admission journal deadline expired during its mutation"
+                )
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            conn.rollback()
+            if _is_sqlite_busy(exc):
+                raise AdmissionJournalUnavailable(
+                    "admission journal is busy beyond its caller deadline"
+                ) from exc
+            raise
+        except BaseException:
+            conn.rollback()
+            raise
 
     @contextmanager
     def _read_connection(

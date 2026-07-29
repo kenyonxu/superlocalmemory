@@ -223,6 +223,7 @@ class _Execution:
     result: WriteResult | None = None
     error: BaseException | None = None
     cancelled: bool = False
+    commit_started: bool = False
 
 
 class WriteCoordinator:
@@ -432,11 +433,7 @@ class WriteCoordinator:
             deadline=time.monotonic() + timeout,
         )
         self._enqueue(item)
-        remaining = max(0.0, item.deadline - time.monotonic())
-        if not item.completion.wait(remaining):
-            with self._condition:
-                item.cancelled = True
-            raise WriteDeadlineExceededError("canonical write exceeded its caller deadline")
+        self._wait_for_completion(item)
         if item.error is not None:
             raise item.error
         return item.rows or []
@@ -480,16 +477,30 @@ class WriteCoordinator:
             command=command,
         )
         self._enqueue(item)
-        remaining = max(0.0, item.deadline - time.monotonic())
-        if not item.completion.wait(remaining):
-            with self._condition:
-                item.cancelled = True
-            raise WriteDeadlineExceededError("canonical write exceeded its caller deadline")
+        self._wait_for_completion(item)
         if item.error is not None:
             raise item.error
         if item.result is None:  # pragma: no cover - defensive worker invariant
             raise WriteCoordinatorError("canonical command completed without a receipt")
         return item.result
+
+    def _wait_for_completion(self, item: _Execution) -> None:
+        """Cancel before commit or wait through an already-linearized commit."""
+        remaining = max(0.0, item.deadline - time.monotonic())
+        if item.completion.wait(remaining):
+            return
+        with self._condition:
+            if item.completion.is_set():
+                return
+            if not item.commit_started:
+                item.cancelled = True
+                raise WriteDeadlineExceededError(
+                    "canonical write exceeded its caller deadline"
+                )
+        # Commit is the linearization point. Once it starts, return its real
+        # result instead of reporting an ambiguous timeout followed by a
+        # durable mutation.
+        item.completion.wait()
 
     def _enqueue(self, item: _Execution) -> None:
         with self._condition:
@@ -562,19 +573,54 @@ class WriteCoordinator:
             item.error = WriteDeadlineExceededError("canonical write expired before execution")
             item.completion.set()
             return
+        remaining = max(0.0, item.deadline - time.monotonic())
+        if not self._process_write_lock.acquire(timeout=remaining):
+            item.error = WriteDeadlineExceededError(
+                "canonical write expired waiting for its process lock"
+            )
+            item.completion.set()
+            return
         try:
-            with self._process_write_lock:
-                synchronous = "FULL" if item.lane is Lane.FOREGROUND else "NORMAL"
-                conn.execute(f"PRAGMA synchronous={synchronous}")
-                conn.execute("BEGIN IMMEDIATE")
-                if item.command is not None:
-                    item.result = self._execute_command(conn, item.command)
+            remaining = item.deadline - time.monotonic()
+            if remaining <= 0:
+                item.error = WriteDeadlineExceededError(
+                    "canonical write expired after waiting for its process lock"
+                )
+                return
+            remaining_ms = max(
+                1,
+                int(remaining * 1_000),
+            )
+            conn.execute(f"PRAGMA busy_timeout={remaining_ms}")
+            synchronous = "FULL" if item.lane is Lane.FOREGROUND else "NORMAL"
+            conn.execute(f"PRAGMA synchronous={synchronous}")
+            conn.execute("BEGIN IMMEDIATE")
+            with self._condition:
+                if item.cancelled or time.monotonic() >= item.deadline:
+                    item.error = WriteDeadlineExceededError(
+                        "canonical write expired before its mutation"
+                    )
+            if item.error is not None:
+                conn.rollback()
+                return
+            if item.command is not None:
+                item.result = self._execute_command(conn, item.command)
+            else:
+                if item.sql is None:  # pragma: no cover - execution invariant
+                    raise WriteCoordinatorError("missing coordinator SQL command")
+                cursor = conn.execute(item.sql, item.parameters)
+                item.rows = cursor.fetchall()
+            with self._condition:
+                if item.cancelled or time.monotonic() >= item.deadline:
+                    item.error = WriteDeadlineExceededError(
+                        "canonical write expired during its mutation"
+                    )
                 else:
-                    if item.sql is None:  # pragma: no cover - execution invariant
-                        raise WriteCoordinatorError("missing coordinator SQL command")
-                    cursor = conn.execute(item.sql, item.parameters)
-                    item.rows = cursor.fetchall()
-                conn.commit()
+                    item.commit_started = True
+            if item.error is not None:
+                conn.rollback()
+                return
+            conn.commit()
         except WriteCoordinatorError as exc:
             conn.rollback()
             item.error = exc
@@ -590,6 +636,7 @@ class WriteCoordinator:
             item.error = WriteCoordinatorError("canonical write command failed")
             item.error.__cause__ = exc
         finally:
+            self._process_write_lock.release()
             item.completion.set()
 
     def _execute_command(self, conn: sqlite3.Connection, command: WriteCommand) -> WriteResult:

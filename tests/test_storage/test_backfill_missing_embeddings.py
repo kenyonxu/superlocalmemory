@@ -143,7 +143,21 @@ class TestBackfillMissingEmbeddings:
         """Metadata is created only as part of a real sqlite-vec pair."""
         import sqlite_vec
 
+        from superlocalmemory.retrieval.vector_store import (
+            VectorStore,
+            VectorStoreConfig,
+        )
         from superlocalmemory.storage.embedding_migrator import backfill_missing_embeddings
+
+        probe = VectorStore(
+            db.db_path,
+            VectorStoreConfig(
+                dimension=config.embedding.dimension,
+                model_name=config.embedding.model_name,
+            ),
+        )
+        if not probe.available:
+            pytest.skip("sqlite-vec cannot load in this Python runtime")
 
         fact_ids = _seed_facts(db, "default", ["alpha", "beta"])
 
@@ -172,6 +186,38 @@ class TestBackfillMissingEmbeddings:
                 tuple(fact_ids),
             ).fetchone()[0]
         assert paired == 2
+
+    def test_projection_failure_remains_pending_for_retry(
+        self,
+        db: DatabaseManager,
+        config: SLMConfig,
+        mock_embedder: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed derived-vector write must not strand canonical state."""
+        from superlocalmemory.retrieval import vector_store as vector_store_mod
+        from superlocalmemory.storage.embedding_migrator import backfill_missing_embeddings
+
+        class RejectingVectorStore:
+            available = True
+
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def upsert(self, *_args: object, **_kwargs: object) -> bool:
+                return False
+
+        monkeypatch.setattr(vector_store_mod, "VectorStore", RejectingVectorStore)
+        _seed_facts(db, "default", ["retry me"])
+
+        result = backfill_missing_embeddings(config, db, mock_embedder)
+
+        assert result == {"scanned": 1, "embedded": 0, "remaining_null": 1}
+        rows = db.execute(
+            "SELECT embedding FROM atomic_facts WHERE profile_id = ?",
+            ("default",),
+        )
+        assert rows[0]["embedding"] is None
 
     def test_byte_compatibility_embedding_format(
         self, db: DatabaseManager, config: SLMConfig, mock_embedder: MagicMock
