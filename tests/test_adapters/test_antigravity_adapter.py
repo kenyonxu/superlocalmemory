@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from superlocalmemory.hooks.adapter_base import HARD_BYTES_CAP
+from superlocalmemory.hooks.adapter_base import HARD_BYTES_CAP, path_sha256
 from superlocalmemory.hooks.antigravity_adapter import (
     AntigravityAdapter,
     GLOBAL_REL,
@@ -88,8 +88,22 @@ def test_content_hash_skip(tmp_path, monkeypatch, fake_recall):
     from superlocalmemory.hooks import context_payload as cp
     monkeypatch.setattr(cp, "_now_iso", lambda: "2026-04-18T00:00:00+00:00")
     adapter = _make_adapter(tmp_path, recall=fake_recall, monkeypatch=monkeypatch)
+    target_before = adapter.target_path
     assert adapter.sync() is True
-    assert adapter.sync() is False
+    target_after = adapter.target_path
+    with sqlite3.connect(tmp_path / "memory.db") as conn:
+        sync_rows = conn.execute(
+            "SELECT target_path_sha256, content_sha256, success "
+            "FROM cross_platform_sync_log WHERE adapter_name=?",
+            (adapter.name,),
+        ).fetchall()
+    assert adapter.sync() is False, {
+        "target_before": str(target_before),
+        "target_after": str(target_after),
+        "hash_before": path_sha256(target_before),
+        "hash_after": path_sha256(target_after),
+        "sync_rows": sync_rows,
+    }
 
 
 def test_disable_removes_file(tmp_path, monkeypatch, fake_recall):
