@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 import sys
@@ -91,19 +92,24 @@ def test_content_hash_skip(tmp_path, monkeypatch, fake_recall):
     target_before = adapter.target_path
     assert adapter.sync() is True
     target_after = adapter.target_path
+    disk_hash = hashlib.sha256(target_after.read_bytes()).hexdigest()
+    rendered_hash = hashlib.sha256(render_antigravity()).hexdigest()
     with sqlite3.connect(tmp_path / "memory.db") as conn:
         sync_rows = conn.execute(
             "SELECT target_path_sha256, content_sha256, success "
             "FROM cross_platform_sync_log WHERE adapter_name=?",
             (adapter.name,),
         ).fetchall()
-    assert adapter.sync() is False, {
-        "target_before": str(target_before),
-        "target_after": str(target_after),
-        "hash_before": path_sha256(target_before),
-        "hash_after": path_sha256(target_after),
-        "sync_rows": sync_rows,
-    }
+    second_sync = adapter.sync()
+    assert second_sync is False, (
+        f"target_before={target_before}\n"
+        f"target_after={target_after}\n"
+        f"hash_before={path_sha256(target_before)}\n"
+        f"hash_after={path_sha256(target_after)}\n"
+        f"rendered_hash={rendered_hash}\n"
+        f"disk_hash={disk_hash}\n"
+        f"sync_rows={sync_rows!r}"
+    )
 
 
 def test_disable_removes_file(tmp_path, monkeypatch, fake_recall):
