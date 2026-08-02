@@ -366,7 +366,7 @@ def test_stop_request_stays_bound_to_captured_daemon_instance() -> None:
     replacement = build_descriptor(
         data_root=Path(os.environ["SLM_DATA_DIR"]),
         port=43135,
-        version="3.8.10",
+        version="3.8.11",
         pid=os.getpid(),
         instance_id="replacement-instance",
         capability="replacement-capability",

@@ -128,4 +128,4 @@ When the SLM MCP server is unavailable, use these CLI equivalents:
 - **slm-optimize-advisor** — context compression and KV cache
 - **slm-governance-advisor** — scope/role compliance, retention policies, GDPR
 
-SuperLocalMemory v3.8.10 · Qualixar · AGPL-3.0-or-later
+SuperLocalMemory v3.8.11 · Qualixar · AGPL-3.0-or-later

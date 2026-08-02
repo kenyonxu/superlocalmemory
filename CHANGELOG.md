@@ -5,6 +5,42 @@ All notable changes to SuperLocalMemory V3 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.11] - 2026-08-02 — Learning-signal integrity and honest reranker diagnostics
+
+### Fixed
+- Explicit feedback reported through `report_feedback` now writes to the
+  canonical learning store (`learning.db`), which every learning consumer
+  reads: the adaptive-ranking phase gate, `pattern_miner`, and the dashboard
+  Living Brain. Previously it wrote only to a table nothing else read, so
+  feedback returned success and a rising counter while the ranker never
+  advanced past Phase 1 (#102).
+- `learning_feedback` now has the `channel` column `pattern_miner` has always
+  queried but no schema ever defined. Every fresh database raised
+  `no such column: channel` on the first mining pass — caught, logged at
+  debug, and silently disabled both channel-performance mining and the
+  co-retrieval mining that shared its error handler. Migration `M033`
+  backfills existing databases without touching existing rows (#102).
+- The cross-encoder reranker now reports the real reason a model load
+  failed instead of a generic timeout message, and no longer retries a
+  configuration error five times (~7.5 minutes) before giving up. An
+  unrecognized `cross_encoder_backend` value is now rejected by name;
+  SuperLocalMemory has no remote/OpenAI-compatible reranker backend, so a
+  `cross_encoder_endpoint` config key was previously accepted and silently
+  ignored (#103).
+- `slm recall` no longer crashes when a daemon response's
+  `retrieval_time_ms` or a result's `score` is present but `null` — the
+  keyword-fallback recall path now includes `retrieval_time_ms` in every
+  response, matching every other recall path's contract.
+- The MagicMock artifact guard (`.gitignore` and its CI test) now also
+  catches the directory-shaped leak (`MagicMock/mock/<id>/`) produced when
+  a mock-derived path reaches `mkdir()`, not just the file-shaped leak
+  (`<MagicMock id='...'>`) produced by `os.open()`.
+
+### Documentation
+- `docs/auto-memory.md` no longer references `slm patterns` / `slm useful`,
+  which do not exist in V3; documents the `report_feedback` MCP tool as the
+  supported path instead.
+
 ## [3.8.10] - 2026-07-29 — Reliable startup and MCP writes
 
 ### Fixed

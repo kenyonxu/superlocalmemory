@@ -62,10 +62,11 @@ def test_npm_dry_run_contains_no_build_tools_tests_or_compiled_caches() -> None:
         "scripts/preuninstall.js",
     }
     # V3.8.6 adds seven bounded canonical-writer, journal, codec, migration, and
-    # strict read-connection modules; V3.8.9 adds materialization_control.py.
+    # strict read-connection modules; V3.8.9 adds materialization_control.py;
+    # V3.8.11 adds M033_learning_feedback_channel.py (one migration module).
     # Keep the count exact enough to catch an accidentally shipped build/test
     # surface; the byte budget remains the primary package-size guard.
-    assert artifact["entryCount"] <= 668
+    assert artifact["entryCount"] <= 669
     assert artifact["unpackedSize"] <= 10 * 1024 * 1024
 
 
