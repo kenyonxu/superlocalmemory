@@ -6,8 +6,8 @@ authors:
   - family-names: "Bhardwaj"
     given-names: "Varun Pratap"
     orcid: ""
-version: "3.8.10"
-date-released: "2026-07-29"
+version: "3.8.11"
+date-released: "2026-08-02"
 license: AGPL-3.0-or-later
 url: "https://superlocalmemory.com"
 repository-code: "https://github.com/qualixar/superlocalmemory"

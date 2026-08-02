@@ -140,6 +140,78 @@ def _emit_event(event_type: str, payload: dict | None = None,
         logger.warning("event emit failed: type=%s err=%s", event_type, exc)
 
 
+# ---------------------------------------------------------------------------
+# Canonical learning-store feedback (issue #102)
+#
+# learning.db is the single store every learning consumer reads: the phase
+# gate (recall_pipeline._ReadOnlyLearningView.count_feedback), pattern_miner,
+# the ranker retrainers, and the dashboard. Recall itself is deliberately
+# read-only and must never open a writer, so an explicit feedback command is
+# the only durable writer in the design. These helpers are that writer.
+# ---------------------------------------------------------------------------
+
+_FEEDBACK_SIGNAL_MAP: dict[str, tuple[str, float]] = {
+    "relevant": ("user_positive", 1.0),
+    "irrelevant": ("user_negative", 0.0),
+    "partial": ("user_correction", 0.5),
+}
+
+
+def _learning_db_path():
+    """Resolve the canonical learning.db path."""
+    return state_path("learning.db")
+
+
+def _record_canonical_feedback(
+    *, profile_id: str, fact_id: str, feedback: str, query: str = "",
+    channel: str = "explicit",
+) -> bool:
+    """Write explicit feedback to learning.db. Returns True on success.
+
+    Best-effort by design — a learning write must never fail the user's
+    feedback call — but the outcome is RETURNED rather than swallowed, so the
+    caller can tell the user the truth about whether the write was durable.
+    """
+    signal_type, value = _FEEDBACK_SIGNAL_MAP.get(
+        feedback, ("user_correction", 0.5),
+    )
+    try:
+        from superlocalmemory.learning.feedback import FeedbackCollector
+
+        collector = FeedbackCollector(_learning_db_path())
+        row_id = collector.record_explicit(
+            profile_id=profile_id,
+            fact_id=fact_id,
+            signal_type=signal_type,
+            value=value,
+            query=query,
+            channel=channel,
+        )
+        return row_id is not None
+    except Exception as exc:
+        logger.warning(
+            "canonical feedback write failed (fact_id=%s): %s", fact_id, exc,
+        )
+        return False
+
+
+def _canonical_feedback_count(profile_id: str) -> int | None:
+    """Count rows in the store that gates the adaptive phases.
+
+    Returns None when the store cannot be read, so the caller can fall back
+    rather than report a misleading zero.
+    """
+    try:
+        from superlocalmemory.learning.feedback import FeedbackCollector
+
+        return FeedbackCollector(
+            _learning_db_path(),
+        ).get_feedback_count(profile_id)
+    except Exception as exc:
+        logger.warning("canonical feedback count failed: %s", exc)
+        return None
+
+
 def register_active_tools(server, get_engine: Callable) -> None:
     """Register 3 active memory tools on *server*."""
 
@@ -551,25 +623,64 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 profile_id=pid,
             )
 
-            count = engine._adaptive_learner.get_feedback_count(pid)
+            # v3.8.11 (issue #102): the AdaptiveLearner write above lands in
+            # ``feedback_records`` in memory.db — a table whose only readers
+            # are AdaptiveLearner's own count and its train(), which nothing
+            # in the running system calls. Reported feedback therefore
+            # returned success and an incrementing counter while every actual
+            # consumer saw nothing.
+            #
+            # The canonical learning store is learning.db. Writing here is
+            # what makes feedback do work: the phase gate
+            # (_ReadOnlyLearningView.count_feedback) unlocks adaptive ranking
+            # at 50 rows, pattern_miner mines channel_performance from it, and
+            # the dashboard Living Brain reads it. Recall stays read-only by
+            # design, so this explicit path is the ONLY durable writer.
+            #
+            # Kept alongside (not replacing) the AdaptiveLearner write so
+            # existing feedback_records data and GDPR erasure stay intact.
+            canonical_recorded = _record_canonical_feedback(
+                profile_id=pid,
+                fact_id=fact_id,
+                feedback=feedback,
+                query=query,
+            )
+
+            # Report the count from the store that ACTUALLY gates the phases.
+            # Pre-3.8.11 this returned the feedback_records count, so the
+            # caller watched a number climb toward 50 while the gate — which
+            # reads learning_feedback — never moved.
+            count = _canonical_feedback_count(pid)
+            if count is None:
+                count = engine._adaptive_learner.get_feedback_count(pid)
             authorization.complete()
 
+            phase = 1 if count < 50 else (2 if count < 200 else 3)
             _emit_event("pattern.learned", {
                 "fact_id": fact_id,
                 "feedback": feedback,
                 "total_signals": count,
-                "phase": 1 if count < 50 else (2 if count < 200 else 3),
+                "phase": phase,
             })
 
-            return {
+            result = {
                 "success": True,
                 "feedback_id": record.feedback_id,
                 "total_signals": count,
-                "phase": 1 if count < 50 else (2 if count < 200 else 3),
+                "phase": phase,
                 "message": f"Feedback recorded. {count} total signals."
                 + (" Phase 2 unlocked!" if count == 50 else "")
                 + (" Phase 3 (ML) unlocked!" if count == 200 else ""),
             }
+            if not canonical_recorded:
+                # Never claim a durable learning write that did not happen.
+                result["durable"] = False
+                result["warning"] = (
+                    "Feedback was accepted but could not be written to the "
+                    "canonical learning store; it will not influence ranking. "
+                    "Run 'slm doctor' to diagnose learning.db."
+                )
+            return result
         except Exception as exc:
             logger.exception("report_feedback failed")
             return {"success": False, "error": str(exc)}

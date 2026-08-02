@@ -128,6 +128,9 @@ from superlocalmemory.storage.migrations import (
 from superlocalmemory.storage.migrations import (
     M032_write_coordinator_admission as _M032,
 )
+from superlocalmemory.storage.migrations import (
+    M033_learning_feedback_channel as _M033,
+)
 
 # Map migration name → module (used for the optional ``verify(conn)`` hook
 # that lets the runner detect "already applied" state when an idempotent
@@ -164,6 +167,7 @@ _MODULES = {
     _M030.NAME: _M030,
     _M031.NAME: _M031,
     _M032.NAME: _M032,
+    _M033.NAME: _M033,
 }
 
 logger = logging.getLogger(__name__)
@@ -219,6 +223,11 @@ MIGRATIONS: list[Migration] = [
     # M012 creates shadow_observations (learning.db) — paired NDCG@10
     # observations for ShadowTest persistence across daemon restart.
     Migration(name=_M012.NAME, db_target="learning", ddl=_M012.DDL,
+              dependencies=(_M003.NAME,)),
+    # M033 adds learning_feedback.channel, which pattern_miner has always
+    # queried but which no schema ever defined. Its DDL creates the table
+    # when absent, so it needs no dependency beyond the migration log.
+    Migration(name=_M033.NAME, db_target="learning", ddl=_M033.DDL,
               dependencies=(_M003.NAME,)),
     Migration(name=_M004.NAME, db_target="memory", ddl=_M004.DDL),
     # M007 creates pending_outcomes (memory.db, LLD-00 §1.2).

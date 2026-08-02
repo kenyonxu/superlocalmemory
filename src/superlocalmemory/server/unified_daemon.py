@@ -534,6 +534,10 @@ def _recall_keyword_fallback(engine, query: str, limit: int) -> dict:
         "results": results,
         "count": len(results),
         "no_confident_match": True,
+        # PR #101: every other recall path returns this key, so clients format
+        # it unconditionally. Omitting it here made the degraded path — the one
+        # that fires when recall is ALREADY struggling — crash the CLI.
+        "retrieval_time_ms": 0,
     }
 
 # v3.4.52: Embedding model warm state. Set to True by the async pre-warm

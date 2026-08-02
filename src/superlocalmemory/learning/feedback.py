@@ -53,6 +53,13 @@ _DASHBOARD_SIGNAL_MAP: Dict[str, tuple[str, float]] = {
     "dwell_negative": ("dwell_negative", 0.2),
 }
 
+# ``channel`` records WHICH retrieval channel surfaced the fact (semantic,
+# bm25, entity_graph, temporal, ...). ``pattern_miner._mine_channel_and_
+# coretrieval`` groups on it to mine ``channel_performance`` patterns. It was
+# read by the miner but never defined here, so every fresh database raised
+# "no such column: channel" — swallowed at debug level, which silently killed
+# BOTH channel mining and the co-retrieval mining that followed it in the same
+# try block. Defined here for new databases; M033 back-fills existing ones.
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS learning_feedback (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,13 +69,19 @@ CREATE TABLE IF NOT EXISTS learning_feedback (
     signal_value REAL    NOT NULL,
     query_hash   TEXT,
     created_at   TEXT    NOT NULL,
-    metadata     TEXT
+    metadata     TEXT,
+    channel      TEXT    DEFAULT 'unknown'
 )
 """
 
 _CREATE_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_feedback_profile
     ON learning_feedback (profile_id, created_at DESC)
+"""
+
+_CREATE_CHANNEL_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_feedback_channel
+    ON learning_feedback (profile_id, channel)
 """
 
 
@@ -108,6 +121,20 @@ class FeedbackCollector:
         try:
             conn.execute(_CREATE_TABLE)
             conn.execute(_CREATE_INDEX)
+            # Pre-3.8.11 databases created ``learning_feedback`` without the
+            # ``channel`` column. M033 covers migrated installs; this ADD keeps
+            # a collector pointed at a legacy file self-healing rather than
+            # failing every channel query for the life of the process.
+            existing = {
+                row[1] for row in
+                conn.execute("PRAGMA table_info(learning_feedback)")
+            }
+            if "channel" not in existing:
+                conn.execute(
+                    "ALTER TABLE learning_feedback "
+                    "ADD COLUMN channel TEXT DEFAULT 'unknown'"
+                )
+            conn.execute(_CREATE_CHANNEL_INDEX)
             conn.commit()
         finally:
             conn.close()
@@ -196,9 +223,19 @@ class FeedbackCollector:
         fact_id: str,
         signal_type: str,
         value: float,
+        query: str = "",
+        channel: str = "unknown",
     ) -> Optional[int]:
         """
         Record explicit user feedback on a specific fact.
+
+        This is the canonical durable write for the learning system. Recall
+        itself is deliberately read-only (it must never open a writer — see
+        ``test_readonly_bandit_uses_uri_read_connection_and_never_records_play``),
+        so explicit feedback is the ONLY path that grows ``learning_feedback``.
+        Every downstream consumer reads this table: the phase gate
+        (``_ReadOnlyLearningView.count_feedback`` unlocks adaptive ranking at
+        50 rows), ``pattern_miner`` (channel_performance), and the dashboard.
 
         Args:
             profile_id:  Profile providing feedback.
@@ -206,6 +243,9 @@ class FeedbackCollector:
             signal_type: One of ``user_positive``, ``user_negative``,
                          ``user_correction``, or any custom type.
             value:       Numeric signal value (0.0 to 1.0).
+            query:       Originating query. Stored only as a SHA-256[:16]
+                         hash — full text is never persisted.
+            channel:     Retrieval channel that surfaced the fact.
 
         Returns:
             Row ID of the inserted record, or None on error.
@@ -215,6 +255,7 @@ class FeedbackCollector:
 
         clamped = max(0.0, min(1.0, float(value)))
         now = _utcnow_iso()
+        query_hash = _hash_query(query) if query else None
 
         with self._lock:
             conn = self._connect()
@@ -222,9 +263,10 @@ class FeedbackCollector:
                 cursor = conn.execute(
                     "INSERT INTO learning_feedback "
                     "(profile_id, fact_id, signal_type, signal_value, "
-                    "query_hash, created_at, metadata) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (profile_id, fact_id, signal_type, clamped, None, now, None),
+                    "query_hash, created_at, metadata, channel) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (profile_id, fact_id, signal_type, clamped, query_hash,
+                     now, None, channel or "unknown"),
                 )
                 conn.commit()
                 return cursor.lastrowid
