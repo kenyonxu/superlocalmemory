@@ -22,10 +22,21 @@ logger = logging.getLogger(__name__)
 
 
 def _daemon_unavailable(command: str, use_json: bool) -> None:
-    """Exit a mutation client without opening a process-local writer."""
+    """Exit a mutation client without opening a process-local writer.
+
+    The bare "owned daemon is unavailable" of earlier releases described a
+    stopped daemon, a recycled PID, an unreachable port and an identity
+    mismatch identically, which gave issue #104's reporter nothing to act on.
+    The diagnosis names the evidence and the next command to run.
+    """
+    from superlocalmemory.cli.daemon import describe_daemon_unavailability
+
+    diagnosis = describe_daemon_unavailability()
     error = {
         "code": "DAEMON_UNAVAILABLE",
-        "message": "Owned daemon is unavailable; retry later.",
+        "reason": diagnosis["reason"],
+        "message": f"Owned daemon is unavailable: {diagnosis['message']}",
+        "hint": diagnosis["hint"],
         "retryable": True,
     }
     if use_json:
@@ -34,7 +45,8 @@ def _daemon_unavailable(command: str, use_json: bool) -> None:
         json_print(command, error=error)
     else:
         print(
-            "DAEMON_UNAVAILABLE: owned daemon is unavailable; retry later.",
+            f"DAEMON_UNAVAILABLE ({diagnosis['reason']}): "
+            f"{diagnosis['message']} {diagnosis['hint']}",
             file=sys.stderr,
         )
     raise SystemExit(1)

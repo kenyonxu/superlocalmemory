@@ -230,6 +230,11 @@ def _worker_main() -> None:
 
 
 _KNOWN_BACKENDS = ("onnx", "", "pytorch", "torch")
+# Backends this worker can never serve — they are handled over HTTP by
+# superlocalmemory.retrieval.remote_reranker in the parent process (#105).
+# Duplicated as a literal on purpose: this module runs as a bare subprocess
+# and must not import the retrieval package (or, transitively, httpx).
+_REMOTE_BACKENDS = ("openai", "remote")
 
 
 def _load_model(
@@ -253,12 +258,26 @@ def _load_model(
     # the PyTorch tier and fail there with a confusing model-load error. A
     # user who set backend="openai" expecting a remote reranker got five
     # silent failures and no hint that the value meant nothing. Name it.
+    #
+    # v3.8.12 (issue #105): remote reranking now EXISTS, but it is served in
+    # the parent process — this worker holds torch/ONNX and cannot forward an
+    # HTTP request. Reaching here with a remote backend means the parent
+    # routed wrong (or a caller drove the worker directly), so the message
+    # points at the config keys that select the remote path.
+    if backend in _REMOTE_BACKENDS:
+        return None, "", "", (
+            f"unknown backend {backend!r} for the LOCAL reranker worker. "
+            f"{backend!r} selects the remote reranker, which runs in the "
+            f"parent process — set retrieval.cross_encoder_endpoint (e.g. "
+            f"\"http://127.0.0.1:8041/v1/rerank\") so SuperLocalMemory routes "
+            f"reranking over HTTP instead of spawning this worker."
+        )
     if backend not in _KNOWN_BACKENDS:
         return None, "", "", (
-            f"unknown backend {backend!r}; supported values are "
-            f"'onnx' or '' (PyTorch). SuperLocalMemory has no remote/"
-            f"OpenAI-compatible reranker backend — the cross-encoder always "
-            f"runs locally, so 'cross_encoder_endpoint' has no effect."
+            f"unknown backend {backend!r}; supported values are 'onnx' or ''"
+            f" (PyTorch) for local reranking, or 'openai'/'remote' with "
+            f"retrieval.cross_encoder_endpoint set for a remote "
+            f"OpenAI-compatible /v1/rerank endpoint."
         )
 
     tier_errors: list[str] = []

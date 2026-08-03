@@ -141,13 +141,21 @@ def _emit_event(event_type: str, payload: dict | None = None,
 
 
 # ---------------------------------------------------------------------------
-# Canonical learning-store feedback (issue #102)
+# Canonical learning-store feedback (issues #102, #106)
 #
-# learning.db is the single store every learning consumer reads: the phase
-# gate (recall_pipeline._ReadOnlyLearningView.count_feedback), pattern_miner,
-# the ranker retrainers, and the dashboard. Recall itself is deliberately
-# read-only and must never open a writer, so an explicit feedback command is
-# the only durable writer in the design. These helpers are that writer.
+# learning.db is the single store every learning consumer reads. Within it the
+# canonical tables are ``learning_signals`` + ``learning_features``: the phase
+# gate (recall_pipeline), the dashboard Living Brain panel, the ranker-phase
+# card, and the retrainer all resolve their phase from ``learning_signals``.
+# ``learning_feedback`` is the pre-v3.4.22 table that legacy_migration copies
+# forward into it.
+#
+# Recall itself is deliberately read-only and must never open a writer, so an
+# explicit feedback command is the only durable writer in the design. These
+# helpers are that writer, and — per issue #106 — they report the SAME number
+# the gate and the dashboard use. There is deliberately no fall back to a
+# different store's count: a cross-store fallback is what let a total write
+# failure still return "success" beside a plausibly incrementing counter.
 # ---------------------------------------------------------------------------
 
 _FEEDBACK_SIGNAL_MAP: dict[str, tuple[str, float]] = {
@@ -162,15 +170,43 @@ def _learning_db_path():
     return state_path("learning.db")
 
 
+def _phase_thresholds() -> tuple[int, int]:
+    """Return the (phase 2, phase 3) signal thresholds.
+
+    Sourced from ``learning.ranker`` so the MCP surface can never report a
+    different phase than the one recall actually applies. Falls back to the
+    documented defaults only if the learning package is unavailable.
+    """
+    try:
+        from superlocalmemory.learning.ranker import (
+            PHASE_2_THRESHOLD,
+            PHASE_3_THRESHOLD,
+        )
+        return PHASE_2_THRESHOLD, PHASE_3_THRESHOLD
+    except Exception:  # pragma: no cover — learning extras absent
+        return 50, 200
+
+
+_PHASE_2_THRESHOLD, _PHASE_3_THRESHOLD = _phase_thresholds()
+
+
+def _phase_for_signal_count(count: int) -> int:
+    """Map a canonical signal count onto the adaptive ranking phase."""
+    if count < _PHASE_2_THRESHOLD:
+        return 1
+    return 2 if count < _PHASE_3_THRESHOLD else 3
+
+
 def _record_canonical_feedback(
     *, profile_id: str, fact_id: str, feedback: str, query: str = "",
     channel: str = "explicit",
 ) -> bool:
     """Write explicit feedback to learning.db. Returns True on success.
 
-    Best-effort by design — a learning write must never fail the user's
-    feedback call — but the outcome is RETURNED rather than swallowed, so the
-    caller can tell the user the truth about whether the write was durable.
+    True means the ``learning_signals`` row that every phase counter reads
+    actually landed — not merely that some row was written somewhere. The
+    outcome is RETURNED rather than swallowed so the caller can tell the user
+    the truth about whether the write was durable.
     """
     signal_type, value = _FEEDBACK_SIGNAL_MAP.get(
         feedback, ("user_correction", 0.5),
@@ -179,7 +215,7 @@ def _record_canonical_feedback(
         from superlocalmemory.learning.feedback import FeedbackCollector
 
         collector = FeedbackCollector(_learning_db_path())
-        row_id = collector.record_explicit(
+        write = collector.record_explicit_event(
             profile_id=profile_id,
             fact_id=fact_id,
             signal_type=signal_type,
@@ -187,7 +223,7 @@ def _record_canonical_feedback(
             query=query,
             channel=channel,
         )
-        return row_id is not None
+        return write.canonical
     except Exception as exc:
         logger.warning(
             "canonical feedback write failed (fact_id=%s): %s", fact_id, exc,
@@ -196,17 +232,20 @@ def _record_canonical_feedback(
 
 
 def _canonical_feedback_count(profile_id: str) -> int | None:
-    """Count rows in the store that gates the adaptive phases.
+    """Count the store that gates the adaptive phases.
 
-    Returns None when the store cannot be read, so the caller can fall back
-    rather than report a misleading zero.
+    Returns None when the store cannot be read. The caller must NOT substitute
+    a count from a different table: before issue #106 an unreadable learning.db
+    silently fell back to ``feedback_records`` in memory.db — a table no
+    consumer reads — so the user watched a fabricated counter climb toward a
+    threshold that nothing was measuring, while the durable write did nothing.
     """
     try:
         from superlocalmemory.learning.feedback import FeedbackCollector
 
         return FeedbackCollector(
             _learning_db_path(),
-        ).get_feedback_count(profile_id)
+        ).get_signal_count(profile_id)
     except Exception as exc:
         logger.warning("canonical feedback count failed: %s", exc)
         return None
@@ -441,16 +480,19 @@ def register_active_tools(server, get_engine: Callable) -> None:
                     "source_type": m.source_type,
                 })
 
-            # Get learning status
-            feedback_count = 0
-            try:
-                feedback_count = engine._adaptive_learner.get_feedback_count(pid)
-            except Exception as exc:
-                # Feedback count is a Dash-Core signal; a silent zero
-                # masks wiring bugs. Log so operators see the failure.
+            # Learning status — issue #106: read the SAME canonical counter
+            # that report_feedback reports, the recall gate applies, and the
+            # dashboard displays. This used to read ``feedback_records`` in
+            # memory.db, so session_init and report_feedback returned two
+            # different "signal" totals for one profile in the same session.
+            # A silent zero masks wiring bugs, so a failed read is logged.
+            feedback_count = _canonical_feedback_count(pid)
+            if feedback_count is None:
                 logger.warning(
-                    "session_init feedback_count read failed: %s", exc,
+                    "session_init canonical signal count unavailable for "
+                    "profile %s; reporting 0", pid,
                 )
+                feedback_count = 0
 
             # v3.6.9 (#35): generate a stable session_id so clients can pass it
             # to remember() and close_session() for proper session aggregation.
@@ -484,11 +526,13 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 "abstention_reason": getattr(response, "abstention_reason", None),
                 "learning": {
                     "feedback_signals": feedback_count,
-                    "phase": 1 if feedback_count < 50 else (2 if feedback_count < 200 else 3),
+                    "phase": _phase_for_signal_count(feedback_count),
                     "status": (
                         "collecting"
-                        if feedback_count < 50
-                        else "learning" if feedback_count < 200 else "trained"
+                        if feedback_count < _PHASE_2_THRESHOLD
+                        else "learning"
+                        if feedback_count < _PHASE_3_THRESHOLD
+                        else "trained"
                     ),
                 },
             }
@@ -623,22 +667,18 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 profile_id=pid,
             )
 
-            # v3.8.11 (issue #102): the AdaptiveLearner write above lands in
-            # ``feedback_records`` in memory.db — a table whose only readers
-            # are AdaptiveLearner's own count and its train(), which nothing
-            # in the running system calls. Reported feedback therefore
-            # returned success and an incrementing counter while every actual
-            # consumer saw nothing.
+            # The AdaptiveLearner write above lands in ``feedback_records`` in
+            # memory.db — a table whose only readers are AdaptiveLearner's own
+            # count and its train(), which nothing in the running system
+            # calls. It is kept so existing data and GDPR erasure stay intact,
+            # but it is NOT the learning write and its count is NOT reported.
             #
-            # The canonical learning store is learning.db. Writing here is
-            # what makes feedback do work: the phase gate
-            # (_ReadOnlyLearningView.count_feedback) unlocks adaptive ranking
-            # at 50 rows, pattern_miner mines channel_performance from it, and
-            # the dashboard Living Brain reads it. Recall stays read-only by
-            # design, so this explicit path is the ONLY durable writer.
-            #
-            # Kept alongside (not replacing) the AdaptiveLearner write so
-            # existing feedback_records data and GDPR erasure stay intact.
+            # The canonical store is learning.db's ``learning_signals`` (+ the
+            # paired ``learning_features`` row). Writing there is what makes
+            # feedback do work: the recall phase gate, the dashboard Living
+            # Brain panel, the ranker-phase card, and the retrainer all read
+            # it. Recall stays read-only by design, so this explicit path is
+            # the only durable writer.
             canonical_recorded = _record_canonical_feedback(
                 profile_id=pid,
                 fact_id=fact_id,
@@ -646,16 +686,32 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 query=query,
             )
 
-            # Report the count from the store that ACTUALLY gates the phases.
-            # Pre-3.8.11 this returned the feedback_records count, so the
-            # caller watched a number climb toward 50 while the gate — which
-            # reads learning_feedback — never moved.
+            # issue #106: report the count from the store that ACTUALLY gates
+            # the phases, and report NOTHING when it cannot be read. The old
+            # fallback to ``feedback_records`` is what made a total write
+            # failure indistinguishable from success: the response carried a
+            # plausible, incrementing ``total_signals`` sourced from a table
+            # nothing consumes, so the caller had no way to notice that
+            # learning.db was never touched.
             count = _canonical_feedback_count(pid)
-            if count is None:
-                count = engine._adaptive_learner.get_feedback_count(pid)
             authorization.complete()
 
-            phase = 1 if count < 50 else (2 if count < 200 else 3)
+            if not canonical_recorded or count is None:
+                # Never claim a durable learning write that did not happen.
+                return {
+                    "success": False,
+                    "durable": False,
+                    "feedback_id": record.feedback_id,
+                    "total_signals": count,
+                    "error": (
+                        "Feedback was accepted but could not be written to "
+                        "the canonical learning store (learning.db), so it "
+                        "will not influence ranking. Run 'slm doctor' to "
+                        "diagnose learning.db."
+                    ),
+                }
+
+            phase = _phase_for_signal_count(count)
             _emit_event("pattern.learned", {
                 "fact_id": fact_id,
                 "feedback": feedback,
@@ -665,21 +721,16 @@ def register_active_tools(server, get_engine: Callable) -> None:
 
             result = {
                 "success": True,
+                "durable": True,
                 "feedback_id": record.feedback_id,
                 "total_signals": count,
                 "phase": phase,
                 "message": f"Feedback recorded. {count} total signals."
-                + (" Phase 2 unlocked!" if count == 50 else "")
-                + (" Phase 3 (ML) unlocked!" if count == 200 else ""),
+                + (" Phase 2 unlocked!"
+                   if count == _PHASE_2_THRESHOLD else "")
+                + (" Phase 3 (ML) unlocked!"
+                   if count == _PHASE_3_THRESHOLD else ""),
             }
-            if not canonical_recorded:
-                # Never claim a durable learning write that did not happen.
-                result["durable"] = False
-                result["warning"] = (
-                    "Feedback was accepted but could not be written to the "
-                    "canonical learning store; it will not influence ranking. "
-                    "Run 'slm doctor' to diagnose learning.db."
-                )
             return result
         except Exception as exc:
             logger.exception("report_feedback failed")

@@ -294,6 +294,10 @@ quality must be evaluated for the target client and workload; V3.8.0 publishes n
 
 **Multilingual models:** configure an OpenAI-compatible embedding endpoint such as Ollama, vLLM, LiteLLM, `bge-m3`, `multilingual-e5`, or `Qwen3-Embedding`. Language coverage and retrieval quality depend on the selected model and should be evaluated for the deployment corpus.
 
+<a id="remote-embedding-and-rerank-endpoints"></a>
+
+**Remote embedding + rerank endpoints.** The bundled reranker `cross-encoder/ms-marco-MiniLM-L-12-v2` is **English-only**, so a Chinese, Japanese, or Arabic corpus is scored by a model that cannot read it. Set `retrieval.cross_encoder_backend: "openai"` plus `retrieval.cross_encoder_endpoint` to route reranking to any Cohere-shaped `POST /v1/rerank` service — llama-server, text-embeddings-inference, Infinity — running a multilingual model such as `BAAI/bge-reranker-v2-m3` (v3.8.12, [#105](https://github.com/qualixar/superlocalmemory/issues/105); the same escape hatch embeddings got in v3.4.24, [#16](https://github.com/qualixar/superlocalmemory/issues/16)). No subprocess and no local model download. An unreachable, slow, or malformed endpoint logs an error and returns fusion-ranked results — SLM never silently substitutes the local English model. Keys, auth, and failure semantics: **[docs/configuration.md](docs/configuration.md#remote-embedding-and-rerank-endpoints)**.
+
 ### Cache + Compress
 
 <a id="three-surfaces-proxy--mcp-tools--skill"></a>

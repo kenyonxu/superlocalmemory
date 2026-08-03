@@ -31,18 +31,22 @@ def test_unknown_backend_is_named_not_silently_downgraded() -> None:
     assert "openai" in error
 
 
-def test_unknown_backend_error_explains_that_remote_reranking_is_unsupported(
-) -> None:
-    """The config that triggered #103 must be addressed directly.
+def test_remote_backend_error_points_at_the_endpoint_key() -> None:
+    """v3.8.12 (#105) changed the truth this error has to tell.
 
-    The reporter configured ``cross_encoder_endpoint`` — a key SuperLocalMemory
-    has never read — and reasonably assumed remote reranking existed. The error
-    must correct that belief instead of leaving them to infer it.
+    Remote reranking now EXISTS, but it is served in the parent process — this
+    worker holds torch/ONNX and cannot forward HTTP. Reaching it with
+    backend='openai' means ``cross_encoder_endpoint`` was never set, so the
+    error must name that key rather than declare remote reranking impossible.
     """
     _, _, _, error = _load_model("/root/model/reranker.gguf", "openai")
 
     assert "cross_encoder_endpoint" in error
-    assert "locally" in error.lower()
+    assert "remote" in error.lower()
+    assert "parent process" in error.lower()
+    assert "no remote" not in error.lower(), (
+        "the pre-3.8.12 claim that remote reranking does not exist is now false"
+    )
 
 
 def test_known_backends_are_not_rejected() -> None:
