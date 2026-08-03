@@ -1,4 +1,4 @@
-<!-- BEGIN SuperLocalMemory v3.8.12 -->
+<!-- BEGIN SuperLocalMemory v3.8.13 -->
 
 ## SuperLocalMemory (SLM) — Agent Rules
 
@@ -39,6 +39,6 @@ slm-recall · slm-remember · slm-session · slm-status · slm-cache · slm-comp
 ### Subagents
 slm-memory-advisor (memory decisions, session hygiene, scope/profile guidance) · slm-optimize-advisor (context compression + KV cache) · slm-governance-advisor (scope/roles/compliance/GDPR)
 
-<!-- END SuperLocalMemory v3.8.12 -->
+<!-- END SuperLocalMemory v3.8.13 -->
 
-SuperLocalMemory v3.8.12 · Qualixar · AGPL-3.0-or-later
+SuperLocalMemory v3.8.13 · Qualixar · AGPL-3.0-or-later

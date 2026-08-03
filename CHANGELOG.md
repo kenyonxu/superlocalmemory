@@ -5,6 +5,36 @@ All notable changes to SuperLocalMemory V3 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.13] - 2026-08-03 — Stale-process detection
+
+### Fixed
+- A running process can now tell when it is serving superseded code. Python
+  imports a module once, so `__version__` is frozen at process start and
+  upgrading the package underneath a long-lived `slm mcp` server changes
+  nothing for that server — it keeps serving the code it read at startup,
+  indefinitely. Nothing detected this. The stale process did not error; it
+  returned confident, plausible, wrong answers and reported a
+  `serverInfo.version` matching the code it had loaded, which is
+  self-consistent and therefore useless as a staleness signal. During the
+  3.8.12 work one machine had eighteen `slm mcp` processes alive at once
+  spanning four days and two releases, and one of them made issue #106 look
+  unfixed across two debugging sessions. (#107)
+
+  The existing process reaper does not cover this: it kills *orphans*, whose
+  parent has died. A server whose IDE is still running is never an orphan.
+
+  Staleness is now reported by `slm doctor` (as a warning, with a restart
+  hint), on the loopback `/health` payload as `version_integrity`, and in the
+  `slm mcp` startup log. The MCP path logs to stderr only — that transport is
+  JSON-RPC over stdio, where a printed warning would corrupt the protocol and
+  turn a cosmetic problem into a dead session.
+
+  Running *ahead* of the installed distribution — normal for an editable
+  checkout — is deliberately reported separately and does not warn. A warning
+  that fires on every developer machine is one everybody learns to ignore, and
+  then it goes unread on the day it matters. Every failure path resolves to
+  `unknown` rather than to a false `current`.
+
 ## [3.8.12] - 2026-08-03 — Canonical learning signals, clock-independent daemon identity, remote reranker
 
 ### Fixed
