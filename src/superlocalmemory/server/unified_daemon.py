@@ -3272,6 +3272,12 @@ def _register_daemon_routes(application: FastAPI) -> None:
             "runtime_state": runtime_state,
             "active_profile": profile_snapshot.profile_id,
             "profile_generation": profile_snapshot.generation,
+            # issue #107: does this daemon's *imported* code still match the
+            # installed distribution? ``version`` above reports what this
+            # process loaded, which is self-consistent and therefore cannot
+            # reveal staleness on its own. Loopback-only, alongside the other
+            # operational metadata.
+            "version_integrity": _version_integrity_payload(),
         }
 
     @application.get("/recall")
@@ -4014,6 +4020,27 @@ _materializer_thread: threading.Thread | None = None
 
 class _PendingProfileMismatchError(RuntimeError):
     """A legacy pending row no longer matches the admitted profile lease."""
+
+
+def _version_integrity_payload() -> dict:
+    """Report whether this daemon's imported code matches what is installed.
+
+    Issue #107.  ``/health``'s ``version`` field reports the version this
+    process loaded at import, so a stale daemon reports its *own* stale version
+    perfectly happily -- self-consistent and useless as a staleness signal.
+    This compares that against the distribution metadata on disk.
+
+    Fail-open by construction: any error degrades to a ``state`` of
+    ``"unknown"`` rather than raising, because ``/health`` is what clients poll
+    to decide whether the daemon is usable and must not start returning 500s
+    over a diagnostic.
+    """
+    try:
+        from superlocalmemory.infra.version_integrity import check_version_integrity
+
+        return check_version_integrity().as_dict()
+    except Exception as exc:  # noqa: BLE001 - health must never fail on this
+        return {"state": "unknown", "detail": f"version check failed: {exc}"}
 
 
 def _materializer_actor_id() -> str:
