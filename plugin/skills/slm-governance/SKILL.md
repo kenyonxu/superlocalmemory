@@ -245,4 +245,4 @@ Before running any destructive operation (`forget`, `compact_memories`):
 
 ---
 
-*SuperLocalMemory v3.8.11 · Qualixar · AGPL-3.0-or-later*
+*SuperLocalMemory v3.8.12 · Qualixar · AGPL-3.0-or-later*

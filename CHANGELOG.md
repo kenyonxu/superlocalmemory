@@ -5,6 +5,61 @@ All notable changes to SuperLocalMemory V3 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.12] - 2026-08-03 — Canonical learning signals, clock-independent daemon identity, remote reranker
+
+### Fixed
+- Explicit feedback now reaches the store every consumer actually reads.
+  Three tables carry a "feedback" name: `feedback_records` (memory.db, read by
+  nothing), `learning_feedback` (the pre-v3.4.22 legacy table that
+  `legacy_migration` copies forward), and `learning_signals` +
+  `learning_features` (canonical — read by the dashboard Living Brain panel,
+  the ranker-phase card, and the LightGBM retrainer). The 3.8.11 fix wrote to
+  the legacy table, so it moved a counter nothing consumes. `record_explicit`
+  now writes the legacy row and the canonical signal/feature pair in one
+  transaction, flagged `is_synthetic=1` so the LightGBM trainer's
+  `WHERE is_synthetic=0` filter excludes them from training. (#106)
+- The recall phase gate and the dashboard no longer read different tables.
+  The gate counted `learning_feedback` while every user-visible surface counted
+  `learning_signals`, so the phase a user was shown and the phase that actually
+  ranked their results could disagree without limit. Both now resolve from the
+  canonical store, with thresholds imported from `learning.ranker` rather than
+  duplicated as literals — duplicated literals are how the two surfaces drifted
+  apart in the first place. (#106)
+- `report_feedback` no longer reports success for a write that did not happen.
+  It fell back to the `feedback_records` count when the canonical read failed,
+  and that table increments on every call regardless, so total write failure was
+  indistinguishable from success. The cross-store fallback is removed; a failed
+  durable write returns `success: false` with `durable: false`. (#106)
+- The CLI no longer disowns a healthy daemon after a few minutes on WSL2.
+  psutil derives `create_time` as boot time plus start ticks and re-reads
+  `/proc/stat` `btime` on every call; WSL2 resyncs its VM clock mid-session, so
+  `btime` moves and every process's computed creation time moves with it,
+  retroactively. The recorded value stopped matching the same live PID while
+  `/health` still answered in milliseconds. Ownership now compares a
+  clock-independent process token — `boot_id` plus raw start ticks on
+  Linux/WSL2, psutil's monotonic creation time elsewhere — as exact equality,
+  with no tolerance constant left to silently expire. PID-reuse protection is
+  strengthened: a creation-time mismatch no longer condemns a process outright,
+  it falls through to cryptographic identity proof over loopback. (#104)
+- `DAEMON_UNAVAILABLE` now names one of eight specific reasons with an
+  actionable hint instead of "owned daemon is unavailable; retry later". (#104)
+- `slm setup` no longer wipes the `retrieval` config block on every re-run.
+
+### Added
+- Remote and custom reranker endpoints, mirroring the remote embedding support
+  added in v3.4.24. Setting `cross_encoder_backend` to `openai` (or `remote`)
+  with a `cross_encoder_endpoint` routes reranking to an OpenAI-compatible
+  `/v1/rerank` service instead of the local subprocess worker. The built-in
+  cross-encoder is English-only, silently degrading recall for non-English
+  users; this lets them bring a multilingual model. Failure degrades to fusion
+  order with `applied=False` and an error log — never a silent fall back to the
+  local English model, which would recreate the very problem this solves. The
+  new outbound HTTP surface enforces an http/https allow-list, rejects 3xx and
+  does not follow redirects, refuses credentials embedded in the URL, and
+  bounds response reads at 8 MB. (#105)
+- `cross_encoder_endpoint` is now a real config field. It was previously
+  accepted and silently ignored — the remaining half of #103.
+
 ## [3.8.11] - 2026-08-02 — Learning-signal integrity and honest reranker diagnostics
 
 ### Fixed
