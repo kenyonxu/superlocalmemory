@@ -120,6 +120,40 @@ class TestCreateScene:
 # ---------------------------------------------------------------------------
 
 class TestAssignToExistingScene:
+    def test_assignment_bounds_mature_store_scene_candidates(self) -> None:
+        db = MagicMock()
+        db.execute.side_effect = [
+            [
+                {
+                    "scene_id": f"scene-{index}",
+                    "profile_id": "default",
+                    "theme": f"Theme {index}",
+                    "fact_ids_json": f'["fact-{index}"]',
+                    "entity_ids_json": "[]",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "last_updated": "2026-01-01T00:00:00+00:00",
+                }
+                for index in range(300)
+            ],
+            [],
+            [],
+        ]
+        incoming = _make_fact("incoming", "Bound mature scene selection")
+        incoming.embedding = [1.0, 0.0, 0.0]
+
+        SceneBuilder(db=db, embedder=MagicMock()).assign_to_scene(
+            incoming,
+            "default",
+        )
+
+        candidate_sql, candidate_params = db.execute.call_args_list[0].args
+        assert "LIMIT ?" in candidate_sql
+        assert candidate_params == ("default", 256)
+
+        live_sql, live_params = db.execute.call_args_list[1].args
+        assert "ms.scene_id IN" in live_sql
+        assert len(live_params) == 257
+
     def test_assigns_to_similar_scene(self, db: DatabaseManager) -> None:
         embedder = MagicMock()
         # Both facts produce similar embeddings
