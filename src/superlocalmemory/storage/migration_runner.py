@@ -131,6 +131,9 @@ from superlocalmemory.storage.migrations import (
 from superlocalmemory.storage.migrations import (
     M033_learning_feedback_channel as _M033,
 )
+from superlocalmemory.storage.migrations import (
+    M034_scene_fact_members as _M034,
+)
 
 # Map migration name → module (used for the optional ``verify(conn)`` hook
 # that lets the runner detect "already applied" state when an idempotent
@@ -168,6 +171,7 @@ _MODULES = {
     _M031.NAME: _M031,
     _M032.NAME: _M032,
     _M033.NAME: _M033,
+    _M034.NAME: _M034,
 }
 
 logger = logging.getLogger(__name__)
@@ -305,6 +309,9 @@ DEFERRED_MIGRATIONS: list[Migration] = [
     Migration(name=_M029.NAME, db_target="memory", ddl=_M029.DDL),
     # M030 bounds Entity Explorer pagination and profile-summary ranking.
     Migration(name=_M030.NAME, db_target="memory", ddl=_M030.DDL),
+    # M034 normalizes memory_scenes.fact_ids_json after engine initialization
+    # has created memory_scenes and atomic_facts.
+    Migration(name=_M034.NAME, db_target="memory", ddl=_M034.DDL),
 ]
 
 

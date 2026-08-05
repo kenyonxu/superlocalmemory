@@ -264,7 +264,10 @@ def init_encoding(
         db, embedder, llm, config.encoding,
     )
     observation_builder = ObservationBuilder(db)
-    scene_builder = SceneBuilder(db, embedder)
+    # V3.2: VectorStore (Phase 1) -- sqlite-vec KNN. Scene assignment also
+    # consumes it, so initialize it before the encoding component is wired.
+    vector_store = _init_vector_store(config)
+    scene_builder = SceneBuilder(db, embedder, vector_store=vector_store)
     entropy_gate = EntropyGate(
         embedder, config.encoding.entropy_threshold,
     )
@@ -275,9 +278,6 @@ def init_encoding(
         sheaf_checker = SheafConsistencyChecker(
             db, config.math.sheaf_contradiction_threshold,
         )
-
-    # V3.2: VectorStore (Phase 1) -- sqlite-vec KNN
-    vector_store = _init_vector_store(config)
 
     # V3.2: AccessLog (Phase 1) -- fact access tracking
     access_log = _init_access_log(db)

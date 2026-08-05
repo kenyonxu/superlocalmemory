@@ -67,9 +67,10 @@ def test_npm_dry_run_contains_no_build_tools_tests_or_compiled_caches() -> None:
     # issue #104 adds infra/process_identity.py (one identity module);
     # issue #105 adds retrieval/remote_reranker.py (one remote-reranker module);
     # issue #107 adds infra/version_integrity.py (one staleness-check module).
+    # V3.8.14 adds M034_scene_fact_members.py (one migration module).
     # Keep the count exact enough to catch an accidentally shipped build/test
     # surface; the byte budget remains the primary package-size guard.
-    assert artifact["entryCount"] <= 672
+    assert artifact["entryCount"] <= 673
     assert artifact["unpackedSize"] <= 10 * 1024 * 1024
 
 

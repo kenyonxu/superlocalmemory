@@ -5,6 +5,22 @@ All notable changes to SuperLocalMemory V3 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.14] - 2026-08-05 — Bounded scene assignment at mature scale
+
+### Fixed
+- Scene assignment no longer expands and compares every historical scene for
+  every materialized fact. v3.8.13 crossed a severe CPU and latency cliff on
+  mature databases because both candidate selection and anchor-embedding
+  loading scaled with the full scene population.
+- A forward-only M034 migration adds an indexed, trigger-maintained
+  `scene_fact_members` projection while retaining `fact_ids_json` for backward
+  compatibility. The existing fact-vector index now selects semantically near
+  scenes, with a bounded live-recency fallback when vector search is
+  unavailable. Profile isolation and deleted-fact handling remain enforced.
+- On the 11,519-scene production-data repro used for this repair, the complete
+  scene-assignment path measured 214 ms median and 231 ms maximum across ten
+  post-warmup runs. The migrated copy passes SQLite `quick_check`.
+
 ## [3.8.13] - 2026-08-03 — Stale-process detection
 
 ### Fixed
