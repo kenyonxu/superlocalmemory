@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -21,7 +22,7 @@ from superlocalmemory.core.engine_wiring import init_reranker
 from superlocalmemory.retrieval.remote_reranker import RemoteReranker
 from superlocalmemory.storage.models import Mode
 
-ENDPOINT = "http://192.168.50.140:8041/v1/rerank"
+ENDPOINT = "https://reranker.example.test/v1/rerank"
 MODEL = "/root/model/reranker.gguf"
 
 
@@ -97,6 +98,22 @@ class TestRetrievalConfigKeys:
         assert loaded.retrieval.cross_encoder_timeout_seconds == 8.0
         assert loaded.retrieval.is_remote_cross_encoder is True
 
+    def test_saved_reranker_secret_is_owner_only_and_round_trips(
+        self, tmp_path: Path,
+    ) -> None:
+        path = tmp_path / "config.json"
+        cfg = SLMConfig.for_mode(Mode.B)
+        cfg.retrieval.cross_encoder_api_key = "reranker-secret"
+
+        cfg.save(path)
+
+        on_disk = json.loads(path.read_text())
+        assert on_disk["retrieval"]["cross_encoder_api_key"] == "reranker-secret"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert SLMConfig.load(path).retrieval.cross_encoder_api_key == (
+            "reranker-secret"
+        )
+
     def test_legacy_config_without_the_key_still_loads_local(
         self, tmp_path: Path,
     ) -> None:
@@ -136,7 +153,7 @@ class TestInitRerankerRouting:
     def test_remote_reranker_receives_model_and_timeout(self) -> None:
         cfg = RetrievalConfig(
             cross_encoder_backend="remote",
-            cross_encoder_endpoint="http://h:8041/v1",
+            cross_encoder_endpoint="https://reranker.example.test/v1",
             cross_encoder_model=MODEL,
             cross_encoder_timeout_seconds=4.0,
         )
@@ -144,7 +161,7 @@ class TestInitRerankerRouting:
         assert isinstance(reranker, RemoteReranker)
         assert reranker._model_name == MODEL
         assert reranker._read_timeout == 4.0
-        assert reranker.safe_endpoint == "http://h:8041/v1/rerank"
+        assert reranker.safe_endpoint == "https://reranker.example.test/v1/rerank"
 
     def test_default_config_builds_the_local_reranker(self) -> None:
         with patch(

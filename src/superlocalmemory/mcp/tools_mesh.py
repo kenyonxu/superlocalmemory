@@ -26,6 +26,9 @@ from typing import Callable
 
 from mcp.types import ToolAnnotations
 
+from superlocalmemory.core.admission import admits
+from superlocalmemory.core.operation_request import OperationKind
+
 logger = logging.getLogger(__name__)
 
 
@@ -221,6 +224,7 @@ def register_mesh_tools(server, get_engine: Callable) -> None:
     """Register all 8 mesh MCP tools."""
 
     @server.tool()
+    @admits(OperationKind.MESH_SEND)
     async def mesh_summary(summary: str = "") -> dict:
         """Register this session and describe what you're working on.
 
@@ -269,6 +273,7 @@ def register_mesh_tools(server, get_engine: Callable) -> None:
         }
 
     @server.tool()
+    @admits(OperationKind.MESH_SEND)
     async def mesh_send(to: str, message: str) -> dict:
         """Send a message to another peer session, broadcast, or project.
 
@@ -309,6 +314,7 @@ def register_mesh_tools(server, get_engine: Callable) -> None:
         return result
 
     @server.tool()
+    @admits(OperationKind.MESH_SEND)
     async def mesh_inbox() -> dict:
         """Read messages sent to this session.
 
@@ -341,6 +347,7 @@ def register_mesh_tools(server, get_engine: Callable) -> None:
         }
 
     @server.tool()
+    @admits(OperationKind.MESH_SEND)
     async def mesh_state(key: str = "", value: str = "", action: str = "get") -> dict:
         """Get or set shared state across all sessions.
 
@@ -370,6 +377,7 @@ def register_mesh_tools(server, get_engine: Callable) -> None:
         return result or {"state": {}}
 
     @server.tool()
+    @admits(OperationKind.MESH_LOCK)
     async def mesh_lock(
         file_path: str,
         action: str = "query",

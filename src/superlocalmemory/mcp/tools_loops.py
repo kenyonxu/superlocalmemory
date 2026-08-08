@@ -39,9 +39,12 @@ from typing import Any, Callable
 
 from mcp.types import ToolAnnotations
 
+from superlocalmemory.core.admission import admits
+from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.loops import (
     Bounds,
     LapResult,
+    LedgerEntry,
     Verdict,
     engine_backed_ledger,
     run_bounded_loop,
@@ -66,20 +69,6 @@ _MAX_NAME_CHARS = 128
 _MAX_QUERY_CHARS = 2000
 
 
-def _top_score(resp: Any) -> float:
-    """Highest result score in a RecallResponse (0.0 when there are none)."""
-    best = 0.0
-    for r in getattr(resp, "results", None) or []:
-        s = getattr(r, "score", None)
-        if s is None:
-            s = getattr(r, "relevance_score", 0.0) or 0.0
-        try:
-            best = max(best, float(s))
-        except (TypeError, ValueError):
-            continue
-    return best
-
-
 def register_loop_tools(server, get_engine: Callable) -> None:
     """Register the 3 bounded-loop tools on *server*.
 
@@ -88,6 +77,7 @@ def register_loop_tools(server, get_engine: Callable) -> None:
     """
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+    @admits(OperationKind.REMEMBER)
     async def slm_loop_run(
         name: str,
         gate_query: str,
@@ -157,14 +147,35 @@ def register_loop_tools(server, get_engine: Callable) -> None:
 
             def gate(lap: int) -> Verdict:
                 resp = engine.recall(gate_query, limit=3, fast=True)
-                results = getattr(resp, "results", None) or []
+                all_results = getattr(resp, "results", None) or []
+                # Exclude the loop's own audit records from the gate evaluation.
+                # Each lap writes a LedgerEntry (JSON with "run_id" + "lap") into
+                # SLM via store_fast; the FTS5 trigger indexes every such insert.
+                # Without this filter BM25 finds those self-authored records on the
+                # next lap and the gate falsely passes. Only memories written by an
+                # external agent — whose content does not parse as a LedgerEntry —
+                # can satisfy an independent gate.
+                results = [
+                    r for r in all_results
+                    if LedgerEntry.from_json(
+                        getattr(getattr(r, "fact", None), "content", "") or ""
+                    ) is None
+                ]
                 floored = bool(getattr(resp, "no_confident_match", False))
-                top = _top_score(resp)
-                passed = bool(results) and not floored and top >= min_score
+                best: float = 0.0
+                for r in results:
+                    s = getattr(r, "score", None)
+                    if s is None:
+                        s = getattr(r, "relevance_score", 0.0) or 0.0
+                    try:
+                        best = max(best, float(s))
+                    except (TypeError, ValueError):
+                        pass
+                passed = bool(results) and not floored and best >= min_score
                 return Verdict(
                     passed,
                     f"recall '{gate_query[:48]}': hits={len(results)} "
-                    f"top={top:.3f} floor={floored}",
+                    f"top={best:.3f} floor={floored}",
                 )
 
             def runner(lap: int) -> LapResult:

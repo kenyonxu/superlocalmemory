@@ -427,6 +427,103 @@ class TestRetentionEnforcement:
         assert row[0] == "archived"
         assert row[1] == "tombstoned"
 
+    def test_tombstone_write_failure_rolls_back_lifecycle(self):
+        db = sqlite3.connect(":memory:")
+        engine = RetentionEngine(db)
+        db.execute(
+            "CREATE TABLE atomic_facts ("
+            "fact_id TEXT PRIMARY KEY, profile_id TEXT, "
+            "lifecycle TEXT DEFAULT 'active', created_at TEXT)"
+        )
+        db.execute(
+            "INSERT INTO atomic_facts VALUES "
+            "('f_old', 'p1', 'active', '2020-01-01T00:00:00+00:00')"
+        )
+        engine.create_rule(
+            name="tomb", framework="gdpr", retention_days=30,
+            action="tombstone", applies_to=None, profile_id="p1",
+        )
+
+        with pytest.raises(sqlite3.OperationalError, match="archive_status"):
+            engine.enforce("p1")
+
+        assert db.execute(
+            "SELECT lifecycle FROM atomic_facts WHERE fact_id='f_old'"
+        ).fetchone()[0] == "active"
+
+    def test_caller_owned_transaction_remains_rollbackable(self):
+        db = sqlite3.connect(":memory:")
+        engine = RetentionEngine(db, autocommit=False)
+        db.execute(
+            "CREATE TABLE atomic_facts ("
+            "fact_id TEXT PRIMARY KEY, profile_id TEXT, "
+            "lifecycle TEXT DEFAULT 'active', archive_status TEXT, created_at TEXT)"
+        )
+        engine.add_rule("p1", "rule", 30)
+        db.execute(
+            "INSERT INTO atomic_facts VALUES "
+            "('f_old', 'p1', 'active', NULL, '2020-01-01T00:00:00+00:00')"
+        )
+        db.commit()
+
+        assert engine.enforce("p1")["archived"] == 1
+        assert db.in_transaction is True
+        db.rollback()
+        assert db.execute(
+            "SELECT lifecycle FROM atomic_facts WHERE fact_id='f_old'"
+        ).fetchone()[0] == "active"
+
+    def test_constructing_non_autocommit_engine_preserves_caller_transaction(self):
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE caller_data (value TEXT)")
+        db.execute("INSERT INTO caller_data VALUES ('uncommitted')")
+
+        engine = RetentionEngine(db, autocommit=False)
+        engine.add_rule("p1", "rule", 30)
+        engine.create_rule(
+            name="gdpr", framework="gdpr", retention_days=60,
+            action="archive", applies_to=None, profile_id="p1",
+        )
+        engine.remove_rule("p1", "rule")
+        assert engine.delete_rule("p1", "gdpr") is True
+        assert db.in_transaction is True
+
+        db.rollback()
+        assert db.execute("SELECT COUNT(*) FROM caller_data").fetchone()[0] == 0
+
+    def test_enforce_honors_applies_to_scope(self):
+        db = sqlite3.connect(":memory:")
+        engine = RetentionEngine(db)
+        db.execute(
+            "CREATE TABLE atomic_facts ("
+            "fact_id TEXT PRIMARY KEY, profile_id TEXT, scope TEXT, "
+            "fact_type TEXT, signal_type TEXT, lifecycle TEXT DEFAULT 'active', "
+            "archive_status TEXT, created_at TEXT)"
+        )
+        db.executemany(
+            "INSERT INTO atomic_facts "
+            "(fact_id, profile_id, scope, fact_type, signal_type, created_at) "
+            "VALUES (?, 'p1', ?, 'semantic', 'factual', '2020-01-01T00:00:00+00:00')",
+            [("personal-old", "personal"), ("shared-old", "shared")],
+        )
+        db.commit()
+        engine.create_rule(
+            name="shared-only",
+            framework="custom",
+            retention_days=30,
+            action="archive",
+            applies_to={"scope": ["shared"]},
+            profile_id="p1",
+        )
+
+        result = engine.enforce("p1")
+
+        states = dict(db.execute(
+            "SELECT fact_id, lifecycle FROM atomic_facts ORDER BY fact_id"
+        ).fetchall())
+        assert result["archived"] == 1
+        assert states == {"personal-old": "active", "shared-old": "archived"}
+
     def test_enforce_no_rules_no_deletions(self):
         db = sqlite3.connect(":memory:")
         engine = RetentionEngine(db)
@@ -477,3 +574,33 @@ class TestRetentionScheduler:
         assert "profiles_processed" in result
         assert "results" in result
         assert result["profiles_processed"] == 0
+
+    def test_profile_failure_rolls_back_partial_enforcement(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "memory.db"
+        with sqlite3.connect(db_path) as db:
+            RetentionEngine(db).add_rule("p1", "rule", 30)
+            db.execute(
+                "CREATE TABLE atomic_facts ("
+                "fact_id TEXT PRIMARY KEY, profile_id TEXT, "
+                "lifecycle TEXT DEFAULT 'active', created_at TEXT)"
+            )
+            db.execute(
+                "INSERT INTO atomic_facts VALUES "
+                "('f1', 'p1', 'active', '2020-01-01T00:00:00+00:00')"
+            )
+            db.commit()
+
+        def partial_then_fail(engine, profile_id):
+            engine._db.execute(
+                "UPDATE atomic_facts SET lifecycle='archived' WHERE profile_id=?",
+                (profile_id,),
+            )
+            raise RuntimeError("injected retention failure")
+
+        monkeypatch.setattr(RetentionEngine, "enforce", partial_then_fail)
+        result = RetentionScheduler(db_path=db_path).run_once()
+        assert result["results"][0]["error"] == "injected retention failure"
+        with sqlite3.connect(db_path) as db:
+            assert db.execute(
+                "SELECT lifecycle FROM atomic_facts WHERE fact_id='f1'"
+            ).fetchone()[0] == "active"

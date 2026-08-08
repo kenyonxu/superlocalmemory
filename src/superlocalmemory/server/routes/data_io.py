@@ -6,6 +6,7 @@
 
 Routes: /api/export, /api/import
 """
+import asyncio
 import io
 import gzip
 import hashlib
@@ -26,6 +27,13 @@ from .helpers import (
 )
 
 logger = logging.getLogger("superlocalmemory.routes.data_io")
+
+# Hard cap on the total decompressed byte count for gzip imports.
+# Bounding the compressed upload size alone does not prevent a decompression
+# bomb: a few kilobytes of input can expand to gigabytes.  This cap is checked
+# incrementally during streaming decompression so the full expanded content is
+# never materialized before the guard fires.
+_MAX_DECOMPRESSED_BYTES: int = 200 * 1024 * 1024  # 200 MB
 
 
 def _internal_error(detail: str = "Internal server error") -> HTTPException:
@@ -158,7 +166,27 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
             raise HTTPException(status_code=413,
                                 detail="Import file exceeds the 50 MB limit")
         if file.filename and file.filename.endswith('.gz'):
-            content = gzip.decompress(content)
+            # Stream-decompress with an incremental byte counter so the full
+            # expanded payload is never allocated before the guard fires.
+            _chunk_size = 65_536
+            chunks: list[bytes] = []
+            total_decompressed = 0
+            with gzip.GzipFile(fileobj=io.BytesIO(content)) as _gz:
+                while True:
+                    chunk = _gz.read(_chunk_size)
+                    if not chunk:
+                        break
+                    total_decompressed += len(chunk)
+                    if total_decompressed > _MAX_DECOMPRESSED_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=(
+                                f"Decompressed content exceeds the "
+                                f"{_MAX_DECOMPRESSED_BYTES // (1024 * 1024)} MB limit"
+                            ),
+                        )
+                    chunks.append(chunk)
+            content = b"".join(chunks)
 
         try:
             data = json.loads(content)
@@ -204,12 +232,25 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
                 if not memory_content:
                     errors.append(f"Memory {idx}: missing 'content' field")
                     continue
+                # Imported content is untrusted: scrub secrets before it reaches
+                # any durable or queryable store, exactly as the canonical
+                # ingest path does.
+                from superlocalmemory.core.ingest_policy import scrub_secrets_for_ingest
+                _scrub = scrub_secrets_for_ingest(memory_content)
+                if _scrub.redacted:
+                    memory_content = _scrub.content
 
                 metadata = {
                     "project_name": memory.get('project_name'),
                     "category": memory.get('category'),
                     "tags": memory.get('tags', ''),
                 }
+                for _field in (
+                    "fact_type", "confidence", "importance", "entities",
+                    "canonical_entities", "referenced_date", "pinned",
+                ):
+                    if _field in memory:
+                        metadata[_field] = memory[_field]
                 receipt, created = command.submit_with_status(IngestionRequest(
                     content=memory_content,
                     profile_id=engine._profile_id,
@@ -224,7 +265,7 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
                     speaker=memory.get('speaker') or "",
                     role=memory.get('role') or "user",
                 ))
-                completed = command.materialize(receipt.operation_id)
+                completed = await asyncio.to_thread(command.materialize, receipt.operation_id)
                 if completed.state is not IngestionState.COMPLETE:
                     raise RuntimeError(
                         completed.last_error or "canonical import failed"

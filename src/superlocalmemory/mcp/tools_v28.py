@@ -15,6 +15,10 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
+from mcp.types import ToolAnnotations
+
+from superlocalmemory.core.admission import admits
+from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.mcp.shared import authorize_mcp_mutation
 
 logger = logging.getLogger(__name__)
@@ -27,6 +31,7 @@ def register_v28_tools(server, get_engine: Callable) -> None:
     # 1. report_outcome
     # ------------------------------------------------------------------
     @server.tool()
+    @admits(OperationKind.REMEMBER)
     async def report_outcome(
         memory_ids: str,
         outcome: str,
@@ -91,7 +96,7 @@ def register_v28_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 2. get_lifecycle_status
     # ------------------------------------------------------------------
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_lifecycle_status(limit: int = 50) -> dict:
         """Get lifecycle state distribution for stored memories.
 
@@ -127,6 +132,7 @@ def register_v28_tools(server, get_engine: Callable) -> None:
     # 3. set_retention_policy
     # ------------------------------------------------------------------
     @server.tool()
+    @admits(OperationKind.CONSOLIDATE)
     async def set_retention_policy(
         cold_after_days: int = 30,
         archive_after_days: int = 90,
@@ -163,6 +169,7 @@ def register_v28_tools(server, get_engine: Callable) -> None:
     # 4. compact_memories
     # ------------------------------------------------------------------
     @server.tool()
+    @admits(OperationKind.CONSOLIDATE)
     async def compact_memories(dry_run: bool = True) -> dict:
         """Compact memory store by archiving cold/stale facts.
 
@@ -212,7 +219,7 @@ def register_v28_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 5. get_behavioral_patterns
     # ------------------------------------------------------------------
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_behavioral_patterns(limit: int = 20) -> dict:
         """Get detected behavioral patterns for the active profile.
 
@@ -241,7 +248,7 @@ def register_v28_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 6. audit_trail
     # ------------------------------------------------------------------
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def audit_trail(limit: int = 50) -> dict:
         """Get compliance audit trail for the active profile.
 

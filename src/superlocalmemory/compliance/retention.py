@@ -17,7 +17,7 @@ import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS retention_rules (
 _ACTION_LIFECYCLE = {"archive": "archived", "tombstone": "archived"}
 _TOMBSTONE_ACTIONS = frozenset({"tombstone"})
 _VALID_ACTIONS = ("archive", "tombstone", "notify")
+_SUPPORTED_APPLIES_TO = frozenset({"scope", "fact_type", "signal_type", "session_id"})
 
 _FACTS_TABLE_CHECK = """
 SELECT name FROM sqlite_master
@@ -59,8 +60,9 @@ class RetentionEngine:
     The engine can identify expired facts and enforce deletion.
     """
 
-    def __init__(self, db: sqlite3.Connection) -> None:
+    def __init__(self, db: sqlite3.Connection, *, autocommit: bool = True) -> None:
         self._db = db
+        self._autocommit = autocommit
         self._ensure_table()
 
     # ------------------------------------------------------------------
@@ -84,7 +86,12 @@ class RetentionEngine:
         ):
             if col not in cols:
                 self._db.execute(f"ALTER TABLE retention_rules ADD COLUMN {ddl}")
-        self._db.commit()
+        self._commit_if_owned()
+
+    def _commit_if_owned(self) -> None:
+        """Commit only when this engine owns the transaction boundary."""
+        if self._autocommit:
+            self._db.commit()
 
     def _has_facts_table(self) -> bool:
         """Check if atomic_facts table exists in the database."""
@@ -131,7 +138,7 @@ class RetentionEngine:
             "VALUES (?, ?, ?, ?)",
             (profile_id, rule_name, days, description),
         )
-        self._db.commit()
+        self._commit_if_owned()
         logger.info(
             "Added retention rule '%s' (%d days) to profile '%s'",
             rule_name, days, profile_id,
@@ -149,7 +156,7 @@ class RetentionEngine:
             "WHERE profile_id = ? AND rule_name = ?",
             (profile_id, rule_name),
         )
-        self._db.commit()
+        self._commit_if_owned()
         logger.info(
             "Removed retention rule '%s' from profile '%s'",
             rule_name, profile_id,
@@ -205,14 +212,22 @@ class RetentionEngine:
         """
         if action not in _VALID_ACTIONS:
             raise ValueError(f"action must be one of {_VALID_ACTIONS}")
+        selectors = applies_to or {}
+        if not isinstance(selectors, dict):
+            raise ValueError("applies_to must be an object")
+        unsupported = set(selectors) - _SUPPORTED_APPLIES_TO
+        if unsupported:
+            raise ValueError(
+                "unsupported applies_to selectors: " + ", ".join(sorted(unsupported))
+            )
         cur = self._db.execute(
             "INSERT OR REPLACE INTO retention_rules "
             "(profile_id, rule_name, days, description, framework, action, applies_to) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (profile_id, name, int(retention_days), "", framework, action,
-             json.dumps(applies_to or {})),
+             json.dumps(selectors, sort_keys=True)),
         )
-        self._db.commit()
+        self._commit_if_owned()
         logger.info(
             "Created retention rule '%s' (%dd, %s/%s) for profile '%s'",
             name, retention_days, framework, action, profile_id,
@@ -237,7 +252,7 @@ class RetentionEngine:
             "DELETE FROM retention_rules WHERE profile_id = ? AND rule_name = ?",
             (profile_id, name),
         )
-        self._db.commit()
+        self._commit_if_owned()
         return cur.rowcount > 0
 
     # ------------------------------------------------------------------
@@ -287,6 +302,23 @@ class RetentionEngine:
     # ------------------------------------------------------------------
 
     def enforce(self, profile_id: str) -> dict[str, Any]:
+        """Atomically enforce all rules for one profile."""
+        if not self._autocommit and not self._db.in_transaction:
+            self._db.execute("BEGIN")
+        savepoint = "slm_retention_profile"
+        self._db.execute(f"SAVEPOINT {savepoint}")
+        try:
+            result = self._enforce_uncommitted(profile_id)
+            self._db.execute(f"RELEASE SAVEPOINT {savepoint}")
+            if self._autocommit:
+                self._db.commit()
+            return result
+        except Exception:
+            self._db.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            self._db.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
+
+    def _enforce_uncommitted(self, profile_id: str) -> dict[str, Any]:
         """Enforce every retention rule for a profile, honoring each action.
 
         For each rule, facts in the profile older than its retention_days are
@@ -312,19 +344,43 @@ class RetentionEngine:
         if not rules or not self._has_facts_table():
             return result
 
+        fact_columns = {
+            row[1] for row in self._db.execute("PRAGMA table_info(atomic_facts)").fetchall()
+        }
+        selector_columns = sorted(_SUPPORTED_APPLIES_TO & fact_columns)
+        selected_columns = ["fact_id", "created_at", *selector_columns]
         rows = self._db.execute(
-            "SELECT fact_id, created_at FROM atomic_facts WHERE profile_id = ?",
+            f"SELECT {', '.join(selected_columns)} FROM atomic_facts "
+            "WHERE profile_id = ?",
             (profile_id,),
         ).fetchall()
+        facts = [dict(zip(selected_columns, row, strict=True)) for row in rows]
 
         affected: set[str] = set()
         for rule in rules:
             action = rule.get("action", "archive")
             days = rule.get("retention_days", rule.get("days", 0))
-            expired = [
-                str(r[0]) for r in rows
-                if r[1] and self._age_in_days(r[1]) > days
-            ]
+            selectors = rule.get("applies_to") or {}
+            if set(selectors) - set(selector_columns):
+                logger.warning(
+                    "Retention rule %r skipped unsupported/unavailable selectors: %s",
+                    rule.get("name"),
+                    sorted(set(selectors) - set(selector_columns)),
+                )
+                continue
+            expired = []
+            for fact in facts:
+                created_at = fact.get("created_at")
+                if not created_at or self._age_in_days(created_at) <= days:
+                    continue
+                matches = True
+                for field, expected in selectors.items():
+                    accepted = expected if isinstance(expected, list) else [expected]
+                    if fact.get(field) not in accepted:
+                        matches = False
+                        break
+                if matches:
+                    expired.append(str(fact["fact_id"]))
             if not expired:
                 continue
             if action == "notify":
@@ -342,18 +398,14 @@ class RetentionEngine:
             )
             if action in _TOMBSTONE_ACTIONS:
                 # Flag purgeable without violating the lifecycle CHECK.
-                try:
-                    self._db.execute(
-                        f"UPDATE atomic_facts SET archive_status = 'tombstoned' "
-                        f"WHERE profile_id = ? AND fact_id IN ({placeholders})",
-                        [profile_id, *expired],
-                    )
-                except Exception:
-                    pass
+                self._db.execute(
+                    f"UPDATE atomic_facts SET archive_status = 'tombstoned' "
+                    f"WHERE profile_id = ? AND fact_id IN ({placeholders})",
+                    [profile_id, *expired],
+                )
             result["archived" if action == "archive" else "tombstoned"] += len(expired)
             affected.update(expired)
 
-        self._db.commit()
         result["affected_ids"] = sorted(affected)
         result["deleted_count"] = result["tombstoned"]  # legacy alias
         logger.info(

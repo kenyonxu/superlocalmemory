@@ -49,6 +49,11 @@ _PROFILE_FULL: frozenset[str] = frozenset({  # 34 base — EXPLICIT literal, NOT
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
     # v3.8.0: bounded-loop tools (CLI + /slm-loop command + MCP).
     "slm_loop_run", "slm_loop_history", "slm_loop_show",
+    # v4: prestage_context IS registered (see mcp/server.py) but is deliberately
+    # NOT in full/power. The profile names are a user-facing config contract
+    # (SLM_MCP_PROFILE=full42) and the published tool-count table depends on
+    # them; adding a tool here would make "full42" serve 43 tools. New tools
+    # reach users through the `whole` profile until a profile rename is shipped.
 }) | _PROFILE_FULL_MESH  # 42
 
 _PROFILE_POWER: frozenset[str] = _PROFILE_FULL | frozenset({  # 54

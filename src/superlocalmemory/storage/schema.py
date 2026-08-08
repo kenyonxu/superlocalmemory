@@ -180,6 +180,8 @@ CREATE TABLE IF NOT EXISTS atomic_facts (
     embedding          TEXT,
     fisher_mean        TEXT,
     fisher_variance    TEXT,
+    -- Tracks how many accesses had Fisher applied; delta-based update in maintenance
+    fisher_last_applied_access INTEGER NOT NULL DEFAULT 0,
 
     -- Lifecycle
     lifecycle          TEXT NOT NULL DEFAULT 'active'
@@ -453,6 +455,10 @@ CREATE TABLE IF NOT EXISTS memory_scenes (
 
 CREATE INDEX IF NOT EXISTS idx_scenes_profile
     ON memory_scenes (profile_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_scenes_profile_scene
+    ON memory_scenes (profile_id, scene_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_facts_profile_fact
+    ON atomic_facts (profile_id, fact_id);
 """
 
 
@@ -467,8 +473,10 @@ CREATE TABLE IF NOT EXISTS scene_fact_members (
     fact_id    TEXT NOT NULL,
     position   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (scene_id, fact_id),
-    FOREIGN KEY (scene_id) REFERENCES memory_scenes(scene_id) ON DELETE CASCADE,
-    FOREIGN KEY (fact_id) REFERENCES atomic_facts(fact_id) ON DELETE CASCADE,
+    FOREIGN KEY (profile_id, scene_id)
+        REFERENCES memory_scenes(profile_id, scene_id) ON DELETE CASCADE,
+    FOREIGN KEY (profile_id, fact_id)
+        REFERENCES atomic_facts(profile_id, fact_id) ON DELETE CASCADE,
     FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
 );
 

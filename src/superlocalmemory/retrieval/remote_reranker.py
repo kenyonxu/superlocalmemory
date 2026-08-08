@@ -48,6 +48,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import json
+import ipaddress
 import logging
 import math
 import os
@@ -91,9 +92,6 @@ _MAX_ATTEMPTS = 2
 # Consecutive failures re-log at most this often. The first failure always
 # logs; the operator must never have to guess whether reranking is running.
 _FAILURE_RELOG_INTERVAL_S = 60.0
-
-_ERROR_BODY_SNIPPET_CHARS = 200
-
 
 class RemoteRerankerError(RuntimeError):
     """A remote rerank request failed (transport, status, or schema)."""
@@ -161,6 +159,12 @@ def _validate_endpoint_url(endpoint: str) -> str | None:
             "retrieval.cross_encoder_endpoint has no host; expected something "
             "like \"http://127.0.0.1:8041/v1/rerank\"."
         )
+    if parsed.query or parsed.fragment:
+        return (
+            "retrieval.cross_encoder_endpoint must not include a query string "
+            "or fragment. Put bearer credentials in "
+            "SLM_CROSS_ENCODER_API_KEY and configure a clean endpoint URL."
+        )
     if parsed.username or parsed.password:
         # httpx logs "HTTP Request: POST <url>" at INFO using str(url), which
         # renders an embedded password in full. This module never logs the raw
@@ -173,7 +177,24 @@ def _validate_endpoint_url(endpoint: str) -> str | None:
             "retrieval.cross_encoder_api_key; it is sent as a Bearer header "
             "and never logged."
         )
+    if parsed.scheme == "http" and not _is_loopback_host(parsed.hostname):
+        return (
+            "retrieval.cross_encoder_endpoint must use HTTPS for non-loopback "
+            "hosts because recall queries and candidate memory text cross this "
+            "connection. Plain HTTP is allowed only for localhost/loopback."
+        )
     return None
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    """Return True only for literal loopback names/addresses (no DNS trust)."""
+    host = (hostname or "").rstrip(".").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def normalize_rerank_endpoint(endpoint: str) -> str:
@@ -208,7 +229,15 @@ def redact_endpoint(endpoint: str) -> str:
         netloc = f"{netloc}:{parsed.port}"
     if parsed.username or parsed.password:
         netloc = f"***@{netloc}"
-    return urlunparse(parsed._replace(netloc=netloc))
+    return urlunparse(parsed._replace(netloc=netloc, query="", fragment=""))
+
+
+def _redact_remote_text(text: str) -> str:
+    """Remove recognized secrets and PII before a remote trust boundary."""
+    from superlocalmemory.core.pii import redact_pii_text
+    from superlocalmemory.core.security_primitives import redact_secrets
+
+    return redact_pii_text(redact_secrets(str(text), aggression="high"))
 
 
 # ---------------------------------------------------------------------------
@@ -240,15 +269,14 @@ def parse_rerank_response(payload: Any, expected: int) -> list[float]:
         index = _coerce_index(item, position, expected)
         if scores[index] is not None:
             raise RemoteRerankerError(
-                f"rerank endpoint returned index {index} more than once"
+                "rerank endpoint returned a duplicate document index"
             )
         scores[index] = _coerce_score(item, index)
 
     missing = [i for i, s in enumerate(scores) if s is None]
     if missing:
         raise RemoteRerankerError(
-            f"rerank endpoint returned no score for document index(es) "
-            f"{missing[:5]}{'…' if len(missing) > 5 else ''}"
+            "rerank endpoint omitted one or more document scores"
         )
     return [float(s) for s in scores]  # type: ignore[arg-type]
 
@@ -264,8 +292,8 @@ def _extract_results_array(payload: Any) -> list[Any]:
     results = payload.get("results")
     if results is None:
         raise RemoteRerankerError(
-            f"rerank response has no 'results' array (keys: "
-            f"{sorted(payload)[:8]}). Is cross_encoder_endpoint pointing at a "
+            "rerank response has no 'results' array. Is "
+            "cross_encoder_endpoint pointing at a "
             f"rerank route and not, say, /v1/embeddings?"
         )
     if not isinstance(results, list):
@@ -280,12 +308,12 @@ def _coerce_index(item: dict, position: int, expected: int) -> int:
     raw = item.get("index", position)
     if isinstance(raw, bool) or not isinstance(raw, int):
         raise RemoteRerankerError(
-            f"rerank result #{position} has non-integer index {raw!r}"
+            f"rerank result #{position} has a non-integer index"
         )
     if not 0 <= raw < expected:
         raise RemoteRerankerError(
-            f"rerank result #{position} has out-of-range index {raw} "
-            f"(sent {expected} documents)"
+            f"rerank result #{position} has an out-of-range index "
+            f"for a {expected}-document request"
         )
     return raw
 
@@ -297,18 +325,18 @@ def _coerce_score(item: dict, index: int) -> float:
             if isinstance(raw, bool) or not isinstance(raw, (int, float)):
                 raise RemoteRerankerError(
                     f"rerank result for index {index} has non-numeric "
-                    f"{key}={raw!r}"
+                    f"{key}"
                 )
             value = float(raw)
             if not math.isfinite(value):
                 raise RemoteRerankerError(
                     f"rerank result for index {index} has non-finite "
-                    f"{key}={raw!r}"
+                    f"{key}"
                 )
             return value
     raise RemoteRerankerError(
         f"rerank result for index {index} has neither 'relevance_score' nor "
-        f"'score' (keys: {sorted(item)[:8]})"
+        "'score'"
     )
 
 
@@ -494,8 +522,8 @@ class RemoteReranker:
             headers["Authorization"] = f"Bearer {self._api_key}"
         body = {
             "model": self._model_name,
-            "query": query,
-            "documents": documents,
+            "query": _redact_remote_text(query),
+            "documents": [_redact_remote_text(document) for document in documents],
         }
 
         last_error: RemoteRerankerError | None = None
@@ -534,12 +562,9 @@ class RemoteReranker:
                         f"followed — configure the final URL directly."
                     )
                 if resp.status_code >= 400:
-                    snippet = raw[:_ERROR_BODY_SNIPPET_CHARS].decode(
-                        "utf-8", "replace",
-                    )
                     message = (
-                        f"HTTP {resp.status_code} from {self.safe_endpoint}: "
-                        f"{snippet}"
+                        f"HTTP {resp.status_code} from {self.safe_endpoint}; "
+                        "response body suppressed"
                     )
                     if resp.status_code >= 500:
                         raise _RetryableRemoteError(message)

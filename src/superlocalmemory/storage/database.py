@@ -12,19 +12,34 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 """
 from __future__ import annotations
 
-import json, logging, os, sqlite3, threading, time
+import json
+import logging
+import os
+import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Generator
 
-from superlocalmemory.storage.write_lock import get_write_lock
 from superlocalmemory.storage.models import (
-    AtomicFact, CanonicalEntity, ConsolidationAction, ConsolidationActionType,
-    EdgeType, EntityAlias, EntityProfile, FactType, GraphEdge,
-    MemoryLifecycle, MemoryRecord, MemoryScene, SignalType, TemporalEvent,
+    AtomicFact,
+    CanonicalEntity,
+    ConsolidationAction,
+    EdgeType,
+    EntityAlias,
+    EntityProfile,
+    FactType,
+    GraphEdge,
+    MemoryLifecycle,
+    MemoryRecord,
+    MemoryScene,
+    SignalType,
+    TemporalEvent,
     TrustScore,
 )
+from superlocalmemory.storage.write_lock import get_write_lock
 
 logger = logging.getLogger(__name__)
 
@@ -559,6 +574,24 @@ class DatabaseManager:
         )
         return [self._row_to_fact(r) for r in rows]
 
+    def _has_archive_status(self) -> bool:
+        """Whether atomic_facts carries the M011 ``archive_status`` column.
+
+        M011 is a DEFERRED migration, so the column is absent until it runs;
+        callers must not filter on a column that may not exist. Cached once True
+        (a column never disappears); re-checked while absent so a later deferred
+        migration is picked up.
+        """
+        if getattr(self, "_archive_col_present", False):
+            return True
+        present = any(
+            dict(row).get("name") == "archive_status"
+            for row in self.execute("PRAGMA table_info(atomic_facts)")
+        )
+        if present:
+            self._archive_col_present = True
+        return present
+
     def get_all_facts(
         self, profile_id: str, limit: int | None = None,
         *,
@@ -581,8 +614,14 @@ class DatabaseManager:
         # hard, env-tunable ceiling even when the caller passes limit=None.
         if limit is None:
             limit = _unbounded_facts_ceiling()
+        # Archived facts are not live; never surface them in direct reads.
+        archive_clause = (
+            " AND COALESCE(archive_status, 'live') != 'archived'"
+            if self._has_archive_status()
+            else ""
+        )
         rows = self.execute(
-            f"SELECT * FROM atomic_facts WHERE {where} "
+            f"SELECT * FROM atomic_facts WHERE {where}{archive_clause} "
             "ORDER BY created_at DESC LIMIT ?",
             (*params, int(limit)),
         )
@@ -610,9 +649,14 @@ class DatabaseManager:
             include_global=include_global,
             include_shared=include_shared,
         )
+        archive_clause = (
+            " AND COALESCE(archive_status, 'live') != 'archived'"
+            if self._has_archive_status()
+            else ""
+        )
         rows = self.execute(
-            f"SELECT * FROM atomic_facts WHERE {where} AND profile_id != ? "
-            "ORDER BY created_at DESC",
+            f"SELECT * FROM atomic_facts WHERE {where} AND profile_id != ?"
+            f"{archive_clause} ORDER BY created_at DESC",
             (*params, profile_id),
         )
         return [self._row_to_fact(r) for r in rows]
@@ -1039,10 +1083,16 @@ class DatabaseManager:
             include_shared=include_shared,
             prefix="f",
         )
+        # Archived facts must not surface via full-text search either.
+        archive_clause = (
+            " AND COALESCE(f.archive_status, 'live') != 'archived'"
+            if self._has_archive_status()
+            else ""
+        )
         rows = self.execute(
             f"""SELECT f.* FROM atomic_facts_fts AS fts
                JOIN atomic_facts AS f ON f.fact_id = fts.fact_id
-               WHERE fts.atomic_facts_fts MATCH ? AND {where}
+               WHERE fts.atomic_facts_fts MATCH ? AND {where}{archive_clause}
                ORDER BY fts.rank LIMIT ?""",
             (match_expr, *params, limit),
         )
@@ -1104,10 +1154,15 @@ class DatabaseManager:
             include_global=include_global,
             include_shared=include_shared,
         )
+        archive_clause = (
+            " AND COALESCE(archive_status, 'live') != 'archived'"
+            if self._has_archive_status()
+            else ""
+        )
         placeholders = ",".join("?" for _ in fact_ids)
         rows = self.execute(
             f"SELECT * FROM atomic_facts WHERE fact_id IN ({placeholders}) "
-            f"AND {where} ORDER BY created_at DESC",
+            f"AND {where}{archive_clause} ORDER BY created_at DESC",
             (*fact_ids, *params),
         )
         return [self._row_to_fact(r) for r in rows]
@@ -1545,19 +1600,47 @@ class DatabaseManager:
         self, fact_id: str, invalidated_by: str,
         invalidation_reason: str,
     ) -> None:
-        """Set valid_until and system_expired_at for a fact.
+        """Mark a fact as invalidated, preserving bi-temporal independence.
 
-        BOTH timestamps set atomically (BI-TEMPORAL INTEGRITY).
-        Never deletes the fact (Rule 17: immutability).
+        - valid_until (event-time): when the fact ceased to be true in the
+          real world.  Sourced from the fact's referenced_date so the
+          real-world boundary is preserved, not overwritten with wall-clock time.
+        - system_expired_at (transaction-time): when the system learned the
+          fact was invalid — always set to now.
+
+        The two dimensions must remain independent: a fact can be true until
+        2020-06-30 in the real world (valid_until) while the system only
+        discovers this in 2024 (system_expired_at).
+
+        Never deletes the fact (immutability).
         """
-        from datetime import UTC, datetime as _dt
+        from datetime import UTC
+        from datetime import datetime as _dt
         now = _dt.now(UTC).isoformat()
+
+        # Resolve the event-time boundary from the fact's referenced_date.
+        # Falls back to the current valid_until (which may already be set),
+        # and ultimately to now if neither is available.
+        fact_rows = self.execute(
+            "SELECT referenced_date FROM atomic_facts WHERE fact_id = ?",
+            (fact_id,),
+        )
+        referenced_date = dict(fact_rows[0]).get("referenced_date") if fact_rows else None
+
+        tv_rows = self.execute(
+            "SELECT valid_until FROM fact_temporal_validity WHERE fact_id = ?",
+            (fact_id,),
+        )
+        existing_valid_until = dict(tv_rows[0]).get("valid_until") if tv_rows else None
+
+        valid_until = referenced_date or existing_valid_until or now
+
         self.execute(
             "UPDATE fact_temporal_validity "
             "SET valid_until = ?, system_expired_at = ?, "
             "    invalidated_by = ?, invalidation_reason = ? "
             "WHERE fact_id = ?",
-            (now, now, invalidated_by, invalidation_reason, fact_id),
+            (valid_until, now, invalidated_by, invalidation_reason, fact_id),
         )
 
     def get_valid_facts(self, profile_id: str) -> list[str]:
@@ -1587,7 +1670,10 @@ class DatabaseManager:
         return [dict(r)["fact_id"] for r in rows]
 
     def get_invalidated_fact_ids(
-        self, fact_ids: list[str], profile_id: str,
+        self,
+        fact_ids: list[str],
+        profile_id: str,
+        as_of: str | None = None,
     ) -> set[str]:
         """Return the subset of ``fact_ids`` that are system-invalidated.
 
@@ -1595,6 +1681,21 @@ class DatabaseManager:
         it was superseded/contradicted by a newer fact (see
         ``invalidate_fact_temporal``). Such facts are wrong/outdated and must be
         excluded from default retrieval (T1, Phase 4).
+
+        Phase 4b — bi-temporal as_of:
+          When ``as_of`` is None (default): returns ALL facts with
+          ``system_expired_at IS NOT NULL`` — existing behaviour, no regression.
+
+          When ``as_of`` is set (UTC ISO 8601, "+00:00" suffix): returns only
+          facts where ``system_expired_at <= as_of`` (transaction-time boundary
+          inclusive). This means supersessions that occurred AFTER ``as_of`` are
+          excluded — at the historical query point the fact was still valid.
+
+        ``as_of`` MUST be UTC-normalized via ``normalize_as_of()`` before this
+        call. The stored ``system_expired_at`` values use Python's
+        ``datetime.now(UTC).isoformat()`` format ("...+00:00") so the
+        ``normalize_as_of()`` "+00:00" output produces correct lexicographic
+        SQL comparisons.
 
         Bounded + indexed: only the supplied candidate ids are queried (never a
         full-table scan), keyed on the ``fact_id`` PK with the
@@ -1615,16 +1716,117 @@ class DatabaseManager:
         for start in range(0, len(fact_ids), chunk):
             batch = fact_ids[start:start + chunk]
             placeholders = ",".join("?" for _ in batch)
-            rows = self.execute(
-                f"SELECT fact_id FROM fact_temporal_validity "
-                f"WHERE fact_id IN ({placeholders}) "
-                f"  AND profile_id = ? "
-                f"  AND system_expired_at IS NOT NULL",
-                (*batch, profile_id),
-            )
+            if as_of is not None:
+                # Transaction-time point-in-time: only supersessions that
+                # occurred AT OR BEFORE as_of contribute to invalidation.
+                # Supersessions after as_of are invisible at this query point.
+                rows = self.execute(
+                    f"SELECT fact_id FROM fact_temporal_validity "
+                    f"WHERE fact_id IN ({placeholders}) "
+                    f"  AND profile_id = ? "
+                    f"  AND system_expired_at IS NOT NULL "
+                    f"  AND system_expired_at <= ?",
+                    (*batch, profile_id, as_of),
+                )
+            else:
+                rows = self.execute(
+                    f"SELECT fact_id FROM fact_temporal_validity "
+                    f"WHERE fact_id IN ({placeholders}) "
+                    f"  AND profile_id = ? "
+                    f"  AND system_expired_at IS NOT NULL",
+                    (*batch, profile_id),
+                )
             for r in rows:
                 invalid.add(dict(r)["fact_id"])
         return invalid
+
+    def get_event_time_expired_fact_ids(
+        self,
+        fact_ids: list[str],
+        profile_id: str,
+        as_of: str | None = None,
+    ) -> set[str]:
+        """Return the subset of ``fact_ids`` that are event-time out-of-range.
+
+        Returns fact_ids whose event-time validity window does not encompass
+        ``as_of`` (or the current wall-clock time when ``as_of`` is None):
+
+        1. **Already expired** — ``valid_until IS NOT NULL AND valid_until <= ref``
+           where ``ref`` is ``as_of`` when provided or the current UTC time.
+           The ``<=`` implements the half-open interval ``[valid_from, valid_until)``:
+           a fact with ``valid_until == as_of`` has expired at that boundary (Phase 4b fix).
+        2. **Not yet valid** — ``valid_from IS NOT NULL AND valid_from > as_of``
+           (only when ``as_of`` is provided for explicit point-in-time recall).
+
+        Zero-regression guarantee: facts with ``valid_until = NULL`` are
+        assumed open-ended (still valid) and are NEVER returned. Facts with no
+        temporal record at all are NEVER returned (assumed valid). Because almost
+        all existing facts have ``valid_until = NULL``, the default path
+        (``as_of=None``) returns an empty set and causes no demotion.
+
+        Bounded + indexed: only the supplied candidate ids are queried (never a
+        full-table scan), keyed on the ``fact_id`` PK. Chunked to stay under
+        SQLite's ~999 bound-parameter limit (chunk size 900). The
+        ``idx_temporal_valid(profile_id, valid_until)`` index assists the
+        ``valid_until <`` range predicate after the PK IN-lookup. The
+        ``valid_from > as_of`` branch operates on the same bounded PK row set
+        (≤ 900 rows per chunk) — no full-table scan occurs.
+
+        Fail-open: any DB error logs a warning and returns an empty set so
+        retrieval can never break because of a validity lookup failure.
+
+        Args:
+            fact_ids: Candidate fact IDs to check (bounded retrieval pool).
+            profile_id: Current profile — scopes the lookup to one tenant.
+            as_of: Optional ISO 8601 datetime string for point-in-time recall.
+                When set, facts not yet valid at this time are also returned.
+                When None (default), only facts past their ``valid_until`` are
+                returned — the standard current-time path.
+
+        Note:
+            ``as_of`` must be in the same ISO 8601 format as the stored
+            ``valid_until`` / ``valid_from`` values so SQLite's lexicographic
+            string comparison correctly orders the timestamps.
+        """
+        if not fact_ids:
+            return set()
+        expired: set[str] = set()
+        try:
+            chunk = 900
+            for start in range(0, len(fact_ids), chunk):
+                batch = fact_ids[start:start + chunk]
+                placeholders = ",".join("?" for _ in batch)
+                if as_of is not None:
+                    # Time-travel: expired-before-as_of OR not-yet-started-at-as_of.
+                    rows = self.execute(
+                        f"SELECT fact_id FROM fact_temporal_validity "
+                        f"WHERE fact_id IN ({placeholders}) "
+                        f"  AND profile_id = ? "
+                        f"  AND ("
+                        f"    (valid_until IS NOT NULL AND valid_until <= ?) "
+                        f"    OR (valid_from IS NOT NULL AND valid_from > ?)"
+                        f"  )",
+                        (*batch, profile_id, as_of, as_of),
+                    )
+                else:
+                    # Default path: only facts whose valid_until has passed.
+                    # idx_temporal_valid(profile_id, valid_until) assists range scan.
+                    rows = self.execute(
+                        f"SELECT fact_id FROM fact_temporal_validity "
+                        f"WHERE fact_id IN ({placeholders}) "
+                        f"  AND profile_id = ? "
+                        f"  AND valid_until IS NOT NULL "
+                        f"  AND valid_until < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+                        (*batch, profile_id),
+                    )
+                for r in rows:
+                    expired.add(dict(r)["fact_id"])
+        except Exception as exc:
+            logger.warning(
+                "Event-time expiry lookup failed (fail-open): %s", exc,
+            )
+            return set()
+        return expired
 
     def get_fact_event_times(
         self, fact_ids: list[str], profile_id: str,
@@ -1655,7 +1857,8 @@ class DatabaseManager:
                 f"         tv.valid_from, f.created_at) AS event_time "
                 f"FROM atomic_facts f "
                 f"LEFT JOIN fact_temporal_validity tv ON f.fact_id = tv.fact_id "
-                f"WHERE f.fact_id IN ({placeholders}) AND f.profile_id = ?",
+                f"WHERE f.fact_id IN ({placeholders}) "
+                f"AND (f.profile_id = ? OR f.scope = 'global')",
                 (*batch, profile_id),
             )
             for r in rows:
@@ -1695,6 +1898,108 @@ class DatabaseManager:
                 )
         except Exception as exc:  # pragma: no cover — legacy/missing FTS table
             logger.debug("upsert_fact_expansion skipped for %s: %s", fact_id, exc)
+
+    def reset_fact_expansion(self, fact_id: str, alt_keys: str = "") -> None:
+        """Replace the expansion row unconditionally, keeping it alive with new alt_keys.
+
+        Unlike ``upsert_fact_expansion``, this always inserts (even when
+        ``alt_keys`` is empty) so the row survives as a cleared placeholder.
+        Used by update paths that must guarantee the expansion entry exists but
+        holds no stale tokens. Fail-soft: a missing FTS table is a no-op.
+        """
+        try:
+            self.execute(
+                "DELETE FROM fact_expansion_fts WHERE fact_id = ?", (fact_id,)
+            )
+            self.execute(
+                "INSERT INTO fact_expansion_fts (fact_id, alt_keys) VALUES (?, ?)",
+                (fact_id, alt_keys),
+            )
+        except Exception as exc:
+            logger.debug("reset_fact_expansion skipped for %s: %s", fact_id, exc)
+
+    def update_temporal_event_description(
+        self, fact_id: str, description: str
+    ) -> None:
+        """Update the description column in ``temporal_events`` for a fact.
+
+        Fail-soft: absent table (pre-migration DB) is silently skipped.
+        """
+        try:
+            self.execute(
+                "UPDATE temporal_events SET description = ? WHERE fact_id = ?",
+                (description, fact_id),
+            )
+        except Exception as exc:
+            logger.debug(
+                "update_temporal_event_description skipped for %s: %s", fact_id, exc
+            )
+
+    def delete_bm25_tokens_for_fact(self, fact_id: str) -> None:
+        """Delete persisted BM25 tokens for a fact from the ``bm25_tokens`` table."""
+        try:
+            self.execute(
+                "DELETE FROM bm25_tokens WHERE fact_id = ?", (fact_id,)
+            )
+        except Exception as exc:
+            logger.debug("delete_bm25_tokens_for_fact skipped for %s: %s", fact_id, exc)
+
+    def delete_graph_edges_for_fact(self, fact_id: str) -> None:
+        """Delete all graph edges where this fact is the source or the target."""
+        try:
+            self.execute(
+                "DELETE FROM graph_edges WHERE source_id = ? OR target_id = ?",
+                (fact_id, fact_id),
+            )
+        except Exception as exc:
+            logger.debug("delete_graph_edges_for_fact skipped for %s: %s", fact_id, exc)
+
+    def remove_fact_from_scenes(self, fact_id: str, profile_id: str) -> None:
+        """Remove a fact_id from every ``memory_scenes`` JSON array in the profile.
+
+        Scenes that become empty after removal are deleted entirely.
+        Fail-soft: any exception is logged and ignored.
+        """
+        try:
+            scenes = self.get_scenes_for_fact(fact_id, profile_id)
+            for scene in scenes:
+                new_ids = [fid for fid in (scene.fact_ids or []) if fid != fact_id]
+                if new_ids:
+                    self.execute(
+                        "UPDATE memory_scenes SET fact_ids_json = ? "
+                        "WHERE scene_id = ?",
+                        (json.dumps(new_ids), scene.scene_id),
+                    )
+                else:
+                    self.execute(
+                        "DELETE FROM memory_scenes WHERE scene_id = ?",
+                        (scene.scene_id,),
+                    )
+        except Exception as exc:
+            logger.debug("remove_fact_from_scenes skipped for %s: %s", fact_id, exc)
+
+    def delete_memory_for_fact(self, fact_id: str, profile_id: str) -> None:
+        """Delete the raw ``memories`` record that sourced this fact.
+
+        Reads the ``memory_id`` from ``atomic_facts`` before the fact row is
+        gone, then deletes the memory. Fail-soft: any exception is logged.
+        """
+        try:
+            rows = self.execute(
+                "SELECT memory_id FROM atomic_facts "
+                "WHERE fact_id = ? AND profile_id = ? LIMIT 1",
+                (fact_id, profile_id),
+            )
+            if rows:
+                memory_id = dict(rows[0]).get("memory_id") or ""
+                if memory_id:
+                    self.execute(
+                        "DELETE FROM memories "
+                        "WHERE memory_id = ? AND profile_id = ?",
+                        (memory_id, profile_id),
+                    )
+        except Exception as exc:
+            logger.debug("delete_memory_for_fact skipped for %s: %s", fact_id, exc)
 
     # ------------------------------------------------------------------
     # Phase 5: Core Memory Blocks CRUD (Rule 15)

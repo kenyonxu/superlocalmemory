@@ -261,9 +261,13 @@ function openMemoryDetail(mem, source) {
         forgetBtn.className = 'btn btn-outline-warning btn-sm';
         forgetBtn.innerHTML = '<i class="bi bi-archive"></i> Forget';
         forgetBtn.title = 'Archive this memory — hidden from recall but recoverable';
-        forgetBtn.onclick = function() {
-            if (!confirm('Forget this memory? It will be archived '
-                + '(hidden from recall but recoverable).')) return;
+        forgetBtn.onclick = async function() {
+            var confirmed = await confirmDestructive({
+                title: 'Forget memory',
+                target: mem.content ? mem.content.slice(0, 80) : 'Memory #' + mem.id,
+                consequence: 'Archived — hidden from recall but recoverable.',
+            });
+            if (!confirmed) return;
             forgetBtn.disabled = true;
             fetch('/api/memories/' + encodeURIComponent(mem.id) + '/forget',
                 {method: 'POST'})
@@ -323,13 +327,147 @@ function openMemoryDetail(mem, source) {
         };
         actionsDiv.appendChild(mergeBtn);
 
+        // Task F: Set Scope — PATCH /api/memories/{fact_id}/scope
+        // Lets the user change personal → shared → global visibility.
+        var scopeBtn = document.createElement('button');
+        scopeBtn.className = 'btn btn-outline-secondary btn-sm';
+        scopeBtn.innerHTML = '<i class="bi bi-globe"></i> Set Scope…';
+        scopeBtn.title = 'Change memory visibility: personal, shared, or global';
+        (function() {
+            var scopeFormEl = null;
+            scopeBtn.addEventListener('click', function() {
+                // Toggle the inline scope form
+                if (scopeFormEl) {
+                    scopeFormEl.remove();
+                    scopeFormEl = null;
+                    return;
+                }
+                scopeFormEl = document.createElement('div');
+                scopeFormEl.className = 'mt-2 p-2 border rounded';
+                scopeFormEl.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;align-items:center;width:100%';
+                var scopeSel = document.createElement('select');
+                scopeSel.className = 'form-select form-select-sm';
+                scopeSel.style.width = 'auto';
+                ['personal', 'shared', 'global'].forEach(function(s) {
+                    var opt = document.createElement('option');
+                    opt.value = s;
+                    opt.textContent = s;
+                    if (s === (mem.scope || 'personal')) opt.selected = true;
+                    scopeSel.appendChild(opt);
+                });
+                var sharedInput = document.createElement('input');
+                sharedInput.className = 'form-control form-control-sm';
+                sharedInput.placeholder = 'shared_with (profile1,profile2)';
+                sharedInput.style.flex = '1';
+                sharedInput.style.display = scopeSel.value === 'shared' ? '' : 'none';
+                if (mem.shared_with) {
+                    try {
+                        var sw = typeof mem.shared_with === 'string'
+                            ? JSON.parse(mem.shared_with) : mem.shared_with;
+                        sharedInput.value = Array.isArray(sw) ? sw.join(',') : String(sw);
+                    } catch(e) { sharedInput.value = String(mem.shared_with || ''); }
+                }
+                scopeSel.addEventListener('change', function() {
+                    sharedInput.style.display = scopeSel.value === 'shared' ? '' : 'none';
+                });
+                var saveBtn = document.createElement('button');
+                saveBtn.className = 'btn btn-sm btn-primary';
+                saveBtn.textContent = 'Save';
+                saveBtn.addEventListener('click', function() {
+                    var scope = scopeSel.value;
+                    var sharedWith = scope === 'shared' ? sharedInput.value : '';
+                    saveBtn.disabled = true;
+                    saveBtn.textContent = 'Saving…';
+                    fetch('/api/memories/' + encodeURIComponent(mem.fact_id || mem.id) + '/scope', {
+                        method: 'PATCH',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({scope: scope, shared_with: sharedWith}),
+                    }).then(function(r) { return r.json(); })
+                    .then(function(d) {
+                        if (d.success) {
+                            mem.scope = scope;
+                            if (typeof showToast === 'function') showToast('Scope set to ' + scope);
+                            scopeFormEl.remove(); scopeFormEl = null;
+                            if (typeof loadMemories === 'function') setTimeout(loadMemories, 300);
+                        } else {
+                            if (typeof showToast === 'function') showToast('Scope update failed: ' + (d.detail || d.error || 'unknown'));
+                            saveBtn.disabled = false; saveBtn.textContent = 'Save';
+                        }
+                    }).catch(function() {
+                        if (typeof showToast === 'function') showToast('Network error setting scope.');
+                        saveBtn.disabled = false; saveBtn.textContent = 'Save';
+                    });
+                });
+                scopeFormEl.appendChild(scopeSel);
+                scopeFormEl.appendChild(sharedInput);
+                scopeFormEl.appendChild(saveBtn);
+                actionsDiv.insertAdjacentElement('afterend', scopeFormEl);
+            });
+        }());
+        actionsDiv.appendChild(scopeBtn);
+
+        // Task G: Pin — POST /api/tiers/pin — keep this fact in the active tier forever
+        var factIdForTier = mem.fact_id || mem.id;
+        var pinBtn = document.createElement('button');
+        pinBtn.className = 'btn btn-outline-success btn-sm';
+        pinBtn.innerHTML = '<i class="bi bi-pin-fill"></i> Pin';
+        pinBtn.title = 'Pin to active tier — this fact will not be demoted by lifecycle';
+        pinBtn.addEventListener('click', function() {
+            pinBtn.disabled = true;
+            fetch('/api/tiers/pin', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({fact_id: factIdForTier, reason: 'pinned from dashboard'}),
+            }).then(function(r) { return r.json(); })
+            .then(function(d) {
+                pinBtn.disabled = false;
+                if (typeof showToast === 'function') {
+                    showToast(d && d.success ? 'Fact pinned to active tier.' : 'Pin failed: ' + (d && (d.detail || d.error) || 'unknown'));
+                }
+            }).catch(function() {
+                pinBtn.disabled = false;
+                if (typeof showToast === 'function') showToast('Network error pinning fact.');
+            });
+        });
+        actionsDiv.appendChild(pinBtn);
+
+        // Task G: Unpin — POST /api/tiers/unpin — allows normal tier demotion again
+        var unpinBtn = document.createElement('button');
+        unpinBtn.className = 'btn btn-outline-warning btn-sm';
+        unpinBtn.innerHTML = '<i class="bi bi-pin-angle"></i> Unpin';
+        unpinBtn.title = 'Unpin — allow normal lifecycle tier demotion';
+        unpinBtn.addEventListener('click', function() {
+            unpinBtn.disabled = true;
+            fetch('/api/tiers/unpin', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({fact_id: factIdForTier, reason: ''}),
+            }).then(function(r) { return r.json(); })
+            .then(function(d) {
+                unpinBtn.disabled = false;
+                if (typeof showToast === 'function') {
+                    showToast(d && d.success ? 'Fact unpinned — will age normally.' : 'Unpin failed: ' + (d && (d.detail || d.error) || 'unknown'));
+                }
+            }).catch(function() {
+                unpinBtn.disabled = false;
+                if (typeof showToast === 'function') showToast('Network error unpinning fact.');
+            });
+        });
+        actionsDiv.appendChild(unpinBtn);
+
         // Delete button — always available (hard delete, irreversible)
         var deleteBtn = document.createElement('button');
         deleteBtn.className = 'btn btn-outline-danger btn-sm';
         deleteBtn.innerHTML = '<i class="bi bi-trash"></i> Delete';
         deleteBtn.title = 'Permanently delete (cannot be undone) — prefer Forget';
-        deleteBtn.onclick = function() {
-            if (!confirm('Delete this memory? This cannot be undone.')) return;
+        deleteBtn.onclick = async function() {
+            var confirmed = await confirmDestructive({
+                title: 'Delete memory',
+                target: mem.content ? mem.content.slice(0, 80) : 'Memory #' + mem.id,
+                consequence: 'Permanently deleted — this cannot be undone.',
+                confirmLabel: 'Delete',
+            });
+            if (!confirmed) return;
             fetch('/api/memories/' + encodeURIComponent(mem.id), {method: 'DELETE'})
                 .then(function(r) { return r.json(); })
                 .then(function(d) {
@@ -430,6 +568,135 @@ function addDetailTagsRow(parent, label, tags) {
         });
     }
     parent.appendChild(dd);
+}
+
+/**
+ * Show a shared confirmation modal for destructive dashboard actions.
+ * Creates the modal element on first call; reuses it on subsequent calls.
+ *
+ * @param {object} opts
+ * @param {string} opts.title          Short header, e.g. "Delete profile"
+ * @param {string} opts.target         Exact item being acted on, e.g. "my-project"
+ * @param {string} opts.consequence    What happens, e.g. "Memories moved to default profile"
+ * @param {string} [opts.confirmLabel] Confirm button text (default: "Confirm")
+ * @param {string} [opts.confirmationText] Exact text required to unlock confirmation
+ * @returns {Promise<boolean>} Resolves true when confirmed, false when cancelled
+ */
+var activeDestructiveConfirmation = null;
+
+function confirmDestructive(opts) {
+    return new Promise(function(resolve) {
+        if (activeDestructiveConfirmation) {
+            activeDestructiveConfirmation.cancel();
+        }
+        var settled = false;
+        var MODAL_ID = 'slm-confirm-destructive-modal';
+        var modalEl = document.getElementById(MODAL_ID);
+
+        if (!modalEl) {
+            modalEl = document.createElement('div');
+            modalEl.id = MODAL_ID;
+            modalEl.className = 'modal fade';
+            modalEl.setAttribute('tabindex', '-1');
+            modalEl.setAttribute('aria-modal', 'true');
+            modalEl.setAttribute('role', 'dialog');
+            modalEl.innerHTML =
+                '<div class="modal-dialog modal-dialog-centered">' +
+                '<div class="modal-content">' +
+                '<div class="modal-header border-0 pb-1">' +
+                '<h5 class="modal-title slm-cd-title text-danger"></h5>' +
+                '<button type="button" class="btn-close"' +
+                ' data-slm-cd-action="cancel" aria-label="Close"></button>' +
+                '</div>' +
+                '<div class="modal-body pt-1">' +
+                '<p class="slm-cd-target fw-semibold mb-1"></p>' +
+                '<p class="slm-cd-consequence text-muted small mb-2"></p>' +
+                '<label class="form-label small mb-1" for="slm-cd-challenge">' +
+                'Type <code class="slm-cd-confirmation-text"></code> to continue</label>' +
+                '<input id="slm-cd-challenge" class="form-control form-control-sm slm-cd-challenge"' +
+                ' type="text" autocomplete="off" spellcheck="false">' +
+                '</div>' +
+                '<div class="modal-footer border-0 pt-0">' +
+                '<button type="button" class="btn btn-secondary btn-sm"' +
+                ' data-slm-cd-action="cancel">Cancel</button>' +
+                '<button type="button" class="btn btn-danger btn-sm"' +
+                ' data-slm-cd-action="confirm">Confirm</button>' +
+                '</div>' +
+                '</div>' +
+                '</div>';
+            document.body.appendChild(modalEl);
+        }
+
+        var titleEl = modalEl.querySelector('.slm-cd-title');
+        var targetEl = modalEl.querySelector('.slm-cd-target');
+        var consequenceEl = modalEl.querySelector('.slm-cd-consequence');
+        var confirmationTextEl = modalEl.querySelector('.slm-cd-confirmation-text');
+        var challengeInput = modalEl.querySelector('.slm-cd-challenge');
+        var confirmBtn = modalEl.querySelector('[data-slm-cd-action="confirm"]');
+        var confirmationText = opts.confirmationText || opts.target || 'CONFIRM';
+
+        if (titleEl) titleEl.textContent = opts.title || 'Confirm action';
+        if (targetEl) targetEl.textContent = opts.target || '';
+        if (consequenceEl) consequenceEl.textContent = opts.consequence || '';
+        if (confirmationTextEl) confirmationTextEl.textContent = confirmationText;
+        if (challengeInput) challengeInput.value = '';
+        if (confirmBtn) {
+            confirmBtn.textContent = opts.confirmLabel || 'Confirm';
+            confirmBtn.disabled = true;
+        }
+
+        var bsModal = null;
+        if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+            bsModal = bootstrap.Modal.getOrCreateInstance(modalEl);
+        }
+
+        function settle(result, hideModal) {
+            if (settled) return;
+            settled = true;
+            if (activeDestructiveConfirmation === confirmationSession) {
+                activeDestructiveConfirmation = null;
+            }
+            modalEl.removeEventListener('click', onAction);
+            if (challengeInput) challengeInput.removeEventListener('input', onChallengeInput);
+            if (bsModal) {
+                modalEl.removeEventListener('hidden.bs.modal', onHide);
+                modalEl.removeEventListener('shown.bs.modal', onShown);
+                if (hideModal !== false) bsModal.hide();
+            }
+            resolve(result);
+        }
+
+        function onAction(e) {
+            var actionEl = e.target.closest('[data-slm-cd-action]');
+            if (!actionEl) return;
+            if (actionEl.getAttribute('data-slm-cd-action') === 'confirm' &&
+                    (!challengeInput || challengeInput.value !== confirmationText)) return;
+            settle(actionEl.getAttribute('data-slm-cd-action') === 'confirm');
+        }
+
+        function onChallengeInput() {
+            if (confirmBtn) confirmBtn.disabled = challengeInput.value !== confirmationText;
+        }
+
+        function onShown() {
+            if (challengeInput) challengeInput.focus();
+        }
+
+        function onHide() { settle(false); }
+
+        var confirmationSession = {
+            cancel: function() { settle(false, false); }
+        };
+        activeDestructiveConfirmation = confirmationSession;
+
+        modalEl.addEventListener('click', onAction);
+        if (challengeInput) challengeInput.addEventListener('input', onChallengeInput);
+        if (bsModal) {
+            modalEl.addEventListener('hidden.bs.modal', onHide, { once: true });
+            modalEl.addEventListener('shown.bs.modal', onShown, { once: true });
+            bsModal.show();
+        }
+    });
 }
 
 function copyMemoryToClipboard() {

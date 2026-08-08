@@ -22,6 +22,10 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Callable
 
+from mcp.types import ToolAnnotations
+
+from superlocalmemory.core.admission import admits
+from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.infra.data_root import state_path
 from superlocalmemory.mcp.shared import authorize_mcp_mutation
 from superlocalmemory.storage.read_connection import ReadConnectionFactory
@@ -257,7 +261,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 1. session_init — Auto-recall project context at session start
     # ------------------------------------------------------------------
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def session_init(
         project_path: str = "",
         query: str = "",
@@ -289,7 +293,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
             from superlocalmemory.mcp._pool_adapter import pool_recall
 
             engine = get_engine()
-            rules = RulesEngine()
+            rules = RulesEngine(config_path=state_path("config.json"))
 
             if not rules.should_recall("session_start"):
                 return {
@@ -436,6 +440,20 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 # weaker ad-hoc path when the mandatory renderer fails.
                 context = ""
 
+            # Live soft-prompt injection (Phase 5): prepend the profile's behavioral
+            # soft prompt so it reaches the session_init context agents actually
+            # consume (same engine->AutoInvoker bridge AutoRecall uses). Fail-soft.
+            try:
+                _sp_getter = getattr(
+                    getattr(engine, "_auto_invoker", None),
+                    "_get_soft_prompt_text", None,
+                )
+                _soft_prompt = _sp_getter() if callable(_sp_getter) else ""
+                if _soft_prompt:
+                    context = f"{_soft_prompt}\n\n{context}" if context else _soft_prompt
+            except Exception as exc:
+                logger.warning("session_init soft-prompt injection failed: %s", exc)
+
             # GAP-FIX (v3.4.65 delivery-lead): the memories[] array is part of
             # the MCP response Claude Code ingests — it MUST be bounded too, not
             # just the rendered `context` string. Previously full unclamped
@@ -544,6 +562,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
     # 2. observe — Auto-capture decisions/bugs/preferences
     # ------------------------------------------------------------------
     @server.tool()
+    @admits(OperationKind.REMEMBER)
     async def observe(
         content: str,
         agent_id: str | None = None,
@@ -568,7 +587,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
             from superlocalmemory.hooks.rules_engine import RulesEngine
             from superlocalmemory.mcp._pool_adapter import pool_store
 
-            rules = RulesEngine()
+            rules = RulesEngine(config_path=state_path("config.json"))
 
             auto = AutoCapture(
                 store_fn=pool_store,
@@ -626,6 +645,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
     # 3. report_feedback — Explicit feedback for learning
     # ------------------------------------------------------------------
     @server.tool()
+    @admits(OperationKind.REMEMBER)
     async def report_feedback(
         fact_id: str,
         feedback: str = "relevant",
@@ -741,6 +761,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
 
     @server.tool()
+    @admits(OperationKind.CONSOLIDATE)
     async def close_session(session_id: str = "") -> dict:
         """Close the current session and create temporal summary events.
 
@@ -794,10 +815,10 @@ def register_active_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
 
     @server.tool()
+    @admits(OperationKind.CORRECT)
     async def core_memory(
         action: str,
         fact_id: str = "",
-        profile_id: str = "default",
     ) -> dict:
         """Manage the explicit Core Memory pin set (v3.4.65).
 

@@ -389,6 +389,12 @@ def main() -> None:
              "Default: no time filter.",
     )
     recall_p.add_argument(
+        "--as-of", dest="as_of", default="",
+        help="Point-in-time recall: an ISO-8601 timestamp "
+             "(2026-01-01T00:00:00+00:00) that pins retrieval to a temporal "
+             "snapshot. Default: current-state recall.",
+    )
+    recall_p.add_argument(
         "--fast", action="store_true",
         help="Force-skip the internal agentic verification round (all six retrieval "
              "channels + reranker still run). This is already the default (client-driven "
@@ -902,6 +908,33 @@ def main() -> None:
     for _sp in loop_sub.choices.values():
         _sp.add_argument("--json", action="store_true",
                          help="Output structured JSON (agent-native)")
+
+    # Wave-3: operational recovery & admin remediation
+    ops_p = sub.add_parser(
+        "ops",
+        help="Operational recovery: list failures, resolve stuck ops, check status",
+    )
+    ops_sub = ops_p.add_subparsers(dest="ops_command", title="ops subcommands")
+    ops_list_p = ops_sub.add_parser(
+        "list", help="List all failed, stuck, or degraded operations (admin)")
+    ops_list_p.add_argument(
+        "--profile", default=None, metavar="PROFILE",
+        help="Filter results to a specific profile (default: all)")
+    ops_list_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON (agent-native)")
+    ops_resolve_p = ops_sub.add_parser(
+        "resolve", help="Admin action: retry / force-reconcile / cancel a stuck op")
+    ops_resolve_p.add_argument("operation_id", help="Operation ID from slm ops list")
+    ops_resolve_p.add_argument(
+        "--action", required=True,
+        choices=["retry", "force_reconcile", "cancel"],
+        help="Remediation action to apply")
+    ops_resolve_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON (agent-native)")
+    ops_status_p = ops_sub.add_parser(
+        "status", help="Quick failure count + writer stall overview")
+    ops_status_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON (agent-native)")
 
     args = parser.parse_args()
 

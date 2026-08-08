@@ -15,6 +15,7 @@ License: AGPL-3.0-or-later
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -137,8 +138,50 @@ class VectorStore:
 
     # -- Table creation -----------------------------------------------------
 
+    @staticmethod
+    def _read_stored_dimension(conn: sqlite3.Connection) -> int | None:
+        """Return the embedding dimension of the existing vec0 table, or None.
+
+        Reads the CREATE VIRTUAL TABLE DDL from sqlite_master and extracts the
+        float[N] declaration.  Falls back to embedding_metadata.dimension if
+        the DDL is absent or unparseable.  Returns None when the table does not
+        yet exist, which means no rebuild is needed.
+        """
+        try:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'fact_embeddings'"
+            ).fetchone()
+            if row is not None:
+                sql = row["sql"] or row[0]
+                if sql:
+                    m = re.search(r'float\[(\d+)\]', sql, re.IGNORECASE)
+                    if m:
+                        return int(m.group(1))
+        except Exception:
+            pass
+
+        # Fallback: read dimension from the most recent metadata row.
+        try:
+            row = conn.execute(
+                "SELECT dimension FROM embedding_metadata LIMIT 1"
+            ).fetchone()
+            if row is not None:
+                return int(row["dimension"])
+        except sqlite3.OperationalError:
+            pass  # metadata table does not exist yet
+
+        return None
+
     def _ensure_vec0_table(self) -> None:
-        """Create the vec0 virtual table and embedding_metadata if not exist."""
+        """Create or rebuild the vec0 virtual table and embedding_metadata.
+
+        If the existing vec0 table was built at a different embedding dimension
+        than self._config.dimension, both tables are dropped and recreated at
+        the new dimension.  Old embeddings are lost; callers that want to
+        re-populate should call rebuild_from_facts() afterward.
+
+        Same-dimension opens are a no-op (IF NOT EXISTS guard).
+        """
         dim = self._config.dimension
         vec0_ddl = (
             f"CREATE VIRTUAL TABLE IF NOT EXISTS fact_embeddings USING vec0("
@@ -162,12 +205,41 @@ class VectorStore:
         meta_idx_profile = (
             "CREATE INDEX IF NOT EXISTS idx_embmeta_profile ON embedding_metadata (profile_id)"
         )
+        row_map_ddl = (
+            "CREATE TABLE IF NOT EXISTS vector_row_map ("
+            "fact_id TEXT NOT NULL PRIMARY KEY, "
+            "profile_id TEXT NOT NULL, "
+            "vec_rowid INTEGER NOT NULL"
+            ")"
+        )
+        row_map_idx = (
+            "CREATE INDEX IF NOT EXISTS idx_vector_row_map_profile "
+            "ON vector_row_map (profile_id)"
+        )
         try:
             with self._managed_connection() as conn:
+                stored_dim = self._read_stored_dimension(conn)
+                if stored_dim is not None and stored_dim != dim:
+                    logger.info(
+                        "Embedding dimension changed %d→%d: rebuilding vector index",
+                        stored_dim,
+                        dim,
+                    )
+                    # Drop metadata first (no FK enforcement, but cleaner ordering).
+                    # Indexes on embedding_metadata are dropped automatically.
+                    conn.execute("DROP TABLE IF EXISTS embedding_metadata")
+                    conn.execute("DROP TABLE IF EXISTS vector_row_map")
+                    conn.execute("DROP TABLE IF EXISTS fact_embeddings")
+                    # Commit the drops before recreating so that the virtual-table
+                    # shadow tables are fully removed before the new CREATE runs.
+                    conn.commit()
+
                 conn.execute(vec0_ddl)
                 conn.execute(meta_ddl)
                 conn.execute(meta_idx_fact)
                 conn.execute(meta_idx_profile)
+                conn.execute(row_map_ddl)
+                conn.execute(row_map_idx)
                 conn.commit()
         except Exception as exc:
             logger.debug("vec0 table creation failed: %s", exc)
@@ -255,11 +327,28 @@ class VectorStore:
                                 # Older self-heal code could insert metadata
                                 # before sqlite-vec, or row-id drift could point
                                 # metadata at another profile's vector.  Neither
-                                # is a valid projection pair.  Remove only the
-                                # stale pointer and rebuild at a fresh rowid;
-                                # never overwrite the other profile's payload.
+                                # is a valid projection pair.  Remove the stale
+                                # pointer and rebuild at a fresh rowid; never
+                                # overwrite the other profile's payload.
                                 conn.execute(
                                     "DELETE FROM embedding_metadata WHERE fact_id = ?",
+                                    (fact_id,),
+                                )
+                                # The old vec0 row is orphaned unless another
+                                # projection pair still references it. Reclaim it
+                                # so drift-repair never abandons raw payload.
+                                still_referenced = conn.execute(
+                                    "SELECT 1 FROM embedding_metadata "
+                                    "WHERE vec_rowid = ? LIMIT 1",
+                                    (rowid,),
+                                ).fetchone()
+                                if still_referenced is None:
+                                    conn.execute(
+                                        "DELETE FROM fact_embeddings WHERE rowid = ?",
+                                        (rowid,),
+                                    )
+                                conn.execute(
+                                    "DELETE FROM vector_row_map WHERE fact_id = ?",
                                     (fact_id,),
                                 )
                                 row = None
@@ -301,6 +390,14 @@ class VectorStore:
                                 ),
                             )
 
+                        conn.execute(
+                            "INSERT INTO vector_row_map (fact_id, profile_id, vec_rowid) "
+                            "VALUES (?, ?, ?) "
+                            "ON CONFLICT(fact_id) DO UPDATE SET "
+                            "profile_id = excluded.profile_id, "
+                            "vec_rowid = excluded.vec_rowid",
+                            (fact_id, profile_id, rowid),
+                        )
                         conn.commit()
                     return True
                 except Exception as exc:
@@ -415,16 +512,33 @@ class VectorStore:
                             (fact_id,),
                         ).fetchone()
 
-                        if row is None:
+                        rowid = None
+                        owner_profile = None
+                        if row is not None:
+                            rowid = row["vec_rowid"]
+                            owner_profile = str(row["profile_id"])
+                        else:
+                            # Metadata-less orphan: resolve the rowid via the
+                            # fact-addressable map so the raw vec0 row is still
+                            # removable by fact_id.
+                            mrow = conn.execute(
+                                "SELECT vec_rowid, profile_id "
+                                "FROM vector_row_map WHERE fact_id = ?",
+                                (fact_id,),
+                            ).fetchone()
+                            if mrow is not None:
+                                rowid = mrow["vec_rowid"]
+                                owner_profile = str(mrow["profile_id"])
+
+                        if rowid is None:
                             return False
 
-                        rowid = row["vec_rowid"]
                         vector_row = conn.execute(
                             "SELECT profile_id FROM fact_embeddings WHERE rowid = ?",
                             (rowid,),
                         ).fetchone()
-                        if vector_row is not None and str(vector_row["profile_id"]) == str(
-                            row["profile_id"]
+                        if vector_row is not None and (
+                            str(vector_row["profile_id"]) == owner_profile
                         ):
                             conn.execute(
                                 "DELETE FROM fact_embeddings WHERE rowid = ?",
@@ -434,11 +548,53 @@ class VectorStore:
                             "DELETE FROM embedding_metadata WHERE vec_rowid = ?",
                             (rowid,),
                         )
+                        conn.execute(
+                            "DELETE FROM vector_row_map WHERE fact_id = ?",
+                            (fact_id,),
+                        )
                         conn.commit()
                     return True
                 except Exception as exc:
                     logger.debug("delete failed for fact_id=%s: %s", fact_id, exc)
                     return False
+
+    def raw_vector_present(self, fact_id: str) -> bool:
+        if not self._available:
+            try:
+                conn = sqlite3.connect(str(self._db_path))
+                try:
+                    row = conn.execute(
+                        "SELECT 1 FROM vector_row_map WHERE fact_id = ? LIMIT 1",
+                        (fact_id,),
+                    ).fetchone()
+                    return row is not None
+                finally:
+                    conn.close()
+            except Exception:
+                return False
+        try:
+            with self._managed_connection() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM vector_row_map vrm "
+                    "WHERE vrm.fact_id = ? "
+                    "AND EXISTS (SELECT 1 FROM fact_embeddings fe "
+                    "WHERE fe.rowid = vrm.vec_rowid)",
+                    (fact_id,),
+                ).fetchone()
+                return row is not None
+        except Exception:
+            try:
+                conn2 = sqlite3.connect(str(self._db_path))
+                try:
+                    row = conn2.execute(
+                        "SELECT 1 FROM vector_row_map WHERE fact_id = ? LIMIT 1",
+                        (fact_id,),
+                    ).fetchone()
+                    return row is not None
+                finally:
+                    conn2.close()
+            except Exception:
+                return False
 
     def count(self, profile_id: str | None = None) -> int:
         """Count complete metadata/vector pairs in the store.
@@ -492,6 +648,56 @@ class VectorStore:
         except Exception as exc:
             logger.debug("indexed_fact_ids failed: %s", exc)
             return set()
+
+    def gc_orphaned_vectors(self, profile_id: str | None = None) -> int:
+        """Physically remove vec0 rows not referenced by any fact-addressable
+        mapping (neither embedding_metadata nor vector_row_map).
+
+        Such rows are unreachable by fact_id and would otherwise persist forever.
+        Returns the count removed. No-op when the vector backend is unavailable.
+        """
+        if not self._available:
+            return 0
+
+        _wl = get_write_lock(self._db_path)
+        with _wl:
+            with self._lock:
+                try:
+                    with self._managed_connection() as conn:
+                        conn.execute("BEGIN IMMEDIATE")
+                        orphans = self._orphan_rowids(conn, profile_id)
+                        for rowid in orphans:
+                            conn.execute(
+                                "DELETE FROM fact_embeddings WHERE rowid = ?",
+                                (rowid,),
+                            )
+                        conn.commit()
+                    return len(orphans)
+                except Exception as exc:
+                    logger.debug("gc_orphaned_vectors failed: %s", exc)
+                    return 0
+
+    @staticmethod
+    def _orphan_rowids(conn: sqlite3.Connection, profile_id: str | None) -> set[int]:
+        """vec0 rowids not referenced by embedding_metadata or vector_row_map."""
+        if profile_id is not None:
+            all_rowids = {r[0] for r in conn.execute(
+                "SELECT rowid FROM fact_embeddings WHERE profile_id = ?",
+                (profile_id,)).fetchall()}
+            ref_meta = {r[0] for r in conn.execute(
+                "SELECT vec_rowid FROM embedding_metadata WHERE profile_id = ?",
+                (profile_id,)).fetchall()}
+            ref_map = {r[0] for r in conn.execute(
+                "SELECT vec_rowid FROM vector_row_map WHERE profile_id = ?",
+                (profile_id,)).fetchall()}
+        else:
+            all_rowids = {r[0] for r in conn.execute(
+                "SELECT rowid FROM fact_embeddings").fetchall()}
+            ref_meta = {r[0] for r in conn.execute(
+                "SELECT vec_rowid FROM embedding_metadata").fetchall()}
+            ref_map = {r[0] for r in conn.execute(
+                "SELECT vec_rowid FROM vector_row_map").fetchall()}
+        return all_rowids - ref_meta - ref_map
 
     def rebuild_from_facts(
         self,

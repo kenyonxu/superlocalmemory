@@ -1,5 +1,5 @@
 # Configuration
-> SuperLocalMemory V3 Documentation
+> SuperLocalMemory V4 Documentation
 > https://superlocalmemory.com | Part of Qualixar
 
 Control how SuperLocalMemory stores, retrieves, and processes your memories.
@@ -168,14 +168,14 @@ cannot score a Chinese, Japanese, or Arabic corpus meaningfully.
 {
   "embedding": {
     "provider": "openai",
-    "api_endpoint": "http://192.168.50.140:8045/v1/embeddings",
+    "api_endpoint": "https://models.example.test/v1/embeddings",
     "model_name": "Qwen3-Embedding",
     "dimension": 1024
   },
   "retrieval": {
     "use_cross_encoder": true,
     "cross_encoder_backend": "openai",
-    "cross_encoder_endpoint": "http://192.168.50.140:8041/v1/rerank",
+    "cross_encoder_endpoint": "https://models.example.test/v1/rerank",
     "cross_encoder_model": "/root/model/reranker.gguf",
     "cross_encoder_timeout_seconds": 15.0
   }
@@ -188,9 +188,9 @@ cannot score a Chinese, Japanese, or Arabic corpus meaningfully.
 |---------|---------|-------------|
 | `use_cross_encoder` | `true` | Master switch for reranking |
 | `cross_encoder_backend` | `""` | `""` / `"onnx"` run locally; `"openai"` / `"remote"` use `cross_encoder_endpoint` |
-| `cross_encoder_endpoint` | `""` | Full or base rerank URL. `/rerank` is appended when absent. `http`/`https` only |
+| `cross_encoder_endpoint` | `""` | Full or base rerank URL. `/rerank` is appended when absent. HTTPS is required off-host; HTTP is loopback-only |
 | `cross_encoder_model` | `cross-encoder/ms-marco-MiniLM-L-12-v2` | Local HF id, or the model name the endpoint serves |
-| `cross_encoder_api_key` | `""` | Optional bearer token — prefer `SLM_CROSS_ENCODER_API_KEY` |
+| `cross_encoder_api_key` | `""` | Optional bearer token. Prefer `SLM_CROSS_ENCODER_API_KEY`; persisted config is owner-readable (`0600`) |
 | `cross_encoder_timeout_seconds` | `15.0` | Per-request read budget for the remote endpoint |
 
 Works with any Cohere-shaped `/v1/rerank` service — llama-server,
@@ -206,6 +206,12 @@ substitute the local English model. Setting `cross_encoder_endpoint` while
 `cross_encoder_backend` is a local value is reported as a configuration error
 rather than ignored (issue #103).
 
+**Privacy boundary.** Remote reranking sends the recall query and candidate
+memory text to the configured service. SLM removes recognized secrets and PII
+before transmission, rejects URL query strings, and requires HTTPS except for
+loopback endpoints. Configure only a service you trust; keep reranking local
+when memory text must not leave the machine.
+
 ## Environment Variables
 
 These override config file settings when set:
@@ -215,7 +221,7 @@ These override config file settings when set:
 | `SLM_MODE` | Override operating mode |
 | `SLM_PROFILE` | Override active profile |
 | `SLM_DATA_DIR` | Override data directory (default: `~/.superlocalmemory/`) |
-| `SLM_CROSS_ENCODER_API_KEY` | Bearer token for a remote rerank endpoint (overrides `retrieval.cross_encoder_api_key`) |
+| `SLM_CROSS_ENCODER_API_KEY` | Runtime-only bearer token for a remote rerank endpoint; overrides any owner-only config value |
 | `OPENAI_API_KEY` | OpenAI API key for Mode C |
 | `ANTHROPIC_API_KEY` | Anthropic API key for Mode C |
 | `AZURE_OPENAI_API_KEY` | Azure OpenAI API key for Mode C |
@@ -291,4 +297,4 @@ See [docs/optimize-config.md](./optimize-config.md) for all 45+ config fields wi
 
 ---
 
-*SuperLocalMemory V3 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*
+*SuperLocalMemory V4 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*

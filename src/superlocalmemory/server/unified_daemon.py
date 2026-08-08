@@ -36,9 +36,8 @@ import sys
 import threading
 import time
 import uuid
-from contextlib import asynccontextmanager, AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -66,6 +65,25 @@ from superlocalmemory.infra.data_root import (
     canonical_data_root,
     state_path,
 )
+
+
+def _learning_db_for_config(config) -> Path:
+    """Single learning.db path for daemon migration + engine (F-05).
+
+    Always resolves through ``canonical_data_root(configured_base_dir=...)`` so
+    a custom ``SLMConfig.base_dir`` without env aliases cannot diverge from the
+    engine's ``config.base_dir / "learning.db"``.
+    """
+    base = getattr(config, "base_dir", None)
+    root = canonical_data_root(configured_base_dir=base)
+    return root / "learning.db"
+
+
+def _memory_db_for_config(config) -> Path:
+    """Memory DB path aligned with :func:`_learning_db_for_config`."""
+    base = getattr(config, "base_dir", None)
+    root = canonical_data_root(configured_base_dir=base)
+    return root / "memory.db"
 from superlocalmemory.learning.source_quality import (
     SourceQualityRepairUnavailable,
     enumerate_source_quality_repair_profiles,
@@ -111,6 +129,10 @@ _SENSITIVE_READ_PREFIXES = (
     "/api/v3/mesh/config", "/api/v3/trust/config",
     "/api/v3/forgetting/config", "/api/v3/mcp/profiles",
     "/api/learning", "/api/behavioral",
+    # Event stream, agent activity, trust signals, and v3 profiling data
+    # expose cross-agent coordination signals and behavioral profiles.
+    "/events", "/api/events", "/api/agents", "/api/trust/",
+    "/api/v3/abstraction", "/api/v3/insights",
 )
 _SENSITIVE_READ_EXACT_PATHS = (
     "/api/search", "/api/v3/recall/trace", "/api/patterns",
@@ -161,12 +183,92 @@ def _rbac_read_gate(request, app_state):
                         content={"error": "Your role cannot read this workspace."})
 
 
+# Adapter process-control routes that change running state (start/stop) or
+# persistence state (enable/disable). These require WRITE permission.
+_ADAPTER_CONTROL_PREFIXES = (
+    "/api/adapters/enable",
+    "/api/adapters/disable",
+    "/api/adapters/start",
+    "/api/adapters/stop",
+)
+
+
+def _is_adapter_control_mutation(method: str, path: str) -> bool:
+    return (
+        method in ("POST", "PUT", "PATCH", "DELETE")
+        and path.startswith(_ADAPTER_CONTROL_PREFIXES)
+    )
+
+
+def _rbac_write_gate(request, app_state):
+    """RBAC gate for state-changing dashboard mutations. Returns a JSONResponse
+    to reject, or None to allow. No-op unless RBAC is active (>=1 user).
+
+    Mirror of _rbac_read_gate but checks WRITE instead of READ permission.
+    Fails closed on RBAC errors (503), consistent with _rbac_read_gate.
+    """
+    from fastapi.responses import JSONResponse
+    rbac = getattr(app_state, "rbac", None)
+    if rbac is None:
+        return None
+    try:
+        active = rbac.user_count() > 0
+    except Exception:
+        return JSONResponse(status_code=503,
+                            content={"error": "authorization temporarily unavailable"})
+    if not active:
+        return None  # single-operator install — mutations are open
+    token = (request.headers.get("x-slm-user-session", "")
+             or (request.cookies.get("slm_session", "") if request.cookies else ""))
+    user = rbac.resolve_session(token) if token else None
+    if user is None:
+        if rbac.require_login():
+            return JSONResponse(status_code=401,
+                                content={"error": "Login required to perform this action."})
+        return None  # owner/operator, personal mode
+    from superlocalmemory.access.rbac import Permission
+    from superlocalmemory.server.routes.helpers import get_active_profile
+    if rbac.has_permission(user["user_id"], get_active_profile(), Permission.WRITE):
+        return None
+    return JSONResponse(status_code=403,
+                        content={"error": "Your role cannot modify this workspace."})
+
+
 def _configured_daemon_port() -> int:
     """Return the configured bind port, falling back safely to the default."""
     try:
         return int(os.environ.get("SLM_DAEMON_PORT", "") or _DEFAULT_PORT)
     except ValueError:
         return _DEFAULT_PORT
+
+
+# Paths that must remain reachable when required schema migrations have failed.
+# All other paths are feature routes subject to the readiness gate.
+_MIGRATION_EXEMPT_PATH_PREFIXES: tuple[str, ...] = (
+    "/health",
+    "/status",
+    "/api/v3/health",
+    "/api/health",
+    "/api/status",
+    "/api/v3/components",    # component status/heal endpoints
+    "/api/v3/repair",
+    "/api/repair",
+    "/api/version",          # version probe (non-schema-dependent)
+    "/static",               # UI assets (served regardless of schema state)
+)
+
+
+def _is_migration_exempt_path(path: str) -> bool:
+    """Return True for health, status, and repair paths that must stay reachable
+    even when the daemon reports a schema migration failure.
+
+    All other paths are considered feature routes whose correctness depends on
+    the schema being fully applied.
+    """
+    return any(
+        path == prefix or path.startswith(prefix + "/") or path.startswith(prefix + "?")
+        for prefix in _MIGRATION_EXEMPT_PATH_PREFIXES
+    )
 
 
 def _process_descriptor(port: int, version: str, state: str) -> DaemonDescriptor:
@@ -377,6 +479,14 @@ def _hot_reconfigure_engine(application, new_config, *, mode_change: bool) -> No
     old_engine = getattr(application.state, "engine", None)
     new_engine = MemoryEngine(new_config)
     try:
+        if mode_change:
+            # A mode switch may change the embedding dimension.  VectorStore
+            # detects the mismatch on init and rebuilds the vec0 table at the
+            # new dimension automatically (see VectorStore._ensure_vec0_table).
+            logger.info(
+                "Mode change detected: vector index will be rebuilt at new "
+                "embedding dimension if dimension changed."
+            )
         new_engine.initialize()
         new_config.save(mode_change=mode_change)
     except BaseException:
@@ -435,7 +545,11 @@ def _hot_reconfigure_engine(application, new_config, *, mode_change: bool) -> No
 
 from superlocalmemory.core.recall_gate import (
     begin_recall as _begin_recall,
+)
+from superlocalmemory.core.recall_gate import (
     end_recall as _end_recall,
+)
+from superlocalmemory.core.recall_gate import (
     in_flight as _recalls_in_flight,
 )
 
@@ -479,6 +593,7 @@ def _emit_event(
 # lock queues, and total wall time is N × single-recall-time. 3 concurrent
 # full recalls gives parallelism benefit without resource oversaturation.
 import asyncio as _asyncio
+
 _recall_semaphore = _asyncio.Semaphore(3)
 
 
@@ -619,11 +734,11 @@ class ObserveBuffer:
             }
 
         try:
-            from superlocalmemory.hooks.auto_capture import AutoCapture
             from superlocalmemory.core.engine_ingestion import (
                 build_engine_ingestion_command,
             )
             from superlocalmemory.core.ingestion_command import IngestionRequest
+            from superlocalmemory.hooks.auto_capture import AutoCapture
 
             decision = AutoCapture().evaluate(content)
             if not decision.capture:
@@ -1240,6 +1355,62 @@ def _release_canonical_remember_runtime(application, runtime=None) -> bool:
     return True
 
 
+def _apply_readiness_gate(runtime, application) -> None:
+    """Abort startup when the writer lease is held but the runtime is not serving.
+
+    A swallowed exception in a critical startup step can leave the coordinator
+    worker dead while the file lock remains held. Continuing to yield in that
+    state keeps the lease on an unusable runtime, blocking any recovery process.
+    This gate detects the broken state, releases the lease, and raises so the
+    daemon exits cleanly and ownership transfers to the next start attempt.
+
+    Calling this with a ready or absent runtime is a no-op.
+    """
+    if runtime is None or runtime.ready:
+        return
+    _release_canonical_remember_runtime(application, runtime)
+    raise RuntimeError(
+        "daemon writer runtime is not ready after startup — "
+        "releasing writer lease so a recovery process can start"
+    )
+
+
+def _apply_deployment_runtime(config, deployment) -> None:
+    """Upgrade engine policy from deployment config without downgrading it."""
+    if deployment.pii_redaction and not getattr(config, "pii_redaction", False):
+        config.pii_redaction = True
+
+
+def _start_deployment_retention(application, config, deployment) -> None:
+    """Start the named-rule retention scheduler when explicitly enabled."""
+    application.state.retention_scheduler = None
+    application.state.retention_connection = None
+    if not deployment.retention_enabled:
+        return
+
+    from superlocalmemory.compliance.scheduler import RetentionScheduler
+
+    scheduler = RetentionScheduler(db_path=config.db_path)
+    scheduler.start()
+    application.state.retention_scheduler = scheduler
+
+
+def _stop_deployment_retention(application) -> bool:
+    """Stop retention and report whether its writer thread fully terminated."""
+    scheduler = getattr(application.state, "retention_scheduler", None)
+    if scheduler is None:
+        return True
+    try:
+        stopped = scheduler.stop()
+    except Exception as exc:  # pragma: no cover - defensive shutdown
+        logger.error("retention scheduler stop failed: %s", exc)
+        return False
+    if stopped is False:
+        logger.error("retention scheduler did not stop within its shutdown budget")
+        return False
+    return True
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Initialize engine, workers, and optional services on startup."""
@@ -1247,6 +1418,7 @@ async def lifespan(application: FastAPI):
 
     engine = None
     config = None
+    deployment = None
     canonical_remember_runtime = None
     profile_runtime = None
 
@@ -1317,11 +1489,35 @@ async def lifespan(application: FastAPI):
     # LLD-06 §7.3 / LLD-07 §4.1 — run additive schema migrations BEFORE
     # engine init so later queries see the expected columns/tables.
     # Non-fatal: any failure here is logged and the daemon still starts.
+    #
+    # F-05: resolve learning.db / memory.db from the same configured base
+    # the engine will use (config.base_dir). Bare canonical_data_root() skips
+    # configured_base_dir and can migrate ~/.superlocalmemory while the
+    # engine writes a custom root.
+    _path_config = None
+    try:
+        from superlocalmemory.core.config import SLMConfig as _SLMConfigForPaths
+
+        try:
+            _SLMConfigForPaths.migrate_to_3mode()
+        except Exception as _m3_exc:  # pragma: no cover — non-fatal path prep
+            logger.debug("migrate_to_3mode before path resolve: %s", _m3_exc)
+        _path_config = _SLMConfigForPaths.load()
+    except Exception as _cfg_exc:  # pragma: no cover — fall back below
+        logger.debug("early config load for migration paths failed: %s", _cfg_exc)
+        _path_config = None
+
     try:
         from superlocalmemory.storage.migration_runner import apply_all
-        _home = canonical_data_root()
-        _learning_db = _home / "learning.db"
-        _memory_db = _home / "memory.db"
+        if _path_config is None:
+            # Catastrophic early-load failure: still one root via Mode-A default
+            # (runtime canonical root), never a bare second resolver branch.
+            from superlocalmemory.core.config import SLMConfig as _SLMFallback
+            from superlocalmemory.storage.models import Mode as _ModeFallback
+
+            _path_config = _SLMFallback.for_mode(_ModeFallback.A)
+        _learning_db = _learning_db_for_config(_path_config)
+        _memory_db = _memory_db_for_config(_path_config)
         _result = apply_all(_learning_db, _memory_db)
         _applied = _result.get("applied", [])
         _failed = _result.get("failed", [])
@@ -1353,26 +1549,109 @@ async def lifespan(application: FastAPI):
             "details": {"_crash": str(_exc)},
         }
 
+    # H1 — boot self-heal: remove provably-dead SLM lock/PID artifacts BEFORE
+    # claiming the writer. The writer claim uses a portalocker OS advisory lock
+    # that auto-releases on holder death, so stale artifacts are metadata-only
+    # leftovers. Fail-soft — a crash here is logged but never blocks startup.
+    try:
+        from superlocalmemory.infra.self_heal import reap_stale_artifacts
+
+        # NOTE: canonical_data_root is imported at module scope (top of file).
+        # Do NOT re-import it locally here — a local import would shadow the
+        # module name for this whole startup function and make the earlier
+        # migration-runner reference raise UnboundLocalError.
+        _sh_report = reap_stale_artifacts(canonical_data_root())
+        if _sh_report["removed"]:
+            logger.info(
+                "boot self-heal: removed %d stale artifact(s)",
+                len(_sh_report["removed"]),
+            )
+        if _sh_report["errors"]:
+            logger.debug(
+                "boot self-heal: %d removal error(s) (non-fatal)",
+                len(_sh_report["errors"]),
+            )
+    except Exception as _sh_exc:
+        logger.debug("boot self-heal failed (non-fatal): %s", _sh_exc)
+
+    # H4 — mesh lock TTL expiry: delete expired mesh_locks rows on boot so
+    # dead-node leases are cleared before any actor reads the lock table.
+    # mesh_locks lives in memory.db.  Fail-soft — never blocks startup.
+    try:
+        from superlocalmemory.infra.self_heal import expire_stale_mesh_locks
+
+        _mesh_db = canonical_data_root() / "memory.db"
+        _mesh_expired = expire_stale_mesh_locks(_mesh_db)
+        if _mesh_expired:
+            logger.info("boot mesh expiry: cleared %d stale mesh_lock row(s)", _mesh_expired)
+    except Exception as _mesh_exc:
+        logger.debug("boot mesh expiry failed (non-fatal): %s", _mesh_exc)
+
+    # H3 — process reaper: kill orphaned SLM child processes whose parent is
+    # dead. Wires the existing infra/process_reaper.py at daemon start.
+    # Fail-soft — never blocks the startup path.
+    try:
+        from superlocalmemory.infra.process_reaper import ReaperConfig, reap_stale_on_startup
+        from superlocalmemory.infra.pid_manager import PidManager
+        from superlocalmemory.infra.data_root import canonical_data_root as _cdr
+
+        _rpr_cfg = ReaperConfig(orphan_age_threshold_hours=0.0)
+        _rpr_mgr = PidManager(_cdr() / "slm.pids")
+        reap_stale_on_startup(_rpr_cfg, _rpr_mgr)
+    except Exception as _rpr_exc:
+        logger.debug("boot process reaper failed (non-fatal): %s", _rpr_exc)
+
     try:
         from superlocalmemory.core.config import SLMConfig
         from superlocalmemory.core.engine import MemoryEngine
 
         # v3.4.54: one-time migration config.json → 3-mode system
+        # (also attempted earlier for F-05 path resolution; idempotent)
         SLMConfig.migrate_to_3mode()
 
-        config = SLMConfig.load()
+        config = _path_config if _path_config is not None else SLMConfig.load()
+        from superlocalmemory.core.config import load_deployment_config
+        deployment = load_deployment_config()
+        _apply_deployment_runtime(config, deployment)
+        application.state.deployment = deployment
         engine = MemoryEngine(config)
         engine.initialize()
+
+        # Refresh migration state now that the engine is initialised.  Any
+        # schema work the engine's own bootstrap may have applied (e.g.
+        # runtime-table creation) is captured here so the dashboard and
+        # health endpoints see a current, consistent picture.  Non-fatal:
+        # a runner crash here is logged but must not block the startup path.
+        try:
+            _result = apply_all(_learning_db, _memory_db)
+            application.state.migration_result = _result
+        except Exception as _ref_exc:  # pragma: no cover — defensive
+            logger.debug("migration state refresh failed (non-fatal): %s", _ref_exc)
 
         # 3.8.6 canonical remember boundary. Migrations have already created
         # the immutable receipt ledger and engine init has created the runtime
         # tables. Claim the daemon's writer lease, install the typed admission
         # handler, and replay crash-surviving journal entries *before* any
         # background writer or ready descriptor is published.
-        from superlocalmemory.core.remember_runtime import CanonicalRememberRuntime
+        from superlocalmemory.core.remember_runtime import (
+            CanonicalRememberRuntime,
+            CanonicalRememberUnavailable,
+            DaemonAlreadyServing,
+        )
 
         canonical_remember_runtime = CanonicalRememberRuntime.for_engine(engine)
-        canonical_remember_runtime.start()
+        try:
+            canonical_remember_runtime.start()
+        except (DaemonAlreadyServing, CanonicalRememberUnavailable):
+            # H2 — graceful single-instance: a health-verified daemon is already
+            # serving (DaemonAlreadyServing), OR the bounded retry loop exhausted
+            # (CanonicalRememberUnavailable).  Belt-and-suspenders: a lost writer
+            # race must NEVER be a traceback for a non-technical user.
+            logger.info(
+                "another SLM daemon holds the writer; this instance exits cleanly"
+            )
+            import sys
+            sys.exit(0)
         application.state.canonical_remember_runtime = canonical_remember_runtime
 
         # WAL is already established at DB creation (DatabaseManager._enable_wal
@@ -1609,7 +1888,8 @@ async def lifespan(application: FastAPI):
                 _t.sleep(0.5)
             try:
                 from superlocalmemory.retrieval.vector_store import (
-                    VectorStore, VectorStoreConfig,
+                    VectorStore,
+                    VectorStoreConfig,
                 )
                 db = engine._db
                 db_path = getattr(db, "db_path", None) or getattr(db, "_db_path", None)
@@ -1752,9 +2032,6 @@ async def lifespan(application: FastAPI):
                 #    attempts. No-op when there are no NULLs.
                 _SELF_HEAL_STATUS["state"] = "backfilling_embeddings"
                 try:
-                    from superlocalmemory.storage.embedding_migrator import (
-                        backfill_missing_embeddings,
-                    )
                     # RECALL-PRIORITY THROTTLE: the embedding worker is a single
                     # serialized subprocess shared with foreground recall. A
                     # continuous backfill starves interactive query-embedding and
@@ -1764,6 +2041,9 @@ async def lifespan(application: FastAPI):
                     # uses. This keeps recall responsive throughout the heal (the
                     # zero-pain requirement); the heal just takes a little longer.
                     from superlocalmemory.core import recall_gate
+                    from superlocalmemory.storage.embedding_migrator import (
+                        backfill_missing_embeddings,
+                    )
                     total_embedded = 0
                     no_progress = 0
                     for _attempt in range(500):
@@ -1935,6 +2215,12 @@ async def lifespan(application: FastAPI):
 
     application.state.observe_buffer = _observe_buffer
 
+    # Readiness gate: if the writer lease was claimed but the coordinator is not
+    # serving (e.g., a swallowed exception in a critical startup step killed the
+    # worker thread), release the lease and abort startup.  A living process that
+    # holds an unusable lease blocks any recovery daemon from starting.
+    _apply_readiness_gate(canonical_remember_runtime, application)
+
     # Phase B: Start health monitor
     try:
         from superlocalmemory.core.health_monitor import HealthMonitor
@@ -1971,6 +2257,40 @@ async def lifespan(application: FastAPI):
         logger.warning("Mesh broker init failed: %s", exc)
         application.state.mesh_broker = None
 
+    # Phase C-2: opt-in mDNS advertiser (default OFF — backward-compatible).
+    # Enabled only when SLM_MESH_ADVERTISE=1|on|true|yes is set explicitly.
+    # Gating on the env var BEFORE importing discovery keeps the default-off
+    # path byte-for-byte identical to pre-3b (no discovery import, no thread
+    # hop, no object alloc). See mesh.discovery.MeshAdvertiser for full docs.
+    application.state.mesh_advertiser = None
+    _advertise_requested = (
+        os.environ.get("SLM_MESH_ADVERTISE", "").strip().lower()
+        in ("1", "on", "true", "yes")
+    )
+    if _advertise_requested and application.state.mesh_broker is None:
+        # Operator asked for advertising but the broker isn't up — make the
+        # skip diagnosable rather than silent (audit P2).
+        logger.warning(
+            "mDNS advertise requested (SLM_MESH_ADVERTISE) but mesh broker is "
+            "not running — advertising skipped"
+        )
+    elif _advertise_requested and application.state.mesh_broker is not None:
+        try:
+            import socket as _adv_sock
+            from superlocalmemory.mesh.discovery import MeshAdvertiser as _MeshAdvertiser
+            _adv_node_id = _adv_sock.gethostname()
+            _advertiser = _MeshAdvertiser(
+                service_port=_configured_daemon_port(),
+                node_id=_adv_node_id,
+            )
+            # register_service blocks ~750 ms (mDNS probe phase) — run off the
+            # event loop to avoid stalling the async startup path (CRIT fix #2).
+            await asyncio.to_thread(_advertiser.start)
+            application.state.mesh_advertiser = _advertiser
+        except Exception as exc:
+            logger.warning("mDNS advertiser init failed (non-fatal): %s", exc)
+            application.state.mesh_advertiser = None
+
     # RBAC / teams (C3): user identity + role enforcement over memory.db.
     # Additive — with zero users the daemon stays single-operator (owner).
     try:
@@ -1990,8 +2310,9 @@ async def lifespan(application: FastAPI):
     # ENFORCE rule: only UPGRADE a setting, NEVER downgrade an already-stronger
     # runtime setting (e.g. RBAC require_login already True → leave it alone).
     try:
-        from superlocalmemory.core.config import load_deployment_config
-        deployment = load_deployment_config()
+        if deployment is None:
+            from superlocalmemory.core.config import load_deployment_config
+            deployment = load_deployment_config()
         application.state.deployment = deployment
         if deployment.require_login:
             _dep_rbac = getattr(application.state, "rbac", None)
@@ -2000,8 +2321,7 @@ async def lifespan(application: FastAPI):
                 logger.info(
                     "Deployment: require_login enforced via enterprise deployment config"
                 )
-        # TODO: Wire deployment.pii_redaction → PII redaction subsystem (WP-10)
-        # TODO: Wire deployment.retention_enabled → retention scheduler (WP-11)
+        _start_deployment_retention(application, config, deployment)
         logger.info(
             "Deployment config loaded: mode=%s require_login=%s "
             "pii=%s retention=%s audit=%s",
@@ -2011,6 +2331,26 @@ async def lifespan(application: FastAPI):
     except Exception as _dep_exc:
         logger.warning("Deployment config wire failed (non-fatal): %s", _dep_exc)
         application.state.deployment = None
+
+    # Phase 1: Admission gateway coverage self-check.
+    # Uses _resolve_deployment() (fail-closed) rather than application.state.deployment
+    # (which may be None if the load failed) so an enterprise box with a broken
+    # config never silently skips a hard coverage check.
+    # G-tranche: pass the real MCP server so dynamic tool enumeration catches
+    # any newly-added tool that lacks both @admits and readOnlyHint=True.
+    try:
+        from superlocalmemory.core.admission import (
+            _resolve_deployment as _adm_resolve,
+            coverage_self_check,
+        )
+        from superlocalmemory.mcp import server as _mcp_server_mod
+        _cov_deployment = _adm_resolve()
+        _mcp_server = getattr(_mcp_server_mod, "server", None)
+        coverage_self_check(_cov_deployment, server=_mcp_server)
+    except RuntimeError as _cov_exc:
+        raise
+    except Exception as _cov_exc:
+        logger.warning("admission coverage self-check failed (non-fatal): %s", _cov_exc)
 
     # Start idle watchdog if configured
     idle_timeout = int(os.environ.get("SLM_DAEMON_IDLE_TIMEOUT", "0"))
@@ -2089,10 +2429,10 @@ async def lifespan(application: FastAPI):
 
     # V3.6: Mount optimize API routes + restore persisted metrics + start flush loop
     try:
-        from superlocalmemory.server.routes.optimize import router as optimize_router
         from superlocalmemory.optimize.metrics.counters import MetricsCollector
         from superlocalmemory.optimize.metrics.persistence import MetricsPersistence
         from superlocalmemory.optimize.storage.db import CacheDB
+        from superlocalmemory.server.routes.optimize import router as optimize_router
         application.include_router(optimize_router)
 
         # Restore persisted metrics counters on startup.
@@ -2132,6 +2472,15 @@ async def lifespan(application: FastAPI):
     # or tool-level cancellation inside a session manager task group cannot
     # propagate out and trigger uvicorn's graceful-shutdown handler.
     async with AsyncExitStack() as _mcp_stack:
+        # Belt-and-suspenders: if an unexpected error occurs between here and
+        # yield, the stack's __aexit__ ensures the lease is released even when
+        # the normal teardown path (after yield) is bypassed.  The explicit
+        # _release_canonical_remember_runtime call in teardown is idempotent.
+        if canonical_remember_runtime is not None:
+            _mcp_stack.callback(
+                _release_canonical_remember_runtime, application, canonical_remember_runtime
+            )
+
         if _mcp_app is not None:
             try:
                 await _mcp_stack.enter_async_context(
@@ -2199,8 +2548,8 @@ async def lifespan(application: FastAPI):
                 pass
         # Final flush to persist the last window (H-04: use singleton)
         try:
-            from superlocalmemory.optimize.metrics.persistence import MetricsPersistence
             from superlocalmemory.optimize.metrics.counters import MetricsCollector
+            from superlocalmemory.optimize.metrics.persistence import MetricsPersistence
             from superlocalmemory.optimize.storage.db import CacheDB as _FinalCacheDB
             MetricsPersistence().flush(
                 MetricsCollector.get_instance(),
@@ -2234,6 +2583,8 @@ async def lifespan(application: FastAPI):
     # order. Each stop is wrapped in try/except so one failure does
     # not skip the rest.
     _observe_buffer.flush_sync()
+
+    _retention_stopped = _stop_deployment_retention(application)
 
     # S9-DASH-02: stop outcome-queue worker (final drain on graceful
     # shutdown). Any events left unpersisted are logged but not
@@ -2317,6 +2668,16 @@ async def lifespan(application: FastAPI):
         except Exception as exc:  # pragma: no cover — defensive
             logger.warning("mesh_broker stop failed: %s", exc)
 
+    # Stop mDNS advertiser (symmetric with Phase C-2 startup). stop() joins
+    # Zeroconf background threads (blocking) — run it OFF the event loop so
+    # shutdown of other async resources isn't stalled (audit P1).
+    _adv = getattr(application.state, "mesh_advertiser", None)
+    if _adv is not None:
+        try:
+            await asyncio.to_thread(_adv.stop)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("mDNS advertiser stop failed (non-fatal): %s", exc)
+
     # LLD-02 SW3: flush pending signals to DB before closing. Bounded 3 s
     # to keep daemon shutdown snappy; drops + counts anything unwritten.
     if getattr(application.state, "signal_worker_started", False):
@@ -2379,28 +2740,71 @@ async def lifespan(application: FastAPI):
         getattr(application.state, "daemon_descriptor", None),
     )
     logger.info("Unified daemon shutdown complete")
+    if not _retention_stopped:
+        raise RuntimeError(
+            "retention scheduler remained active during daemon shutdown"
+        )
 
 
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
 
-def _configure_mcp_transport_settings(fastmcp) -> bool:
-    """Apply the current transport mode without leaking singleton state.
+def _configure_mcp_transport_settings() -> dict:
+    """Return kwargs for ``MCPServer.streamable_http_app(...)`` (mcp 2.0.0).
 
-    ``superlocalmemory.mcp.server.server`` is process-global.  App factories
-    are invoked more than once by tests and embedded hosts, so both flags must
-    be assigned on every call; an earlier stateless app must not silently turn
-    a later default app stateless.  Keeping this small policy separate also
-    lets tests exercise the wiring without reloading FastMCP and rebuilding
-    hundreds of Pydantic models in a native-heavy Python process.
+    FastMCP's mutable ``settings.stateless_http`` / ``.json_response`` /
+    ``.streamable_http_path`` / ``.transport_security`` are gone in mcp 2.0.0.
+    Those values are now keyword arguments to ``streamable_http_app()``.
+
+    Fully-stateless is the default (``remote_mode.mcp_stateless()``). Under
+    ``stateless_http=True`` we never pass ``session_idle_timeout`` or an
+    event store — both are illegal/unused for transport sessions that do not
+    exist. Callers pass the returned dict through as
+    ``server.streamable_http_app(**kwargs)``.
     """
+    from typing import Any
+
     from superlocalmemory.core.remote_mode import mcp_stateless
 
     stateless = bool(mcp_stateless())
-    fastmcp.settings.stateless_http = stateless
-    fastmcp.settings.json_response = stateless
-    return stateless
+    kwargs: dict[str, Any] = {
+        "streamable_http_path": "/",
+        "stateless_http": stateless,
+        # json_response pairs with stateless so tool results complete as a
+        # single HTTP body (no long-lived SSE). Required for reliable
+        # gateway/hub forwarding and TestClient e2e.
+        "json_response": True if stateless else False,
+        "event_store": None,
+        "host": "127.0.0.1",
+    }
+
+    # DNS-rebinding protection from env. Default: SDK localhost auto-protect
+    # (host=127.0.0.1). Set SLM_MCP_ALLOWED_HOSTS=... to open to a LAN, or
+    # "*" to disable protection entirely (trusted private network only).
+    _mcp_allowed = os.environ.get("SLM_MCP_ALLOWED_HOSTS", "").strip()
+    if _mcp_allowed:
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        if _mcp_allowed == "*":
+            logger.warning(
+                "SLM_MCP_ALLOWED_HOSTS=* disables MCP DNS-rebinding "
+                "protection entirely. Prefer an explicit host list; only "
+                "use '*' on a trusted private network."
+            )
+            kwargs["transport_security"] = TransportSecuritySettings(
+                enable_dns_rebinding_protection=False,
+            )
+        else:
+            _hosts = [h.strip() for h in _mcp_allowed.split(",") if h.strip()]
+            kwargs["transport_security"] = TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=_hosts,
+                allowed_origins=[f"http://{h}" for h in _hosts],
+            )
+        logger.info("MCP transport security: allowed_hosts=%r", _mcp_allowed)
+
+    return kwargs
 
 
 def create_app() -> FastAPI:
@@ -2459,6 +2863,18 @@ def create_app() -> FastAPI:
     except ImportError:
         pass
 
+    # -- Mesh 3c protocol routes: state-delta (LWW) + lock-delta (fencing) --
+    try:
+        from superlocalmemory.server.routes.mesh_state import router as mesh_state_router
+        application.include_router(mesh_state_router)
+    except ImportError:
+        pass
+    try:
+        from superlocalmemory.server.routes.mesh_lock import router as mesh_lock_router
+        application.include_router(mesh_lock_router)
+    except ImportError:
+        pass
+
     # -- Entity routes (Phase D) --
     try:
         from superlocalmemory.server.routes.entity import router as entity_router
@@ -2475,11 +2891,11 @@ def create_app() -> FastAPI:
 
     # -- Brain route (LLD-04 v2: /api/v3/brain + deprecated shims) --
     try:
-        from superlocalmemory.server.routes.brain import (
-            router as brain_router,
-        )
         from superlocalmemory.server.middleware.security_headers import (
             SecurityHeadersMiddleware as StrictSecurityHeadersMiddleware,
+        )
+        from superlocalmemory.server.routes.brain import (
+            router as brain_router,
         )
         application.include_router(brain_router)
         # Strict CSP / XFO / XCTO / Referrer-Policy — applies to every
@@ -2567,76 +2983,43 @@ def create_app() -> FastAPI:
     # -- Daemon-specific routes --
     _register_daemon_routes(application)
 
-    # -- v3.6.7: MCP Streamable-HTTP transport at /mcp --
-    # Mount the FastMCP server as a Starlette ASGI sub-app so ALL clients
+    # -- MCP Streamable-HTTP transport at /mcp (mcp 2.0.0 fully-stateless) --
+    # Mount the MCPServer as a Starlette ASGI sub-app so ALL clients
     # (Claude Code sessions, subagents, desktop, hermes) share ONE daemon
     # process instead of spawning an `slm mcp` subprocess per connection.
     # The session manager lifespan is started in lifespan() via AsyncExitStack.
     # Fail-open: if import or mount fails, stdio transport keeps working.
     #
-    # streamable_http_path is set to "/" so that when mounted at "/mcp" the
-    # effective user-facing endpoint is exactly http://127.0.0.1:8765/mcp.
-    # (FastAPI strips the mount prefix before passing the request to the
-    # sub-app, so the sub-app's internal route must be "/".)
+    # streamable_http_path="/" so that when mounted at "/mcp" the effective
+    # user-facing endpoint is exactly http://127.0.0.1:8765/mcp.
+    # (FastAPI strips the mount prefix before the sub-app sees the request.)
     try:
-        from superlocalmemory.mcp.server import server as _mcp_fastmcp
-        _mcp_fastmcp.settings.streamable_http_path = "/"
-        _mcp_fastmcp._session_manager = None  # Defensive reset for idempotency
-        # v3.6.9 (#36): configure DNS-rebinding protection from env.
-        # Default: localhost-only (safe). Set SLM_MCP_ALLOWED_HOSTS=192.168.x.y:*
-        # (comma-separated, e.g. "192.168.50.144:*,slm.lan:*") to open to a LAN.
-        # Use "*" to disable protection entirely (trusted private network only).
-        # TransportSecuritySettings imported lazily here so that MCP mount
-        # works on older SDK versions when SLM_MCP_ALLOWED_HOSTS is not set.
-        _mcp_allowed = os.environ.get("SLM_MCP_ALLOWED_HOSTS", "").strip()
-        if _mcp_allowed:
-            from mcp.server.transport_security import TransportSecuritySettings
-            if _mcp_allowed == "*":
-                # M-05 (3.7.9): "*" fully disables DNS-rebinding protection.
-                # Never silent — a convenience setting in a CI/Docker env must
-                # not quietly expose the instance.
-                logger.warning(
-                    "SLM_MCP_ALLOWED_HOSTS=* disables MCP DNS-rebinding "
-                    "protection entirely. Prefer an explicit host list; only "
-                    "use '*' on a trusted private network."
-                )
-                _mcp_fastmcp.settings.transport_security = TransportSecuritySettings(
-                    enable_dns_rebinding_protection=False,
-                )
-            else:
-                _hosts = [h.strip() for h in _mcp_allowed.split(",") if h.strip()]
-                _mcp_fastmcp.settings.transport_security = TransportSecuritySettings(
-                    enable_dns_rebinding_protection=True,
-                    allowed_hosts=_hosts,
-                    allowed_origins=[f"http://{h}" for h in _hosts],
-                )
-            logger.info("MCP transport security: allowed_hosts=%r", _mcp_allowed)
-        # v3.6.12 (issue #39): stateless MCP transport for distributed/gateway
-        # deployments. SLM's Streamable-HTTP is stateful by default — every call
-        # must replay the Mcp-Session-Id from the initialize handshake. A gateway
-        # (MCP Hub, LAN forwarder) that doesn't replay it gets "-32600 Session
-        # not found" (the mesh-tools symptom in #39). Stateless mode treats each
-        # request independently so any forwarder works. Default OFF (loopback
-        # clients keep full stateful sessions); enabled by SLM_REMOTE=1 or
-        # SLM_MCP_STATELESS=1. Per-agent /mcp/{agent_id} routing is unaffected
-        # (path-based, not session-based).
+        from superlocalmemory.mcp.server import server as _mcp_server
         from superlocalmemory.core.remote_mode import is_remote_mode
-        if _configure_mcp_transport_settings(_mcp_fastmcp):
+
+        # mcp 2.0.0: transport knobs are kwargs to streamable_http_app(), not
+        # mutable settings.stateless_http / .json_response / .transport_security.
+        _mcp_kwargs = _configure_mcp_transport_settings()
+        if _mcp_kwargs.get("stateless_http"):
             if is_remote_mode():
-                logger.warning(
-                    "MCP transport: STATELESS mode ON (SLM_REMOTE) — LAN "
-                    "gateways/hubs may forward tool calls without a session id. "
-                    "Per-session isolation is relaxed; intended for trusted networks."
+                logger.info(
+                    "MCP transport: STATELESS (default; SLM_REMOTE) — gateways/hubs "
+                    "may forward tool calls without a transport session id. "
+                    "App-level session_init remains available."
                 )
             else:
-                logger.warning(
-                    "MCP transport: STATELESS mode ON (SLM_MCP_STATELESS alone) "
-                    "— session isolation relaxed for LOOPBACK clients. Intended "
-                    "for a local gateway/hub (e.g. MCP Hub) on 127.0.0.1 only; "
-                    "the token endpoint stays loopback-only without SLM_REMOTE."
+                logger.info(
+                    "MCP transport: STATELESS (default) — no Mcp-Session-Id "
+                    "required; json_response=True. Opt out with SLM_MCP_STATEFUL=1."
                 )
+        else:
+            logger.warning(
+                "MCP transport: STATEFUL (SLM_MCP_STATEFUL or SLM_MCP_STATELESS=0) "
+                "— clients must replay Mcp-Session-Id after initialize."
+            )
+
         global _mcp_app
-        _mcp_app = _mcp_fastmcp.streamable_http_app()
+        _mcp_app = _mcp_server.streamable_http_app(**_mcp_kwargs)
 
         # v3.6.10: per-agent-ID routing — /mcp/{agent_id} extracts the agent
         # identity from the URL path and places it in a ContextVar so all MCP
@@ -2647,8 +3030,9 @@ def create_app() -> FastAPI:
 
         application.mount("/mcp", AgentIDExtractorASGI(_mcp_app))
         logger.info(
-            "MCP HTTP transport mounted at /mcp (Streamable HTTP, port %d; "
-            "per-agent routing enabled)",
+            "MCP HTTP transport mounted at /mcp (Streamable HTTP, mcp 2.0.0, "
+            "stateless=%s, port %d; per-agent routing enabled)",
+            bool(_mcp_kwargs.get("stateless_http")),
             _configured_daemon_port(),
         )
     except Exception as _mcp_exc:  # pragma: no cover — defensive
@@ -2662,14 +3046,14 @@ def _register_dashboard_routes(application: FastAPI) -> None:
 
     Extracted from api.py's create_app() to avoid duplicate MemoryEngine.
     """
-    from superlocalmemory.server.api import UI_DIR as _source_ui_dir
-
     # D-04: Copy UI assets to the data dir at daemon startup to avoid macOS
     # xattr/TCC PermissionError on source-tree files in editable installs.
     # The data dir has no quarantine attributes; the copy is idempotent (same
     # content from the same package) so concurrent daemon starts are safe.
     # Falls back to the source path with a WARNING — never crashes the daemon.
     import shutil as _shutil
+
+    from superlocalmemory.server.api import UI_DIR as _source_ui_dir
     _data_ui_dir = state_path("ui")
     try:
         _data_ui_dir.mkdir(parents=True, exist_ok=True)
@@ -2692,11 +3076,11 @@ def _register_dashboard_routes(application: FastAPI) -> None:
 
     # Rate limiting (graceful)
     try:
-        from superlocalmemory.infra.rate_limiter import RateLimiter
         from superlocalmemory.core.remote_mode import (
-            rate_limit_config,
             is_rate_limit_exempt,
+            rate_limit_config,
         )
+        from superlocalmemory.infra.rate_limiter import RateLimiter
         # v3.6.12 (issue #40): thresholds are env-tunable (SLM_RATE_LIMIT_WRITE/
         # READ/WINDOW) so distributed/LAN operators can raise them. Defaults
         # unchanged (30 writes / 120 reads per 60s) for the local case.
@@ -2720,7 +3104,10 @@ def _register_dashboard_routes(application: FastAPI) -> None:
         # apply any persisted override from config.json.
         try:
             from superlocalmemory.infra.rate_limiter import (
-                register_managed as _reg_rl, reset_managed as _reset_rl,
+                register_managed as _reg_rl,
+            )
+            from superlocalmemory.infra.rate_limiter import (
+                reset_managed as _reset_rl,
             )
             _reset_rl()
             _reg_rl("write", _write_limiter)
@@ -2919,6 +3306,17 @@ def _register_dashboard_routes(application: FastAPI) -> None:
                 _resp = _rbac_read_gate(request, application.state)
                 if _resp is not None:
                     return _resp
+            # RBAC write gate: adapter process-control and similar
+            # state-changing dashboard routes require WRITE permission.
+            # Checked after the mutation-actor boundary above, which already
+            # validated the machine-level credential; this layer checks the
+            # user-level role within the workspace.
+            if _is_adapter_control_mutation(
+                request.method, request.url.path,
+            ):
+                _resp = _rbac_write_gate(request, application.state)
+                if _resp is not None:
+                    return _resp
             return await call_next(request)
     except Exception as _auth_exc:
         # v3.6.12 (failopen-1): security middleware must NEVER fail open silently.
@@ -2957,6 +3355,29 @@ def _register_dashboard_routes(application: FastAPI) -> None:
                 )
             return await call_next(request)
 
+    # Migration-readiness gate — outermost middleware; runs before auth and
+    # rate-limiting.  When required schema migrations are in a failed state every
+    # feature route receives a 503 so callers see one consistent "not ready"
+    # signal instead of route-specific errors that vary by which schema element
+    # is missing.  Health, status, and repair paths are always reachable so that
+    # operators can monitor and recover the daemon without waiting for migrations.
+    @application.middleware("http")
+    async def _migration_readiness_gate(request, call_next):
+        migration_result = getattr(application.state, "migration_result", None)
+        if migration_result and migration_result.get("failed"):
+            if not _is_migration_exempt_path(request.url.path):
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": (
+                            "Service unavailable: required schema migrations have "
+                            "not completed. Check /health for details."
+                        )
+                    },
+                )
+        return await call_next(request)
+
     # Static files — UI_DIR is already the effective path (data-dir or source
     # fallback) set by the D-04 copy block above; mkdir is a no-op for
     # the data-dir path (already created) and guarded in the source-fallback case.
@@ -2968,16 +3389,17 @@ def _register_dashboard_routes(application: FastAPI) -> None:
     application.mount("/static", StaticFiles(directory=str(UI_DIR)), name="static")
 
     # Route modules
-    from superlocalmemory.server.routes.memories import router as memories_router
-    from superlocalmemory.server.routes.stats import router as stats_router
-    from superlocalmemory.server.routes.profiles import router as profiles_router
+    from superlocalmemory.server.routes.adapters import router as adapters_router
+    from superlocalmemory.server.routes.agents import router as agents_router
     from superlocalmemory.server.routes.backup import router as backup_router
     from superlocalmemory.server.routes.data_io import router as data_io_router
     from superlocalmemory.server.routes.events import router as events_router
-    from superlocalmemory.server.routes.agents import router as agents_router
-    from superlocalmemory.server.routes.ws import router as ws_router, manager as ws_manager
+    from superlocalmemory.server.routes.memories import router as memories_router
+    from superlocalmemory.server.routes.profiles import router as profiles_router
+    from superlocalmemory.server.routes.stats import router as stats_router
     from superlocalmemory.server.routes.v3_api import router as v3_router
-    from superlocalmemory.server.routes.adapters import router as adapters_router
+    from superlocalmemory.server.routes.ws import manager as ws_manager
+    from superlocalmemory.server.routes.ws import router as ws_router
 
     application.include_router(memories_router)
     application.include_router(stats_router)
@@ -3039,8 +3461,8 @@ def _register_dashboard_routes(application: FastAPI) -> None:
             pass
 
     # Wire WebSocket manager
-    import superlocalmemory.server.routes.profiles as _profiles_mod
     import superlocalmemory.server.routes.data_io as _data_io_mod
+    import superlocalmemory.server.routes.profiles as _profiles_mod
     _profiles_mod.ws_manager = ws_manager
     _data_io_mod.ws_manager = ws_manager
 
@@ -3272,6 +3694,8 @@ def _register_daemon_routes(application: FastAPI) -> None:
             "runtime_state": runtime_state,
             "active_profile": profile_snapshot.profile_id,
             "profile_generation": profile_snapshot.generation,
+            # Wave-3: operational failure counts (visible to all team members)
+            **_ops_failure_counts(engine),
             # issue #107: does this daemon's *imported* code still match the
             # installed distribution? ``version`` above reports what this
             # process loaded, which is self-consistent and therefore cannot
@@ -3299,12 +3723,32 @@ def _register_daemon_routes(application: FastAPI) -> None:
         include_global: bool | None = None,
         include_shared: bool | None = None,
         window: str = "",
+        as_of: str = "",
     ):
         _update_activity()
         search_query = q or query  # Accept both ?q= and ?query= for compatibility
         engine = _get_engine_or_503()
         if not search_query:
             return {"results": [], "count": 0, "query_type": "none", "retrieval_time_ms": 0}
+        # Phase 4b: normalize as_of at HTTP boundary. Invalid → return error.
+        _as_of_raw = as_of.strip() if as_of else ""
+        if _as_of_raw:
+            from superlocalmemory.retrieval.temporal_utils import normalize_as_of
+            _as_of_norm = normalize_as_of(_as_of_raw)
+            if _as_of_norm is None:
+                # Audit P1a: hard-reject with HTTP 400 (a bare dict serializes as
+                # 200, so status-code-only clients would miss the rejection).
+                from starlette.responses import JSONResponse
+                return JSONResponse(
+                    {
+                        "error": "invalid_as_of",
+                        "message": f"Cannot parse as_of: {_as_of_raw!r}",
+                    },
+                    status_code=400,
+                )
+            as_of = _as_of_norm
+        else:
+            as_of = ""
         # v3.8.2: resolve the client-driven-agentic default now so the concrete
         # bool drives BOTH the full-recall semaphore below and engine.recall().
         from superlocalmemory.core.recall_pipeline import resolve_hot_path_fast
@@ -3329,6 +3773,9 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 getattr(application.state, "daemon_descriptor", None),
                 actor_kind="http-recall",
             )
+        # Phase-1/D2: clamp cross-profile scope flags per enterprise recall policy.
+        from superlocalmemory.core.admission import enforce_read_scope
+        include_global, include_shared = enforce_read_scope(include_global, include_shared)
         # v3.4.32: mark recall in-flight so the pending materializer pauses
         # v3.4.52: run engine.recall() in a thread-pool executor so the
         # FastAPI event loop stays responsive for /health, /remember, and
@@ -3360,6 +3807,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
                     include_global=include_global,
                     include_shared=include_shared,
                     window=window or None,
+                    as_of=as_of or None,
                 ),
             )
             _budget = _recall_budget_s()
@@ -3463,7 +3911,10 @@ def _register_daemon_routes(application: FastAPI) -> None:
         # authenticated dashboard user may mutate this profile. This must run
         # before either the trust pre-hook or the durable admission journal.
         from superlocalmemory.access.rbac import Permission
-        from superlocalmemory.server.rbac_enforce import require_permission
+        from superlocalmemory.server.rbac_enforce import (
+            require_permission,
+            resolve_actor_roles,
+        )
 
         require_permission(request, Permission.WRITE, profile=engine._profile_id)
         if scope in {"shared", "global"}:
@@ -3512,6 +3963,65 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 "profile_id": engine._profile_id,
                 "content_preview": req.content[:100],
             })
+
+            # V4 Phase 4: OperationPolicyRegistry evaluation.
+            # ActorContext is server-derived — principal_id from _require_write_actor,
+            # client_host from ASGI request, session_token_hash from server headers.
+            # NONE of these values come from the request body (RememberRequest).
+            # This block runs BEFORE the durable admission journal is written.
+            from superlocalmemory.core.actor_context import (
+                ActorContext as _ActorContext,
+            )
+            from superlocalmemory.core.actor_context import (
+                Transport as _Transport,
+            )
+            from superlocalmemory.core.operation_policy_registry import (
+                _DEFAULT_REGISTRY as _policy_registry,
+            )
+            from superlocalmemory.core.operation_request import OperationKind as _OpKind
+
+            _client_host = (
+                request.client.host if request.client is not None else ""
+            ) or ""
+            _token_raw = (
+                request.headers.get("x-slm-user-session", "")
+                or (request.cookies.get("slm_session", "") if request.cookies else "")
+            ) or ""
+            _token_hash = (
+                hashlib.sha256(_token_raw.encode()).hexdigest()[:16]
+                if _token_raw else ""
+            )
+            # Detect single-user vs. company mode from the RBAC engine (server-side
+            # state). Fail-open if the RBAC state cannot be read — a 503 from RBAC
+            # already blocks the request via _rbac_write_gate. Here we only need the
+            # mode string for unknown-kind fallback; REMEMBER is always a known kind.
+            _rbac_state = getattr(application.state, "rbac", None)
+            try:
+                _is_company = bool(
+                    _rbac_state is not None and _rbac_state.user_count() > 0
+                )
+            except Exception:
+                _is_company = False
+            _policy_mode = "company" if _is_company else "local"
+
+            _http_actor = _ActorContext(
+                principal_id=trusted_actor_id,
+                roles=resolve_actor_roles(request, profile=engine._profile_id),
+                active_profile_id=engine._profile_id,
+                transport=_Transport.HTTP,
+                client_host=_client_host,
+                session_token_hash=_token_hash,
+            )
+            _policy_decision = _policy_registry.evaluate(
+                _OpKind.REMEMBER, _http_actor, _policy_mode,
+            )
+            if not _policy_decision.allowed:
+                # Map to PermissionError: the except block below converts this
+                # to HTTP 403 — consistent with AdmissionAuthorizationError.
+                raise PermissionError(
+                    f"operation policy denied REMEMBER: {_policy_decision.reason}"
+                )
+
             admission = RememberRequest(
                 content=req.content,
                 profile_id=engine._profile_id,
@@ -3604,6 +4114,9 @@ def _register_daemon_routes(application: FastAPI) -> None:
     async def consolidate_cognitive_endpoint(body: dict, request: Request):
         _update_activity()
         engine = _get_engine_or_503()
+        from superlocalmemory.access.rbac import Permission
+        from superlocalmemory.server.rbac_enforce import require_permission
+        require_permission(request, Permission.WRITE, profile=engine._profile_id)
         from superlocalmemory.server.route_mutations import (
             authorize_route_mutation,
         )
@@ -3611,10 +4124,10 @@ def _register_daemon_routes(application: FastAPI) -> None:
             request,
             operation="update",
             source_agent_id="http-cognitive-consolidation",
-            profile_id=body.get("profile_id") or engine.profile_id,
+            profile_id=engine.profile_id,
         )
         try:
-            pid = body.get("profile_id") or engine.profile_id
+            pid = engine.profile_id
             from superlocalmemory.encoding.cognitive_consolidator import (
                 CognitiveConsolidator,
             )
@@ -3638,6 +4151,9 @@ def _register_daemon_routes(application: FastAPI) -> None:
     async def run_maintenance_endpoint(body: dict, request: Request):
         _update_activity()
         engine = _get_engine_or_503()
+        from superlocalmemory.access.rbac import Permission
+        from superlocalmemory.server.rbac_enforce import require_permission
+        require_permission(request, Permission.WRITE, profile=engine._profile_id)
         from superlocalmemory.server.route_mutations import (
             authorize_route_mutation,
         )
@@ -3645,29 +4161,29 @@ def _register_daemon_routes(application: FastAPI) -> None:
             request,
             operation="update",
             source_agent_id="http-maintenance",
-            profile_id=body.get("profile_id") or engine.profile_id,
+            profile_id=engine.profile_id,
         )
         try:
-            pid = body.get("profile_id") or engine.profile_id
+            pid = engine.profile_id
             results: dict = {}
             try:
                 from superlocalmemory.core.maintenance import run_maintenance as _run_maint
                 maint_result = _run_maint(engine._db, engine._config, pid)
                 results["langevin"] = {"updated": maint_result.get("updated", 0)}
-            except Exception as exc:
+            except Exception:
                 logger.exception("maintenance langevin step failed")
                 results["langevin"] = {"error": "internal error"}
             try:
-                from superlocalmemory.math.ebbinghaus import EbbinghausCurve
                 from superlocalmemory.learning.forgetting_scheduler import (
                     ForgettingScheduler,
                 )
+                from superlocalmemory.math.ebbinghaus import EbbinghausCurve
                 ebb = EbbinghausCurve(engine._config.forgetting)
                 sched = ForgettingScheduler(
                     engine._db, ebb, engine._config.forgetting,
                 )
                 results["forgetting"] = sched.run_decay_cycle(pid, force=False)
-            except Exception as exc:
+            except Exception:
                 logger.exception("maintenance forgetting step failed")
                 results["forgetting"] = {"error": "internal error"}
             try:
@@ -3680,7 +4196,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 )
                 count = cw._generate_patterns(pid, False)
                 results["behavioral"] = {"patterns_mined": count}
-            except Exception as exc:
+            except Exception:
                 logger.exception("maintenance behavioral step failed")
                 results["behavioral"] = {"error": "internal error"}
             authorization.complete()
@@ -3754,6 +4270,8 @@ def _register_daemon_routes(application: FastAPI) -> None:
             # index backfill after an upgrade). Dashboard renders a plain
             # "Optimizing memory…" line from this. Defaults to idle before start.
             "self_heal": globals().get("_SELF_HEAL_STATUS", {"state": "idle"}),
+            # Wave-3: operational failure counts (dead-letter, degraded, stalled)
+            **_ops_failure_counts(engine),
         }
 
     @application.get("/api/v3/components")
@@ -3805,6 +4323,105 @@ def _register_daemon_routes(application: FastAPI) -> None:
         threading.Thread(target=_run, daemon=True, name="manual-heal").start()
         return {"status": "started"}
 
+    # ------------------------------------------------------------------
+    # Wave-3: Operational Recovery & Admin Remediation  (V4 resilience slice)
+    # ------------------------------------------------------------------
+
+    @application.get("/operations/failed")
+    async def list_failed_operations_endpoint(
+        request: Request,
+        profile: str = None,
+    ):
+        """Return all failed/stuck/degraded operations — admin surface.
+
+        Requires MANAGE permission (OWNER or ADMIN role).  Returns three
+        categories: dead-letter DLQ entries, DEGRADED completion manifests,
+        and exhausted projection obligations.  Safe read-only; never mutates.
+        """
+        from superlocalmemory.server.rbac_enforce import require_permission
+        from superlocalmemory.access.rbac import Permission
+
+        require_permission(request, Permission.MANAGE)
+        _update_activity()
+
+        config = getattr(application.state, "config", None)
+        db_path = getattr(config, "db_path", None)
+        if db_path is None or not db_path.exists():
+            return {"dead_letter": [], "degraded_manifests": [],
+                    "exhausted_obligations": [], "total": 0}
+
+        try:
+            from superlocalmemory.core.ops_remediation import list_failed_operations
+            return list_failed_operations(db_path, profile_id=profile)
+        except Exception as exc:
+            logger.warning("list_failed_operations endpoint error: %s", exc, exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to query operations")
+
+    @application.post("/operations/{operation_id}/resolve")
+    async def resolve_operation_endpoint(request: Request, operation_id: str):
+        """Admin remediation: retry / force-reconcile / cancel a stuck operation.
+
+        Body JSON: ``{"action": "retry"|"force_reconcile"|"cancel"}``
+
+        Requires MANAGE permission.  Writes an audit event for every mutation.
+        The action itself is delegated to ``core.ops_remediation.resolve_operation``.
+        Returns ``{"success": bool, "action": str, "operation_id": str, ...}``.
+        """
+        from superlocalmemory.server.rbac_enforce import require_permission
+        from superlocalmemory.access.rbac import Permission
+
+        require_permission(request, Permission.MANAGE)
+        _update_activity()
+
+        body: dict = {}
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="JSON body required")
+
+        action = body.get("action", "")
+        if action not in ("retry", "force_reconcile", "cancel"):
+            raise HTTPException(
+                status_code=400,
+                detail="action must be one of: retry, force_reconcile, cancel",
+            )
+
+        config = getattr(application.state, "config", None)
+        db_path = getattr(config, "db_path", None)
+        if db_path is None or not db_path.exists():
+            raise HTTPException(status_code=503, detail="Database not available")
+
+        engine = getattr(application.state, "engine", None)
+
+        try:
+            from superlocalmemory.core.ops_remediation import resolve_operation
+            result = resolve_operation(db_path, engine, operation_id, action)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            logger.warning(
+                "resolve_operation endpoint error op=%s action=%s: %s",
+                operation_id, action, exc, exc_info=True,
+            )
+            raise HTTPException(status_code=500, detail="Remediation failed")
+
+        # Audit trail — best effort, non-blocking
+        try:
+            from superlocalmemory.compliance.audit import AuditChain
+            audit_path = state_path("audit_chain.db")
+            actor_header = request.headers.get("X-Actor-Id", "admin")
+            AuditChain(str(audit_path)).log(
+                operation=f"ops_resolve:{action}",
+                agent_id=actor_header,
+                profile_id="",
+                content_hash="",
+                metadata={"operation_id": operation_id, "result": result},
+            )
+        except Exception:
+            logger.debug("audit log for ops_resolve failed (non-fatal)", exc_info=True)
+
+        return result
+
     @application.get("/list")
     async def list_facts(limit: int = 50):
         _update_activity()
@@ -3849,6 +4466,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
         _require_write_actor(request)
         import subprocess
         import sys as _sys
+
         from superlocalmemory.core.platform_utils import popen_platform_kwargs
 
         logger.info("Daemon restart requested via API")
@@ -3922,6 +4540,9 @@ def _register_daemon_routes(application: FastAPI) -> None:
         """
         _update_activity()
         engine = _get_engine_or_503()
+        from superlocalmemory.access.rbac import Permission
+        from superlocalmemory.server.rbac_enforce import require_permission
+        require_permission(request, Permission.WRITE, profile=engine._profile_id)
         from superlocalmemory.server.route_mutations import (
             authorize_route_mutation,
         )
@@ -4104,6 +4725,195 @@ def _run_materializer_operation(
             return operation(engine)
 
 
+def _reconcile_projection_manifest(
+    engine, operation_id: str, profile_id: str, fact_ids,
+) -> None:
+    try:
+        from superlocalmemory.core.transactions.concrete_owners import (
+            REQUIRED_ADMISSION_OWNERS,
+            build_transaction_service,
+        )
+        from superlocalmemory.core.transactions.owners import ObligationKind
+
+        if not profile_id:
+            return
+        context = _context_for_operation(engine, operation_id)
+        if context is None:
+            _terminalize_orphan_operation(engine, operation_id)
+            return
+        service = build_transaction_service(engine)
+        with engine._db.raw_connection() as conn:
+            service.record(
+                conn, context,
+                owners=REQUIRED_ADMISSION_OWNERS,
+                kind=ObligationKind.APPLY,
+            )
+        service.reconcile_operation(engine._db, context)
+    except Exception as exc:
+        logger.warning(
+            "projection reconciliation skipped for %s: %s", operation_id, exc,
+        )
+
+
+def _context_for_operation(engine, operation_id: str):
+    import json as _json
+
+    from superlocalmemory.core.transactions.owners import OperationContext
+
+    db = getattr(engine, "_db", None)
+    if db is None:
+        return None
+    rows = db.execute(
+        "SELECT profile_id, final_fact_ids_json, queryable_fact_ids_json "
+        "FROM ingestion_operations WHERE operation_id = ?",
+        (operation_id,),
+    )
+    if not rows:
+        return None
+    row = dict(rows[0])
+    if row.get("profile_id") != getattr(engine, "_profile_id", None):
+        return None
+    try:
+        fact_ids = _json.loads(row.get("final_fact_ids_json") or "[]") or _json.loads(
+            row.get("queryable_fact_ids_json") or "[]"
+        )
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(fact_ids, list) or not fact_ids:
+        return None
+    fact_ids = [str(fid) for fid in fact_ids]
+    return OperationContext(
+        operation_id=operation_id,
+        profile_id=row["profile_id"],
+        subject_id=operation_id,
+        fact_ids=tuple(fact_ids),
+    )
+
+
+_REDRIVE_INTERVAL_S = 30.0
+_last_redrive_ts = 0.0
+
+
+def _reconcile_pending_projections(
+    engine, *, limit: int = 20, force: bool = False,
+) -> int:
+    global _last_redrive_ts
+    now = time.monotonic()
+    if not force and now - _last_redrive_ts < _REDRIVE_INTERVAL_S:
+        return 0
+    _last_redrive_ts = now
+    try:
+        from superlocalmemory.core.transactions.concrete_owners import (
+            build_transaction_service,
+        )
+        from superlocalmemory.core.transactions.obligations import ObligationLedger
+
+        db = getattr(engine, "_db", None)
+        profile_id = getattr(engine, "_profile_id", None)
+        if db is None or not profile_id:
+            return 0
+        ledger = ObligationLedger()
+        with db.raw_connection() as conn:
+            op_ids = set(
+                ledger.pending_operation_ids(conn, profile_id=profile_id, limit=limit)
+            )
+            op_ids.update(
+                ledger.operations_missing_manifest(
+                    conn, profile_id=profile_id, limit=limit,
+                )
+            )
+        if not op_ids:
+            return 0
+        service = build_transaction_service(engine)
+        done = 0
+        for operation_id in sorted(op_ids):
+            try:
+                context = _context_for_operation(engine, operation_id)
+                if context is None:
+                    _terminalize_orphan_operation(engine, operation_id)
+                    continue
+                service.reconcile_operation(db, context)
+                done += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "projection redrive failed for %s: %s", operation_id, exc,
+                )
+        return done
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("projection redrive pass skipped: %s", exc)
+        return 0
+
+
+def _terminalize_orphan_operation(engine, operation_id: str) -> None:
+    from superlocalmemory.core.transactions.obligations import ObligationLedger
+    from superlocalmemory.core.transactions.owners import ObligationState
+    from superlocalmemory.core.transactions.reconciler import Reconciler
+    from superlocalmemory.core.transactions.service import MAX_APPLY_ATTEMPTS
+
+    db = getattr(engine, "_db", None)
+    profile_id = getattr(engine, "_profile_id", None)
+    if db is None or not profile_id:
+        return
+    ledger = ObligationLedger()
+    with db.raw_connection() as conn:
+        for obligation in ledger.fetch(conn, operation_id):
+            if obligation.attempts >= MAX_APPLY_ATTEMPTS:
+                continue
+            ledger.mark(
+                conn, operation_id, obligation.owner, obligation.kind,
+                ObligationState.FAILED,
+                detail={"phase": "orphan", "error": "canonical record missing"},
+                bump_attempts=True,
+            )
+        Reconciler(ledger).reconcile(
+            conn, operation_id, profile_id, canonical_committed=False,
+        )
+
+
+def _ops_failure_counts(engine) -> dict:
+    """Return Wave-3 operational failure counts for /status and /health.
+
+    Always returns a dict (never raises). Counts default to 0 on any error.
+    Includes: dead_letter_count, degraded_operations, exhausted_obligations,
+    writer_stalled (bool), writer_stalled_op_id, writer_stalled_age_s.
+    """
+    result: dict = {
+        "dead_letter_count": 0,
+        "degraded_operations": 0,
+        "exhausted_obligations": 0,
+        "writer_stalled": False,
+        "writer_stalled_op_id": None,
+        "writer_stalled_age_s": None,
+    }
+    # Writer stall info from canonical coordinator
+    try:
+        writer_runtime = getattr(application.state, "canonical_remember_runtime", None)
+        coordinator = getattr(writer_runtime, "_coordinator", None) if writer_runtime else None
+        if coordinator is None:
+            coordinator = getattr(application.state, "write_coordinator", None)
+        if coordinator is not None and hasattr(coordinator, "inflight_info"):
+            info = coordinator.inflight_info()
+            result["writer_stalled"] = bool(info.get("stalled"))
+            result["writer_stalled_op_id"] = info.get("op_id")
+            result["writer_stalled_age_s"] = info.get("age_s")
+    except Exception:
+        pass
+
+    # DB failure counts
+    try:
+        from superlocalmemory.core.ops_remediation import get_failure_counts
+        db_path = getattr(getattr(application.state, "config", None), "db_path", None)
+        if db_path is not None and db_path.exists():
+            counts = get_failure_counts(db_path)
+            result["dead_letter_count"] = counts.get("dead_letter_count", 0)
+            result["degraded_operations"] = counts.get("degraded_operations", 0)
+            result["exhausted_obligations"] = counts.get("exhausted_obligations", 0)
+    except Exception:
+        pass
+
+    return result
+
+
 def _materialize_ingestion_one_pass(
     engine,
     *,
@@ -4162,6 +4972,12 @@ def _materialize_ingestion_one_pass(
             continue
         if result.state is IngestionState.COMPLETE:
             completed += 1
+            _reconcile_projection_manifest(
+                engine,
+                result.operation_id,
+                getattr(operation, "profile_id", ""),
+                result.fact_ids,
+            )
             _emit_event(
                 "memory.stored",
                 payload={
@@ -4179,6 +4995,7 @@ def _materialize_ingestion_one_pass(
                 result.operation_id,
                 result.last_error,
             )
+    _reconcile_pending_projections(engine)
     return completed, failed
 
 
@@ -4241,7 +5058,9 @@ def _start_pending_materializer() -> None:
 
     def _loop():
         from superlocalmemory.cli.pending_store import (
-            get_pending, mark_done, mark_failed,
+            get_pending,
+            mark_done,
+            mark_failed,
         )
         # v3.4.38: log first engine acquisition so we know materializer is alive
         _engine_logged = False
@@ -4369,6 +5188,7 @@ def start_server(port: int = _DEFAULT_PORT) -> None:
     global _start_time
     assert_no_durable_root_conflict()
     import socket
+
     import uvicorn
 
     # Bind before any migration or engine work.  A process which cannot own
@@ -4434,7 +5254,10 @@ def start_server(port: int = _DEFAULT_PORT) -> None:
 
     try:
         from superlocalmemory.migrations.v3_4_25_to_v3_4_26 import (
-            is_ready as _is_ready, migrate as _migrate,
+            is_ready as _is_ready,
+        )
+        from superlocalmemory.migrations.v3_4_25_to_v3_4_26 import (
+            migrate as _migrate,
         )
         _data = canonical_data_root()
         if not _is_ready(_data):

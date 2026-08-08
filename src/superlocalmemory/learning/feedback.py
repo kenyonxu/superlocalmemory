@@ -12,7 +12,7 @@ Collects implicit and explicit relevance signals:
 
 Privacy:
     - Full query text is NEVER stored.
-    - Queries are hashed to SHA-256[:16] for grouping.
+    - Queries are keyed-hashed for local grouping; the key never enters SQLite.
 
 Storage:
     Every explicit-feedback event is written to the CANONICAL learning store
@@ -39,8 +39,10 @@ Storage:
 
 from __future__ import annotations
 
-import hashlib
+import hmac
 import logging
+import os
+import secrets
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -170,9 +172,46 @@ def _canonical_schema_ready(conn: sqlite3.Connection) -> bool:
     )
 
 
-def _hash_query(query: str) -> str:
-    """Privacy-preserving SHA-256[:16] query hash."""
-    return hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
+def _load_or_create_hash_key(db_path: Path) -> bytes:
+    """Return an owner-only per-install key for feedback query HMACs."""
+    key_path = db_path.parent / ".feedback-hash-key"
+    try:
+        key = key_path.read_bytes()
+        if len(key) >= 32:
+            os.chmod(key_path, 0o600)
+            return key
+    except OSError:
+        pass
+
+    key = secrets.token_bytes(32)
+    try:
+        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        existing = key_path.read_bytes()
+        if len(existing) < 32:
+            raise RuntimeError("feedback hash key is truncated")
+        os.chmod(key_path, 0o600)
+        return existing
+    except OSError as exc:
+        # Do not fall back to a guessable digest on a read-only data root.
+        # A process-local key preserves privacy; only cross-restart grouping
+        # is lost, and the operator gets an explicit warning.
+        logger.warning(
+            "cannot persist feedback hash key beside %s: %s; using a "
+            "process-local key", db_path, exc,
+        )
+        return key
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(key)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(key_path, 0o600)
+    return key
+
+
+def _hash_query(query: str, key: bytes) -> str:
+    """Return a keyed, truncated SHA-256 digest for local query grouping."""
+    return hmac.digest(key, query.encode("utf-8"), "sha256").hex()[:16]
 
 
 class FeedbackCollector:
@@ -188,6 +227,7 @@ class FeedbackCollector:
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = Path(db_path)
+        self._query_hash_key = _load_or_create_hash_key(self._db_path)
         self._lock = threading.Lock()
         # Latched once the canonical LLD-02 tables are confirmed present, so
         # the sqlite_master probe runs at most once per collector instead of
@@ -262,7 +302,7 @@ class FeedbackCollector:
         if not profile_id or not query:
             return 0
 
-        qhash = _hash_query(query)
+        qhash = _hash_query(query, self._query_hash_key)
         returned_set = set(fact_ids_returned)
         now = _utcnow_iso()
         records: list[tuple] = []
@@ -357,8 +397,9 @@ class FeedbackCollector:
             signal_type: One of ``user_positive``, ``user_negative``,
                          ``user_correction``, or any custom type.
             value:       Numeric signal value (0.0 to 1.0).
-            query:       Originating query. Stored only as a SHA-256[:16]
-                         hash — full text is never persisted.
+            query:       Originating query. Stored only as a keyed truncated
+                         digest — full text and the HMAC key are never stored
+                         in SQLite.
             channel:     Retrieval channel that surfaced the fact.
 
         Returns:
@@ -369,7 +410,9 @@ class FeedbackCollector:
 
         clamped = max(0.0, min(1.0, float(value)))
         now = _utcnow_iso()
-        query_hash = _hash_query(query) if query else None
+        query_hash = (
+            _hash_query(query, self._query_hash_key) if query else None
+        )
 
         with self._lock:
             conn = self._connect()

@@ -270,6 +270,12 @@ def _cmd_loop(args: Namespace) -> None:
     cmd_loop(args)
 
 
+def _cmd_ops(args: Namespace) -> None:
+    """Wave-3: operational recovery & admin remediation commands."""
+    from superlocalmemory.cli.ops_cmd import cmd_ops
+    cmd_ops(args)
+
+
 # ---- end SLM v3.6 Optimize dispatch functions ----
 
 
@@ -399,6 +405,8 @@ def dispatch(args: Namespace) -> None:
         "loop": _cmd_loop,
         # V3.8.2 super-help — grouped overview of every command + topics
         "help": cmd_help,
+        # Wave-3: operational recovery & admin remediation
+        "ops": _cmd_ops,
     }
     handler = handlers.get(args.command)
     if handler:
@@ -982,6 +990,10 @@ def cmd_evolve(args: Namespace) -> None:
     if not session_id:
         return  # Silent exit — nothing to do without a session
 
+    from superlocalmemory.core.admission import gate_cli_mutation
+    from superlocalmemory.core.operation_request import OperationKind
+    gate_cli_mutation(OperationKind.EVOLVE_SKILL)
+
     # Check if evolution is enabled via config.json
     config_path = state_path("config.json")
     try:
@@ -1058,6 +1070,11 @@ def cmd_mode(args: Namespace) -> None:
     from superlocalmemory.storage.models import Mode
 
     config = SLMConfig.load()
+
+    if args.value:
+        from superlocalmemory.core.admission import gate_cli_mutation
+        from superlocalmemory.core.operation_request import OperationKind
+        gate_cli_mutation(OperationKind.MODE_CHANGE)
 
     if getattr(args, 'json', False):
         from superlocalmemory.cli.json_output import json_print
@@ -1431,6 +1448,9 @@ def cmd_recall(args: Namespace) -> None:
     # produces True/False here.
     include_global = getattr(args, 'include_global', None)
     include_shared = getattr(args, 'include_shared', None)
+    # Phase-1/D2: clamp cross-profile scope flags before forwarding to daemon.
+    from superlocalmemory.core.admission import enforce_read_scope
+    include_global, include_shared = enforce_read_scope(include_global, include_shared)
 
     # V3.3.21: Route through daemon for instant response (no cold start).
     # S9-DASH-02: pass a stable session_id derived from the shell's
@@ -1453,10 +1473,23 @@ def cmd_recall(args: Namespace) -> None:
                 scope_qs += f"&include_shared={str(include_shared).lower()}"
             _window = getattr(args, "window", "") or ""
             window_qs = f"&window={quote(_window)}" if _window else ""
+            _as_of = getattr(args, "as_of", "") or ""
+            if _as_of:
+                from superlocalmemory.retrieval.temporal_utils import normalize_as_of
+                _as_of_norm = normalize_as_of(_as_of)
+                if _as_of_norm is None:
+                    import sys as _sys
+                    _sys.stderr.write(
+                        f"Error: invalid --as-of value: {_as_of!r}\n"
+                        "Expected ISO 8601 UTC datetime, e.g. '2024-01-01T00:00:00Z'.\n"
+                    )
+                    _sys.exit(1)
+                _as_of = _as_of_norm
+            as_of_qs = f"&as_of={quote(_as_of)}" if _as_of else ""
             result = daemon_request(
                 "GET",
                 f"/recall?q={quote(args.query)}&limit={args.limit}"
-                f"&session_id={quote(session_id)}{fast_qs}{scope_qs}{window_qs}",
+                f"&session_id={quote(session_id)}{fast_qs}{scope_qs}{window_qs}{as_of_qs}",
             )
             if result and "results" in result:
                 # Format daemon response same as engine response
@@ -1522,6 +1555,10 @@ def _cli_record_signals(config, query, results):
 
 def cmd_forget(args: Namespace) -> None:
     """Delete daemon-queried memories matching a query."""
+    from superlocalmemory.core.admission import gate_cli_mutation
+    from superlocalmemory.core.operation_request import OperationKind
+    gate_cli_mutation(OperationKind.FORGET)
+
     import urllib.parse
 
     from superlocalmemory.cli.daemon import (
@@ -1644,6 +1681,10 @@ def cmd_forget(args: Namespace) -> None:
 
 def cmd_delete(args: Namespace) -> None:
     """Delete a specific memory by exact fact ID."""
+    from superlocalmemory.core.admission import gate_cli_mutation
+    from superlocalmemory.core.operation_request import OperationKind
+    gate_cli_mutation(OperationKind.FORGET)
+
     import urllib.parse
 
     from superlocalmemory.cli.daemon import (
@@ -1711,6 +1752,10 @@ def cmd_delete(args: Namespace) -> None:
 
 def cmd_update(args: Namespace) -> None:
     """Update the content of a specific memory by exact fact ID."""
+    from superlocalmemory.core.admission import gate_cli_mutation
+    from superlocalmemory.core.operation_request import OperationKind
+    gate_cli_mutation(OperationKind.CORRECT)
+
     import urllib.parse
 
     from superlocalmemory.cli.daemon import (
@@ -2023,13 +2068,35 @@ def _gather_optimize_surface_b() -> dict:
 def _readline_with_timeout(
     stream, timeout_sec: float,
 ) -> tuple[str | None, Exception | None]:
-    """Read one line from a pipe-like stream without POSIX-only select().
+    """Read one line from a pipe-like stream with a deadline.
 
-    Windows select() only accepts sockets, not subprocess pipes. A bounded
-    helper thread keeps the embedding-worker probe cross-platform while
-    preserving the existing timeout behavior.
+    Prefer a selector poll of the stream's file descriptor on POSIX so a
+    timeout never abandons a thread blocked in readline() (thread + FD leak).
+    Windows select() only accepts sockets, not subprocess pipes — fall back
+    to a bounded helper thread there and for streams without a usable fileno.
     """
+    import selectors
     import threading
+
+    timeout_sec = max(0.0, float(timeout_sec))
+    fd: int | None
+    try:
+        raw_fd = stream.fileno()
+        fd = raw_fd if isinstance(raw_fd, int) else None
+    except (AttributeError, OSError, ValueError, TypeError):
+        fd = None
+
+    if fd is not None and sys.platform != "win32":
+        try:
+            with selectors.DefaultSelector() as sel:
+                sel.register(fd, selectors.EVENT_READ)
+                events = sel.select(timeout=timeout_sec)
+            if not events:
+                return None, None
+            line = stream.readline()
+            return (line if isinstance(line, str) else None), None
+        except (OSError, ValueError) as exc:
+            return None, exc
 
     result: dict[str, object] = {}
 
@@ -2091,6 +2158,7 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ("Health & self-healing", [
         ("doctor", "Full pre-flight check (add --fix to auto-repair)"),
         ("health", "Quick math/retrieval layer status"),
+        ("ops", "List/resolve stuck, dead-lettered, or degraded operations (admin)"),
         ("diagnostics", "Export a local diagnostics bundle"),
         ("evidence", "Build/inspect evidence bundles"),
         ("rotate-token", "Rotate the local dashboard install token"),
@@ -2285,6 +2353,32 @@ def cmd_doctor(args: Namespace) -> None:
         except Exception as _fix_exc:
             if not use_json:
                 print(f"  auto-repair error: {_fix_exc}\n")
+
+        # H5 — stale-artifact reap (additive; runs after component healer).
+        # Removes provably-dead lock/PID files so the doctor report below
+        # reflects the healed state.  Fail-open — never blocks doctor.
+        try:
+            from superlocalmemory.infra.self_heal import reap_stale_artifacts
+            from superlocalmemory.infra.data_root import canonical_data_root
+
+            _sh_report = reap_stale_artifacts(canonical_data_root())
+            if not use_json:
+                if _sh_report["removed"]:
+                    print(
+                        f"  Cleaned {len(_sh_report['removed'])} stale"
+                        " lock/pid file(s):"
+                    )
+                    for _item in _sh_report["removed"]:
+                        print(
+                            f"    - {Path(_item['path']).name}"
+                            f" ({_item['reason']})"
+                        )
+                else:
+                    print("  No stale lock/pid files found.")
+                print()
+        except Exception as _sh_exc:
+            if not use_json:
+                print(f"  stale-artifact cleanup skipped: {_sh_exc}\n")
 
     # 1. Python version
     v = sys.version_info
@@ -2997,7 +3091,7 @@ def cmd_dashboard(args: Namespace) -> None:
     print("  SuperLocalMemory V3 — Web Dashboard")
     print(f"  Starting daemon if needed...")
 
-    if not ensure_daemon():
+    if not ensure_daemon(port=port):
         print("  ✗ Could not start daemon. Run `slm doctor` to diagnose.")
         sys.exit(1)
 
@@ -3057,6 +3151,12 @@ def cmd_profile(args: Namespace) -> None:
     Writes to BOTH SQLite and profiles.json so CLI, Dashboard, and
     MCP all see the same profiles.
     """
+    action = getattr(args, "action", "list")
+    if action in ("switch", "create"):
+        from superlocalmemory.core.admission import gate_cli_mutation
+        from superlocalmemory.core.operation_request import OperationKind
+        gate_cli_mutation(OperationKind.PROFILE_SWITCH)
+
     from superlocalmemory.core.config import SLMConfig
     from superlocalmemory.storage.database import DatabaseManager
     from superlocalmemory.storage import schema
@@ -3598,6 +3698,10 @@ def cmd_observe(args: Namespace) -> None:
         print("No content to observe.")
         return
 
+    from superlocalmemory.core.admission import gate_cli_mutation
+    from superlocalmemory.core.operation_request import OperationKind
+    gate_cli_mutation(OperationKind.REMEMBER)
+
     # V3.3.28: Route through daemon (singleton engine, single embedding worker).
     # This is the P0 fix for the memory blast incident of April 7, 2026.
     try:
@@ -3665,6 +3769,9 @@ def cmd_observe(args: Namespace) -> None:
 
 def cmd_decay(args: Namespace) -> None:
     """Run Ebbinghaus forgetting decay cycle."""
+    from superlocalmemory.core.admission import gate_cli_mutation
+    from superlocalmemory.core.operation_request import OperationKind
+    gate_cli_mutation(OperationKind.CONSOLIDATE)
     from superlocalmemory.core.config import SLMConfig
     from superlocalmemory.core.engine import MemoryEngine
 
@@ -3721,6 +3828,9 @@ def cmd_decay(args: Namespace) -> None:
 
 def cmd_quantize(args: Namespace) -> None:
     """Run EAP embedding quantization cycle."""
+    from superlocalmemory.core.admission import gate_cli_mutation
+    from superlocalmemory.core.operation_request import OperationKind
+    gate_cli_mutation(OperationKind.CONSOLIDATE)
     from superlocalmemory.core.config import SLMConfig
     from superlocalmemory.core.engine import MemoryEngine
 
@@ -3779,6 +3889,10 @@ def cmd_quantize(args: Namespace) -> None:
 
 def cmd_consolidate(args: Namespace) -> None:
     """Run cognitive consolidation pipeline."""
+    from superlocalmemory.core.admission import gate_cli_mutation
+    from superlocalmemory.core.operation_request import OperationKind
+    gate_cli_mutation(OperationKind.CONSOLIDATE)
+
     from superlocalmemory.core.config import SLMConfig
     from superlocalmemory.core.engine import MemoryEngine
 

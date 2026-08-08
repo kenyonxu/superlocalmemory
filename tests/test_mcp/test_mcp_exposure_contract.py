@@ -44,7 +44,10 @@ class _SandboxPool:
 
     def store(self, content: str, metadata: dict) -> dict:
         assert content
-        assert metadata["idempotency_key"].startswith("mcp:")
+        # A sessionless remember (this sandbox passes no session id) derives its
+        # key under the "mcp:req:" sub-namespace; pin the exact prefix so a
+        # regression to a different namespace is caught, not just any "mcp:".
+        assert metadata["idempotency_key"].startswith("mcp:req:")
         return {
             "ok": True,
             "fact_ids": ["fact-sandbox"],
@@ -91,6 +94,7 @@ def _register_every_tool(target) -> None:
     from superlocalmemory.mcp.tools_mesh import register_mesh_tools
     from superlocalmemory.mcp.tools_optimize import register_optimize_tools
     from superlocalmemory.mcp.tools_loops import register_loop_tools
+    from superlocalmemory.mcp.tools_ops import register_ops_tools
     from superlocalmemory.mcp.tools_v28 import register_v28_tools
     from superlocalmemory.mcp.tools_v3 import register_v3_tools
     from superlocalmemory.mcp.tools_v33 import register_v33_tools
@@ -107,14 +111,20 @@ def _register_every_tool(target) -> None:
     register_evolution_tools(target, get_engine)
     register_optimize_tools(target)
     register_loop_tools(target, get_engine)
+    register_ops_tools(target, get_engine)
+    from superlocalmemory.mcp.tools_context import register_prestage_tool
+    register_prestage_tool(target, lambda *a, **k: [])
 
 
 @pytest.mark.parametrize(
     ("exposure", "profile", "expected_count"),
     (
+        # essential stays 42 to match the full42 profile name (user-facing
+        # config contract + published tool-count table). prestage_context is
+        # registered but reaches users through `whole`, which is why whole is 87.
         ("essential", "", 42),
         ("named-core", "core", 14),
-        ("whole", "whole", 84),
+        ("whole", "whole", 87),
     ),
 )
 def test_registration_exposure_is_exact_and_duplicate_free(

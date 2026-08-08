@@ -1,6 +1,6 @@
 [project]
 name = "superlocalmemory"
-version = "3.8.14"
+version = "4.0.0"
 description = "Local-first agent memory with auditable hybrid retrieval"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -16,7 +16,6 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
@@ -37,7 +36,7 @@ dependencies = [
     "numpy==2.4.4",
     "scipy==1.17.1",
     "networkx==3.6.1",
-    "mcp==1.28.1",
+    "mcp==2.0.0",
     "python-dateutil==2.9.0.post0",
     "rank-bm25==0.2.2",
     "vadersentiment==3.3.2",
@@ -63,7 +62,7 @@ dependencies = [
     # Keep this direct: portalocker also needs pywin32 today, but capture must
     # not depend on that transitive implementation detail.
     "pywin32==311; sys_platform == 'win32'",
-    "cryptography==48.0.1",
+    "cryptography==50.0.0",
     # Semantic search + cross-encoder reranker. Do NOT use
     # sentence-transformers[onnx] — its extras pull optimum which
     # overrides the sentence-transformers pin via transitive deps.
@@ -91,6 +90,9 @@ dependencies = [
     # the ~560MB model downloads on first setup/warmup (fail-open). Verified the
     # pin does NOT disturb the transformers/torch/numpy pins above.
     "llmlingua==0.2.2",
+    # LLMLingua pulls NLTK transitively. Pin the patched release so clean
+    # installs cannot resolve to the vulnerable 3.9.x line.
+    "nltk==3.10.0",
 ]
 
 [project.optional-dependencies]
@@ -173,9 +175,14 @@ superlocalmemory = ["ui/**/*", "optimize/NOTICE"]
 [tool.setuptools.data-files]
 "share/superlocalmemory/codex/skills/slm-cache" = ["plugin-src/skills/slm-cache/SKILL.md"]
 "share/superlocalmemory/codex/skills/slm-compress" = ["plugin-src/skills/slm-compress/SKILL.md"]
+"share/superlocalmemory/codex/skills/slm-governance" = ["plugin-src/skills/slm-governance/SKILL.md"]
 "share/superlocalmemory/codex/skills/slm-graph" = ["plugin-src/skills/slm-graph/SKILL.md"]
+"share/superlocalmemory/codex/skills/slm-loop" = ["plugin-src/skills/slm-loop/SKILL.md"]
+"share/superlocalmemory/codex/skills/slm-mesh" = ["plugin-src/skills/slm-mesh/SKILL.md"]
+"share/superlocalmemory/codex/skills/slm-profile" = ["plugin-src/skills/slm-profile/SKILL.md"]
 "share/superlocalmemory/codex/skills/slm-recall" = ["plugin-src/skills/slm-recall/SKILL.md"]
 "share/superlocalmemory/codex/skills/slm-remember" = ["plugin-src/skills/slm-remember/SKILL.md"]
+"share/superlocalmemory/codex/skills/slm-scope" = ["plugin-src/skills/slm-scope/SKILL.md"]
 "share/superlocalmemory/codex/skills/slm-session" = ["plugin-src/skills/slm-session/SKILL.md"]
 "share/superlocalmemory/codex/skills/slm-status" = ["plugin-src/skills/slm-status/SKILL.md"]
 "share/superlocalmemory/portable-kit/rules" = ["plugin-src/rules/AGENTS.md"]

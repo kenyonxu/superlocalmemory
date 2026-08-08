@@ -38,7 +38,7 @@ from superlocalmemory.retrieval.remote_reranker import (
 )
 from superlocalmemory.storage.models import AtomicFact
 
-ENDPOINT = "http://192.168.50.140:8041/v1/rerank"
+ENDPOINT = "https://reranker.example.test/v1/rerank"
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +187,27 @@ class TestConfigValidation:
             "openai", "https://rerank.internal/v1/rerank",
         ) is None
 
+    @pytest.mark.parametrize("url", [
+        "http://127.0.0.1:8041/v1/rerank",
+        "http://[::1]:8041/v1/rerank",
+        "http://localhost:8041/v1/rerank",
+    ])
+    def test_plain_http_is_loopback_only(self, url: str) -> None:
+        assert validate_remote_reranker_config("openai", url) is None
+
+    def test_plain_http_off_host_is_rejected(self) -> None:
+        error = validate_remote_reranker_config(
+            "openai", "http://192.168.50.140:8041/v1/rerank",
+        )
+        assert error and "HTTPS" in error
+
+    def test_query_strings_and_fragments_are_rejected(self) -> None:
+        for suffix in ("?api_key=secret", "#secret"):
+            error = validate_remote_reranker_config(
+                "openai", ENDPOINT + suffix,
+            )
+            assert error and "query string or fragment" in error
+
     def test_constructor_rejects_invalid_config(self) -> None:
         with pytest.raises(RemoteRerankerConfigError):
             RemoteReranker("m", "file:///etc/passwd")
@@ -197,10 +218,10 @@ class TestConfigValidation:
 class TestEndpointNormalization:
 
     @pytest.mark.parametrize("given,expected", [
-        ("http://h:8041/v1/rerank", "http://h:8041/v1/rerank"),
-        ("http://h:8041/v1/rerank/", "http://h:8041/v1/rerank"),
-        ("http://h:8041/v1", "http://h:8041/v1/rerank"),
-        ("http://h:8041", "http://h:8041/rerank"),
+        ("https://h:8041/v1/rerank", "https://h:8041/v1/rerank"),
+        ("https://h:8041/v1/rerank/", "https://h:8041/v1/rerank"),
+        ("https://h:8041/v1", "https://h:8041/v1/rerank"),
+        ("https://h:8041", "https://h:8041/rerank"),
     ])
     def test_rerank_suffix_is_added_once(self, given: str, expected: str) -> None:
         assert normalize_rerank_endpoint(given) == expected
@@ -248,7 +269,7 @@ class TestResponseParsing:
             {"index": 0, "relevance_score": 1.0},
             {"index": 0, "relevance_score": 2.0},
         ]}
-        with pytest.raises(RemoteRerankerError, match="more than once"):
+        with pytest.raises(RemoteRerankerError, match="duplicate"):
             parse_rerank_response(payload, 2)
 
     def test_out_of_range_index_is_rejected(self) -> None:
@@ -314,6 +335,19 @@ class TestRerankHappyPath:
         assert body["query"] == "测试"
         assert body["documents"] == ["文档零", "文档一", "文档二"]
         assert str(rec.requests[0].url) == ENDPOINT
+
+    def test_request_body_is_redacted_before_network_egress(self) -> None:
+        rr = _reranker()
+        candidates = [
+            (_fact("f0", "Contact alice@example.com with sk-" + "a" * 24), 1.0),
+        ]
+        with stub_http(_ok_response({0: 1.0})) as rec:
+            rr.rerank("SSN 123-45-6789", candidates, top_k=1)
+        serialized = json.dumps(rec.bodies[0])
+        assert "alice@example.com" not in serialized
+        assert "123-45-6789" not in serialized
+        assert "sk-" + "a" * 24 not in serialized
+        assert "PII" in serialized
 
     def test_top_k_truncates_after_reranking(self) -> None:
         rr = _reranker()
@@ -387,6 +421,34 @@ class TestRerankFailurePaths:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, text="<html>gateway</html>")
         self._assert_degraded(_reranker(), handler, caplog)
+
+    def test_error_response_body_is_never_logged(self, caplog) -> None:
+        canary = "echoed-private-memory-canary"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, text=canary)
+
+        self._assert_degraded(_reranker(), handler, caplog)
+        assert canary not in caplog.text
+
+    def test_malformed_success_payload_values_and_keys_are_never_logged(
+        self, caplog,
+    ) -> None:
+        value_canary = "remote-schema-value-secret-canary"
+        key_canary = "remote-schema-key-secret-canary"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "results": [{
+                    "index": 0,
+                    "score": value_canary,
+                    key_canary: "present",
+                }],
+            })
+
+        self._assert_degraded(_reranker(), handler, caplog)
+        assert value_canary not in caplog.text
+        assert key_canary not in caplog.text
 
     def test_partial_results_are_refused(self, caplog) -> None:
         """A ``top_n``-style partial answer must not leave documents unscored."""
@@ -570,7 +632,7 @@ class TestAuthentication:
 
     def test_credentials_in_the_url_are_refused_outright(self) -> None:
         """httpx logs request URLs in full — a password must never get in one."""
-        url = "http://admin:hunter2@192.168.50.140:8041/v1/rerank"
+        url = "https://admin:hunter2@reranker.example.test/v1/rerank"
 
         error = validate_remote_reranker_config("openai", url)
         assert error

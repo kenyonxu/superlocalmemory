@@ -21,8 +21,8 @@ _ENDPOINT = "/api/v3/mcp/profiles"
 _EXPECTED_COUNTS = {
     "core": 14,
     "code": 24,   # v3.8.0: +3 bounded-loop tools
-    "full": 42,   # v3.8.0: +3 bounded-loop tools
-    "power": 54,  # v3.8.0: inherits full's +3
+    "full": 42,   # profile name encodes the count (full42) — do not grow
+    "power": 54,  # profile name encodes the count (power54) — do not grow
     "mesh": 8,
 }
 

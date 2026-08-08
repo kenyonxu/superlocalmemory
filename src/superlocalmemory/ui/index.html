@@ -49,8 +49,8 @@
         <input id="q" placeholder="Search memories…">
         <span class="kbd">⌘K</span>
       </label>
-      <span class="badge-local" title="All data stays on this machine. Nothing leaves your device.">
-        <i class="bi bi-lock-fill" aria-hidden="true"></i> LOCAL ONLY
+      <span class="badge-local" title="Local-first memory; active mode and integrations determine network egress.">
+        <i class="bi bi-lock-fill" aria-hidden="true"></i> LOCAL-FIRST
       </span>
       <button class="btn icon ghost" data-theme-icon aria-label="Toggle theme"></button>
     </header>
@@ -973,7 +973,10 @@
                     <h6 class="mb-2">Active retention policies</h6>
                     <div class="mb-3" id="compliance-policies-content"><span class="text-muted">Loading...</span></div>
                     <div class="d-flex justify-content-between align-items-center mb-2">
-                        <h6 class="mb-0">Audit trail</h6>
+                        <div class="d-flex align-items-center gap-2">
+                            <h6 class="mb-0">Audit trail</h6>
+                            <span id="cp-chain-integrity"></span>
+                        </div>
                         <select class="form-select form-select-sm" id="cp-audit-filter" style="width: auto;" data-act-change="load-compliance">
                             <option value="">All events</option>
                             <option value="recall">Recall</option>
@@ -986,6 +989,12 @@
                     </div>
                     <div id="compliance-audit-content"><span class="text-muted">Loading...</span></div>
                 </section>
+
+                <!-- Admin Operations Health is provided as a self-injected tab by
+                     ui/js/od-ops-health.js (fetches /operations/failed, KPI strip,
+                     writer-stall banner, one-click Retry/Reconcile/Cancel). The earlier
+                     static shell here was unpopulated and carried an inline handler, so it
+                     was removed in favour of the single functional CSP-clean tab. -->
             </div>
 
             <!-- Skill Evolution (v3.4.10 — Arsenal Evolution) -->
@@ -1569,6 +1578,8 @@
     <script src="static/js/od-components.js?v=382"></script>
     <script src="static/js/od-health.js?v=382"></script>
     <script src="static/js/od-operations.js?v=380"></script>
+    <script src="static/js/od-compliance-ext.js?v=100"></script>
+    <script src="static/js/od-ops-health.js?v=400"></script>
     <script src="static/js/od-team.js?v=379"></script>
     <script src="static/js/od-graph.js?v=379"></script>
     <script src="static/js/od-memories.js?v=379"></script>

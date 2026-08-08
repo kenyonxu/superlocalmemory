@@ -19,6 +19,8 @@ import logging
 from typing import Callable
 
 from mcp.types import ToolAnnotations
+from superlocalmemory.core.admission import admits
+from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.infra.data_root import state_path
 from superlocalmemory.storage.read_connection import ReadConnectionFactory
 
@@ -28,6 +30,7 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
     """Register evolution MCP tools for skill evolution intelligence."""
 
     @server.tool()
+    @admits(OperationKind.EVOLVE_SKILL)
     async def evolve_skill(
         skill_name: str,
         evolution_type: str = "fix",
@@ -270,6 +273,8 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
             skill_name: Specific skill name (empty = all skills)
         """
         try:
+            engine = get_engine()
+            profile_id = engine.profile_id if engine else "default"
             db_path = state_path("memory.db")
             conn = ReadConnectionFactory(db_path).open()
 
@@ -279,9 +284,9 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
                     "trigger_type, generation, status, mutation_summary, "
                     "blind_verified, created_at, completed_at "
                     "FROM skill_evolution_log "
-                    "WHERE skill_name = ? OR parent_skill_id = ? "
+                    "WHERE profile_id = ? AND (skill_name = ? OR parent_skill_id = ?) "
                     "ORDER BY created_at ASC",
-                    (skill_name, skill_name),
+                    (profile_id, skill_name, skill_name),
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -289,7 +294,9 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
                     "trigger_type, generation, status, mutation_summary, "
                     "blind_verified, created_at, completed_at "
                     "FROM skill_evolution_log "
+                    "WHERE profile_id = ? "
                     "ORDER BY created_at DESC LIMIT 100",
+                    (profile_id,),
                 ).fetchall()
 
             conn.close()

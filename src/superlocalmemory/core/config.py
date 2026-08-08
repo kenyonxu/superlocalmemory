@@ -283,8 +283,9 @@ class RetrievalConfig:
     # It is now read, validated, and — when it disagrees with the backend —
     # reported as a loud configuration error instead of nothing at all.
     cross_encoder_endpoint: str = ""
-    # Optional bearer token. Prefer the SLM_CROSS_ENCODER_API_KEY environment
-    # variable — it takes precedence and keeps the secret out of config.json.
+    # Optional bearer token. SLM_CROSS_ENCODER_API_KEY takes precedence.
+    # When persisted for backward compatibility, config.json is atomically
+    # forced to owner-only mode 0600 by save().
     cross_encoder_api_key: str = ""
     # Per-request read budget for the remote reranker. Recall is interactive,
     # so this stays tight: a slow reranker degrades to fusion scores rather
@@ -385,6 +386,12 @@ class MathConfig:
     langevin_weight_range: tuple[float, float] = (0.0, 1.0)
 
     # Hopfield
+
+    # Ebbinghaus-Langevin coupling in maintenance (Phase 5 — P1-ELC)
+    # When True, the maintenance cycle computes the combined Ebbinghaus-Langevin
+    # coupled state for each fact and writes back the lifecycle zone.
+    # Defaults to False to preserve existing maintenance behaviour.
+    ebbinghaus_langevin_coupling_enabled: bool = False
 
     # Sheaf (at encoding time, NOT retrieval)
     sheaf_at_encoding: bool = True
@@ -744,6 +751,11 @@ class TemporalValidatorConfig:
     # Include expired facts in historical queries
     include_expired_in_history: bool = True
 
+    # Event-time (valid_until) demotion factor, applied like
+    # superseded_demotion_factor but for facts whose stated validity window has
+    # elapsed. Default matches the prior hardcoded constant (0.5).
+    event_time_demotion_factor: float = 0.5
+
 
 @dataclass(frozen=True)
 class EvolutionConfig:
@@ -908,7 +920,7 @@ DEPLOYMENT_ENTERPRISE = DeploymentConfig(
 def load_deployment_config(
     config_toml_path: Path | None = None,
 ) -> DeploymentConfig:
-    """Parse [deployment] from config.toml; return Personal defaults if absent.
+    """Parse [deployment] from config.toml with fail-closed invalid-state handling.
 
     config.toml is the installer-written performance config (separate from the
     daemon's config.json managed by SLMConfig). This function reads ONLY the
@@ -919,8 +931,9 @@ def load_deployment_config(
             ``~/.superlocalmemory/config.toml`` via the canonical data root.
 
     Returns:
-        DeploymentConfig — Personal preset when the file is absent, the section
-        is missing, or any parse error occurs (fail-open, non-destructive).
+        DeploymentConfig — Personal only when the file or deployment section is
+        absent. A present but invalid deployment configuration resolves to the
+        enterprise preset so startup controls cannot silently downgrade.
     """
     if config_toml_path is None:
         try:
@@ -939,40 +952,55 @@ def load_deployment_config(
         logger.warning(
             "load_deployment_config: failed to parse %s: %s", config_toml_path, exc
         )
-        return DEPLOYMENT_PERSONAL
+        return DEPLOYMENT_ENTERPRISE
 
-    dep = data.get("deployment", {})
-    if not dep:
+    if "deployment" not in data:
         # No [deployment] section — personal defaults, no behaviour change.
         return DEPLOYMENT_PERSONAL
+    dep = data["deployment"]
+    if not isinstance(dep, dict):
+        logger.warning(
+            "load_deployment_config: [deployment] in %s is not a table — "
+            "failing closed to enterprise",
+            config_toml_path,
+        )
+        return DEPLOYMENT_ENTERPRISE
 
-    raw_mode = str(dep.get("mode", "personal")).lower()
+    raw_mode = str(dep.get("mode", "")).lower()
     if raw_mode not in _VALID_DEPLOYMENT_MODES:
         logger.warning(
-            "load_deployment_config: unknown mode %r in %s — defaulting to personal",
+            "load_deployment_config: unknown mode %r in %s — failing closed to enterprise",
             raw_mode, config_toml_path,
         )
-        raw_mode = "personal"
+        return DEPLOYMENT_ENTERPRISE
 
     # Use the preset for the mode as the base so omitted keys inherit
     # sensible values (enterprise → require_login=True etc.).
     base = DEPLOYMENT_ENTERPRISE if raw_mode == "enterprise" else DEPLOYMENT_PERSONAL
 
+    def _strict_bool(name: str, default: bool) -> bool:
+        value = dep.get(name, default)
+        if not isinstance(value, bool):
+            raise TypeError(f"{name} must be a TOML boolean")
+        return value
+
     try:
         return DeploymentConfig(
             mode=raw_mode,
-            require_login=bool(dep.get("require_login", base.require_login)),
-            pii_redaction=bool(dep.get("pii_redaction", base.pii_redaction)),
-            retention_enabled=bool(dep.get("retention_enabled", base.retention_enabled)),
-            audit=bool(dep.get("audit", base.audit)),
+            require_login=_strict_bool("require_login", base.require_login),
+            pii_redaction=_strict_bool("pii_redaction", base.pii_redaction),
+            retention_enabled=_strict_bool(
+                "retention_enabled", base.retention_enabled
+            ),
+            audit=_strict_bool("audit", base.audit),
         )
     except (ValueError, TypeError) as exc:
         logger.warning(
             "load_deployment_config: invalid values in [deployment] in %s: %s — "
-            "falling back to personal",
+            "failing closed to enterprise",
             config_toml_path, exc,
         )
-        return DEPLOYMENT_PERSONAL
+        return DEPLOYMENT_ENTERPRISE
 
 
 # ---------------------------------------------------------------------------
@@ -1085,12 +1113,24 @@ class SLMConfig:
     daemon_legacy_port: int = 8767     # Backward-compat redirect port
     daemon_enable_legacy_port: bool = True  # Set False to disable 8767 redirect
 
+    # v4: auto-close orphaned application sessions during maintenance.
+    # A session is stale when it has had no new atomic_facts for this many
+    # hours. close_session is only invoked by the MCP tool otherwise, so
+    # without this pass temporal summaries never form for abandoned sessions.
+    session_idle_close_hours: float = 24.0
+    session_idle_close_max_per_pass: int = 50
+
     # v3.4.3: Entity compilation
     entity_compilation_enabled: bool = True
     entity_compilation_retrieval_boost: float = 1.0  # 1.0 = disabled. >1.0 = boost score.
 
     # v3.4.3: Mesh
     mesh_enabled: bool = True
+
+    # Deployment policy overlay. Personal installs remain unchanged; the
+    # daemon upgrades this to True before engine initialization when the
+    # enterprise deployment preset requests PII redaction.
+    pii_redaction: bool = False
 
     def __post_init__(self) -> None:
         if self.db_path is None:
@@ -1208,6 +1248,65 @@ class SLMConfig:
                 if k in ForgettingConfig.__dataclass_fields__
             })
 
+        # quantization: nested PolarQuantConfig + QJLConfig are reconstructed
+        # from their serialized dicts; scalar fields are passed through directly.
+        # Unknown subkeys are filtered out for forward-compat safety.
+        qt_raw = data.get("quantization", {})
+        if qt_raw:
+            try:
+                polar_raw = qt_raw.get("polar", {})
+                qjl_raw = qt_raw.get("qjl", {})
+                polar = PolarQuantConfig(**{
+                    k: v for k, v in polar_raw.items()
+                    if k in PolarQuantConfig.__dataclass_fields__
+                })
+                qjl = QJLConfig(**{
+                    k: v for k, v in qjl_raw.items()
+                    if k in QJLConfig.__dataclass_fields__
+                })
+                qt_scalars = {
+                    k: v for k, v in qt_raw.items()
+                    if k in QuantizationConfig.__dataclass_fields__
+                    and k not in ("polar", "qjl")
+                }
+                config.quantization = QuantizationConfig(polar=polar, qjl=qjl, **qt_scalars)
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Ignoring invalid quantization config (%s) — using defaults", exc
+                )
+
+        # sagq: valid_bit_widths is serialized as a list by dataclasses.asdict()
+        # and must be coerced back to a tuple to satisfy the field annotation and
+        # preserve identity through a round-trip.
+        sq_raw = data.get("sagq", {})
+        if sq_raw:
+            try:
+                sq_kwargs = {
+                    k: v for k, v in sq_raw.items()
+                    if k in SAGQConfig.__dataclass_fields__
+                }
+                if "valid_bit_widths" in sq_kwargs:
+                    sq_kwargs["valid_bit_widths"] = tuple(sq_kwargs["valid_bit_widths"])
+                config.sagq = SAGQConfig(**sq_kwargs)
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Ignoring invalid sagq config (%s) — using defaults", exc
+                )
+
+        # auto_invoke: dict fields (weights, act_r_weights, mode_a_weights) are
+        # preserved as-is by asdict(); no special reconstruction required.
+        ai_raw = data.get("auto_invoke", {})
+        if ai_raw:
+            try:
+                config.auto_invoke = AutoInvokeConfig(**{
+                    k: v for k, v in ai_raw.items()
+                    if k in AutoInvokeConfig.__dataclass_fields__
+                })
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Ignoring invalid auto_invoke config (%s) — using defaults", exc
+                )
+
         rt = data.get("retrieval", {})
         if rt:
             # V3.3.2 migration: add ONNX cross-encoder backend field.
@@ -1227,6 +1326,12 @@ class SLMConfig:
         # V3.4.3 config fields (additive — missing keys get dataclass defaults)
         config.daemon_idle_timeout = data.get("daemon_idle_timeout", 0)
         config.daemon_port = data.get("daemon_port", 8765)
+        config.session_idle_close_hours = float(
+            data.get("session_idle_close_hours", 24.0) or 24.0
+        )
+        config.session_idle_close_max_per_pass = int(
+            data.get("session_idle_close_max_per_pass", 50) or 50
+        )
         config.daemon_legacy_port = data.get("daemon_legacy_port", 8767)
         config.daemon_enable_legacy_port = data.get("daemon_enable_legacy_port", True)
         config.entity_compilation_enabled = data.get("entity_compilation_enabled", True)
@@ -1324,6 +1429,14 @@ class SLMConfig:
                     "Ignoring invalid scope config (%s) — using shared-off defaults", exc
                 )
 
+        # Preserve the raw loaded dict so save() can return every key that was
+        # present in the file, including unknown forward-compat keys and nested
+        # sections whose subkeys this version does not model.  The attribute is
+        # intentionally private (leading underscore) and is not a declared field,
+        # so dataclasses.asdict() and dataclasses.replace() ignore it — callers
+        # that clone a config via replace() will lose unknown-key preservation,
+        # which is acceptable: the primary contract is load→save round-trip.
+        config._raw_preserved: dict = dict(data)  # type: ignore[attr-defined]
         return config
 
     def save(
@@ -1441,17 +1554,82 @@ class SLMConfig:
             "enabled": self.graph_pruning.enabled,
         }
 
-        # Preserve existing V3.3 config sections that aren't in for_mode()
-        for key in ("forgetting", "quantization", "sagq", "embedding_signature", "auto_invoke"):
-            if key in existing:
-                data[key] = existing[key]
+        # Daemon, entity-compilation, and mesh scalar settings were loaded by
+        # load() but omitted from earlier versions of this method. Write them
+        # explicitly so a load-then-save is lossless for these fields.
+        data["daemon_idle_timeout"] = self.daemon_idle_timeout
+        data["daemon_port"] = self.daemon_port
+        data["session_idle_close_hours"] = self.session_idle_close_hours
+        data["session_idle_close_max_per_pass"] = self.session_idle_close_max_per_pass
+        data["daemon_legacy_port"] = self.daemon_legacy_port
+        data["daemon_enable_legacy_port"] = self.daemon_enable_legacy_port
+        data["entity_compilation_enabled"] = self.entity_compilation_enabled
+        data["entity_compilation_retrieval_boost"] = self.entity_compilation_retrieval_boost
+        data["mesh_enabled"] = self.mesh_enabled
+
+        # Typed in-memory config sections.  Preserve any on-disk subkeys this
+        # version does not model (forward-compat or externally-tuned fields such
+        # as forgetting.half_life_days), then overlay the current in-memory
+        # dataclass values so a programmatic mutation still survives a
+        # save/load cycle while unmodeled subkeys are never dropped.
+        # dataclasses.asdict() recurses into nested dataclasses
+        # (quantization.polar, quantization.qjl).
+        #
+        # embedding_signature: has no typed in-memory model — it is an opaque blob
+        # written by external tooling (see below).
+        for _section, _obj in (
+            ("forgetting", self.forgetting),
+            ("quantization", self.quantization),
+            ("sagq", self.sagq),
+            ("auto_invoke", self.auto_invoke),
+        ):
+            _base = existing.get(_section)
+            _merged = dict(_base) if isinstance(_base, dict) else {}
+            _merged.update(asdict(_obj))
+            data[_section] = _merged
+
+        # Merge any keys from the last load() that are not covered by the
+        # explicit serialization above.  This includes unknown forward-compat
+        # top-level keys and nested sections whose subkeys this version does
+        # not model (e.g. a "health" dict that carries vendor-extension fields).
+        # Explicitly serialized keys always take precedence; preserved keys are
+        # only written when the slot is vacant in the output dict.
+        _raw = getattr(self, "_raw_preserved", None)
+        if _raw:
+            for _k, _v in _raw.items():
+                if _k not in data:
+                    data[_k] = _v
+
+        # embedding_signature has no typed in-memory model — it is an opaque blob
+        # written by external tooling.  Preserve the on-disk value verbatim so a
+        # load→save cycle does not erase externally written metadata.
+        if "embedding_signature" in existing:
+            data["embedding_signature"] = existing["embedding_signature"]
 
         # Atomic write: a crash mid-write must NOT leave a truncated/corrupt
         # config.json (which would make every subsequent `slm` call fail to load).
         import os as _os
-        _tmp = path.with_suffix(path.suffix + ".tmp")
-        _tmp.write_text(json.dumps(data, indent=2))
-        _os.replace(_tmp, path)
+        import tempfile as _tempfile
+
+        _fd, _tmp_name = _tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent,
+        )
+        _tmp = Path(_tmp_name)
+        try:
+            with _os.fdopen(_fd, "w", encoding="utf-8") as _handle:
+                json.dump(data, _handle, indent=2)
+                _handle.write("\n")
+                _handle.flush()
+                _os.fsync(_handle.fileno())
+            _os.chmod(_tmp, 0o600)
+            _os.replace(_tmp, path)
+            _os.chmod(path, 0o600)
+        except BaseException:
+            try:
+                _tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     @staticmethod
     def provider_presets() -> dict[str, dict[str, str]]:

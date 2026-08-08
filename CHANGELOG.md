@@ -1,146 +1,74 @@
 # Changelog
 
-All notable changes to SuperLocalMemory V3 will be documented in this file.
+All notable changes to SuperLocalMemory will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.8.14] - 2026-08-05 — Bounded scene assignment at mature scale
+## [4.0.0] - 2026-08-01 — Verifiable memory transactions
 
-### Fixed
-- Scene assignment no longer expands and compares every historical scene for
-  every materialized fact. v3.8.13 crossed a severe CPU and latency cliff on
-  mature databases because both candidate selection and anchor-embedding
-  loading scaled with the full scene population.
-- A forward-only M034 migration adds an indexed, trigger-maintained
-  `scene_fact_members` projection while retaining `fact_ids_json` for backward
-  compatibility. The existing fact-vector index now selects semantically near
-  scenes, with a bounded live-recency fallback when vector search is
-  unavailable. Profile isolation and deleted-fact handling remain enforced.
-- On the 11,519-scene production-data repro used for this repair, the complete
-  scene-assignment path measured 214 ms median and 231 ms maximum across ten
-  post-warmup runs. The migrated copy passes SQLite `quick_check`.
+Version 4.0 hardens the full lifecycle of a memory operation — admission,
+canonical commit, projection to every store, migration, backup, and erasure —
+so each step is authorized, atomic, and verifiable. Existing memories and
+configuration are preserved; no manual migration is required.
 
-## [3.8.13] - 2026-08-03 — Stale-process detection
-
-### Fixed
-- A running process can now tell when it is serving superseded code. Python
-  imports a module once, so `__version__` is frozen at process start and
-  upgrading the package underneath a long-lived `slm mcp` server changes
-  nothing for that server — it keeps serving the code it read at startup,
-  indefinitely. Nothing detected this. The stale process did not error; it
-  returned confident, plausible, wrong answers and reported a
-  `serverInfo.version` matching the code it had loaded, which is
-  self-consistent and therefore useless as a staleness signal. During the
-  3.8.12 work one machine had eighteen `slm mcp` processes alive at once
-  spanning four days and two releases, and one of them made issue #106 look
-  unfixed across two debugging sessions. (#107)
-
-  The existing process reaper does not cover this: it kills *orphans*, whose
-  parent has died. A server whose IDE is still running is never an orphan.
-
-  Staleness is now reported by `slm doctor` (as a warning, with a restart
-  hint), on the loopback `/health` payload as `version_integrity`, and in the
-  `slm mcp` startup log. The MCP path logs to stderr only — that transport is
-  JSON-RPC over stdio, where a printed warning would corrupt the protocol and
-  turn a cosmetic problem into a dead session.
-
-  Running *ahead* of the installed distribution — normal for an editable
-  checkout — is deliberately reported separately and does not warn. A warning
-  that fires on every developer machine is one everybody learns to ignore, and
-  then it goes unread on the day it matters. Every failure path resolves to
-  `unknown` rather than to a false `current`.
-
-## [3.8.12] - 2026-08-03 — Canonical learning signals, clock-independent daemon identity, remote reranker
-
-### Fixed
-- Explicit feedback now reaches the store every consumer actually reads.
-  Three tables carry a "feedback" name: `feedback_records` (memory.db, read by
-  nothing), `learning_feedback` (the pre-v3.4.22 legacy table that
-  `legacy_migration` copies forward), and `learning_signals` +
-  `learning_features` (canonical — read by the dashboard Living Brain panel,
-  the ranker-phase card, and the LightGBM retrainer). The 3.8.11 fix wrote to
-  the legacy table, so it moved a counter nothing consumes. `record_explicit`
-  now writes the legacy row and the canonical signal/feature pair in one
-  transaction, flagged `is_synthetic=1` so the LightGBM trainer's
-  `WHERE is_synthetic=0` filter excludes them from training. (#106)
-- The recall phase gate and the dashboard no longer read different tables.
-  The gate counted `learning_feedback` while every user-visible surface counted
-  `learning_signals`, so the phase a user was shown and the phase that actually
-  ranked their results could disagree without limit. Both now resolve from the
-  canonical store, with thresholds imported from `learning.ranker` rather than
-  duplicated as literals — duplicated literals are how the two surfaces drifted
-  apart in the first place. (#106)
-- `report_feedback` no longer reports success for a write that did not happen.
-  It fell back to the `feedback_records` count when the canonical read failed,
-  and that table increments on every call regardless, so total write failure was
-  indistinguishable from success. The cross-store fallback is removed; a failed
-  durable write returns `success: false` with `durable: false`. (#106)
-- The CLI no longer disowns a healthy daemon after a few minutes on WSL2.
-  psutil derives `create_time` as boot time plus start ticks and re-reads
-  `/proc/stat` `btime` on every call; WSL2 resyncs its VM clock mid-session, so
-  `btime` moves and every process's computed creation time moves with it,
-  retroactively. The recorded value stopped matching the same live PID while
-  `/health` still answered in milliseconds. Ownership now compares a
-  clock-independent process token — `boot_id` plus raw start ticks on
-  Linux/WSL2, psutil's monotonic creation time elsewhere — as exact equality,
-  with no tolerance constant left to silently expire. PID-reuse protection is
-  strengthened: a creation-time mismatch no longer condemns a process outright,
-  it falls through to cryptographic identity proof over loopback. (#104)
-- `DAEMON_UNAVAILABLE` now names one of eight specific reasons with an
-  actionable hint instead of "owned daemon is unavailable; retry later". (#104)
-- `slm setup` no longer wipes the `retrieval` config block on every re-run.
+### Changed
+- **MCP SDK 2.0.0 (fully-stateless Streamable HTTP).** Pinned `mcp==2.0.0`.
+  Replaced deleted `mcp.server.fastmcp.FastMCP` with
+  `mcp.server.mcpserver.MCPServer` (same `@tool` decorator and
+  `run(transport="stdio")`). Transport knobs
+  (`stateless_http`, `json_response`, `streamable_http_path`,
+  `transport_security`) are now kwargs to `streamable_http_app()` —
+  `_configure_mcp_transport_settings()` returns that kwargs dict.
+  **Stateless is the default** (opt out with `SLM_MCP_STATEFUL=1`). Session
+  idle-timeout and EventStore SSE resumability are unused under
+  `stateless_http=True`. Application-level `session_init` / `close_session`
+  are unchanged (orthogonal to transport sessions). SDK lowlevel already
+  registers `server/discover` — not hand-written. Product version is passed
+  as `MCPServer(version=...)` (no private `_mcp_server.version` poke).
 
 ### Added
-- Remote and custom reranker endpoints, mirroring the remote embedding support
-  added in v3.4.24. Setting `cross_encoder_backend` to `openai` (or `remote`)
-  with a `cross_encoder_endpoint` routes reranking to an OpenAI-compatible
-  `/v1/rerank` service instead of the local subprocess worker. The built-in
-  cross-encoder is English-only, silently degrading recall for non-English
-  users; this lets them bring a multilingual model. Failure degrades to fusion
-  order with `applied=False` and an error log — never a silent fall back to the
-  local English model, which would recreate the very problem this solves. The
-  new outbound HTTP surface enforces an http/https allow-list, rejects 3xx and
-  does not follow redirects, refuses credentials embedded in the URL, and
-  bounds response reads at 8 MB. (#105)
-- `cross_encoder_endpoint` is now a real config field. It was previously
-  accepted and silently ignored — the remaining half of #103.
+- A unified admission gateway resolves one authenticated actor, active profile,
+  and policy decision for every write across the CLI, MCP, HTTP, WebSocket, and
+  hook surfaces.
+- Every completed operation carries a durable receipt and a hash-verifiable
+  completion manifest spanning all representations.
+- Backups are captured as a coherent, checksum-verified set and restored
+  atomically, rolling the live set back if any store fails mid-restore.
+- **SLM-Mesh** remains the peer-coordination plane (cross-session / cross-machine
+  messages, locks, shared state, inbox/outbox) with mesh MCP tools on the
+  `full` / `power` / `mesh` profiles.
+- Documented MCP profile counts for the V4 surface: `full` 42 (default everyday),
+  `power` 54, `whole` 87 registered tools; `core` 14, `code` 24, `mesh` 8.
+- Product documentation reframes the release as V4: multi-scope memory and
+  profiles, cache/compress context optimization, Entity Explorer and skill
+  evolution, Modes A/B/C locality choices, GDPR export/erasure/retention and
+  hash-chained audit controls, and the seven-layer retrieval/operations stack.
 
-## [3.8.11] - 2026-08-02 — Learning-signal integrity and honest reranker diagnostics
+### Security
+- Outbound provider requests are validated against server-side request forgery,
+  blocking internal metadata endpoints and unresolved hosts.
+- Secrets are scrubbed from content before it is persisted or indexed, on both
+  the canonical write path and import.
+- Profile erasure removes every representation — main store, projections,
+  full-text and semantic indexes, and the context cache — and reports each count.
+- Mesh peers receive server-assigned identities bound to tenant and project;
+  production remote transport rejects plaintext, and shared state rejects
+  secret-looking values.
 
 ### Fixed
-- Explicit feedback reported through `report_feedback` now writes to the
-  canonical learning store (`learning.db`), which every learning consumer
-  reads: the adaptive-ranking phase gate, `pattern_miner`, and the dashboard
-  Living Brain. Previously it wrote only to a table nothing else read, so
-  feedback returned success and a rising counter while the ranker never
-  advanced past Phase 1 (#102).
-- `learning_feedback` now has the `channel` column `pattern_miner` has always
-  queried but no schema ever defined. Every fresh database raised
-  `no such column: channel` on the first mining pass — caught, logged at
-  debug, and silently disabled both channel-performance mining and the
-  co-retrieval mining that shared its error handler. Migration `M033`
-  backfills existing databases without touching existing rows (#102).
-- The cross-encoder reranker now reports the real reason a model load
-  failed instead of a generic timeout message, and no longer retries a
-  configuration error five times (~7.5 minutes) before giving up. An
-  unrecognized `cross_encoder_backend` value is now rejected by name;
-  SuperLocalMemory has no remote/OpenAI-compatible reranker backend, so a
-  `cross_encoder_endpoint` config key was previously accepted and silently
-  ignored (#103).
-- `slm recall` no longer crashes when a daemon response's
-  `retrieval_time_ms` or a result's `score` is present but `null` — the
-  keyword-fallback recall path now includes `retrieval_time_ms` in every
-  response, matching every other recall path's contract.
-- The MagicMock artifact guard (`.gitignore` and its CI test) now also
-  catches the directory-shaped leak (`MagicMock/mock/<id>/`) produced when
-  a mock-derived path reaches `mkdir()`, not just the file-shaped leak
-  (`<MagicMock id='...'>`) produced by `os.open()`.
+- A corrected fact is re-indexed everywhere, so semantic and keyword recall
+  reflect the new content instead of a stale copy.
+- Archived facts are excluded from every read path, including keyword search
+  and direct fetch.
+- Schema migrations refuse to run against a database written by a newer build,
+  and a migration whose dependency did not complete is held back.
+- In-memory configuration changes are preserved across a save, and unknown or
+  externally tuned settings survive a load/save cycle.
 
-### Documentation
-- `docs/auto-memory.md` no longer references `slm patterns` / `slm useful`,
-  which do not exist in V3; documents the `report_feedback` MCP tool as the
-  supported path instead.
+### Notes
+- Existing memories and configuration are preserved. No database migration is
+  required.
 
 ## [3.8.10] - 2026-07-29 — Reliable startup and MCP writes
 
@@ -2403,7 +2331,7 @@ Hardening release — correctness, stability, and security fixes.
 **Varun Pratap Bhardwaj**
 *Solution Architect*
 
-SuperLocalMemory V3 - Intelligent local memory system for AI coding assistants.
+SuperLocalMemory V4 - Intelligent local memory system for AI coding assistants.
 
 ---
 
@@ -2841,7 +2769,7 @@ We use [Semantic Versioning](https://semver.org/):
 - **MINOR:** New features (backward compatible, e.g., 2.0.0 → 2.1.0)
 - **PATCH:** Bug fixes (backward compatible, e.g., 2.1.0 → 2.1.1)
 
-**Current Version:** v3.3.0
+**Current Version:** v4.0.0 (see top of this file for the active release entry)
 **Website:** [superlocalmemory.com](https://superlocalmemory.com)
 **npm:** `npm install -g superlocalmemory`
 
@@ -2849,7 +2777,7 @@ We use [Semantic Versioning](https://semver.org/):
 
 ## License
 
-SuperLocalMemory V3 is released under the [Elastic License 2.0](LICENSE).
+Early SuperLocalMemory V3 packaging used the [Elastic License 2.0](LICENSE); the current public project license is AGPL-3.0-or-later (see LICENSE at the repository root).
 
 ---
 

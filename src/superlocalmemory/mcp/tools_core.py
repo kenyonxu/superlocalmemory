@@ -19,7 +19,9 @@ from typing import Callable
 
 from mcp.types import ToolAnnotations
 
+from superlocalmemory.core.admission import admits
 from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
+from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.infra.data_root import state_path
 from superlocalmemory.mcp._daemon_proxy import daemon_unavailable_error
 from superlocalmemory.mcp.shared import authorize_mcp_mutation
@@ -63,6 +65,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
     """Register the 13 core MCP tools on *server*."""
 
     @server.tool()
+    @admits(OperationKind.REMEMBER)
     async def remember(
         content: str, tags: str = "", project: str = "",
         importance: int = 5, session_id: str = "",
@@ -91,13 +94,25 @@ def register_core_tools(server, get_engine: Callable) -> None:
             "session_id": session_id,
         }
         effective_idempotency_key = idempotency_key
-        if not effective_idempotency_key and session_id:
-            material = (
-                f"{agent_id}\0{session_id}\0{scope or ''}\0{shared_with}\0{content}"
-            )
-            effective_idempotency_key = "mcp:" + hashlib.sha256(
-                material.encode("utf-8")
-            ).hexdigest()
+        if not effective_idempotency_key:
+            # Derive a stable key before the first attempt so every retry of
+            # the same logical call carries the same key.  When a session token
+            # is present it is included in the material to keep per-session
+            # stores separate.  Without a session token the key is derived from
+            # the remaining call parameters so repeated observations with the
+            # same content, agent, and scope are deduplicated across retries.
+            if session_id:
+                material = (
+                    f"{agent_id}\0{session_id}\0{scope or ''}\0{shared_with}\0{content}"
+                )
+                effective_idempotency_key = "mcp:" + hashlib.sha256(
+                    material.encode("utf-8")
+                ).hexdigest()
+            else:
+                material = f"{agent_id}\0{scope or ''}\0{shared_with}\0{content}"
+                effective_idempotency_key = "mcp:req:" + hashlib.sha256(
+                    material.encode("utf-8")
+                ).hexdigest()
         # Parse shared_with from comma-separated string
         _shared_list = [s.strip() for s in shared_with.split(",") if s.strip()] if shared_with else None
         # v3.5.5 WRITE-THROUGH: route through the daemon's /remember, which does
@@ -109,6 +124,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
         daemon_owned = False
         try:
             import asyncio as _asyncio
+
             from superlocalmemory.cli.daemon import daemon_request, is_daemon_running
             # is_daemon_running() and daemon_request() both use blocking urllib
             # against the same uvicorn server — run in threads so the MCP
@@ -173,6 +189,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
         try:
             import asyncio as _asyncio
+
             from superlocalmemory.mcp._daemon_proxy import choose_pool
 
             worker_meta = {
@@ -247,12 +264,14 @@ def register_core_tools(server, get_engine: Callable) -> None:
             }
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @admits(OperationKind.RECALL)
     async def recall(
         query: str, limit: int = CANONICAL_RECALL_LIMIT, agent_id: str = "mcp_client",
         session_id: str = "", fast: bool | None = None,
         include_global: bool | None = None,
         include_shared: bool | None = None,
         window: str = "",
+        as_of: str | None = None,
     ) -> dict:
         """Search memories through hybrid retrieval, RRF fusion, and reranking.
 
@@ -286,6 +305,10 @@ def register_core_tools(server, get_engine: Callable) -> None:
         range. Accepts a relative span (``"24h"``, ``"7d"``, ``"30d"``,
         ``"1y"``) or an explicit range (``"2026-07-01..2026-07-31"``). Empty =
         no time filter.
+
+        Point-in-time: optional ``as_of`` (ISO-8601 string, e.g.
+        ``"2026-01-01T00:00:00+00:00"``) pins recall to a temporal snapshot;
+        omit or pass ``None`` for current-state recall.
         """
         # v3.6.10: resolve "mcp_client" sentinel → URL path (HTTP) or env var (stdio)
         if agent_id == "mcp_client":
@@ -342,12 +365,28 @@ def register_core_tools(server, get_engine: Callable) -> None:
             #
             # V3.4.26: WorkerPool now concurrent — parallel calls no longer
             # block behind a single threading.Lock. See worker_pool.py.
+            # Phase 4b: normalize as_of at MCP boundary. Invalid → reject.
+            # Audit P2: treat empty/whitespace as_of as ABSENT (like HTTP does),
+            # not as an invalid value — only a non-blank unparseable string is
+            # rejected.
+            if as_of is not None and str(as_of).strip():
+                from superlocalmemory.retrieval.temporal_utils import normalize_as_of
+                as_of = normalize_as_of(as_of)
+                if as_of is None:
+                    return {"success": False, "error": "invalid_as_of"}
+            else:
+                as_of = None
+
+            from superlocalmemory.core.admission import enforce_read_scope
+            _incl_global, _incl_shared = enforce_read_scope(include_global, include_shared)
+
             def _recall_via_daemon_pool():
                 pool = choose_pool()
                 return pool.recall(
                     query, limit=limit, session_id=effective_sid,
-                    fast=fast, include_global=include_global,
-                    include_shared=include_shared, window=window or None,
+                    fast=fast, include_global=_incl_global,
+                    include_shared=_incl_shared, window=window or None,
+                    as_of=as_of,
                 )
 
             result = await asyncio.to_thread(
@@ -376,11 +415,12 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def search(query: str, limit: int = 10, profile_id: str = "") -> dict:
+    @admits(OperationKind.RECALL)
+    async def search(query: str, limit: int = 10) -> dict:
         """Full-text search across memories using FTS5 with BM25 ranking."""
         try:
             engine = get_engine()
-            pid = await _runtime_profile(get_engine, profile_id)
+            pid = await _runtime_profile(get_engine)
             facts = engine._db.search_facts_fts(query, pid, limit=limit)
             items = []
             for f in facts:
@@ -424,11 +464,11 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def list_recent(limit: int = 20, profile_id: str = "") -> dict:
+    async def list_recent(limit: int = 20) -> dict:
         """List most recently stored memories, newest first."""
         try:
             engine = get_engine()
-            pid = await _runtime_profile(get_engine, profile_id)
+            pid = await _runtime_profile(get_engine)
             # v3.6.12 (search-2): push the limit into the query — was loading the
             # ENTIRE facts table (deserializing every 768-float embedding) just
             # to return the top N. get_all_facts preserves created_at DESC order.
@@ -522,11 +562,12 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool()
-    async def build_graph(profile_id: str = "") -> dict:
+    @admits(OperationKind.CORRECT)
+    async def build_graph() -> dict:
         """Rebuild knowledge graph edges for all facts in the active profile."""
         try:
             engine = get_engine()
-            pid = await _runtime_profile(get_engine, profile_id)
+            pid = await _runtime_profile(get_engine)
             authorization = authorize_mcp_mutation(
                 engine,
                 "update",
@@ -550,6 +591,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool()
+    @admits(OperationKind.PROFILE_SWITCH)
     async def switch_profile(profile_id: str) -> dict:
         """Switch the active memory profile. All operations scope to this profile."""
         try:
@@ -674,19 +716,22 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("switch_profile failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def backup_status() -> dict:
         """Get backup system status, last backup time, and available backup files."""
         try:
             engine = get_engine()
             from superlocalmemory.infra.backup import BackupManager
-            bm = BackupManager(engine._config.base_dir, engine._db.db_path)
+            bm = BackupManager(
+                db_path=engine._db.db_path,
+                base_dir=engine._config.base_dir,
+            )
             return {"success": True, **bm.get_status()}
         except Exception as exc:
             logger.exception("backup_status failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def memory_used() -> dict:
         """Get memory usage breakdown by fact type and lifecycle state."""
         try:
@@ -711,7 +756,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("memory_used failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_learned_patterns(pattern_type: str = "", limit: int = 20) -> dict:
         """Get learned behavioral patterns (interests, refinements, archival habits)."""
         try:
@@ -729,6 +774,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool()
+    @admits(OperationKind.CORRECT)
     async def correct_pattern(pattern_id: str, correction: str) -> dict:
         """Correct or annotate a learned behavioral pattern to improve retrieval."""
         try:
@@ -757,6 +803,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool(annotations=ToolAnnotations(destructiveHint=True))
+    @admits(OperationKind.FORGET)
     async def delete_memory(fact_id: str, agent_id: str = "mcp_client") -> dict:
         """Delete a specific memory by exact fact ID.
 
@@ -823,6 +870,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool(annotations=ToolAnnotations(idempotentHint=True))
+    @admits(OperationKind.CORRECT)
     async def update_memory(
         fact_id: str, content: str, agent_id: str = "mcp_client",
     ) -> dict:
@@ -886,7 +934,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("update_memory failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_attribution() -> dict:
         """Get system attribution: author, version, license, and provenance metadata."""
         return {

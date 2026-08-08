@@ -112,7 +112,11 @@ def _get_broker(request: Request):
             )
             if not presented or not hmac.compare_digest(presented, secret):
                 raise HTTPException(401, detail="invalid or missing credential")
-            return broker
+        # TEST-1/SEC: When a fleet secret is configured, it is the primary auth
+        # mechanism. Loopback callers are trusted by transport and need no further
+        # proof. Only fall through to require_write_actor when NO secret is configured
+        # (install-token-only, single-machine mode).
+        return broker
 
     # Loopback is a transport property, not an identity.  Every mesh read and
     # write must prove the install/API/process capability because peer inboxes,
@@ -346,6 +350,83 @@ def send(req: SendRequest, request: Request):
     if not to_target:
         raise HTTPException(400, detail="'to' or 'to_peer' required")
     profile = _active_profile()
+
+    # 3a-1 + 3a-2: Apply signature verification and admission gate for non-loopback.
+    client_host = request.client.host if request.client else "127.0.0.1"
+    from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
+    _is_lb = _is_loopback_host(client_host)
+
+    if not _is_lb:
+        from superlocalmemory.mesh.broker_security import (
+            check_mesh_message_signature,
+            is_strict_identity,
+        )
+        config = getattr(request.app.state, "config", None)
+        strict = is_strict_identity(config)
+        fleet_secret = getattr(broker, "_shared_secret", None)
+
+        # SEC-4 (hardened): identity resolution per mode.
+        #  - COMPAT (default): fleet secret verifies (or unsigned legacy accepted).
+        #  - STRICT: the sender MUST be a registered peer with its own per-peer key.
+        #    There is NO fleet-secret fallback in strict mode — unregistered
+        #    from_peer, a NULL peer_key, or a DB error all FAIL CLOSED. (The old
+        #    fleet fallback was an impersonation escape hatch: any fleet-secret
+        #    holder could claim an unregistered/legacy from_peer.)
+        verify_secret = fleet_secret
+        if strict:
+            if not req.from_peer:
+                raise HTTPException(401, detail="strict identity: from_peer required")
+            import sqlite3 as _sqlite3
+            try:
+                _conn = _sqlite3.connect(broker._db_path, timeout=3)
+                _conn.row_factory = _sqlite3.Row
+                _row = _conn.execute(
+                    "SELECT peer_key FROM mesh_peers WHERE peer_id=? LIMIT 1",
+                    (req.from_peer,),
+                ).fetchone()
+                _conn.close()
+            except _sqlite3.Error:
+                raise HTTPException(503, detail="strict identity: peer key lookup failed")
+            if not _row or not _row["peer_key"]:
+                raise HTTPException(
+                    401,
+                    detail="strict identity: from_peer is not a registered peer with a per-peer key",
+                )
+            verify_secret = str(_row["peer_key"])
+
+        sig_err = check_mesh_message_signature(
+            verify_secret,
+            req.from_peer,
+            to_target,
+            req.content,
+            request.headers.get("x-mesh-sig"),
+            request.headers.get("x-mesh-nonce"),
+            request.headers.get("x-mesh-ts"),
+            is_loopback=False,
+            strict=strict,
+        )
+        if sig_err is not None:
+            raise HTTPException(401, detail=sig_err.get("error", "signature error"))
+
+        # Admission gate parity (closes Wave-1 P1 bypass for inbound remote send).
+        try:
+            from superlocalmemory.core.admission import (
+                AdmissionDenied,
+                admit,
+                resolve_actor,
+            )
+            from superlocalmemory.core.actor_context import Transport
+            from superlocalmemory.core.operation_request import OperationKind
+        except ImportError:
+            AdmissionDenied = None  # type: ignore[assignment,misc]
+
+        if AdmissionDenied is not None:
+            try:
+                actor = resolve_actor(Transport.HTTP, client_host=client_host)
+                admit(OperationKind.MESH_SEND, actor)
+            except AdmissionDenied as exc:
+                raise HTTPException(403, detail=str(exc))
+
     # This sync FastAPI route already runs in the worker thread pool, so the
     # broker's SQLite retries and optional remote HTTP delivery cannot block
     # the daemon event loop.

@@ -1,5 +1,5 @@
 # Getting Started
-> SuperLocalMemory V3 Documentation
+> SuperLocalMemory V4 Documentation
 > https://superlocalmemory.com | Part of Qualixar
 
 Install the CLI, activate the product explicitly, and verify one store/recall
@@ -37,6 +37,10 @@ cross-client behavior for every product that implements MCP.
 ---
 
 ## Prerequisites
+
+> **Supported V4 platforms:** Apple Silicon macOS, 64-bit Windows, and 64-bit Linux.
+> Intel Mac and 32-bit Windows are not supported by the patched cryptographic
+> runtime required for V4.
 
 - **Node.js** 18 or later
 - **Python** 3.11 or later — macOS ships 3.9; use `brew install python@3.11` or a version manager.
@@ -176,4 +180,4 @@ For the full parameter set, see [CLI Reference → Bounded Loops](cli-reference.
 
 ---
 
-*SuperLocalMemory V3 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*
+*SuperLocalMemory V4 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*

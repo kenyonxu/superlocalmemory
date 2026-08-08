@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from superlocalmemory.core.hooks import HookRegistry
     from superlocalmemory.storage.database import DatabaseManager
 
+from superlocalmemory.storage.erasure_fence import is_erasing
 from superlocalmemory.storage.models import (
     AtomicFact,
     FactType,
@@ -269,6 +270,111 @@ def _upsert_fact_vectors(fact, profile_id, ann_index, vector_store, embedder=Non
             profile_id=profile_id,
             embedding=fact.embedding,
         )
+
+
+class _TombstoneReadError(Exception):
+    pass
+
+
+def _fact_is_tombstoned(db: DatabaseManager, profile_id: str, fact_id: str) -> bool:
+    try:
+        rows = db.execute(
+            "SELECT 1 FROM projection_tombstones "
+            "WHERE profile_id = ? AND fact_id = ? LIMIT 1",
+            (profile_id, fact_id),
+        )
+        return bool(rows)
+    except Exception as exc:
+        raise _TombstoneReadError(
+            f"tombstone check failed for {fact_id[:16]}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def _residue_table_exists(db: DatabaseManager, name: str) -> bool:
+    try:
+        return bool(db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+            (name,),
+        ))
+    except Exception:
+        # Cannot determine existence: treat as present so the residue probe runs
+        # and fails closed rather than silently reporting "no residue".
+        return True
+
+
+def _read_tombstoned_with_retry(
+    db: DatabaseManager, profile_id: str, fact_id: str, attempts: int = 3,
+) -> bool:
+    last: _TombstoneReadError | None = None
+    for _ in range(max(1, attempts)):
+        try:
+            return _fact_is_tombstoned(db, profile_id, fact_id)
+        except _TombstoneReadError as exc:
+            last = exc
+    raise last if last is not None else _TombstoneReadError("tombstone read failed")
+
+
+def _vector_residue_present(db: DatabaseManager, fact_id: str) -> bool:
+    uncertain = False
+    for table in ("embedding_metadata", "vector_row_map"):
+        if not _residue_table_exists(db, table):
+            continue
+        try:
+            if db.execute(
+                f"SELECT 1 FROM {table} WHERE fact_id = ? LIMIT 1", (fact_id,)
+            ):
+                return True
+        except Exception:
+            uncertain = True
+    return uncertain
+
+
+def _drop_resurrected_facts(
+    db: DatabaseManager,
+    profile_id: str,
+    stored_ids: list[str],
+    vector_store: Any,
+    ann_index: Any,
+    retrieval_engine: Any,
+) -> list[str]:
+    survivors: list[str] = []
+    for fid in stored_ids:
+        try:
+            tombstoned = _read_tombstoned_with_retry(db, profile_id, fid)
+        except _TombstoneReadError as exc:
+            if is_erasing(profile_id, fid):
+                # Tombstone unreadable but the in-process fence confirms an
+                # erasure is in flight — clean up rather than leave residue.
+                tombstoned = True
+            else:
+                logger.error(
+                    "Tombstone read error in drop_resurrected for %s, deferring: %s",
+                    fid[:16], exc,
+                )
+                continue
+        if not tombstoned:
+            survivors.append(fid)
+            continue
+        vec_store_ok = vector_store is not None and getattr(vector_store, "available", False)
+        try:
+            if vec_store_ok:
+                vector_store.delete(fid)
+            if ann_index is not None and hasattr(ann_index, "remove"):
+                ann_index.remove(fid)
+            bm25 = getattr(retrieval_engine, "_bm25", None) if retrieval_engine else None
+            if bm25 is not None and hasattr(bm25, "remove_fact"):
+                bm25.remove_fact(fid)
+            db.delete_bm25_tokens_for_fact(fid)
+            db.delete_fact(fid, profile_id=profile_id)
+        except Exception as exc:
+            logger.warning("resurrection undo failed for %s: %s", fid[:16], exc)
+        if _vector_residue_present(db, fid):
+            logger.error(
+                "resurrection undo incomplete for %s: vector residue remains "
+                "(vec_store_available=%s); tombstone preserved",
+                fid[:16], vec_store_ok,
+            )
+    return survivors
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +639,17 @@ def run_store(
 
     stored_ids: list[str] = []
     for fact in facts:
+        try:
+            if _fact_is_tombstoned(db, profile_id, fact.fact_id):
+                continue
+        except _TombstoneReadError as _tse:
+            logger.error(
+                "Tombstone read error for %s, deferring ingestion: %s",
+                fact.fact_id[:16], _tse,
+            )
+            continue
+        if is_erasing(profile_id, fact.fact_id):
+            continue
         fact = enrich_fact(
             fact, record, profile_id,
             embedder=embedder,
@@ -852,6 +969,10 @@ def run_store(
             except Exception:
                 provenance_complete = False
 
+    stored_ids = _drop_resurrected_facts(
+        db, profile_id, stored_ids, vector_store, ann_index, retrieval_engine,
+    )
+
     logger.info("Stored %d facts (session=%s)", len(stored_ids), session_id)
 
     if derivation_report is not None:
@@ -981,6 +1102,25 @@ def run_store_fact_direct(
 # run_close_session  (was MemoryEngine.close_session)
 # ---------------------------------------------------------------------------
 
+def _session_already_summarised(
+    db: DatabaseManager,
+    profile_id: str,
+    session_id: str,
+) -> bool:
+    """True if close_session already wrote temporal summaries for this session."""
+    if not session_id:
+        return False
+    try:
+        rows = db.execute(
+            "SELECT 1 FROM temporal_events "
+            "WHERE profile_id = ? AND description LIKE ? LIMIT 1",
+            (profile_id, f"Session {session_id}:%"),
+        )
+        return bool(rows)
+    except Exception:
+        return False
+
+
 def run_close_session(
     session_id: str,
     profile_id: str,
@@ -993,9 +1133,19 @@ def run_close_session(
     with session scope. Enables temporal queries like "What happened
     in session 3?"
 
+    Idempotent: if temporal summaries for this session already exist,
+    returns 0 without writing duplicates.
+
     Returns number of session summary events created.
     """
     from superlocalmemory.storage.models import TemporalEvent
+
+    if not session_id:
+        return 0
+
+    if _session_already_summarised(db, profile_id, session_id):
+        logger.debug("Session %s already summarised — skip close", session_id)
+        return 0
 
     facts = db.get_all_facts(profile_id)
     session_facts = [f for f in facts if f.session_id == session_id]

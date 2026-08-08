@@ -1,0 +1,21 @@
+{
+  "environment": {
+    "package": "superlocalmemory",
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "python": "3.13.13",
+    "timestamp": "2026-08-08T08:38:19.919138+00:00",
+    "version": "4.0.0"
+  },
+  "result": {
+    "extra": {},
+    "failures": [],
+    "guarantee": "superseded facts kept but demoted 0.25x and re-ranked below valid",
+    "held": 200,
+    "method": "Real invalidate_fact_temporal + TemporalValidityFilter(0.25) over the real get_invalidated_fact_ids query.",
+    "metric_name": "correct-demotion rate",
+    "metric_value": 1.0,
+    "name": "exp6a_superseded_demotion",
+    "passed": true,
+    "trials": 200
+  }
+}

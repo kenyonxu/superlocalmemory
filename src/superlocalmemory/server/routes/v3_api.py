@@ -134,7 +134,10 @@ async def dashboard(request: Request):
             except Exception:
                 pass
 
-        return {
+        from superlocalmemory.core.modes import dashboard_mode_fields
+
+        # Mode record is the single source of truth for locality claims (F-03).
+        payload = {
             "mode": config.mode.value,
             "mode_name": {"a": "Local Guardian", "b": "Smart Local", "c": "Full Power"}.get(config.mode.value, "Unknown"),
             "provider": config.llm.provider or "none",
@@ -145,6 +148,8 @@ async def dashboard(request: Request):
             "base_dir": str(config.base_dir),
             "version": SLM_VERSION,
         }
+        payload.update(dashboard_mode_fields(config.mode))
+        return payload
     except Exception as e:
         return _internal_error()
 
@@ -589,41 +594,45 @@ def _validate_provider_url(url: str, client_host: str) -> str | None:
     are allowed for it. A NON-loopback caller may not make the server fetch
     private/loopback/link-local/reserved targets — that is the SSRF abuse.
     """
-    from urllib.parse import urlparse
-    import ipaddress
-    import socket
-    p = urlparse(url)
-    if p.scheme not in ("http", "https"):
-        return "Only http/https endpoints are supported"
-    host = p.hostname or ""
-    if host.lower() in ("169.254.169.254", "metadata.google.internal", "metadata"):
-        return "Cloud metadata endpoints are not allowed"
+    from superlocalmemory.server.egress_policy import (
+        EgressActor,
+        EgressVerdict,
+        validate_egress_url,
+    )
     from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
 
-    if _is_loopback_host(client_host):
-        return None  # local dashboard may target its own local/LAN endpoints
+    is_local = _is_loopback_host(client_host)
     # SLM_REMOTE residue (#40): an allowlisted LAN dashboard is trusted exactly
     # like the loopback one and may probe its own LAN LLM endpoint. This does
     # NOT relax the SSRF guard for arbitrary remote callers —
     # is_lan_client_allowed is False unless remote mode is ON *and* the client
     # IP is in SLM_MCP_ALLOWED_HOSTS.
+    is_lan = False
     try:
         from superlocalmemory.core.remote_mode import is_lan_client_allowed
-        if is_lan_client_allowed(client_host):
-            return None
+        is_lan = bool(is_lan_client_allowed(client_host))
     except Exception:  # pragma: no cover — defensive, never weaken on import error
-        pass
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        try:
-            ip = ipaddress.ip_address(socket.gethostbyname(host))
-        except Exception:
-            return None  # unresolvable — let the HTTP client fail normally
-    if (ip.is_private or ip.is_loopback or ip.is_link_local
-            or ip.is_reserved or ip.is_multicast):
-        return "Internal/private endpoints are not allowed from a remote client"
-    return None
+        is_lan = False
+
+    result = validate_egress_url(
+        url, EgressActor(is_local=is_local, is_lan=is_lan)
+    )
+
+    if result.verdict is EgressVerdict.ALLOW:
+        return None
+    if result.verdict is EgressVerdict.DENY_SCHEME:
+        return "Only http/https endpoints are supported"
+    if result.verdict is EgressVerdict.DENY_METADATA:
+        return "Cloud metadata endpoints are not allowed"
+    if result.verdict in (
+        EgressVerdict.DENY_CREDENTIALS,
+        EgressVerdict.DENY_FRAGMENT,
+    ):
+        return "Endpoint URL must not embed credentials or fragments"
+    if result.verdict is EgressVerdict.DENY_DNS_FAILURE:
+        return "Endpoint host could not be resolved"
+    # DENY_PRIVATE / DENY_MIXED_DNS / DENY_HOST
+    return "Internal/private endpoints are not allowed from a remote client"
 
 
 @router.post("/provider/test")
@@ -820,6 +829,17 @@ async def recall_trace(request: Request):
         query = body.get("query", "")
         limit = body.get("limit", 10)
         window = body.get("window", "") or ""
+        as_of_raw = (body.get("as_of", "") or "").strip()
+
+        # Normalize as_of at HTTP boundary. Invalid → 400.
+        _as_of: str | None = None
+        if as_of_raw:
+            from superlocalmemory.retrieval.temporal_utils import normalize_as_of
+            _as_of = normalize_as_of(as_of_raw)
+            if _as_of is None:
+                return JSONResponse(
+                    {"error": "invalid_as_of", "raw": as_of_raw}, status_code=400
+                )
 
         # Use daemon engine — already loaded, shares warm page cache.
         # run_in_executor keeps event loop alive so browser doesn't abort.
@@ -832,7 +852,10 @@ async def recall_trace(request: Request):
         t0 = _time.monotonic()
         response = await loop.run_in_executor(
             None,
-            lambda: engine.recall(query, limit=limit, fast=False, window=window or None),
+            lambda: engine.recall(
+                query, limit=limit, fast=False,
+                window=window or None, as_of=_as_of,
+            ),
         )
         elapsed_ms = round((_time.monotonic() - t0) * 1000, 1)
 

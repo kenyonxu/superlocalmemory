@@ -151,14 +151,26 @@ def build_immediate_admission_handler(
         from datetime import UTC, datetime
 
         from superlocalmemory.core.ingest_gate import apply_ingest_gate
+        from superlocalmemory.core.ingest_policy import scrub_secrets_for_ingest
         from superlocalmemory.storage.models import AtomicFact, FactType, MemoryRecord
+
+        # Secrets are ALWAYS scrubbed at this shared queryable-write chokepoint,
+        # which both the canonical HTTP /remember runtime and the canonical_store
+        # Python/CLI path funnel through. A credential must never persist verbatim
+        # in any durable representation (memory rows, fact rows), regardless of
+        # ingress surface. The scrub is idempotent: content already scrubbed by an
+        # upstream caller is returned unchanged.
+        scrub = scrub_secrets_for_ingest(request.content)
+        content = scrub.content
+        if scrub.redacted:
+            logger.info("secret scrub: redacted credential material on queryable write")
 
         metadata = dict(request.metadata)
         metadata["ingestion_operation_id"] = operation_id
         if request.session_id:
             metadata.setdefault("session_id", request.session_id)
         gate = apply_ingest_gate(
-            request.content,
+            content,
             max_verbatim_chars=max_verbatim_chars,
             max_ingest_bytes=max_ingest_bytes,
         )
@@ -225,7 +237,7 @@ def build_immediate_admission_handler(
             record = MemoryRecord(
                 memory_id=memory_id,
                 profile_id=request.profile_id,
-                content=request.content,
+                content=content,
                 session_id=request.session_id,
                 session_date=observation_date,
                 speaker=request.speaker,
@@ -302,6 +314,15 @@ def canonical_store(
             error=ValueError("content rejected by local admission policy"),
         )
         return []
+    # Secrets are ALWAYS scrubbed pre-admission (not opt-in): a credential must
+    # never persist verbatim in any durable or queryable representation
+    # (facts, receipts, journal, exports, backups, mesh).
+    from superlocalmemory.core.ingest_policy import scrub_secrets_for_ingest
+
+    _secret_scrub = scrub_secrets_for_ingest(content)
+    if _secret_scrub.redacted:
+        content = _secret_scrub.content
+        logger.info("secret scrub: redacted credential material on ingest")
     # C4: opt-in PII redaction. When enabled (config.pii_redaction or
     # SLM_PII_REDACTION), scrub personal identifiers BEFORE the content is
     # extracted, embedded, or persisted — nothing sensitive ever reaches disk.
@@ -426,13 +447,54 @@ def build_engine_ingestion_command(engine: MemoryEngine) -> IngestionCommand:
     )
 
     def validate_admission(request: IngestionRequest) -> None:
-        """Apply trust policy before the journal or canonical transaction."""
+        """Apply trust policy before the journal or canonical transaction.
+
+        V4 Phase 4 addition: evaluate the OperationPolicyRegistry AFTER the
+        trust hook and BEFORE the coordinator transaction. This evaluation is
+        CPU-only (dict lookup + frozenset operations, no I/O) and runs in the
+        validate_admission slot which is already outside the SQLite writer.
+
+        The default registry allows every REMEMBER from an OWNER via the
+        INTERNAL transport in local mode — zero new rejections on the current
+        happy path. A denial raises ValueError, which propagates through
+        IngestionCommand.submit() to the caller exactly as existing slot
+        violations do.
+        """
         engine._hooks.run_pre("store", {
             "operation": "store",
             "agent_id": request.trusted_actor_id,
             "profile_id": request.profile_id,
             "content_preview": request.content[:100],
         })
+
+        # Phase 4: additive policy check — runs after the trust hook.
+        # Imports are lazy to avoid import-order coupling at module init.
+        from superlocalmemory.core.actor_context import ActorContext, ActorRole, Transport
+        from superlocalmemory.core.operation_policy_registry import _DEFAULT_REGISTRY
+        from superlocalmemory.core.operation_request import OperationKind
+
+        # A missing actor is rejected by the existing admission check with its
+        # canonical message; the policy layer is strictly additive and must not
+        # preempt that rejection, so it only evaluates when an actor is present.
+        if request.trusted_actor_id:
+            _actor = ActorContext(
+                # trusted_actor_id is already server-validated by the caller;
+                # it is NEVER taken from the request body here.
+                principal_id=request.trusted_actor_id,
+                roles=frozenset({ActorRole.OWNER}),
+                active_profile_id=request.profile_id,
+                transport=Transport.INTERNAL,
+                client_host="",   # in-process: always local
+            )
+            _decision = _DEFAULT_REGISTRY.evaluate(
+                OperationKind.REMEMBER,
+                _actor,
+                "local",  # internal Python-API path is always local/single-user
+            )
+            if not _decision.allowed:
+                raise ValueError(
+                    f"operation policy denied REMEMBER: {_decision.reason}"
+                )
 
     def resume_checkpoint(operation: IngestionOperation) -> MaterializationResult:
         """Repair only stages whose writes have an idempotent natural key."""

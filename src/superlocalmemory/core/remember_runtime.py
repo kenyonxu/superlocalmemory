@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import threading
 import uuid
@@ -36,6 +37,14 @@ from superlocalmemory.core.remember_admission import (
     RememberReceipt,
     RememberService,
 )
+from superlocalmemory.core.transactions.concrete_owners import (
+    REQUIRED_ADMISSION_OWNERS,
+)
+from superlocalmemory.core.transactions.obligations import ObligationLedger
+from superlocalmemory.core.transactions.owners import (
+    ObligationKind,
+    OperationContext,
+)
 from superlocalmemory.storage.admission_codec import MachineKeyCommandCodec
 from superlocalmemory.storage.admission_journal import (
     Actor,
@@ -47,6 +56,11 @@ from superlocalmemory.storage.admission_journal import (
     TerminalAdmissionError,
 )
 from superlocalmemory.storage.database import DatabaseManager
+from superlocalmemory.storage.generation_fence import (
+    admitted_epoch,
+    clear_admission_epoch,
+    record_admission_epoch,
+)
 from superlocalmemory.storage.write_coordinator import (
     CommandConflictError,
     CommandKind,
@@ -64,9 +78,31 @@ Materializer = Callable[
     list[str] | tuple[str, ...] | MaterializationResult,
 ]
 
+logger = logging.getLogger("superlocalmemory.core.remember_runtime")
+_OBLIGATION_LEDGER = ObligationLedger()
+
+
+def _obligation_schema_present(conn) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='projection_obligations'"
+    ).fetchone()
+    if row is None:
+        return False
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(projection_obligations)")}
+    return "context_digest" in columns
+
 
 class CanonicalRememberUnavailable(RuntimeError):
     """The daemon cannot accept a bounded canonical remember request."""
+
+
+class DaemonAlreadyServing(RuntimeError):
+    """A healthy SLM daemon is already serving; this instance should exit 0.
+
+    Raised by ``CanonicalRememberRuntime.start()`` (H2) when the writer claim
+    fails AND a health-verified daemon is responding on the configured port.
+    Caught by ``unified_daemon.py`` lifespan → ``sys.exit(0)``.
+    """
 
 
 class CanonicalMutationConflict(ValueError):
@@ -100,6 +136,54 @@ def validate_deterministic_admission(
         max_ingest_bytes=max_ingest_bytes,
     ).rejected:
         raise AdmissionPayloadError("content rejected by deterministic ingest policy")
+
+
+# ---------------------------------------------------------------------------
+# H2 — graceful single-instance helpers (keep all I/O in stdlib; no imports
+# from the server layer to avoid circular dependencies with core).
+# ---------------------------------------------------------------------------
+
+def _get_daemon_port() -> int:
+    """Return the HTTP port this daemon instance listens on.
+
+    Reads ``SLM_DAEMON_PORT`` from the environment (set by ``unified_daemon``
+    at startup) and falls back to the conventional default of 8765.
+    """
+    import os
+
+    raw = os.environ.get("SLM_DAEMON_PORT", "")
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return 8765
+
+
+def _slm_health_check(port: int) -> bool:
+    """Return True iff a healthy SLM daemon responds on *port* within 2 s."""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/health", timeout=2
+        ) as resp:
+            return int(resp.status) == 200
+    except Exception:
+        return False
+
+
+def _boot_self_heal(data_dir: Path) -> None:
+    """Run the H1 stale-artifact reaper.  Fail-soft — never blocks startup."""
+    try:
+        from superlocalmemory.infra.self_heal import reap_stale_artifacts
+
+        report = reap_stale_artifacts(data_dir)
+        if report["removed"]:
+            logger.info(
+                "remember_runtime self-heal: removed %d stale artifact(s)",
+                len(report["removed"]),
+            )
+    except Exception as exc:
+        logger.debug("remember_runtime self-heal failed (non-fatal): %s", exc)
 
 
 class _CoordinatorAdapter:
@@ -152,6 +236,7 @@ class CanonicalRememberRuntime:
         self._writer = writer
         self._materialize = materialize or _materialization_is_not_available
         self._binding_lock = threading.RLock()
+        self._generation = 0
         self.coordinator = WriteCoordinator(db.db_path, owner_id=owner_id)
         self.journal = AdmissionJournal(
             journal_path,
@@ -159,6 +244,7 @@ class CanonicalRememberRuntime:
         )
         self._service = RememberService(self.journal, _CoordinatorAdapter(self.coordinator))
         self._started = False
+        self._obligation_schema_ok: bool | None = None
 
     @classmethod
     def for_engine(cls, engine: Any) -> "CanonicalRememberRuntime":
@@ -181,13 +267,72 @@ class CanonicalRememberRuntime:
         )
 
     def start(self) -> None:
-        """Claim writer ownership, install the handler, then recover journal work."""
+        """Claim writer ownership, install the handler, then recover journal work.
+
+        H2 / G-01+G-05 — bounded graceful single-instance:
+
+        When ``claim_ownership()`` fails (another process holds the portalocker
+        flock), we enter a bounded retry loop (≤ 5 attempts, ~1 s between each,
+        total ≤ ~6 s) rather than immediately crashing or silently giving up.
+        This handles the race between a healthy daemon's HTTP-server bind and our
+        health check — the holder may be alive but not yet responding.
+
+        Per-iteration logic:
+          (a) ``claim_ownership()`` succeeds → break and proceed (holder died).
+          (b) ``_slm_health_check(port)`` is True → raise ``DaemonAlreadyServing``
+              (caught by ``unified_daemon.py`` lifespan → ``sys.exit(0)``).
+          (c) First iteration only → run ``_boot_self_heal()`` to clear
+              provably-dead metadata artifacts, then continue.
+
+        After the loop exhausts all attempts without claiming the lock, we know
+        a live process is holding the portalocker flock.  Raise
+        ``DaemonAlreadyServing`` (NOT ``CanonicalRememberUnavailable``) so the
+        daemon exits cleanly rather than crashing with a traceback.
+
+        INVARIANT: ``claim_ownership()`` (portalocker OS flock) is the sole
+        writer-integrity gate.  We never bypass it, never signal or kill a live
+        process.
+        """
+        import time as _time
+
         if self._started:
             return
         if not self.coordinator.claim_ownership():
-            raise CanonicalRememberUnavailable(
-                "another daemon owns the canonical memory writer"
-            )
+            port = _get_daemon_port()
+            _self_heal_done = False
+            _MAX_ATTEMPTS = 5
+
+            for _attempt in range(_MAX_ATTEMPTS):
+                if _attempt > 0:
+                    _time.sleep(1.0)
+
+                # (a) Re-try the claim — holder may have died in the gap.
+                if self.coordinator.claim_ownership():
+                    break  # claimed → proceed to handler registration
+
+                # (b) Health-verified owner → exit gracefully.
+                if _slm_health_check(port):
+                    raise DaemonAlreadyServing(
+                        f"another healthy SLM daemon is already serving"
+                        f" on port {port}"
+                    )
+
+                # (c) First iteration only: clear provably-dead stale artifacts.
+                if not _self_heal_done:
+                    logger.info(
+                        "remember_runtime: writer claim failed, no healthy"
+                        " daemon on port %d; running self-heal (attempt %d/%d)",
+                        port, _attempt + 1, _MAX_ATTEMPTS,
+                    )
+                    _boot_self_heal(self.coordinator.db_path.parent)
+                    _self_heal_done = True
+            else:
+                # Loop exhausted: a live process holds the portalocker flock.
+                # Exit cleanly — never crash with a traceback.
+                raise DaemonAlreadyServing(
+                    f"another SLM daemon holds the writer lock after"
+                    f" {_MAX_ATTEMPTS} attempts on port {port}"
+                )
         try:
             self.coordinator.register_handler(CommandKind.ADMISSION, self._handle_admission)
             self.coordinator.register_handler(CommandKind.DELETE_FACT, self._handle_mutation)
@@ -241,11 +386,13 @@ class CanonicalRememberRuntime:
             self._db = db
             self._profile_id = profile_id
             self._writer = writer
+            self._generation += 1
         try:
             self.replay_pending()
         except BaseException:
             with self._binding_lock:
                 self._db, self._profile_id, self._writer = previous
+                self._generation -= 1
             raise
 
     def remember(
@@ -256,6 +403,9 @@ class CanonicalRememberRuntime:
             raise CanonicalRememberUnavailable("canonical remember writer is not ready")
         if deadline_ms < 1 or deadline_ms > 2_000:
             raise ValueError("deadline_ms must be between 1 and 2000")
+        with self._binding_lock:
+            admitted = self._generation
+        record_admission_epoch(request.profile_id, request.idempotency_key, admitted)
         try:
             return self._service.remember(request, actor, deadline_ms=deadline_ms)
         except (
@@ -266,6 +416,8 @@ class CanonicalRememberRuntime:
             raise CanonicalRememberUnavailable(
                 "canonical remember is temporarily unavailable"
             ) from exc
+        finally:
+            clear_admission_epoch(request.profile_id, request.idempotency_key)
 
     def replay_pending(self) -> int:
         """Finish prepared/dispatched journal entries before publishing readiness."""
@@ -442,6 +594,9 @@ class CanonicalRememberRuntime:
             db = self._db
             if request.profile_id != self._profile_id:
                 raise ValueError("admission command targets a different profile")
+            expected = admitted_epoch(request.profile_id, request.idempotency_key)
+            if expected is not None and expected != self._generation:
+                raise ValueError("admission command epoch is stale")
             ingestion_request = IngestionRequest(
                 content=request.content,
                 profile_id=request.profile_id,
@@ -469,6 +624,7 @@ class CanonicalRememberRuntime:
                     receipt = command_impl.submit(ingestion_request)
                 except IngestionRejectedError as exc:
                     raise CommandRejectedError() from exc
+                self._record_projection_obligations(conn, request, receipt)
         return WriteResult.from_receipt(
             command,
             {
@@ -479,6 +635,47 @@ class CanonicalRememberRuntime:
                 "status": "queryable",
                 "materialization_state": receipt.state.value,
             },
+        )
+
+    def _record_projection_obligations(self, conn, request, receipt) -> None:
+        """Record per-owner APPLY obligations for the admitted facts.
+
+        Fail-closed: raises RuntimeError if M033 is absent.  This is
+        intentional — a successful remember() without a corresponding
+        obligation record would make projection audits permanently incomplete.
+        Back-compat: installs without M033 must run migrations first.
+
+        Schema negative cache: ``_obligation_schema_ok`` is re-checked on
+        every call while False so that hot migrations (M033 applied while the
+        runtime is running) are detected without a restart.  Once the schema
+        is confirmed present the value is cached True for the lifetime of the
+        runtime instance.
+
+        Cross-process erasure fence: distributed, multi-writer erasure fencing
+        is intentionally SCOPED OUT of V4.  Single-process SQLite WAL provides
+        adequate isolation for the current deployment model.  See
+        docs/architecture/erasure-fence-deferred.md for the deferred design.
+        """
+        fact_ids = tuple(getattr(receipt, "fact_ids", ()) or ())
+        if not fact_ids:
+            return
+        # Re-check while False so a hot M033 migration is picked up without
+        # requiring a daemon restart.  Cache True permanently once confirmed.
+        if not self._obligation_schema_ok:
+            self._obligation_schema_ok = _obligation_schema_present(conn)
+        if not self._obligation_schema_ok:
+            raise RuntimeError(
+                "projection_obligations schema is absent; "
+                "run migrations (M033) before ingesting facts"
+            )
+        context = OperationContext(
+            operation_id=receipt.operation_id,
+            profile_id=request.profile_id,
+            subject_id=receipt.operation_id,
+            fact_ids=fact_ids,
+        )
+        _OBLIGATION_LEDGER.record_many(
+            conn, context, REQUIRED_ADMISSION_OWNERS, ObligationKind.APPLY,
         )
 
     def _handle_mutation(self, conn, capability, command: WriteCommand) -> WriteResult:
@@ -708,5 +905,6 @@ def _thaw_command_value(value: Any) -> Any:
 __all__ = [
     "CanonicalRememberRuntime",
     "CanonicalRememberUnavailable",
+    "DaemonAlreadyServing",
     "validate_deterministic_admission",
 ]

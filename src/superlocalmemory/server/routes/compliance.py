@@ -8,16 +8,16 @@ Routes: /api/compliance/status, /api/compliance/audit,
         /api/compliance/retention-policy
 Uses V3 compliance modules: ABACEngine, AuditChain, RetentionEngine.
 """
-import json
 import logging
 from typing import Optional
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
-from .helpers import get_active_profile, get_engine_lazy, MEMORY_DIR, DB_PATH
 from superlocalmemory.server.route_mutations import authorize_route_mutation
 from superlocalmemory.storage.memory_write import memory_write
+
+from .helpers import DB_PATH, MEMORY_DIR, get_active_profile, get_engine_lazy
 
 logger = logging.getLogger("superlocalmemory.routes.compliance")
 router = APIRouter()
@@ -31,10 +31,10 @@ AUDIT_DB = MEMORY_DIR / "audit_chain.db"
 # Feature detection
 COMPLIANCE_AVAILABLE = False
 try:
-    from superlocalmemory.compliance.audit import AuditChain
-    from superlocalmemory.compliance.retention import RetentionEngine
     from superlocalmemory.compliance.abac import ABACEngine
+    from superlocalmemory.compliance.audit import AuditChain
     from superlocalmemory.compliance.gdpr import GDPRCompliance
+    from superlocalmemory.compliance.retention import RetentionEngine
     COMPLIANCE_AVAILABLE = True
 except ImportError:
     logger.info("V3 compliance engine not available")
@@ -239,8 +239,8 @@ async def gdpr_export(request: Request):
     # remote uncredentialed fails closed) AND require MANAGE — in company mode
     # a session cookie flows on navigation, so a non-admin user is still denied;
     # the machine owner keeps MANAGE.
-    from superlocalmemory.server.write_identity import require_http_mutation_actor
     from superlocalmemory.server.rbac_enforce import require_manage
+    from superlocalmemory.server.write_identity import require_http_mutation_actor
     require_http_mutation_actor(request, getattr(request.app.state, "daemon_descriptor", None),
                                 actor_kind="gdpr-export")
     require_manage(request)
@@ -299,9 +299,155 @@ async def gdpr_erase(request: Request, data: dict = {}):
             source_agent_id="http-gdpr-erase",
             profile_id=profile,
         )
-        result = GDPRCompliance(engine._db).forget_profile(profile)
+        result = GDPRCompliance(engine._db, engine=engine).forget_profile(profile)
         authorization.complete()
-        return {"success": True, "active_profile": profile, **(result or {})}
+        result = result or {}
+        failure_markers = (
+            "vector_store_failures",
+            "audit_completion_failed",
+            "audit_request_failed",
+            "receipt_persist_failed",
+        )
+        success = not any(result.get(marker) for marker in failure_markers)
+        return {"success": success, "active_profile": profile, **result}
     except Exception:
         logger.exception("gdpr_erase error")
         return {"success": False, "error": "Internal server error"}
+
+
+# ── GDPR Art. 17 — Entity-level Erasure ──────────────────────────────────────
+
+@router.post("/api/compliance/gdpr/erase-entity")
+async def gdpr_erase_entity(request: Request, data: dict = {}):
+    """Erase all facts mentioning a named entity for the active profile.
+
+    IRREVERSIBLE. Body must contain an ``entity_name`` and a ``confirm``
+    field that exactly matches ``entity_name`` — same confirm-guard pattern
+    as profile erasure. Mutation-authorized; requires MANAGE permission.
+    """
+    if not COMPLIANCE_AVAILABLE:
+        return {"success": False, "error": "Compliance engine not available"}
+    try:
+        engine = get_engine_lazy(request.app.state)
+        if engine is None:
+            return {"success": False, "error": "Engine not initialized"}
+        profile = get_active_profile()
+        entity_name = ((data or {}).get("entity_name") or "").strip()
+        confirm = (data or {}).get("confirm", "")
+        if not entity_name:
+            return {"success": False, "error": "entity_name is required"}
+        if confirm != entity_name:
+            return {
+                "success": False,
+                "error": (
+                    "Confirmation required: send {\"confirm\": \"" + entity_name +
+                    "\"} to erase this entity. This is irreversible."
+                ),
+            }
+        from superlocalmemory.server.rbac_enforce import require_manage
+        from superlocalmemory.server.write_identity import require_http_mutation_actor
+        require_http_mutation_actor(
+            request,
+            getattr(request.app.state, "daemon_descriptor", None),
+            actor_kind="gdpr-erase-entity",
+        )
+        require_manage(request, profile=profile)
+        authorization = authorize_route_mutation(
+            request,
+            operation="delete",
+            source_agent_id="http-gdpr-erase-entity",
+            profile_id=profile,
+        )
+        result = GDPRCompliance(engine._db, engine=engine).forget_entity(entity_name, profile)
+        authorization.complete()
+        result = result or {}
+        failure_markers = (
+            "vector_store_failures",
+            "audit_completion_failed",
+            "audit_request_failed",
+            "receipt_persist_failed",
+        )
+        success = not any(result.get(marker) for marker in failure_markers)
+        return {
+            "success": success, "active_profile": profile,
+            "entity_name": entity_name, **result,
+        }
+    except Exception:
+        logger.exception("gdpr_erase_entity error")
+        return {"success": False, "error": "Internal server error"}
+
+
+# ── Erasure Receipts — list + cryptographic verify ───────────────────────────
+
+@router.get("/api/compliance/receipts")
+async def list_erasure_receipts(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """List recent erasure receipts for the active profile.
+
+    Returns summary rows from ``erasure_receipts`` (migration M035):
+    erasure_id, subject_type, subject_id, state, all_erased, fact_count,
+    requested_at, completed_at. Read-only; loopback-gated.
+    """
+    if not COMPLIANCE_AVAILABLE:
+        return {"available": False, "error": "Compliance engine not available"}
+    from superlocalmemory.server.write_identity import require_http_mutation_actor
+    require_http_mutation_actor(
+        request,
+        getattr(request.app.state, "daemon_descriptor", None),
+        actor_kind="erasure-receipts-read",
+    )
+    try:
+        engine = get_engine_lazy(request.app.state)
+        if engine is None:
+            return {"available": False, "error": "Engine not initialized"}
+        profile = get_active_profile()
+        try:
+            rows = engine._db.execute(
+                "SELECT erasure_id, subject_type, subject_id, state, all_erased, "
+                "fact_count, requested_at, completed_at "
+                "FROM erasure_receipts WHERE profile_id = ? "
+                "ORDER BY requested_at DESC LIMIT ?",
+                (profile, limit),
+            )
+            receipts = [dict(r) for r in rows]
+        except Exception:
+            receipts = []
+        return {
+            "available": True, "active_profile": profile,
+            "receipts": receipts, "total": len(receipts),
+        }
+    except Exception:
+        logger.exception("list_erasure_receipts error")
+        return {"available": False, "error": "Internal server error"}
+
+
+@router.get("/api/compliance/receipts/{erasure_id}/verify")
+async def verify_erasure_receipt(request: Request, erasure_id: str):
+    """Cryptographically verify an erasure receipt's audit hash.
+
+    Returns ``{verified: bool}`` — True means the stored hash matches a
+    recompute from the receipt fields (tamper-evident). Read-only;
+    loopback-gated.
+    """
+    if not COMPLIANCE_AVAILABLE:
+        return {"available": False, "error": "Compliance engine not available"}
+    from superlocalmemory.server.write_identity import require_http_mutation_actor
+    require_http_mutation_actor(
+        request,
+        getattr(request.app.state, "daemon_descriptor", None),
+        actor_kind="erasure-receipt-verify",
+    )
+    try:
+        engine = get_engine_lazy(request.app.state)
+        if engine is None:
+            return {"available": False, "error": "Engine not initialized"}
+        profile = get_active_profile()
+        from superlocalmemory.core.transactions.erasure import verify_receipt
+        with engine._db.raw_connection() as conn:
+            verified = verify_receipt(conn, erasure_id, profile_id=profile)
+        return {"available": True, "erasure_id": erasure_id, "verified": verified}
+    except Exception:
+        logger.exception("verify_erasure_receipt error")
+        return {"available": False, "error": "Internal server error"}
