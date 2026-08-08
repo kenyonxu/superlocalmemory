@@ -664,9 +664,9 @@ See [LICENSE](LICENSE) for details.
 - [pytest Documentation](https://docs.pytest.org/)
 
 **Knowledge Graphs:**
-- [GraphRAG Paper](https://example.com)
-- [Leiden Algorithm](https://example.com)
-- [TF-IDF Explained](https://example.com)
+- [GraphRAG Paper](https://arxiv.org/abs/2404.16130)
+- [Leiden Algorithm](https://www.nature.com/articles/s41598-019-41695-z)
+- [TF-IDF Explained](https://scikit-learn.org/stable/modules/feature_extraction.html#tfidf-term-weighting)
 
 **SQLite:**
 - [SQLite Documentation](https://www.sqlite.org/docs.html)

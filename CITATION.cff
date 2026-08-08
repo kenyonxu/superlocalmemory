@@ -1,23 +1,27 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
-title: "SuperLocalMemory V3"
+title: "SuperLocalMemory V4"
 authors:
   - family-names: "Bhardwaj"
     given-names: "Varun Pratap"
-    orcid: ""
+    orcid: "https://orcid.org/0009-0002-8726-4289"
 version: "4.0.0"
-date-released: "2026-08-01"
+date-released: "2026-08-08"
 license: AGPL-3.0-or-later
 url: "https://superlocalmemory.com"
 repository-code: "https://github.com/qualixar/superlocalmemory"
 preferred-citation:
   type: article
-  title: "Information-Geometric Foundations for Zero-LLM Enterprise Agent Memory"
+  title: "SuperLocalMemory 4.0: The Governed Memory Operating System for AI Agents"
   authors:
     - family-names: "Bhardwaj"
       given-names: "Varun Pratap"
+    - family-names: "Singh"
+      given-names: "Garima"
+    - family-names: "Bhardwaj"
+      given-names: "Arun Pratap"
   year: 2026
-  journal: "arXiv preprint arXiv:2603.14588"
-  url: "https://arxiv.org/abs/2603.14588"
-  doi: "10.5281/zenodo.19038659"
+  journal: "Zenodo preprint"
+  url: "https://zenodo.org/records/21853302"
+  doi: "10.5281/zenodo.21853302"

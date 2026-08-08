@@ -57,12 +57,23 @@ That's it. SLM will:
    live files
 2. Go to your `slm-backup` repo on GitHub
 3. Click **Releases** in the sidebar
-4. Download the `.db` files (plus `-wal`/`-shm` sidecars and `lance/` if you
-   saved a whole-root copy) from the latest release
-5. Copy them into `~/.superlocalmemory/` (offline replace) and verify they are
-   owner-only (`0600`/`0700`) on an encrypted/private volume
-6. Run `slm restart` (there is no wired in-place `restore` route for whole-root
-   sets in this release)
+4. Download every database asset from one timestamped backup run. Compare it
+   with the operator-recorded managed-database inventory for that run; cloud
+   sync can report success when only some assets upload. Do not mix timestamps
+   or proceed with a partial set.
+5. Quarantine the complete stopped live data root as a separate offline copy
+   and restore into a clean data root. This prevents stale live `-wal`/`-shm`
+   sidecars from replaying against a replaced database. Rename each
+   downloaded timestamped asset back to its canonical managed filename before
+   replacement: `memory-<timestamp>-cloud-sync.db` → `memory.db`,
+   `learning-...` → `learning.db`, `audit_chain-...` → `audit_chain.db`,
+   `code_graph-...` → `code_graph.db`, `pending-...` → `pending.db`, and
+   `audit-...` → `audit.db`. The legacy cloud path does not upload WAL/SHM or
+   `lance/`; use only the renamed canonical database assets in the clean root.
+6. Verify
+   owner-only (`0600`/`0700`) permissions on an encrypted/private volume, then
+   run `slm restart`. There is no wired in-place whole-root restore route in
+   this release.
 
 ---
 
@@ -140,12 +151,17 @@ Google requires every application to register an "OAuth client" before it can ac
 
 1. `slm serve stop`
 2. Open Google Drive → `SLM-Backup` folder
-3. Download all `.db` files (plus sidecars/`lance/` if present for a whole-root
-   copy)
-4. Copy them to `~/.superlocalmemory/` and verify owner-only modes on an
-   encrypted/private volume
-5. Run `slm restart` (no wired whole-root restore route; offline copy is the
-   supported path)
+3. Download the complete timestamped set from one run, compare it with the
+   operator-recorded inventory, and reject an incomplete or mixed-timestamp
+   set. The legacy cloud path does not include `lance/`.
+4. Quarantine the stopped live root and restore into a clean data root so stale
+   WAL/SHM sidecars cannot replay. Rename each timestamped
+   asset to its canonical managed filename (`memory.db`, `learning.db`,
+   `audit_chain.db`, `code_graph.db`, `pending.db`, `audit.db`) before
+   replacement. Install only the renamed canonical database assets.
+5. Verify owner-only modes on an
+   encrypted/private volume, and run `slm restart`. Offline replacement is the
+   supported path; no wired whole-root restore route exists.
 
 ---
 

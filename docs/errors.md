@@ -37,7 +37,10 @@ Use `slm doctor` to diagnose most issues automatically.
 
 ## Structured Error Envelope
 
-All MCP tool errors and daemon HTTP errors return a JSON envelope:
+Daemon HTTP errors use this JSON envelope. MCP tools expose structured failures,
+but their historical tool contracts are not one uniform envelope: callers must
+handle both the newer `ok: false` form and legacy `success: false` / `error`
+forms documented by the individual tool.
 
 ```json
 {

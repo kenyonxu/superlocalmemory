@@ -70,7 +70,7 @@ authenticated actor.
 SLM historically assumes every dashboard browser, MCP client, and API caller is on `127.0.0.1`. That breaks three things when you reach SLM across a LAN (issues #39 / #40):
 
 1. **The Brain page can't load** from a remote browser — `/internal/token` refuses non-loopback clients, so the dashboard never gets the install token.
-2. **Mesh / forwarded MCP tools return `-32600 Session not found`** — the Streamable-HTTP transport is stateful, so any gateway/hub that doesn't replay the `Mcp-Session-Id` is rejected.
+2. **Older stateful MCP clients can return `-32600 Session not found`** when a gateway/hub fails to replay `Mcp-Session-Id`. V4's MCP 2 transport is stateless by default, so this is not the normal V4 path.
 3. **The dashboard CSRF origin guard** only accepts loopback origins.
 
 `SLM_REMOTE=1` flips all three at once — **default OFF**, so the loopback-only posture is unchanged for local installs. LAN access is still gated by your existing `SLM_MCP_ALLOWED_HOSTS` allowlist:
@@ -86,7 +86,7 @@ What `SLM_REMOTE=1` does:
 - **`/internal/token`** can serve the install token to allowlisted clients.
   Treat every allowlisted host as trusted local-operator infrastructure; an IP
   allowlist is not user authentication.
-- **MCP transport runs stateless** so gateways/hubs/forwarders work without replaying the session id (fixes the mesh `-32600`). Available standalone as `SLM_MCP_STATELESS=1` if you only need the gateway fix without opening the token endpoint.
+- **MCP transport remains stateless by default** so gateways/hubs/forwarders work without replaying a session ID. Set `SLM_MCP_STATEFUL=1` only when a compatibility integration explicitly requires stateful Streamable HTTP; it is not enabled by `SLM_REMOTE`.
 - **The dashboard CSRF origin guard** also accepts allowlisted LAN origins.
 - **The dashboard rate limiter exempts** allowlisted LAN browsers (they poll like the local dashboard does), so normal use doesn't trip `429`.
 
@@ -214,8 +214,9 @@ agent id; pick a stable, lowercase name per tool.
 |----------|---------|---------|
 | `SLM_MCP_EMBEDDED` | Set `1` when running MCP inside the daemon (suppresses warmup threads) | — |
 | `SLM_MCP_ALLOWED_HOSTS` | **NEW** Comma-separated allowlist (`host:port*`, exact IP, CIDR, prefix`*`, or `*`) for HTTP MCP + LAN token/origin/rate-limit (see above) | localhost-only |
-| `SLM_REMOTE` | **NEW (v3.6.12)** One-switch LAN mode: serves token to allowlisted LAN clients, runs MCP stateless, relaxes origin guard, exempts LAN from rate limit. Default OFF | — |
-| `SLM_MCP_STATELESS` | **NEW (v3.6.12)** Run MCP transport stateless only (gateway/hub fix) without opening the token endpoint | — |
+| `SLM_REMOTE` | One-switch LAN mode: serves token to allowlisted LAN clients, relaxes origin guard, and exempts LAN from rate limit. It does not change the default stateless MCP transport. Default OFF | — |
+| `SLM_MCP_STATELESS` | Explicitly select stateless MCP transport; stateless is already the V4 default | — |
+| `SLM_MCP_STATEFUL` | Set `1` only for a compatibility integration that requires stateful Streamable HTTP | — |
 | `SLM_MCP_TOOLS` | Comma-separated list of MCP tools to expose (default: all) | — |
 | `SLM_RATE_LIMIT_WRITE` | **NEW (v3.6.12)** Max dashboard write requests per window | `30` |
 | `SLM_RATE_LIMIT_READ` | **NEW (v3.6.12)** Max dashboard read requests per window | `120` |

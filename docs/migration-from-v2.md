@@ -31,11 +31,14 @@ rollback caveats below. No `slm migrate --dry-run` exists.
 | **Modes** | One mode (cloud required for smart features) | Three modes: A (zero-cloud), B (local LLM), C (cloud LLM) |
 | **Math layer** | None | Fisher-Rao similarity, Sheaf consistency, Langevin lifecycle |
 | **Ingestion** | Basic text storage | 11-step pipeline: entities, facts, emotions, beliefs, graph, and more |
-| **Data directory** | `~/.claude-memory/` | `~/.superlocalmemory/` (`~/.claude-memory/` symlink preserves old path) |
+| **Data directory** | `~/.claude-memory/` | `~/.superlocalmemory/` (the migrator attempts a legacy-path symlink; verify it) |
 | **Consistency** | Manual | Automatic contradiction detection |
 | **Recall quality** | Good | Significantly better on complex queries (multi-hop, temporal) |
 
-**What stays the same:** All CLI commands, MCP tools, IDE integrations, profiles, trust scores, and learned patterns carry forward.
+**Compatibility boundary:** verify the commands, integrations, profiles, and
+runtime artifacts your deployment relies on after migration. The migrator is a
+data/schema migration, not a proof that every optional configuration, learned
+state, or integration remains operational.
 
 ## Before You Migrate
 
@@ -52,17 +55,18 @@ slm --version
 # Should show 3.x.x or 4.x.x
 ```
 
-3. **Verify a complete pre-upgrade backup exists** (do not rely on a live
+3. **Preserve both data roots before migration** (do not rely on a live
    `memory.db` copy):
 
 ```bash
 slm serve stop
-# Copy the complete data root to an encrypted/private destination and verify
-# owner-only modes (0600/0700). See docs/cloud-backup.md and
-# docs/SECURITY-encryption-at-rest.md. Destination follows process umask —
-# do not assume 0600 inheritance.
-ls -l ~/.superlocalmemory/backups/
-slm serve start
+# Copy the complete legacy V2 source ~/.claude-memory/ to an encrypted/private
+# destination. If ~/.superlocalmemory/ already exists, preserve it separately.
+# Include every present .db plus -wal/-shm sidecar and lance/ directory.
+# Verify owner-only modes (0600/0700); destination follows process umask.
+ls -la ~/.claude-memory/
+# Keep the daemon stopped through `slm migrate`; restart only after migration
+# and verification have completed.
 ```
 
 > No `slm migrate --dry-run` exists for the V2→V3 migrator. For V4 additive
@@ -73,20 +77,23 @@ slm serve start
 
 ```bash
 slm migrate
+# After migration completes and its checks pass:
+slm serve start
 ```
 
-The migration:
+The migrator performs these code-defined steps:
 
 1. Creates a backup of your V2 database (verify it is complete and
    owner-only before proceeding)
 2. Copies data from `~/.claude-memory/` to `~/.superlocalmemory/`
-3. Creates a symlink (`~/.claude-memory/ -> ~/.superlocalmemory/`) so old IDE configs still work
-4. Extends the database schema with V3 tables (15 new tables)
-5. Re-indexes existing memories for multi-producer retrieval
-6. Sets Mode A as default (zero breaking changes)
-7. Verifies integrity
+3. Attempts to create a legacy-path symlink (`~/.claude-memory/ -> ~/.superlocalmemory/`); verify it before relying on old IDE configs
+4. Extends the database schema and inserts migrated facts
 
-> Duration: under 30 s for most databases; 10 000+ memories may take 1–2 min.
+It does not configure an operating mode, run a SQLite integrity check, or
+guarantee that every optional embedding/BM25 projection has been rebuilt.
+Run the post-migration checks below and re-embed/rebuild any optional indexes
+required by your deployment.
+
 > The migration spans file copies, SQLite commits, and a rename/symlink — not a
 > single global transaction. Do **not** treat it as globally
 > transactional/zero-loss without a verified pre-upgrade backup.
@@ -95,17 +102,12 @@ The migration:
 `pattern_miner`) and the deferred `M039` normalized scene/fact projection are
 applied automatically; see header note for DDL details.
 
-## What Gets Preserved
+## Migration boundaries
 
-Everything:
-
-- All stored memories (content, timestamps, metadata)
-- All profiles and their isolation boundaries
-- Trust scores and provenance data
-- Learned patterns and behavioral data
-- Compliance settings and retention policies
-- Audit trail (hash-chain intact)
-- IDE configurations (via symlink)
+The migrator copies supported V2 memory data and attempts the legacy-path
+symlink. Preserve and verify your pre-upgrade whole-root backup because it does
+not prove complete continuity for optional indexes, configuration, audit/trust
+history, or every runtime artifact in a customized installation.
 
 ## What Gets Added
 
@@ -118,7 +120,8 @@ The migration adds V3 capabilities to your existing data:
 - Sheaf consistency sections
 - Langevin lifecycle state
 
-These are computed from your existing memories during migration.
+These are available to configure after migration; do not assume every optional
+projection has been materialized until its health/rebuild check succeeds.
 
 ## After Migration
 
@@ -131,7 +134,7 @@ slm db migrate --status   # shows M038/M039 applied state: see docs/cli-referenc
 ```
 
 Confirm:
-- Mode shows `A` (default after migration)
+- Configure and verify the intended operating mode; migration does not select one
 - Memory count matches your V2 count (`slm status --json | jq '.data.fact_count'`)
 - `slm db migrate --status` shows expected migrations as applied/verified
 
@@ -172,9 +175,12 @@ while the daemon runs is unsafe and does not guarantee a coherent restore set.
 
 ## IDE Configuration Updates
 
-### Automatic (recommended)
+### Automatic (best effort)
 
-The migration preserves your IDE configs via symlink. No IDE reconfiguration needed.
+The migrator attempts to create a legacy-path symlink for compatible IDE
+configurations. Check that it exists and test each IDE integration after
+migration; a symlink failure is reported as a warning rather than a global
+migration failure.
 
 ### Manual (optional)
 
@@ -189,11 +195,14 @@ This updates all detected IDE configs to point to `~/.superlocalmemory/` instead
 ## FAQ
 
 **Q: Will my IDE break during migration?**
-No. The symlink ensures old paths still work. Your IDE will not notice the change.
+It may require repair. Confirm the legacy-path symlink and run a real
+connection/recall check in each IDE you use; use `slm connect` to update
+detected configurations directly.
 
 **Q: Do I need to reconfigure my API keys?**
-No. API keys are migrated to the new config location automatically (plaintext
-`0600` in `config.json` — prefer env if you want to avoid disk persistence).
+Possibly. The V2 migrator copies the database; it does not prove migration of
+separate configuration or credential files. Reconfigure or supply keys through
+environment variables as needed, then test the provider path you use.
 
 **Q: Can I run V2 and V3 side by side?**
 No. The migration converts your database in place (with backup). No side-by-side.
@@ -205,10 +214,13 @@ backup (offline whole-root copy with daemon stopped) and restore that if needed.
 Do not rely on an unverified live `memory.db` copy.
 
 **Q: I have multiple profiles. Are they all migrated?**
-Yes. All profiles are migrated together. Profile isolation is preserved.
+Verify them explicitly. Confirm each expected profile appears and that its
+recall boundaries still behave correctly before retiring the recovery copy.
 
 **Q: How big will my database get after migration?**
-The V3 schema adds approximately 20-40% to database size due to the entity graph, BM25 index, and math layer metadata. A 50MB V2 database becomes roughly 60-70MB.
+There is no supported fixed percentage. Size depends on the source data,
+enabled indexes, and later model/vector artifacts. Measure the backup and the
+completed target root before deleting any recovery copy.
 
 ---
 

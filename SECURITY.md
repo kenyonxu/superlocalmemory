@@ -27,10 +27,13 @@ We will respond within 48 hours and provide a fix timeline within 7 days.
 
 ### Security Architecture
 
-#### Mode A (Zero-LLM, Local-Only)
-- All data stored at `~/.superlocalmemory/`
-- Zero cloud API calls during store/recall operations
-- Mode A core store/recall operates locally without telemetry, analytics, or phone-home; optional connectors, external providers, backup destinations, and model downloads use the network only when configured
+#### Mode A (Zero-LLM, local core)
+- The core store/recall path can run locally at the configured SLM data root
+  (default: `~/.superlocalmemory/`)
+- The local core has no telemetry, analytics, or phone-home behavior
+- Configured remote embedding, remote reranking, connectors, cloud backups, or
+  model downloads can make network calls during store/recall or related jobs;
+  assess those explicit choices before treating an installation as local-only
 - SQLite with WAL mode for data integrity
 
 #### Authentication
@@ -113,7 +116,8 @@ code under your user account at load time regardless of these mitigations.
 #### Compliance
 - GDPR Article 15 (right to access): full data export
 - GDPR Article 17 (right to erasure): complete erasure including learning data
-- EU AI Act data sovereignty: Mode A keeps all data local
+- EU AI Act data sovereignty: assess the configured deployment and egress path;
+  Mode A's local core alone is not a legal or network-locality guarantee
 - Tamper-proof audit trail with SHA-256 hash chain
 - Bounded / content-free diagnostics export: `slm diagnostics export`
 

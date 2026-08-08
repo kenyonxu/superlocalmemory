@@ -189,6 +189,7 @@ Migrate a V2 database to V3 format (one-shot; no `--dry-run`).
 
 ```bash
 slm migrate                # Run migration
+slm migrate --rollback     # V2-to-V3 rollback only; restore a verified backup if it fails
 ```
 
 > There is no `slm migrate --dry-run`, no `slm consistency` (use `slm health`
@@ -198,6 +199,10 @@ slm migrate                # Run migration
 > (`slm serve stop` first, include WAL/SHM + `lance/` if present) before
 > migrating. Downgrade of V4 additive DBs is unsupported; see
 > `slm db migrate` below.
+
+`slm migrate --rollback` is only for the legacy V2-to-V3 migrator. It is
+different from `slm db migrate`, whose V4 additive migrations are forward-only
+and have no `--rollback` option.
 
 ### V4 additive DB migrations (`slm db migrate`)
 
@@ -830,6 +835,22 @@ slm db migrate --status    # Show migration_log status (no writes)
 slm db migrate --dry-run   # Preview what would change (no writes)
 slm db migrate             # Apply pending migrations (forward-only)
 ```
+
+### `slm ops list|resolve|status`
+
+Inspect and remediate failed, stuck, or degraded governed operations.
+
+```bash
+slm ops list --profile work --json
+slm ops status --json
+slm ops resolve <operation_id> --action retry
+slm ops resolve <operation_id> --action force_reconcile
+slm ops resolve <operation_id> --action cancel
+```
+
+`resolve` is an administrator action. Obtain the operation ID from `slm ops
+list` and choose the remediation action deliberately; it can re-drive or
+cancel durable work.
 
 ### `slm db scale status|prepare|verify|promote|rollback|adopt`
 
