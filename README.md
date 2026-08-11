@@ -29,10 +29,11 @@ negative control, and shipped with the harness that regenerates the evidence:
 does <em>not</em> exercise is stated too.</p>
 <p align="center"><code>v4.0.1</code> — one control plane: <strong>SLM-Mesh</strong> peer coordination · multi-scope memory (personal / shared / global) · profiles · Cache · Compress · 7-layer retrieval · code graph · Entity Explorer · skill evolution · Modes A/B/C · GDPR retention &amp; audit chain · bounded loops — across CLI, MCP, dashboard, the <strong>Claude plugin</strong>, the <strong>Codex add-on</strong>, and documented IDE integrations.<br/>
 Proxy: <code>slm wrap claude</code> &nbsp;·&nbsp; MCP: add <code>slm_compress</code> to your config &nbsp;·&nbsp; Skill: zero-config</p>
-<p align="center"><strong>4 public research records</strong> · V4 preprint: <a href="https://zenodo.org/records/21853302">Zenodo 21853302</a> (<a href="https://doi.org/10.5281/zenodo.21853302">DOI 10.5281/zenodo.21853302</a>) · prior arXiv preprints: <a href="https://arxiv.org/abs/2603.02240">2603.02240</a> · <a href="https://arxiv.org/abs/2603.14588">2603.14588</a> · <a href="https://arxiv.org/abs/2604.04514">2604.04514</a>. The V4 arXiv submission is pending public announcement.</p>
+<p align="center"><strong>Four public arXiv preprints</strong> · V4: <a href="https://arxiv.org/abs/2608.08253">arXiv:2608.08253</a> · companion archive: <a href="https://zenodo.org/records/21853302">Zenodo 21853302</a> (<a href="https://doi.org/10.5281/zenodo.21853302">DOI 10.5281/zenodo.21853302</a>) · prior preprints: <a href="https://arxiv.org/abs/2603.02240">2603.02240</a> · <a href="https://arxiv.org/abs/2603.14588">2603.14588</a> · <a href="https://arxiv.org/abs/2604.04514">2604.04514</a>.</p>
 
 <p align="center">
   <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/v4.0.1-Current_Release-2ea44f?style=for-the-badge&logo=checkmarx&logoColor=white" alt="v4.0.1 — Current Release"/></a>
+  <a href="https://arxiv.org/abs/2608.08253"><img src="https://img.shields.io/badge/arXiv-2608.08253-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="SuperLocalMemory 4.0 paper on arXiv:2608.08253"/></a>
   <a href="https://zenodo.org/records/21853302"><img src="https://img.shields.io/badge/Zenodo-10.5281%2Fzenodo.21853302-1682D4?style=for-the-badge&logo=zenodo&logoColor=white" alt="V4 paper on Zenodo: 10.5281/zenodo.21853302"/></a>
   <a href="https://arxiv.org/abs/2603.14588"><img src="https://img.shields.io/badge/arXiv-2603.14588-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="arXiv Paper"/></a>
   <a href="#three-surfaces-proxy--mcp-tools--skill"><img src="https://img.shields.io/badge/Proxy_|_MCP_|_Skill-22c55e?style=for-the-badge" alt="Three Surfaces: Proxy, MCP Tools, Skill"/></a>
@@ -696,9 +697,9 @@ runtime capability is enabled and healthy. See [CHANGELOG.md](CHANGELOG.md) for
 the complete release history.
 ## Research Papers
 
-SuperLocalMemory has a V4 Zenodo preprint and three earlier arXiv preprints (2026):
+SuperLocalMemory has a V4 arXiv preprint with a companion Zenodo archive, plus three earlier arXiv preprints (2026):
 
-- **SuperLocalMemory 4.0: The Governed Memory Operating System for AI Agents:** [Zenodo 21853302](https://zenodo.org/records/21853302) · [DOI 10.5281/zenodo.21853302](https://doi.org/10.5281/zenodo.21853302). The arXiv submission is pending public announcement.
+- **SuperLocalMemory 4.0: The Governed Memory Operating System for AI Agents:** [arXiv:2608.08253](https://arxiv.org/abs/2608.08253) · [Zenodo 21853302](https://zenodo.org/records/21853302) · [DOI 10.5281/zenodo.21853302](https://doi.org/10.5281/zenodo.21853302).
 - **The Living Brain (V3.3):** [arXiv:2604.04514](https://arxiv.org/abs/2604.04514) · [Zenodo 19435120](https://zenodo.org/records/19435120)
 - **Information-Geometric Foundations (V3):** [arXiv:2603.14588](https://arxiv.org/abs/2603.14588) · [Zenodo 19038659](https://zenodo.org/records/19038659)
 - **Trust & Behavioral Foundations (V2):** [arXiv:2603.02240](https://arxiv.org/abs/2603.02240) · [Zenodo 18709670](https://zenodo.org/records/18709670)

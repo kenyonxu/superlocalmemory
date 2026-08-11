@@ -64,7 +64,7 @@ examples:
 documentation:
   Website:    https://superlocalmemory.com
   GitHub:     https://github.com/qualixar/superlocalmemory
-  Paper:      https://arxiv.org/abs/2603.14588
+  Paper:      https://arxiv.org/abs/2608.08253
 """
 
 
