@@ -5,6 +5,27 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 4.0.6 — The Connected Brain
+
+### Fixed
+- Storage: per-call connections now disable checkpoint-on-close
+  (`SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`). Closing a WAL-mode connection could
+  run a checkpoint that waited indefinitely on reader marks pinned by another
+  connection, while holding SQLite's process-global VFS mutex — convoying
+  every later connection in the process. `PRAGMA busy_timeout` does not apply
+  to the close path. Reported, diagnosed and fixed by **@kenyonxu** (#118),
+  with a production postmortem and an in-suite reproduction.
+- Storage: per-call connections now also set `PRAGMA wal_autocheckpoint=400`.
+  This pragma is per-connection and is not persisted in the database file, so
+  it previously applied only to the short-lived initialisation connection and
+  every working connection silently fell back to SQLite's default of 1000
+  frames. With checkpoint-on-close disabled, autocheckpoint is the only
+  remaining checkpoint path, so the intended value must be set where the
+  writes actually happen.
+- Storage: when checkpoint-on-close cannot be disabled (Python 3.11, which
+  predates `Connection.setconfig`), this is now logged once instead of failing
+  silently, so operators know the deadlock hardening is inactive.
+
 ## [4.0.5] - 2026-08-16 — Reviewed time-aware corrections
 
 ### Added
