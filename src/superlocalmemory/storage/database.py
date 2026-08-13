@@ -231,6 +231,18 @@ class DatabaseManager:
         conn.row_factory = sqlite3.Row
         conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA foreign_keys=ON")
+        # Deadlock hardening (postmortem 2026-08-13, Option B): WAL close
+        # triggers a checkpoint that can wait indefinitely on reader marks
+        # pinned by another process/thread — while holding SQLite's
+        # process-global VFS mutex, which convoys every later connect().
+        # busy_timeout does NOT apply to the close path. NO_CKPT_ON_CLOSE
+        # makes close() checkpoint-free so it can never block; normal
+        # checkpointing continues via wal_autocheckpoint=400 on write paths.
+        # Available since Python 3.12 / SQLite 3.31; guarded for portability.
+        try:
+            conn.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1)  # type: ignore[attr-defined]
+        except (AttributeError, sqlite3.OperationalError):
+            pass
         return conn
 
     @contextmanager

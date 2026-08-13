@@ -5,6 +5,17 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Storage: per-call connections in `DatabaseManager._connect()` now set
+  `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`, so closing a WAL-mode connection never
+  runs a checkpoint that can block indefinitely on reader marks pinned by
+  another connection. The close path holds SQLite's process-global VFS mutex,
+  and `PRAGMA busy_timeout` does not apply to it, so one stuck close could
+  convoy every later `sqlite3.connect()` in the process. Routine
+  checkpointing continues via `PRAGMA wal_autocheckpoint=400` on write paths.
+
 ## [4.0.1] - 2026-08-09 — Dashboard and operations-status correctness
 
 ### Fixed
