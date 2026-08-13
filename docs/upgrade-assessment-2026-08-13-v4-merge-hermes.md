@@ -245,3 +245,42 @@ git merge upstream/main
 ### 确认无误后
 - [ ] 切换真实数据目录,观察 24h
 - [ ] 保留备份至少一个版本周期
+
+---
+
+## 8. 后续上游贡献路线图(2026-08-13 立项)
+
+### 8.1 已提交:PR #118 — WAL close-path 死锁修复
+
+- **链接**:https://github.com/qualixar/superlocalmemory/pull/118
+- **内容**:`DatabaseManager._connect()` 设 `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE=1`(postmortem Option B)+ 行为级回归测试 + CHANGELOG
+- **依据**:2026-08-13 生产事故(§5.5)+ 全量套件内复现(`test_search_profile_isolation_memory_counts` 无界挂起)
+- **状态**:待上游 review。worktree 保留于 `/tmp/slm-pr-ckpt` 以备迭代
+- **意义**:这是从真实事故反向定位的根因修复,附带生产/套件双重证据,是我们向上游建立贡献者信誉的关键 PR
+
+### 8.2 候选:Hermes MemoryProvider 集成上游化
+
+**现状核实(2026-08-13)**:上游 `src/superlocalmemory/integrations/` 目录**不存在**;Hermes 在上游仅以 MCP 客户端身份出现(`mcp/server.py` keepalive 注释、`tools_mesh.py` peer 身份、`docs/ide-setup.md` 配置指南)。我们的 MemoryProvider(prefetch/sync_turn/生命周期钩子/三工具)为 fork 独有。
+
+**上游化障碍**:
+1. 依赖 hermes-agent 侧 `MemoryProvider` 外部契约(prefetch/sync_turn/on_memory_write/on_pre_compress 签名),上游仓库无此契约定义,PR 需自带适配层说明
+2. 9 个文件 + 测试,CI 需 mock hermes 侧契约
+3. 上游产品叙事为 MCP-first;嵌入式 MemoryProvider 路线需维护者方向认可
+
+**推进策略**:先等 PR #118 落地建立信誉 → 开 issue 探询维护者对 `integrations/` 目录的兴趣 → 若认可则按 multi-scope 的成功模式拆 3 个 PR(接口骨架 → provider 核心 → 工具三件套)。**不建议**未经探询直接提交大 PR。
+
+### 8.3 候选:两个上游潜伏测试缺陷(小 PR)
+
+merge 后测试修复中发现(见提交 `5ecfd733`):
+1. `test_release_package_surface` 断言字面量 `python -m pytest tests/ -q`,但上游 `pypi-publish.yml` 实际使用 `RELEASE_TEST_ARGS` 数组展开——该测试在上游 CI 必然失败(或从未在发布分支上运行)
+2. `test_rejects_python_less_than_3_11` 的 python3 shim 不覆盖带版本号的解释器名(python3.13 等),env 中存在多版本 python 时测试失真
+
+两个都是 5 行内的小修复,适合作为 #118 之后的"热身跟进 PR"。
+
+### 8.4 暂不上游化,保持 fork 独有
+
+- mslm 品牌层(name/版本/README/文档)
+- embeddings worker 代理转发 + `HF_ENDPOINT` 移除(中国大陆网络环境特定)
+- `torch>=2.11.0` 宽松 pin(环境适配;上游有意硬 pin 以锁定 Apple Silicon 内存行为,上游化会被拒)
+- `SLMConfig.proxy` 字段补全(若实现,可考虑上游化)
+
