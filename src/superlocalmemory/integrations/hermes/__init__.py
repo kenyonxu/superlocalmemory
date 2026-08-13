@@ -428,7 +428,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
         def _do_prefetch() -> None:
             try:
                 response = self._engine.recall(
-                    query, limit=_PREFETCH_RECALL_LIMIT, fast=True,
+                    query, limit=_PREFETCH_RECALL_LIMIT,
                     include_global=self._include_global,
                     include_shared=self._include_shared,
                 )
