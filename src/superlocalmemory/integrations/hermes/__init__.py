@@ -24,7 +24,9 @@ import importlib
 import json
 import logging
 import threading
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode
 
 from agent.memory_manager import sanitize_context
 from agent.memory_provider import MemoryProvider
@@ -45,6 +47,45 @@ _PREFETCH_RECALL_LIMIT = 8
 _PRE_COMPRESS_MSG_COUNT = 10
 _PRE_COMPRESS_MSG_TRUNCATE = 500
 _SEMANTIC_NOISE = frozenset({"", "ok", "yes", "thanks", "thx"})
+
+# ---------------------------------------------------------------------------
+# Daemon routing (daemon-first, in-process fallback)
+#
+# The embedding worker is a deliberate machine-wide singleton owned by the
+# unified daemon (anti memory-blast guard — core/embeddings.py). An in-process
+# EmbeddingService self-disables when the worker is foreign-owned, so the
+# gateway's semantic/hopfield/spreading-activation channels return nothing.
+# Routing recall/store through the daemon's HTTP API gives full retrieval
+# quality (warm embedder + reranker + singleton engine) and removes
+# dual-writer WAL contention. When the daemon is unreachable the provider
+# falls back to the in-process engine (previous behaviour).
+# ---------------------------------------------------------------------------
+
+_DAEMON_RECALL_TIMEOUT = 8.0
+_DAEMON_STORE_TIMEOUT = 20.0
+
+
+def _daemon_available() -> bool:
+    """True when the unified daemon is alive (cheap PID-file check)."""
+    try:
+        from superlocalmemory.cli.daemon import is_daemon_running
+
+        return bool(is_daemon_running())
+    except Exception:
+        return False
+
+
+def _daemon_api(
+    method: str, path: str, body: Optional[dict] = None, timeout: float = 8.0
+) -> Optional[dict]:
+    """Thin wrapper over ``cli.daemon.daemon_request`` (auth handled there)."""
+    try:
+        from superlocalmemory.cli.daemon import daemon_request
+
+        return daemon_request(method, path, body, timeout_seconds=timeout)
+    except Exception as exc:
+        logger.debug("MSLM daemon request failed (%s %s): %s", method, path, exc)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +399,79 @@ class SuperLocalMemoryProvider(MemoryProvider):
 
     # -- Prefetch: hybrid mode -----------------------------------------------
 
+    # -- Daemon-routed engine calls -------------------------------------------
+
+    def _engine_recall(self, query: str, limit: int) -> Any:
+        """Recall via the unified daemon; ``None`` signals local fallback.
+
+        The daemon holds the machine-wide embedding worker and the reranker,
+        so a routed recall returns full-channel results; the in-process engine
+        self-disables its embedder (foreign-owned worker) and silently skips
+        the semantic/hopfield/spreading-activation channels.
+        """
+        if not _daemon_available():
+            return None
+        qs = urlencode({
+            "q": query,
+            "limit": limit,
+            "include_global": "true" if self._include_global else "false",
+            "include_shared": "true" if self._include_shared else "false",
+        })
+        resp = _daemon_api("GET", f"/recall?{qs}", timeout=_DAEMON_RECALL_TIMEOUT)
+        if not resp or not resp.get("ok"):
+            return None
+        results = [
+            SimpleNamespace(
+                fact=SimpleNamespace(
+                    content=r.get("content", "") or "",
+                    fact_id=r.get("fact_id", "") or "",
+                ),
+                score=float(r.get("score", 0.0) or 0.0),
+                confidence=float(r.get("confidence", 0.0) or 0.0),
+                channel_scores=r.get("channel_scores") or {},
+            )
+            for r in (resp.get("results") or [])
+        ]
+        return SimpleNamespace(
+            query=resp.get("query", query),
+            results=results,
+            query_type=resp.get("query_type", ""),
+            retrieval_time_ms=float(resp.get("retrieval_time_ms", 0.0) or 0.0),
+        )
+
+    def _engine_store(
+        self,
+        content: str,
+        *,
+        session_id: str = "",
+        speaker: str = "",
+        scope: str = "personal",
+        shared_with: Optional[List[str]] = None,
+    ) -> Optional[List[str]]:
+        """Store via the unified daemon; ``None`` signals local fallback.
+
+        The daemon owns the canonical write path (admission gateway +
+        materializer), so routed stores skip the embedded engine's local
+        write pipeline entirely — no dual-writer WAL contention.
+        """
+        if not _daemon_available():
+            return None
+        resp = _daemon_api(
+            "POST",
+            "/remember",
+            {
+                "content": content,
+                "session_id": session_id,
+                "scope": scope,
+                "shared_with": shared_with,
+                "metadata": {"speaker": speaker, "source": "hermes-provider"},
+            },
+            timeout=_DAEMON_STORE_TIMEOUT,
+        )
+        if not resp or not resp.get("ok"):
+            return None
+        return list(resp.get("fact_ids") or [])
+
     def _format_recall_results(
         self, response: Any,
     ) -> str:
@@ -385,7 +499,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
         try:
             limit = kwargs.get("limit", _PREFETCH_RECALL_LIMIT)
             fast = kwargs.get("fast", True)
-            response = self._engine.recall(
+            response = self._engine_recall(query, limit) or self._engine.recall(
                 query, limit=limit, fast=fast,
                 include_global=self._include_global,
                 include_shared=self._include_shared,
@@ -425,9 +539,15 @@ class SuperLocalMemoryProvider(MemoryProvider):
         if self._cron_skipped or not self._engine or not query.strip():
             return
 
+        # One prefetch at a time — daemon-routed recalls vary in latency
+        # (HTTP), and overlapping threads would race the cache write.
+        with self._prefetch_lock:
+            if self._prefetch_thread and self._prefetch_thread.is_alive():
+                return
+
         def _do_prefetch() -> None:
             try:
-                response = self._engine.recall(
+                response = self._engine_recall(query, _PREFETCH_RECALL_LIMIT) or self._engine.recall(
                     query, limit=_PREFETCH_RECALL_LIMIT,
                     include_global=self._include_global,
                     include_shared=self._include_shared,
@@ -483,13 +603,17 @@ class SuperLocalMemoryProvider(MemoryProvider):
 
         def _sync() -> None:
             try:
-                with self._write_lock:
-                    self._engine.store(
-                        combined,
-                        session_id=session,
-                        speaker="user",
-                        scope="personal",
-                    )
+                fact_ids = self._engine_store(
+                    combined, session_id=session, speaker="user", scope="personal",
+                )
+                if fact_ids is None:  # daemon unreachable — in-process fallback
+                    with self._write_lock:
+                        self._engine.store(
+                            combined,
+                            session_id=session,
+                            speaker="user",
+                            scope="personal",
+                        )
             except Exception as exc:
                 logger.debug("MSLM sync_turn failed: %s", exc)
 
@@ -518,11 +642,15 @@ class SuperLocalMemoryProvider(MemoryProvider):
 
         def _write() -> None:
             try:
-                with self._write_lock:
-                    self._engine.store(
-                        content, session_id=self._session_id,
-                        scope="personal",
-                    )
+                fact_ids = self._engine_store(
+                    content, session_id=self._session_id, scope="personal",
+                )
+                if fact_ids is None:  # daemon unreachable — in-process fallback
+                    with self._write_lock:
+                        self._engine.store(
+                            content, session_id=self._session_id,
+                            scope="personal",
+                        )
             except Exception as exc:
                 logger.debug("MSLM on_memory_write failed: %s", exc)
 
@@ -554,11 +682,15 @@ class SuperLocalMemoryProvider(MemoryProvider):
 
         def _flush() -> None:
             try:
-                with self._write_lock:
-                    self._engine.store(
-                        combined, session_id=self._session_id,
-                        speaker="system", scope="personal",
-                    )
+                fact_ids = self._engine_store(
+                    combined, session_id=self._session_id, speaker="system", scope="personal",
+                )
+                if fact_ids is None:  # daemon unreachable — in-process fallback
+                    with self._write_lock:
+                        self._engine.store(
+                            combined, session_id=self._session_id,
+                            speaker="system", scope="personal",
+                        )
             except Exception as exc:
                 logger.debug("MSLM pre-compress store failed: %s", exc)
 
@@ -730,7 +862,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
         fast = bool(params.get("fast", False))
 
         try:
-            response = self._engine.recall(
+            response = self._engine_recall(query, limit) or self._engine.recall(
                 query, limit=limit, fast=fast,
                 include_global=self._include_global,
                 include_shared=self._include_shared,
@@ -779,11 +911,15 @@ class SuperLocalMemoryProvider(MemoryProvider):
             shared_with = None
 
         try:
-            with self._write_lock:
-                fact_ids = self._engine.store(
-                    content, session_id=self._session_id, scope=scope,
-                    shared_with=shared_with,
-                )
+            fact_ids = self._engine_store(
+                content, session_id=self._session_id, scope=scope, shared_with=shared_with,
+            )
+            if fact_ids is None:  # daemon unreachable — in-process fallback
+                with self._write_lock:
+                    fact_ids = self._engine.store(
+                        content, session_id=self._session_id, scope=scope,
+                        shared_with=shared_with,
+                    )
         except Exception as exc:
             logger.debug("MSLM store failed: %s", exc)
             return tool_error(f"Store failed: {exc}")

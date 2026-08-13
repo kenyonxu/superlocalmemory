@@ -284,3 +284,32 @@ merge 后测试修复中发现(见提交 `5ecfd733`):
 - `torch>=2.11.0` 宽松 pin(环境适配;上游有意硬 pin 以锁定 Apple Silicon 内存行为,上游化会被拒)
 - `SLMConfig.proxy` 字段补全(若实现,可考虑上游化)
 
+---
+
+## 9. 嵌入式进程召回质量:daemon 路由(2026-08-13 实施)
+
+### 9.1 根因(已查实)
+
+嵌入 worker 是**有意的机器级单例**(2026-04-07 内存爆炸事故后,v3.4.13 引入 `.embedding-worker.pid` 守卫,全机仅 1 个 worker)。unified_daemon 持有它;gateway 内嵌的 `EmbeddingService` 检测到"被别的进程持有"后**自我禁用**(`embeddings.py:716-724`,`is_available=False` → `embed()` 返回 None)→ gateway 内 recall 的 semantic/hopfield/spreading_activation 三通道静默跳过,仅剩 BM25/entity/temporal/profile——**自 2026 年 4 月起知惠的召回质量一直缺三个通道**(postmortem 12:42:42 即有同样警告)。
+
+对比:跨 encoder reranker 遇到同样单例时是**路由到 daemon 的 worker**;嵌入 service 只做了禁用、没做路由。代码注释自证设计意图:"Primary defense: daemon routing"(`embeddings.py:61`),CLI `observe` 已有 `daemon_request` 先例。
+
+### 9.2 方案 A:provider daemon 路由(已实施 ✅)
+
+provider 增加 daemon-first 路由层,daemon 不可达时回退进程内引擎:
+
+- **recall**(`_engine_recall`):`GET /recall?q=&limit=&include_global=&include_shared=` → 守护进程的热嵌入 + reranker + 单例引擎全通道结果
+- **store**(`_engine_store`):`POST /remember`(scope/shared_with 透传,speaker 进 metadata)→ daemon 的 canonical 写入路径(准入网关 + materializer),**顺带消除双进程 WAL 写竞争**(postmortem 拓扑)
+- 7 个调用点全部重接(3 recall + 4 store)
+- 顺修潜伏缺陷:`queue_prefetch` 缺线程重叠守卫
+- 测试:hermes conftest 补 daemon 探测隔离(此前会打真实 daemon);新增 8 个路由测试(在线/离线/报错/非 ok × recall+store),**92/92 全绿**
+- 联调实证:daemon 路由 recall 返回 score=0.647/conf=0.900 的全通道结果、**零 embedding-None 警告**;daemon 路由 store 落库成功
+
+### 9.3 方案 B:EmbeddingService 通用路由(立项,上游候选)
+
+在 slm 层修:`EmbeddingService` 检测到 worker 被他进程持有 **且** daemon 在线时,经 daemon 执行 embed(复用 reranker 的 WorkerPool IPC 或新增 daemon embed 端点)。受益面是所有嵌入消费方(MCP stdio server、任何嵌入式宿主),而非仅 hermes provider。
+
+- 价值与 PR #118 同级,适合作为下一个上游贡献
+- 前置:确认 daemon 侧 embed 能力端点形态(现有 `/recall` 是完整召回,不是纯 embed;WorkerPool IPC 是否可复用待调研)
+- 预估:中工作量(daemon 端点 + EmbeddingService 路由分支 + 并发测试)
+

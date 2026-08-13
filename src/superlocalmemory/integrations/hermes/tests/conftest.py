@@ -7,6 +7,21 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _daemon_down_by_default():
+    """Isolate tests from any live unified daemon on the dev machine.
+
+    The provider's daemon-routing probes real machine state (PID file +
+    HTTP). Tests default to 'daemon down' (in-process fallback); routing
+    tests re-patch ``_daemon_available`` per test.
+    """
+    with patch(
+        "superlocalmemory.integrations.hermes._daemon_available",
+        return_value=False,
+    ):
+        yield
+
+
 @pytest.fixture
 def mock_slm_config():
     """Mock SLMConfig with basic attributes set."""

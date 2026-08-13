@@ -917,3 +917,113 @@ class TestPluginYAML:
         assert "version" in data
         assert "pip_dependencies" in data
         assert "hooks" in data
+
+
+class TestDaemonRouting:
+    """Daemon-first routing with in-process fallback (embedding-worker singleton).
+
+    The unified daemon owns the machine-wide embedding worker, so when it is
+    reachable the provider routes recall/store through the daemon HTTP API;
+    otherwise it falls back to the in-process engine.
+    """
+
+    def _setup_provider(self, provider, mock_engine):
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            MockEngine.return_value = mock_engine
+            provider.initialize("session_1", agent_identity="coder")
+
+    def _daemon_recall_json(self):
+        return {
+            "ok": True,
+            "query": "q",
+            "results": [
+                {"fact_id": "f1", "content": "daemon fact", "score": 0.9, "confidence": 0.8},
+            ],
+            "query_type": "factual",
+            "retrieval_time_ms": 12.0,
+        }
+
+    # -- recall routing -------------------------------------------------------
+
+    def test_recall_routed_when_daemon_up(self, provider, mock_engine):
+        """daemon 在线时 recall 走 HTTP,本地引擎不被调用."""
+        self._setup_provider(provider, mock_engine)
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api", return_value=self._daemon_recall_json()) as api:
+            out = provider._sync_recall("q")
+
+        assert "daemon fact" in out
+        api.assert_called_once()
+        mock_engine.recall.assert_not_called()
+
+    def test_recall_falls_back_when_daemon_down(self, provider, mock_engine):
+        """daemon 不在线(autouse fixture)时回退本地引擎."""
+        self._setup_provider(provider, mock_engine)
+        mock_engine.recall.return_value.results = []
+        provider._sync_recall("q")
+        mock_engine.recall.assert_called_once()
+
+    def test_recall_falls_back_when_daemon_errors(self, provider, mock_engine):
+        """daemon 请求失败(返回 None)时回退本地引擎."""
+        self._setup_provider(provider, mock_engine)
+        mock_engine.recall.return_value.results = []
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api", return_value=None):
+            provider._sync_recall("q")
+        mock_engine.recall.assert_called_once()
+
+    def test_recall_falls_back_when_daemon_not_ok(self, provider, mock_engine):
+        """daemon 返回非 ok 时回退本地引擎."""
+        self._setup_provider(provider, mock_engine)
+        mock_engine.recall.return_value.results = []
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api", return_value={"ok": False}):
+            provider._sync_recall("q")
+        mock_engine.recall.assert_called_once()
+
+    # -- store routing --------------------------------------------------------
+
+    def test_store_routed_when_daemon_up(self, provider, mock_engine):
+        """daemon 在线时 sync_turn 走 /remember,本地 store 不被调用."""
+        self._setup_provider(provider, mock_engine)
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api",
+                   return_value={"ok": True, "fact_ids": ["f1", "f2"]}) as api:
+            provider.sync_turn("hello world", "hi there")
+            provider._sync_thread.join(timeout=5.0)
+
+        assert api.call_count == 1
+        args, kwargs = api.call_args
+        assert args[0] == "POST" and args[1] == "/remember"
+        assert args[2]["scope"] == "personal"
+        assert "hello world" in args[2]["content"]
+        mock_engine.store.assert_not_called()
+
+    def test_store_falls_back_when_daemon_down(self, provider, mock_engine):
+        """daemon 不在线时 sync_turn 回退本地 store."""
+        self._setup_provider(provider, mock_engine)
+        provider.sync_turn("hello world", "hi there")
+        provider._sync_thread.join(timeout=5.0)
+        mock_engine.store.assert_called_once()
+
+    def test_store_falls_back_when_daemon_errors(self, provider, mock_engine):
+        """daemon store 失败时回退本地 store."""
+        self._setup_provider(provider, mock_engine)
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api", return_value=None):
+            provider.sync_turn("hello world", "hi there")
+            provider._sync_thread.join(timeout=5.0)
+        mock_engine.store.assert_called_once()
+
+    def test_remember_tool_routed(self, provider, mock_engine):
+        """slm_remember 工具在 daemon 在线时走路由."""
+        self._setup_provider(provider, mock_engine)
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api",
+                   return_value={"ok": True, "fact_ids": ["f1"]}):
+            out = provider._tool_remember({"content": "route me"})
+        import json as _json
+        assert _json.loads(out)["status"] == "stored"
+        mock_engine.store.assert_not_called()
