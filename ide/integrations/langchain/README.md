@@ -1,14 +1,15 @@
 # langchain-superlocalmemory
 
-LangChain chat message history backed by [SuperLocalMemory V2](https://github.com/qualixar/superlocalmemory) -- 100% local, zero cloud.
+LangChain chat message history backed by the local data root of [SuperLocalMemory V4.0.0](https://github.com/qualixar/superlocalmemory).
 
-Every message stays on your machine in a SQLite database. No API keys, no subscriptions, no telemetry.
+This adapter writes chat messages to the configured SLM data root. Optional SLM providers, connectors, backup, and downloads have separate network behavior.
 
 ## Prerequisites
 
-- Python 3.10+
-- [SuperLocalMemory V2](https://github.com/qualixar/superlocalmemory) installed (`~/.superlocalmemory/` must exist)
+- Python >=3.11,<3.15 (3.11, 3.12, 3.13, 3.14)
+- [SuperLocalMemory V4.0.0](https://github.com/qualixar/superlocalmemory) installed in the same Python environment
 - `langchain-core >= 1.0.0`
+- Supported platforms: Apple Silicon macOS, 64-bit Windows, 64-bit Linux — Intel Mac and 32-bit Windows (Win32) are outside the V4.0.0 support contract (`cryptography==50.0.0` has no wheel for those architectures).
 
 ## Installation
 
@@ -86,10 +87,13 @@ history = SuperLocalMemoryChatMessageHistory(
 
 ## How It Works
 
-Each LangChain message is stored as an individual memory entry in SuperLocalMemory V2:
+Each LangChain message is submitted through SuperLocalMemory V4.0.0's canonical
+ingestion contract. The exact serialized message remains in the parent memory
+row for lossless chat-history round trips, while SLM builds searchable facts:
 
 - **Content**: JSON-serialized message (type, content, additional_kwargs)
-- **Tags**: `["langchain", "langchain:session:<session_id>"]`
+- **Session isolation**: a SHA-256-namespaced session identifier
+- **Tags**: `["langchain", "langchain:session:<session_id>"]` in metadata
 - **Importance**: 3 (lower than user memories, so chat history does not crowd search results)
 - **Project**: `"langchain"`
 
@@ -97,10 +101,10 @@ This means your LangChain conversations are visible in the SLM dashboard, search
 
 ## License
 
-AGPL-3.0 -- see [LICENSE](../../LICENSE) for details.
+AGPL-3.0 -- see [LICENSE](../../../LICENSE) for details.
 
 ## Links
 
-- [SuperLocalMemory V2 Repository](https://github.com/qualixar/superlocalmemory)
+- [SuperLocalMemory V4.0.0 Repository](https://github.com/qualixar/superlocalmemory)
 - [Documentation](https://superlocalmemory.com/)
 - [LangChain Documentation](https://python.langchain.com/)

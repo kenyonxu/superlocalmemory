@@ -1,5 +1,5 @@
 # Auto-Memory
-> SuperLocalMemory V3 Documentation
+> SuperLocalMemory V4 Documentation
 > https://superlocalmemory.com | Part of Qualixar
 
 SuperLocalMemory captures and recalls context automatically. Install it once, then forget about it — your AI assistant gets smarter over time without any manual effort.
@@ -14,28 +14,26 @@ When you work with an AI assistant that has SLM connected, certain types of info
 |-------------------|---------|
 | **Decisions** | "Let's use WebSocket instead of SSE" |
 | **Bug fixes** | "The crash was caused by a null pointer in the auth middleware" |
-| **Architecture choices** | "We're going with a microservices approach for the payment system" |
 | **Preferences** | "I prefer functional components over class components" |
-| **Project context** | "The staging server is at 10.0.1.50, port 8080" |
-| **People and roles** | "Sarah is the lead on the mobile team" |
-| **Corrections** | "Actually, the deadline is March 20, not March 15" |
 
 ### What does NOT get captured
 
 - Raw code blocks (too noisy, changes too fast)
 - Casual conversation ("thanks", "sounds good")
-- Repeated information already in memory
-- Content filtered by the entropy gate (redundant or low-value)
+- Repeated content within the configured observation debounce window
+- Content that does not match the enabled decision, bug-fix, or preference admission rules
 
 ### How the system decides what to capture
 
-The ingestion pipeline scores each candidate memory on:
+Auto-capture admission is a lightweight rules step. It matches configured
+decision, bug-fix, and preference patterns and returns a category, reason, and
+confidence. Rejected observations are not acknowledged as stored.
 
-1. **Information value** — Does this add new knowledge not already stored?
-2. **Specificity** — Is this a concrete fact or a vague statement?
-3. **Reusability** — Is this likely to be useful in a future session?
-
-Memories that score below the threshold are discarded. This keeps your database focused and retrieval quality high.
+Accepted observations are submitted durably to M018 before the caller receives
+`captured: true`. This is separate from materialization: the operation first
+becomes `queryable`, then enrichment advances it to `complete` or records a
+retryable `failed` state. Entropy, consolidation, graph, temporal, provenance,
+and projector work belong to materialization, not admission.
 
 ## How Auto-Recall Works
 
@@ -68,6 +66,18 @@ The AI responds with awareness of your past decisions, preferences, and project 
 
 The AI did not "remember" this on its own. SLM injected the relevant memories before the AI generated its response.
 
+### Memory is evidence, not instruction
+
+Recalled content can include old prompts, imported text, or hostile
+instructions. SLM therefore renders it inside one reference-only untrusted
+evidence boundary, with provenance, size budgets, recognized-secret redaction,
+and forged-boundary neutralization. If the mandatory renderer fails, SLM omits
+the memory context instead of falling back to raw text.
+
+IDE instruction files contain only static product protocol. SLM retrieves
+dynamic memory through MCP at runtime rather than copying recalled text into a
+trusted Cursor, Copilot, or Antigravity rules file.
+
 ## Configuration
 
 ### Toggle auto-capture and auto-recall
@@ -87,15 +97,15 @@ Set either to `false` to disable. When disabled, you can still use `slm remember
 
 ```json
 {
-  "max_recall_results": 10,
   "recall_threshold": 0.3
 }
 ```
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `max_recall_results` | `10` | Maximum memories injected per query |
 | `recall_threshold` | `0.3` | Minimum relevance score (0.0 to 1.0). Lower = more memories, possibly less relevant. Higher = fewer but more precise. |
+
+> **Recall result count:** The default is 20 results per query (`CANONICAL_RECALL_LIMIT`). Override per-call with the `--limit N` flag (CLI) or the `limit` parameter (MCP `recall` tool). There is no config file key for this default.
 
 ### Adjust capture sensitivity
 
@@ -120,11 +130,17 @@ slm remember "The API rate limit on production is 500 req/min, staging is 100 re
 # Explicitly recall
 slm recall "rate limits"
 
-# Delete a memory
-slm forget --id 42
+# Delete by query (fuzzy) — preview then confirm
+slm forget "old rate limit" --dry-run
+slm forget "old rate limit" --yes
+
+# Delete a specific fact by exact ID (precise)
+slm delete QmFzZTY0RmFjdElk --yes
+slm list --limit 20   # shows fact IDs for delete/update
 ```
 
 Manual operations work regardless of auto-capture/auto-recall settings.
+`slm forget` matches by query text (fuzzy); it does not take `--id`. Use `slm delete <fact_id>` for an exact ID.
 
 ## Learning Over Time
 
@@ -134,17 +150,45 @@ SLM's adaptive learning system observes which memories are recalled frequently, 
 - **Memories marked "outdated"** are deprioritized or flagged for review
 - **Usage patterns** inform what types of information to prioritize for capture
 
-You can see what the system has learned:
+Learning is driven by **explicit feedback**. Recall itself is deliberately
+read-only — it never opens a database writer, so that a busy recall path cannot
+contend with the dashboard — which means reported feedback is what grows the
+learning store. Feedback is recorded through the MCP `report_feedback` tool:
 
-```bash
-slm patterns            # Show learned patterns
-slm patterns correct 5  # Correct pattern #5 if it's wrong
 ```
+report_feedback(fact_id="<id>", feedback="relevant")     # helpful
+report_feedback(fact_id="<id>", feedback="irrelevant")   # not useful
+report_feedback(fact_id="<id>", feedback="partial")      # somewhat relevant
+```
+
+Each call returns `total_signals` and the current `phase`. Adaptive reranking
+activates at 50 signals (phase 2) and the ML ranker at 200 (phase 3).
+
+You can see what the system has learned in the **Living Brain** panel of the
+dashboard (`slm dashboard`), which reads the same store.
+
+> **Note:** the `slm patterns`, `slm useful` and `slm learning` commands
+> described in some older V2 documentation do not exist in V3. Use
+> `report_feedback` and the dashboard instead.
 
 ## Privacy
 
-Auto-capture and auto-recall happen entirely within SLM on your machine. In Mode A, no data leaves your device at any point. In Mode C, recall queries are sent to your configured LLM provider, but the memories themselves remain local.
+Core auto-capture and recall storage use the configured local data root. Mode A
+does not require a cloud model provider for core memory operations, but optional
+connectors, cloud backup, proxy providers, dependency/model downloads, and
+other explicitly enabled integrations can use the network. Mode C sends the
+constructed model request—including selected memory evidence—to the configured
+cloud provider. Review that provider's retention and privacy terms before use.
+
+### Feedback query pseudonymization
+
+Learning feedback stores a pseudonymized grouping key, not the raw query text.
+
+- **Mechanism:** per-install keyed HMAC (`hmac.digest(key, query.encode("utf-8"), "sha256").hex()[:16]`) in `src/superlocalmemory/learning/feedback.py: _hash_query` — 16 hex characters (64-bit), **not encryption** (cannot be reversed to the query).
+- **Correlation:** within a single install, the same query text produces the same `query_hash`, so repeat-query grouping is possible; across installs the keys differ.
+- **Key storage:** 32-byte key at `.feedback-hash-key` beside the DB (`db_path.parent / ".feedback-hash-key"`), written atomically with mode `0600` (`src/superlocalmemory/learning/feedback.py: _load_or_create_hash_key`). Existing keys are re-chmodded to `0600` on load.
+- **Read-only data root fallback:** if the key cannot be persisted (for example, a read-only data root), the collector falls back to a process-local key and logs a warning; this preserves privacy but **loses cross-restart grouping** because the next process generates a new key. See `SECURITY.md` for the operational caveat.
 
 ---
 
-*SuperLocalMemory V3 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*
+*SuperLocalMemory V4 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*

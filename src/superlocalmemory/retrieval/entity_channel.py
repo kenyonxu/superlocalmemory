@@ -8,15 +8,27 @@ SA-RAG pattern: entities from query -> canonical lookup -> graph traversal
 with decay. Handles BOTH uppercase and lowercase entity mentions.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
-License: Elastic-2.0
+License: AGPL-3.0-or-later
 """
+
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import threading
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from superlocalmemory.retrieval.scope_policy import (
+    authorized_fact_ids,
+    filter_authorized_results,
+)
+from superlocalmemory.storage.database import (
+    _scope_where,
+    _unbounded_facts_ceiling,
+)
 
 if TYPE_CHECKING:
     from superlocalmemory.encoding.entity_resolver import EntityResolver
@@ -24,26 +36,144 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _adj_ttl_seconds() -> float:
+    """In-memory adjacency-cache TTL (seconds), env-overridable.
+
+    v3.8.5: raised from a hard-coded 300s to 3600s. The TTL only exists to
+    catch edge-WEIGHT mutations (pruning / MAX-merge) that leave the edge COUNT
+    unchanged — new memories already force a reload via the count check. At 300s
+    a 208K-edge graph rebuilt on the recall hot path every 5 idle minutes,
+    causing a recurring multi-second latency spike. Weight drift is a minor
+    ranking refinement, so a longer TTL trades negligible staleness for a big
+    latency win. Set SLM_ENTITY_ADJ_TTL_S to tune (0 disables time-based reload;
+    the count-based correctness reload always remains).
+    """
+    try:
+        return max(0.0, float(os.environ.get("SLM_ENTITY_ADJ_TTL_S", "3600")))
+    except (TypeError, ValueError):
+        return 3600.0
+
+
 _PROPER_NOUN_RE = re.compile(r"\b[A-Z][a-z]{1,}\b")
 
-_ENTITY_STOP: frozenset[str] = frozenset({
-    # Expanded stop list for query entity extraction
-    "what", "when", "where", "who", "which", "how", "does", "did",
-    "the", "that", "this", "there", "then", "than", "they", "them",
-    "have", "has", "had", "been", "being", "about", "after", "before",
-    "from", "into", "with", "some", "other", "would", "could", "should",
-    "will", "because", "also", "just", "like", "know", "think",
-    "feel", "want", "need", "make", "take", "give", "tell", "said",
-    "wow", "gonna", "got", "by", "thanks", "thank", "hey", "hi",
-    "hello", "bye", "good", "great", "nice", "cool", "right",
-    "let", "can", "might", "much", "many", "more", "most",
-    "something", "anything", "everything", "nothing", "someone",
-    "it", "my", "your", "our", "their", "me", "you", "we", "us",
-    "do", "if", "or", "no", "to", "at", "on", "in", "so",
-    "go", "come", "see", "look", "say", "ask", "try", "keep",
-    "yes", "yeah", "sure", "okay", "ok", "really", "actually",
-    "maybe", "well", "still", "even", "very",
-})
+_ENTITY_STOP: frozenset[str] = frozenset(
+    {
+        # Expanded stop list for query entity extraction
+        "what",
+        "when",
+        "where",
+        "who",
+        "which",
+        "how",
+        "does",
+        "did",
+        "the",
+        "that",
+        "this",
+        "there",
+        "then",
+        "than",
+        "they",
+        "them",
+        "have",
+        "has",
+        "had",
+        "been",
+        "being",
+        "about",
+        "after",
+        "before",
+        "from",
+        "into",
+        "with",
+        "some",
+        "other",
+        "would",
+        "could",
+        "should",
+        "will",
+        "because",
+        "also",
+        "just",
+        "like",
+        "know",
+        "think",
+        "feel",
+        "want",
+        "need",
+        "make",
+        "take",
+        "give",
+        "tell",
+        "said",
+        "wow",
+        "gonna",
+        "got",
+        "by",
+        "thanks",
+        "thank",
+        "hey",
+        "hi",
+        "hello",
+        "bye",
+        "good",
+        "great",
+        "nice",
+        "cool",
+        "right",
+        "let",
+        "can",
+        "might",
+        "much",
+        "many",
+        "more",
+        "most",
+        "something",
+        "anything",
+        "everything",
+        "nothing",
+        "someone",
+        "it",
+        "my",
+        "your",
+        "our",
+        "their",
+        "me",
+        "you",
+        "we",
+        "us",
+        "do",
+        "if",
+        "or",
+        "no",
+        "to",
+        "at",
+        "on",
+        "in",
+        "so",
+        "go",
+        "come",
+        "see",
+        "look",
+        "say",
+        "ask",
+        "try",
+        "keep",
+        "yes",
+        "yeah",
+        "sure",
+        "okay",
+        "ok",
+        "really",
+        "actually",
+        "maybe",
+        "well",
+        "still",
+        "even",
+        "very",
+    }
+)
 
 
 def extract_query_entities(query: str) -> list[str]:
@@ -68,10 +198,10 @@ def extract_query_entities(query: str) -> list[str]:
     for m in re.finditer(r'"([^"]+)"', query):
         _add(m.group(1).strip())
     # Also extract multi-word capitalized sequences (e.g. "New York", "San Francisco")
-    for m in re.finditer(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', query):
+    for m in re.finditer(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b", query):
         _add(m.group(1))
     # Extract all-caps abbreviations (e.g. NYU, MIT, UCLA) — min 2 chars
-    for m in re.finditer(r'\b([A-Z]{2,})\b', query):
+    for m in re.finditer(r"\b([A-Z]{2,})\b", query):
         _add(m.group(1))
 
     return candidates
@@ -87,9 +217,11 @@ class EntityGraphChannel:
     """
 
     def __init__(
-        self, db: DatabaseManager,
+        self,
+        db: DatabaseManager,
         entity_resolver: EntityResolver | None = None,
-        decay: float = 0.7, activation_threshold: float = 0.05,
+        decay: float = 0.7,
+        activation_threshold: float = 0.05,
         max_hops: int = 4,
         graph_metrics: dict[str, dict] | None = None,
         cozo_backend: Any = None,  # v3.4.5: optional CozoDB backend
@@ -101,15 +233,27 @@ class EntityGraphChannel:
         self._max_hops = max_hops
         # v3.4.5: Optional CozoDB graph backend (Sprint 2)
         self._cozo = cozo_backend
+        self._cache_lock = threading.RLock()
         # In-memory adjacency: {node_id -> [(neighbor_id, weight), ...]}
         self._adj: dict[str, list[tuple[str, float]]] = {}
         self._adj_profile: str = ""  # Track which profile is loaded
+        self._adj_scope_key: tuple[str, bool, bool] | None = None
         self._adj_edge_count: int = 0  # Track edge count for staleness detection
+        self._adj_fact_count: int = 0
+        self._entity_to_facts: dict[str, list[str]] = defaultdict(list)
+        self._fact_to_entities: dict[str, list[str]] = defaultdict(list)
+        self._visible_fact_ids: set[str] = set()
         # v3.4.1: Graph intelligence metrics (loaded from fact_importance)
         self._graph_metrics: dict[str, dict] = graph_metrics or {}
         self._graph_metrics_profile: str = ""
 
-    def _ensure_adjacency(self, profile_id: str) -> None:
+    def _ensure_adjacency(
+        self,
+        profile_id: str,
+        *,
+        include_global: bool = False,
+        include_shared: bool = False,
+    ) -> None:
         """Load graph adjacency into memory for fast spreading activation.
 
         Loads ALL edges for a profile into a bidirectional dict.
@@ -117,24 +261,49 @@ class EntityGraphChannel:
         Cost: ~1s for 232K edges, ~18 MB RAM.
         """
         # Check staleness: profile changed or new edges added since last load
-        current_count = self._get_edge_count(profile_id)
+        scope_key = (profile_id, bool(include_global), bool(include_shared))
+        current_count = self._get_edge_count(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+        )
+        try:
+            current_fact_count = self._db.get_fact_count(
+                profile_id,
+                include_global=include_global,
+                include_shared=include_shared,
+            )
+        except Exception:
+            current_fact_count = -1
         # memory-bounding-01: also reload if the cache is older than the TTL,
         # even when the edge COUNT is unchanged. Edge weights/pruning can mutate
         # the graph without changing the count (e.g. store_edge MAX-merge), and a
         # count-stable window would otherwise serve a stale adjacency map.
         import time as _t_ec
+
         _now_ec = _t_ec.monotonic()
-        _fresh = (_now_ec - getattr(self, "_adj_loaded_at", 0.0)) < 300.0
-        if (self._adj_profile == profile_id
-                and self._adj
-                and self._adj_edge_count == current_count
-                and _fresh):
+        _ttl = _adj_ttl_seconds()
+        # TTL=0 disables the time-based reload entirely (count-based correctness
+        # reload still applies); otherwise the cache is fresh within the TTL.
+        _fresh = _ttl <= 0.0 or ((_now_ec - getattr(self, "_adj_loaded_at", 0.0)) < _ttl)
+        if (
+            self._adj_scope_key == scope_key
+            and (self._adj or self._visible_fact_ids)
+            and self._adj_edge_count == current_count
+            and self._adj_fact_count == current_fact_count
+            and _fresh
+        ):
             return
         adj: dict[str, list[tuple[str, float]]] = defaultdict(list)
         try:
+            where, params = _scope_where(
+                profile_id,
+                include_global=include_global,
+                include_shared=include_shared,
+            )
             rows = self._db.execute(
-                "SELECT source_id, target_id, weight FROM graph_edges WHERE profile_id = ?",
-                (profile_id,),
+                f"SELECT source_id, target_id, weight FROM graph_edges WHERE {where}",
+                (*params,),
             )
         except Exception:
             rows = []
@@ -143,27 +312,57 @@ class EntityGraphChannel:
             s, t, w = d["source_id"], d["target_id"], float(d["weight"])
             adj[s].append((t, w))
             adj[t].append((s, w))
-        self._adj = dict(adj)  # Convert defaultdict to regular dict (no accidental growth)
-        self._adj_profile = profile_id
-        self._adj_edge_count = current_count
-        self._adj_loaded_at = _now_ec  # memory-bounding-01: TTL reference
         # Also load entity maps (same staleness lifecycle)
-        self._load_entity_maps(profile_id)
+        self._load_entity_maps(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+        )
+        # Edge scope alone cannot authorize an endpoint.  Prune both endpoints
+        # against the visible fact corpus so denied facts cannot influence an
+        # allowed candidate indirectly through propagation.
+        self._adj = {
+            node_id: [
+                (neighbor_id, weight)
+                for neighbor_id, weight in neighbors
+                if neighbor_id in self._visible_fact_ids
+            ]
+            for node_id, neighbors in adj.items()
+            if node_id in self._visible_fact_ids
+        }
+        self._adj_profile = profile_id
+        self._adj_scope_key = scope_key
+        self._adj_edge_count = current_count
+        self._adj_fact_count = current_fact_count
+        self._adj_loaded_at = _now_ec  # memory-bounding-01: TTL reference
         # v3.4.1: Load graph intelligence metrics (P0)
         self._load_graph_metrics(profile_id)
 
         logger.info(
             "Loaded adjacency cache: %d nodes, %d edges, %d entity mappings for profile %s",
-            len(self._adj), sum(len(v) for v in self._adj.values()) // 2,
-            len(self._entity_to_facts), profile_id,
+            len(self._adj),
+            sum(len(v) for v in self._adj.values()) // 2,
+            len(self._entity_to_facts),
+            profile_id,
         )
 
-    def _get_edge_count(self, profile_id: str) -> int:
+    def _get_edge_count(
+        self,
+        profile_id: str,
+        *,
+        include_global: bool = False,
+        include_shared: bool = False,
+    ) -> int:
         """Fast edge count for staleness check (~1ms)."""
         try:
+            where, params = _scope_where(
+                profile_id,
+                include_global=include_global,
+                include_shared=include_shared,
+            )
             rows = self._db.execute(
-                "SELECT COUNT(*) as cnt FROM graph_edges WHERE profile_id = ?",
-                (profile_id,),
+                f"SELECT COUNT(*) as cnt FROM graph_edges WHERE {where}",
+                (*params,),
             )
             if rows:
                 return int(dict(rows[0]).get("cnt", 0))
@@ -171,43 +370,64 @@ class EntityGraphChannel:
             pass
         return 0
 
-    def _load_entity_maps(self, profile_id: str) -> None:
+    def _load_entity_maps(
+        self,
+        profile_id: str,
+        *,
+        include_global: bool = False,
+        include_shared: bool = False,
+    ) -> None:
         """Pre-load entity→fact and fact→entity maps into memory.
 
         Eliminates per-entity and per-fact SQL in the spreading activation loop.
-        Same data, same algorithm — zero quality change.
+        Fetch only the two columns this index consumes. Loading full AtomicFact
+        objects also deserializes every 768-d embedding and Fisher vector; on a
+        mature database that turned one new fact into a 5-second recall stall.
+        The scope predicate and configurable 50k safety ceiling are identical
+        to ``get_all_facts``; only heavyweight unused columns are omitted.
         """
         # entity_id -> [fact_id, ...]
         self._entity_to_facts: dict[str, list[str]] = defaultdict(list)
         # fact_id -> [entity_id, ...]
         self._fact_to_entities: dict[str, list[str]] = defaultdict(list)
+        self._visible_fact_ids = set()
 
         try:
+            where, params = _scope_where(
+                profile_id,
+                include_global=include_global,
+                include_shared=include_shared,
+            )
             rows = self._db.execute(
-                "SELECT fact_id, canonical_entities_json FROM atomic_facts "
-                "WHERE profile_id = ? AND canonical_entities_json IS NOT NULL "
-                "AND canonical_entities_json != ''",
-                (profile_id,),
+                "SELECT fact_id, canonical_entities_json "
+                f"FROM atomic_facts WHERE {where} "
+                "ORDER BY created_at DESC LIMIT ?",
+                (*params, _unbounded_facts_ceiling()),
             )
         except Exception:
             rows = []
-        for r in rows:
-            d = dict(r)
-            fid = d["fact_id"]
-            raw = d.get("canonical_entities_json")
-            if not raw:
+        for row in rows:
+            data = dict(row)
+            fact_id = str(data.get("fact_id") or "")
+            if not fact_id:
                 continue
+            self._visible_fact_ids.add(fact_id)
             try:
-                eids = json.loads(raw)
-                for eid in eids:
-                    self._entity_to_facts[eid].append(fid)
-                    self._fact_to_entities[fid].append(eid)
-            except (ValueError, TypeError):
-                continue
+                entity_ids = json.loads(
+                    data.get("canonical_entities_json") or "[]",
+                )
+            except (TypeError, ValueError):
+                entity_ids = []
+            for entity_id in entity_ids:
+                if not isinstance(entity_id, str) or not entity_id:
+                    continue
+                self._entity_to_facts[entity_id].append(fact_id)
+                self._fact_to_entities[fact_id].append(entity_id)
 
         logger.info(
             "Loaded entity maps: %d entities, %d facts with entities",
-            len(self._entity_to_facts), len(self._fact_to_entities),
+            len(self._entity_to_facts),
+            len(self._fact_to_entities),
         )
 
     def _load_graph_metrics(self, profile_id: str) -> None:
@@ -235,7 +455,8 @@ class EntityGraphChannel:
                 }
             logger.info(
                 "Loaded graph metrics: %d facts for profile %s",
-                len(self._graph_metrics), profile_id,
+                len(self._graph_metrics),
+                profile_id,
             )
         except Exception as exc:
             logger.debug("Graph metrics load failed (graceful degradation): %s", exc)
@@ -245,32 +466,61 @@ class EntityGraphChannel:
         """Clear all caches. Call after adding/removing edges or facts."""
         self._adj.clear()
         self._adj_profile = ""
+        self._adj_scope_key = None
         self._adj_edge_count = 0
+        self._adj_fact_count = 0
         self._entity_to_facts = defaultdict(list)
         self._fact_to_entities = defaultdict(list)
+        self._visible_fact_ids.clear()
         self._graph_metrics.clear()
         self._graph_metrics_profile = ""
 
     def search(self, query: str, profile_id: str, top_k: int = 50) -> list[tuple[str, float]]:
+        """Serialize access to the scope-keyed graph/entity cache."""
+        with self._cache_lock:
+            return self._search_locked(query, profile_id, top_k)
+
+    def _search_locked(
+        self,
+        query: str,
+        profile_id: str,
+        top_k: int = 50,
+    ) -> list[tuple[str, float]]:
         """Search via entity graph with spreading activation.
 
         V3.3.9: Uses in-memory adjacency for O(1) edge lookups.
         V3.4.5: Routes to CozoDB if backend is active (Sprint 2).
         """
+        include_global = bool(getattr(self, "include_global", False))
+        include_shared = bool(getattr(self, "include_shared", False))
         raw_entities = extract_query_entities(query)
+
+        if not raw_entities:
+            return []
+
+        # Load the visible fact/entity map before resolution. Canonical entity
+        # IDs are profile-local UUIDs, so the same name may have a different ID
+        # in an opted-in global/shared owner's partition.
+        self._ensure_adjacency(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+        )
 
         # v3.4.5: Route to CozoDB if active
         if self._cozo is not None:
-            return self._search_via_cozo(query, raw_entities, profile_id, top_k)
-        if not raw_entities:
-            return []
+            return self._search_via_cozo(
+                query,
+                raw_entities,
+                profile_id,
+                top_k,
+                include_global=include_global,
+                include_shared=include_shared,
+            )
 
         canonical_ids = self._resolve_entities(raw_entities, profile_id)
         if not canonical_ids:
             return []
-
-        # Load adjacency cache (no-op if already loaded for this profile)
-        self._ensure_adjacency(profile_id)
 
         # Seed activation from direct entity-linked facts
         # Use in-memory map when available, fall back to SQL for mock/test DBs
@@ -283,13 +533,18 @@ class EntityGraphChannel:
                 for fid in self._entity_to_facts.get(eid, ()):
                     activation[fid] = max(activation[fid], 1.0)
             else:
-                for fact in self._db.get_facts_by_entity(eid, profile_id, include_global=getattr(self, 'include_global', False), include_shared=getattr(self, 'include_shared', False)):
+                for fact in self._db.get_facts_by_entity(
+                    eid,
+                    profile_id,
+                    include_global=include_global,
+                    include_shared=include_shared,
+                ):
                     activation[fact.fact_id] = max(activation[fact.fact_id], 1.0)
 
         # Spreading activation through graph edges (all in-memory O(1) lookups)
         frontier = set(activation.keys())
         for hop in range(1, self._max_hops):
-            hop_decay = self._decay ** hop
+            hop_decay = self._decay**hop
             if hop_decay < self._threshold:
                 break
             next_frontier: set[str] = set()
@@ -317,10 +572,17 @@ class EntityGraphChannel:
                     # NOTE: SQL fallback path does NOT use graph intelligence (P1/P2/P3).
                     # Graph intelligence is only available on the in-memory cache path.
                     # This fallback exists for mock/test DBs. See Phase 7 LLD H-01.
-                    for edge in self._db.get_edges_for_node(fid, profile_id, include_global=getattr(self, 'include_global', False), include_shared=getattr(self, 'include_shared', False)):
+                    for edge in self._db.get_edges_for_node(
+                        fid,
+                        profile_id,
+                        include_global=include_global,
+                        include_shared=include_shared,
+                    ):
                         neighbor = edge.target_id if edge.source_id == fid else edge.source_id
                         propagated = activation[fid] * self._decay
-                        if propagated >= self._threshold and propagated > activation.get(neighbor, 0.0):
+                        if propagated >= self._threshold and propagated > activation.get(
+                            neighbor, 0.0
+                        ):
                             activation[neighbor] = propagated
                             next_frontier.add(neighbor)
 
@@ -342,7 +604,12 @@ class EntityGraphChannel:
                 new_eids_sql = self._discover_entities(frontier, profile_id, visited_entities)
                 for eid in new_eids_sql:
                     visited_entities.add(eid)
-                    for fact in self._db.get_facts_by_entity(eid, profile_id, include_global=getattr(self, 'include_global', False), include_shared=getattr(self, 'include_shared', False)):
+                    for fact in self._db.get_facts_by_entity(
+                        eid,
+                        profile_id,
+                        include_global=include_global,
+                        include_shared=include_shared,
+                    ):
                         if hop_decay > activation.get(fact.fact_id, 0.0):
                             activation[fact.fact_id] = hop_decay
                             next_frontier.add(fact.fact_id)
@@ -354,6 +621,7 @@ class EntityGraphChannel:
         # v3.4.1 P2: Community-aware boosting
         if self._graph_metrics and use_cache:
             from collections import Counter as _Counter
+
             seed_communities: _Counter = _Counter()
             for eid in canonical_ids:
                 for fid in self._entity_to_facts.get(eid, ()):
@@ -384,13 +652,41 @@ class EntityGraphChannel:
         if max_score > 0:
             results = [(fid, sc / max_score) for fid, sc in results]
         results.sort(key=lambda x: x[1], reverse=True)
-        return results[:top_k]
+        return filter_authorized_results(
+            self._db,
+            results,
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+        )[:top_k]
 
     def score_candidates(
         self,
         query: str,
         candidate_fact_ids: list[str],
         profile_id: str,
+        *,
+        include_global: bool | None = None,
+        include_shared: bool | None = None,
+    ) -> dict[str, float]:
+        """Serialize access to the scope-keyed graph/entity cache."""
+        with self._cache_lock:
+            return self._score_candidates_locked(
+                query,
+                candidate_fact_ids,
+                profile_id,
+                include_global=include_global,
+                include_shared=include_shared,
+            )
+
+    def _score_candidates_locked(
+        self,
+        query: str,
+        candidate_fact_ids: list[str],
+        profile_id: str,
+        *,
+        include_global: bool | None = None,
+        include_shared: bool | None = None,
     ) -> dict[str, float]:
         """Score candidate facts by their entity-graph proximity to query entities.
 
@@ -418,15 +714,32 @@ class EntityGraphChannel:
         if not candidate_fact_ids:
             return {}
 
+        if include_global is None:
+            include_global = bool(getattr(self, "include_global", False))
+        if include_shared is None:
+            include_shared = bool(getattr(self, "include_shared", False))
+        allowed_candidates = authorized_fact_ids(
+            self._db,
+            candidate_fact_ids,
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+        )
+        if not allowed_candidates:
+            return {}
+
         raw_entities = extract_query_entities(query)
         if not raw_entities:
             return {}
 
+        self._ensure_adjacency(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+        )
         canonical_ids = self._resolve_entities(raw_entities, profile_id)
         if not canonical_ids:
             return {}
-
-        self._ensure_adjacency(profile_id)
 
         # Run full spreading activation (same as search())
         activation: dict[str, float] = defaultdict(float)
@@ -438,12 +751,17 @@ class EntityGraphChannel:
                 for fid in self._entity_to_facts.get(eid, ()):
                     activation[fid] = max(activation[fid], 1.0)
             else:
-                for fact in self._db.get_facts_by_entity(eid, profile_id, include_global=getattr(self, 'include_global', False), include_shared=getattr(self, 'include_shared', False)):
+                for fact in self._db.get_facts_by_entity(
+                    eid,
+                    profile_id,
+                    include_global=include_global,
+                    include_shared=include_shared,
+                ):
                     activation[fact.fact_id] = max(activation[fact.fact_id], 1.0)
 
         frontier = set(activation.keys())
         for hop in range(1, self._max_hops):
-            hop_decay = self._decay ** hop
+            hop_decay = self._decay**hop
             if hop_decay < self._threshold:
                 break
             next_frontier: set[str] = set()
@@ -478,6 +796,7 @@ class EntityGraphChannel:
         # Community-aware boosting (same as search)
         if self._graph_metrics and use_cache:
             from collections import Counter as _Counter
+
             seed_communities: _Counter = _Counter()
             for eid in canonical_ids:
                 for fid in self._entity_to_facts.get(eid, ()):
@@ -495,7 +814,7 @@ class EntityGraphChannel:
                         activation[fid] *= boost
 
         # Extract scores ONLY for the candidate set, normalize to [0, 1]
-        candidate_set = set(candidate_fact_ids)
+        candidate_set = allowed_candidates
         scored = {fid: activation.get(fid, 0.0) for fid in candidate_set}
 
         max_score = max(scored.values()) if scored else 0
@@ -505,7 +824,9 @@ class EntityGraphChannel:
         return scored
 
     def _suppress_contradictions(
-        self, activation: dict[str, float], profile_id: str,
+        self,
+        activation: dict[str, float],
+        profile_id: str,
     ) -> None:
         """P3: Penalize older fact in contradiction pairs, heavy-penalize superseded.
 
@@ -558,7 +879,7 @@ class EntityGraphChannel:
             logger.debug("Contradiction suppression failed: %s", exc)
 
     def _resolve_entities(self, raw: list[str], profile_id: str) -> list[str]:
-        """Resolve raw names to canonical entity IDs."""
+        """Resolve local and visible cross-profile canonical entity IDs."""
         ids: list[str] = []
         seen: set[str] = set()
         if self._resolver is not None:
@@ -572,17 +893,50 @@ class EntityGraphChannel:
                 if ent and ent.entity_id not in seen:
                     seen.add(ent.entity_id)
                     ids.append(ent.entity_id)
+
+        # Entity UUIDs are profile-local. Supplement local resolution with
+        # same-name/alias IDs that are actually referenced by visible facts.
+        names = [name.strip().lower() for name in raw if name.strip()]
+        if names and self._visible_fact_ids and self._entity_to_facts:
+            placeholders = ",".join("?" for _ in names)
+            try:
+                rows = self._db.execute(
+                    "SELECT entity_id FROM canonical_entities "
+                    f"WHERE LOWER(canonical_name) IN ({placeholders}) "
+                    "UNION SELECT entity_id FROM entity_aliases "
+                    f"WHERE LOWER(alias) IN ({placeholders})",
+                    (*names, *names),
+                )
+            except Exception:
+                rows = []
+            visible_entity_ids = set(self._entity_to_facts)
+            for row in rows:
+                entity_id = str(dict(row)["entity_id"])
+                if entity_id in visible_entity_ids and entity_id not in seen:
+                    seen.add(entity_id)
+                    ids.append(entity_id)
         return ids
 
     def _discover_entities(
-        self, fact_ids: set[str], profile_id: str, visited: set[str],
+        self,
+        fact_ids: set[str],
+        profile_id: str,
+        visited: set[str],
     ) -> list[str]:
         """Find new canonical entity IDs referenced by a set of facts."""
         new: list[str] = []
         seen = set(visited)
-        for fid in fact_ids:
+        allowed_fact_ids = authorized_fact_ids(
+            self._db,
+            fact_ids,
+            profile_id,
+            include_global=bool(getattr(self, "include_global", False)),
+            include_shared=bool(getattr(self, "include_shared", False)),
+        )
+        for fid in allowed_fact_ids:
             rows = self._db.execute(
-                "SELECT canonical_entities_json FROM atomic_facts WHERE fact_id = ?", (fid,),
+                "SELECT canonical_entities_json FROM atomic_facts WHERE fact_id = ?",
+                (fid,),
             )
             if not rows:
                 continue
@@ -600,8 +954,14 @@ class EntityGraphChannel:
 
     # v3.4.5: CozoDB-backed search (Sprint 2)
     def _search_via_cozo(
-        self, query: str, raw_entities: list[str],
-        profile_id: str, top_k: int,
+        self,
+        query: str,
+        raw_entities: list[str],
+        profile_id: str,
+        top_k: int,
+        *,
+        include_global: bool = False,
+        include_shared: bool = False,
     ) -> list[tuple[str, float]]:
         """Entity graph search routed through CozoDB.
 
@@ -616,26 +976,59 @@ class EntityGraphChannel:
         if not canonical_ids:
             return []
 
+        # Scoped/global recall has deliberately more complex authorization
+        # semantics than the promoted default-profile projection.  Never let
+        # a projection broaden that boundary: SQLite remains authoritative.
+        if include_global or include_shared:
+            return self._search_without_cozo(query, profile_id, top_k)
+
         try:
-            # Use CozoDB for spreading activation
-            scored = self._cozo.spreading_activation(
+            scored = self._cozo.recall_facts(
                 canonical_ids,
+                profile_id=profile_id,
                 depth=self._max_hops,
                 decay=self._decay,
-                top_k=top_k * 2,  # Fetch extra for filtering
+                threshold=self._threshold,
+                top_k=top_k * 2,
             )
 
-            # Map entity scores to fact scores
-            fact_scores: list[tuple[str, float]] = []
-            for entity_id, score in scored:
-                facts = self._db.get_facts_by_entity(entity_id, profile_id, include_global=getattr(self, 'include_global', False), include_shared=getattr(self, 'include_shared', False))
-                for fact in facts:
-                    fact_scores.append((fact.fact_id, score))
+            cozo_results = filter_authorized_results(
+                self._db,
+                scored,
+                profile_id,
+                include_global=include_global,
+                include_shared=include_shared,
+            )[:top_k]
+            # Shadow SQLite before accepting a projected answer.  The graph
+            # channel has optional PageRank/community enrichments, so exact
+            # Score equality is neither required nor useful; result *membership*
+            # is the correctness contract. Order within the same fact set is
+            # tolerated — requiring identical ordering would fail closed on
+            # every query with score ties, leaving Cozo permanently unused.
+            # Any membership divergence is recorded and fails closed to SQLite.
+            sqlite_results = self._search_without_cozo(query, profile_id, top_k)
+            matches = {fact_id for fact_id, _ in cozo_results} == {
+                fact_id for fact_id, _ in sqlite_results
+            }
+            record = getattr(self._cozo, "record_shadow_comparison", None)
+            if callable(record):
+                record(matches=matches, projected=cozo_results, canonical=sqlite_results)
+            return cozo_results if matches else sqlite_results
+        except Exception as exc:
+            record = getattr(self._cozo, "record_shadow_error", None)
+            if callable(record):
+                record(str(exc))
+            return self._search_without_cozo(query, profile_id, top_k)
 
-            # Sort and return top_k
-            fact_scores.sort(key=lambda x: x[1], reverse=True)
-            return fact_scores[:top_k]
-
-        except Exception:
-            # Fallback to in-memory adjacency (existing code path)
-            return []
+    def _search_without_cozo(
+        self,
+        query: str,
+        profile_id: str,
+        top_k: int,
+    ) -> list[tuple[str, float]]:
+        """Run canonical SQLite entity recall without recursive projection use."""
+        cozo, self._cozo = self._cozo, None
+        try:
+            return self._search_locked(query, profile_id, top_k)
+        finally:
+            self._cozo = cozo

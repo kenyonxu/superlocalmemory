@@ -1,5 +1,5 @@
 # Distributed Deployment
-> SuperLocalMemory V3.6.9+ — Multi-machine / LXC / container setup
+> SuperLocalMemory V4 — Multi-machine / LXC / container setup (SLM-Mesh)
 > https://superlocalmemory.com | Part of Qualixar
 
 This guide covers running SLM in distributed environments: multiple containers, LXC hosts, VMs, or any topology where the daemon runs on a different host than the MCP clients.
@@ -9,10 +9,13 @@ This guide covers running SLM in distributed environments: multiple containers, 
 ## Quick start (single host, already works in v3.6.8)
 
 ```bash
-pip install superlocalmemory
+npm install -g superlocalmemory
 slm setup
 slm serve start   # or: systemctl start slm-http
 ```
+
+Python deployments can instead create and activate a dedicated virtual
+environment, then run `python -m pip install superlocalmemory` before setup.
 
 For multi-container setups, read on.
 
@@ -28,7 +31,11 @@ SLM_DAEMON_HOST=0.0.0.0 slm serve start
 Environment=SLM_DAEMON_HOST=0.0.0.0
 ```
 
-> **Security:** Pair `SLM_DAEMON_HOST=0.0.0.0` with `SLM_MESH_SHARED_SECRET` on any non-loopback interface. The daemon has no built-in auth layer beyond this.
+> **Security:** Host allowlists are DNS-rebinding/origin controls, not
+> authentication. Remote HTTP MCP requires a configured SLM API key; mesh
+> routes require their configured shared secret. Use TLS and network policy in
+> front of any non-loopback listener. Do not expose the daemon directly to the
+> public internet.
 
 ---
 
@@ -43,11 +50,18 @@ SLM_MCP_ALLOWED_HOSTS=192.168.50.144:* slm serve start
 # Allow multiple hosts
 SLM_MCP_ALLOWED_HOSTS=192.168.50.144:*,slm.lan:* slm serve start
 
-# Disable protection entirely (trusted private network only)
+# Broad wildcard (not recommended; still does not replace authentication)
 SLM_MCP_ALLOWED_HOSTS=* slm serve start
 ```
 
-The value is a comma-separated list of `host:port-wildcard` patterns, e.g. `192.168.50.144:*` allows any port on that IP. On a trusted LAN, `*` is fine; on anything reachable from the internet, use explicit host patterns.
+The value is a comma-separated list of `host:port-wildcard` patterns, e.g.
+`192.168.50.144:*` allows any port on that IP. Prefer exact hosts or bounded
+CIDRs. `*` widens the rebinding/origin surface and is not recommended, even on
+a private LAN.
+
+Remote HTTP MCP requests must also present the configured SLM API key. The
+allowlist decides which hosts may reach the transport; it does not create an
+authenticated actor.
 
 ---
 
@@ -56,7 +70,7 @@ The value is a comma-separated list of `host:port-wildcard` patterns, e.g. `192.
 SLM historically assumes every dashboard browser, MCP client, and API caller is on `127.0.0.1`. That breaks three things when you reach SLM across a LAN (issues #39 / #40):
 
 1. **The Brain page can't load** from a remote browser — `/internal/token` refuses non-loopback clients, so the dashboard never gets the install token.
-2. **Mesh / forwarded MCP tools return `-32600 Session not found`** — the Streamable-HTTP transport is stateful, so any gateway/hub that doesn't replay the `Mcp-Session-Id` is rejected.
+2. **Older stateful MCP clients can return `-32600 Session not found`** when a gateway/hub fails to replay `Mcp-Session-Id`. V4's MCP 2 transport is stateless by default, so this is not the normal V4 path.
 3. **The dashboard CSRF origin guard** only accepts loopback origins.
 
 `SLM_REMOTE=1` flips all three at once — **default OFF**, so the loopback-only posture is unchanged for local installs. LAN access is still gated by your existing `SLM_MCP_ALLOWED_HOSTS` allowlist:
@@ -69,12 +83,18 @@ slm serve start
 ```
 
 What `SLM_REMOTE=1` does:
-- **`/internal/token`** serves the install token to clients whose IP is in `SLM_MCP_ALLOWED_HOSTS` (Brain page loads remotely). Non-allowlisted IPs are still `403`.
-- **MCP transport runs stateless** so gateways/hubs/forwarders work without replaying the session id (fixes the mesh `-32600`). Available standalone as `SLM_MCP_STATELESS=1` if you only need the gateway fix without opening the token endpoint.
+- **`/internal/token`** can serve the install token to allowlisted clients.
+  Treat every allowlisted host as trusted local-operator infrastructure; an IP
+  allowlist is not user authentication.
+- **MCP transport remains stateless by default** so gateways/hubs/forwarders work without replaying a session ID. Set `SLM_MCP_STATEFUL=1` only when a compatibility integration explicitly requires stateful Streamable HTTP; it is not enabled by `SLM_REMOTE`.
 - **The dashboard CSRF origin guard** also accepts allowlisted LAN origins.
 - **The dashboard rate limiter exempts** allowlisted LAN browsers (they poll like the local dashboard does), so normal use doesn't trip `429`.
 
-> **Security (WORSTCASE):** Remote mode widens the attack surface. Stateless MCP relaxes per-session isolation, and serving the install token to a LAN host lets any allowlisted machine read the brain. Keep `SLM_MCP_ALLOWED_HOSTS` specific (prefer a CIDR like `192.168.50.0/24` over blanket `*`) and only enable on a trusted network. Pair with `SLM_MESH_SHARED_SECRET`.
+> **Security:** Remote mode widens the attack surface. Stateless MCP relaxes
+> per-session isolation, and serving an install token to a LAN host gives that
+> host a local dashboard credential. Keep `SLM_MCP_ALLOWED_HOSTS` specific,
+> configure the SLM API key for remote MCP, configure
+> `SLM_MESH_SHARED_SECRET` for mesh, and terminate TLS at a trusted gateway.
 
 ### Tuning the dashboard rate limiter (v3.6.12)
 
@@ -123,7 +143,7 @@ SLM_DAEMON_URL=http://192.168.50.144:8765
 ## Per-agent identity over HTTP — `/mcp/{agent_id}` (v3.6.10+)
 
 The HTTP MCP endpoint accepts an **agent-id path segment** so that every AI tool
-sharing the one daemon gets its own memory attribution — without spawning a
+sharing the one daemon gets its own audit attribution — without spawning a
 separate `slm mcp` stdio process per tool (which wastes RAM).
 
 | URL | Resolved `agent_id` |
@@ -138,7 +158,12 @@ separate `slm mcp` stdio process per tool (which wastes RAM).
 The daemon extracts the segment from the URL path into a per-request
 `ContextVar`, so `remember`, `recall`, `observe`, `delete_memory`,
 `update_memory`, `session_init`, and event emission all tag the correct agent —
-no MCP-protocol changes, works with any HTTP MCP client.
+no MCP-protocol changes are required.
+
+The path segment is metadata, not authentication. Mutation authority derives
+from the verified local capability, same-origin install token, configured SLM
+API key, or documented mesh credential. A caller cannot grant itself trust by
+choosing a different `{agent_id}`.
 
 **Precedence:** URL path segment → `SLM_AGENT_ID` env var (stdio) → `mcp_client`.
 The bare `/mcp/` endpoint is unchanged, so existing configs keep working.
@@ -189,8 +214,9 @@ agent id; pick a stable, lowercase name per tool.
 |----------|---------|---------|
 | `SLM_MCP_EMBEDDED` | Set `1` when running MCP inside the daemon (suppresses warmup threads) | — |
 | `SLM_MCP_ALLOWED_HOSTS` | **NEW** Comma-separated allowlist (`host:port*`, exact IP, CIDR, prefix`*`, or `*`) for HTTP MCP + LAN token/origin/rate-limit (see above) | localhost-only |
-| `SLM_REMOTE` | **NEW (v3.6.12)** One-switch LAN mode: serves token to allowlisted LAN clients, runs MCP stateless, relaxes origin guard, exempts LAN from rate limit. Default OFF | — |
-| `SLM_MCP_STATELESS` | **NEW (v3.6.12)** Run MCP transport stateless only (gateway/hub fix) without opening the token endpoint | — |
+| `SLM_REMOTE` | One-switch LAN mode: serves token to allowlisted LAN clients, relaxes origin guard, and exempts LAN from rate limit. It does not change the default stateless MCP transport. Default OFF | — |
+| `SLM_MCP_STATELESS` | Explicitly select stateless MCP transport; stateless is already the V4 default | — |
+| `SLM_MCP_STATEFUL` | Set `1` only for a compatibility integration that requires stateful Streamable HTTP | — |
 | `SLM_MCP_TOOLS` | Comma-separated list of MCP tools to expose (default: all) | — |
 | `SLM_RATE_LIMIT_WRITE` | **NEW (v3.6.12)** Max dashboard write requests per window | `30` |
 | `SLM_RATE_LIMIT_READ` | **NEW (v3.6.12)** Max dashboard read requests per window | `120` |
@@ -203,7 +229,7 @@ agent id; pick a stable, lowercase name per tool.
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `SLM_MESH_HOST` | Bind address for mesh WebSocket broker | `127.0.0.1` |
-| `SLM_MESH_WS_PORT` | WebSocket port for mesh broker | `8766` |
+| `SLM_MESH_WS_PORT` | WebSocket port for mesh broker | `7900` |
 | `SLM_MESH_SHARED_SECRET` | Auth secret for the mesh HTTP API. Required when `SLM_MESH_HOST` is not localhost. Send as `Authorization: Bearer <secret>` (canonical) or `X-Mesh-Secret: <secret>` (legacy). | — |
 | `SLM_MESH_PEER_URL` | Explicit peer URL to register with at startup | — |
 | `SLM_MESH_DISCOVERY` | Discovery mode: `local` / `manual` | `local` |
@@ -213,6 +239,18 @@ agent id; pick a stable, lowercase name per tool.
 > Example: `curl http://192.168.50.144:8765/mesh/status -H "Authorization: Bearer <your-secret>"`
 
 > **Note:** The variable is `SLM_MESH_WS_PORT` (not `SLM_MCP_WS_PORT`).
+
+### Inspecting the mesh
+
+Check broker health and connected peer sessions from the terminal:
+
+```bash
+slm mesh status   # broker up/down, peer count, uptime
+slm mesh peers    # active peer sessions on this machine
+```
+
+These are read-only and query the running daemon's mesh broker; agents also
+have the `mesh_*` MCP tools and the dashboard **Mesh Peers** tab.
 > `SLM_DAEMON_HOST` is canonical; `SLM_HOST` is the alias (not the other way around).
 
 ### Memory / health / workers

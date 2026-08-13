@@ -10,7 +10,14 @@ Get SuperLocalMemory working in under 5 minutes — whether you're a new user or
 
 ```bash
 npm install -g superlocalmemory
-# or: pip install superlocalmemory
+```
+
+Python alternative: create and activate a virtual environment, then install:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install superlocalmemory
 ```
 
 ### 2. Setup
@@ -20,7 +27,7 @@ slm setup
 ```
 
 The wizard asks you to pick a mode:
-- **A (Local Guardian)** — Zero cloud. Your data never leaves your machine. Default.
+- **A (Local Guardian)** — Core memory operations use the local data root without a cloud model provider. Optional integrations have separate network behavior. Default.
 - **B (Smart Local)** — Local LLM via Ollama for answer synthesis.
 - **C (Full Power)** — Cloud LLM for maximum accuracy. Requires API key.
 
@@ -37,10 +44,12 @@ Downloads the nomic-embed-text-v1.5 model (~500MB). If you skip this, it downloa
 ### 4. Store your first memory
 
 ```bash
-slm remember "Our API uses JWT tokens with 24-hour expiry. Refresh tokens last 30 days."
+slm remember "Our API uses JWT tokens with 24-hour expiry. Refresh tokens last 30 days." --json
 ```
 
-Output: `Stored 1 facts.`
+Output includes `operation_id`, fact IDs, and `materialization_state:
+queryable`. This means the SQLite relational/FTS projection is recallable and
+enrichment is pending. Use `--sync` to wait for `complete`.
 
 ### 5. Recall it
 
@@ -60,7 +69,7 @@ slm status
 ```
 
 ```
-SuperLocalMemory V3
+SuperLocalMemory V4
   Mode: A
   Provider: none
   Base dir: ~/.superlocalmemory
@@ -110,7 +119,7 @@ Works with: Claude Code, Cursor, VS Code Copilot, Windsurf, Continue, Cody, Chat
 slm dashboard
 ```
 
-Opens at http://localhost:8765. 17 tabs: memory browser, knowledge graph, recall lab, trust scores, math health, compliance, and more.
+Opens at http://localhost:8765. Dashboard workspaces include Dashboard, Brain, Knowledge Graph, Memories, Health, Operations, Entity Explorer, Skill Evolution, Mesh Peers, Settings, and Optimize (workspace/tab counts are illustrative — verify the installed dashboard; do not treat a count as a contract).
 
 ---
 
@@ -132,13 +141,13 @@ V3 installs alongside V2. Your V2 data is untouched until you migrate.
 slm migrate
 ```
 
-This will:
+This will (not a global transaction — spans file copies, commits, and symlink/junction; verify after):
 - Show your V2 stats (memory count, DB size)
 - Ask for confirmation
-- Back up your V2 database automatically
+- Create a backup at `~/.superlocalmemory/memory-v2-backup.db` / `~/.claude-memory-v2-original` (verify it exists before relying on rollback)
 - Copy data to the V3 location (`~/.superlocalmemory/`)
 - Convert V2 memories to V3 atomic facts
-- Create a symlink so old tools still find the data
+- Create a symlink/junction so old tools still find the data (platform-dependent)
 
 ### 3. Setup V3
 
@@ -159,23 +168,25 @@ slm recall "something you stored in V2"   # Verify old memories are accessible
 
 | Feature | V2 | V3 |
 |:--------|:---|:---|
-| Retrieval | Cosine similarity only | 4-channel (Semantic + BM25 + Entity Graph + Temporal) |
-| Similarity | Cosine distance | Fisher-Rao geodesic distance |
+| Retrieval | Cosine similarity only | Five candidate producers plus fusion and optional score enhancements |
+| Similarity | Cosine distance | Dense cosine relevance with optional Fisher-informed later scoring |
 | Consistency | None | Sheaf cohomology (algebraic topology) |
 | Lifecycle | Hardcoded thresholds | Self-organizing Langevin dynamics |
 | Modes | Single mode | A (zero-cloud), B (local LLM), C (cloud LLM) |
-| EU AI Act | Not addressed | Mode A/B compliant by design |
-| Dashboard | 5 tabs | 17 tabs |
-| MCP Tools | 6 | 24 |
-| Tests | ~200 | 1400+ |
+| Privacy and compliance controls | Not addressed | Deployment-specific controls and assessment |
+| Dashboard |_tabs are illustrative — verify the installed build_ | _workspace counts are illustrative — verify the installed dashboard_ |
+| MCP Tools | 6 | Profile-selected V3 tool surfaces |
+| Tests | Historical V2 suite | V3 unit, contract, artifact, and integration suites |
 
 ### Rollback if needed
 
 ```bash
+# rollback only while the migrator-created backup still exists — verify before use:
+ls -lh ~/.superlocalmemory/memory-v2-backup.db; ls -ld ~/.claude-memory-v2-original
 slm migrate --rollback
 ```
 
-This restores your V2 installation. No data is lost.
+This restores your V2 installation from the backup while it still exists; verify the backup (`~/.superlocalmemory/memory-v2-backup.db` / `~/.claude-memory-v2-original`) before use — code has no automatic deletion or guaranteed window. It spans file copies, commits, and rename/symlink and reports failures; verify the restored state.
 
 ---
 
@@ -204,7 +215,7 @@ Full reference: [CLI Reference](CLI-Reference)
 ## Next Steps
 
 - [Modes Explained](Modes-Explained) — Understand A vs B vs C
-- [MCP Tools](MCP-Tools) — All 24 tools available in your IDE
+- [MCP Tools](MCP-Tools) — Profile-selected tool and resource contracts
 - [IDE Setup](IDE-Setup) — Per-IDE configuration guides
 - [Auto-Memory](Auto-Memory) — How auto-capture and auto-recall work
 - [Architecture Overview](V3-Architecture) — How the system works under the hood

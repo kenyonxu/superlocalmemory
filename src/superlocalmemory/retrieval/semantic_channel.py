@@ -13,7 +13,7 @@ where all variances are identical, Fisher distance degenerates to a
 monotonic transform of Euclidean distance — same ranking as cosine.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
-License: Elastic-2.0
+License: AGPL-3.0-or-later
 """
 
 from __future__ import annotations
@@ -32,6 +32,20 @@ logger = logging.getLogger(__name__)
 
 # Minimum variance floor to prevent division-by-zero in Fisher distance
 _VARIANCE_FLOOR: float = 1e-6
+
+
+class _LanceCandidateSource:
+    """Adapt the promoted Lance projection to the existing candidate contract."""
+
+    available = True
+
+    def __init__(self, backend: Any) -> None:
+        self._backend = backend
+
+    def search(self, query_embedding: list[float], *, top_k: int, profile_id: str) -> list[tuple[str, float]]:
+        return self._backend.similarity_search(
+            query_embedding, top_k=top_k, profile_id=profile_id,
+        )
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -95,6 +109,9 @@ class SemanticChannel:
         # V3.3.26: Lazily instantiated FRQAD metric for mixed-precision scoring
         self._frqad_metric: object | None = None
         self._vector_store = vector_store
+        self._scale_vector_backend: Any | None = None
+        self._scale_shadow_checks = 0
+        self._scale_shadow_mismatches = 0
         # V3.3.19: TurboQuant 3-tier search (stateless, optional)
         self._qas = quantization_aware_search
 
@@ -103,6 +120,8 @@ class SemanticChannel:
         query_embedding: list[float],
         profile_id: str,
         top_k: int = 50,
+        include_global: bool | None = None,
+        include_shared: bool | None = None,
     ) -> list[tuple[str, float]]:
         """Search for semantically similar facts.
 
@@ -113,27 +132,137 @@ class SemanticChannel:
             query_embedding: Dense vector for the query.
             profile_id: Scope to this profile.
             top_k: Maximum results to return.
+            include_global: Include global-scope facts. Defaults to the
+                ``include_global`` instance attribute when not supplied,
+                preserving backward compatibility for callers that still
+                set the attribute directly.
+            include_shared: Include shared-scope facts. Same fallback.
 
         Returns:
             List of (fact_id, score) sorted by score descending.
             Score is in [0, 1] range.
         """
+        # Resolve scope flags: explicit param takes priority; fall back to the
+        # legacy attribute-based path so existing callers keep working.
+        if include_global is None:
+            include_global = bool(getattr(self, "include_global", False))
+        if include_shared is None:
+            include_shared = bool(getattr(self, "include_shared", False))
+
         if not query_embedding:
             return []
 
         q_vec = np.array(query_embedding, dtype=np.float32)
 
+        # Lance is a derived projection.  It is never an authorization source
+        # and it never silently replaces the canonical sqlite-vec path: every
+        # promoted query is shadowed and falls back if the result *membership*
+        # differs. Order differences within the same fact set are tolerated —
+        # float-score ties would otherwise force a fallback on every query,
+        # leaving the promoted backend permanently unused. Once membership
+        # matches, the projected backend's own ranking is authoritative.
+        if (
+            self._scale_vector_backend is not None
+            and not include_global
+            and not include_shared
+        ):
+            projected = self._search_via_lance(
+                query_embedding, q_vec, profile_id, top_k,
+                include_global=include_global, include_shared=include_shared,
+            )
+            canonical = self._search_without_lance(
+                query_embedding, q_vec, profile_id, top_k,
+                include_global=include_global, include_shared=include_shared,
+            )
+            self._scale_shadow_checks += 1
+            if {fid for fid, _ in projected} == {fid for fid, _ in canonical}:
+                return projected
+            self._scale_shadow_mismatches += 1
+            logger.warning("Lance semantic projection diverged from SQLite; using SQLite")
+            return canonical
+
         # --- FAST PATH: sqlite-vec KNN ---
         if self._vector_store and self._vector_store.available:
             results = self._search_via_vector_store(
                 query_embedding, q_vec, profile_id, top_k,
+                include_global=include_global, include_shared=include_shared,
             )
             if results:  # If vec0 returned results, use them
                 return results
             # If vec0 is empty (cold start), fall through to full scan
 
         # --- FALLBACK: full-table scan (original code, unchanged) ---
-        return self._search_full_scan(query_embedding, q_vec, profile_id, top_k)
+        return self._search_full_scan(
+            query_embedding, q_vec, profile_id, top_k,
+            include_global=include_global, include_shared=include_shared,
+        )
+
+    def set_scale_vector_backend(self, backend: Any | None) -> None:
+        """Attach a parity-verified Lance projection without replacing SQLite."""
+        self._scale_vector_backend = backend
+
+    def scale_projection_telemetry(self) -> dict[str, int]:
+        return {
+            "shadow_checks": self._scale_shadow_checks,
+            "shadow_mismatches": self._scale_shadow_mismatches,
+        }
+
+    def _search_via_lance(
+        self,
+        query_embedding: list[float],
+        q_vec: np.ndarray,
+        profile_id: str,
+        top_k: int,
+        include_global: bool | None = None,
+        include_shared: bool | None = None,
+    ) -> list[tuple[str, float]]:
+        if include_global is None:
+            include_global = bool(getattr(self, "include_global", False))
+        if include_shared is None:
+            include_shared = bool(getattr(self, "include_shared", False))
+        original_store, original_qas = self._vector_store, self._qas
+        try:
+            self._vector_store = _LanceCandidateSource(self._scale_vector_backend)
+            # QAS indexes SQLite/quantized records and cannot represent Lance.
+            self._qas = None
+            return self._search_via_vector_store(
+                query_embedding, q_vec, profile_id, top_k,
+                include_global=include_global, include_shared=include_shared,
+            )
+        except Exception as exc:
+            logger.warning("Lance semantic projection failed closed to SQLite: %s", exc)
+            return []
+        finally:
+            self._vector_store, self._qas = original_store, original_qas
+
+    def _search_without_lance(
+        self,
+        query_embedding: list[float],
+        q_vec: np.ndarray,
+        profile_id: str,
+        top_k: int,
+        include_global: bool | None = None,
+        include_shared: bool | None = None,
+    ) -> list[tuple[str, float]]:
+        if include_global is None:
+            include_global = bool(getattr(self, "include_global", False))
+        if include_shared is None:
+            include_shared = bool(getattr(self, "include_shared", False))
+        backend, self._scale_vector_backend = self._scale_vector_backend, None
+        try:
+            if self._vector_store and self._vector_store.available:
+                results = self._search_via_vector_store(
+                    query_embedding, q_vec, profile_id, top_k,
+                    include_global=include_global, include_shared=include_shared,
+                )
+                if results:
+                    return results
+            return self._search_full_scan(
+                query_embedding, q_vec, profile_id, top_k,
+                include_global=include_global, include_shared=include_shared,
+            )
+        finally:
+            self._scale_vector_backend = backend
 
     def _search_via_vector_store(
         self,
@@ -141,8 +270,14 @@ class SemanticChannel:
         q_vec: np.ndarray,
         profile_id: str,
         top_k: int,
+        include_global: bool | None = None,
+        include_shared: bool | None = None,
     ) -> list[tuple[str, float]]:
         """KNN via VectorStore (or QAS 3-tier), then Fisher-Rao re-scoring."""
+        if include_global is None:
+            include_global = bool(getattr(self, "include_global", False))
+        if include_shared is None:
+            include_shared = bool(getattr(self, "include_shared", False))
         # V3.3.19: Try TurboQuant 3-tier search first (float32 + int8 + polar)
         if self._qas is not None:
             try:
@@ -162,6 +297,43 @@ class SemanticChannel:
             knn_results = self._vector_store.search(
                 query_embedding, top_k=top_k * 2, profile_id=profile_id,
             )
+
+        # M-01: Normalize KNN scores to [0.5, 1.0] via (score + 1.0) / 2.0 so
+        # they are on the same scale as full-scan scores computed from
+        # (_cosine_similarity(q, f) + 1.0) / 2.0 in the external_scores path.
+        # vector_store.search() clips at 0 (max(0, cosine)), which maps [–1,1]
+        # to [0,1]; the canonical formula maps to [0.5, 1.0] for positives.
+        # Both are [0,1] but different scales — without this normalization KNN
+        # scores are systematically lower and external facts always win max().
+        knn_results = [(fid, (score + 1.0) / 2.0) for fid, score in knn_results]
+
+        # The vector index is partitioned by owner profile. An opted-in global
+        # or authorized shared fact owned by another profile cannot enter the
+        # local KNN candidate set, so merge the bounded cross-profile visible
+        # supplement using the same canonical DB scope predicate as fallback.
+        external_facts = self._db.get_external_visible_facts(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+        )
+        external_scores: list[tuple[str, float]] = []
+        for fact in external_facts:
+            if fact.embedding is None:
+                continue
+            fact_vec = np.array(fact.embedding, dtype=np.float32)
+            if fact_vec.shape != q_vec.shape:
+                continue
+            score = (_cosine_similarity(q_vec, fact_vec) + 1.0) / 2.0
+            if score > 0.05:
+                external_scores.append((fact.fact_id, score))
+
+        if external_scores:
+            combined = {fid: score for fid, score in knn_results}
+            for fact_id, score in external_scores:
+                combined[fact_id] = max(combined.get(fact_id, 0.0), score)
+            knn_results = sorted(
+                combined.items(), key=lambda item: item[1], reverse=True,
+            )[:top_k * 2]
         if not knn_results:
             return []  # Caller falls through to full scan
 
@@ -170,12 +342,17 @@ class SemanticChannel:
         knn_scores = {fid: score for fid, score in knn_results}
         facts = self._db.get_facts_by_ids(
             candidate_ids, profile_id,
-            include_global=getattr(self, 'include_global', False),
-            include_shared=getattr(self, 'include_shared', False),
+            include_global=include_global,
+            include_shared=include_shared,
         )
 
         if not facts:
-            return [(fid, score) for fid, score in knn_results[:top_k]]
+            # The vector/QAS indexes are candidate sources, never an
+            # authorization source.  Returning their raw IDs here leaked an
+            # owner-private fact precisely when canonical scope filtering
+            # rejected the entire candidate set.  Empty means "no authorized
+            # fast-path hits" so the caller may use the scoped full scan.
+            return []
 
         # Step 3: Fisher-Rao re-scoring on the subset
         q_mean: np.ndarray | None = None
@@ -187,26 +364,37 @@ class SemanticChannel:
 
         scored: list[tuple[str, float]] = []
         for fact in facts:
-            cos_sim = knn_scores.get(fact.fact_id, 0.0)
+            # C2-ret H-01: recompute the final cosine from the canonical
+            # full-precision embedding using the SAME formula as the full-scan
+            # fallback, so the fast path is observationally equivalent — identical
+            # score MAGNITUDES, not merely identical rankings. The KNN/vector-store
+            # score is a candidate-SELECTION signal only (it decides which facts
+            # are Fisher-rescored), never the final magnitude; trusting it here
+            # leaked the vector store's negative-cosine clamp into public scores.
+            # When a candidate carries no usable embedding (index-only rows), fall
+            # back to the normalized KNN score, preserving the M-01 contract.
+            f_vec: np.ndarray | None = None
+            if fact.embedding is not None:
+                candidate = np.array(fact.embedding, dtype=np.float32)
+                if candidate.shape == q_vec.shape:
+                    f_vec = candidate
 
-            # V3.3.21: Fisher-Rao ramp with minimum floor.
-            # Bug fix: access_count=0 for fresh facts → Fisher weight=0 → metric DEAD.
-            # Paper 2's +12pp on multi-hop came from Fisher-Rao. A 0.3 floor ensures
-            # fresh facts still benefit from variance-weighted similarity, while
-            # frequently accessed facts get progressively stronger Fisher influence.
-            fisher_weight = max(0.15, min(1.2, (fact.access_count or 0) / 10.0 * 1.2))
+            if f_vec is not None:
+                cos_sim = (_cosine_similarity(q_vec, f_vec) + 1.0) / 2.0
+            else:
+                cos_sim = knn_scores.get(fact.fact_id, 0.0)
+
+            fisher_weight = self._fisher_weight(fact.access_count)
 
             if (fisher_weight > 0.01
                     and fact.fisher_variance is not None
-                    and fact.embedding is not None
+                    and f_vec is not None
                     and len(fact.fisher_variance) == len(q_vec)):
-                f_vec = np.array(fact.embedding, dtype=np.float32)
                 var_vec = np.array(fact.fisher_variance, dtype=np.float32)
                 f_sim = self._compute_fisher_sim(
                     q_vec, f_vec, var_vec, fact, q_mean, q_var,
                 )
-                capped_w = min(1.0, fisher_weight)
-                sim = capped_w * f_sim + (1.0 - capped_w) * cos_sim
+                sim = fisher_weight * f_sim + (1.0 - fisher_weight) * cos_sim
             else:
                 sim = cos_sim
 
@@ -222,10 +410,16 @@ class SemanticChannel:
         q_vec: np.ndarray,
         profile_id: str,
         top_k: int,
+        include_global: bool | None = None,
+        include_shared: bool | None = None,
     ) -> list[tuple[str, float]]:
         """Original full-table-scan search. Used as fallback when VectorStore
         is unavailable or empty (cold start).
         """
+        if include_global is None:
+            include_global = bool(getattr(self, "include_global", False))
+        if include_shared is None:
+            include_shared = bool(getattr(self, "include_shared", False))
         # Compute query Fisher params for Bayesian comparison (F45 fix)
         q_mean: np.ndarray | None = None
         q_var: np.ndarray | None = None
@@ -236,8 +430,8 @@ class SemanticChannel:
 
         facts = self._db.get_all_facts(
             profile_id,
-            include_global=getattr(self, 'include_global', False),
-            include_shared=getattr(self, 'include_shared', False),
+            include_global=include_global,
+            include_shared=include_shared,
         )
 
         scored: list[tuple[str, float]] = []
@@ -252,8 +446,8 @@ class SemanticChannel:
             # Cosine baseline (always computed)
             cos_sim = (_cosine_similarity(q_vec, f_vec) + 1.0) / 2.0
 
-            # Graduated Fisher-Rao ramp (F37, F108)
-            fisher_weight = min(1.2, (fact.access_count or 0) / 10.0 * 1.2)
+            # The weighting contract is identical to the sqlite-vec path.
+            fisher_weight = self._fisher_weight(fact.access_count)
 
             if (fisher_weight > 0.01
                     and fact.fisher_variance is not None
@@ -262,8 +456,7 @@ class SemanticChannel:
                 f_sim = self._compute_fisher_sim(
                     q_vec, f_vec, var_vec, fact, q_mean, q_var,
                 )
-                capped_w = min(1.0, fisher_weight)
-                sim = capped_w * f_sim + (1.0 - capped_w) * cos_sim
+                sim = fisher_weight * f_sim + (1.0 - fisher_weight) * cos_sim
             else:
                 sim = cos_sim
 
@@ -272,6 +465,14 @@ class SemanticChannel:
 
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:top_k]
+
+    @staticmethod
+    def _fisher_weight(access_count: int | None) -> float:
+        """Canonical Fisher blend shared by every semantic candidate path."""
+        graduated = (access_count or 0) / 10.0 * 1.2
+        # A small floor keeps Fisher variance active for new facts.  The cap
+        # prevents the blend from extrapolating beyond its two score inputs.
+        return min(1.0, max(0.15, graduated))
 
     # ------------------------------------------------------------------
     # Fisher similarity dispatch

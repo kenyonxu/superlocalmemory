@@ -36,6 +36,7 @@ def test_isolation_wrong_db_raises(tmp_path: Path) -> None:
 
 # ---- file permissions (SEC-C-01) ----
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits do not represent an NTFS ACL")
 def test_chmod_600_set(tmp_cache_db, tmp_path: Path) -> None:
     mode = stat_mode(tmp_path / "llmcache.db")
     assert mode is not None
@@ -207,6 +208,31 @@ def test_key_stability_across_reruns(tmp_path: Path) -> None:
     db2.close()
 
 
+def test_machine_id_falls_back_on_windows_without_os_uname(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Windows has no os.uname(); CacheDB must use the persisted uuid fallback."""
+    import os as _os
+    from superlocalmemory.optimize.storage.db import CacheDB
+
+    monkeypatch.setattr(
+        "superlocalmemory.optimize.storage.db.platform.system",
+        lambda: "Windows",
+    )
+    canonical = tmp_path / "canonical"
+    monkeypatch.setenv("SLM_DATA_DIR", str(canonical))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delattr(_os, "uname", raising=False)
+
+    db = CacheDB.__new__(CacheDB)
+    mid = db._get_machine_id()
+
+    mid_file = canonical / ".llmcache_key"
+    assert mid
+    assert mid_file.exists()
+    assert mid_file.read_text(encoding="utf-8").strip() == mid
+
+
 def test_ccr_put_get_roundtrip(tmp_cache_db) -> None:
     ccr_id = uuid.uuid4().hex
     original = b"verbatim user context that must be encrypted"
@@ -230,19 +256,44 @@ def test_get_default_returns_singleton(tmp_path: Path, monkeypatch) -> None:
 
 # ---- fail-open ----
 
-def test_get_fail_open_on_corrupt_db(tmp_path: Path) -> None:
+def test_get_fail_open_on_corrupt_db(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """get() must return None (not raise) for an unopenable DB."""
+    import sqlite3
+
     from superlocalmemory.optimize.storage.db import CacheDB
+
     db_path = tmp_path / "corrupt.db"
     db_path.write_bytes(b"not a sqlite file at all")
-    # CacheDB init may raise or open; either way, get() must not raise.
+    real_connect = sqlite3.connect
+    probe_closed = False
+    first_connect = True
+
+    class FailingProbe:
+        def execute(self, _sql: str) -> None:
+            raise sqlite3.DatabaseError("file is not a database")
+
+        def close(self) -> None:
+            nonlocal probe_closed
+            probe_closed = True
+
+    def connect_once_with_failing_probe(*args, **kwargs):
+        nonlocal first_connect
+        if first_connect:
+            first_connect = False
+            return FailingProbe()
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect_once_with_failing_probe)
+    db = CacheDB(db_path)
     try:
-        db = CacheDB(db_path)
-        row = db.get("any", "t1")
-        assert row is None
-    except RuntimeError:
-        # Acceptable: init refuses a corrupt file; proxy won't instantiate.
-        pass
+        assert probe_closed
+        assert db.get("any", "t1") is None
+        assert db_path.with_suffix(".db.corrupt").read_bytes() == b"not a sqlite file at all"
+    finally:
+        db.close()
 
 
 # ---- C-06: AES key persistence ----
@@ -263,9 +314,11 @@ def test_c06_aes_key_persisted_to_file(tmp_path: Path) -> None:
         assert key_file.exists(), "opt-key.bin must be created on first DB open"
         key_bytes = key_file.read_bytes()
         assert len(key_bytes) == 32, f"Persisted key must be 32 bytes, got {len(key_bytes)}"
-        # Permissions must be 0600
-        mode = oct(key_file.stat().st_mode & 0o777)
-        assert mode == "0o600", f"opt-key.bin must be 0600, got {mode}"
+        if os.name != "nt":
+            # POSIX permissions must be 0600. NTFS protection is represented
+            # by its DACL, not the compatibility bits returned by os.stat().
+            mode = oct(key_file.stat().st_mode & 0o777)
+            assert mode == "0o600", f"opt-key.bin must be 0600, got {mode}"
     finally:
         db_mod._KEY_FILE = original
 
@@ -324,3 +377,28 @@ def test_c06_second_open_uses_persisted_key(tmp_path: Path) -> None:
         assert row is not None, "C-06: second open must read entries written by first open"
     finally:
         db_mod._KEY_FILE = original
+
+
+# ---- M2: durable KV counters ----
+
+def test_kv_counter_incr_and_load(tmp_cache_db) -> None:
+    tmp_cache_db.kv_counter_incr("kv_hits", 3)
+    tmp_cache_db.kv_counter_incr("kv_misses", 1)
+    tmp_cache_db.kv_counter_incr("kv_hits")  # default delta=1
+    assert tmp_cache_db.kv_counters_load() == {"kv_hits": 4, "kv_misses": 1}
+
+
+def test_kv_counters_persist_across_restart(tmp_path, monkeypatch) -> None:
+    """M2: KV hit/miss counters survive a daemon restart (new CacheDB instance)."""
+    from superlocalmemory.optimize.storage import db as _db_mod
+    from superlocalmemory.optimize.storage.db import CacheDB
+    monkeypatch.setattr(_db_mod, "_KEY_FILE", tmp_path / "opt-key.bin")
+    db_path = tmp_path / "llmcache.db"
+
+    db1 = CacheDB(db_path)
+    db1.kv_counter_incr("kv_hits", 5)
+    db1.kv_counter_incr("kv_misses", 2)
+    db1.close()
+
+    db2 = CacheDB(db_path)  # simulate restart
+    assert db2.kv_counters_load() == {"kv_hits": 5, "kv_misses": 2}

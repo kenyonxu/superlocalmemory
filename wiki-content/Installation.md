@@ -1,47 +1,44 @@
-# Installation
+# Installation — V4.0.0
 
-SuperLocalMemory V3 installs via **npm**, **pip**, or **git clone**. All three methods give you the same product — choose whichever fits your workflow.
+SuperLocalMemory V4 has two primary paths: an npm global CLI with a
+package-owned Python environment, and a Python CLI + SDK inside an activated
+virtual environment. Repository-clone installers share the same release
+identity but have different ownership and verification contracts.
 
-> **No desktop app (DMG/EXE) for V3.** V3 is a CLI + MCP server, not a GUI application. The V2 desktop installers are deprecated. Use `slm dashboard` for the web UI.
+> **Current release:** **V4.0.0** (`2026-08-01`, see [CHANGELOG](https://github.com/qualixar/superlocalmemory/blob/main/CHANGELOG.md)). All commands below describe the installed V4.0.0 artifact.
 
 ## Prerequisites
 
 | Requirement | Version | Check |
 |:-----------|:--------|:------|
-| **Python** | 3.11+ | `python3 --version` |
-| **Node.js** (for npm install) | 14+ | `node --version` |
+| **Python** | 3.11 – 3.14 | `python3 --version` |
+| **Node.js** (for npm install) | 18+ | `node --version` |
 
-Python 3.11+ is required for the V3 engine. Node.js is only needed if you install via npm.
+Python 3.11+ is required for the V4 engine (built on the V3.8 control plane). Node.js is only needed if you install via npm.
+
+> **Platform boundary (V4):** **Apple Silicon macOS, 64-bit Windows, 64-bit Linux.** Intel Mac and 32-bit Windows are **not supported** by the pinned `cryptography==50.0.0` runtime — the package has no wheel for those architectures. `package.json` `os: [darwin, linux, win32]` is the npm publish descriptor and does not hard-block architectures; install will fail where `cryptography==50.0.0` wheels are absent (see `pyproject.toml` `cryptography==50.0.0`). The Python native dependency enforces the narrower boundary above.
 
 ---
 
-## Method 1: npm (Recommended)
+## Primary path 1: npm global CLI
 
-One command installs everything — CLI, Python dependencies, and MCP server.
+This installs the CLI and MCP runtime into a package-owned Python environment.
 
 ```bash
 npm install -g superlocalmemory
 ```
 
-This automatically:
-- Installs the V3 engine and CLI (`slm` command)
-- Auto-installs Python dependencies (numpy, scipy, networkx, sentence-transformers, torch)
-- Creates data directory at `~/.superlocalmemory/`
-- **Auto-installs Claude Code hooks** (v3.3.6+) — memory lifecycle is fully automatic
-- Detects V2 installations and guides migration
-
-**That's it.** Open Claude Code and memory just works. No `slm setup` or `slm init` needed for auto-memory.
-
-For optional configuration:
+The npm lifecycle does not mutate protected system Python, install hooks, edit
+IDE configuration, start a daemon, download a model, or create the memory data
+root. Activation is explicit:
 
 ```bash
-slm setup     # Interactive wizard — choose Mode A/B/C, configure provider
+slm setup     # Choose mode and integrations
 slm warmup    # Pre-download embedding model (~500MB, one-time)
+slm doctor    # Verify the installed runtime and configuration
 ```
 
-> **`slm warmup` is optional.** If you skip it, the model downloads automatically on your first `slm remember` or `slm recall`.
-
-> **Don't want auto-hooks?** Run `slm hooks remove` to opt out. Re-enable anytime with `slm hooks install`.
+Hooks remain opt-in through `slm setup` or `slm hooks install`.
 
 ### Verify
 
@@ -51,7 +48,7 @@ slm status
 
 You should see:
 ```
-SuperLocalMemory V3
+SuperLocalMemory V4
   Mode: A
   Provider: none
   Base dir: /home/you/.superlocalmemory
@@ -60,28 +57,26 @@ SuperLocalMemory V3
 
 ---
 
-## Method 2: pip
+## Primary path 2: Python CLI + SDK in an activated virtual environment
 
 ```bash
-pip install superlocalmemory
-```
-
-Then run:
-
-```bash
+python3 -m venv .venv
+source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install superlocalmemory
 slm setup
-slm warmup    # Optional — pre-download embedding model
-slm status    # Verify
+slm doctor
 ```
 
----
+Keep the environment active whenever you run `slm` or import the SDK. Do not
+use global pip, `sudo pip`, or externally-managed-system-Python overrides.
 
-## Method 3: Git Clone (for development or air-gapped environments)
+## Repository clone (research and development)
 
 ```bash
 git clone https://github.com/qualixar/superlocalmemory.git
 cd superlocalmemory
-pip install -e .
+./scripts/install.sh install   # macOS/Linux; requires existing uv or pipx
+# Windows PowerShell: .\scripts\install.ps1 -Action Install
 ```
 
 Then:
@@ -94,7 +89,11 @@ slm status
 
 ---
 
-## What Gets Installed
+## Resource expectations
+
+Dependency and model footprints vary by Python platform, resolver, selected
+backend, and configured embedding model. The values below are orientation from
+the historical default stack, not a V4 release envelope:
 
 | Component | Size | When |
 |:----------|:-----|:-----|
@@ -102,26 +101,35 @@ slm status
 | Search engine (sentence-transformers, einops, torch) | ~200MB | During install |
 | Embedding model (nomic-ai/nomic-embed-text-v1.5, 768d) | ~500MB | First use or `slm warmup` |
 
-**Total disk footprint:** ~750MB after first use (mostly PyTorch + embedding model).
+**Historical orientation:** ~750MB after first use (mostly PyTorch + an
+embedding model). Measure the frozen artifact on each supported platform before
+using this value for capacity planning.
 
-**RAM usage:** ~500-800MB peak during embedding model load, ~20-50MB steady state. CPU-only — no GPU required.
+**Historical orientation:** ~500-800MB peak during default embedding-model
+load and ~20-50MB steady state. Backend and model selection can change this
+materially.
 
-> **If any dependency fails during install**, the installer prints the exact `pip install` command to fix it. BM25 keyword search works even without embeddings — you're never fully blocked.
+If an optional retrieval dependency is unavailable, inspect `slm doctor`,
+health, and trace output. Do not assume degraded retrieval is equivalent to the
+declared full topology.
 
 ---
 
 ## Platform Notes
 
-### macOS (Apple Silicon + Intel)
+### Apple Silicon macOS (supported)
 
 ```bash
 npm install -g superlocalmemory
 slm setup
 ```
 
-Works out of the box. Python 3.11+ is included with Homebrew (`brew install python@3.12`) or available from python.org.
+Use an existing supported Python 3.11–3.14 runtime. The npm installer does not
+bootstrap Homebrew, uv, pipx, or Python.
 
-### Linux (Ubuntu/Debian/Fedora)
+> Intel Mac is **not supported** in V4 (pinned `cryptography==50.0.0` has no Intel macOS wheel).
+
+### 64-bit Linux (Ubuntu/Debian/Fedora — supported)
 
 ```bash
 npm install -g superlocalmemory
@@ -130,14 +138,18 @@ slm setup
 
 Ensure Python 3.11+ is installed: `sudo apt install python3.11` (Ubuntu) or `sudo dnf install python3.11` (Fedora).
 
-### Windows
+### 64-bit Windows (supported)
 
 ```bash
 npm install -g superlocalmemory
 slm setup
 ```
 
-Requires Python 3.11+ from [python.org](https://www.python.org/downloads/). Add Python to PATH during installation.
+Requires an installed supported Python runtime (3.11–3.14, 64-bit).
+
+> 32-bit Windows (Win32) is **not supported** in V4.
+
+Hosted Windows artifact proof must pass for the frozen release before the channel is marked verified (see `benchmark/` — evidence is currently macOS-only; do not claim cross-platform verification beyond the installed runtime's `slm doctor`).
 
 ---
 
@@ -163,22 +175,35 @@ slm connect        # Configure all detected IDEs
 slm connect --list # See which IDEs are configured
 ```
 
-See [IDE Setup](IDE-Setup) for per-IDE instructions.
+See [IDE Setup](IDE-Setup) for per-IDE instructions. MCP tool counts in V4: `core` 14 / `code` 24 / `full` 42 / `power` 54 / `mesh` 8 / **`whole` 87** (see [MCP Tools](MCP-Tools)).
 
 ---
 
 ## Upgrading from V2
 
-If you have V2 (2.8.6 or earlier) installed:
+If you have V2 (2.8.6 or earlier) installed — **V2→V3 migration** (spans file copies, commits, and rename/symlink — not a single global transaction; verify after):
 
 ```bash
-npm install -g superlocalmemory    # Installs V3 alongside V2
-slm migrate                        # Migrates V2 data to V3 schema
+npm install -g superlocalmemory    # Installs V4 alongside V2
+slm migrate                        # V2→V3 data migration (V2Migrator)
+# Rollback only while the created backup still exists — verify before use:
+ls -lh ~/.superlocalmemory/memory-v2-backup.db; ls -ld ~/.claude-memory-v2-original
+slm migrate --rollback             # Valid only while migration backup still exists (no automatic 30-day deletion)
 ```
 
-V3 is a complete architectural reinvention — new mathematical engine, new retrieval pipeline, new storage schema. Your existing data is preserved. A backup is created automatically before migration.
+V3 is a complete architectural reinvention — new mathematical engine, new retrieval pipeline (5 candidate producers + graph enhancement), new storage schema. A backup is created (`~/.superlocalmemory/memory-v2-backup.db` / `~/.claude-memory-v2-original`); operators must verify (`slm status`, `slm health`, `slm status --json | jq '.data.fact_count'`) before decommissioning the prior state. This is not a zero-data-loss global transaction guarantee.
 
-See [Migration from V2](Migration-from-V2) for the full guide.
+**Not to be confused with `slm db migrate`** — the V4 additive schema maintenance command (forward only — see below and [CLI Reference](CLI-Reference)):
+
+```bash
+slm db migrate --status            # Inspect forward/deferred migrations
+slm db migrate --dry-run           # Preview (no writes)
+slm db migrate                     # Apply pending additive migrations (forward only; no rollback)
+# V4.0.0 M038 (eager) + M039 (deferred) are auto-applied at startup; no manual command normally required.
+# Schema downgrade is unsupported; restore a verified pre-upgrade backup of the complete data root (stop daemon, include WAL/SHM).
+```
+
+See [Migration from V2](Migration-from-V2) for the full V2→V3 guide.
 
 ---
 
@@ -190,7 +215,11 @@ See [Migration from V2](Migration-from-V2) for the full guide.
 
 ### `ModuleNotFoundError: No module named 'superlocalmemory'`
 - Ensure Python 3.11+ is the default: `python3 --version`
-- Reinstall: `pip install --force-reinstall superlocalmemory`
+- Activate the environment used for SLM, then reinstall with
+  `python -m pip install --force-reinstall superlocalmemory`.
+
+### `cryptography` install fails on Intel Mac or Win32
+- Expected: V4's pinned `cryptography==50.0.0` has no wheel for those architectures — packaging metadata does not hard-block them, but install will fail where `cryptography==50.0.0` wheels are absent. Use Apple Silicon macOS, 64-bit Windows, or 64-bit Linux.
 
 ### Embedding model fails to download
 - Check internet connection
@@ -207,7 +236,8 @@ See [Migration from V2](Migration-from-V2) for the full guide.
 
 - [Quick Start Tutorial](Quick-Start-Tutorial) — Your first memory in 2 minutes
 - [Modes Explained](Modes-Explained) — Choose between A (zero-cloud), B (local Ollama), C (full power)
-- [CLI Reference](CLI-Reference) — All 14 commands with examples
+- [CLI Reference](CLI-Reference) — Current command guidance and installed-help contract (`slm --help` is the source of truth)
+- [MCP Tools](MCP-Tools) — V4 profile counts and the whole 87 distinction
 
 ---
 *Part of [Qualixar](https://qualixar.com) | Created by [Varun Pratap Bhardwaj](https://varunpratap.com)*

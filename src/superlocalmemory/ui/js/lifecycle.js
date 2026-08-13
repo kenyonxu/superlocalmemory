@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Elastic-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 SuperLocalMemory (superlocalmemory.com)
 // Lifecycle tab — state distribution, compaction, transitions (v2.8)
 // NOTE: All dynamic values pass through escapeHtml() or textContent for DOM insertion.
@@ -299,7 +299,13 @@ async function compactDryRun() {
 }
 
 async function compactExecute() {
-    if (!confirm('This will transition memories to lower lifecycle states. Continue?')) return;
+    var confirmed = await confirmDestructive({
+        title: 'Apply compaction',
+        target: 'All eligible memories',
+        consequence: 'Transitions memories to lower lifecycle states.',
+        confirmLabel: 'Apply',
+    });
+    if (!confirmed) return;
     try {
         var response = await fetch('/api/lifecycle/compact', {
             method: 'POST',

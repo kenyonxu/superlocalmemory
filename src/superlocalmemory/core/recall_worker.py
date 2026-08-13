@@ -62,6 +62,7 @@ def _get_engine():
 def _handle_recall(
     query: str, limit: int, session_id: str = "", fast: bool = False,
     include_global: bool | None = None, include_shared: bool | None = None,
+    window: str | None = None,
 ) -> dict:
     engine = _get_engine()
     # v3.6.15 multi-scope: None flags let engine.recall resolve the configured
@@ -70,15 +71,26 @@ def _handle_recall(
     response = engine.recall(
         query, limit=limit, session_id=session_id or None, fast=bool(fast),
         include_global=include_global, include_shared=include_shared,
+        window=window or None,
     )
 
-    # Batch-fetch original memory text for all results
+    # Batch-fetch original memory text for all results. Retrieval already
+    # enforced scope, so resolve content for everything it returned (own +
+    # global + shared-with-me); another tenant's PRIVATE content still can't
+    # resolve. Using the raw (possibly-None) recall flags here would drop
+    # content for legitimately-recalled global/shared memories.
     memory_ids = list({r.fact.memory_id for r in response.results[:limit] if r.fact.memory_id})
-    memory_map = engine._db.get_memory_content_batch(memory_ids) if memory_ids else {}
+    memory_map = engine._db.get_memory_content_batch(
+        memory_ids, engine.profile_id,
+        include_global=True, include_shared=True,
+    ) if memory_ids else {}
 
     # v3.6.6: same shared chokepoint as the daemon HTTP route + CLI fallback,
     # so the MCP WorkerPool subprocess path returns identical budgeted output.
-    from superlocalmemory.server.recall_serializer import serialize_recall_response
+    from superlocalmemory.server.recall_serializer import (
+        recall_response_metadata,
+        serialize_recall_response,
+    )
     _rc = getattr(engine._config, "retrieval", None)
     results, no_confident_match = serialize_recall_response(
         response,
@@ -99,13 +111,43 @@ def _handle_recall(
         "total_candidates": getattr(response, "total_candidates", 0),
         "results": results,
         "no_confident_match": no_confident_match,
+        **recall_response_metadata(response),
     }
 
 
 def _handle_store(content: str, metadata: dict) -> dict:
     engine = _get_engine()
-    session_id = metadata.pop("session_id", "")
-    fact_ids = engine.store(content, session_id=session_id, metadata=metadata)
+    values = dict(metadata or {})
+    session_id = str(values.pop("session_id", "") or "")
+    scope = str(values.pop("scope", "personal") or "personal")
+    shared_with = list(values.pop("shared_with", []) or [])
+    idempotency_key = str(values.pop("idempotency_key", "") or "")
+    from superlocalmemory.core.engine_ingestion import (
+        canonical_store,
+        local_trusted_actor_id,
+    )
+    operation = canonical_store(
+        engine,
+        content,
+        source_type="mcp-offline-worker",
+        trusted_actor_id=local_trusted_actor_id("recall-worker"),
+        metadata=values,
+        scope=scope,
+        shared_with=shared_with,
+        session_id=session_id,
+        idempotency_key=idempotency_key,
+        return_receipt=True,
+    )
+    if hasattr(operation, "fact_ids"):
+        fact_ids = list(operation.fact_ids)
+        operation_id = getattr(operation, "operation_id", None)
+        materialization_state = getattr(
+            getattr(operation, "state", None), "value", "complete"
+        )
+    else:
+        fact_ids = list(operation)
+        operation_id = None
+        materialization_state = "complete"
 
     # Generate and persist summary immediately after store (Mode A heuristic, B/C LLM)
     if fact_ids:
@@ -125,17 +167,29 @@ def _handle_store(content: str, metadata: dict) -> dict:
         except Exception:
             pass  # Summary is non-critical
 
-    return {"ok": True, "fact_ids": fact_ids, "count": len(fact_ids)}
+    pending = materialization_state != "complete"
+    return {
+        "ok": True,
+        "fact_ids": fact_ids,
+        "count": len(fact_ids),
+        "operation_id": operation_id,
+        "pending_id": operation_id if pending else None,
+        "materialization_state": materialization_state,
+    }
 
 
 def _handle_get_memory_facts(memory_id: str) -> dict:
     engine = _get_engine()
     pid = engine.profile_id
-    # Get original memory content
-    mem_map = engine._db.get_memory_content_batch([memory_id])
+    # Get original memory content (C4: tenant-scoped; global/shared resolvable)
+    mem_map = engine._db.get_memory_content_batch(
+        [memory_id], pid, include_global=True, include_shared=True,
+    )
     original = mem_map.get(memory_id, "")
-    # Get child facts
-    facts = engine._db.get_facts_by_memory_id(memory_id, pid)
+    # Get child facts — same scope as the content fetch so a shared/global
+    # memory's facts are not silently empty.
+    facts = engine._db.get_facts_by_memory_id(
+        memory_id, pid, include_global=True, include_shared=True)
     fact_list = []
     for f in facts:
         fact_list.append({
@@ -154,65 +208,40 @@ def _handle_get_memory_facts(memory_id: str) -> dict:
     }
 
 
-def _handle_delete_memory(fact_id: str, agent_id: str = "system") -> dict:
-    """Delete a specific atomic fact by ID with audit logging."""
+def _handle_delete_memory(
+    fact_id: str,
+    source_agent_id: str = "system",
+) -> dict:
+    """Delete a fact after capability-derived authorization."""
     engine = _get_engine()
-    pid = engine.profile_id
-    rows = engine._db.execute(
-        "SELECT content FROM atomic_facts WHERE fact_id = ? AND profile_id = ? LIMIT 1",
-        (fact_id, pid),
+    from superlocalmemory.core.engine_ingestion import local_trusted_actor_id
+    from superlocalmemory.core.mutations import delete_fact_authorized
+
+    return delete_fact_authorized(
+        engine,
+        fact_id,
+        trusted_actor_id=local_trusted_actor_id("recall-worker"),
+        source_agent_id=source_agent_id,
     )
-    if not rows:
-        return {"ok": False, "error": f"Memory {fact_id} not found"}
-    content_preview = dict(rows[0]).get("content", "")[:80]
-    engine._db.delete_fact(fact_id)
-    # Audit log
-    import logging as _logging
-    _logging.getLogger("superlocalmemory.audit").info(
-        "DELETE fact_id=%s by agent=%s content=%s", fact_id[:16], agent_id, content_preview,
-    )
-    return {"ok": True, "deleted": fact_id, "content_preview": content_preview}
 
 
-def _handle_update_memory(fact_id: str, content: str, agent_id: str = "system") -> dict:
-    """Update content of a specific atomic fact with audit logging."""
+def _handle_update_memory(
+    fact_id: str,
+    content: str,
+    source_agent_id: str = "system",
+) -> dict:
+    """Update a fact after capability-derived authorization."""
     engine = _get_engine()
-    pid = engine.profile_id
-    rows = engine._db.execute(
-        "SELECT content FROM atomic_facts WHERE fact_id = ? AND profile_id = ? LIMIT 1",
-        (fact_id, pid),
+    from superlocalmemory.core.engine_ingestion import local_trusted_actor_id
+    from superlocalmemory.core.mutations import update_fact_authorized
+
+    return update_fact_authorized(
+        engine,
+        fact_id,
+        content,
+        trusted_actor_id=local_trusted_actor_id("recall-worker"),
+        source_agent_id=source_agent_id,
     )
-    if not rows:
-        return {"ok": False, "error": f"Memory {fact_id} not found"}
-    old_content = dict(rows[0]).get("content", "")[:80]
-    # V3.3.12: Re-embed updated content so semantic search + BM25 stay consistent.
-    # Previously only the text column was updated, leaving stale embeddings.
-    updates: dict = {"content": content}
-    if engine._embedder:
-        try:
-            new_emb = engine._embedder.embed(content)
-            if new_emb:
-                updates["embedding"] = new_emb
-                fm, fv = engine._embedder.compute_fisher_params(new_emb)
-                updates["fisher_mean"] = fm
-                updates["fisher_variance"] = fv
-        except Exception:
-            pass
-    engine._db.update_fact(fact_id, updates)
-    # Update BM25 index for the new content
-    if hasattr(engine, '_retrieval_engine') and engine._retrieval_engine:
-        bm25 = getattr(engine._retrieval_engine, '_bm25', None)
-        if bm25:
-            try:
-                bm25.add(fact_id, content, pid)
-            except Exception:
-                pass
-    import logging as _logging
-    _logging.getLogger("superlocalmemory.audit").info(
-        "UPDATE fact_id=%s by agent=%s old=%s new=%s",
-        fact_id[:16], agent_id, old_content, content[:80],
-    )
-    return {"ok": True, "fact_id": fact_id, "content": content}
 
 
 def _handle_summarize(texts: list[str], mode: str) -> dict:
@@ -292,6 +321,7 @@ def _worker_main() -> None:
                     req.get("session_id", ""), bool(req.get("fast", False)),
                     include_global=req.get("include_global"),
                     include_shared=req.get("include_shared"),
+                    window=req.get("window"),
                 )
                 _respond(result)
             elif cmd == "store":
@@ -299,14 +329,15 @@ def _worker_main() -> None:
                 _respond(result)
             elif cmd == "delete_memory":
                 result = _handle_delete_memory(
-                    req.get("fact_id", ""), req.get("agent_id", "system"),
+                    req.get("fact_id", ""),
+                    req.get("source_agent_id", req.get("agent_id", "system")),
                 )
                 _respond(result)
             elif cmd == "update_memory":
                 result = _handle_update_memory(
                     req.get("fact_id", ""),
                     req.get("content", ""),
-                    req.get("agent_id", "system"),
+                    req.get("source_agent_id", req.get("agent_id", "system")),
                 )
                 _respond(result)
             elif cmd == "get_memory_facts":

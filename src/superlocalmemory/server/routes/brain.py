@@ -30,6 +30,14 @@ Design notes (LLD-04 §7 hard rules):
   never spell those names anywhere in this module.
 * **U6** — install token required on ``/api/v3/brain`` and all
   deprecated shim routes. See ``require_install_token`` below.
+
+  External API consumers (L1): the dashboard auto-fetches the token from
+  ``GET /internal/token`` (loopback + same-origin only) and sends it as the
+  ``X-Install-Token`` header. Non-browser callers (scripts, IDE adapters,
+  third-party integrations) instead read the token from
+  ``~/.superlocalmemory/.install_token`` and send the same header:
+  ``curl -H "X-Install-Token: $(cat ~/.superlocalmemory/.install_token)" \
+  http://127.0.0.1:8765/api/v3/brain``.
 * **U10** — feature count surfaced from ``features.FEATURE_DIM``;
   stratum total from module constant ``_STRATA_TOTAL`` (48 = 4×3×4).
 """
@@ -37,13 +45,13 @@ Design notes (LLD-04 §7 hard rules):
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from superlocalmemory import __version__
 
 from superlocalmemory.core.security_primitives import (
     redact_secrets,
@@ -51,6 +59,9 @@ from superlocalmemory.core.security_primitives import (
 )
 from superlocalmemory.learning.database import LearningDatabase
 from superlocalmemory.learning.features import FEATURE_DIM
+from superlocalmemory.infra.data_root import canonical_data_root
+from superlocalmemory.storage.read_connection import ReadConnectionFactory
+from .helpers import get_active_profile
 
 logger = logging.getLogger("superlocalmemory.routes.brain")
 
@@ -64,7 +75,7 @@ router = APIRouter(prefix="/api/v3", tags=["brain"])
 # LLD-03 v2 stratum space = 4 query types × 3 entity bins × 4 time buckets.
 _STRATA_TOTAL: int = 48
 
-_VERSION: str = "3.4.23"
+_VERSION: str = __version__
 
 # Banned metric names (LLD-04 U4). Kept as a tuple for grep visibility;
 # the source-level test asserts we don't accidentally reintroduce them.
@@ -73,7 +84,13 @@ _VERSION: str = "3.4.23"
 
 # Memory directory (home-dir based). Always resolved at call time so that
 # tests can override via monkeypatch on ``_learning_db_path``.
-_MEMORY_DIR_DEFAULT = Path.home() / ".superlocalmemory"
+_MEMORY_DIR_DEFAULT = None  # test-only compatibility override
+
+
+def _memory_dir() -> Path:
+    if _MEMORY_DIR_DEFAULT is not None:
+        return Path(_MEMORY_DIR_DEFAULT)
+    return canonical_data_root()
 
 
 def _learning_db_path() -> Path:
@@ -83,11 +100,11 @@ def _learning_db_path() -> Path:
     monkeypatch without touching Path.home. See
     ``tests/test_api/test_brain_endpoint.py``.
     """
-    return _MEMORY_DIR_DEFAULT / "learning.db"
+    return _memory_dir() / "learning.db"
 
 
 def _memory_db_path() -> Path:
-    return _MEMORY_DIR_DEFAULT / "memory.db"
+    return _memory_dir() / "memory.db"
 
 
 # ---------------------------------------------------------------------------
@@ -538,7 +555,7 @@ def _compute_cache_stats() -> dict:
     size = db.stat().st_size
     entry_count = 0
     try:
-        conn = sqlite3.connect(str(db), timeout=5.0)
+        conn = ReadConnectionFactory(db).open()
         try:
             row = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM atomic_facts",
@@ -563,16 +580,11 @@ def _adapter_last_sync_ago(adapter_name: str) -> int | None:
     honest empty rather than a fabricated number.
     """
     try:
-        import sqlite3 as _sqlite3
         from datetime import datetime as _dt, timezone as _tz
-        from pathlib import Path as _P
-
-        memory_db = _P.home() / ".superlocalmemory" / "memory.db"
+        memory_db = _memory_dir() / "memory.db"
         if not memory_db.exists():
             return None
-        conn = _sqlite3.connect(
-            f"file:{memory_db}?mode=ro", uri=True, timeout=1.0,
-        )
+        conn = ReadConnectionFactory(memory_db).open()
         try:
             cur = conn.execute(
                 "SELECT last_sync_at FROM cross_platform_sync_log "
@@ -889,13 +901,47 @@ def _action_outcomes_count(lrn_db: LearningDatabase,
         return 0
 
 
+def _compute_action_outcomes_preview(profile_id: str) -> dict:
+    """Count profile-scoped action outcomes from their canonical database."""
+    empty = {
+        "action_outcomes_rows": 0,
+        "source": "memory.db:action_outcomes",
+        "is_real": True,
+    }
+    db_path = _memory_db_path()
+    if not db_path.exists():
+        return empty
+    try:
+        conn = ReadConnectionFactory(db_path).open()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM action_outcomes WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return empty
+    return {**empty, "action_outcomes_rows": int(row[0] or 0) if row else 0}
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 
+def _authorized_profile(request: Request, profile_id: str | None) -> str:
+    """Resolve and authorize the exact Brain profile requested by the caller."""
+    from superlocalmemory.access.rbac import Permission
+    from superlocalmemory.server.rbac_enforce import require_permission
+
+    effective_profile = profile_id or get_active_profile()
+    require_permission(request, Permission.READ, profile=effective_profile)
+    return effective_profile
+
+
 @router.get("/brain", dependencies=[Depends(require_install_token)])
-async def get_brain(profile_id: str = "default") -> dict:
+async def get_brain(request: Request, profile_id: str | None = None) -> dict:
     """Unified Brain endpoint — LLD-04 §3.1.
 
     Fan-out: each section is a synchronous SQLite reader. Running them
@@ -910,11 +956,14 @@ async def get_brain(profile_id: str = "default") -> dict:
     """
     import asyncio
 
+    # Default to the ACTIVE profile (request runtime truth), never literal
+    # "default" — the Brain must reflect whichever profile is active.
+    profile_id = _authorized_profile(request, profile_id)
     lrn_db = LearningDatabase(_learning_db_path())
 
     (
         preferences, learning, usage, bandit_snap, cache,
-        cross_platform, outcomes_rows, evolution,
+        cross_platform, outcomes_preview, evolution,
     ) = await asyncio.gather(
         asyncio.to_thread(_compute_preferences, profile_id),
         asyncio.to_thread(_compute_learning_status, profile_id, lrn_db),
@@ -922,7 +971,7 @@ async def get_brain(profile_id: str = "default") -> dict:
         asyncio.to_thread(_compute_bandit_snapshot, profile_id, lrn_db),
         asyncio.to_thread(_compute_cache_stats),
         asyncio.to_thread(_compute_cross_platform),
-        asyncio.to_thread(_action_outcomes_count, lrn_db, profile_id),
+        asyncio.to_thread(_compute_action_outcomes_preview, profile_id),
         asyncio.to_thread(
             _compute_evolution_timeseries, profile_id, lrn_db,
             days=_EVOLUTION_DEFAULT_DAYS,
@@ -960,11 +1009,11 @@ async def get_brain(profile_id: str = "default") -> dict:
             "is_real": True, "source": "learning_signals",
             "days": _EVOLUTION_DEFAULT_DAYS, "total_signals": 0, "points": [],
         }),
-        "outcomes_preview": {
-            "action_outcomes_rows":
-                0 if isinstance(outcomes_rows, Exception) else outcomes_rows,
-            "ships_in": "3.4.22",
-        },
+        "outcomes_preview": _ok(outcomes_preview, {
+            "action_outcomes_rows": 0,
+            "source": "memory.db:action_outcomes",
+            "is_real": True,
+        }),
         # S9-defer H-22: live tile data for the Reward / Shadow /
         # Evolution-Cost dashboard tiles. Each block is a honest-empty
         # default when the underlying table is missing (fresh install
@@ -985,8 +1034,6 @@ def _compute_outcome_queue_stats(profile_id: str) -> dict:
     ``pending_outcomes`` so the operator can see the closed loop is
     actually flowing: recall → enqueue → persist → finalize.
     """
-    import sqlite3
-    from pathlib import Path
     try:
         from superlocalmemory.learning.outcome_queue import (
             get_counters, queue_size,
@@ -995,12 +1042,12 @@ def _compute_outcome_queue_stats(profile_id: str) -> dict:
         qsz = queue_size()
     except Exception:
         counters, qsz = {}, 0
-    home = Path.home() / ".superlocalmemory"
+    home = _memory_dir()
     db = home / "memory.db"
     pending_now = 0
     if db.exists():
         try:
-            conn = sqlite3.connect(str(db), timeout=1.0)
+            conn = ReadConnectionFactory(db).open()
             try:
                 row = conn.execute(
                     "SELECT COUNT(*) FROM pending_outcomes "
@@ -1030,8 +1077,7 @@ def _compute_outcome_queue_stats(profile_id: str) -> dict:
 def _compute_reward_preview(profile_id: str) -> dict:
     """Reward-tile aggregate — count + mean reward over the last 24h."""
     import sqlite3
-    from pathlib import Path
-    home = Path.home() / ".superlocalmemory"
+    home = _memory_dir()
     db = home / "memory.db"
     default = {
         "is_real": False, "rows_24h": 0, "mean_reward_24h": 0.0,
@@ -1040,7 +1086,7 @@ def _compute_reward_preview(profile_id: str) -> dict:
     if not db.exists():
         return default
     try:
-        conn = sqlite3.connect(str(db), timeout=1.0)
+        conn = ReadConnectionFactory(db).open()
         try:
             row = conn.execute(
                 "SELECT COUNT(*) AS c, AVG(reward) AS m "
@@ -1173,7 +1219,8 @@ def _compute_evolution_cost_preview(profile_id: str) -> dict:
 @router.get("/brain/evolution-timeseries",
             dependencies=[Depends(require_install_token)])
 async def get_brain_evolution_timeseries(
-    profile_id: str = "default",
+    request: Request,
+    profile_id: str | None = None,
     days: int = _EVOLUTION_DEFAULT_DAYS,
 ) -> dict:
     """Daily learning-signal counts for ``profile_id`` over the last ``days``.
@@ -1183,6 +1230,7 @@ async def get_brain_evolution_timeseries(
     """
     import asyncio
 
+    profile_id = _authorized_profile(request, profile_id)
     lrn_db = LearningDatabase(_learning_db_path())
     result = await asyncio.to_thread(
         _compute_evolution_timeseries, profile_id, lrn_db, days=days,
@@ -1198,7 +1246,10 @@ async def get_brain_evolution_timeseries(
 
 @router.get("/learning/stats",
             dependencies=[Depends(require_install_token)])
-async def learning_stats_deprecated(profile_id: str = "default") -> dict:
+async def learning_stats_deprecated(
+    request: Request, profile_id: str | None = None,
+) -> dict:
+    profile_id = _authorized_profile(request, profile_id)
     lrn_db = LearningDatabase(_learning_db_path())
     return {
         "deprecated": True,
@@ -1209,7 +1260,10 @@ async def learning_stats_deprecated(profile_id: str = "default") -> dict:
 
 @router.get("/patterns",
             dependencies=[Depends(require_install_token)])
-async def patterns_deprecated(profile_id: str = "default") -> dict:
+async def patterns_deprecated(
+    request: Request, profile_id: str | None = None,
+) -> dict:
+    profile_id = _authorized_profile(request, profile_id)
     return {
         "deprecated": True,
         "use_instead": "/api/v3/brain",
@@ -1219,7 +1273,10 @@ async def patterns_deprecated(profile_id: str = "default") -> dict:
 
 @router.get("/behavioral",
             dependencies=[Depends(require_install_token)])
-async def behavioral_deprecated(profile_id: str = "default") -> dict:
+async def behavioral_deprecated(
+    request: Request, profile_id: str | None = None,
+) -> dict:
+    profile_id = _authorized_profile(request, profile_id)
     return {
         "deprecated": True,
         "use_instead": "/api/v3/brain",

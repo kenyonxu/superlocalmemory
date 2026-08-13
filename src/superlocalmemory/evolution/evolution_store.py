@@ -12,9 +12,11 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -32,6 +34,7 @@ logger = logging.getLogger(__name__)
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS skill_evolution_log (
     id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL DEFAULT 'default',
     skill_name TEXT NOT NULL,
     parent_skill_id TEXT,
     evolution_type TEXT NOT NULL,
@@ -49,15 +52,55 @@ CREATE TABLE IF NOT EXISTS skill_evolution_log (
     completed_at TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_evo_skill ON skill_evolution_log(skill_name);
-CREATE INDEX IF NOT EXISTS idx_evo_status ON skill_evolution_log(status);
-CREATE INDEX IF NOT EXISTS idx_evo_created ON skill_evolution_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_evo_skill ON skill_evolution_log(profile_id, skill_name);
+CREATE INDEX IF NOT EXISTS idx_evo_status ON skill_evolution_log(profile_id, status);
+CREATE INDEX IF NOT EXISTS idx_evo_created ON skill_evolution_log(profile_id, created_at);
 
 CREATE TABLE IF NOT EXISTS evolution_cycle_state (
-    key TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL DEFAULT 'default',
+    key TEXT NOT NULL,
     value INTEGER DEFAULT 0,
-    updated_at TEXT
+    updated_at TEXT,
+    PRIMARY KEY (profile_id, key)
 );
+
+-- Phase 2: append-only status-transition log (LLD Decision B2).
+-- Each state change for a record produces one new row here.
+-- The BEFORE UPDATE trigger enforces immutability at the DB layer.
+CREATE TABLE IF NOT EXISTS skill_evolution_transitions (
+    seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_id       TEXT NOT NULL,
+    profile_id      TEXT NOT NULL DEFAULT 'default',
+    from_status     TEXT NOT NULL,
+    to_status       TEXT NOT NULL,
+    transitioned_at TEXT NOT NULL,
+    actor_id        TEXT DEFAULT '',
+    reason          TEXT DEFAULT '',
+    prev_hash       TEXT DEFAULT '',
+    transition_hash TEXT NOT NULL,
+    metadata        TEXT DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_evo_trans_record
+    ON skill_evolution_transitions(record_id, seq);
+
+CREATE INDEX IF NOT EXISTS idx_evo_trans_profile
+    ON skill_evolution_transitions(profile_id, transitioned_at);
+
+-- DB-enforced append-only: any UPDATE on this table is a bug (LLD Decision B2).
+CREATE TRIGGER IF NOT EXISTS no_update_evo_transitions
+BEFORE UPDATE ON skill_evolution_transitions
+BEGIN
+    SELECT RAISE(ABORT, 'skill_evolution_transitions is append-only');
+END;
+
+-- Audit P1-3: DELETE must also be forbidden — otherwise the hash chain can be
+-- silently truncated/erased without a DB abort, breaking the immutable-log claim.
+CREATE TRIGGER IF NOT EXISTS no_delete_evo_transitions
+BEFORE DELETE ON skill_evolution_transitions
+BEGIN
+    SELECT RAISE(ABORT, 'skill_evolution_transitions is append-only');
+END;
 """
 
 # Anti-loop budget
@@ -77,6 +120,11 @@ class EvolutionStore:
     def _ensure_schema(self) -> None:
         conn = sqlite3.connect(self._db_path, timeout=10)
         try:
+            # Migrate an existing pre-isolation DB BEFORE running the schema DDL:
+            # the DDL creates indexes on profile_id, which would fail on a legacy
+            # table that still lacks the column. On a fresh DB the migration is a
+            # no-op (tables absent) and the DDL creates everything correctly.
+            self._migrate_profile_isolation(conn)
             conn.executescript(_SCHEMA_DDL)
             conn.commit()
         except sqlite3.OperationalError as exc:
@@ -84,56 +132,113 @@ class EvolutionStore:
         finally:
             conn.close()
 
-    def reset_cycle(self) -> None:
-        """Reset per-cycle counters. Call at start of each consolidation."""
+    def _migrate_profile_isolation(self, conn: sqlite3.Connection) -> None:
+        """Self-migrate pre-profile-isolation DBs to add per-profile scoping.
+
+        These tables are store-owned (created lazily here, not by the schema
+        migration runner which fires before this store exists), so the store
+        owns their upgrade too. Idempotent: only alters when the column/PK is
+        missing. Existing rows backfill to 'default' — the historical profile.
+        """
+        # skill_evolution_log: additive column (safe, preserves rows).
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(skill_evolution_log)").fetchall()}
+        if cols and "profile_id" not in cols:
+            conn.execute(
+                "ALTER TABLE skill_evolution_log "
+                "ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'default'"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_evo_skill "
+                "ON skill_evolution_log(profile_id, skill_name)"
+            )
+
+        # evolution_cycle_state: PK changes from (key) to (profile_id, key).
+        # SQLite cannot alter a PK in place → rebuild + copy, backfilling
+        # existing counters to the 'default' profile.
+        cyc_cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(evolution_cycle_state)").fetchall()}
+        if cyc_cols and "profile_id" not in cyc_cols:
+            conn.execute(
+                "ALTER TABLE evolution_cycle_state RENAME TO _evo_cycle_old"
+            )
+            conn.execute(
+                "CREATE TABLE evolution_cycle_state ("
+                " profile_id TEXT NOT NULL DEFAULT 'default',"
+                " key TEXT NOT NULL,"
+                " value INTEGER DEFAULT 0,"
+                " updated_at TEXT,"
+                " PRIMARY KEY (profile_id, key))"
+            )
+            conn.execute(
+                "INSERT INTO evolution_cycle_state "
+                "(profile_id, key, value, updated_at) "
+                "SELECT 'default', key, value, updated_at FROM _evo_cycle_old"
+            )
+            conn.execute("DROP TABLE _evo_cycle_old")
+
+    def reset_cycle(self, profile_id: str) -> None:
+        """Reset per-cycle counters for one profile. Called at cycle start.
+
+        The evolve budget is per-profile: one profile exhausting its budget
+        must never block another profile from evolving.
+        """
         now = datetime.now(timezone.utc).isoformat()
         conn = sqlite3.connect(self._db_path, timeout=10)
         try:
             conn.execute(
-                "INSERT OR REPLACE INTO evolution_cycle_state (key, value, updated_at) "
-                "VALUES ('cycle_count', 0, ?)",
-                (now,),
+                "INSERT OR REPLACE INTO evolution_cycle_state "
+                "(profile_id, key, value, updated_at) "
+                "VALUES (?, 'cycle_count', 0, ?)",
+                (profile_id, now),
             )
             conn.commit()
         finally:
             conn.close()
 
-    def can_evolve(self) -> bool:
-        """Check if budget allows another evolution this cycle."""
+    def can_evolve(self, profile_id: str) -> bool:
+        """Check if this profile's budget allows another evolution this cycle."""
         conn = sqlite3.connect(self._db_path, timeout=10)
         try:
             row = conn.execute(
-                "SELECT value FROM evolution_cycle_state WHERE key = 'cycle_count'",
+                "SELECT value FROM evolution_cycle_state "
+                "WHERE profile_id = ? AND key = 'cycle_count'",
+                (profile_id,),
             ).fetchone()
             count = row[0] if row else 0
             return count < MAX_EVOLUTIONS_PER_CYCLE
         finally:
             conn.close()
 
-    def record_evolution_attempt(self) -> None:
-        """Increment cycle counter in DB."""
+    def record_evolution_attempt(self, profile_id: str) -> None:
+        """Increment this profile's cycle counter in DB."""
         now = datetime.now(timezone.utc).isoformat()
         conn = sqlite3.connect(self._db_path, timeout=10)
         try:
             row = conn.execute(
-                "SELECT value FROM evolution_cycle_state WHERE key = 'cycle_count'",
+                "SELECT value FROM evolution_cycle_state "
+                "WHERE profile_id = ? AND key = 'cycle_count'",
+                (profile_id,),
             ).fetchone()
             current = row[0] if row else 0
             conn.execute(
-                "INSERT OR REPLACE INTO evolution_cycle_state (key, value, updated_at) "
-                "VALUES ('cycle_count', ?, ?)",
-                (current + 1, now),
+                "INSERT OR REPLACE INTO evolution_cycle_state "
+                "(profile_id, key, value, updated_at) "
+                "VALUES (?, 'cycle_count', ?, ?)",
+                (profile_id, current + 1, now),
             )
             conn.commit()
         finally:
             conn.close()
 
-    def _get_cycle_count(self) -> int:
-        """Read current cycle count from DB."""
+    def _get_cycle_count(self, profile_id: str) -> int:
+        """Read this profile's current cycle count from DB."""
         conn = sqlite3.connect(self._db_path, timeout=10)
         try:
             row = conn.execute(
-                "SELECT value FROM evolution_cycle_state WHERE key = 'cycle_count'",
+                "SELECT value FROM evolution_cycle_state "
+                "WHERE profile_id = ? AND key = 'cycle_count'",
+                (profile_id,),
             ).fetchone()
             return row[0] if row else 0
         finally:
@@ -159,21 +264,28 @@ class EvolutionStore:
             del self._addressed_degradations[k]
 
     # ------------------------------------------------------------------
-    # CRUD
+    # Phase 2: append-only transition log
     # ------------------------------------------------------------------
 
-    def save_record(self, record: EvolutionRecord) -> None:
+    def insert_record(self, record: EvolutionRecord, profile_id: str) -> None:
+        """INSERT a new evolution record (CANDIDATE status).
+
+        Unlike save_record, this uses plain INSERT — NOT INSERT OR REPLACE.
+        Raises sqlite3.IntegrityError if a row with the same id already exists.
+        Call this exactly once per candidate (CRIT-1: never reuse record_id).
+        """
         conn = sqlite3.connect(self._db_path, timeout=10)
         try:
             conn.execute(
-                "INSERT OR REPLACE INTO skill_evolution_log "
-                "(id, skill_name, parent_skill_id, evolution_type, trigger_type, "
-                " generation, status, mutation_summary, evidence, "
+                "INSERT INTO skill_evolution_log "
+                "(id, profile_id, skill_name, parent_skill_id, evolution_type, "
+                " trigger_type, generation, status, mutation_summary, evidence, "
                 " original_content, evolved_content, content_diff, "
                 " blind_verified, rejection_reason, created_at, completed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.id,
+                    profile_id,
                     record.skill_name,
                     record.parent_skill_id,
                     record.evolution_type.value,
@@ -195,13 +307,191 @@ class EvolutionStore:
         finally:
             conn.close()
 
-    def get_record(self, record_id: str) -> Optional[EvolutionRecord]:
+    def append_transition(
+        self,
+        record_id: str,
+        profile_id: str,
+        from_status: EvolutionStatus,
+        to_status: EvolutionStatus,
+        *,
+        actor_id: str = "",
+        reason: str = "",
+        metadata: dict | None = None,
+    ) -> str:
+        """Append an immutable status-transition row. Returns transition_hash.
+
+        Hash linkage (audit P2-3): transition_hash = SHA-256 over a canonical,
+        pipe-delimited payload covering EVERY persisted field —
+        ``prev_hash | record_id | from_status | to_status | ts | actor_id |
+        reason | metadata_str``. Delimiters remove concatenation ambiguity and
+        including reason+metadata makes those columns tamper-evident too.
+
+        prev_hash is the transition_hash of the most recent row for this
+        record_id, or 'genesis' for the first transition.
+
+        Concurrency (audit P1-5): the read-prev-then-insert is wrapped in a
+        single ``BEGIN IMMEDIATE`` transaction so two concurrent writers cannot
+        both read the same prev_hash and fork the chain.
+
+        Never calls UPDATE or DELETE. Raises ValueError if from_status == to_status.
+        """
+        if from_status == to_status:
+            raise ValueError(
+                f"append_transition: from_status == to_status == {from_status!r}; "
+                "no-op transitions are not allowed in the append-only log."
+            )
+        ts = datetime.now(timezone.utc).isoformat()
+        metadata_str = json.dumps(metadata or {}, sort_keys=True)
+
+        # isolation_level=None + explicit BEGIN IMMEDIATE = one atomic
+        # select-prev-then-insert critical section per call (P1-5).
+        conn = sqlite3.connect(self._db_path, timeout=10, isolation_level=None)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            # Find prev_hash for this record_id (genesis if first)
+            row = conn.execute(
+                "SELECT transition_hash FROM skill_evolution_transitions "
+                "WHERE record_id = ? AND profile_id = ? "
+                "ORDER BY seq DESC LIMIT 1",
+                (record_id, profile_id),
+            ).fetchone()
+            prev_hash = row[0] if row else "genesis"
+
+            # Canonical, delimited payload over ALL persisted fields (P2-3).
+            payload = "|".join((
+                prev_hash, record_id,
+                from_status.value, to_status.value,
+                ts, actor_id, reason, metadata_str,
+            ))
+            transition_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+            conn.execute(
+                "INSERT INTO skill_evolution_transitions "
+                "(record_id, profile_id, from_status, to_status, "
+                " transitioned_at, actor_id, reason, prev_hash, "
+                " transition_hash, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    record_id,
+                    profile_id,
+                    from_status.value,
+                    to_status.value,
+                    ts,
+                    actor_id,
+                    reason,
+                    prev_hash,
+                    transition_hash,
+                    metadata_str,
+                ),
+            )
+            conn.execute("COMMIT")
+            return transition_hash
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
+
+    def get_latest_status(
+        self, record_id: str, profile_id: str,
+    ) -> EvolutionStatus | None:
+        """Return the to_status of the highest-seq transition for record_id.
+
+        Returns None if no transitions exist for this record_id / profile_id.
+        """
+        conn = sqlite3.connect(self._db_path, timeout=10)
+        try:
+            row = conn.execute(
+                "SELECT to_status FROM skill_evolution_transitions "
+                "WHERE record_id = ? AND profile_id = ? "
+                "ORDER BY seq DESC LIMIT 1",
+                (record_id, profile_id),
+            ).fetchone()
+            if row is None:
+                return None
+            return EvolutionStatus(row[0])
+        finally:
+            conn.close()
+
+    def get_transitions(self, record_id: str, profile_id: str) -> list[dict]:
+        """Return all transition rows for record_id ordered by seq ASC."""
+        conn = sqlite3.connect(self._db_path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT seq, record_id, profile_id, from_status, to_status, "
+                "transitioned_at, actor_id, reason, prev_hash, transition_hash, "
+                "metadata "
+                "FROM skill_evolution_transitions "
+                "WHERE record_id = ? AND profile_id = ? "
+                "ORDER BY seq ASC",
+                (record_id, profile_id),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # CRUD
+    # ------------------------------------------------------------------
+
+    def save_record(self, record: EvolutionRecord, profile_id: str) -> None:
+        """DEPRECATED: use insert_record() for new records and append_transition() for state changes.
+
+        Retained for backward-compatibility with existing tests and callers.
+        Uses INSERT OR REPLACE — mutable semantics, not append-only.
+        Will be removed in a future cleanup pass (not Phase 2 scope).
+        """
+        warnings.warn(
+            "EvolutionStore.save_record() is deprecated; "
+            "use insert_record() + append_transition() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        conn = sqlite3.connect(self._db_path, timeout=10)
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO skill_evolution_log "
+                "(id, profile_id, skill_name, parent_skill_id, evolution_type, "
+                " trigger_type, generation, status, mutation_summary, evidence, "
+                " original_content, evolved_content, content_diff, "
+                " blind_verified, rejection_reason, created_at, completed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    record.id,
+                    profile_id,
+                    record.skill_name,
+                    record.parent_skill_id,
+                    record.evolution_type.value,
+                    record.trigger.value,
+                    record.generation,
+                    record.status.value,
+                    record.mutation_summary,
+                    json.dumps(list(record.evidence)),
+                    record.original_content,
+                    record.evolved_content,
+                    record.content_diff,
+                    1 if record.blind_verified else 0,
+                    record.rejection_reason,
+                    record.created_at,
+                    record.completed_at,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_record(self, record_id: str, profile_id: str) -> Optional[EvolutionRecord]:
         conn = sqlite3.connect(self._db_path, timeout=10)
         conn.row_factory = sqlite3.Row
         try:
             row = conn.execute(
-                "SELECT * FROM skill_evolution_log WHERE id = ?",
-                (record_id,),
+                "SELECT * FROM skill_evolution_log "
+                "WHERE id = ? AND profile_id = ?",
+                (record_id, profile_id),
             ).fetchone()
             if not row:
                 return None
@@ -209,68 +499,95 @@ class EvolutionStore:
         finally:
             conn.close()
 
-    def get_skill_history(self, skill_name: str, limit: int = 20) -> list[EvolutionRecord]:
+    def get_skill_history(
+        self, skill_name: str, profile_id: str, limit: int = 20,
+    ) -> list[EvolutionRecord]:
         conn = sqlite3.connect(self._db_path, timeout=10)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
                 "SELECT * FROM skill_evolution_log "
-                "WHERE skill_name = ? ORDER BY created_at DESC LIMIT ?",
-                (skill_name, limit),
-            ).fetchall()
-            return [self._row_to_record(dict(r)) for r in rows]
-        finally:
-            conn.close()
-
-    def get_recent(self, limit: int = 10) -> list[EvolutionRecord]:
-        conn = sqlite3.connect(self._db_path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        try:
-            rows = conn.execute(
-                "SELECT * FROM skill_evolution_log "
+                "WHERE skill_name = ? AND profile_id = ? "
                 "ORDER BY created_at DESC LIMIT ?",
-                (limit,),
+                (skill_name, profile_id, limit),
             ).fetchall()
             return [self._row_to_record(dict(r)) for r in rows]
         finally:
             conn.close()
 
-    def count_attempts(self, skill_name: str) -> int:
+    def get_recent(self, profile_id: str, limit: int = 10) -> list[EvolutionRecord]:
+        conn = sqlite3.connect(self._db_path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT * FROM skill_evolution_log "
+                "WHERE profile_id = ? ORDER BY created_at DESC LIMIT ?",
+                (profile_id, limit),
+            ).fetchall()
+            return [self._row_to_record(dict(r)) for r in rows]
+        finally:
+            conn.close()
+
+    def count_attempts(self, skill_name: str, profile_id: str) -> int:
+        """Count non-successful evolution attempts for a skill.
+
+        Audit P0-2: with the Phase-2 append-only model, ``skill_evolution_log``
+        rows are frozen at 'candidate' by ``insert_record`` and never updated, so
+        the legacy ``status NOT IN ('promoted')`` filter counted successes too —
+        permanently disabling a skill after MAX_ATTEMPTS_PER_SKILL improvements.
+        The current status is now read from the append-only transitions log
+        (latest ``to_status`` per record), and success states are excluded,
+        mirroring the pre-Phase-2 exclusion of 'promoted'. Legacy rows with no
+        transitions fall back to their frozen log status via COALESCE.
+        """
+        success = ("promoted", "verified_quarantined", "approved", "active")
+        marks = ",".join("?" for _ in success)
         conn = sqlite3.connect(self._db_path, timeout=10)
         try:
             row = conn.execute(
-                "SELECT COUNT(*) FROM skill_evolution_log "
-                "WHERE skill_name = ? AND status NOT IN ('promoted')",
-                (skill_name,),
+                "SELECT COUNT(*) FROM skill_evolution_log l "
+                "WHERE l.skill_name = ? AND l.profile_id = ? "
+                "AND COALESCE("
+                "  (SELECT t.to_status FROM skill_evolution_transitions t "
+                "   WHERE t.record_id = l.id AND t.profile_id = l.profile_id "
+                "   ORDER BY t.seq DESC LIMIT 1), l.status"
+                f") NOT IN ({marks})",
+                (skill_name, profile_id, *success),
             ).fetchone()
             return row[0] if row else 0
         finally:
             conn.close()
 
-    def has_exceeded_attempts(self, skill_name: str) -> bool:
-        return self.count_attempts(skill_name) >= MAX_ATTEMPTS_PER_SKILL
+    def has_exceeded_attempts(self, skill_name: str, profile_id: str) -> bool:
+        return self.count_attempts(skill_name, profile_id) >= MAX_ATTEMPTS_PER_SKILL
 
-    def get_stats(self) -> dict:
+    def get_stats(self, profile_id: str) -> dict:
         conn = sqlite3.connect(self._db_path, timeout=10)
         try:
             total = conn.execute(
-                "SELECT COUNT(*) FROM skill_evolution_log",
+                "SELECT COUNT(*) FROM skill_evolution_log WHERE profile_id = ?",
+                (profile_id,),
             ).fetchone()[0]
             by_status = {}
             for row in conn.execute(
-                "SELECT status, COUNT(*) FROM skill_evolution_log GROUP BY status",
+                "SELECT status, COUNT(*) FROM skill_evolution_log "
+                "WHERE profile_id = ? GROUP BY status",
+                (profile_id,),
             ).fetchall():
                 by_status[row[0]] = row[1]
             by_type = {}
             for row in conn.execute(
-                "SELECT evolution_type, COUNT(*) FROM skill_evolution_log GROUP BY evolution_type",
+                "SELECT evolution_type, COUNT(*) FROM skill_evolution_log "
+                "WHERE profile_id = ? GROUP BY evolution_type",
+                (profile_id,),
             ).fetchall():
                 by_type[row[0]] = row[1]
             return {
                 "total": total,
                 "by_status": by_status,
                 "by_type": by_type,
-                "cycle_budget_remaining": MAX_EVOLUTIONS_PER_CYCLE - self._get_cycle_count(),
+                "cycle_budget_remaining":
+                    MAX_EVOLUTIONS_PER_CYCLE - self._get_cycle_count(profile_id),
             }
         finally:
             conn.close()

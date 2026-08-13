@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import signal
 import sys
 
@@ -52,33 +53,67 @@ def _start_parent_watchdog() -> None:
     start_parent_watchdog()
 
 
+def _embedding_backend_order() -> tuple[str, str]:
+    """Return the stable local backend preference for this platform.
+
+    ONNX model export/loading can stall indefinitely on Apple Silicon while
+    the same cached model loads through PyTorch CPU in a few seconds.  Keep
+    ONNX first elsewhere and retain it as a fallback on macOS.
+    """
+    if sys.platform == "darwin" and platform.machine().lower() == "arm64":
+        return ("pytorch", "onnx")
+    return ("onnx", "pytorch")
+
+
+# H-02 (3.7.9): trust_remote_code=_trusts_remote_code(name) runs arbitrary Python from the model
+# repository at load time. Restrict it to the pinned models SLM ships that
+# genuinely need custom modeling code (nomic-embed). Any other model — including
+# one swapped into config by a write-path attacker — loads with
+# trust_remote_code=False and therefore cannot execute repo code.
+_TRUSTED_REMOTE_CODE_MODELS = frozenset({
+    "nomic-ai/nomic-embed-text-v1.5",
+    "nomic-ai/nomic-embed-text-v1",
+})
+
+_RSS_LIMIT_MB = int(os.environ.get("SLM_EMBED_WORKER_RSS_LIMIT_MB", 2500))
+
+
+def _trusts_remote_code(model_name: str) -> bool:
+    return model_name in _TRUSTED_REMOTE_CODE_MODELS
+
+
 def _load_embedding_model(name: str) -> tuple:
     """Load embedding model. ONNX CPU-only first, PyTorch fallback.
 
     Returns (model, backend_name) or (None, "").
     """
-    from sentence_transformers import SentenceTransformer
-
-    # ONNX with explicit CPU provider — avoids CoreML EP memory overhead.
     try:
-        m = SentenceTransformer(
-            name,
-            backend="onnx",
-            trust_remote_code=True,
-            model_kwargs={"provider": "CPUExecutionProvider"},
-        )
-        return m, "onnx"
+        from sentence_transformers import SentenceTransformer
     except Exception:
-        pass
-
-    # PyTorch CPU fallback.
-    try:
-        import torch
-        with torch.inference_mode():
-            m = SentenceTransformer(name, trust_remote_code=True, device="cpu")
-        return m, "pytorch"
-    except Exception:
+        # Dependency/version errors must stay inside the JSON-lines protocol.
+        # Letting this import escape kills the worker before it can explain the
+        # failure, which the parent previously mislabeled as a long timeout.
         return None, ""
+
+    for backend in _embedding_backend_order():
+        try:
+            if backend == "onnx":
+                m = SentenceTransformer(
+                    name,
+                    backend="onnx",
+                    trust_remote_code=_trusts_remote_code(name),
+                    model_kwargs={"provider": "CPUExecutionProvider"},
+                )
+            else:
+                import torch
+                with torch.inference_mode():
+                    m = SentenceTransformer(
+                        name, trust_remote_code=_trusts_remote_code(name), device="cpu",
+                    )
+            return m, backend
+        except Exception:
+            continue
+    return None, ""
 
 
 def _worker_main() -> None:
@@ -86,10 +121,10 @@ def _worker_main() -> None:
     _start_parent_watchdog()
 
     import numpy as np
+
     from superlocalmemory.core.platform_utils import get_rss_mb
 
     model = None
-    model_name = None
     dim = 0
 
     for line in sys.stdin:
@@ -121,7 +156,6 @@ def _worker_main() -> None:
                     _respond({"ok": False, "error": f"Dimension mismatch: {dim} != {expected_dim}"})
                     model = None
                     continue
-                model_name = name
                 _respond({"ok": True, "dim": dim, "model": name, "backend": active_backend})
             else:
                 _respond({"ok": False, "error": "Model load failed"})
@@ -137,7 +171,6 @@ def _worker_main() -> None:
                 model, active_backend = _load_embedding_model(name)
                 if model is not None:
                     dim = model.get_sentence_embedding_dimension()
-                    model_name = name
                 else:
                     _respond({"ok": False, "error": "Model load failed"})
                     continue
@@ -152,9 +185,8 @@ def _worker_main() -> None:
                 _respond({"ok": False, "error": str(exc)})
 
             # V3.3.16: RSS watchdog — V3.4.24: cross-platform via platform_utils.
-            _rss_limit = int(os.environ.get("SLM_EMBED_WORKER_RSS_LIMIT_MB", 1800))
             rss_mb = get_rss_mb()
-            if rss_mb > 0 and rss_mb > _rss_limit:
+            if rss_mb > 0 and rss_mb > _RSS_LIMIT_MB:
                 sys.exit(0)
 
             continue

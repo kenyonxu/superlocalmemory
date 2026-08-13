@@ -1,17 +1,56 @@
 name: Tests
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      focused_windows:
+        description: Run only repeated Windows release-blocker proofs
+        required: true
+        type: boolean
+        default: false
+      python_matrix:
+        description: JSON array of Python versions for focused Windows proofs
+        required: true
+        type: string
+        default: '["3.11", "3.12", "3.13", "3.14"]'
 jobs:
+  security:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.focused_windows }}
+    name: Dependency and static security gates
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8
+      - name: Audit locked runtime dependencies
+        shell: bash
+        run: |
+          uv export --no-dev --no-emit-project --format requirements-txt \
+            --output-file /tmp/slm-runtime-requirements.txt
+          uvx --from pip-audit==2.9.0 pip-audit \
+            --requirement /tmp/slm-runtime-requirements.txt \
+            --no-deps --disable-pip \
+            --ignore-vuln GHSA-rrmf-rvhw-rf47 \
+            --ignore-vuln PYSEC-2026-3447
+      - name: Reject high-confidence high-severity Python findings
+        run: uvx --from bandit==1.8.6 bandit -r src/superlocalmemory -q -lll -iii
+
   test:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.focused_windows }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-14, windows-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -40,12 +79,58 @@ jobs:
             --ignore=tests/test_integration/test_e2e_v33.py \
             --ignore=tests/test_benchmarks/ \
             --ignore=tests/graph/test_cozo_backend.py \
-            --ignore=tests/vector/test_lancedb_backend.py \
-            || EXIT_CODE=$?
-          # Windows Python exits with code 1 due to KeyboardInterrupt during
-          # daemon thread cleanup (not a test failure). Tests themselves pass.
-          if [ "${EXIT_CODE:-0}" -eq 1 ] && [ "$RUNNER_OS" = "Windows" ]; then
-            echo "::warning::Windows KeyboardInterrupt during cleanup (non-fatal)"
-            exit 0
-          fi
-          exit ${EXIT_CODE:-0}
+            --ignore=tests/vector/test_lancedb_backend.py
+
+  windows-focused:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.focused_windows }}
+    name: Windows focused proofs (${{ matrix.python-version }})
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(inputs.python_matrix) }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            uv.lock
+      - name: Install focused test environment
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check -e ".[dev]"
+          python -m pip install --disable-pip-version-check \
+            pytest pytest-asyncio sqlite-vec portalocker
+      - name: Repeat Windows release-blocker proofs
+        shell: bash
+        run: |
+          for attempt in 1 2 3 4 5; do
+            echo "Windows proof attempt ${attempt}/5"
+            python -m pytest -q -o "addopts=" \
+              tests/test_adapters/test_antigravity_adapter.py::test_content_hash_skip \
+              tests/storage/test_admission_journal_concurrency.py::test_prepare_deadline_bounds_process_lock_wait \
+              tests/stress/test_386_canonical_legacy_multiprocess_contention.py::test_386_canonical_remember_survives_legacy_multiprocess_contention
+          done
+
+  native-lancedb:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.focused_windows }}
+    name: Native LanceDB (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Install native backend test environment
+        run: python -m pip install --disable-pip-version-check -e ".[dev,lancedb]"
+      - name: Run LanceDB in a dedicated process lane
+        run: python -m pytest -q -m native tests/vector

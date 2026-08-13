@@ -70,6 +70,7 @@ class WorkerPool:
         fast: bool = False,
         include_global: bool | None = None,
         include_shared: bool | None = None,
+        window: str | None = None,
     ) -> dict:
         """Run recall in worker subprocess. Returns result dict.
 
@@ -83,14 +84,18 @@ class WorkerPool:
         so the worker-side engine resolves the configured default — shared
         memory is opt-in.
         """
-        msg = {
+        msg: dict = {
             "cmd": "recall", "query": query, "limit": limit,
-            "session_id": session_id or "", "fast": bool(fast),
+            "session_id": session_id or "",
         }
+        if fast is not None:
+            msg["fast"] = bool(fast)
         if include_global is not None:
             msg["include_global"] = bool(include_global)
         if include_shared is not None:
             msg["include_shared"] = bool(include_shared)
+        if window:
+            msg["window"] = window
         return self._send(msg)
 
     def store(self, content: str, metadata: dict | None = None) -> dict:
@@ -101,12 +106,21 @@ class WorkerPool:
         })
 
     def delete_memory(self, fact_id: str, agent_id: str = "system") -> dict:
-        """Delete a specific memory by fact_id. Logged for audit."""
-        return self._send({"cmd": "delete_memory", "fact_id": fact_id, "agent_id": agent_id})
+        """Delete by fact ID; ``agent_id`` is untrusted audit metadata."""
+        return self._send({
+            "cmd": "delete_memory",
+            "fact_id": fact_id,
+            "source_agent_id": agent_id,
+        })
 
     def update_memory(self, fact_id: str, content: str, agent_id: str = "system") -> dict:
-        """Update content of a specific memory. Logged for audit."""
-        return self._send({"cmd": "update_memory", "fact_id": fact_id, "content": content, "agent_id": agent_id})
+        """Update content; ``agent_id`` is untrusted audit metadata."""
+        return self._send({
+            "cmd": "update_memory",
+            "fact_id": fact_id,
+            "content": content,
+            "source_agent_id": agent_id,
+        })
 
     def get_memory_facts(self, memory_id: str) -> dict:
         """Get original memory text + child atomic facts."""
@@ -220,12 +234,38 @@ class WorkerPool:
     def _readline_with_timeout(stream, timeout_seconds: float) -> str:
         """Read one line from *stream* with a timeout.
 
-        Uses a daemon thread so the call never blocks the main thread
-        indefinitely. This is the cross-platform replacement for
-        ``selectors`` which fails on Windows pipes.
+        Prefer a deadline-driven selector poll of the stream's file descriptor
+        (POSIX pipes). That path never spawns a helper thread, so a hung
+        worker cannot leak reader threads or pin the pipe FD across timeouts.
+        A thread fallback remains only for streams without a usable fileno
+        (unit-test mocks) and for Windows, where selectors cannot wait on
+        pipes.
 
         Returns the line read, or ``""`` on timeout / error.
         """
+        import selectors
+
+        timeout_seconds = max(0.0, float(timeout_seconds))
+        fd: int | None
+        try:
+            raw_fd = stream.fileno()
+            fd = raw_fd if isinstance(raw_fd, int) else None
+        except (AttributeError, OSError, ValueError, TypeError):
+            fd = None
+
+        # Windows select()/selectors only accept sockets, not subprocess pipes.
+        if fd is not None and sys.platform != "win32":
+            try:
+                with selectors.DefaultSelector() as sel:
+                    sel.register(fd, selectors.EVENT_READ)
+                    events = sel.select(timeout=timeout_seconds)
+                if not events:
+                    return ""
+                line = stream.readline()
+                return line if line else ""
+            except (OSError, ValueError):
+                return ""
+
         result_container: list[str] = []
         error_container: list[Exception] = []
 
@@ -282,15 +322,27 @@ class WorkerPool:
             self._idle_timer.cancel()
             self._idle_timer = None
         if self._proc is not None:
-            pid = self._proc.pid
+            proc = self._proc
+            pid = proc.pid
             try:
-                self._proc.stdin.write('{"cmd":"quit"}\n')
-                self._proc.stdin.flush()
-                self._proc.wait(timeout=3)
+                proc.stdin.write('{"cmd":"quit"}\n')
+                proc.stdin.flush()
+                proc.wait(timeout=3)
             except Exception:
                 try:
-                    self._proc.kill()
-                    self._proc.wait(timeout=2)
+                    proc.kill()
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+            # L-CONC-1: deterministically close the pipe fds rather than leaving
+            # them to GC. This releases the OS handles immediately and unblocks
+            # any orphaned _readline_with_timeout reader thread (its readline
+            # returns/raises on the closed pipe), so repeated request timeouts
+            # cannot accumulate reader threads or file descriptors. Cross-platform.
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                try:
+                    if stream is not None:
+                        stream.close()
                 except Exception:
                     pass
             self._proc = None

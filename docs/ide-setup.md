@@ -1,5 +1,5 @@
 # IDE Setup
-> SuperLocalMemory V3 Documentation
+> SuperLocalMemory V4 Documentation
 > https://superlocalmemory.com | Part of Qualixar
 
 Connect SuperLocalMemory to your AI coding tool. Once connected, memories are captured and recalled automatically.
@@ -12,7 +12,7 @@ SLM ships with **two MCP transports**. Pick the one that fits your tool.
 
 | Transport | How it works | RAM cost | Requirement |
 |-----------|-------------|----------|-------------|
-| **HTTP** (recommended) | All clients share one daemon process | ~2 GB once, flat forever | `slm start` must be running |
+| **HTTP** (recommended) | All clients share one daemon process | ~2 GB once, flat forever | `slm serve` must be running |
 | **stdio** (universal) | One `slm mcp` subprocess per connection | ~90–110 MB × connections | None — works offline |
 | **`mcp-remote` bridge** | stdio wrapper that tunnels to HTTP | ~50 MB bridge + HTTP pool | npm `@modelcontextprotocol/client-cli` |
 
@@ -517,6 +517,28 @@ slm connect zed
 
 ---
 
+## Framework Adapters (v3.8.0)
+
+Nine Python packages back their framework's native memory interface with the local SLM data root. Install alongside the framework; no running daemon is required for core usage.
+
+| Framework | Install name | Implements |
+|-----------|-------------|------------|
+| LangGraph | `langgraph-superlocalmemory` | `BaseStore` |
+| Semantic Kernel | `semantic-kernel-superlocalmemory` | `VectorStore` |
+| Microsoft Agent Framework | `agent-framework-superlocalmemory` | `ContextProvider` / `HistoryProvider` |
+| LangChain | `langchain-superlocalmemory` | `BaseChatMessageHistory` |
+| LlamaIndex | `llama-index-storage-chat-store-superlocalmemory` | `BaseChatStore` |
+| CrewAI | `crewai-superlocalmemory` | `StorageBackend` |
+| AutoGen | `autogen-superlocalmemory` | `Memory` |
+| Google ADK | `google-adk-superlocalmemory` | `BaseMemoryService` |
+| OpenAI Agents | `openai-agents-superlocalmemory` | `SessionABC` |
+
+All adapters write to the same SLM data root that the CLI, MCP, and dashboard surface. Optional SLM providers, connectors, and backup have separate network behavior.
+
+Full usage examples and prerequisites: [Framework Adapters →](framework-adapters.md)
+
+---
+
 ## Verifying the Connection
 
 After connecting any IDE, verify it works:
@@ -545,7 +567,7 @@ curl -s http://127.0.0.1:8765/mcp/ \
   | grep '"name":"SuperLocalMemory'
 ```
 
-A response containing `"name":"SuperLocalMemory V3"` confirms HTTP MCP is live.
+A response containing `"name":"SuperLocalMemory V4"` confirms HTTP MCP is live.
 
 ---
 
@@ -572,7 +594,7 @@ export PATH="$(npm root -g)/../bin:$PATH"
 The SLM daemon is not running. Start it:
 
 ```bash
-slm start
+slm serve
 # or
 slm restart
 ```
@@ -604,4 +626,4 @@ When using HTTP transport, all IDEs connect to the same daemon process at `http:
 
 ---
 
-*SuperLocalMemory V3 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*
+*SuperLocalMemory V4 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*

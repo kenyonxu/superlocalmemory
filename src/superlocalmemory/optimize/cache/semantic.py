@@ -22,7 +22,7 @@ import logging
 import random
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Backward-compatible exported default; runtime validation uses _embed_dim.
 _EMBED_DIM: int = 768
 _DEFAULT_MAX_TURNS: int = 6
 _DEFAULT_CONTEXT_WINDOW: int = 3
@@ -77,9 +78,15 @@ class VCacheSemantic(SemanticTier):
         self,
         db: "CacheDB",
         config: "OptimizeConfig",
+        *,
+        embedder: Callable[[str], list[float] | np.ndarray | None] | None = None,
+        embedding_dimension: int | None = None,
     ) -> None:
         self._db = db
         self._config = config
+        self._embedder = embedder
+        self._embed_dim = embedding_dimension
+        self._dimension_lock = threading.Lock()
         # TODO(v3.7): when entry_count > 10_000, promote to sqlite-vec. Config flag: semantic_use_vec.
 
         self._boundary_store = BoundaryStore(
@@ -91,7 +98,9 @@ class VCacheSemantic(SemanticTier):
             step=float(getattr(config, "semantic_boundary_step", 0.01)),
             epsilon=float(getattr(config, "semantic_error_target", _DEFAULT_ERROR_TARGET)),
         )
-        self._centroid_store = CentroidStore()
+        self._centroid_store = CentroidStore(
+            embedding_dimension=embedding_dimension,
+        )
         self._context_key_builder = ContextKeyBuilder(
             window_turns=int(getattr(config, "semantic_context_window_turns", _DEFAULT_CONTEXT_WINDOW))
         )
@@ -134,12 +143,18 @@ class VCacheSemantic(SemanticTier):
             return None
         try:
             if embed is None:
-                return None
+                if self._embedder is None:
+                    return None
+                messages = _extract_messages(req)
+                system = _extract_system(req)
+                embed = self._embedder(self._build_query_text(messages, system))
+                if embed is None:
+                    return None
             vec = np.asarray(embed, dtype=np.float32)
-            if vec.shape[0] != _EMBED_DIM:
+            if not self._accept_dimension(vec):
                 logger.debug(
-                    "VCacheSemantic.lookup: skip — embed dim=%d (expected %d)",
-                    vec.shape[0], _EMBED_DIM,
+                    "VCacheSemantic.lookup: skip — embed dim=%s (expected %s)",
+                    vec.shape, self._embed_dim,
                 )
                 return None
             return self._lookup_inner(req, tenant_id, vec)
@@ -190,7 +205,13 @@ class VCacheSemantic(SemanticTier):
             return
         try:
             if embed is None:
-                return
+                if self._embedder is None:
+                    return
+                messages = _extract_messages(req)
+                system = _extract_system(req)
+                embed = self._embedder(self._build_query_text(messages, system))
+                if embed is None:
+                    return
             messages = _extract_messages(req)
             system = _extract_system(req)
             query_text = self._build_query_text(messages, system)
@@ -247,6 +268,21 @@ class VCacheSemantic(SemanticTier):
                 tenant_id, exc, exc_info=True,
             )
 
+    def close(self) -> None:
+        close = getattr(self._embedder, "close", None)
+        if callable(close):
+            close()
+
+    def _accept_dimension(self, vector: np.ndarray) -> bool:
+        """Lock one configured/inferred vector width for this cache instance."""
+        if vector.ndim != 1 or vector.size == 0:
+            return False
+        with self._dimension_lock:
+            if self._embed_dim is None:
+                self._embed_dim = int(vector.shape[0])
+                self._centroid_store._embedding_dimension = self._embed_dim
+            return int(vector.shape[0]) == self._embed_dim
+
     # ------------------------------------------------------------------
     # Internal lookup
     # ------------------------------------------------------------------
@@ -262,14 +298,17 @@ class VCacheSemantic(SemanticTier):
         max_turns = int(getattr(cfg, "semantic_max_turns_for_semantic", _DEFAULT_MAX_TURNS))
         messages = _extract_messages(req)
 
-        # Step 1: Multi-turn guard
-        turn_count = self._context_key_builder.turn_count(messages)
-        if turn_count > max_turns:
-            logger.debug(
-                "VCacheSemantic: skip (turn_count=%d > max=%d)",
-                turn_count, max_turns,
-            )
-            return None
+        # Step 1: Multi-turn guard — on long conversations nearest-neighbour
+        # reuse is riskiest, so skip semantic there. Honours the
+        # semantic_multiturn_guard kill-switch (default on).
+        if bool(getattr(cfg, "semantic_multiturn_guard", True)):
+            turn_count = self._context_key_builder.turn_count(messages)
+            if turn_count > max_turns:
+                logger.debug(
+                    "VCacheSemantic: skip (turn_count=%d > max=%d)",
+                    turn_count, max_turns,
+                )
+                return None
 
         # Step 2: SAFE-CACHE centroid defense
         if bool(getattr(cfg, "semantic_centroid_defense", True)):
@@ -367,7 +406,7 @@ class VCacheSemantic(SemanticTier):
             for entry_id, blob, ctx_fp in rows:  # C-10: unpack persisted context_fp
                 try:
                     v = np.frombuffer(blob, dtype=np.float32).copy()
-                    if v.shape[0] == _EMBED_DIM:
+                    if self._accept_dimension(v):
                         entries.append((entry_id, ctx_fp, v))
                 except Exception:
                     continue
@@ -416,10 +455,11 @@ class VCacheSemantic(SemanticTier):
     ) -> None:
         """Persist vector + boundary record; update in-memory index + centroid."""
         vec = np.asarray(embed, dtype=np.float32)
-        if vec.shape[0] != _EMBED_DIM:
+        if not self._accept_dimension(vec):
             logger.warning(
-                "VCacheSemantic._set_inner: unexpected embedding dim %d (expected %d) "
-                "for entry=%s — skipping", vec.shape[0], _EMBED_DIM, entry_id,
+                "VCacheSemantic._set_inner: unexpected embedding shape %s "
+                "(expected %s) for entry=%s — skipping",
+                vec.shape, self._embed_dim, entry_id,
             )
             return
 
@@ -430,8 +470,8 @@ class VCacheSemantic(SemanticTier):
             tenant_id=tenant_id,
             vector=vec_bytes,
             meta={
-                "model": "nomic-ai/nomic-embed-text-v1.5",
-                "dim": _EMBED_DIM,
+                "model": "configured-embedding-provider",
+                "dim": self._embed_dim,
                 "context_fp": context_fp,
             },
         )
@@ -494,20 +534,25 @@ class VCacheSemantic(SemanticTier):
         cached_response: dict[str, Any],
         verifier_model: str,
     ) -> tuple[bool, dict[str, Any] | None]:
-        """Phase 3.0 stub: return (True, None) — treat as verified, no rewrite.
+        """Verify a verify-band candidate before it is served. Fails CLOSED.
 
-        Full implementation requires a sub-agent call to a cheap model.
-        Stub is conservative: boundary learning still fires, so over time
-        the boundary will tighten if errors accumulate.
+        Real verification (a cheap sub-agent check that the cached response
+        actually answers *this* prompt) is not yet implemented. Until it is,
+        this returns (False, None) so the caller treats every verify-band
+        candidate as a MISS rather than serving an UNVERIFIED cached response —
+        which, for a semantically-similar-but-distinct prompt (common in
+        coding), could be a wrong answer. Only high-confidence hits
+        (score >= return_threshold) are ever served.
 
-        A-03 fix: callers do NOT call record_outcome() on this stub path
-        (the True signal is fake — would poison the MLE model).
+        A prior stub returned (True, None), silently serving unverified hits;
+        that was a correctness hazard and is fixed here by failing closed.
         """
         logger.debug(
-            "VCacheSemantic._verify_and_rewrite: stub returning True "
-            "(verifier=%s entry=%s)", verifier_model, entry_id,
+            "VCacheSemantic._verify_and_rewrite: verifier not implemented — "
+            "failing closed to a miss (verifier=%s entry=%s)",
+            verifier_model, entry_id,
         )
-        return True, None
+        return False, None
 
     @staticmethod
     def _build_query_text(messages: list[dict[str, Any]], system: str) -> str:

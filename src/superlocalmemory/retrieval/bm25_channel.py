@@ -12,7 +12,7 @@ the entire index. This version persists tokens to the DB via
 store_bm25_tokens / get_all_bm25_tokens and cold-loads on init.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
-License: Elastic-2.0
+License: AGPL-3.0-or-later
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ import re
 from typing import TYPE_CHECKING
 
 from rank_bm25 import BM25Plus
+
+from superlocalmemory.storage.database import _scope_where
 
 if TYPE_CHECKING:
     from superlocalmemory.storage.database import DatabaseManager
@@ -72,28 +74,55 @@ class BM25Channel:
         self._bm25: BM25Plus | None = None
         self._dirty: bool = False
         self._loaded_profiles: set[str] = set()
+        self._loaded_scope_key: tuple[str, bool, bool] | None = None
 
     @property
     def document_count(self) -> int:
         return len(self._corpus)
 
-    def ensure_loaded(self, profile_id: str) -> None:
+    def ensure_loaded(
+        self,
+        profile_id: str,
+        include_global: bool | None = None,
+        include_shared: bool | None = None,
+    ) -> None:
         """Cold-load BM25 tokens from DB for a profile (once).
 
-        Idempotent: subsequent calls for the same profile are no-ops.
+        Idempotent: subsequent calls for the same profile/scope are no-ops.
+
+        Args:
+            profile_id: Profile to load.
+            include_global: Include global-scope facts. Falls back to the
+                instance attribute when not supplied.
+            include_shared: Include shared-scope facts. Same fallback.
         """
-        if profile_id in self._loaded_profiles:
+        if include_global is None:
+            include_global = bool(getattr(self, "include_global", False))
+        if include_shared is None:
+            include_shared = bool(getattr(self, "include_shared", False))
+        scope_key = (profile_id, include_global, include_shared)
+        if scope_key == self._loaded_scope_key:
             return
 
-        token_map = self._db.get_all_bm25_tokens(profile_id)
-        _inc_global = getattr(self, 'include_global', False)
-        _inc_shared = getattr(self, 'include_shared', False)
+        # A legacy in-memory index is a visibility-specific view. Reusing a
+        # corpus warmed under another profile/scope leaks private documents or
+        # omits newly enabled global/shared documents.
+        self._corpus = []
+        self._fact_ids = []
+        self._fact_id_set = set()
+        self._raw_texts = []
+        self._bm25 = None
+        token_map = self._db.get_all_bm25_tokens(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+        )
         if not token_map:
             # Fallback: tokenize facts directly if no pre-stored tokens
             facts = self._db.get_all_facts(
                 profile_id,
-                include_global=_inc_global,
-                include_shared=_inc_shared,
+                include_global=include_global,
+                include_shared=include_shared,
             )
             for fact in facts:
                 if fact.fact_id in self._fact_id_set:
@@ -112,8 +141,8 @@ class BM25Channel:
             try:
                 facts = self._db.get_all_facts(
                     profile_id,
-                    include_global=_inc_global,
-                    include_shared=_inc_shared,
+                    include_global=include_global,
+                    include_shared=include_shared,
                 )
                 fact_content_map = {f.fact_id: f.content for f in facts}
             except Exception:
@@ -128,6 +157,7 @@ class BM25Channel:
 
         self._dirty = True
         self._loaded_profiles.add(profile_id)
+        self._loaded_scope_key = scope_key
         logger.debug(
             "BM25 cold-loaded %d documents for profile=%s",
             len(token_map) if token_map else 0, profile_id,
@@ -157,7 +187,12 @@ class BM25Channel:
         self._db.store_bm25_tokens(fact_id, profile_id, tokens)
 
     def _fts5_search(
-        self, query: str, profile_id: str, top_k: int = 30,
+        self,
+        query: str,
+        profile_id: str,
+        top_k: int = 30,
+        include_global: bool | None = None,
+        include_shared: bool | None = None,
     ) -> list[tuple[str, float]]:
         """v3.5.0: SQLite FTS5 keyword search (C-level indexed, scales to millions).
 
@@ -170,20 +205,38 @@ class BM25Channel:
         Raises (OperationalError) if the FTS5 table is absent — the caller
         then falls back to the legacy in-memory rank_bm25 path.
         """
+        if include_global is None:
+            include_global = bool(getattr(self, "include_global", False))
+        if include_shared is None:
+            include_shared = bool(getattr(self, "include_shared", False))
         tokens = tokenize(query)
         if not tokens:
             return []
         # Quote each token so query punctuation can't break FTS5 MATCH syntax;
         # OR-join for high recall (any token may match).
         match_expr = " OR ".join('"' + t.replace('"', "") + '"' for t in tokens)
+        where, params = _scope_where(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+            prefix="af",
+        )
+        # Archived facts are not live; never surface them in keyword recall.
+        # Guarded on column presence: the archive column is added by a deferred
+        # migration and may be absent on an unmigrated database.
+        archive_clause = (
+            " AND COALESCE(af.archive_status, 'live') != 'archived'"
+            if self._db._has_archive_status()
+            else ""
+        )
         sql = (
             "SELECT af.fact_id AS fact_id, bm25(atomic_facts_fts) AS rank "
             "FROM atomic_facts_fts "
             "JOIN atomic_facts af ON af.rowid = atomic_facts_fts.rowid "
-            "WHERE atomic_facts_fts MATCH ? AND af.profile_id = ? "
+            f"WHERE atomic_facts_fts MATCH ? AND {where}{archive_clause} "
             "ORDER BY rank LIMIT ?"
         )
-        rows = self._db.execute(sql, (match_expr, profile_id, int(top_k)))
+        rows = self._db.execute(sql, (match_expr, *params, int(top_k)))
         out: list[tuple[str, float]] = []
         for r in rows:
             d = dict(r)
@@ -191,13 +244,39 @@ class BM25Channel:
             if not fid:
                 continue
             out.append((fid, -float(d.get("rank", 0.0))))
-        return out
+
+        # T3b: UNION fact-expansion (alias / paraphrase) matches so a query for
+        # a synonym matches a fact that only used the canonical term. Additive —
+        # direct content hits stay primary; an alias-only hit is added at a
+        # discount so it ranks below content matches. Fail-open if the expansion
+        # FTS is absent (legacy DB).
+        content_ids = {fid for fid, _ in out}
+        try:
+            exp_sql = (
+                "SELECT af.fact_id AS fact_id, bm25(fact_expansion_fts) AS rank "
+                "FROM fact_expansion_fts "
+                "JOIN atomic_facts af ON af.fact_id = fact_expansion_fts.fact_id "
+                f"WHERE fact_expansion_fts MATCH ? AND {where}{archive_clause} "
+                "ORDER BY rank LIMIT ?"
+            )
+            for r in self._db.execute(exp_sql, (match_expr, *params, int(top_k))):
+                d = dict(r)
+                fid = d.get("fact_id")
+                if fid and fid not in content_ids:
+                    out.append((fid, -float(d.get("rank", 0.0)) * 0.85))
+        except Exception as exc:  # pragma: no cover — legacy/missing expansion FTS
+            logger.debug("Expansion FTS search skipped: %s", exc)
+
+        out.sort(key=lambda x: x[1], reverse=True)
+        return out[:top_k]
 
     def search(
         self,
         query: str,
         profile_id: str,
         top_k: int = 30,
+        include_global: bool | None = None,
+        include_shared: bool | None = None,
     ) -> list[tuple[str, float]]:
         """Search BM25 index for matching facts.
 
@@ -207,10 +286,17 @@ class BM25Channel:
             query: Search query text.
             profile_id: Scope to this profile.
             top_k: Maximum results.
+            include_global: Include global-scope facts. Falls back to the
+                instance attribute when not supplied.
+            include_shared: Include shared-scope facts. Same fallback.
 
         Returns:
             List of (fact_id, bm25_score) sorted by score descending.
         """
+        if include_global is None:
+            include_global = bool(getattr(self, "include_global", False))
+        if include_shared is None:
+            include_shared = bool(getattr(self, "include_shared", False))
         # v3.5.0: FTS5 fast path — C-level indexed, ~ms, scales to millions.
         # The legacy in-memory rank_bm25 path rebuilt the whole index over the
         # entire corpus on every corpus change (11s+ at 17.5k facts, does not
@@ -218,13 +304,16 @@ class BM25Channel:
         # Falls back to rank_bm25 ONLY if the FTS5 table is genuinely
         # unavailable (raises) — e.g. a pre-FTS legacy DB.
         try:
-            return self._fts5_search(query, profile_id, top_k)
+            return self._fts5_search(
+                query, profile_id, top_k,
+                include_global=include_global, include_shared=include_shared,
+            )
         except Exception as exc:  # pragma: no cover — legacy/missing FTS table
             logger.debug(
                 "BM25 FTS5 path unavailable, using rank_bm25 fallback: %s", exc,
             )
 
-        self.ensure_loaded(profile_id)
+        self.ensure_loaded(profile_id, include_global=include_global, include_shared=include_shared)
 
         if not self._corpus:
             return []
@@ -255,6 +344,45 @@ class BM25Channel:
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:top_k]
 
+    def update_fact(self, fact_id: str, new_content: str, profile_id: str) -> None:
+        """Replace a fact's representation in the live index and persist new tokens.
+
+        Removes any existing in-memory entry for the fact_id first so the index
+        holds each fact exactly once after the call. Delegates to remove_fact +
+        add so the two operations stay in sync.
+
+        Args:
+            fact_id: Fact whose content has changed.
+            new_content: Updated text to index.
+            profile_id: Owner profile (used for DB token persistence).
+        """
+        self.remove_fact(fact_id)
+        self.add(fact_id, new_content, profile_id)
+
+    def remove_fact(self, fact_id: str) -> None:
+        """Remove a fact from the live in-memory index.
+
+        Idempotent: a no-op when the fact is not in the index. Does NOT touch
+        the persistent ``bm25_tokens`` DB table — the caller is responsible for
+        that (so a delete path can clean up storage independently).
+
+        Args:
+            fact_id: Fact to evict from the in-memory corpus.
+        """
+        if fact_id not in self._fact_id_set:
+            return
+        try:
+            idx = self._fact_ids.index(fact_id)
+            del self._corpus[idx]
+            del self._fact_ids[idx]
+            raw_texts = getattr(self, "_raw_texts", [])
+            if idx < len(raw_texts):
+                del raw_texts[idx]
+            self._fact_id_set.discard(fact_id)
+            self._dirty = True
+        except (ValueError, IndexError):
+            self._fact_id_set.discard(fact_id)
+
     def clear(self) -> None:
         """Clear the in-memory index (does NOT delete DB tokens)."""
         self._corpus = []
@@ -263,3 +391,4 @@ class BM25Channel:
         self._bm25 = None
         self._dirty = False
         self._loaded_profiles = set()
+        self._loaded_scope_key = None

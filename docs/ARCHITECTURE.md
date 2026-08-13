@@ -1,17 +1,34 @@
 # Architecture
-> SuperLocalMemory V3 Documentation
+> SuperLocalMemory V4 Documentation
 > https://superlocalmemory.com | Part of Qualixar
 
-A high-level overview of how SuperLocalMemory V3 stores, organizes, and retrieves your memories.
+A high-level overview of how SuperLocalMemory V4 stores, organizes, and retrieves your memories.
+
+Published V3 LoCoMo evidence carried into V4 (from the V3 paper / V3.7 package) is maintained in
+[Benchmark Evidence](benchmarks.md), including the original model, judge, and
+sample disclosures required to interpret each result.
+
+## What changed in V4
+
+V4 keeps the V3 multi-channel retrieval and local-first store as the foundation, and adds a governed write path (admission, per-store obligations, completion manifests), stronger cross-store erasure, SLM-Mesh peer coordination, multi-scope memory with profiles, cache/compress context optimization, Entity Explorer and skill evolution surfaces, and enterprise controls (roles, retention, hash-chained audit). Modes A/B/C still describe locality and enrichment choices; they do **not** determine EU AI Act legal compliance — that depends on deployment context.
+
+## Memory boundaries: profiles and scopes
+
+Profiles partition the active workspace. Within a profile, a memory is
+`personal` (default), `shared` with explicitly named profile readers, or
+`global`. Read visibility across profiles is default-deny: recall includes
+shared/global facts only when an operator enables the relevant policy or a
+caller supplies the explicit scope option. This is local authorization and is
+separate from trusted-peer SLM Mesh coordination.
 
 ---
 
 ## Design Principles
 
-1. **Local-first.** Your data stays on your machine by default. Cloud is opt-in.
-2. **Zero-configuration.** Install and forget. Memory capture and recall happen automatically.
-3. **Multi-channel retrieval.** No single search method is best for every query. V3 combines four channels and picks the best results.
-4. **Mathematically grounded.** Retrieval quality, consistency, and lifecycle management are backed by information geometry rather than heuristics.
+1. **Local-first.** Core memory state uses a local data root; optional integrations have separate network behavior.
+2. **Explicit activation.** Installation does not implicitly add hooks, edit IDE configuration, start a daemon, or download a model.
+3. **Multi-channel retrieval.** The engine can combine five candidate producers when their dependencies are healthy.
+4. **Inspectable scoring.** Mathematical and heuristic signals remain distinct from calibrated answer confidence.
 
 ## System Overview
 
@@ -21,7 +38,7 @@ Your IDE (Claude, Cursor, VS Code, ...)
        | MCP Protocol
        v
 +------------------+
-| MCP Server       |  24 tools, 6 resources
+| MCP Server       |  Profile-selected tools and resources
 +------------------+
        |
        v
@@ -37,55 +54,74 @@ Your IDE (Claude, Cursor, VS Code, ...)
 
 ## How Memories Are Stored (Ingestion)
 
-When you store a memory (or one is auto-captured), it passes through an 11-step pipeline:
+An accepted write is first recorded in the M018 `ingestion_operations` table.
+The source type and idempotency key own replay identity; reuse with different
+immutable evidence is rejected.
 
-| Step | What it does |
-|------|-------------|
-| 1. Metadata extraction | Timestamps, session context, source identification |
-| 2. Entity extraction | People, projects, technologies, organizations mentioned |
-| 3. Fact extraction | Discrete facts pulled from the text |
-| 4. Emotion detection | Sentiment and emotional tone (frustration, confidence, etc.) |
-| 5. Belief extraction | Opinions, preferences, and stated beliefs |
-| 6. Entity resolution | Links mentions to canonical entities (e.g., "React" and "ReactJS" become one) |
-| 7. Graph wiring | Connects entities and facts into a relationship graph |
-| 8. Foresight tagging | Predicts what future queries this memory might answer |
-| 9. Observation building | Creates structured observations for pattern learning |
-| 10. Entropy gating | Filters out redundant or low-value information |
-| 11. Storage | Writes to all indexes: semantic vectors, BM25 tokens, graph edges, temporal events |
+| Durable phase | Contract |
+|---|---|
+| `raw` | Raw content, metadata, scope, session context, and trusted actor are durable. |
+| `queryable` | A relational fact and its SQLite FTS projection are committed in the same transaction. |
+| `enriching` | A lease-owning worker performs extraction, entity resolution, consolidation, graph, temporal, provenance, and embedding work. |
+| checkpoint | Final fact IDs and completed derivation stages are committed before optional external projection. |
+| `complete` | Every declared derivation and projector stage reports success. |
+| `failed` | Evidence and checkpoint data remain inspectable and retryable with bounded backoff. |
 
-In Mode A, all steps run locally without any LLM calls. In Modes B and C, the LLM enhances entity extraction and fact decomposition.
+Mode and configured dependencies determine how individual enrichment stages are
+implemented. The state record reports what the released runtime actually
+completed; documentation does not imply that an unavailable optional backend
+participated.
 
 ## How Memories Are Retrieved (Recall)
 
-Every recall query runs through four independent retrieval channels, then fuses the results:
+Recall uses five candidate producers where their dependencies are available,
+then fusion, optional reranking, and graph-based score enhancement.
 
-### The Four Channels
+### Candidate Producers
 
 | Channel | How it works | Best for |
 |---------|-------------|----------|
-| **Semantic** | Vector similarity using sentence embeddings, enhanced by Fisher-Rao geometry | "Queries that mean the same thing but use different words" |
+| **Semantic** | Dense vector similarity; Fisher-derived terms can affect later scoring where available | "Queries that mean the same thing but use different words" |
 | **BM25** | Classic keyword matching with term frequency scoring | "Queries with specific names, codes, or exact terms" |
-| **Entity Graph** | Traverses the relationship graph via spreading activation | "Who works with Maria?" or "What connects service A to service B?" |
 | **Temporal** | Matches based on time references and event ordering | "What did we decide last Friday?" or "Changes since the sprint started" |
+| **Hopfield** | Associative retrieval over stored representations | Related decisions and linked technical context |
+| **Spreading activation** | Traverses linked graph neighborhoods | Multi-hop related evidence |
 
 ### Fusion and Ranking
 
-1. Each channel returns its top candidates with scores
-2. **Reciprocal Rank Fusion** (RRF) combines the four ranked lists into one
-3. In Mode C, a **cross-encoder** reranks the top results for final precision
-4. The top results are returned to your AI assistant
+1. Available producers return candidates with scores and provenance.
+2. Reciprocal Rank Fusion combines the ranked lists.
+3. Optional rerankers refine the leading candidates when enabled.
+4. Graph-derived evidence can modify later scoring without becoming a sixth producer.
+5. The response returns the final ranked evidence and measured runtime fields.
 
-This multi-channel approach means V3 finds memories that any single search method would miss. A keyword search alone might miss paraphrased content. A vector search alone might miss exact names. The combination catches both.
+No single producer is guaranteed to run in every mode. The runtime degrades to
+the indexes that are healthy and reports its result provenance.
+
+## Safe context injection
+
+Stored text is data, even when it came from a local or first-party source. Every
+runtime injection surface maps recalled results into one renderer that applies
+configured budgets, redacts recognized secrets, neutralizes attempts to forge
+the canonical boundary, and carries fact/source provenance. The rendered block
+is explicitly reference-only evidence; instructions found inside do not gain
+authority to call tools, change roles, or request secrets.
+
+Cursor, Copilot, and Antigravity instruction files contain only
+product-authored static protocol. Dynamic memories are fetched through MCP at
+runtime and are not persisted into these high-trust files. See
+`docs/adr/0001-untrusted-memory-boundary.md` (archived decision; see git history
+at `c1669e94`) for the decision and its limits.
 
 ## Three Operating Modes
 
 | Mode | Retrieval | LLM Usage | Data Location |
 |------|-----------|-----------|---------------|
-| **A: Zero-Cloud** | 4-channel + math scoring | None | 100% local |
-| **B: Local LLM** | 4-channel + local LLM reranking | Ollama (local) | 100% local |
-| **C: Cloud LLM** | 4-channel + cross-encoder + agentic retrieval | Cloud provider | Queries sent to cloud |
+| **A: Local** | Candidate retrieval + math-informed scoring | None for core memory operations | Local data root; optional integrations may use the network |
+| **B: Local LLM** | Candidate retrieval + local LLM enrichment | Ollama (local) | Local data root; optional integrations may use the network |
+| **C: Cloud LLM** | Candidate retrieval plus configured provider-backed enrichment | Cloud provider | Configured content is sent to the provider |
 
-Mode A is the default. It delivers strong recall quality using mathematical scoring without any network calls.
+Mode A is the default. Core memory operations can run without a cloud model provider, but model and dependency downloads, connectors, cloud backup, and explicitly enabled integrations may use the network.
 
 ## Mathematical Foundations
 
@@ -115,35 +151,73 @@ V3 uses three mathematical layers. These are not academic additions — they sol
 
 **Effect:** Active memories stay prominent. Stale memories fade gracefully. Storage stays efficient.
 
-## EU AI Act Compliance
+## Bounded Loop Engine (v3.8.0)
 
-Mode A satisfies data sovereignty requirements under the EU AI Act by design:
+A gate-verified iteration primitive. The engine runs laps until an independent gate passes or a hard bound trips. The agent's own claim that it is done is recorded per lap for audit, but does not terminate the run — only the independent gate can.
 
-- **No cloud dependency.** All memory operations run locally. No data leaves your machine.
-- **Right to erasure.** `slm forget` deletes data locally. No cloud logs to purge.
-- **Transparency.** The retrieval pipeline is auditable. No black-box LLM decisions in Mode A.
-- **Risk classification.** A local retrieval system with no AI decision-making qualifies as minimal risk.
+Three surfaces drive the same engine and the same durable ledger:
+
+| Surface | Entry point |
+|---------|-------------|
+| CLI | `slm loop {demo\|history\|show}` |
+| MCP | `slm_loop_run`, `slm_loop_history`, `slm_loop_show` |
+| Slash command | `/slm-loop` |
+
+Every lap is stored in the active SLM data root under tag `loop:<name>`, making the full run history queryable via `slm recall` and visible on the dashboard.
+
+## Framework Adapters (v3.8.0)
+
+Nine Python packages implement each framework's native memory interface, backed by the local SLM data root:
+
+| Package | Framework | Interface |
+|---------|-----------|-----------|
+| `langgraph-superlocalmemory` | LangGraph | `BaseStore` |
+| `semantic-kernel-superlocalmemory` | Semantic Kernel | `VectorStore` |
+| `agent-framework-superlocalmemory` | Microsoft Agent Framework | `ContextProvider` / `HistoryProvider` |
+| `langchain-superlocalmemory` | LangChain | `BaseChatMessageHistory` |
+| `llama-index-storage-chat-store-superlocalmemory` | LlamaIndex | `BaseChatStore` |
+| `crewai-superlocalmemory` | CrewAI | `StorageBackend` |
+| `autogen-superlocalmemory` | AutoGen | `Memory` |
+| `google-adk-superlocalmemory` | Google ADK | `BaseMemoryService` |
+| `openai-agents-superlocalmemory` | OpenAI Agents | `SessionABC` |
+
+Each adapter delegates persistence to the same SLM engine that powers the CLI and MCP surfaces. Optional SLM providers, connectors, and backup retain their documented network behavior. See [Framework Adapters →](framework-adapters.md).
+
+## Privacy and compliance controls
+
+SuperLocalMemory provides controls that may support a deployment's privacy and compliance program. It is not a legal certification. Operators must assess the configured system, use case, data flows, and surrounding services.
+
+- **Local core path.** Mode A can keep memory content in the configured local data root during core operations.
+- **Erasure command.** `slm forget` removes selected local records; backups, exports, caches, derived indexes, and provider logs require separate verification.
+- **Auditability.** Retrieval and lifecycle surfaces expose local records and diagnostics, subject to release-specific verification.
+- **Policy controls.** Provenance, retention, and access-policy features are available for operator configuration.
 
 Mode C sends queries to a cloud LLM provider. In that mode, the cloud provider's compliance posture applies to those queries.
 
 ## Database
 
-All data is stored in a single SQLite database:
+Core memory is SQLite-backed:
 
 ```
 ~/.superlocalmemory/memory.db
 ```
 
-The database uses WAL (Write-Ahead Logging) mode for safe concurrent access from multiple IDE connections.
+The data root also contains configuration, logs, models, queues, derived indexes, and optional backend state. Back up or migrate the documented data root rather than copying only `memory.db`. The core database uses WAL (Write-Ahead Logging) mode for concurrent access.
 
 Key table groups:
 
 - **Core:** memories, sessions, profiles
-- **Knowledge:** semantic_facts, kg_nodes, memory_edges, canonical_entities
-- **Retrieval indexes:** bm25_tokens, memory_metadata, temporal_events
+- **Knowledge:** atomic_facts, graph_edges, canonical_entities, temporal_events
+- **Durable ingestion:** ingestion_operations (M018 operation state and raw evidence)
+- **Retrieval indexes:** SQLite FTS plus configured derived indexes
 - **Math layers:** fisher_state, sheaf_sections, langevin_state
-- **Compliance:** trust_scores, provenance, audit_trail, retention_policies
+- **Compliance and provenance:** trust scores, provenance records, audit and retention controls
+
+M017 additively adds scope to CCQ consolidation blocks. M018 is the canonical
+expand-phase ingestion contract. The legacy `pending.db` spool remains only as
+an offline compatibility input; replay submits its evidence into M018 before it
+is marked done.
 
 ---
 
-*SuperLocalMemory V3 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*
+*SuperLocalMemory V4 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*

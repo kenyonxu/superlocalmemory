@@ -19,16 +19,21 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
-import os
-import sqlite3
 import uuid
-from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+from mcp.types import ToolAnnotations
+
+from superlocalmemory.core.admission import admits
+from superlocalmemory.core.operation_request import OperationKind
+from superlocalmemory.infra.data_root import state_path
+from superlocalmemory.mcp.shared import authorize_mcp_mutation
+from superlocalmemory.storage.read_connection import ReadConnectionFactory
+
+if TYPE_CHECKING:
+    from superlocalmemory.mcp._pool_adapter import PoolRecallResponse
 
 logger = logging.getLogger(__name__)
-
-MEMORY_DIR = Path.home() / ".superlocalmemory"
-DB_PATH = MEMORY_DIR / "memory.db"
 
 
 def _sqlite_emergency_recall(
@@ -41,15 +46,17 @@ def _sqlite_emergency_recall(
     native BM25 ranking via ``ORDER BY fts.rank``. This is the Mem0 / Letta
     industry pattern — multi-process safe via SQLite WAL mode.
 
-    Quality degraded vs full 6-channel (no semantic, no entity graph, no
+    Quality degraded vs the full recall path (no semantic, no entity graph, no
     temporal/spreading-activation/Hopfield) but still provides real BM25
     math + age gate. Returns ``degraded_mode=True`` via the caller's flag.
 
     Used ONLY when Tier-1 (full daemon recall) fails completely. Normal
-    path is full 6-channel; this is the fire-alarm.
+    path is the full five-producer fusion + entity-graph enhancement;
+    this is the fire-alarm.
     """
-    from superlocalmemory.mcp._pool_adapter import PoolFact, PoolRecallItem, PoolRecallResponse
     import re
+
+    from superlocalmemory.mcp._pool_adapter import PoolFact, PoolRecallItem, PoolRecallResponse
     try:
         # FTS5 MATCH syntax: tokenize the query, drop special characters
         # that confuse the parser (/, :, ., etc), and join with OR for
@@ -64,7 +71,8 @@ def _sqlite_emergency_recall(
             f"AND f.created_at >= datetime('now', '-{int(max_age_days)} days') "
             if max_age_days > 0 else ""
         )
-        conn = sqlite3.connect(str(DB_PATH), timeout=5.0)
+        memory_db = state_path("memory.db").resolve()
+        conn = ReadConnectionFactory(memory_db, timeout_ms=250).open()
         try:
             rows = conn.execute(
                 f"""SELECT f.fact_id, f.content, f.memory_id, f.created_at,
@@ -129,24 +137,122 @@ def _emit_event(event_type: str, payload: dict | None = None,
     resolved_agent = source_agent if source_agent is not None else _get_agent_id()
     try:
         from superlocalmemory.infra.event_bus import EventBus
-        bus = EventBus.get_instance(str(DB_PATH))
+        bus = EventBus.get_instance(str(state_path("memory.db")))
         bus.emit(event_type, payload=payload, source_agent=resolved_agent,
                  source_protocol="mcp")
     except Exception as exc:
         logger.warning("event emit failed: type=%s err=%s", event_type, exc)
 
 
-def _register_agent(agent_id: str, profile_id: str) -> None:
-    """Register an agent in the AgentRegistry (best-effort)."""
+# ---------------------------------------------------------------------------
+# Canonical learning-store feedback (issues #102, #106)
+#
+# learning.db is the single store every learning consumer reads. Within it the
+# canonical tables are ``learning_signals`` + ``learning_features``: the phase
+# gate (recall_pipeline), the dashboard Living Brain panel, the ranker-phase
+# card, and the retrainer all resolve their phase from ``learning_signals``.
+# ``learning_feedback`` is the pre-v3.4.22 table that legacy_migration copies
+# forward into it.
+#
+# Recall itself is deliberately read-only and must never open a writer, so an
+# explicit feedback command is the only durable writer in the design. These
+# helpers are that writer, and — per issue #106 — they report the SAME number
+# the gate and the dashboard use. There is deliberately no fall back to a
+# different store's count: a cross-store fallback is what let a total write
+# failure still return "success" beside a plausibly incrementing counter.
+# ---------------------------------------------------------------------------
+
+_FEEDBACK_SIGNAL_MAP: dict[str, tuple[str, float]] = {
+    "relevant": ("user_positive", 1.0),
+    "irrelevant": ("user_negative", 0.0),
+    "partial": ("user_correction", 0.5),
+}
+
+
+def _learning_db_path():
+    """Resolve the canonical learning.db path."""
+    return state_path("learning.db")
+
+
+def _phase_thresholds() -> tuple[int, int]:
+    """Return the (phase 2, phase 3) signal thresholds.
+
+    Sourced from ``learning.ranker`` so the MCP surface can never report a
+    different phase than the one recall actually applies. Falls back to the
+    documented defaults only if the learning package is unavailable.
+    """
     try:
-        from superlocalmemory.core.registry import AgentRegistry
-        registry_path = MEMORY_DIR / "agents.json"
-        registry = AgentRegistry(persist_path=registry_path)
-        registry.register_agent(agent_id, profile_id)
+        from superlocalmemory.learning.ranker import (
+            PHASE_2_THRESHOLD,
+            PHASE_3_THRESHOLD,
+        )
+        return PHASE_2_THRESHOLD, PHASE_3_THRESHOLD
+    except Exception:  # pragma: no cover — learning extras absent
+        return 50, 200
+
+
+_PHASE_2_THRESHOLD, _PHASE_3_THRESHOLD = _phase_thresholds()
+
+
+def _phase_for_signal_count(count: int) -> int:
+    """Map a canonical signal count onto the adaptive ranking phase."""
+    if count < _PHASE_2_THRESHOLD:
+        return 1
+    return 2 if count < _PHASE_3_THRESHOLD else 3
+
+
+def _record_canonical_feedback(
+    *, profile_id: str, fact_id: str, feedback: str, query: str = "",
+    channel: str = "explicit",
+) -> bool:
+    """Write explicit feedback to learning.db. Returns True on success.
+
+    True means the ``learning_signals`` row that every phase counter reads
+    actually landed — not merely that some row was written somewhere. The
+    outcome is RETURNED rather than swallowed so the caller can tell the user
+    the truth about whether the write was durable.
+    """
+    signal_type, value = _FEEDBACK_SIGNAL_MAP.get(
+        feedback, ("user_correction", 0.5),
+    )
+    try:
+        from superlocalmemory.learning.feedback import FeedbackCollector
+
+        collector = FeedbackCollector(_learning_db_path())
+        write = collector.record_explicit_event(
+            profile_id=profile_id,
+            fact_id=fact_id,
+            signal_type=signal_type,
+            value=value,
+            query=query,
+            channel=channel,
+        )
+        return write.canonical
     except Exception as exc:
         logger.warning(
-            "agent registry write failed: agent=%s err=%s", agent_id, exc,
+            "canonical feedback write failed (fact_id=%s): %s", fact_id, exc,
         )
+        return False
+
+
+def _canonical_feedback_count(profile_id: str) -> int | None:
+    """Count the store that gates the adaptive phases.
+
+    Returns None when the store cannot be read. The caller must NOT substitute
+    a count from a different table: before issue #106 an unreadable learning.db
+    silently fell back to ``feedback_records`` in memory.db — a table no
+    consumer reads — so the user watched a fabricated counter climb toward a
+    threshold that nothing was measuring, while the durable write did nothing.
+    """
+    try:
+        from superlocalmemory.learning.feedback import FeedbackCollector
+
+        return FeedbackCollector(
+            _learning_db_path(),
+        ).get_signal_count(profile_id)
+    except Exception as exc:
+        logger.warning("canonical feedback count failed: %s", exc)
+        return None
 
 
 def register_active_tools(server, get_engine: Callable) -> None:
@@ -155,7 +261,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 1. session_init — Auto-recall project context at session start
     # ------------------------------------------------------------------
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def session_init(
         project_path: str = "",
         query: str = "",
@@ -181,20 +287,21 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 relevance score is ≥ 0.70 (architectural decisions that remain
                 permanently relevant still surface). Default: 30.
                 Set to 0 to disable the age gate entirely.
-
-        Scoring: Uses 6-channel fusion (semantic + BM25 + entity_graph + temporal +
-        spreading_activation + hopfield) with Ebbinghaus exponential recency decay
-        and FSRS stability strengthening by access frequency.
         """
         try:
             from superlocalmemory.hooks.rules_engine import RulesEngine
             from superlocalmemory.mcp._pool_adapter import pool_recall
 
             engine = get_engine()
-            rules = RulesEngine()
+            rules = RulesEngine(config_path=state_path("config.json"))
 
             if not rules.should_recall("session_start"):
-                return {"success": True, "context": "", "memories": [], "message": "Auto-recall disabled"}
+                return {
+                    "success": True,
+                    "context": "",
+                    "memories": [],
+                    "message": "Auto-recall disabled",
+                }
 
             recall_config = rules.get_recall_config()
             relevance_threshold = recall_config.get("relevance_threshold", 0.3)
@@ -206,8 +313,9 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 search_query = "recent important decisions"
 
             # 2-tier recall (industry pattern: Hindsight / Zep / Supermemory):
-            # PRIMARY: full 6-channel via daemon (semantic + BM25 + entity + temporal
-            #          + Hopfield + spreading-activation, Fisher-Rao fusion, FSRS decay).
+            # PRIMARY: full recall via daemon — five candidate producers (semantic
+            #          + BM25 + temporal + Hopfield + spreading-activation) into RRF
+            #          fusion, then entity-graph post-fusion enhancement, FSRS decay.
             #          Fast because Ollama embed model is kept warm (keep_alive=-1
             #          + eager pre-warm at daemon boot).
             # EMERGENCY: direct FTS5 BM25 (Mem0 / Letta pattern). Used ONLY when
@@ -220,7 +328,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 # thread so the async MCP event loop is not stalled — same
                 # fix class as #34 mesh tools deadlock.
                 response = await asyncio.to_thread(
-                    pool_recall, search_query, limit=max_results, fast=False,
+                    pool_recall, search_query, limit=max_results, fast=None,
                 )
             except (PoolError, Exception) as exc:
                 logger.warning(
@@ -239,7 +347,8 @@ def register_active_tools(server, get_engine: Callable) -> None:
             # Memories older than max_age_days are excluded unless their score
             # exceeds 0.7 (high-relevance architectural decisions always surface).
             # max_age_days=0 disables the gate entirely.
-            from datetime import UTC, datetime as _dt
+            from datetime import UTC
+            from datetime import datetime as _dt
             _now = _dt.now(UTC)
 
             def _age_days(created_at_str: str) -> float:
@@ -272,6 +381,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 clamp_content,
                 is_low_quality,
                 render_context,
+                sanitize_untrusted_content,
             )
 
             pid = engine.profile_id
@@ -282,7 +392,6 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 pinned_facts = engine.db.get_pinned(pid)
             except Exception:
                 pinned_facts = []
-            pinned_ids = {f.fact_id for f in pinned_facts}
             pinned_seen = set()
 
             cfg_inj = getattr(getattr(engine, "config", None), "injection", None)
@@ -304,6 +413,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
                     importance=getattr(pf, "importance", 0.0) or 0.0,
                     access_count=getattr(pf, "access_count", 0) or 0,
                     pinned=True,
+                    source_type="pinned-fact",
                 ))
                 pinned_seen.add(pf.fact_id)
 
@@ -317,17 +427,32 @@ def register_active_tools(server, get_engine: Callable) -> None:
                     fact_id=r.fact.fact_id,
                     importance=getattr(r.fact, "importance", 0.0) or 0.0,
                     access_count=getattr(r.fact, "access_count", 0) or 0,
+                    source_type="recall",
                 ))
 
             mode_str = str(getattr(engine, "mode", "B")).upper()
             try:
-                context = render_context(inj_mems, mode=mode_str, cfg=cfg_inj, wrap=False)
+                context = render_context(
+                    inj_mems, mode=mode_str, cfg=cfg_inj, wrap=True,
+                )
             except Exception:
-                # Fall back to legacy content building on any formatter failure
-                lines = ["# Relevant Memory Context", ""]
-                for m in inj_mems[:max_results]:
-                    lines.append(f"- {m.content[:200]}")
-                context = "\n".join(lines)
+                # Fail closed: never serialize retrieved content through a
+                # weaker ad-hoc path when the mandatory renderer fails.
+                context = ""
+
+            # Live soft-prompt injection (Phase 5): prepend the profile's behavioral
+            # soft prompt so it reaches the session_init context agents actually
+            # consume (same engine->AutoInvoker bridge AutoRecall uses). Fail-soft.
+            try:
+                _sp_getter = getattr(
+                    getattr(engine, "_auto_invoker", None),
+                    "_get_soft_prompt_text", None,
+                )
+                _soft_prompt = _sp_getter() if callable(_sp_getter) else ""
+                if _soft_prompt:
+                    context = f"{_soft_prompt}\n\n{context}" if context else _soft_prompt
+            except Exception as exc:
+                logger.warning("session_init soft-prompt injection failed: %s", exc)
 
             # GAP-FIX (v3.4.65 delivery-lead): the memories[] array is part of
             # the MCP response Claude Code ingests — it MUST be bounded too, not
@@ -335,27 +460,57 @@ def register_active_tools(server, get_engine: Callable) -> None:
             # content shipped here (one fact was 131K chars → ~124K-token
             # response, defeating the whole token budget). Clamp each content
             # to per_memory_max_tokens, drop junk, and honour max_results.
-            memories = [
-                {
-                    "fact_id": m.fact_id,
-                    "content": clamp_content(m.content, cfg_inj),
-                    "score": m.score,
-                    "is_core": m.is_core,
-                }
-                for m in inj_mems[:max_results]
-                if not is_low_quality(m.content)
-            ]
-
-            # Get learning status
-            feedback_count = 0
-            try:
-                feedback_count = engine._adaptive_learner.get_feedback_count(pid)
-            except Exception as exc:
-                # Feedback count is a Dash-Core signal; a silent zero
-                # masks wiring bugs. Log so operators see the failure.
-                logger.warning(
-                    "session_init feedback_count read failed: %s", exc,
+            contract_by_id = {
+                r.fact.fact_id: r for r in relevant[:max_results]
+            }
+            memories = []
+            for position, m in enumerate(inj_mems[:max_results], start=1):
+                if is_low_quality(m.content):
+                    continue
+                result_contract = contract_by_id.get(m.fact_id)
+                relevance = (
+                    getattr(result_contract, "relevance_score", m.score)
+                    if result_contract is not None else m.score
                 )
+                memory_confidence = (
+                    getattr(result_contract, "memory_confidence", None)
+                    if result_contract is not None else None
+                )
+                memories.append({
+                    "fact_id": m.fact_id,
+                    "content": clamp_content(
+                        sanitize_untrusted_content(m.content), cfg_inj,
+                    ),
+                    "score": m.score,
+                    "relevance_score": relevance,
+                    "ranking_score": (
+                        getattr(result_contract, "ranking_score", None)
+                        if result_contract is not None else None
+                    ),
+                    "confidence": memory_confidence,
+                    "memory_confidence": memory_confidence,
+                    "rank_position": (
+                        getattr(result_contract, "rank_position", position)
+                        if result_contract is not None else position
+                    ),
+                    "is_core": m.is_core,
+                    "untrusted": True,
+                    "source_type": m.source_type,
+                })
+
+            # Learning status — issue #106: read the SAME canonical counter
+            # that report_feedback reports, the recall gate applies, and the
+            # dashboard displays. This used to read ``feedback_records`` in
+            # memory.db, so session_init and report_feedback returned two
+            # different "signal" totals for one profile in the same session.
+            # A silent zero masks wiring bugs, so a failed read is logged.
+            feedback_count = _canonical_feedback_count(pid)
+            if feedback_count is None:
+                logger.warning(
+                    "session_init canonical signal count unavailable for "
+                    "profile %s; reporting 0", pid,
+                )
+                feedback_count = 0
 
             # v3.6.9 (#35): generate a stable session_id so clients can pass it
             # to remember() and close_session() for proper session aggregation.
@@ -363,15 +518,6 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 f"slm-{datetime.datetime.now(datetime.timezone.utc):%Y%m%d}"
                 f"-{uuid.uuid4().hex[:8]}"
             )
-
-            # Register agent + emit event (v3.4.39: SLM_AGENT_ID env support)
-            agent_id = _get_agent_id()
-            _register_agent(agent_id, pid)
-            _emit_event("agent.connected", {
-                "agent_id": agent_id,
-                "project_path": project_path,
-                "memory_count": len(memories),
-            })
 
             return {
                 "success": True,
@@ -381,11 +527,31 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 "memory_count": len(memories),
                 "core_memory": [m["content"] for m in memories if m.get("is_core")],
                 "degraded_mode": degraded_mode,
-                "retrieval_mode": "emergency_fts5_bm25" if degraded_mode else "full_6_channel",
+                "retrieval_mode": (
+                    "emergency_fts5_bm25"
+                    if degraded_mode
+                    else "hybrid_candidate_fusion"
+                ),
+                "score_contract_version": getattr(
+                    response, "score_contract_version", "2"
+                ),
+                "calibration_status": getattr(
+                    response, "calibration_status", "uncalibrated"
+                ),
+                "calibration_id": getattr(response, "calibration_id", None),
+                "answer_confidence": getattr(response, "answer_confidence", None),
+                "abstained": getattr(response, "abstained", not bool(relevant)),
+                "abstention_reason": getattr(response, "abstention_reason", None),
                 "learning": {
                     "feedback_signals": feedback_count,
-                    "phase": 1 if feedback_count < 50 else (2 if feedback_count < 200 else 3),
-                    "status": "collecting" if feedback_count < 50 else ("learning" if feedback_count < 200 else "trained"),
+                    "phase": _phase_for_signal_count(feedback_count),
+                    "status": (
+                        "collecting"
+                        if feedback_count < _PHASE_2_THRESHOLD
+                        else "learning"
+                        if feedback_count < _PHASE_3_THRESHOLD
+                        else "trained"
+                    ),
                 },
             }
         except Exception as exc:
@@ -396,6 +562,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
     # 2. observe — Auto-capture decisions/bugs/preferences
     # ------------------------------------------------------------------
     @server.tool()
+    @admits(OperationKind.REMEMBER)
     async def observe(
         content: str,
         agent_id: str | None = None,
@@ -420,7 +587,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
             from superlocalmemory.hooks.rules_engine import RulesEngine
             from superlocalmemory.mcp._pool_adapter import pool_store
 
-            rules = RulesEngine()
+            rules = RulesEngine(config_path=state_path("config.json"))
 
             auto = AutoCapture(
                 store_fn=pool_store,
@@ -478,6 +645,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
     # 3. report_feedback — Explicit feedback for learning
     # ------------------------------------------------------------------
     @server.tool()
+    @admits(OperationKind.REMEMBER)
     async def report_feedback(
         fact_id: str,
         feedback: str = "relevant",
@@ -496,8 +664,22 @@ def register_active_tools(server, get_engine: Callable) -> None:
             pid = engine.profile_id
 
             if feedback not in ("relevant", "irrelevant", "partial"):
-                return {"success": False, "error": f"Invalid feedback: {feedback}. Use relevant/irrelevant/partial"}
+                return {
+                    "success": False,
+                    "error": (
+                        f"Invalid feedback: {feedback}. "
+                        "Use relevant/irrelevant/partial"
+                    ),
+                }
 
+            authorization = authorize_mcp_mutation(
+                engine,
+                "update",
+                mutation_source="mcp-recall-feedback",
+                profile_id=pid,
+                fact_id=fact_id,
+                content_preview=feedback,
+            )
             record = engine._adaptive_learner.record_feedback(
                 query=query,
                 fact_id=fact_id,
@@ -505,24 +687,71 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 profile_id=pid,
             )
 
-            count = engine._adaptive_learner.get_feedback_count(pid)
+            # The AdaptiveLearner write above lands in ``feedback_records`` in
+            # memory.db — a table whose only readers are AdaptiveLearner's own
+            # count and its train(), which nothing in the running system
+            # calls. It is kept so existing data and GDPR erasure stay intact,
+            # but it is NOT the learning write and its count is NOT reported.
+            #
+            # The canonical store is learning.db's ``learning_signals`` (+ the
+            # paired ``learning_features`` row). Writing there is what makes
+            # feedback do work: the recall phase gate, the dashboard Living
+            # Brain panel, the ranker-phase card, and the retrainer all read
+            # it. Recall stays read-only by design, so this explicit path is
+            # the only durable writer.
+            canonical_recorded = _record_canonical_feedback(
+                profile_id=pid,
+                fact_id=fact_id,
+                feedback=feedback,
+                query=query,
+            )
 
+            # issue #106: report the count from the store that ACTUALLY gates
+            # the phases, and report NOTHING when it cannot be read. The old
+            # fallback to ``feedback_records`` is what made a total write
+            # failure indistinguishable from success: the response carried a
+            # plausible, incrementing ``total_signals`` sourced from a table
+            # nothing consumes, so the caller had no way to notice that
+            # learning.db was never touched.
+            count = _canonical_feedback_count(pid)
+            authorization.complete()
+
+            if not canonical_recorded or count is None:
+                # Never claim a durable learning write that did not happen.
+                return {
+                    "success": False,
+                    "durable": False,
+                    "feedback_id": record.feedback_id,
+                    "total_signals": count,
+                    "error": (
+                        "Feedback was accepted but could not be written to "
+                        "the canonical learning store (learning.db), so it "
+                        "will not influence ranking. Run 'slm doctor' to "
+                        "diagnose learning.db."
+                    ),
+                }
+
+            phase = _phase_for_signal_count(count)
             _emit_event("pattern.learned", {
                 "fact_id": fact_id,
                 "feedback": feedback,
                 "total_signals": count,
-                "phase": 1 if count < 50 else (2 if count < 200 else 3),
+                "phase": phase,
             })
 
-            return {
+            result = {
                 "success": True,
+                "durable": True,
                 "feedback_id": record.feedback_id,
                 "total_signals": count,
-                "phase": 1 if count < 50 else (2 if count < 200 else 3),
+                "phase": phase,
                 "message": f"Feedback recorded. {count} total signals."
-                + (" Phase 2 unlocked!" if count == 50 else "")
-                + (" Phase 3 (ML) unlocked!" if count == 200 else ""),
+                + (" Phase 2 unlocked!"
+                   if count == _PHASE_2_THRESHOLD else "")
+                + (" Phase 3 (ML) unlocked!"
+                   if count == _PHASE_3_THRESHOLD else ""),
             }
+            return result
         except Exception as exc:
             logger.exception("report_feedback failed")
             return {"success": False, "error": str(exc)}
@@ -532,6 +761,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
 
     @server.tool()
+    @admits(OperationKind.CONSOLIDATE)
     async def close_session(session_id: str = "") -> dict:
         """Close the current session and create temporal summary events.
 
@@ -562,7 +792,15 @@ def register_active_tools(server, get_engine: Callable) -> None:
                     pass
             if not sid:
                 return {"success": False, "error": "No session_id provided or found"}
+            authorization = authorize_mcp_mutation(
+                engine,
+                "update",
+                mutation_source="mcp-session-close",
+                profile_id=engine.profile_id,
+                content_preview=sid,
+            )
             count = engine.close_session(sid)
+            authorization.complete()
             return {
                 "success": True,
                 "session_id": sid,
@@ -577,10 +815,10 @@ def register_active_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
 
     @server.tool()
+    @admits(OperationKind.CORRECT)
     async def core_memory(
         action: str,
         fact_id: str = "",
-        profile_id: str = "default",
     ) -> dict:
         """Manage the explicit Core Memory pin set (v3.4.65).
 
@@ -591,18 +829,37 @@ def register_active_tools(server, get_engine: Callable) -> None:
         try:
             engine = get_engine()
             db = engine.db
-            pid = profile_id or engine.profile_id
+            # Isolation: the tenant is ALWAYS the engine's active profile. The
+            # caller-supplied profile_id is ignored — honoring it let any MCP
+            # client read/pin another profile's facts by passing profile_id.
+            pid = engine.profile_id
 
             if action == "pin":
                 if not fact_id:
                     return {"success": False, "error": "fact_id required for pin"}
+                authorization = authorize_mcp_mutation(
+                    engine,
+                    "update",
+                    mutation_source="mcp-core-memory-pin",
+                    profile_id=pid,
+                    fact_id=fact_id,
+                )
                 db.set_pinned(fact_id, True)
+                authorization.complete()
                 return {"success": True, "action": "pin", "fact_id": fact_id}
 
             if action == "unpin":
                 if not fact_id:
                     return {"success": False, "error": "fact_id required for unpin"}
+                authorization = authorize_mcp_mutation(
+                    engine,
+                    "update",
+                    mutation_source="mcp-core-memory-unpin",
+                    profile_id=pid,
+                    fact_id=fact_id,
+                )
                 db.set_pinned(fact_id, False)
+                authorization.complete()
                 return {"success": True, "action": "unpin", "fact_id": fact_id}
 
             if action == "list":

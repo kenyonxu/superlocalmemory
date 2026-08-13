@@ -27,6 +27,50 @@ async function loadAutoSettings() {
     }
 }
 
+async function loadScopeSettings() {
+    try {
+        var response = await fetch('/api/v3/scope/config');
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        var data = await response.json();
+        var defaultScope = document.getElementById('settings-default-scope');
+        var shared = document.getElementById('settings-recall-shared');
+        var globalScope = document.getElementById('settings-recall-global');
+        if (defaultScope) defaultScope.value = data.default_scope || 'personal';
+        if (shared) shared.checked = data.recall_include_shared === true;
+        if (globalScope) globalScope.checked = data.recall_include_global === true;
+    } catch (error) {
+        var status = document.getElementById('settings-scope-status');
+        if (status) status.textContent = 'Could not load runtime visibility settings.';
+    }
+}
+
+async function saveScopeSettings() {
+    var status = document.getElementById('settings-scope-status');
+    var payload = {
+        default_scope: document.getElementById('settings-default-scope')?.value || 'personal',
+        recall_include_shared: document.getElementById('settings-recall-shared')?.checked === true,
+        recall_include_global: document.getElementById('settings-recall-global')?.checked === true,
+    };
+    if (status) status.textContent = 'Applying to daemon...';
+    try {
+        var response = await fetch('/api/v3/scope/config', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+        });
+        var data = await response.json();
+        if (!response.ok || data.success !== true) {
+            throw new Error(data.error || 'daemon rejected visibility settings');
+        }
+        if (status) status.textContent = 'Applied to the resident daemon.';
+        return true;
+    } catch (error) {
+        if (status) status.textContent = 'Not applied: ' + error.message;
+        await loadScopeSettings();
+        return false;
+    }
+}
+
 function saveAutoCaptureConfig() {
     var payload = {
         enabled: document.getElementById('auto-capture-toggle')?.checked,
@@ -151,10 +195,21 @@ async function loadModeSettings() {
 
         var bannerDetail = document.getElementById('settings-current-detail');
         if (bannerDetail) {
-            if (mode === 'a') bannerDetail.textContent = 'Zero cloud — EU AI Act compliant';
+            if (mode === 'a') bannerDetail.textContent = 'Local inference — legal classification requires deployment assessment';
             else if (data.has_key) bannerDetail.textContent = 'API key configured';
             else if (provider === 'ollama') bannerDetail.textContent = 'No API key needed';
             else bannerDetail.textContent = 'API key not set';
+        }
+
+        var postureBadge = document.querySelector('.badge-local');
+        if (postureBadge) {
+            if (mode === 'c') {
+                postureBadge.innerHTML = '<i class="bi bi-cloud" aria-hidden="true"></i> CLOUD MODE';
+                postureBadge.title = 'Mode C can use configured cloud providers and integrations.';
+            } else {
+                postureBadge.innerHTML = '<i class="bi bi-lock-fill" aria-hidden="true"></i> LOCAL INFERENCE';
+                postureBadge.title = 'Inference is local; mesh, integrations, and backups have separate egress controls.';
+            }
         }
 
         var banner = document.getElementById('settings-current-banner');
@@ -419,7 +474,10 @@ async function saveAllSettings() {
 async function loadEmbeddingSettings() {
     try {
         var resp = await fetch('/api/v3/embedding/config');
-        if (!resp.ok) return;
+        if (!resp.ok) {
+            showEmbeddingConfigUnavailable();
+            return;
+        }
         var data = await resp.json();
 
         var provEl = document.getElementById('settings-emb-provider');
@@ -451,7 +509,17 @@ async function loadEmbeddingSettings() {
         }
     } catch (e) {
         console.log('Load embedding settings error:', e);
+        showEmbeddingConfigUnavailable();
     }
+}
+
+function showEmbeddingConfigUnavailable() {
+    var info = document.getElementById('settings-emb-info');
+    if (!info) return;
+    // Do not alter any form values here: rendering fallback values would make
+    // a transient daemon/config failure look like a valid Mode A setup.
+    info.textContent = 'Embedding configuration unavailable. Check daemon health and retry.';
+    info.className = 'text-warning small';
 }
 
 function updateEmbeddingUI() {
@@ -533,6 +601,9 @@ document.getElementById('settings-save-all')?.addEventListener('click', saveAllS
 document.getElementById('settings-test-btn')?.addEventListener('click', testConnection);
 document.getElementById('settings-emb-provider')?.addEventListener('change', updateEmbeddingUI);
 document.getElementById('settings-emb-test-btn')?.addEventListener('click', testEmbeddingEndpoint);
+['settings-default-scope', 'settings-recall-shared', 'settings-recall-global'].forEach(function(id) {
+    document.getElementById(id)?.addEventListener('change', saveScopeSettings);
+});
 
 // Mode radio buttons
 document.querySelectorAll('input[name="settings-mode-radio"]').forEach(function(radio) {
@@ -542,6 +613,7 @@ document.querySelectorAll('input[name="settings-mode-radio"]').forEach(function(
 // Load settings when the settings tab is shown
 document.getElementById('settings-tab')?.addEventListener('shown.bs.tab', function() {
     loadAutoSettings();
+    loadScopeSettings();
     loadModeSettings();
     loadEmbeddingSettings();
     updateModeUI();

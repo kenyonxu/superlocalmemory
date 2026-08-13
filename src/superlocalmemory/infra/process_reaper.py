@@ -79,6 +79,46 @@ class SlmProcessInfo:
     age_hours: float
 
 
+def is_mcp_server_process(process: SlmProcessInfo) -> bool:
+    """Return whether *process* is an MCP stdio server, not an SLM daemon.
+
+    The startup reaper is deliberately aggressive (zero age threshold), but
+    only an orphaned MCP process is safe to reap from ``slm mcp``.  A unified
+    daemon is intentionally detached from the shell that launched it, so on
+    some hosts it has PPID 1 and looks like an orphan.  Reaping that daemon at
+    MCP startup drops in-flight CLI and dashboard requests.
+
+    Keep this predicate narrow and based on the command line recorded by the
+    OS: every supported MCP entry point includes the standalone ``mcp``
+    argument or imports the MCP server module.  The daemon's command does
+    neither.
+    """
+    command = process.command.lower()
+    return (
+        "/slm mcp" in command
+        or " slm mcp" in command
+        or "superlocalmemory.cli.main mcp" in command
+        or "superlocalmemory.mcp.server" in command
+    )
+
+
+def is_unified_daemon_process(process: SlmProcessInfo) -> bool:
+    """Return whether *process* is a long-lived shared SLM daemon.
+
+    A healthy daemon is deliberately detached and therefore commonly has
+    PPID 1.  That is not evidence that it is stale.  Automatic startup reaping
+    must never kill one merely because another SLM data root is starting.
+    """
+    command = process.command.lower()
+    return (
+        "superlocalmemory.server.unified_daemon" in command
+        or "/slm serve" in command
+        or " slm serve" in command
+        or "/slm daemon" in command
+        or " slm daemon" in command
+    )
+
+
 # ---------------------------------------------------------------------------
 # Windows no-op stubs (AUDIT FIX H0-HIGH-02)
 # ---------------------------------------------------------------------------
@@ -452,6 +492,7 @@ else:
             untracked_orphans = [
                 o for o in find_orphans(config)
                 if o.pid not in tracked_pids
+                and not is_unified_daemon_process(o)
             ]
             for orphan in untracked_orphans:
                 logger.warning(

@@ -25,21 +25,30 @@ import json
 import logging
 import os
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
+
+from superlocalmemory.infra.data_root import state_path
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SOCK_NAME = "hook_daemon.sock"
 
+# AF_UNIX is absent on Windows builds < 10.0.17063 and on Python < 3.9. When it
+# is unavailable the hook daemon does not start and callers fall back to the
+# subprocess recall path. Detect it explicitly (once, with a log) instead of
+# relying on an AttributeError being swallowed by a broad except.
+_AF_UNIX = getattr(socket, "AF_UNIX", None)
+
 
 def _default_sock_path() -> Path:
-    return Path.home() / ".superlocalmemory" / _DEFAULT_SOCK_NAME
+    return state_path(_DEFAULT_SOCK_NAME)
 
 
 def _default_queue_db_path() -> Path:
-    return Path.home() / ".superlocalmemory" / "recall_queue.db"
+    return state_path("recall_queue.db")
 
 
 class HookDaemon:
@@ -75,7 +84,13 @@ class HookDaemon:
         from superlocalmemory.core.recall_queue import RecallQueue
         self._queue = RecallQueue(self._queue_db_path)
 
-        self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        if _AF_UNIX is None:
+            logger.info(
+                "HookDaemon: AF_UNIX unavailable on %s; hook recall uses the "
+                "subprocess fallback", sys.platform,
+            )
+            raise RuntimeError("AF_UNIX unavailable on this platform")
+        self._server_sock = socket.socket(_AF_UNIX, socket.SOCK_STREAM)
         self._server_sock.bind(str(self._sock_path))
         self._server_sock.listen(8)
         self._server_sock.settimeout(1.0)
@@ -224,9 +239,11 @@ def try_socket_recall(
     path = sock_path or _default_sock_path()
     if not path.exists():
         return None
+    if _AF_UNIX is None:
+        return None
 
     try:
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client = socket.socket(_AF_UNIX, socket.SOCK_STREAM)
         client.settimeout(timeout)
         client.connect(str(path))
 
@@ -257,10 +274,12 @@ def ensure_hook_daemon(
 ) -> HookDaemon | None:
     """Start hook daemon if not already running. Returns daemon or None."""
     path = sock_path or _default_sock_path()
+    if _AF_UNIX is None:
+        return None
 
     if path.exists():
         try:
-            test = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            test = socket.socket(_AF_UNIX, socket.SOCK_STREAM)
             test.settimeout(1.0)
             test.connect(str(path))
             test.close()

@@ -1,5 +1,7 @@
 # Multi-Machine Mesh (v3.4.48)
 
+**SLM-Mesh** provides authenticated peer coordination across sessions and machines.
+
 SuperLocalMemory v3.4.48 enables two machines on the same LAN to share agent peer lists and route messages cross-machine — zero manual configuration required when mDNS is available.
 
 ## How It Works
@@ -27,7 +29,7 @@ SuperLocalMemory v3.4.48 enables two machines on the same LAN to share agent pee
 
 ```bash
 export SLM_MESH_SHARED_SECRET=your-shared-secret-here
-slm start   # or however you start SLM
+slm serve   # start the SLM daemon
 ```
 
 ### On M5 (add `SLM_MESH_PEER_URL` to your env/MCP config)
@@ -72,10 +74,12 @@ When `SLM_MESH_DISCOVERY=on` (default) and `zeroconf` is installed, SLM automati
 
 Install zeroconf support:
 ```bash
-pip install "superlocalmemory[mesh]"
+python -m pip install "superlocalmemory[mesh]"
 # or
-pip install zeroconf
+python -m pip install zeroconf
 ```
+
+Run these commands only while the SLM Python virtual environment is active.
 
 ## MCP Tools — Unchanged
 

@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import sqlite3
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -21,11 +20,7 @@ from superlocalmemory.hooks.adapter_base import (
 from superlocalmemory.hooks.antigravity_adapter import AntigravityAdapter
 from superlocalmemory.hooks.copilot_adapter import CopilotAdapter
 from superlocalmemory.hooks.cursor_adapter import CursorAdapter
-from superlocalmemory.hooks.context_payload import (
-    DEFAULT_TOP_K,
-    build_payload,
-    truncate_payload_for_cap,
-)
+from superlocalmemory.hooks.context_payload import build_payload, truncate_payload_for_cap
 from superlocalmemory.hooks.sync_loop import (
     DEFAULT_INTERVAL_SECONDS,
     _interval_from_env,
@@ -94,6 +89,47 @@ def test_atomic_write_rewrites_on_content_change(tmp_path):
     )
     assert r1.wrote and r2.wrote
     assert target.read_bytes() == b"second"
+
+
+def test_path_hash_does_not_depend_on_target_existence(tmp_path, monkeypatch):
+    target = tmp_path / "not-created-yet.txt"
+    target_exists = False
+
+    monkeypatch.setattr(Path, "exists", lambda _path: target_exists)
+    monkeypatch.setattr(Path, "resolve", lambda path: Path(str(path).upper()))
+
+    before_creation = path_sha256(target)
+    target_exists = True
+    after_creation = path_sha256(target)
+
+    assert before_creation == after_creation
+
+
+def test_atomic_write_preserves_lf_bytes_and_hash_identity(tmp_path):
+    target = tmp_path / "lf-content.txt"
+    content = b"first line\nsecond line\n"
+    sync_log_db = tmp_path / "m.db"
+
+    first = atomic_write(
+        target,
+        content,
+        adapter_name="test",
+        profile_id="p",
+        sync_log_db=sync_log_db,
+    )
+    second = atomic_write(
+        target,
+        content,
+        adapter_name="test",
+        profile_id="p",
+        sync_log_db=sync_log_db,
+    )
+
+    disk_bytes = target.read_bytes()
+    assert disk_bytes == content
+    assert first.content_sha256 == hashlib.sha256(disk_bytes).hexdigest()
+    assert first.wrote
+    assert not second.wrote
 
 
 def test_atomic_write_rewrites_after_out_of_band_mutation(tmp_path):

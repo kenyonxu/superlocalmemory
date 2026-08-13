@@ -25,9 +25,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from superlocalmemory.core.config import ChannelWeights, RetrievalConfig
+from superlocalmemory.core.config import RetrievalConfig
+from superlocalmemory.retrieval.bm25_channel import BM25Channel
 from superlocalmemory.retrieval.engine import RetrievalEngine
-from superlocalmemory.storage.models import AtomicFact, Mode, RecallResponse
+from superlocalmemory.storage import schema as real_schema
+from superlocalmemory.storage.database import DatabaseManager
+from superlocalmemory.storage.models import AtomicFact, MemoryRecord
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +160,92 @@ class TestFourChannelPipeline:
         engine = _build_engine(db=db, bm25_results=[("f1", 0.8)])
         response = engine.recall("q", "default")
         assert len(response.results) == 1
+
+    def test_exact_bm25_hit_survives_semantic_top_k_pressure(self) -> None:
+        """A newly queryable exact-token fact must not hide below semantic hits."""
+        semantic_ids = [f"semantic-{index}" for index in range(5)]
+        facts = [
+            *[
+                _make_fact(
+                    fact_id,
+                    f"Semantically similar older memory number {index}",
+                )
+                for index, fact_id in enumerate(semantic_ids)
+            ],
+            _make_fact(
+                "exact-new",
+                "SLM381_UNIQUE_QUERYABLE_MARKER is immediately recallable",
+            ),
+        ]
+        engine = _build_engine(
+            db=_mock_db(facts),
+            semantic_results=[
+                (fact_id, 0.95 - index * 0.01)
+                for index, fact_id in enumerate(semantic_ids)
+            ],
+            bm25_results=[("exact-new", 12.0)],
+        )
+
+        response = engine.recall(
+            "SLM381_UNIQUE_QUERYABLE_MARKER",
+            "default",
+            limit=3,
+        )
+
+        assert len(response.results) == 3
+        assert "exact-new" in {result.fact.fact_id for result in response.results}
+
+    def test_real_fts5_exact_hit_keeps_bounded_slot(
+        self,
+        tmp_path,
+    ) -> None:
+        """A real sub-1.0 FTS5 hit remains visible under semantic pressure."""
+        db = DatabaseManager(tmp_path / "fts5-exact-slot.db")
+        db.initialize(real_schema)
+        semantic_ids = [f"semantic-{index}" for index in range(3)]
+        for index, fact_id in enumerate([*semantic_ids, "exact-new"]):
+            memory_id = f"memory-{fact_id}"
+            content = (
+                "SLM381_UNIQUE_QUERYABLE_MARKER is immediately recallable"
+                if fact_id == "exact-new"
+                else f"Semantically similar older memory number {index}"
+            )
+            db.store_memory(MemoryRecord(memory_id=memory_id, content=content))
+            db.store_fact(AtomicFact(
+                fact_id=fact_id,
+                memory_id=memory_id,
+                content=content,
+            ))
+
+        bm25 = BM25Channel(db)
+        lexical = bm25.search("SLM381_UNIQUE_QUERYABLE_MARKER", "default")
+        assert len(lexical) == 1
+        assert lexical[0][0] == "exact-new"
+        assert 0.0 < lexical[0][1] < 1.0
+
+        engine = RetrievalEngine(
+            db=db,
+            config=RetrievalConfig(),
+            channels={
+                "semantic": _mock_channel([
+                    (fact_id, 0.95 - index * 0.01)
+                    for index, fact_id in enumerate(semantic_ids)
+                ]),
+                "bm25": bm25,
+            },
+            embedder=_mock_embedder(),
+        )
+        try:
+            response = engine.recall(
+                "SLM381_UNIQUE_QUERYABLE_MARKER",
+                "default",
+                limit=2,
+            )
+        finally:
+            engine.close()
+
+        assert len(response.results) == 2
+        assert "exact-new" in {result.fact.fact_id for result in response.results}
 
     def test_entity_graph_enhances_bm25(self) -> None:
         """V3.4.12: entity_graph is a signal enhancer, not independent channel.
@@ -363,3 +452,147 @@ class TestContentQualityPenalty:
         assert scores.get("f_long", 0) > scores.get("f_short", 0), (
             f"Long content ({scores.get('f_long')}) should outscore short content ({scores.get('f_short')})"
         )
+
+
+# ---------------------------------------------------------------------------
+# T1: bi-temporal validity filter wired into the recall pipeline
+# ---------------------------------------------------------------------------
+
+class TestTemporalValidityWiring:
+    """Superseded (system-invalidated) facts must not surface in recall."""
+
+    @staticmethod
+    def _facts() -> list[AtomicFact]:
+        return [
+            _make_fact("f_valid", "Alice currently lives in Mumbai and works there daily"),
+            _make_fact("f_superseded", "Alice used to live in Delhi before relocating recently"),
+        ]
+
+    def test_superseded_fact_absent_after_filter(self) -> None:
+        from superlocalmemory.core.config import TemporalValidatorConfig
+        from superlocalmemory.retrieval.temporal_validity_filter import (
+            register_temporal_validity_filter,
+        )
+        facts = self._facts()
+        db = _mock_db(facts)
+        db.get_invalidated_fact_ids.side_effect = (
+            lambda ids, pid, as_of=None: {"f_superseded"} & set(ids)
+        )
+        engine = _build_engine(
+            db=db,
+            semantic_results=[("f_valid", 0.9), ("f_superseded", 0.85)],
+        )
+        register_temporal_validity_filter(
+            engine._registry, db, TemporalValidatorConfig(),
+        )
+
+        response = engine.recall("where does Alice live?", "default")
+        ids = {r.fact.fact_id for r in response.results}
+        assert "f_valid" in ids
+        assert "f_superseded" not in ids
+
+    def test_without_filter_superseded_fact_present(self) -> None:
+        # Control: without the filter, both facts surface — proving the filter
+        # (not some other pipeline stage) is what removes the superseded one.
+        facts = self._facts()
+        db = _mock_db(facts)
+        engine = _build_engine(
+            db=db,
+            semantic_results=[("f_valid", 0.9), ("f_superseded", 0.85)],
+        )
+        response = engine.recall("where does Alice live?", "default")
+        ids = {r.fact.fact_id for r in response.results}
+        assert "f_valid" in ids
+        assert "f_superseded" in ids
+
+
+# ---------------------------------------------------------------------------
+# T-window: event-time range pruning in recall()
+# ---------------------------------------------------------------------------
+
+class TestTimeWindowRecall:
+    """recall(window=...) keeps only candidates whose event time is in range."""
+
+    @staticmethod
+    def _facts() -> list[AtomicFact]:
+        return [
+            _make_fact("f_recent", "The deployment pipeline was refactored this month in detail"),
+            _make_fact("f_old", "The original prototype was written a long time ago back then"),
+        ]
+
+    def _engine(self) -> tuple[RetrievalEngine, MagicMock]:
+        facts = self._facts()
+        db = _mock_db(facts)
+        db.get_fact_event_times.side_effect = lambda ids, pid: {
+            k: v for k, v in
+            {"f_recent": "2026-07-20 09:00:00", "f_old": "2020-01-01 09:00:00"}.items()
+            if k in ids
+        }
+        engine = _build_engine(
+            db=db, semantic_results=[("f_recent", 0.9), ("f_old", 0.88)],
+        )
+        return engine, db
+
+    def test_window_keeps_only_in_range(self) -> None:
+        engine, _ = self._engine()
+        response = engine.recall(
+            "q", "default", window=("2026-07-01", "2026-07-31"),
+        )
+        ids = {r.fact.fact_id for r in response.results}
+        assert "f_recent" in ids
+        assert "f_old" not in ids
+
+    def test_no_window_returns_both(self) -> None:
+        engine, db = self._engine()
+        response = engine.recall("q", "default")  # window=None
+        ids = {r.fact.fact_id for r in response.results}
+        assert {"f_recent", "f_old"} <= ids
+        db.get_fact_event_times.assert_not_called()  # no window -> no lookup
+
+    def test_unparseable_window_applies_no_filter(self) -> None:
+        engine, _ = self._engine()
+        response = engine.recall("q", "default", window="someday")
+        ids = {r.fact.fact_id for r in response.results}
+        assert {"f_recent", "f_old"} <= ids  # bad spec => additive no-op
+
+    def test_query_infers_window(self) -> None:
+        # T3: no explicit window, but "last week" in the query auto-windows to 7d.
+        from datetime import datetime, timedelta, timezone
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        facts = self._facts()
+        db = _mock_db(facts)
+        db.get_fact_event_times.side_effect = lambda ids, pid: {
+            k: v for k, v in
+            {"f_recent": recent, "f_old": "2019-01-01 00:00:00"}.items()
+            if k in ids
+        }
+        engine = _build_engine(
+            db=db, semantic_results=[("f_recent", 0.9), ("f_old", 0.88)],
+        )
+        response = engine.recall("what did I work on last week", "default")
+        ids = {r.fact.fact_id for r in response.results}
+        assert "f_recent" in ids
+        assert "f_old" not in ids
+
+    def test_inferred_window_falls_back_when_empty(self) -> None:
+        # An inferred (query-derived) window must never zero-out results: if it
+        # would exclude everything, recall falls back to the unwindowed set.
+        facts = self._facts()
+        db = _mock_db(facts)
+        db.get_fact_event_times.side_effect = lambda ids, pid: {
+            k: "2019-01-01 00:00:00" for k in ids  # all far outside "last week"
+        }
+        engine = _build_engine(
+            db=db, semantic_results=[("f_recent", 0.9), ("f_old", 0.88)],
+        )
+        response = engine.recall("what did I do last week", "default")  # inferred 7d
+        ids = {r.fact.fact_id for r in response.results}
+        assert {"f_recent", "f_old"} <= ids  # fallback keeps all
+
+    def test_explicit_empty_window_is_honored(self) -> None:
+        # An explicit user window is authoritative even when it empties results.
+        engine, _ = self._engine()   # f_recent=2026-07, f_old=2020
+        response = engine.recall(
+            "q", "default", window=("1900-01-01", "1900-12-31"),
+        )
+        assert response.results == []

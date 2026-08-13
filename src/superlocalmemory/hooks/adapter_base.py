@@ -26,11 +26,12 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+from superlocalmemory.storage.write_lock import get_write_lock
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +39,11 @@ from typing import Protocol, runtime_checkable
 # ---------------------------------------------------------------------------
 
 HARD_BYTES_CAP = 4096
-COPILOT_SOFT_BYTES = 2048
+# Soft budget for the managed instruction block. Raised 2048 -> 2560 -> 2816 as
+# the block grew to carry the memory, token-optimization, and (compact)
+# bounded-loop protocols; the 4 KB hard cap still bounds total size (recall
+# content is truncated to stay under it).
+COPILOT_SOFT_BYTES = 2816
 TRUNCATION_MARKER = b"\n<!-- truncated -->"
 
 
@@ -70,8 +75,11 @@ class Adapter(Protocol):
 
 def path_sha256(path: Path) -> str:
     """SHA-256 of the absolute path string, full 64-hex (never truncated)."""
-    return hashlib.sha256(str(path.resolve() if path.exists()
-                              else path).encode("utf-8")).hexdigest()
+    # The identity must not depend on whether the target exists. On Windows,
+    # Path.resolve() can normalize an existing path differently from the same
+    # not-yet-created path, changing the sync-log key after the first write.
+    canonical = os.path.normcase(os.path.abspath(os.fspath(path)))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _now_iso() -> str:
@@ -82,25 +90,31 @@ def _ensure_memory_log(db_path: Path) -> None:
     """Lazily create ``cross_platform_sync_log`` if a test-mode memory.db is
     fresh. Production code goes through the migration runner, but tests can
     hand us an empty DB; this keeps adapters usable without pre-running
-    migrations."""
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.executescript(
-            "CREATE TABLE IF NOT EXISTS cross_platform_sync_log ("
-            " adapter_name TEXT NOT NULL,"
-            " profile_id TEXT NOT NULL,"
-            " target_path_sha256 TEXT NOT NULL,"
-            " target_basename TEXT NOT NULL,"
-            " last_sync_at TEXT NOT NULL,"
-            " bytes_written INTEGER NOT NULL,"
-            " content_sha256 TEXT NOT NULL,"
-            " success INTEGER NOT NULL,"
-            " error_msg TEXT,"
-            " PRIMARY KEY (adapter_name, target_path_sha256));"
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    migrations.
+
+    Acquires the process-level write lock for *db_path* before opening
+    a sqlite3 connection so that this DDL write is serialised with all
+    other in-process writers (DatabaseManager, VectorStore, etc.).
+    """
+    with get_write_lock(db_path):
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.executescript(
+                "CREATE TABLE IF NOT EXISTS cross_platform_sync_log ("
+                " adapter_name TEXT NOT NULL,"
+                " profile_id TEXT NOT NULL,"
+                " target_path_sha256 TEXT NOT NULL,"
+                " target_basename TEXT NOT NULL,"
+                " last_sync_at TEXT NOT NULL,"
+                " bytes_written INTEGER NOT NULL,"
+                " content_sha256 TEXT NOT NULL,"
+                " success INTEGER NOT NULL,"
+                " error_msg TEXT,"
+                " PRIMARY KEY (adapter_name, target_path_sha256));"
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def sync_log_last_content_sha256(
@@ -152,31 +166,37 @@ def sync_log_record(
         )
     if os.sep in target_path_sha256 or "/" in target_path_sha256:
         raise ValueError("target_path_sha256 must be a hash, not a raw path")
-    _ensure_memory_log(db_path)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            "INSERT INTO cross_platform_sync_log ("
-            "adapter_name, profile_id, target_path_sha256, target_basename, "
-            "last_sync_at, bytes_written, content_sha256, success, error_msg"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(adapter_name, target_path_sha256) DO UPDATE SET "
-            " profile_id = excluded.profile_id,"
-            " target_basename = excluded.target_basename,"
-            " last_sync_at = excluded.last_sync_at,"
-            " bytes_written = excluded.bytes_written,"
-            " content_sha256 = excluded.content_sha256,"
-            " success = excluded.success,"
-            " error_msg = excluded.error_msg",
-            (
-                adapter_name, profile_id, target_path_sha256, target_basename,
-                _now_iso(), bytes_written, content_sha256,
-                1 if success else 0, error_msg,
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    # Acquire the process-level write lock BEFORE opening the sqlite3 connection.
+    # This ensures the INSERT/UPDATE below is serialised with all other in-process
+    # writers (DatabaseManager, VectorStore, consolidation) via the single shared
+    # RLock for memory.db, eliminating SQLITE_BUSY races at the WAL layer.
+    # _ensure_memory_log also acquires the same RLock (re-entrant — safe).
+    with get_write_lock(db_path):
+        _ensure_memory_log(db_path)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute(
+                "INSERT INTO cross_platform_sync_log ("
+                "adapter_name, profile_id, target_path_sha256, target_basename, "
+                "last_sync_at, bytes_written, content_sha256, success, error_msg"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(adapter_name, target_path_sha256) DO UPDATE SET "
+                " profile_id = excluded.profile_id,"
+                " target_basename = excluded.target_basename,"
+                " last_sync_at = excluded.last_sync_at,"
+                " bytes_written = excluded.bytes_written,"
+                " content_sha256 = excluded.content_sha256,"
+                " success = excluded.success,"
+                " error_msg = excluded.error_msg",
+                (
+                    adapter_name, profile_id, target_path_sha256, target_basename,
+                    _now_iso(), bytes_written, content_sha256,
+                    1 if success else 0, error_msg,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +254,11 @@ def atomic_write(
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     if hasattr(os, "O_NOFOLLOW") and _is_posix():
         flags |= os.O_NOFOLLOW  # SEC — POSIX refuses symlinks
+    if hasattr(os, "O_BINARY") and not _is_posix():
+        # Windows file descriptors default to text mode, which rewrites LF
+        # bytes as CRLF.  The sync log hashes the caller's original bytes, so
+        # text-mode conversion makes an unchanged file look modified forever.
+        flags |= os.O_BINARY
 
     mode = posix_mode if _is_posix() else windows_mode
     fd = os.open(str(tmp), flags, mode)

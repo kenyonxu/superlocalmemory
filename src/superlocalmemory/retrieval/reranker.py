@@ -11,7 +11,7 @@ at ~60 MB. Same isolation pattern as EmbeddingService.
 The worker subprocess auto-kills after 2 minutes idle.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
-License: Elastic-2.0
+License: AGPL-3.0-or-later
 """
 
 from __future__ import annotations
@@ -25,25 +25,30 @@ import sys
 import threading
 import time
 import weakref
+from pathlib import Path
 from typing import Any
 
-from pathlib import Path
-
+from superlocalmemory.infra.data_root import state_path
 from superlocalmemory.storage.models import AtomicFact
 
-_RERANKER_PID_FILE = Path.home() / ".superlocalmemory" / ".reranker-worker.pid"
+_RERANKER_PID_FILE = None  # test-only override
+
+
+def _reranker_pid_file() -> Path:
+    return _RERANKER_PID_FILE or state_path(".reranker-worker.pid")
 
 
 def _is_reranker_worker_alive() -> bool:
     """Check if a reranker worker PID is already alive (machine-wide singleton)."""
     try:
-        if not _RERANKER_PID_FILE.exists():
+        pid_file = _reranker_pid_file()
+        if not pid_file.exists():
             return False
-        pid = int(_RERANKER_PID_FILE.read_text().strip())
+        pid = int(pid_file.read_text().strip())
         os.kill(pid, 0)
         return True
     except (ValueError, OSError, ProcessLookupError):
-        _RERANKER_PID_FILE.unlink(missing_ok=True)
+        _reranker_pid_file().unlink(missing_ok=True)
         return False
 
 # Track all live reranker instances for atexit cleanup
@@ -51,9 +56,9 @@ _live_rerankers: set[weakref.ref] = set()
 
 logger = logging.getLogger(__name__)
 
-_IDLE_TIMEOUT_SECONDS = 300  # V3.4.37: 5 min (was 30) — balance cold-start vs RAM.
+_IDLE_TIMEOUT_SECONDS = 1800  # V3.8.1: keep interactive sessions warm.
 # V3.3.12: Configurable via SLM_RERANKER_IDLE_TIMEOUT env var.
-# V3.4.19: Bumped from 120 → 1800 in lock-step with the embedding worker.
+# Low-RAM installations can retain aggressive recycling through the override.
 # Set ``SLM_RERANKER_IDLE_TIMEOUT=120`` + ``slm restart`` to revert.
 _IDLE_TIMEOUT_SECONDS = int(os.environ.get("SLM_RERANKER_IDLE_TIMEOUT", _IDLE_TIMEOUT_SECONDS))
 _SUBPROCESS_RESPONSE_TIMEOUT = 15  # v3.4.52: 15s (was 180s). Long timeout blocked the
@@ -62,6 +67,36 @@ _SUBPROCESS_RESPONSE_TIMEOUT = 15  # v3.4.52: 15s (was 180s). Long timeout block
 # cold start; if the worker can't respond, we fall back to fusion
 # scores without reranking.
 _WORKER_RECYCLE_AFTER = 500  # Recycle after N requests
+
+# One-time model load is far heavier than a live rerank request: the child
+# process imports torch / sentence-transformers and runs a warmup inference,
+# which measured 9-16s on the reference machine.  Sharing the 15s live-request
+# timeout (``_SUBPROCESS_RESPONSE_TIMEOUT``) made the load a coin flip — logs
+# showed ~half of daemon boots hitting "timed out after 15s", killing the
+# worker, and leaving recall on FALLBACK scoring for the entire daemon
+# lifetime (a silent quality regression, not a transient one).  The load gets
+# its own generous budget, and the background warmup RETRIES with backoff so a
+# transient slow/failed load self-heals instead of permanently degrading
+# recall quality.  Live rerank requests keep the tight 15s cap so a recall
+# never blocks on a sick subprocess.
+_WARMUP_LOAD_TIMEOUT = int(os.environ.get("SLM_RERANKER_WARMUP_TIMEOUT", "90"))
+_WARMUP_MAX_ATTEMPTS = int(os.environ.get("SLM_RERANKER_WARMUP_ATTEMPTS", "5"))
+_WARMUP_RETRY_BACKOFF_S = float(os.environ.get("SLM_RERANKER_WARMUP_BACKOFF", "3"))
+
+
+# Substrings that mark a load failure as a configuration problem rather than a
+# transient one. Retrying these can never succeed, so the warmup aborts on the
+# first occurrence instead of spending _WARMUP_MAX_ATTEMPTS × backoff on them.
+_PERMANENT_LOAD_ERROR_MARKERS = (
+    "unknown backend",
+    "sentence-transformers is not installed",
+)
+
+
+def _is_permanent_load_error(error: str) -> bool:
+    """True when a worker load error cannot be fixed by retrying."""
+    lowered = (error or "").lower()
+    return any(m in lowered for m in _PERMANENT_LOAD_ERROR_MARKERS)
 
 
 class CrossEncoderReranker:
@@ -91,6 +126,8 @@ class CrossEncoderReranker:
         self._model_loaded = False  # True once worker confirms model is ready
         self._worker_loading = False  # True while background warmup in progress
         self._lock = threading.Lock()
+        self._shutdown_event = threading.Event()
+        self._warmup_thread: threading.Thread | None = None
         self._idle_timer: threading.Timer | None = None
         self._request_count: int = 0
 
@@ -106,7 +143,7 @@ class CrossEncoderReranker:
     def __del__(self) -> None:
         """Kill worker subprocess when reranker is garbage-collected."""
         try:
-            self._kill_worker()
+            self.shutdown(timeout=0.1)
         except Exception:
             pass
 
@@ -122,26 +159,113 @@ class CrossEncoderReranker:
         lock, creating a race where the warmup's readline thread could
         steal responses meant for _send_request → deadlock → timeout.
         """
-        if self._worker_loading or self._model_loaded:
+        if self._shutdown_event.is_set() or self._worker_loading or self._model_loaded:
             return
         self._worker_loading = True
 
         def _warmup() -> None:
             try:
-                self._ensure_worker()
-                if self._worker_proc is None:
-                    return
-                resp = self._send_request({
-                    "cmd": "load",
-                    "model_name": self._model_name,
-                    "backend": self._backend,
-                }, timeout=_SUBPROCESS_RESPONSE_TIMEOUT)
-                if resp and resp.get("ok"):
-                    self._model_loaded = True
-                    logger.info(
-                        "Reranker worker warm (backend=%s, warmup_inference=%s)",
-                        resp.get("backend", "?"),
-                        resp.get("warmup_inference", False),
+                for attempt in range(1, _WARMUP_MAX_ATTEMPTS + 1):
+                    if self._shutdown_event.is_set() or self._model_loaded:
+                        return
+                    try:
+                        self._ensure_worker()
+                    except Exception as exc:
+                        logger.warning(
+                            "Reranker warmup attempt %d/%d: worker spawn "
+                            "raised: %s", attempt, _WARMUP_MAX_ATTEMPTS, exc,
+                        )
+                        self._worker_proc = None
+
+                    if self._worker_proc is None:
+                        # Either the spawn failed, or another process already
+                        # owns the machine-wide singleton worker.  If a sibling
+                        # worker is alive this instance will use it on demand —
+                        # stop retrying quietly rather than spinning.
+                        if _is_reranker_worker_alive():
+                            logger.debug(
+                                "Reranker warmup: worker owned by another "
+                                "process; this instance uses it on demand",
+                            )
+                            return
+                    else:
+                        # Give the ONE-TIME model load a generous budget — it is
+                        # far heavier than a live rerank request. On timeout
+                        # _send_request kills the worker, so the next attempt
+                        # respawns cleanly (no stale-response race).
+                        resp = None
+                        try:
+                            resp = self._send_request({
+                                "cmd": "load",
+                                "model_name": self._model_name,
+                                "backend": self._backend,
+                            }, timeout=_WARMUP_LOAD_TIMEOUT)
+                        except Exception as exc:
+                            logger.warning(
+                                "Reranker warmup attempt %d/%d: load request "
+                                "raised: %s",
+                                attempt, _WARMUP_MAX_ATTEMPTS, exc,
+                            )
+                        if resp and resp.get("ok"):
+                            self._model_loaded = True
+                            logger.info(
+                                "Reranker worker warm (attempt %d/%d, "
+                                "backend=%s, warmup_inference=%s)",
+                                attempt, _WARMUP_MAX_ATTEMPTS,
+                                resp.get("backend", "?"),
+                                resp.get("warmup_inference", False),
+                            )
+                            return
+                        # v3.8.11 (issue #103): this used to report
+                        # "(timeout=90s)" for EVERY failure, including loads
+                        # that failed instantly. A user whose retries were 3s
+                        # apart was told each one timed out after 90s, and the
+                        # worker's actual error was never printed at all.
+                        # Distinguish the two cases and surface the real cause.
+                        if resp is None:
+                            logger.warning(
+                                "Reranker warmup attempt %d/%d: no response "
+                                "from worker within %ds; retrying",
+                                attempt, _WARMUP_MAX_ATTEMPTS,
+                                _WARMUP_LOAD_TIMEOUT,
+                            )
+                        else:
+                            load_error = (
+                                resp.get("error")
+                                or "worker reported not-ready without an error"
+                            )
+                            # A misconfiguration cannot fix itself. Retrying a
+                            # bad backend name or a missing dependency four
+                            # more times burns ~7.5 minutes of daemon startup
+                            # to reach the same answer (issue #103). Fail fast
+                            # and say exactly what to change.
+                            if _is_permanent_load_error(load_error):
+                                logger.error(
+                                    "Reranker disabled — configuration error: "
+                                    "%s. Not retrying. Fix the config or set "
+                                    "retrieval.use_cross_encoder=false; recall "
+                                    "continues with fusion scores.",
+                                    load_error,
+                                )
+                                return
+                            logger.warning(
+                                "Reranker warmup attempt %d/%d failed: %s; "
+                                "retrying",
+                                attempt, _WARMUP_MAX_ATTEMPTS, load_error,
+                            )
+
+                    if attempt < _WARMUP_MAX_ATTEMPTS and not self._model_loaded:
+                        if self._shutdown_event.wait(
+                            min(_WARMUP_RETRY_BACKOFF_S * attempt, 15.0),
+                        ):
+                            return
+
+                if not self._model_loaded:
+                    logger.warning(
+                        "Reranker warmup exhausted %d attempts; recall uses "
+                        "fallback scoring until the next rerank triggers a "
+                        "fresh load. Run 'slm doctor' for diagnostics.",
+                        _WARMUP_MAX_ATTEMPTS,
                     )
             except Exception as exc:
                 logger.debug("Background reranker warmup failed: %s", exc)
@@ -159,7 +283,11 @@ class CrossEncoderReranker:
         """
         if self._model_loaded:
             return True
-        if not self._worker_loading and not self._model_loaded:
+        if (
+            not self._shutdown_event.is_set()
+            and not self._worker_loading
+            and not self._model_loaded
+        ):
             self._start_background_warmup()
         t = getattr(self, '_warmup_thread', None)
         if t is not None:
@@ -176,6 +304,8 @@ class CrossEncoderReranker:
         v3.4.13: Checks PID file before spawning — only ONE reranker worker
         can exist at a time on the machine.
         """
+        if self._shutdown_event.is_set():
+            return
         if self._worker_proc is not None and self._worker_proc.poll() is None:
             return
         self._worker_proc = None
@@ -215,8 +345,9 @@ class CrossEncoderReranker:
                 **popen_platform_kwargs(),
             )
             # v3.4.13: Register PID for machine-wide singleton
-            _RERANKER_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-            _RERANKER_PID_FILE.write_text(str(self._worker_proc.pid))
+            pid_file = _reranker_pid_file()
+            pid_file.parent.mkdir(parents=True, exist_ok=True)
+            pid_file.write_text(str(self._worker_proc.pid))
             logger.info(
                 "Reranker worker spawned (PID %d)", self._worker_proc.pid,
             )
@@ -254,6 +385,8 @@ class CrossEncoderReranker:
         falls back to fusion scores without reranking). This prevents
         concurrent recall requests from serialising on the lock.
         """
+        if self._shutdown_event.is_set():
+            return None
         effective_timeout = timeout or _SUBPROCESS_RESPONSE_TIMEOUT
 
         acquired = self._lock.acquire(blocking=block)
@@ -300,7 +433,38 @@ class CrossEncoderReranker:
 
     @staticmethod
     def _readline_with_timeout(stream: Any, timeout_seconds: float) -> str:
-        """Read a line from stream with timeout. Returns '' on timeout."""
+        """Read a line from stream with timeout. Returns '' on timeout.
+
+        Prefer a deadline-driven selector poll of the stream's file descriptor
+        (POSIX pipes). That path never spawns a helper thread, so a hung
+        worker cannot leak reader threads or pin the pipe FD across timeouts.
+        A thread fallback remains only for streams without a usable fileno
+        (unit-test mocks) and for Windows, where selectors cannot wait on
+        pipes.
+        """
+        import selectors
+
+        timeout_seconds = max(0.0, float(timeout_seconds))
+        fd: int | None
+        try:
+            raw_fd = stream.fileno()
+            fd = raw_fd if isinstance(raw_fd, int) else None
+        except (AttributeError, OSError, ValueError, TypeError):
+            fd = None
+
+        # Windows select()/selectors only accept sockets, not subprocess pipes.
+        if fd is not None and sys.platform != "win32":
+            try:
+                with selectors.DefaultSelector() as sel:
+                    sel.register(fd, selectors.EVENT_READ)
+                    events = sel.select(timeout=timeout_seconds)
+                if not events:
+                    return ""
+                line = stream.readline()
+                return line if line else ""
+            except (OSError, ValueError):
+                return ""
+
         result_container: list[str] = []
         error_container: list[Exception] = []
 
@@ -320,26 +484,53 @@ class CrossEncoderReranker:
             raise error_container[0]
         return result_container[0] if result_container else ""
 
-    def _kill_worker(self) -> None:
-        """Terminate worker subprocess."""
+    def _kill_worker(self, timeout: float = 3.0) -> None:
+        """Terminate the worker and close every owned pipe exactly once."""
         if self._idle_timer is not None:
             self._idle_timer.cancel()
             self._idle_timer = None
-        if self._worker_proc is not None:
-            try:
-                self._worker_proc.stdin.write('{"cmd":"quit"}\n')
-                self._worker_proc.stdin.flush()
-                self._worker_proc.wait(timeout=3)
-            except Exception:
-                try:
-                    self._worker_proc.kill()
-                except Exception:
-                    pass
+
+        proc = self._worker_proc
+        if proc is not None:
+            # Detach first so re-entrant/finalizer cleanup is idempotent.
             self._worker_proc = None
             self._worker_ready = False
+            # Invariant: a dead worker has no loaded model. Enforcing this in
+            # ONE place (not just the recycle/timeout callers) means the idle
+            # timer's kill also clears the flag, so the recall path sees the
+            # gap and triggers a background re-warmup instead of sending a
+            # rerank to a cold worker and risking a 15s-timeout churn.
+            self._model_loaded = False
+            try:
+                proc.stdin.write('{"cmd":"quit"}\n')
+                proc.stdin.flush()
+                proc.wait(timeout=max(0.0, timeout))
+            except Exception:
+                try:
+                    returncode = proc.poll()
+                except Exception:
+                    returncode = None
+                if returncode is None or not isinstance(returncode, int):
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=max(0.0, timeout))
+                    except Exception:
+                        pass
+            finally:
+                # Explicit close prevents TextIOWrapper from flushing a dead
+                # child's stdin later from an unraisable object finalizer.
+                for stream_name in ("stdin", "stdout", "stderr"):
+                    stream = getattr(proc, stream_name, None)
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except (BrokenPipeError, OSError, ValueError):
+                            pass
 
     def _reset_idle_timer(self) -> None:
         """Reset idle timer — kills worker after 2 min inactivity."""
+        if self._shutdown_event.is_set():
+            return
         if self._idle_timer is not None:
             self._idle_timer.cancel()
         self._idle_timer = threading.Timer(
@@ -353,6 +544,16 @@ class CrossEncoderReranker:
         with self._lock:
             self._kill_worker()
             logger.info("CrossEncoderReranker: worker killed (idle timeout)")
+
+    def shutdown(self, timeout: float = 3.0) -> None:
+        """Cancel warmup, terminate the child, and join owned background work."""
+        shutdown_event = getattr(self, "_shutdown_event", None)
+        if shutdown_event is not None:
+            shutdown_event.set()
+        self._kill_worker(timeout=min(max(0.0, timeout), 1.0))
+        warmup_thread = getattr(self, "_warmup_thread", None)
+        if warmup_thread is not None and warmup_thread is not threading.current_thread():
+            warmup_thread.join(timeout=timeout)
 
     # ------------------------------------------------------------------
     # Public API
@@ -373,13 +574,33 @@ class CrossEncoderReranker:
         results (without reranking), and MCP gets reranked results
         (worker stays warm between calls).
         """
-        if not candidates:
-            return []
+        results, _, _ = self.rerank_with_status(query, candidates, top_k=top_k)
+        return results
 
-        # Non-blocking: if model isn't loaded yet, return fallback
+    def rerank_with_status(
+        self,
+        query: str,
+        candidates: list[tuple[AtomicFact, float]],
+        top_k: int = 10,
+    ) -> tuple[list[tuple[AtomicFact, float]], bool, str]:
+        """Return results plus whether cross-encoder inference actually ran."""
+        if not candidates:
+            return [], False, "no_candidates"
+
+        # Non-blocking: if the model isn't loaded, return fallback AND kick a
+        # background (re)warmup so the reranker SELF-HEALS.  Without this, a
+        # worker that was recycled (every 500 reqs), idle-killed (30 min), or
+        # crashed left ``_model_loaded`` False with nothing to reload it — every
+        # subsequent recall degraded to fallback scoring until the daemon was
+        # restarted (a silent, sustained quality regression).  The warmup is
+        # guarded (no-op if already loading/loaded), retried, and never blocks
+        # this recall — it returns fallback now and full quality resumes within
+        # seconds once the model is warm again.
         if not self._model_loaded:
+            if not self._shutdown_event.is_set() and not self._worker_loading:
+                self._start_background_warmup()
             sorted_cands = sorted(candidates, key=lambda x: x[1], reverse=True)
-            return sorted_cands[:top_k]
+            return sorted_cands[:top_k], False, "fallback_not_ready"
 
         documents = [fact.content for fact, _ in candidates]
 
@@ -397,7 +618,7 @@ class CrossEncoderReranker:
         if resp is None or not resp.get("ok"):
             # Fallback: return by existing score
             sorted_cands = sorted(candidates, key=lambda x: x[1], reverse=True)
-            return sorted_cands[:top_k]
+            return sorted_cands[:top_k], False, "fallback_busy_or_unavailable"
 
         scores = resp["scores"]
         scored: list[tuple[AtomicFact, float]] = [
@@ -405,7 +626,7 @@ class CrossEncoderReranker:
             for (fact, _), score in zip(candidates, scores)
         ]
         scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[:top_k]
+        return scored[:top_k], True, "applied"
 
     def score_pair(self, query: str, document: str) -> float:
         """Score a single (query, document) pair."""
@@ -444,7 +665,7 @@ def _cleanup_all_rerankers() -> None:
         reranker = ref()
         if reranker is not None:
             try:
-                reranker._kill_worker()
+                reranker.shutdown()
             except Exception:
                 pass
     _live_rerankers.clear()

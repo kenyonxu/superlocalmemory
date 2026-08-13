@@ -166,54 +166,14 @@ def test_auth_write_requires_key(tmp_path):
 
 
 # -----------------------------------------------------------------------
-# Webhook Dispatcher
-# -----------------------------------------------------------------------
-
-def test_webhook_dispatcher_init():
-    from superlocalmemory.infra.webhook_dispatcher import WebhookDispatcher
-    dispatcher = WebhookDispatcher()
-    assert dispatcher is not None
-    assert dispatcher.is_closed is False
-    dispatcher.close()
-
-
-def test_webhook_dispatcher_rejects_invalid_url():
-    from superlocalmemory.infra.webhook_dispatcher import WebhookDispatcher
-    dispatcher = WebhookDispatcher()
-    try:
-        with pytest.raises(ValueError):
-            dispatcher.dispatch({"type": "test"}, "ftp://bad.url")
-    finally:
-        dispatcher.close()
-
-
-def test_webhook_dispatcher_stats():
-    from superlocalmemory.infra.webhook_dispatcher import WebhookDispatcher
-    dispatcher = WebhookDispatcher()
-    try:
-        stats = dispatcher.get_stats()
-        assert "dispatched" in stats
-        assert "succeeded" in stats
-    finally:
-        dispatcher.close()
-
-
-def test_webhook_dispatcher_close_is_idempotent():
-    from superlocalmemory.infra.webhook_dispatcher import WebhookDispatcher
-    dispatcher = WebhookDispatcher()
-    dispatcher.close()
-    dispatcher.close()  # second call should not raise
-    assert dispatcher.is_closed is True
-
-
-# -----------------------------------------------------------------------
 # Backup Manager
 # -----------------------------------------------------------------------
 
 def test_backup_default_path():
     from superlocalmemory.infra.backup import BackupManager
+    from superlocalmemory.infra.data_root import canonical_data_root
     backup = BackupManager()
-    assert ".superlocalmemory" in str(backup.base_dir)
+    assert backup.base_dir == canonical_data_root()
 
 
 def test_backup_custom_paths(tmp_path):

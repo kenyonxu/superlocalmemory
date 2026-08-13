@@ -7,22 +7,201 @@ Uses V3 MemoryEngine for store/recall. Falls back to direct DB for list/graph.
 """
 import json
 import logging
+import re
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from .helpers import (
-    get_db_connection, dict_factory, get_active_profile, get_engine_lazy,
-    SearchRequest, DB_PATH, MEMORY_DIR,
+    SearchRequest,
+    dict_factory,
+    get_active_profile,
+    get_db_connection,
+    get_engine_lazy,
 )
 
 logger = logging.getLogger("superlocalmemory.routes.memories")
 router = APIRouter()
+_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
+
+# v3.8.3: GENEROUS latency budget for recall. SLM's value is quality recall
+# under heavy multi-agent load, so semantic recall is given ample time to
+# finish — the keyword fallback is a LAST-RESORT safety net for a genuine hang
+# (e.g. a wedged embedder), NOT an aggressive speed cutoff. Only if recall
+# exceeds this budget do we serve the fast keyword search so the caller ALWAYS
+# gets a result instead of hanging forever. Tune with SLM_SEARCH_RECALL_TIMEOUT_S.
+# The dashboard's fetch timeout is set ABOVE this so the browser waits for the
+# quality result rather than aborting early.
+_DEFAULT_RECALL_BUDGET_S = 25.0
+
+
+def _search_recall_timeout_s() -> float:
+    import os
+    try:
+        v = float(os.environ.get("SLM_SEARCH_RECALL_TIMEOUT_S", ""))
+        return v if v > 0 else _DEFAULT_RECALL_BUDGET_S
+    except (TypeError, ValueError):
+        return _DEFAULT_RECALL_BUDGET_S
+
+
+def _internal_error(detail: str = "Internal server error") -> HTTPException:
+    """SEC-H-02: log the full traceback server-side; return a generic message.
+
+    Returning ``str(e)`` to HTTP clients leaks DB schema (column/constraint
+    names), the data-directory filesystem path, and possibly config internals —
+    a GDPR Art. 32 gap. Call this only from inside an ``except`` block so
+    ``logger.exception`` captures the active traceback automatically.
+    """
+    logger.exception("memories route error")
+    return HTTPException(status_code=500, detail=detail)
 
 
 def _get_engine(request: Request):
     """Get V3 engine from app state, initializing lazily on first call."""
     return get_engine_lazy(request.app.state)
+
+
+def _canonical_mutation_runtime(request: Request):
+    """Return the daemon-owned mutation boundary or fail before queueing work."""
+    runtime = getattr(request.app.state, "canonical_remember_runtime", None)
+    if runtime is None or not runtime.ready:
+        raise HTTPException(503, detail="canonical mutation writer is not ready; retry shortly")
+    return runtime
+
+
+def _mutation_idempotency_key(request: Request) -> str:
+    """Accept a client retry key without making one mandatory for the dashboard."""
+    key = request.headers.get("X-Idempotency-Key", "").strip() or str(uuid.uuid4())
+    if not _IDEMPOTENCY_KEY.fullmatch(key):
+        raise HTTPException(
+            422,
+            detail="X-Idempotency-Key must contain 1-256 safe characters",
+        )
+    return key
+
+
+def _canonical_mutation_error(exc: Exception, detail: str) -> HTTPException:
+    """Map typed mutation failures without leaking SQLite or filesystem detail."""
+    from superlocalmemory.core.remember_runtime import (
+        CanonicalMutationConflict,
+        CanonicalRememberUnavailable,
+    )
+
+    if isinstance(exc, CanonicalMutationConflict):
+        return HTTPException(409, detail=str(exc))
+    if isinstance(exc, CanonicalRememberUnavailable):
+        return HTTPException(
+            503,
+            detail="canonical mutation writer is temporarily unavailable",
+        )
+    return _internal_error(detail)
+
+
+def _mutation_runtime_or_missing_fact(
+    request: Request, engine, profile_id: str, fact_id: str,
+):
+    """Retain the public 404 for a missing fact without creating a local writer."""
+    runtime = getattr(request.app.state, "canonical_remember_runtime", None)
+    if runtime is not None and runtime.ready:
+        return runtime
+    rows = engine._db.execute(
+        "SELECT 1 FROM atomic_facts WHERE fact_id = ? AND profile_id = ?",
+        (fact_id, profile_id),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    raise HTTPException(503, detail="canonical mutation writer is not ready; retry shortly")
+
+
+def _admit_http_mutation(request: Request, operation: str) -> None:
+    """Route a memory HTTP mutation through OperationPolicyRegistry.evaluate().
+
+    Called from _authorize_memory_mutation after RBAC passes. Raises HTTP 403
+    if the policy registry denies the actor. Maps "delete" → FORGET,
+    "update" → CORRECT. Uses the server-derived principal and roles.
+    """
+    from fastapi import HTTPException as _HTTPException
+
+    from superlocalmemory.core.actor_context import Transport
+    from superlocalmemory.core.admission import AdmissionDenied, admit, resolve_actor
+    from superlocalmemory.core.operation_request import OperationKind
+    from superlocalmemory.server.rbac_enforce import (
+        resolve_actor_roles,
+        resolve_principal,
+    )
+
+    deployment = getattr(request.app.state, "deployment", None)
+    is_enterprise = bool(deployment and deployment.is_enterprise)
+    tier = "enterprise" if is_enterprise else "personal"
+    mode = "company" if is_enterprise else "local"
+
+    principal_info = resolve_principal(request)
+    principal = str(principal_info.get("user_id") or "")
+    actor_roles = resolve_actor_roles(request)
+    actor = resolve_actor(
+        Transport.HTTP,
+        tier=tier,
+        mode=mode,
+        principal=principal,
+        roles=actor_roles,
+    )
+    kind = OperationKind.FORGET if operation == "delete" else OperationKind.CORRECT
+    try:
+        admit(kind, actor, mode=mode)
+    except AdmissionDenied as exc:
+        raise _HTTPException(
+            status_code=403,
+            detail=f"Operation denied: {exc.decision.reason}",
+        ) from exc
+
+
+def _authorize_memory_mutation(
+    request: Request,
+    operation: str,
+    fact_id: str,
+    *,
+    content_preview: str = "",
+    run_pre_hook: bool = True,
+):
+    """Authenticate a mutation, optionally gating route-owned direct SQL."""
+    from superlocalmemory.server.write_identity import require_write_actor
+
+    actor_id = require_write_actor(
+        request,
+        getattr(request.app.state, "daemon_descriptor", None),
+        actor_kind="dashboard",
+    )
+    # RBAC (C3): on top of machine auth, enforce the caller's role on the active
+    # profile. delete → DELETE; every other mutation → WRITE.
+    from superlocalmemory.access.rbac import Permission as _Perm
+    from superlocalmemory.server.rbac_enforce import require_permission as _rbac_require
+    _rbac_require(
+        request,
+        _Perm.DELETE if operation == "delete" else _Perm.WRITE,
+    )
+    # Phase 1: admission gateway — policy registry decision for this route.
+    _admit_http_mutation(request, operation)
+    engine = _get_engine(request)
+    if engine is None:
+        raise HTTPException(503, detail="Engine not initialized")
+    profile_id = engine.profile_id
+    context = {
+        "operation": operation,
+        "agent_id": actor_id,
+        "source_agent_id": "dashboard",
+        "profile_id": profile_id,
+        "fact_id": fact_id,
+    }
+    if content_preview:
+        context["content_preview"] = content_preview[:100]
+    if run_pre_hook:
+        try:
+            engine._hooks.run_pre(operation, context)
+        except Exception as exc:
+            logger.warning("Dashboard %s authorization rejected: %s", operation, exc)
+            raise HTTPException(403, detail="Write authorization rejected") from exc
+    return engine, profile_id, context
 
 
 def _preview(content: str | None) -> str:
@@ -215,6 +394,14 @@ async def get_memories(
         None,
         description="Named filter: 'high_reward' | 'being_forgotten'",
     ),
+    scope: Optional[str] = Query(
+        None,
+        description=(
+            "Scope view (v3 only): 'shared' (shared with this profile), "
+            "'global' (global memories), 'all' (this profile + global + shared). "
+            "Default None = this profile only (unchanged isolation)."
+        ),
+    ),
 ):
     """List memories with optional filtering and pagination.
 
@@ -236,15 +423,36 @@ async def get_memories(
         use_v3 = _has_table(cursor, 'atomic_facts')
 
         if use_v3:
-            query = """
-                SELECT fact_id as id, memory_id, content, fact_type as category,
-                       confidence as importance, access_count,
-                       created_at, created_at as updated_at,
-                       session_id as project_name
-                FROM atomic_facts WHERE profile_id = ?
-            """
-            params = [active_profile]
-            count_base = "SELECT COUNT(*) as total FROM atomic_facts WHERE profile_id = ?"
+            # Scope view clause. Default (scope=None) is this-profile-only —
+            # identical isolation to before. Other values widen the view to
+            # global and/or shared-with-this-profile memories.
+            _esc = active_profile.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            _shared_pat = f'%"{_esc}"%'
+            if scope == "global":
+                scope_where = "scope = 'global'"
+                scope_params = []
+            elif scope == "shared":
+                scope_where = "scope = 'shared' AND shared_with LIKE ? ESCAPE '\\'"
+                scope_params = [_shared_pat]
+            elif scope == "all":
+                scope_where = (
+                    "(profile_id = ? OR scope = 'global' "
+                    "OR (scope = 'shared' AND shared_with LIKE ? ESCAPE '\\'))"
+                )
+                scope_params = [active_profile, _shared_pat]
+            else:
+                scope_where = "profile_id = ?"
+                scope_params = [active_profile]
+
+            query = (
+                "SELECT fact_id as id, memory_id, content, fact_type as category, "
+                "confidence as importance, access_count, "
+                "created_at, created_at as updated_at, "
+                "session_id as project_name, scope, shared_with "
+                f"FROM atomic_facts WHERE {scope_where}"
+            )
+            params = list(scope_params)
+            count_base = f"SELECT COUNT(*) as total FROM atomic_facts WHERE {scope_where}"
         else:
             query = """
                 SELECT id, content, summary, category, project_name, project_path,
@@ -255,7 +463,8 @@ async def get_memories(
             params = [active_profile]
             count_base = "SELECT COUNT(*) as total FROM memories WHERE profile = ?"
 
-        count_params = [active_profile]
+        # count params must mirror the base WHERE params (scope-aware for v3).
+        count_params = list(params)
 
         if category:
             if use_v3:
@@ -358,8 +567,8 @@ async def get_memories(
             "has_more": (offset + limit) < total,
         }
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    except Exception:
+        raise _internal_error("Database error")
 
 
 @router.get("/api/graph")
@@ -392,8 +601,8 @@ async def get_graph(
             },
         }
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Graph error: {str(e)}")
+    except Exception:
+        raise _internal_error("Graph error")
 
 
 @router.post("/api/search")
@@ -417,60 +626,123 @@ async def search_memories(request: Request, body: SearchRequest):
         # directly in an async route blocks the ASGI event loop — Chrome detects
         # a stalled connection and aborts with "signal is aborted without reason"
         # before the response arrives. Fix: run in a thread-pool executor so the
-        # event loop stays alive to send keepalive frames. Also fast=False skips
-        # spreading_activation + Hopfield (saves ~7s on cold graph traversal).
+        # event loop stays alive to send keepalive frames.
+        # v3.8.2: fast=True — the dashboard search BOX is a snappy retrieval
+        # list (all six local channels + reranker), never the internal agentic
+        # LLM round, which would reintroduce the multi-second hang this endpoint
+        # is regression-tested against (test_search_fast_param_and_profile_isolation).
+        # The human-facing LLM synthesis lives on separate paths that are NOT the
+        # search list: the "ask" memory-chat (/api/v3/chat/stream, Ollama Mode B)
+        # and the precomputed knowledge-cluster summaries (core.community_summary,
+        # Mode B/C). So search stays fast; synthesis is where the LLM adds value.
         import asyncio
         import time as _time
         engine = _get_engine(request)
         if engine is not None:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             t0 = _time.monotonic()
-            response = await loop.run_in_executor(
+            # T-window: prefer an explicit ``window`` spec; otherwise derive a
+            # range from the legacy date_from/date_to pair when both are set.
+            _window = getattr(body, "window", None) or ""
+            if not _window and getattr(body, "date_from", None) and getattr(body, "date_to", None):
+                _window = f"{body.date_from}..{body.date_to}"
+            # v3.8.3: bound the synchronous recall. Under a concurrent
+            # maintenance pass or a busy embedder it can run tens of seconds
+            # and the browser aborts the fetch. If it exceeds the budget we
+            # fall through to the fast keyword search below, so the dashboard
+            # ALWAYS returns instead of failing with an abort.
+            _recall_future = loop.run_in_executor(
                 None,
-                lambda: engine.recall(body.query, limit=body.limit, fast=False),
+                lambda: engine.recall(
+                    body.query, limit=body.limit, fast=True,
+                    window=_window or None,
+                ),
             )
-            elapsed_ms = round((_time.monotonic() - t0) * 1000, 1)
-            results = []
-            for r in response.results[: body.limit]:
-                results.append({
-                    "fact_id": r.fact.fact_id,
-                    "memory_id": getattr(r.fact, "memory_id", ""),
-                    "content": r.fact.content[:300],
-                    "score": round(r.score, 4),
-                    "confidence": round(getattr(r, "confidence", 0.0), 4),
-                    "channel_scores": getattr(r, "channel_scores", {}),
-                    "created_at": getattr(r.fact, "created_at", ""),
-                })
-            return {
-                "query": body.query,
-                "results": results,
-                "total": len(results),
-                "query_type": getattr(response, "query_type", "semantic"),
-                "retrieval_time_ms": elapsed_ms,
-            }
+            # A run_in_executor thread cannot be cancelled, and wait_for() on it
+            # blocks until the thread finishes (defeating the timeout). So poll
+            # the future without blocking the event loop and give up at the
+            # deadline — the orphaned recall completes in the background and its
+            # result is discarded. This is what bounds dashboard-search latency.
+            _budget = _search_recall_timeout_s()
+            _deadline = loop.time() + _budget
+            while not _recall_future.done() and loop.time() < _deadline:
+                await asyncio.sleep(0.05)
+            if _recall_future.done():
+                response = _recall_future.result()
+            else:
+                # Ensure the orphaned future's eventual result/exception is
+                # retrieved so asyncio doesn't log "never retrieved".
+                _recall_future.add_done_callback(
+                    lambda f: (f.cancelled() or f.exception())
+                )
+                logger.warning(
+                    "search_memories: semantic recall exceeded %.0fs budget for "
+                    "%r — serving keyword fallback",
+                    _budget, (body.query or "")[:80],
+                )
+                response = None
+            if response is not None:
+                elapsed_ms = round((_time.monotonic() - t0) * 1000, 1)
+                from superlocalmemory.server.recall_serializer import (
+                    recall_response_metadata,
+                    serialize_recall_response,
+                )
+                results, no_confident_match = serialize_recall_response(
+                    response,
+                    limit=body.limit,
+                    per_fact_max=300,
+                    total_max=max(300, body.limit * 300),
+                )
+                return {
+                    "query": body.query,
+                    "results": results,
+                    "total": len(results),
+                    "query_type": getattr(response, "query_type", "semantic"),
+                    "retrieval_time_ms": elapsed_ms,
+                    "no_confident_match": no_confident_match,
+                    **recall_response_metadata(response),
+                }
+            # recall timed out — fall through to the fast keyword search.
 
-        # Fallback: direct DB text search (engine not yet initialised)
+        # Fallback: direct DB text search (engine not ready OR recall over budget)
         conn = get_db_connection()
         conn.row_factory = dict_factory
         cursor = conn.cursor()
         active_profile = get_active_profile()
         cursor.execute("""
-            SELECT fact_id as id, content, confidence as score,
+            SELECT fact_id, content, confidence as memory_confidence,
                    fact_type as category, created_at
             FROM atomic_facts
             WHERE profile_id = ? AND content LIKE ?
             ORDER BY confidence DESC LIMIT ?
         """, (active_profile, f'%{body.query}%', body.limit))
-        results = cursor.fetchall()
+        rows = cursor.fetchall()
         conn.close()
+
+        results = [{
+            **row,
+            "score": None,
+            "relevance_score": None,
+            "ranking_score": None,
+            "confidence": row.get("memory_confidence"),
+            "rank_position": position,
+        } for position, row in enumerate(rows, start=1)]
 
         return {
             "query": body.query, "results": results, "total": len(results),
             "query_type": "text_search", "retrieval_time_ms": 0,
+            "retrieval_mode": "degraded_lexical",
+            "score_contract_version": "2",
+            "calibration_status": "uncalibrated",
+            "calibration_id": None,
+            "answer_confidence": None,
+            "abstained": not bool(results),
+            "abstention_reason": None if results else "no_candidates",
+            "no_confident_match": False,
         }
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Search error: {str(e)}")
+    except Exception:
+        raise _internal_error("Search error")
     finally:
         end_recall()
 
@@ -554,13 +826,21 @@ async def get_clusters(request: Request):
                 unclustered = 0
 
         conn.close()
-        return {"clusters": clusters, "total_clusters": len(clusters), "unclustered_count": unclustered}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Cluster error: {str(e)}")
+        return {
+            "clusters": clusters,
+            "total_clusters": len(clusters),
+            "unclustered_count": unclustered,
+        }
+    except Exception:
+        raise _internal_error("Cluster error")
 
 
 @router.get("/api/clusters/{cluster_id}")
-async def get_cluster_detail(request: Request, cluster_id: str, limit: int = Query(50, ge=1, le=200)):
+async def get_cluster_detail(
+    request: Request,
+    cluster_id: str,
+    limit: int = Query(50, ge=1, le=200),
+):
     """Get detailed view of a specific cluster (scene)."""
     try:
         conn = get_db_connection()
@@ -606,14 +886,30 @@ async def get_cluster_detail(request: Request, cluster_id: str, limit: int = Que
         if not members:
             raise HTTPException(status_code=404, detail="Cluster not found")
         # Generate cluster summary
+        # v3.7.8: previously routed through WorkerPool.shared(), a subprocess
+        # cache never recycled on a profile switch (CRITICAL cross-profile
+        # leak — up to 120s stale). Use the daemon's own resident,
+        # lease-protected engine's config instead; the summarizer only
+        # consumes already profile-filtered `texts` above, so this closes
+        # the stale-engine window without changing behavior.
         summary = ""
         try:
-            from superlocalmemory.core.worker_pool import WorkerPool
-            pool = WorkerPool.shared()
             texts = [m.get("content", "")[:200] for m in members[:10] if m.get("content")]
             if texts:
-                result = pool.summarize(texts)
-                summary = result.get("summary", "") if result.get("ok") else ""
+                from superlocalmemory.core.summarizer import Summarizer
+                from superlocalmemory.server.routes.helpers import get_engine_lazy
+
+                # v3.4.64: Do NOT call runtime.operation() synchronously in an
+                # async route — if a transition is pending, acquire_operation()
+                # blocks the event loop thread, deadlocking the drain.  The
+                # middleware already holds an operation lease for this request;
+                # the engine is stable for the full duration of the handler.
+                engine = get_engine_lazy(request.app.state)
+                if engine is not None:
+                    summarizer = Summarizer(engine._config)
+                    summary = summarizer.summarize_cluster(
+                        [{"content": t} for t in texts]
+                    ) or ""
         except Exception:
             pass
 
@@ -625,24 +921,60 @@ async def get_cluster_detail(request: Request, cluster_id: str, limit: int = Que
         }
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Cluster detail error: {str(e)}")
+    except Exception:
+        raise _internal_error("Cluster detail error")
 
 
 @router.get("/api/memories/{memory_id}/facts")
 async def get_memory_facts(request: Request, memory_id: str):
-    """Get original memory text with all its child atomic facts."""
+    """Get original memory text with all its child atomic facts.
+
+    v3.7.8: previously routed through WorkerPool.shared(), a subprocess
+    engine cached at process init and never recycled on a profile switch
+    (CRITICAL cross-profile leak — served the OLD profile's facts for up to
+    120s after a switch). Uses the daemon's own resident, lease-protected
+    engine instead, exactly like the /recall route.
+    """
     try:
-        from superlocalmemory.core.worker_pool import WorkerPool
-        pool = WorkerPool.shared()
-        result = pool.get_memory_facts(memory_id)
-        if result.get("ok"):
-            return result
-        raise HTTPException(status_code=404, detail="Memory not found")
+        from superlocalmemory.server.routes.helpers import get_engine_lazy
+
+        # v3.4.64: Do NOT call runtime.operation() synchronously in an async
+        # route — blocks the event loop when a transition is pending.  The
+        # middleware already holds an operation lease; the engine and its
+        # profile_id are stable for the full duration of this request.
+        engine = get_engine_lazy(request.app.state)
+        if engine is None:
+            raise HTTPException(status_code=503, detail="Engine not initialized")
+        active_profile = engine.profile_id
+        mem_map = engine._db.get_memory_content_batch(
+            [memory_id], active_profile, include_global=True, include_shared=True,
+        )
+        original = mem_map.get(memory_id, "")
+        facts = engine._db.get_facts_by_memory_id(memory_id, active_profile)
+        fact_list = [
+            {
+                "fact_id": f.fact_id,
+                "content": f.content,
+                "fact_type": (
+                    f.fact_type.value if hasattr(f.fact_type, "value")
+                    else str(f.fact_type)
+                ),
+                "confidence": round(f.confidence, 3),
+                "created_at": f.created_at,
+            }
+            for f in facts
+        ]
+        return {
+            "ok": True,
+            "memory_id": memory_id,
+            "original_content": original,
+            "facts": fact_list,
+            "fact_count": len(fact_list),
+        }
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    except Exception:
+        raise _internal_error()
 
 
 @router.get("/api/memories/{memory_id}/detail")
@@ -692,8 +1024,8 @@ async def get_memory_detail(request: Request, memory_id: str):
         }
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Detail error: {str(e)}")
+    except Exception:
+        raise _internal_error("Detail error")
 
 
 @router.get("/api/facts/{fact_id}")
@@ -732,34 +1064,46 @@ async def get_fact_detail(request: Request, fact_id: str):
         return row
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Fact detail error: {str(e)}")
+    except Exception:
+        raise _internal_error("Fact detail error")
 
 
 @router.delete("/api/memories/{fact_id}")
 async def delete_memory(request: Request, fact_id: str):
     """Delete a specific memory (atomic fact) by ID."""
+    engine, _active_profile, hook_context = _authorize_memory_mutation(
+        request, "delete", fact_id, run_pre_hook=False,
+    )
     try:
-        conn = get_db_connection()
-        conn.row_factory = dict_factory
-        cursor = conn.cursor()
-        active_profile = get_active_profile()
-        # Verify it exists and belongs to this profile
-        cursor.execute(
-            "SELECT fact_id FROM atomic_facts WHERE fact_id = ? AND profile_id = ?",
-            (fact_id, active_profile),
+        from superlocalmemory.core.mutations import delete_fact_authorized
+
+        result = delete_fact_authorized(
+            engine,
+            fact_id,
+            trusted_actor_id=hook_context["agent_id"],
+            source_agent_id="dashboard",
+            canonical_runtime=_mutation_runtime_or_missing_fact(
+                request, engine, _active_profile, fact_id,
+            ),
+            idempotency_key=_mutation_idempotency_key(request),
         )
-        if not cursor.fetchone():
-            conn.close()
+        if not result.get("ok"):
+            if result.get("retryable"):
+                raise HTTPException(
+                    status_code=503,
+                    detail="Erasure incomplete (projection residue); retry shortly",
+                )
             raise HTTPException(status_code=404, detail="Memory not found")
-        cursor.execute("DELETE FROM atomic_facts WHERE fact_id = ?", (fact_id,))
-        conn.commit()
-        conn.close()
-        return {"success": True, "deleted": fact_id}
+        return {
+            "success": True,
+            "deleted": fact_id,
+            "erasure_verified": bool(result.get("erasure_verified", False)),
+            "erasure_state": result.get("erasure_state", "FAILED"),
+        }
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Delete error: {str(e)}")
+    except Exception as exc:
+        raise _canonical_mutation_error(exc, "Delete error")
 
 
 @router.post("/api/memories/{fact_id}/forget")
@@ -771,53 +1115,25 @@ async def forget_memory(request: Request, fact_id: str):
     The fact's payload is ALSO copied into ``memory_archive`` so a
     future ``slm restore`` can bring it back.
     """
-    import json as _json
+    engine, active_profile, hook_context = _authorize_memory_mutation(
+        request, "delete", fact_id,
+        run_pre_hook=False,
+    )
     try:
-        conn = get_db_connection()
-        conn.row_factory = dict_factory
-        cursor = conn.cursor()
-        active_profile = get_active_profile()
-        cursor.execute(
-            "SELECT fact_id, content, importance, confidence, "
-            "       canonical_entities_json, embedding, created_at "
-            "FROM atomic_facts WHERE fact_id = ? AND profile_id = ?",
-            (fact_id, active_profile),
+        engine._hooks.run_pre("delete", hook_context)
+        result = _canonical_mutation_runtime(request).archive_fact(
+            active_profile,
+            fact_id,
+            idempotency_key=_mutation_idempotency_key(request),
         )
-        row = cursor.fetchone()
-        if not row:
-            conn.close()
+        if not result.get("ok"):
             raise HTTPException(status_code=404, detail="Memory not found")
-        # Archive copy — payload_json small enough for the canonical row.
-        payload = {
-            "fact_id": row["fact_id"],
-            "content": row["content"],
-            "canonical_entities_json": row.get("canonical_entities_json"),
-            "importance": row.get("importance"),
-            "confidence": row.get("confidence"),
-            "created_at": row.get("created_at"),
-        }
-        from datetime import datetime, timezone
-        archived_at = datetime.now(timezone.utc).isoformat()
-        import uuid as _uuid
-        cursor.execute(
-            "INSERT INTO memory_archive "
-            "(archive_id, fact_id, profile_id, payload_json, archived_at, reason) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (str(_uuid.uuid4()), fact_id, active_profile,
-             _json.dumps(payload), archived_at, "user_forget_dashboard"),
-        )
-        cursor.execute(
-            "UPDATE atomic_facts SET archive_status = 'archived' "
-            "WHERE fact_id = ?",
-            (fact_id,),
-        )
-        conn.commit()
-        conn.close()
-        return {"success": True, "fact_id": fact_id, "archived_at": archived_at}
+        engine._hooks.run_post("delete", hook_context)
+        return {"success": True, "fact_id": fact_id, "archived_at": result["archived_at"]}
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Forget error: {str(e)}")
+    except Exception as exc:
+        raise _canonical_mutation_error(exc, "Forget error")
 
 
 @router.post("/api/memories/{fact_id}/merge")
@@ -830,6 +1146,10 @@ async def merge_memory(request: Request, fact_id: str):
     the loser's ``merged_into`` column. The loser is archived so it
     no longer appears in default recall. The winner is untouched.
     """
+    engine, active_profile, hook_context = _authorize_memory_mutation(
+        request, "delete", fact_id,
+        run_pre_hook=False,
+    )
     try:
         body = await request.json()
         kept = str((body or {}).get("into", "")).strip()
@@ -840,50 +1160,26 @@ async def merge_memory(request: Request, fact_id: str):
             raise HTTPException(400, "'into' exceeds 200-char limit")
         if kept == fact_id:
             raise HTTPException(400, "Cannot merge a fact into itself")
-        conn = get_db_connection()
-        conn.row_factory = dict_factory
-        cursor = conn.cursor()
-        active_profile = get_active_profile()
-        # Both must belong to the active profile.
-        cursor.execute(
-            "SELECT fact_id FROM atomic_facts "
-            "WHERE fact_id IN (?, ?) AND profile_id = ?",
-            (fact_id, kept, active_profile),
+        engine._hooks.run_pre("delete", hook_context)
+        result = _canonical_mutation_runtime(request).merge_fact(
+            active_profile,
+            fact_id,
+            kept,
+            idempotency_key=_mutation_idempotency_key(request),
         )
-        found = {r["fact_id"] for r in cursor.fetchall()}
-        if fact_id not in found or kept not in found:
-            conn.close()
-            raise HTTPException(
-                404,
-                "Both fact_ids must exist in the active profile",
-            )
-        from datetime import datetime, timezone
-        merged_at = datetime.now(timezone.utc).isoformat()
-        cursor.execute(
-            "INSERT INTO memory_merge_log "
-            "(kept_fact_id, merged_fact_id, profile_id, reason, merged_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (kept, fact_id, active_profile,
-             "user_merge_dashboard", merged_at),
-        )
-        cursor.execute(
-            "UPDATE atomic_facts "
-            "SET merged_into = ?, archive_status = 'archived' "
-            "WHERE fact_id = ?",
-            (kept, fact_id),
-        )
-        conn.commit()
-        conn.close()
+        if not result.get("ok"):
+            raise HTTPException(404, "Both fact_ids must exist in the active profile")
+        engine._hooks.run_post("delete", hook_context)
         return {
             "success": True,
             "merged": fact_id,
             "into": kept,
-            "merged_at": merged_at,
+            "merged_at": result["merged_at"],
         }
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Merge error: {str(e)}")
+    except Exception as exc:
+        raise _canonical_mutation_error(exc, "Merge error")
 
 
 @router.patch("/api/memories/{fact_id}")
@@ -894,25 +1190,90 @@ async def edit_memory(request: Request, fact_id: str):
         new_content = (body.get("content") or "").strip()
         if not new_content:
             raise HTTPException(status_code=400, detail="content is required")
-        conn = get_db_connection()
-        conn.row_factory = dict_factory
-        cursor = conn.cursor()
-        active_profile = get_active_profile()
-        cursor.execute(
-            "SELECT fact_id FROM atomic_facts WHERE fact_id = ? AND profile_id = ?",
-            (fact_id, active_profile),
+        engine, _active_profile, hook_context = _authorize_memory_mutation(
+            request,
+            "update",
+            fact_id,
+            content_preview=new_content,
+            run_pre_hook=False,
         )
-        if not cursor.fetchone():
-            conn.close()
+        from superlocalmemory.core.mutations import update_fact_authorized
+
+        result = update_fact_authorized(
+            engine,
+            fact_id,
+            new_content,
+            trusted_actor_id=hook_context["agent_id"],
+            source_agent_id="dashboard",
+            canonical_runtime=_canonical_mutation_runtime(request),
+            idempotency_key=_mutation_idempotency_key(request),
+        )
+        if not result.get("ok"):
             raise HTTPException(status_code=404, detail="Memory not found")
-        cursor.execute(
-            "UPDATE atomic_facts SET content = ? WHERE fact_id = ?",
-            (new_content, fact_id),
-        )
-        conn.commit()
-        conn.close()
         return {"success": True, "fact_id": fact_id, "content": new_content}
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Edit error: {str(e)}")
+    except Exception as exc:
+        raise _canonical_mutation_error(exc, "Edit error")
+
+
+_VALID_SCOPES = ("personal", "shared", "global")
+
+
+@router.patch("/api/memories/{fact_id}/scope")
+async def set_memory_scope(request: Request, fact_id: str):
+    """Set a memory's scope (personal | shared | global) + shared_with.
+
+    Body: {"scope": "shared", "shared_with": "alice,bob"}. shared_with accepts a
+    comma-separated string or a list; it is stored as a JSON array so the
+    _scope_where LIKE match works. Mutation-authorized, and the fact must
+    belong to the active profile (a caller cannot re-scope another profile's
+    fact). This is the write side of multi-scope sharing from the dashboard.
+    """
+    try:
+        body = await request.json()
+        scope = (body.get("scope") or "").strip().lower()
+        if scope not in _VALID_SCOPES:
+            raise HTTPException(400, detail=f"scope must be one of {_VALID_SCOPES}")
+
+        raw_shared = body.get("shared_with", [])
+        if isinstance(raw_shared, str):
+            shared_list = [s.strip() for s in raw_shared.split(",") if s.strip()]
+        elif isinstance(raw_shared, list):
+            shared_list = [str(s).strip() for s in raw_shared if str(s).strip()]
+        else:
+            shared_list = []
+        if scope == "shared" and not shared_list:
+            raise HTTPException(
+                400, detail="shared scope requires at least one profile in shared_with")
+        # global/personal never carry a shared_with list.
+        if scope != "shared":
+            shared_list = []
+
+        engine, active_profile, hook_context = _authorize_memory_mutation(
+            request, "update", fact_id, run_pre_hook=False,
+        )
+        if scope in {"shared", "global"}:
+            from superlocalmemory.access.rbac import Permission
+            from superlocalmemory.server.rbac_enforce import require_permission
+
+            require_permission(request, Permission.SHARE, profile=active_profile)
+        engine._hooks.run_pre("update", hook_context)
+        result = _canonical_mutation_runtime(request).set_fact_scope(
+            active_profile,
+            fact_id,
+            scope,
+            shared_list,
+            idempotency_key=_mutation_idempotency_key(request),
+        )
+        if not result.get("ok"):
+            raise HTTPException(404, detail="Memory not found in this profile")
+        engine._hooks.run_post("update", hook_context)
+        return {
+            "success": True, "fact_id": fact_id, "scope": scope,
+            "shared_with": shared_list, "active_profile": active_profile,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _canonical_mutation_error(exc, "Scope update error")

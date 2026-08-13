@@ -248,6 +248,10 @@ async def test_kv_set_get_hit_miss_and_tenant_isolation(tools, monkeypatch):
     set_r = await tools["slm_cache_set"](key="my_key", value="agent_a_value")
     assert set_r["ok"] is True
     assert set_r["stored"] is True
+    # The direct MCP KV path must populate the normalized tag index as well
+    # as the entry's descriptive tag_json, otherwise CLI invalidation is a
+    # misleading no-op for MCP-created cache entries.
+    mock_db.tag_register.assert_called_once()
 
     get_hit = await tools["slm_cache_get"](key="my_key")
     assert get_hit["ok"] is True
@@ -298,6 +302,7 @@ async def test_stats_fresh_all_int_fields_present(tools, monkeypatch):
 
     mock_db = MagicMock()
     mock_db.metrics_load.return_value = MetricsSnapshot()
+    mock_db.kv_counters_load.return_value = {}  # M2: fall back to session counters
     monkeypatch.setattr("superlocalmemory.mcp.tools_optimize.CacheDB", type("FakeCDB", (), {"get_default": staticmethod(lambda: mock_db)}))
 
     result = await tools["slm_optimize_stats"]()
@@ -330,10 +335,18 @@ async def test_stats_after_kv_hit_increments_counter(tools, monkeypatch):
     def _get_value(cache_key, tenant_id):
         return store.get((cache_key, tenant_id))
 
+    # M2: track the durable KV counters so we exercise the persisted path.
+    kv_counters: dict = {}
+
+    def _kv_incr(name, delta=1):
+        kv_counters[name] = kv_counters.get(name, 0) + delta
+
     mock_db = MagicMock()
     mock_db.set.side_effect = _set
     mock_db.get_value.side_effect = _get_value
     mock_db.metrics_load.return_value = MetricsSnapshot()
+    mock_db.kv_counter_incr.side_effect = _kv_incr
+    mock_db.kv_counters_load.side_effect = lambda: dict(kv_counters)
     monkeypatch.setattr("superlocalmemory.mcp.tools_optimize.CacheDB", type("FakeCDB", (), {"get_default": staticmethod(lambda: mock_db)}))
 
     await tools["slm_cache_set"](key="stat_key", value="stat_val")
@@ -342,6 +355,7 @@ async def test_stats_after_kv_hit_increments_counter(tools, monkeypatch):
     result = await tools["slm_optimize_stats"]()
     assert result["ok"] is True
     assert result["cache_kv_hits"] >= 1
+    assert kv_counters.get("kv_hits", 0) >= 1  # durable counter was incremented
 
 
 # ─── Test 13: oversize content → ccr_id:None, note set, no crash ─────────────
@@ -385,14 +399,15 @@ async def test_compress_fail_open_on_engine_crash(tools, monkeypatch):
     assert "internal error" in result["note"].lower()
 
 
-# ─── Test 15: integration — _FilteredServer, 5 tools, no headroom_* ──────────
+# ─── Test 15: integration — _FilteredServer, 5 tools, all SLM-branded ────────
 
 
-async def test_integration_filtered_server_five_tools_no_headroom():
+async def test_integration_filtered_server_five_tools_all_slm_branded():
     """Register on _FilteredServer with optimize names allowed.
 
-    Asserts: exactly 5 tools registered, names match _OPTIMIZE_TOOL_NAMES,
-    zero headroom_* tools — fulfills AUDIT L-03.
+    Asserts: exactly 5 tools registered, names match _OPTIMIZE_TOOL_NAMES, and
+    every registered tool is SLM-branded (no foreign-branded name leaks into the
+    MCP surface) — fulfills AUDIT L-03.
     """
     from superlocalmemory.mcp.tools_optimize import register_optimize_tools, _OPTIMIZE_TOOL_NAMES
 
@@ -421,5 +436,5 @@ async def test_integration_filtered_server_five_tools_no_headroom():
     assert registered == set(_OPTIMIZE_TOOL_NAMES), (
         f"Name mismatch. Expected {_OPTIMIZE_TOOL_NAMES}, got {registered}"
     )
-    headroom = {n for n in registered if n.startswith("headroom")}
-    assert not headroom, f"headroom_* tools must not be registered: {headroom}"
+    foreign = {n for n in registered if not n.startswith("slm_")}
+    assert not foreign, f"only SLM-branded optimize tools may be registered: {foreign}"

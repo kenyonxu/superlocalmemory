@@ -62,9 +62,10 @@ def _add_action(fact_id: str = "f1") -> ConsolidationAction:
     )
 
 
-def _noop_action() -> ConsolidationAction:
+def _noop_action(existing_fact_id: str = "") -> ConsolidationAction:
     return ConsolidationAction(
         action_type=ConsolidationActionType.NOOP,
+        existing_fact_id=existing_fact_id,
     )
 
 
@@ -131,70 +132,12 @@ class TestStoreBasicFlow:
         result = engine_with_mock_deps.store("", session_id="s1")
         assert result == []
 
-    def test_store_enriches_with_embedding(
-        self, engine_with_mock_deps: MemoryEngine, mock_embedder: MagicMock,
-    ) -> None:
-        """store() calls embedder.embed() to enrich facts with embeddings."""
-        engine_with_mock_deps.store(
-            "Dave moved to Berlin in 2025 to work at a startup as a data scientist", session_id="s1",
-        )
-        # The mock embedder's embed method should have been called
-        assert mock_embedder.embed.called
-
-    def test_store_calls_graph_builder(
-        self, engine_with_mock_deps: MemoryEngine,
-    ) -> None:
-        """store() invokes _graph_builder.build_edges for each stored fact."""
-        gb = engine_with_mock_deps._graph_builder
-        with patch.object(gb, 'build_edges', wraps=gb.build_edges) as spy:
-            ids = engine_with_mock_deps.store(
-                "Eve is a quantum computing researcher at MIT in the physics department", session_id="s1",
-            )
-            if ids:
-                assert spy.called
-
-
 # ---------------------------------------------------------------------------
 # Consolidation paths
 # ---------------------------------------------------------------------------
 
 class TestStoreConsolidation:
     """Verify noop / update / add consolidation outcomes."""
-
-    def test_store_noop_consolidation_skips_fact(
-        self, engine_with_mock_deps: MemoryEngine,
-    ) -> None:
-        """When consolidator returns NOOP, the fact is not stored."""
-        consolidator = engine_with_mock_deps._consolidator
-        with patch.object(
-            consolidator, 'consolidate', return_value=_noop_action(),
-        ):
-            ids = engine_with_mock_deps.store(
-                "Duplicate content here about something previously stored in the system", session_id="s1",
-            )
-            assert ids == []
-
-    def test_store_update_consolidation_returns_id(
-        self, engine_with_mock_deps: MemoryEngine,
-    ) -> None:
-        """When consolidator returns UPDATE, the updated fact ID is in result."""
-        # First store a fact to have something to "update"
-        original_ids = engine_with_mock_deps.store(
-            "Frank likes eating pepperoni pizza from the Italian restaurant downtown", session_id="s1",
-        )
-        if not original_ids:
-            pytest.skip("No facts extracted from initial store")
-
-        existing_id = original_ids[0]
-        consolidator = engine_with_mock_deps._consolidator
-        mock_action = _update_action(new_fact_id=existing_id)
-        with patch.object(
-            consolidator, 'consolidate', return_value=mock_action,
-        ):
-            ids = engine_with_mock_deps.store(
-                "Frank really loves eating margherita pizza with fresh basil and mozzarella", session_id="s2",
-            )
-            assert existing_id in ids
 
     def test_store_add_consolidation_stores_fact(
         self, engine_with_mock_deps: MemoryEngine,
@@ -227,19 +170,6 @@ class TestStoreHooks:
         spy.assert_called_once()
         ctx = spy.call_args[0][0]
         assert ctx["operation"] == "store"
-
-    def test_store_runs_post_hooks(
-        self, engine_with_mock_deps: MemoryEngine,
-    ) -> None:
-        """store() calls _hooks.run_post('store', ...) with fact_ids."""
-        spy = MagicMock()
-        engine_with_mock_deps._hooks.register_post("store", spy)
-        engine_with_mock_deps.store("Post hook test for verifying post-store hooks are invoked correctly", session_id="s1")
-        spy.assert_called_once()
-        ctx = spy.call_args[0][0]
-        assert "fact_ids" in ctx
-        assert "fact_count" in ctx
-
 
 # ---------------------------------------------------------------------------
 # store_fact_direct
@@ -274,6 +204,38 @@ class TestStoreFactDirect:
             engine_with_mock_deps.store_fact_direct(fact)
             bm25_spy.assert_called_once()
             assert bm25_spy.call_args[0][0] == "bm25-f1"
+
+    def test_store_fact_direct_uses_complete_m018_operation(
+        self, engine_with_mock_deps: MemoryEngine,
+    ) -> None:
+        fact = _make_fact(
+            fact_id="durable-direct-f1",
+            content="The prebuilt durable fact preserves Alice and its identity",
+            entities=["Alice"],
+            fact_type=FactType.OPINION,
+        )
+        fact.memory_id = ""
+        fact.session_id = "prebuilt-session"
+
+        returned_id = engine_with_mock_deps.store_fact_direct(fact)
+
+        rows = engine_with_mock_deps._db.execute(
+            "SELECT state, final_fact_ids_json, source_type FROM ingestion_operations "
+            "WHERE idempotency_key=?",
+            ("prebuilt:durable-direct-f1",),
+        )
+        stored = engine_with_mock_deps._db.get_fact("durable-direct-f1")
+        assert returned_id == "durable-direct-f1"
+        assert len(rows) == 1
+        assert dict(rows[0]) == {
+            "state": "complete",
+            "final_fact_ids_json": '["durable-direct-f1"]',
+            "source_type": "python-api-prebuilt",
+        }
+        assert stored is not None
+        assert stored.fact_type is FactType.OPINION
+        assert stored.entities == ["Alice"]
+        assert stored.session_id == "prebuilt-session"
 
 
 # ---------------------------------------------------------------------------

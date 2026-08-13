@@ -12,22 +12,30 @@ Provides:
 V3 change: base directory is ``~/.superlocalmemory/`` (was ``~/.claude-memory/``).
 """
 
+import hashlib
 import json
 import logging
+import shutil
 import sqlite3
+import time
+import uuid
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Generator, List, Optional
+
+from superlocalmemory.infra.data_root import DynamicStatePath, canonical_data_root
 
 logger = logging.getLogger("superlocalmemory.backup")
 
 # ---------------------------------------------------------------------------
 # V3 paths
 # ---------------------------------------------------------------------------
-MEMORY_DIR = Path.home() / ".superlocalmemory"
-DB_PATH = MEMORY_DIR / "memory.db"
-BACKUP_DIR = MEMORY_DIR / "backups"
-CONFIG_FILE = MEMORY_DIR / "backup_config.json"
+MEMORY_DIR = DynamicStatePath()
+DB_PATH = DynamicStatePath("memory.db")
+BACKUP_DIR = DynamicStatePath("backups")
+CONFIG_FILE = DynamicStatePath("backup_config.json")
 
 # Defaults
 DEFAULT_INTERVAL_HOURS = 168   # 7 days
@@ -55,6 +63,416 @@ MANAGED_DATABASES: tuple[str, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Coherent multi-store backup set
+# ---------------------------------------------------------------------------
+
+
+class BackupVerificationError(Exception):
+    """Raised when a backup set fails checksum re-verification."""
+
+
+class BackupRestoreError(Exception):
+    """Raised when a restore cannot be safely completed."""
+
+
+@dataclass(frozen=True)
+class StoreEntry:
+    """Describes one database file within a backup set."""
+
+    store_name: str   # filename, e.g. "memory.db"
+    file_path: str    # absolute path inside the final backup directory
+    size_bytes: int
+    sha256: str       # SHA-256 hex digest of the backup copy
+
+
+@dataclass(frozen=True)
+class BackupSetManifest:
+    """Describes a coherent snapshot of all managed databases.
+
+    All stores share a single epoch so callers can detect sets assembled
+    from different points in time and reject them. Checksums allow
+    independent verification of every backup file before restore.
+    """
+
+    set_id: str                       # unique identifier for this backup set
+    epoch: int                        # Unix timestamp when the set was created
+    stores: tuple[StoreEntry, ...]    # one entry per backed-up store
+    manifest_hash: str                # SHA-256 over sorted store checksums
+    verified: bool                    # True only after Phase-4 re-verification
+    created_at: str = ""              # ISO-8601 UTC creation timestamp
+    product_version: str = ""         # reserved for version tracking
+
+
+class BackupCoordinator:
+    """Creates and verifies coherent backup sets spanning all managed databases.
+
+    A backup set groups every managed store under a single epoch and publishes
+    an atomic manifest only when all per-store checksums pass re-verification.
+    Any mismatch detected during re-verification causes the entire staging
+    directory to be removed without publication.
+
+    Args:
+        managed_databases: Ordered tuple of DB filenames to include.
+        base_dir: Directory where the live databases reside.
+        backup_dir: Directory where backup sets are written.
+    """
+
+    def __init__(
+        self,
+        managed_databases: tuple[str, ...],
+        base_dir: Path,
+        backup_dir: Path,
+    ) -> None:
+        self._managed_databases = managed_databases
+        self._base_dir = Path(base_dir)
+        self._backup_dir = Path(backup_dir)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def create_backup_set(self) -> BackupSetManifest:
+        """Copy all existing managed stores and publish a verified manifest.
+
+        The algorithm has six phases:
+          1. Identify which stores exist on disk.
+          2. Create a staging directory.
+          3. Fence SQLite writers (BEGIN IMMEDIATE) then copy every store and
+             record per-file SHA-256 checksums (Phase 3). If a ``lance/``
+             directory exists under the base dir, copy it into staging as well.
+          4. Re-read every staging file and compare to Phase-3 hashes.
+             Mismatch → staging removed, BackupVerificationError raised.
+          5. Build the manifest from the verified checksums.
+          6. Atomically rename staging → final directory and write manifest.json.
+
+        The ``lance/`` directory (LanceDB vector index) is treated as an
+        out-of-manifest companion: it is copied recursively into the backup set
+        and restored alongside the SQLite stores. Its presence is noted in the
+        server log. If absent, the step is silently skipped.
+
+        Returns:
+            BackupSetManifest with verified=True.
+
+        Raises:
+            BackupVerificationError: if any staging file's content changed
+                between Phase 3 and Phase 4.
+        """
+        set_id = uuid.uuid4().hex[:16]
+        epoch = int(time.time())
+        staging_dir = self._backup_dir / f".staging_{set_id}"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+
+        existing_dbs = [
+            db for db in self._managed_databases
+            if (self._base_dir / db).exists()
+        ]
+        sqlite_paths = [self._base_dir / db for db in existing_dbs]
+
+        # staging_records: (db_name, staging_path, size_bytes, phase3_sha256)
+        staging_records: list[tuple[str, Path, int, str]] = []
+
+        # Phases 2–3: fence writers, copy, hash
+        with self._writer_fence(sqlite_paths):
+            for db_name in existing_dbs:
+                src = self._base_dir / db_name
+                dest = staging_dir / db_name
+                self._sqlite_backup(src, dest)
+                sha = self._compute_entry_sha256(dest)
+                staging_records.append((db_name, dest, dest.stat().st_size, sha))
+
+            # Copy the LanceDB vector directory if present.
+            lance_src = self._base_dir / "lance"
+            if lance_src.is_dir():
+                lance_staging = staging_dir / "lance"
+                shutil.copytree(str(lance_src), str(lance_staging))
+                logger.info(
+                    "Backup set %s: captured lance/ directory (%d items)",
+                    set_id,
+                    sum(1 for _ in lance_staging.rglob("*") if _.is_file()),
+                )
+
+        # Phase 4: re-verify every staging copy
+        for db_name, staging_path, _size, expected_sha in staging_records:
+            actual_sha = self._compute_entry_sha256(staging_path)
+            if actual_sha != expected_sha:
+                shutil.rmtree(str(staging_dir), ignore_errors=True)
+                raise BackupVerificationError(
+                    f"Checksum mismatch for {db_name}: "
+                    f"expected {expected_sha}, got {actual_sha}"
+                )
+
+        # Phase 5: build manifest (file_path points to where files will land)
+        final_dir = self._backup_dir / f"backup_{set_id}"
+        entries = tuple(
+            StoreEntry(
+                store_name=db_name,
+                file_path=str(final_dir / db_name),
+                size_bytes=size,
+                sha256=sha,
+            )
+            for db_name, _sp, size, sha in staging_records
+        )
+        manifest = BackupSetManifest(
+            set_id=set_id,
+            epoch=epoch,
+            stores=entries,
+            manifest_hash=self._compute_manifest_hash(entries),
+            verified=True,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        # Phase 6: atomic publish
+        staging_dir.rename(final_dir)
+        (final_dir / "manifest.json").write_text(
+            json.dumps(asdict(manifest), indent=2)
+        )
+
+        return manifest
+
+    def restore_from_manifest(self, manifest: BackupSetManifest) -> None:
+        """Restore all stores from a verified manifest.
+
+        The restore proceeds in three phases to guarantee cross-store atomicity:
+
+        Phase A — Verify:
+            Re-derive the manifest hash and verify every backup file's checksum.
+            No live files are touched until all checks pass. Raises
+            BackupRestoreError on any failure.
+
+        Phase B — Pre-restore snapshot:
+            Copy the current live version of every store being restored into a
+            ``<store>.pre_restore`` sibling file, and the current ``lance/``
+            directory (if present) to ``lance.pre_restore/``. These snapshots
+            allow a full rollback if the write phase is interrupted.
+
+        Phase C — Staged write:
+            Copy each backup file to a ``<store>.restore_staging`` temporary,
+            then rename it into place. If any step raises, all pre-restore
+            snapshots are copied back to their live locations before the error
+            is re-raised, returning the live set to its original coherent state.
+            On full success, all snapshot files are removed.
+
+        The ``lance/`` directory companion is handled with the same snapshot and
+        rollback discipline: if the backup set contains a ``lance/`` subdirectory
+        it is restored recursively; absence is silently skipped on both sides.
+
+        Raises:
+            BackupRestoreError: on unverified manifest, hash mismatch, missing
+                or corrupted backup files, or if the staged write phase fails
+                and the rollback itself encounters an error.
+        """
+        if not manifest.verified:
+            raise BackupRestoreError("Cannot restore from an unverified manifest")
+
+        # Phase A-1: Re-derive manifest_hash from the store entries and compare.
+        # This detects tampering of manifest.json where an attacker changes a
+        # store's sha256 entry without recalculating manifest_hash.
+        computed_hash = self._compute_manifest_hash(manifest.stores)
+        if computed_hash != manifest.manifest_hash:
+            raise BackupRestoreError(
+                "Manifest hash mismatch: backup set is incoherent or has been tampered"
+            )
+
+        # Phase A-2: Verify every backup file exists and matches its checksum.
+        for entry in manifest.stores:
+            src = Path(entry.file_path)
+            if not src.exists():
+                raise BackupRestoreError(f"Backup file missing: {entry.file_path}")
+            actual_sha = self._compute_entry_sha256(src)
+            if actual_sha != entry.sha256:
+                raise BackupRestoreError(
+                    f"Corrupted backup file (checksum mismatch): {entry.store_name}"
+                )
+
+        # Determine the backup set directory.
+        # Primary: derive from the first store's file_path (most reliable).
+        # Fallback for empty-store manifests: reconstruct from the backup_dir +
+        # set_id, which is how create_backup_set names the final directory.
+        if manifest.stores:
+            backup_set_dir: Optional[Path] = Path(manifest.stores[0].file_path).parent
+        else:
+            candidate = self._backup_dir / f"backup_{manifest.set_id}"
+            backup_set_dir = candidate if candidate.is_dir() else None
+
+        lance_backup: Optional[Path] = (
+            backup_set_dir / "lance"
+            if backup_set_dir is not None and (backup_set_dir / "lance").is_dir()
+            else None
+        )
+
+        # Phase B: Snapshot the current live copies so we can roll back.
+        # pre_restore_map: live_target -> pre_restore_snapshot_path
+        pre_restore_map: dict[Path, Path] = {}
+        pre_restore_lance: Optional[Path] = None
+        try:
+            for entry in manifest.stores:
+                target = self._base_dir / entry.store_name
+                snapshot = target.parent / f"{entry.store_name}.pre_restore"
+                if target.exists():
+                    shutil.copy2(str(target), str(snapshot))
+                pre_restore_map[target] = snapshot
+
+            live_lance = self._base_dir / "lance"
+            if lance_backup is not None and live_lance.is_dir():
+                pre_restore_lance = self._base_dir / "lance.pre_restore"
+                if pre_restore_lance.exists():
+                    shutil.rmtree(str(pre_restore_lance))
+                shutil.copytree(str(live_lance), str(pre_restore_lance))
+
+        except Exception as exc:
+            # Snapshot creation failed — clean up any partial snapshots and abort
+            # before touching any live files.
+            self._cleanup_pre_restore_snapshots(pre_restore_map, pre_restore_lance)
+            raise BackupRestoreError(
+                f"Pre-restore snapshot failed, no live files were modified: {exc}"
+            ) from exc
+
+        # Phase C: Write restored files into the live directory.
+        try:
+            for entry in manifest.stores:
+                target = self._base_dir / entry.store_name
+                staging = target.parent / f"{entry.store_name}.restore_staging"
+                shutil.copy2(entry.file_path, str(staging))
+                staging.rename(target)
+
+            if lance_backup is not None:
+                live_lance = self._base_dir / "lance"
+                lance_staging = self._base_dir / "lance.restore_staging"
+                if lance_staging.exists():
+                    shutil.rmtree(str(lance_staging))
+                shutil.copytree(str(lance_backup), str(lance_staging))
+                if live_lance.exists():
+                    shutil.rmtree(str(live_lance))
+                lance_staging.rename(live_lance)
+                logger.info("Restore: lance/ directory restored from backup set")
+
+        except Exception as exc:
+            # Staged write failed — roll back all live files from pre-restore
+            # snapshots so the live set returns to its original coherent state.
+            logger.error(
+                "Restore write phase failed (%s); rolling back live files to "
+                "pre-restore state.",
+                exc,
+            )
+            rollback_errors: list[str] = []
+            for target, snapshot in pre_restore_map.items():
+                if snapshot.exists():
+                    try:
+                        shutil.copy2(str(snapshot), str(target))
+                    except Exception as rb_exc:
+                        rollback_errors.append(f"{target.name}: {rb_exc}")
+            # Roll back the lance/ directory if a snapshot was taken.
+            if pre_restore_lance is not None and pre_restore_lance.exists():
+                try:
+                    live_lance = self._base_dir / "lance"
+                    if live_lance.exists():
+                        shutil.rmtree(str(live_lance))
+                    shutil.copytree(str(pre_restore_lance), str(live_lance))
+                except Exception as rb_exc:
+                    rollback_errors.append(f"lance/: {rb_exc}")
+
+            self._cleanup_pre_restore_snapshots(pre_restore_map, pre_restore_lance)
+
+            if rollback_errors:
+                raise BackupRestoreError(
+                    f"Restore failed and rollback encountered errors: "
+                    f"{'; '.join(rollback_errors)}. Original error: {exc}"
+                ) from exc
+            raise BackupRestoreError(
+                f"Restore write phase failed; live files rolled back to "
+                f"pre-restore state: {exc}"
+            ) from exc
+
+        # Phase C succeeded — remove pre-restore snapshots.
+        self._cleanup_pre_restore_snapshots(pre_restore_map, pre_restore_lance)
+
+    # ------------------------------------------------------------------
+    # Internal helpers (factored out for subclass testability)
+    # ------------------------------------------------------------------
+
+    def _compute_entry_sha256(self, path: Path) -> str:
+        """Return the SHA-256 hex digest of a file's raw bytes."""
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def _compute_manifest_hash(
+        self, entries: tuple[StoreEntry, ...]
+    ) -> str:
+        """Deterministic hash of all store checksums (sorted for stability)."""
+        sorted_checksums = sorted(e.sha256 for e in entries)
+        payload = "|".join(sorted_checksums).encode()
+        return hashlib.sha256(payload).hexdigest()
+
+    @contextmanager
+    def _writer_fence(
+        self, db_paths: list[Path]
+    ) -> Generator[None, None, None]:
+        """Hold BEGIN IMMEDIATE on every live SQLite DB during the copy window.
+
+        This blocks concurrent writers for the duration of the copy loop,
+        ensuring the source files do not change while being read by
+        sqlite3.backup(). Connections are rolled back and closed on exit.
+        """
+        conns: list[sqlite3.Connection] = []
+        for path in db_paths:
+            if path.exists():
+                conn = sqlite3.connect(str(path))
+                conn.execute("BEGIN IMMEDIATE")
+                conns.append(conn)
+        try:
+            yield
+        finally:
+            for conn in conns:
+                try:
+                    conn.rollback()
+                    conn.close()
+                except Exception:  # pragma: no cover – cleanup best-effort
+                    pass
+
+    def _sqlite_backup(self, src: Path, dest: Path) -> None:
+        """Copy a SQLite database using the Online Backup API (hot copy)."""
+        src_conn = sqlite3.connect(str(src))
+        dst_conn = sqlite3.connect(str(dest))
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+            src_conn.close()
+
+    @staticmethod
+    def _cleanup_pre_restore_snapshots(
+        snapshot_map: dict[Path, Path],
+        lance_snapshot: Optional[Path],
+    ) -> None:
+        """Remove pre-restore snapshot files and directories.
+
+        Called after a successful restore to tidy up, and on the error path
+        after rollback completes. Best-effort: individual removal failures are
+        logged but do not raise.
+        """
+        for snapshot_path in snapshot_map.values():
+            if snapshot_path.exists():
+                try:
+                    snapshot_path.unlink()
+                except OSError as exc:
+                    logger.warning(
+                        "Could not remove pre-restore snapshot %s: %s",
+                        snapshot_path.name, exc,
+                    )
+        if lance_snapshot is not None and lance_snapshot.exists():
+            try:
+                shutil.rmtree(str(lance_snapshot))
+            except OSError as exc:
+                logger.warning(
+                    "Could not remove lance pre-restore snapshot %s: %s",
+                    lance_snapshot, exc,
+                )
+
+# ---------------------------------------------------------------------------
+# Legacy per-file backup manager (preserved for backward compatibility)
+# ---------------------------------------------------------------------------
+
+
 class BackupManager:
     """Automated backup manager for SuperLocalMemory V3.
 
@@ -70,7 +488,7 @@ class BackupManager:
         backup_dir: Optional[Path] = None,
         base_dir: Optional[Path] = None,
     ) -> None:
-        self.base_dir = base_dir or MEMORY_DIR
+        self.base_dir = Path(base_dir) if base_dir is not None else canonical_data_root()
         self.db_path = db_path or (self.base_dir / "memory.db")
         self.backup_dir = backup_dir or (self.base_dir / "backups")
         self._config_file = self.base_dir / "backup_config.json"
@@ -264,19 +682,41 @@ class BackupManager:
 
         A safety snapshot of the current state is taken first.
         """
-        backup_path = self.backup_dir / filename
+        # Containment: filename must be a bare .db name inside backup_dir — no
+        # path separators or traversal. Prevents restoring (and thus copying
+        # over memory.db) an arbitrary file the daemon user can read.
+        if (not filename or "/" in filename or "\\" in filename
+                or ".." in filename or not filename.endswith(".db")):
+            logger.error("Restore rejected: invalid backup filename: %r", filename)
+            return False
+        backup_dir = self.backup_dir.resolve()
+        backup_path = (self.backup_dir / filename).resolve()
+        if backup_path.parent != backup_dir:
+            logger.error("Restore rejected: path escapes backup dir: %r", filename)
+            return False
         if not backup_path.exists():
             logger.error("Backup not found: %s", filename)
             return False
 
+        # Derive the target database from the backup filename stem.
+        # Backup files are named "{stem}-{timestamp}.db", where stem is the
+        # database name without extension (e.g., "audit_chain" for audit_chain.db).
+        stem_map = {Path(db).stem: db for db in MANAGED_DATABASES}
+        file_stem = filename.split("-", 1)[0]
+        target_name = stem_map.get(file_stem)
+        if target_name is None:
+            logger.error(
+                "Restore rejected: unrecognised database stem %r in %r; "
+                "expected one of %s",
+                file_stem,
+                filename,
+                list(stem_map),
+            )
+            return False
+        target = self.db_path.parent / target_name
+
         try:
             self.create_backup(label="pre-restore")
-
-            target = (
-                self.db_path.parent / "learning.db"
-                if filename.startswith("learning-")
-                else self.db_path
-            )
 
             src = sqlite3.connect(str(backup_path))
             dst = sqlite3.connect(str(target))

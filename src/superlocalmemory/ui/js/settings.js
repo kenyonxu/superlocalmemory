@@ -272,12 +272,14 @@ function _updateSidebarWidget(destinations) {
 
     if (primary.destination_type === 'google_drive') {
         var email = config.email || 'Google Drive';
-        avatar.innerHTML = '<img src="https://www.google.com/s2/favicons?domain=google.com&sz=32" style="width:28px;height:28px;border-radius:50%;" onerror="this.outerHTML=\'<i class=\\\'bi bi-google\\\' style=\\\'font-size:14px;color:#4285f4;\\\'></i>\'">';
+        // Keep the dashboard fully local. CSP deliberately forbids remote
+        // avatar requests, and a provider icon conveys the same state.
+        avatar.innerHTML = '<i class="bi bi-google" style="font-size:14px;color:#4285f4;"></i>';
         name.textContent = email.split('@')[0];
         name.title = email;
     } else if (primary.destination_type === 'github') {
         var username = config.username || 'GitHub';
-        avatar.innerHTML = '<img src="https://github.com/' + username + '.png?size=56" style="width:28px;height:28px;border-radius:50%;" onerror="this.outerHTML=\'<i class=\\\'bi bi-github\\\' style=\\\'font-size:14px;\\\'></i>\'">';
+        avatar.innerHTML = '<i class="bi bi-github" style="font-size:14px;"></i>';
         name.textContent = username;
     }
 
@@ -378,7 +380,7 @@ function _updateNavbarWidget(destinations) {
                 icon +
                 '<span style="flex:1;color:#e0e0e0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + name + '</span>' +
                 '<span class="account-dest-badge ' + statusCls + '">' + statusText + '</span>' +
-                '<button class="btn btn-sm" onclick="disconnectDestination(\'' + dest.id + '\')" style="padding:0;border:0;color:#555;font-size:12px;" title="Disconnect"><i class="bi bi-x"></i></button>' +
+                '<button class="btn btn-sm" data-act-click="disconnect-destination" data-dest-id="' + dest.id + '" style="padding:0;border:0;color:#555;font-size:12px;" title="Disconnect"><i class="bi bi-x"></i></button>' +
                 '</div>';
         });
         accountList.innerHTML = html;
@@ -420,7 +422,7 @@ function renderCloudDestinations(destinations, container) {
             card.innerHTML = '<div class="card-body p-2">' +
                 '<div class="d-flex justify-content-between align-items-center">' +
                 '<div><i class="bi bi-' + icon + '"></i> <strong>' + dest.display_name + '</strong> ' + statusBadge + '</div>' +
-                '<button class="btn btn-outline-danger btn-sm" onclick="disconnectDestination(\'' + dest.id + '\')"><i class="bi bi-x-circle"></i></button>' +
+                '<button class="btn btn-outline-danger btn-sm" data-act-click="disconnect-destination" data-dest-id="' + dest.id + '"><i class="bi bi-x-circle"></i></button>' +
                 '</div>' +
                 '<div class="small text-muted mt-1">Last sync: ' + lastSync + '</div>' +
                 '</div>';
@@ -472,7 +474,13 @@ async function connectGoogleDrive() {
 }
 
 async function disconnectDestination(destId) {
-    if (!confirm('Disconnect this backup destination? Your backups on the cloud will remain.')) return;
+    var confirmed = await confirmDestructive({
+        title: 'Disconnect backup destination',
+        target: destId,
+        consequence: 'Your backups on the cloud will remain.',
+        confirmLabel: 'Disconnect',
+    });
+    if (!confirmed) return;
 
     try {
         var response = await fetch('/api/backup/disconnect/' + destId, { method: 'DELETE' });
@@ -527,7 +535,21 @@ async function syncCloudNow() {
 async function exportBackup() {
     showToast('Preparing backup export...');
     try {
-        window.location.href = '/api/backup/export';
+        var response = await fetch('/api/backup/export', { method: 'POST' });
+        if (!response.ok) throw new Error('Export rejected');
+        var blob = await response.blob();
+        var disposition = response.headers.get('Content-Disposition') || '';
+        var match = disposition.match(/filename="?([^";]+)"?/i);
+        var objectUrl = URL.createObjectURL(blob);
+        var link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = match ? match[1] : 'superlocalmemory-backup.db.gz';
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(objectUrl);
+        showToast('Backup export downloaded');
     } catch (error) {
         showToast('Export failed');
     }

@@ -11,7 +11,10 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import uuid
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -19,14 +22,124 @@ if TYPE_CHECKING:
     from superlocalmemory.core.hooks import HookRegistry
     from superlocalmemory.storage.database import DatabaseManager
 
+from superlocalmemory.storage.erasure_fence import is_erasing
 from superlocalmemory.storage.models import (
-    AtomicFact, FactType, MemoryRecord,
+    AtomicFact,
+    FactType,
+    MemoryRecord,
 )
 
 logger = logging.getLogger(__name__)
 
 # Langevin initialization radius for new facts (ACTIVE zone < 0.3)
 _INIT_LANGEVIN_RADIUS = 0.05
+
+
+def _reraise_materialization_deferral(exc: Exception) -> None:
+    """Keep explicit runtime preemption out of best-effort fallbacks."""
+    from superlocalmemory.core.materialization_control import MaterializationDeferred
+
+    if isinstance(exc, MaterializationDeferred):
+        raise exc
+
+
+def _ingestion_effect_id(operation_id: str, *parts: object) -> str:
+    """Return a stable ID for a relational effect owned by one ingestion."""
+    if not operation_id:
+        return uuid.uuid4().hex
+    payload = "\0".join((operation_id, *(str(part) for part in parts)))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def _record_fact_entity_association(
+    db: DatabaseManager,
+    *,
+    operation_id: str,
+    profile_id: str,
+    fact_id: str,
+    entity_id: str,
+) -> None:
+    """Apply one fact/entity count effect in O(1), exactly once."""
+    if not operation_id:
+        db.increment_entity_fact_count(entity_id, profile_id)
+        return
+    with db.transaction():
+        claimed = db.execute(
+            "INSERT INTO fact_entity_associations "
+            "(profile_id,fact_id,entity_id,first_operation_id,count_applied) "
+            "SELECT ?,?,?,?,"
+            "CASE WHEN fact.rowid > repair.target_fact_rowid THEN 1 ELSE 0 END "
+            "FROM canonical_entities AS entity "
+            "JOIN atomic_facts AS fact "
+            "ON fact.fact_id=? AND fact.profile_id=? "
+            "JOIN fact_entity_association_repair_state AS repair "
+            "ON repair.repair_key='historical-backfill' "
+            "WHERE entity.entity_id=? AND entity.profile_id=? "
+            "ON CONFLICT(profile_id,fact_id,entity_id) DO UPDATE SET "
+            "count_applied=excluded.count_applied,"
+            "first_operation_id=excluded.first_operation_id "
+            "WHERE fact_entity_associations.count_applied=0 "
+            "AND excluded.count_applied=1 "
+            "RETURNING count_applied",
+            (
+                profile_id,
+                fact_id,
+                entity_id,
+                operation_id,
+                fact_id,
+                profile_id,
+                entity_id,
+                profile_id,
+            ),
+        )
+        if claimed and int(claimed[0]["count_applied"]) == 1:
+            db.execute(
+                "UPDATE canonical_entities SET fact_count=fact_count+1 "
+                "WHERE entity_id=? AND profile_id=?",
+                (entity_id, profile_id),
+            )
+        elif not claimed:
+            # An empty result has TWO causes: (a) the 'historical-backfill'
+            # repair-state row is missing — M028 DDL ran but its INSERT rolled
+            # back (partial migration) — so the JOIN returned zero rows and the
+            # main INSERT produced no output; or (b) the association already
+            # exists and the ON CONFLICT update was correctly skipped (an
+            # idempotent re-run). Only (a) needs the fallback insert; (b) is a
+            # no-op. Disambiguate by probing the repair-state table directly —
+            # a DIFFERENT table, so this stays a constant-query, idempotent
+            # effect and never re-fires the insert on an already-applied row.
+            repair_ready = db.execute(
+                "SELECT 1 FROM fact_entity_association_repair_state "
+                "WHERE repair_key='historical-backfill' LIMIT 1",
+            )
+            if repair_ready:
+                # (b) idempotent skip — the association was already applied.
+                return
+            # (a) partial migration: insert with count_applied=1 (no historical-
+            # rowid check needed — all associations in this state are
+            # post-migration). ON CONFLICT DO NOTHING makes this retry-safe.
+            fallback = db.execute(
+                "INSERT INTO fact_entity_associations "
+                "(profile_id,fact_id,entity_id,first_operation_id,count_applied) "
+                "SELECT ?,?,?,?,1 "
+                "FROM canonical_entities AS entity "
+                "JOIN atomic_facts AS fact "
+                "ON fact.fact_id=? AND fact.profile_id=? "
+                "WHERE entity.entity_id=? AND entity.profile_id=? "
+                "ON CONFLICT(profile_id,fact_id,entity_id) DO NOTHING "
+                "RETURNING count_applied",
+                (
+                    profile_id, fact_id, entity_id, operation_id,
+                    fact_id, profile_id,
+                    entity_id, profile_id,
+                ),
+            )
+            if fallback:
+                db.execute(
+                    "UPDATE canonical_entities SET fact_count=fact_count+1 "
+                    "WHERE entity_id=? AND profile_id=?",
+                    (entity_id, profile_id),
+                )
 
 
 def _init_langevin_position(dim: int = 8) -> list[float]:
@@ -59,13 +172,27 @@ def enrich_fact(
     temporal_parser: Any,
 ) -> AtomicFact:
     """Enrich fact with embeddings, entities, temporal, emotional data."""
-    from superlocalmemory.encoding.emotional import tag_emotion, emotional_importance_boost
+    from superlocalmemory.encoding.emotional import emotional_importance_boost, tag_emotion
     from superlocalmemory.encoding.signal_inference import infer_signal
 
-    embedding = embedder.embed(fact.content) if embedder else None
-    fisher_mean, fisher_variance = (None, None)
-    if embedder and embedding:
-        fisher_mean, fisher_variance = embedder.compute_fisher_params(embedding)
+    # v3.8.4 D: if the fact already carries a sync-embedded vector (warm-guard
+    # path in store_fast), reuse it — avoids a redundant embed call in the
+    # materializer and keeps the vector consistent with the one indexed in the
+    # vector store at write time.
+    if fact.embedding is not None:
+        embedding = fact.embedding
+        fisher_mean = fact.fisher_mean
+        fisher_variance = fact.fisher_variance
+        # fisher_params are computed in the warm-guard path too, but guard
+        # against the edge case where they weren't (e.g. compute_fisher_params
+        # raised after embed succeeded).
+        if (fisher_mean is None or fisher_variance is None) and embedder and embedding:
+            fisher_mean, fisher_variance = embedder.compute_fisher_params(embedding)
+    else:
+        embedding = embedder.embed(fact.content) if embedder else None
+        fisher_mean, fisher_variance = (None, None)
+        if embedder and embedding:
+            fisher_mean, fisher_variance = embedder.compute_fisher_params(embedding)
 
     canonical = {}
     if entity_resolver and fact.entities:
@@ -129,6 +256,7 @@ def _upsert_fact_vectors(fact, profile_id, ann_index, vector_store, embedder=Non
         try:
             fact.embedding = embedder.embed(fact.content)
         except Exception as _emb_exc:  # pragma: no cover - defensive
+            _reraise_materialization_deferral(_emb_exc)
             logger.debug("on-demand embed failed for %s: %s", fact.fact_id, _emb_exc)
             return
     if not getattr(fact, "embedding", None):
@@ -142,6 +270,111 @@ def _upsert_fact_vectors(fact, profile_id, ann_index, vector_store, embedder=Non
             profile_id=profile_id,
             embedding=fact.embedding,
         )
+
+
+class _TombstoneReadError(Exception):
+    pass
+
+
+def _fact_is_tombstoned(db: DatabaseManager, profile_id: str, fact_id: str) -> bool:
+    try:
+        rows = db.execute(
+            "SELECT 1 FROM projection_tombstones "
+            "WHERE profile_id = ? AND fact_id = ? LIMIT 1",
+            (profile_id, fact_id),
+        )
+        return bool(rows)
+    except Exception as exc:
+        raise _TombstoneReadError(
+            f"tombstone check failed for {fact_id[:16]}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def _residue_table_exists(db: DatabaseManager, name: str) -> bool:
+    try:
+        return bool(db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+            (name,),
+        ))
+    except Exception:
+        # Cannot determine existence: treat as present so the residue probe runs
+        # and fails closed rather than silently reporting "no residue".
+        return True
+
+
+def _read_tombstoned_with_retry(
+    db: DatabaseManager, profile_id: str, fact_id: str, attempts: int = 3,
+) -> bool:
+    last: _TombstoneReadError | None = None
+    for _ in range(max(1, attempts)):
+        try:
+            return _fact_is_tombstoned(db, profile_id, fact_id)
+        except _TombstoneReadError as exc:
+            last = exc
+    raise last if last is not None else _TombstoneReadError("tombstone read failed")
+
+
+def _vector_residue_present(db: DatabaseManager, fact_id: str) -> bool:
+    uncertain = False
+    for table in ("embedding_metadata", "vector_row_map"):
+        if not _residue_table_exists(db, table):
+            continue
+        try:
+            if db.execute(
+                f"SELECT 1 FROM {table} WHERE fact_id = ? LIMIT 1", (fact_id,)
+            ):
+                return True
+        except Exception:
+            uncertain = True
+    return uncertain
+
+
+def _drop_resurrected_facts(
+    db: DatabaseManager,
+    profile_id: str,
+    stored_ids: list[str],
+    vector_store: Any,
+    ann_index: Any,
+    retrieval_engine: Any,
+) -> list[str]:
+    survivors: list[str] = []
+    for fid in stored_ids:
+        try:
+            tombstoned = _read_tombstoned_with_retry(db, profile_id, fid)
+        except _TombstoneReadError as exc:
+            if is_erasing(profile_id, fid):
+                # Tombstone unreadable but the in-process fence confirms an
+                # erasure is in flight — clean up rather than leave residue.
+                tombstoned = True
+            else:
+                logger.error(
+                    "Tombstone read error in drop_resurrected for %s, deferring: %s",
+                    fid[:16], exc,
+                )
+                continue
+        if not tombstoned:
+            survivors.append(fid)
+            continue
+        vec_store_ok = vector_store is not None and getattr(vector_store, "available", False)
+        try:
+            if vec_store_ok:
+                vector_store.delete(fid)
+            if ann_index is not None and hasattr(ann_index, "remove"):
+                ann_index.remove(fid)
+            bm25 = getattr(retrieval_engine, "_bm25", None) if retrieval_engine else None
+            if bm25 is not None and hasattr(bm25, "remove_fact"):
+                bm25.remove_fact(fid)
+            db.delete_bm25_tokens_for_fact(fid)
+            db.delete_fact(fid, profile_id=profile_id)
+        except Exception as exc:
+            logger.warning("resurrection undo failed for %s: %s", fid[:16], exc)
+        if _vector_residue_present(db, fid):
+            logger.error(
+                "resurrection undo incomplete for %s: vector residue remains "
+                "(vec_store_available=%s); tombstone preserved",
+                fid[:16], vec_store_ok,
+            )
+    return survivors
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +414,16 @@ def run_store(
     auto_linker: Any = None,
     context_generator: Any = None,
     consolidation_engine: Any = None,
+    existing_memory_id: str | None = None,
+    queryable_fact_ids: tuple[str, ...] = (),
+    trusted_actor_id: str = "",
+    pre_authorized: bool = False,
+    ingestion_source_type: str = "store",
+    ingestion_operation_id: str = "",
+    derivation_report: dict[str, bool] | None = None,
+    precompleted_derivation_stages: frozenset[str] = frozenset(),
+    materialization_progress: dict[str, Any] | None = None,
+    materialization_checkpoint: Any = None,
 ) -> list[str]:
     """Store content and extract structured facts. Returns fact_ids.
 
@@ -190,46 +433,118 @@ def run_store(
     # Pre-operation hooks (trust gate, ABAC, rate limiter)
     hook_ctx = {
         "operation": "store",
-        "agent_id": metadata.get("agent_id", "unknown") if metadata else "unknown",
+        "agent_id": (
+            trusted_actor_id
+            or (metadata.get("agent_id", "unknown") if metadata else "unknown")
+        ),
         "profile_id": profile_id,
         "content_preview": content[:100],
     }
-    hooks.run_pre("store", hook_ctx)
+    if not pre_authorized:
+        hooks.run_pre("store", hook_ctx)
 
-    if entropy_gate and not entropy_gate.should_pass(content):
+    # Admission gates apply to FRESH submissions only. A materialization pass
+    # re-runs this pipeline for content whose queryable projection was already
+    # committed at submit (``queryable_fact_ids`` is set). Re-applying admission
+    # here — the entropy near-duplicate gate especially — would discard that
+    # already-committed fact (return []) and wedge the operation in an endless
+    # materialize retry loop ("materialization produced no final facts"). The
+    # near-duplicate verdict is expected at materialize: the submitted
+    # projection itself is in the gate's window. Admission was already decided
+    # at submit (store_fast enforces the same gates), so skip it here.
+    is_materialization = bool(queryable_fact_ids)
+
+    if entropy_gate and not is_materialization and not entropy_gate.should_pass(content):
         return []
 
     # v3.5.0: store-side quality gate (H3). Reject prompt-template leakage,
     # empty placeholders, and other non-memory content BEFORE it enters the
     # DB. Uses the shared is_low_quality from core/injection so both store
     # AND injection filter by identical rules. Saves DB IO + recall pollution.
-    try:
-        from superlocalmemory.core.injection import is_low_quality
-        if is_low_quality(content):
-            logger.debug("Store rejected (low-quality content): %s...",
-                         content[:80].replace("\n", " "))
-            return []
-    except Exception:
-        pass  # Best-effort gate; store succeeds if import fails
+    if not is_materialization:
+        try:
+            from superlocalmemory.core.injection import is_low_quality
+            if is_low_quality(content):
+                logger.debug("Store rejected (low-quality content): %s...",
+                             content[:80].replace("\n", " "))
+                return []
+        except Exception:
+            pass  # Best-effort gate; store succeeds if import fails
 
     from superlocalmemory.encoding.temporal_parser import TemporalParser
     parser = temporal_parser or TemporalParser()
     parsed_date = parser.parse_session_date(session_date) if session_date else None
 
-    record = MemoryRecord(
-        profile_id=profile_id, content=content,
-        session_id=session_id, speaker=speaker, role=role,
-        session_date=parsed_date, metadata=metadata or {},
-        scope=scope, shared_with=shared_with,
+    queryable_ids = frozenset(queryable_fact_ids)
+    queryable_facts: list[AtomicFact] = []
+    if existing_memory_id:
+        memory_rows = db.execute(
+            "SELECT * FROM memories WHERE memory_id=?",
+            (existing_memory_id,),
+        )
+        if not memory_rows:
+            raise ValueError("queryable ingestion memory does not exist")
+        memory = dict(memory_rows[0])
+        if memory["profile_id"] != profile_id:
+            raise ValueError("queryable ingestion memory profile mismatch")
+        if memory["content"] != content:
+            raise ValueError("queryable ingestion memory content mismatch")
+        stored_shared = json.loads(memory.get("shared_with") or "null")
+        if (memory.get("scope") or "personal") != scope:
+            raise ValueError("queryable ingestion memory scope mismatch")
+        if (stored_shared or None) != (shared_with or None):
+            raise ValueError("queryable ingestion shared scope mismatch")
+        queryable_facts = db.get_facts_by_ids(list(queryable_ids), profile_id)
+        if len(queryable_facts) != len(queryable_ids):
+            raise ValueError("queryable ingestion fact profile mismatch or missing fact")
+        if any(fact.memory_id != existing_memory_id for fact in queryable_facts):
+            raise ValueError("queryable ingestion fact belongs to another memory")
+        record = MemoryRecord(
+            memory_id=existing_memory_id,
+            profile_id=profile_id,
+            content=content,
+            session_id=memory.get("session_id") or session_id,
+            speaker=memory.get("speaker") or speaker,
+            role=memory.get("role") or role,
+            session_date=memory.get("session_date") or parsed_date,
+            created_at=memory["created_at"],
+            metadata=json.loads(memory.get("metadata_json") or "{}"),
+            scope=scope,
+            shared_with=shared_with,
+        )
+    else:
+        record = MemoryRecord(
+            profile_id=profile_id, content=content,
+            session_id=session_id, speaker=speaker, role=role,
+            session_date=parsed_date, metadata=metadata or {},
+            scope=scope, shared_with=shared_with,
+        )
+        db.store_memory(record)
+
+    extraction_complete = "extraction" in precompleted_derivation_stages
+    consolidation_complete = (
+        "consolidation" in precompleted_derivation_stages
+        or consolidator is not None
     )
-    db.store_memory(record)
+    canonicalization_complete = (
+        "canonicalization" in precompleted_derivation_stages
+        or entity_resolver is not None
+    )
+    graph_complete = (
+        "graph" in precompleted_derivation_stages
+        or graph_builder is not None
+    )
+    temporal_complete = True
+    provenance_complete = provenance is not None
 
     try:
         facts = fact_extractor.extract_facts(
             turns=[content], session_id=session_id,
             session_date=parsed_date, speaker_a=speaker,
         )
+        extraction_complete = facts is not None
     except Exception as _extract_exc:
+        _reraise_materialization_deferral(_extract_exc)
         # P0-1 (remember-write-04): an extractor EXCEPTION (transient LLM/embed
         # backend error) must NOT orphan the already-committed memory. The None
         # guard below only handled a None *return*, not a raise. Treat a raise
@@ -252,14 +567,14 @@ def run_store(
     # that fact extraction may abstract away (dates, names, specifics).
     # This ensures BM25 and semantic search can always find the original text.
     # V3.3.12: Extract entities from verbatim content so entity channel + temporal
-    # channel can find it (was entities=[] which made 4/6 channels blind).
+    # channel can find it (was entities=[] which blinded the entity-graph and temporal signals).
     # V3.3.20: Stronger verbatim filter — skip greetings, filler, short phrases.
     # Verbatim facts with just "Hey! How are you?" dilute embeddings and add noise.
     _MIN_VERBATIM_WORDS = 8
-    if (content.strip()
+    if (not queryable_facts
+            and content.strip()
             and len(content.strip()) >= 40
             and len(content.strip().split()) >= _MIN_VERBATIM_WORDS):
-        import uuid
         import re as _re
         _verbatim_text = content.strip()
         # Extract entities using the same regex as fact_extractor
@@ -285,12 +600,24 @@ def run_store(
         if verbatim.content.strip().lower() not in extracted_texts:
             facts.append(verbatim)
 
+    if queryable_facts:
+        # Replace any extractor-produced copy of the complete raw turn with the
+        # already-queryable projection, then promote that stable fact ID in
+        # place.  Large inputs may have a clamped queryable projection, so the
+        # projection itself is authoritative for the verbatim retrieval unit.
+        raw_text = content.strip().lower()
+        facts = [
+            fact for fact in facts
+            if fact.content.strip().lower() != raw_text
+            and fact.fact_id not in queryable_ids
+        ]
+        facts.extend(queryable_facts)
+
     # V3.3.21: If fact extraction produced nothing (short input like "this is test"),
     # store the raw content as a minimal fact. User explicitly called `slm remember` —
     # their data should NEVER be silently dropped. The min-length and min-word filters
     # are designed for automatic conversation extraction, not explicit user storage.
     if not facts and content.strip():
-        import uuid
         facts = [AtomicFact(
             fact_id=uuid.uuid4().hex[:16],
             content=content.strip(),
@@ -312,6 +639,17 @@ def run_store(
 
     stored_ids: list[str] = []
     for fact in facts:
+        try:
+            if _fact_is_tombstoned(db, profile_id, fact.fact_id):
+                continue
+        except _TombstoneReadError as _tse:
+            logger.error(
+                "Tombstone read error for %s, deferring ingestion: %s",
+                fact.fact_id[:16], _tse,
+            )
+            continue
+        if is_erasing(profile_id, fact.fact_id):
+            continue
         fact = enrich_fact(
             fact, record, profile_id,
             embedder=embedder,
@@ -319,9 +657,55 @@ def run_store(
             temporal_parser=temporal_parser,
         )
 
+        if (
+            materialization_progress is not None
+            and not materialization_progress.get("relational_started", False)
+        ):
+            if materialization_checkpoint is not None:
+                materialization_checkpoint(
+                    "relational_started",
+                    (),
+                    {
+                        "pipeline_started": True,
+                        "relational_started": True,
+                        "pipeline": False,
+                    },
+                )
+            materialization_progress["relational_started"] = True
+
+        is_queryable_promotion = fact.fact_id in queryable_ids
+        if is_queryable_promotion:
+            db.update_fact(fact.fact_id, {
+                "content": fact.content,
+                "fact_type": fact.fact_type,
+                "entities_json": fact.entities,
+                "canonical_entities_json": fact.canonical_entities,
+                "observation_date": fact.observation_date,
+                "referenced_date": fact.referenced_date,
+                "interval_start": fact.interval_start,
+                "interval_end": fact.interval_end,
+                "confidence": fact.confidence,
+                "importance": fact.importance,
+                "evidence_count": fact.evidence_count,
+                "access_count": fact.access_count,
+                "source_turn_ids_json": fact.source_turn_ids,
+                "session_id": fact.session_id,
+                "embedding": fact.embedding,
+                "fisher_mean": fact.fisher_mean,
+                "fisher_variance": fact.fisher_variance,
+                "lifecycle": fact.lifecycle,
+                "langevin_position": fact.langevin_position,
+                "emotional_valence": fact.emotional_valence,
+                "emotional_arousal": fact.emotional_arousal,
+                "signal_type": fact.signal_type,
+            })
         if consolidator:
             try:
-                action = consolidator.consolidate(fact, profile_id)
+                action = consolidator.consolidate(
+                    fact,
+                    profile_id,
+                    exclude_fact_ids=queryable_ids,
+                )
             except Exception as _consolidate_exc:
                 # P0-1 (remember-write-03): a consolidate failure (e.g. LLM
                 # timeout) must NOT orphan the already-committed memory. Fall
@@ -331,19 +715,31 @@ def run_store(
                     "consolidate() failed for fact %s — storing raw fact as "
                     "fallback: %s", fact.fact_id, _consolidate_exc,
                 )
+                consolidation_complete = False
                 action = None
 
             if action is not None:
                 if action.action_type.value == "noop":
-                    continue
+                    # A canonical ingestion projection already exists before
+                    # enrichment. Reconcile it against pre-existing facts and
+                    # remove it when consolidation proves it is a duplicate.
+                    target_id = action.existing_fact_id
+                    if is_queryable_promotion and target_id:
+                        db.delete_fact(fact.fact_id)
+                    existing_fact = db.get_fact(target_id) if target_id else None
+                    if existing_fact is None:
+                        continue
+                    fact = existing_fact
 
                 # Opinion confidence tracking: reinforce or decay
                 if fact.fact_type == FactType.OPINION and action.action_type.value == "update":
                     try:
-                        existing = db.get_fact(action.new_fact_id)
+                        existing = db.get_fact(
+                            action.existing_fact_id or action.new_fact_id
+                        )
                         if existing and existing.fact_type == FactType.OPINION:
                             new_conf = min(1.0, existing.confidence + 0.1)
-                            db.update_fact(action.new_fact_id, {"confidence": new_conf})
+                            db.update_fact(existing.fact_id, {"confidence": new_conf})
                     except Exception:
                         pass
                 elif fact.fact_type == FactType.OPINION and action.action_type.value == "supersede":
@@ -358,35 +754,39 @@ def run_store(
                         pass
 
                 if action.action_type.value in ("update", "supersede"):
-                    updated_fact = db.get_fact(action.new_fact_id)
-                    if updated_fact:
-                        # P1-2 (embeddings-vector-01): the merged/superseding
-                        # fact must reach the vector store (embed on-demand if
-                        # it has none) — otherwise it is invisible to the
-                        # semantic channel despite living in atomic_facts.
-                        _upsert_fact_vectors(
-                            updated_fact, profile_id, ann_index, vector_store, embedder,
+                    target_id = (
+                        (action.existing_fact_id or action.new_fact_id)
+                        if action.action_type.value == "update"
+                        else action.new_fact_id
+                    )
+                    if is_queryable_promotion and target_id != fact.fact_id:
+                        db.delete_fact(fact.fact_id)
+                    updated_fact = db.get_fact(target_id)
+                    if updated_fact is None:
+                        raise RuntimeError(
+                            f"consolidation {action.action_type.value} produced "
+                            f"missing fact {target_id}"
                         )
-                        if graph_builder:
-                            graph_builder.build_edges(updated_fact, profile_id)
-                        if observation_builder:
-                            for eid in updated_fact.canonical_entities:
-                                observation_builder.update_profile(
-                                    eid, updated_fact, profile_id,
-                                )
-                    stored_ids.append(action.new_fact_id)
-                    continue
+                    # Continue through the shared index/graph/temporal/
+                    # provenance stages.  The previous early continue made
+                    # UPDATE/SUPERSEDE facts look stored while skipping half of
+                    # canonical materialization.
+                    fact = updated_fact
                 # ADD case: consolidator already stored the fact (F8 fix)
                 # Fall through to post-processing below
             else:
                 # Consolidate failed → store the raw fact ourselves so the
                 # memory is never left without a retrievable fact, then fall
                 # through to post-processing (embeddings, graph, context).
-                db.store_fact(fact)
-        else:
+                if not is_queryable_promotion:
+                    db.store_fact(fact)
+        elif not is_queryable_promotion:
             db.store_fact(fact)
 
-        stored_ids.append(fact.fact_id)
+        if fact.fact_id not in stored_ids:
+            stored_ids.append(fact.fact_id)
+            if materialization_progress is not None:
+                materialization_progress["fact_ids"] = tuple(stored_ids)
 
         # Dual-write embedding to ANN index + vector store (embed on-demand if
         # a consolidated ADD fact arrived without one). See _upsert_fact_vectors.
@@ -461,21 +861,39 @@ def run_store(
                         len(invalidations), fact.fact_id,
                     )
             except Exception as exc:
+                temporal_complete = False
                 logger.debug(
                     "Temporal validation skipped for fact %s: %s",
                     fact.fact_id, exc,
                 )
 
+        # Phase 4b: fact-augmented key expansion (T3b). Index entity aliases /
+        # canonical names as BM25 alt-keys so paraphrased queries match. Mode A
+        # (entity graph) is zero-LLM and safe on the hot store path; LLM
+        # paraphrase enrichment (Mode B/C) is left to background consolidation.
+        try:
+            from superlocalmemory.core.key_expander import KeyExpander
+            _alt_keys = KeyExpander(db).expand(fact, profile_id, mode="a")
+            if _alt_keys:
+                db.upsert_fact_expansion(fact.fact_id, _alt_keys)
+        except Exception as exc:
+            logger.debug("Key expansion skipped for %s: %s", fact.fact_id, exc)
+
         if observation_builder:
             for eid in fact.canonical_entities:
                 observation_builder.update_profile(eid, fact, profile_id)
 
-        # Increment fact_count for each linked canonical entity
+        # The normalized association key makes this O(1) and exactly-once
+        # across retries, crashes, and separate operations that consolidate to
+        # the same fact.
         for eid in fact.canonical_entities:
-            try:
-                db.increment_entity_fact_count(eid)
-            except Exception:
-                pass  # Non-critical — entity may have been deleted
+            _record_fact_entity_association(
+                db,
+                operation_id=ingestion_operation_id,
+                profile_id=profile_id,
+                fact_id=fact.fact_id,
+                entity_id=eid,
+            )
         if scene_builder:
             scene_builder.assign_to_scene(fact, profile_id)
 
@@ -486,8 +904,17 @@ def run_store(
             from superlocalmemory.storage.models import TemporalEvent
             for eid in fact.canonical_entities:
                 event = TemporalEvent(
+                    event_id=_ingestion_effect_id(
+                        ingestion_operation_id,
+                        "temporal",
+                        fact.fact_id,
+                        eid,
+                        "observed",
+                    ),
                     profile_id=profile_id, entity_id=eid,
                     fact_id=fact.fact_id,
+                    scope=fact.scope,
+                    shared_with=fact.shared_with,
                     observation_date=fact.observation_date,
                     referenced_date=fact.referenced_date,
                     interval_start=fact.interval_start,
@@ -501,11 +928,21 @@ def run_store(
             from superlocalmemory.encoding.foresight import extract_foresight_signals
             from superlocalmemory.storage.models import TemporalEvent as _TE
             foresight_signals = extract_foresight_signals(fact)
-            for sig in foresight_signals:
+            for signal_index, sig in enumerate(foresight_signals):
                 f_event = _TE(
+                    event_id=_ingestion_effect_id(
+                        ingestion_operation_id,
+                        "temporal",
+                        fact.fact_id,
+                        sig.get("entity_id", ""),
+                        "foresight",
+                        signal_index,
+                    ),
                     profile_id=profile_id,
                     entity_id=sig.get("entity_id", ""),
                     fact_id=fact.fact_id,
+                    scope=fact.scope,
+                    shared_with=fact.shared_with,
                     interval_start=sig.get("start_time"),
                     interval_end=sig.get("end_time"),
                     description=sig.get("description", ""),
@@ -525,19 +962,57 @@ def run_store(
                 provenance.record(
                     fact_id=fact.fact_id,
                     profile_id=profile_id,
-                    source_type="store",
-                    source_id=session_id,
-                    created_by=speaker or "unknown",
+                    source_type=ingestion_source_type,
+                    source_id=ingestion_operation_id or session_id,
+                    created_by=trusted_actor_id or speaker or "unknown",
                 )
             except Exception:
-                pass
+                provenance_complete = False
+
+    stored_ids = _drop_resurrected_facts(
+        db, profile_id, stored_ids, vector_store, ann_index, retrieval_engine,
+    )
 
     logger.info("Stored %d facts (session=%s)", len(stored_ids), session_id)
 
+    if derivation_report is not None:
+        derivation_report.update({
+            "extraction": extraction_complete,
+            "canonicalization": canonicalization_complete,
+            "consolidation": consolidation_complete,
+            "graph": graph_complete,
+            "temporal": temporal_complete,
+            "provenance": provenance_complete,
+        })
+
+    # Stage observations and emitted fact IDs are recorded before optional
+    # post-hooks.  A hook failure must not erase the durable retry boundary and
+    # cause extraction/consolidation to run again.
+    if materialization_progress is not None:
+        materialization_progress["fact_ids"] = tuple(stored_ids)
+        materialization_progress["relational_complete"] = True
+        materialization_progress["post_hooks"] = False
+    if materialization_checkpoint is not None and stored_ids:
+        materialization_checkpoint(
+            "relational_complete",
+            tuple(stored_ids),
+            {
+                "pipeline_started": True,
+                "relational_started": True,
+                "pipeline": True,
+                "post_hooks": False,
+                "relational": True,
+                **dict(derivation_report or {}),
+            },
+        )
+
     # Post-operation hooks (audit, trust signal, event bus)
+    hook_ctx["ingestion_operation_id"] = ingestion_operation_id
     hook_ctx["fact_ids"] = stored_ids
     hook_ctx["fact_count"] = len(stored_ids)
     hooks.run_post("store", hook_ctx)
+    if materialization_progress is not None:
+        materialization_progress["post_hooks"] = True
 
     # Phase 5: Step-count trigger for lightweight consolidation (L7)
     if consolidation_engine is not None:
@@ -602,8 +1077,6 @@ def run_store_fact_direct(
         )
         fact.canonical_entities = list(canonical.values())
     db.store_fact(fact)
-    # v3.4.5: Incremental sync to CozoDB/LanceDB (F-04)
-    _sync_to_graph_backends(fact)
     if fact.embedding and ann_index:
         ann_index.add(fact.fact_id, fact.embedding)
     # V3.2: VectorStore upsert (dual-write)
@@ -615,6 +1088,9 @@ def run_store_fact_direct(
         )
     if graph_builder:
         graph_builder.build_edges(fact, profile_id)
+    # The graph projection must run after GraphBuilder: syncing immediately
+    # after SQLite fact insertion omitted every new fact edge from Cozo.
+    _sync_to_graph_backends(fact)
     # BM25 indexing
     bm25 = getattr(retrieval_engine, '_bm25', None) if retrieval_engine else None
     if bm25:
@@ -625,6 +1101,25 @@ def run_store_fact_direct(
 # ---------------------------------------------------------------------------
 # run_close_session  (was MemoryEngine.close_session)
 # ---------------------------------------------------------------------------
+
+def _session_already_summarised(
+    db: DatabaseManager,
+    profile_id: str,
+    session_id: str,
+) -> bool:
+    """True if close_session already wrote temporal summaries for this session."""
+    if not session_id:
+        return False
+    try:
+        rows = db.execute(
+            "SELECT 1 FROM temporal_events "
+            "WHERE profile_id = ? AND description LIKE ? LIMIT 1",
+            (profile_id, f"Session {session_id}:%"),
+        )
+        return bool(rows)
+    except Exception:
+        return False
+
 
 def run_close_session(
     session_id: str,
@@ -638,9 +1133,19 @@ def run_close_session(
     with session scope. Enables temporal queries like "What happened
     in session 3?"
 
+    Idempotent: if temporal summaries for this session already exist,
+    returns 0 without writing duplicates.
+
     Returns number of session summary events created.
     """
     from superlocalmemory.storage.models import TemporalEvent
+
+    if not session_id:
+        return 0
+
+    if _session_already_summarised(db, profile_id, session_id):
+        logger.debug("Session %s already summarised — skip close", session_id)
+        return 0
 
     facts = db.get_all_facts(profile_id)
     session_facts = [f for f in facts if f.session_id == session_id]

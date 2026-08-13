@@ -7,8 +7,8 @@
 All PyTorch/model work runs in a SEPARATE subprocess. The main process
 (dashboard, MCP, CLI) never imports torch and stays at ~60 MB.
 
-The worker subprocess auto-kills after 2 minutes idle, returning all
-memory to the OS. It respawns on next embed call (~3 sec cold start).
+The worker subprocess has a configurable idle timeout and respawns on the
+next embed call when it has been unloaded.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
 """
@@ -24,18 +24,19 @@ import sys
 import threading
 import time
 import weakref
+from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterator
 
 import numpy as np
+
+from superlocalmemory.core.config import EmbeddingConfig
 
 # Track all live embedding services for atexit cleanup
 _live_embedding_services: set[weakref.ref] = set()
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
-
-from superlocalmemory.core.config import EmbeddingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +62,21 @@ class DimensionMismatchError(RuntimeError):
 # This lock is the secondary safety net for when the daemon isn't available.
 # ---------------------------------------------------------------------------
 
-_EMBEDDING_LOCK_FILE = Path.home() / ".superlocalmemory" / ".embedding.lock"
-_EMBEDDING_PID_FILE = Path.home() / ".superlocalmemory" / ".embedding-worker.pid"
 _MAX_CONCURRENT_WORKERS = int(os.environ.get("SLM_MAX_EMBEDDING_WORKERS", 1))
 _embedding_lock_fd: int | None = None
+_embedding_lock_state_guard = threading.Lock()
+
+
+def _embedding_lock_file() -> Path:
+    from superlocalmemory.infra.data_root import state_path
+
+    return state_path(".embedding.lock")
+
+
+def _embedding_pid_file() -> Path:
+    from superlocalmemory.infra.data_root import state_path
+
+    return state_path(".embedding-worker.pid")
 
 
 def _is_embedding_worker_alive() -> bool:
@@ -74,76 +86,109 @@ def _is_embedding_worker_alive() -> bool:
     check if one is already running. Prevents duplicate 1.6GB workers.
     """
     try:
-        if not _EMBEDDING_PID_FILE.exists():
+        pid_file = _embedding_pid_file()
+        if not pid_file.exists():
             return False
-        pid = int(_EMBEDDING_PID_FILE.read_text().strip())
+        pid = int(pid_file.read_text().strip())
         os.kill(pid, 0)  # Signal 0 = check if alive
         return True
     except (ValueError, OSError, ProcessLookupError):
         # PID file invalid or process dead — clean up stale file
-        _EMBEDDING_PID_FILE.unlink(missing_ok=True)
+        _embedding_pid_file().unlink(missing_ok=True)
         return False
 
 
 def register_embedding_worker_pid(pid: int) -> None:
     """Write the embedding worker PID to the machine-wide PID file."""
-    _EMBEDDING_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _EMBEDDING_PID_FILE.write_text(str(pid))
+    pid_file = _embedding_pid_file()
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(pid))
 
 
 def acquire_embedding_lock(timeout: float = 5.0) -> bool:
     """Acquire system-wide embedding worker lock.
 
-    v3.4.13: First checks if a worker PID is already alive (fast path).
-    Falls back to fcntl.flock on Unix. On Windows, falls back to PID check only.
+    The caller must re-check the PID file after acquisition before spawning.
+    POSIX uses flock; Windows uses a one-byte msvcrt lock.
     Returns True if lock acquired (safe to spawn), False if another worker active.
     """
     global _embedding_lock_fd
 
-    # v3.4.13: Fast path — if a worker PID is alive, don't even try the lock
-    if _is_embedding_worker_alive():
-        return False
+    # Serialize local contenders as well as cross-process contenders. The file
+    # descriptor stays local until its OS lock succeeds, so a failed acquire
+    # can never overwrite and leak the descriptor that owns the live worker.
+    with _embedding_lock_state_guard:
+        if _embedding_lock_fd is not None:
+            return False
+        if _is_embedding_worker_alive():
+            return False
 
-    if sys.platform == "win32":
-        return True  # No file locking on Windows — PID check above is the guard
+        lock_file = _embedding_lock_file()
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        candidate_fd: int | None = None
+        try:
+            candidate_fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                try:
+                    if sys.platform == "win32":
+                        import msvcrt
 
-    import fcntl
-    _EMBEDDING_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+                        if os.fstat(candidate_fd).st_size == 0:
+                            os.write(candidate_fd, b"\0")
+                        os.lseek(candidate_fd, 0, os.SEEK_SET)
+                        msvcrt.locking(candidate_fd, msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
 
-    try:
-        _embedding_lock_fd = os.open(str(_EMBEDDING_LOCK_FILE), os.O_CREAT | os.O_RDWR)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                fcntl.flock(_embedding_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return True
-            except (BlockingIOError, OSError):
-                time.sleep(0.2)
-        # Timeout — another worker holds the lock
-        os.close(_embedding_lock_fd)
-        _embedding_lock_fd = None
-        return False
-    except Exception:
-        return True  # On error, allow through (don't block functionality)
+                        fcntl.flock(
+                            candidate_fd,
+                            fcntl.LOCK_EX | fcntl.LOCK_NB,
+                        )
+                    _embedding_lock_fd = candidate_fd
+                    return True
+                except (BlockingIOError, OSError):
+                    time.sleep(0.2)
+            os.close(candidate_fd)
+            return False
+        except Exception:
+            if candidate_fd is not None:
+                try:
+                    os.close(candidate_fd)
+                except OSError:
+                    pass
+            return False
 
 
 def release_embedding_lock() -> None:
     """Release system-wide embedding worker lock."""
     global _embedding_lock_fd
-    if _embedding_lock_fd is not None:
+    with _embedding_lock_state_guard:
+        if _embedding_lock_fd is None:
+            return
         try:
-            import fcntl
-            fcntl.flock(_embedding_lock_fd, fcntl.LOCK_UN)
+            if sys.platform == "win32":
+                import msvcrt
+
+                os.lseek(_embedding_lock_fd, 0, os.SEEK_SET)
+                msvcrt.locking(_embedding_lock_fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(_embedding_lock_fd, fcntl.LOCK_UN)
             os.close(_embedding_lock_fd)
         except Exception:
-            pass
+            try:
+                os.close(_embedding_lock_fd)
+            except OSError:
+                pass
         _embedding_lock_fd = None
 
 
-_IDLE_TIMEOUT_SECONDS = 300  # 5 minutes — balance cold-start vs RAM.
-# V3.4.37: Reduced from 1800 → 300. Holding 1.1 GB for 30 min idle
-# wastes RAM on laptops. 5 min covers bursty session_init+recall
-# patterns while freeing memory between sessions.
+_IDLE_TIMEOUT_SECONDS = 1800  # 30 minutes — keep interactive sessions warm.
+# V3.8.1: existing-user soaks showed that the five-minute policy repeatedly
+# recycled a ~1.1 GB local model and imposed 20-30 second cold starts. The
+# explicit environment override remains available for low-RAM installations.
 _IDLE_TIMEOUT_SECONDS = int(os.environ.get("SLM_EMBED_IDLE_TIMEOUT", _IDLE_TIMEOUT_SECONDS))
 # V3.3.21: Configurable response timeout — 180s default, but batch ingestion
 # (2-turn chunks across 10 conversations) needs 600s+ to survive cold-start
@@ -181,8 +226,10 @@ class EmbeddingService:
         self._last_used: float = 0.0
         self._idle_timer: threading.Timer | None = None
         self._worker_ready = False
+        self._owns_worker_lock = False
         self._request_count: int = 0
         self._http_client: object | None = None
+        self._remote_ready = False
 
         # Register for atexit cleanup (prevent orphaned workers)
         ref = weakref.ref(self, _live_embedding_services.discard)
@@ -210,30 +257,128 @@ class EmbeddingService:
         return self._available
 
     @property
+    def is_warm(self) -> bool:
+        """Return whether the configured backend has served a request.
+
+        ``is_available`` only means that the backend may be started.  A local
+        sentence-transformers cold start can take minutes on Apple Silicon, so
+        background enrichment must not mistake availability for readiness and
+        occupy the only worker ahead of an interactive recall.
+        """
+        config = getattr(self, "_config", None)
+        if config is not None and (
+            config.is_openai_compatible or config.is_cloud
+        ):
+            return bool(
+                getattr(self, "_remote_ready", False)
+                and self.is_available
+            )
+        proc = getattr(self, "_worker_proc", None)
+        if proc is None or getattr(self, "_request_count", 0) <= 0:
+            return False
+        try:
+            return proc.poll() is None
+        except Exception:
+            return False
+
+    @property
     def dimension(self) -> int:
         return self._config.dimension
 
-    def unload(self) -> None:
-        """Kill the worker subprocess to free all memory."""
-        with self._lock:
+    def unload(self, timeout: float = 1.0) -> bool:
+        """Release the worker without blocking daemon shutdown on an embed call.
+
+        An in-flight request owns ``_lock`` while it waits for the worker's
+        response.  Shutdown must not wait behind a wedged response: callers
+        can continue teardown and the worker process will be handled by the
+        process supervisor if necessary.
+        """
+        if not self._lock.acquire(timeout=max(0.0, timeout)):
+            logger.warning("EmbeddingService: unload skipped; embed worker is busy")
+            return False
+        try:
             self._kill_worker()
             logger.info("EmbeddingService: worker killed (idle timeout)")
+            return True
+        finally:
+            self._lock.release()
+
+    def shutdown(self, timeout: float = 1.0) -> None:
+        """Force bounded process teardown even when an embed call owns the lock.
+
+        Shutdown is stronger than the idle-time ``unload`` operation.  Once
+        the engine is closing, no new request may use this service, so it is
+        safe to detach and terminate a wedged child without waiting behind the
+        request lock.
+        """
+        acquired = self._lock.acquire(timeout=max(0.0, timeout))
+        try:
+            self._kill_worker(timeout=min(max(0.0, timeout), 1.0))
+        finally:
+            if acquired:
+                self._lock.release()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
+    @contextmanager
+    def _request_lock(self) -> Iterator[None]:
+        """Admit one model request without starving an interactive recall.
+
+        A background caller may pass the recall gate and then queue behind an
+        in-flight model request. If a recall arrives while it is queued, a
+        plain mutex can let that background caller retake the worker first.
+        Re-check the gate after acquiring the mutex so at most the already
+        running background request can delay a newly arrived recall.
+        """
+        from superlocalmemory.core.recall_gate import (
+            in_flight,
+            is_background_work,
+            wait_for_foreground_idle,
+        )
+
+        if not is_background_work():
+            with self._lock:
+                yield
+            return
+
+        while True:
+            wait_for_foreground_idle()
+            self._lock.acquire()
+            if in_flight() == 0:
+                break
+            self._lock.release()
+        try:
+            yield
+        finally:
+            self._lock.release()
+
     def embed(self, text: str) -> list[float] | None:
         """Embed a single text string. Returns list of floats or None."""
         if not text or not text.strip():
             raise ValueError("Cannot embed empty text")
+        from superlocalmemory.core.recall_gate import wait_for_foreground_idle
+        wait_for_foreground_idle()
         if self._config.is_openai_compatible:
-            vecs = self._openai_compatible_embed_batch([text])
-            vec = vecs[0]
-            self._validate_dimension(np.asarray(vec))
-            return vec
+            try:
+                vecs = self._openai_compatible_embed_batch([text])
+                vec = vecs[0]
+                self._validate_dimension(np.asarray(vec))
+                self._remote_ready = True
+                return vec
+            except Exception:
+                self._remote_ready = False
+                raise
         if self._config.is_cloud:
-            return self._cloud_embed_single(text)
+            try:
+                vec = self._cloud_embed_single(text)
+                self._validate_dimension(np.asarray(vec))
+                self._remote_ready = True
+                return vec
+            except Exception:
+                self._remote_ready = False
+                raise
         result = self._subprocess_embed([text])
         if result is None:
             return None
@@ -245,14 +390,34 @@ class EmbeddingService:
         """Embed a batch of texts."""
         if not texts:
             raise ValueError("Cannot embed empty batch")
+        from superlocalmemory.core.recall_gate import is_background_work
+        if is_background_work():
+            # A single large background batch can own the only local inference
+            # worker for tens of seconds. Slice it so a recall arriving after
+            # this call started gets priority before the next text.
+            return [self.embed(text) for text in texts]
         if self._config.is_openai_compatible:
-            results = self._openai_compatible_embed_batch(texts)
-            for vec in results:
-                if vec is not None:
-                    self._validate_dimension(np.asarray(vec))
-            return results
+            try:
+                results = self._openai_compatible_embed_batch(texts)
+                for vec in results:
+                    if vec is not None:
+                        self._validate_dimension(np.asarray(vec))
+                self._remote_ready = any(vec is not None for vec in results)
+                return results
+            except Exception:
+                self._remote_ready = False
+                raise
         if self._config.is_cloud:
-            return self._cloud_embed_batch(texts)
+            try:
+                results = self._cloud_embed_batch(texts)
+                for vec in results:
+                    if vec is not None:
+                        self._validate_dimension(np.asarray(vec))
+                self._remote_ready = any(vec is not None for vec in results)
+                return results
+            except Exception:
+                self._remote_ready = False
+                raise
         result = self._subprocess_embed(texts)
         if result is None:
             return [None] * len(texts)
@@ -289,7 +454,15 @@ class EmbeddingService:
         Includes a timeout (_SUBPROCESS_RESPONSE_TIMEOUT seconds) so the CLI
         never hangs indefinitely on cold model loads or network issues.
         """
-        with self._lock:
+        with self._request_lock():
+            # Only an explicit terminal disable (``False``) short-circuits. A
+            # ``None`` availability is the recall-health self-heal's "re-probe"
+            # signal (recall_health._heal_embedder) — it must fall through and
+            # respawn the worker, matching OllamaEmbedder's tri-state
+            # convention. Using ``not self._available`` here bricked the local
+            # worker on the first heal tick, because ``None`` is falsy.
+            if self._available is False:
+                return None
             # Worker recycling: restart after N requests to prevent
             # C++ allocator fragmentation over long-running sessions.
             if self._request_count >= _WORKER_RECYCLE_AFTER and self._worker_proc is not None:
@@ -334,7 +507,18 @@ class EmbeddingService:
                 resp = json.loads(resp_line)
                 if not resp.get("ok"):
                     logger.warning("Worker error: %s", resp.get("error"))
+                    # A well-formed worker error is a terminal local
+                    # dependency/model failure, not a transient pipe race.
+                    # Disable this service and terminate the child so every
+                    # recall does not respawn a heavyweight failing process.
+                    self._available = False
+                    self._kill_worker()
                     return None
+                # A successful embed proves the worker is healthy, so clear any
+                # transient/``None`` availability left by a self-heal re-probe
+                # back to a definite ``True``. Without this the flag lingers at
+                # ``None`` and the next ``not``-style check elsewhere re-blocks.
+                self._available = True
                 self._reset_idle_timer()
                 self._request_count += 1
                 return resp["vectors"]
@@ -367,7 +551,47 @@ class EmbeddingService:
 
     @staticmethod
     def _readline_with_timeout(stream, timeout_seconds: float) -> str:
-        """Read a line from stream with a timeout. Returns '' on timeout."""
+        """Read a line from stream with a timeout. Returns '' on timeout.
+
+        Prefer a deadline-driven selector poll of the stream's file descriptor
+        (POSIX pipes). That path never spawns a helper thread, so a hung
+        embedding worker cannot leak reader threads or pin the pipe FD across
+        timeouts. A thread fallback remains only for streams without a usable
+        fileno (unit-test mocks) and for Windows, where selectors cannot wait
+        on pipes.
+        """
+        import selectors
+
+        timeout_seconds = max(0.0, float(timeout_seconds))
+        fd: int | None
+        try:
+            raw_fd = stream.fileno()
+            fd = raw_fd if isinstance(raw_fd, int) else None
+        except (AttributeError, OSError, ValueError, TypeError):
+            fd = None
+
+        # Windows select()/selectors only accept sockets, not subprocess pipes.
+        if fd is not None and sys.platform != "win32":
+            try:
+                with selectors.DefaultSelector() as sel:
+                    sel.register(fd, selectors.EVENT_READ)
+                    events = sel.select(timeout=timeout_seconds)
+                if not events:
+                    logger.warning(
+                        "Embedding worker did not respond within %ds",
+                        timeout_seconds,
+                    )
+                    return ""
+                # Readable or EOF. Protocol is one JSON line per response;
+                # the worker writes a complete line before we are woken.
+                line = stream.readline()
+                return line if line else ""
+            except (OSError, ValueError) as exc:
+                # Closed/invalid FD mid-wait — same as empty to the caller
+                # (which kills and may respawn the worker).
+                logger.debug("Embedding readline selector failed: %s", exc)
+                return ""
+
         result_container: list[str] = []
         error_container: list[Exception] = []
 
@@ -377,7 +601,10 @@ class EmbeddingService:
             except Exception as exc:
                 error_container.append(exc)
 
-        reader = threading.Thread(target=_read, daemon=True)
+        # Name contains ``_read`` so leak detectors can find abandoned readers.
+        reader = threading.Thread(
+            target=_read, daemon=True, name="slm_embed_readline_read",
+        )
         reader.start()
         reader.join(timeout=timeout_seconds)
 
@@ -385,6 +612,25 @@ class EmbeddingService:
             logger.warning(
                 "Embedding worker did not respond within %ds", timeout_seconds,
             )
+            # Close/shutdown the stream so the blocked readline() returns and
+            # the reader thread can exit. Raising alone would leak the thread
+            # (and its FD) on Windows pipes and fileno-less mocks.
+            for closer_name in ("close", "shutdown"):
+                closer = getattr(stream, closer_name, None)
+                if not callable(closer):
+                    continue
+                try:
+                    if closer_name == "shutdown":
+                        try:
+                            closer(True)  # type: ignore[misc]
+                        except TypeError:
+                            closer()
+                    else:
+                        closer()
+                except Exception:
+                    pass
+            # Bound the join so a stuck closer cannot hang the caller forever.
+            reader.join(timeout=min(1.0, max(0.05, timeout_seconds)))
             return ""
         if error_container:
             raise error_container[0]
@@ -454,18 +700,32 @@ class EmbeddingService:
         v3.4.13: Machine-wide singleton — checks PID file before spawning.
         Only ONE embedding_worker can exist at a time on the machine.
         """
-        if self._worker_proc is not None and self._worker_proc.poll() is None:
-            return
-        self._worker_proc = None
+        if self._worker_proc is not None:
+            if self._worker_proc.poll() is None:
+                return
+            # An unexpectedly exited child still leaves this service holding
+            # its lifetime flock. Fully close the dead process and release that
+            # lock before attempting the normal acquire/spawn sequence. Merely
+            # dropping the Popen reference makes the process deadlock against
+            # its own old flock until the acquire timeout expires.
+            self._kill_worker()
 
-        # v3.4.13: Check if another worker is already alive (machine-wide)
+        # Serialize the check/spawn/register sequence across processes. Checking
+        # the PID file without this lock allows two cold callers to both see no
+        # worker and launch memory-heavy children.
+        if not acquire_embedding_lock():
+            logger.debug("Embedding worker owned by another process")
+            self._available = False
+            return
         if _is_embedding_worker_alive():
-            logger.debug("Embedding worker already alive (PID file), skipping spawn")
+            release_embedding_lock()
+            logger.debug("Embedding worker already alive after lock acquisition")
             self._available = False
             return
 
         # V3.3.28: Check memory pressure before spawning
         if not self._check_memory_pressure():
+            release_embedding_lock()
             logger.warning("Skipping embedding worker spawn due to memory pressure")
             self._available = False
             return
@@ -518,9 +778,23 @@ class EmbeddingService:
             )
             # v3.4.13: Register PID for machine-wide singleton guard
             register_embedding_worker_pid(self._worker_proc.pid)
+            self._owns_worker_lock = True
             logger.info("Embedding worker spawned (PID %d)", self._worker_proc.pid)
             self._worker_ready = True
         except Exception as exc:
+            failed_proc = self._worker_proc
+            if failed_proc is not None:
+                try:
+                    failed_proc.terminate()
+                    failed_proc.wait(timeout=3)
+                except Exception:
+                    try:
+                        failed_proc.kill()
+                        failed_proc.wait(timeout=3)
+                    except Exception:
+                        pass
+            release_embedding_lock()
+            self._owns_worker_lock = False
             logger.warning(
                 "Failed to spawn embedding worker: %s. "
                 "Run 'slm doctor' to verify your Python environment. "
@@ -530,28 +804,78 @@ class EmbeddingService:
             self._available = False
             self._worker_proc = None
 
-    def _kill_worker(self) -> None:
-        """Terminate worker subprocess."""
+    def _kill_worker(self, timeout: float = 3.0) -> None:
+        """Terminate the worker and close every owned pipe exactly once."""
         if self._idle_timer is not None:
             self._idle_timer.cancel()
             self._idle_timer = None
-        if self._worker_proc is not None:
-            try:
-                self._worker_proc.stdin.write('{"cmd":"quit"}\n')
-                self._worker_proc.stdin.flush()
-                self._worker_proc.wait(timeout=3)
-            except Exception:
-                try:
-                    self._worker_proc.kill()
-                except Exception:
-                    pass
+
+        proc = self._worker_proc
+        if proc is not None:
+            # Detach first so re-entrant/finalizer cleanup is idempotent.
             self._worker_proc = None
             self._worker_ready = False
+            try:
+                proc.stdin.write('{"cmd":"quit"}\n')
+                proc.stdin.flush()
+                proc.wait(timeout=max(0.0, timeout))
+            except Exception:
+                try:
+                    returncode = proc.poll()
+                except Exception:
+                    returncode = None
+                # MagicMock/unknown poll results are treated conservatively as
+                # live; a real exited child always reports an integer code.
+                if returncode is None or not isinstance(returncode, int):
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=max(0.0, timeout))
+                    except Exception:
+                        pass
+            finally:
+                # TextIOWrapper.close() can itself raise BrokenPipeError while
+                # flushing buffered stdin. Suppress it here, while the stream
+                # is still strongly referenced, so it cannot surface later as
+                # an unraisable finalizer warning.
+                for stream_name in ("stdin", "stdout", "stderr"):
+                    stream = getattr(proc, stream_name, None)
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except (BrokenPipeError, OSError, ValueError):
+                            pass
+        if getattr(self, "_owns_worker_lock", False):
+            try:
+                pid_file = _embedding_pid_file()
+                if (
+                    proc is not None
+                    and pid_file.exists()
+                    and pid_file.read_text().strip() == str(proc.pid)
+                ):
+                    pid_file.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                pass
+            finally:
+                self._owns_worker_lock = False
+                release_embedding_lock()
 
     def _reset_idle_timer(self) -> None:
-        """Reset idle timer — kills worker after 2 min inactivity."""
+        """Reset the configurable worker-idle timer.
+
+        F5 fix: opportunistically evict the worker mid-window when memory
+        pressure is detected (``_check_memory_pressure`` returns False).
+        This prevents the idle-timeout window from holding a worker alive
+        while system memory is exhausted.
+        """
         if self._idle_timer is not None:
             self._idle_timer.cancel()
+        if not self._check_memory_pressure():
+            # Pressure detected — kill worker immediately; do not schedule a
+            # new idle timer so no further embedding work is attempted until
+            # the next explicit request reloads the worker.
+            self._kill_worker()
+            self._idle_timer = None
+            return
         self._idle_timer = threading.Timer(
             _IDLE_TIMEOUT_SECONDS, self.unload,
         )
@@ -595,9 +919,32 @@ class EmbeddingService:
         client = self._get_http_client()
         last_error: Exception | None = None
         for attempt in range(max_retries):
+            from superlocalmemory.core.materialization_control import (
+                MaterializationDeferred,
+            )
+            from superlocalmemory.core.recall_gate import (
+                background_preempt_requested,
+                is_background_work,
+            )
+            if background_preempt_requested():
+                raise MaterializationDeferred(
+                    "background embedding yielded to runtime transition"
+                )
             try:
-                resp = client.post(endpoint, headers=headers, json=body)
+                request_kwargs = {"headers": headers, "json": body}
+                if is_background_work():
+                    # Runtime reconfigure drains admitted operations in five
+                    # seconds.  A background remote read must leave enough
+                    # scheduling margin to observe that transition and release
+                    # its lease, while interactive recall keeps the provider's
+                    # normal timeout budget.
+                    request_kwargs["timeout"] = 3.5
+                resp = client.post(endpoint, **request_kwargs)
                 resp.raise_for_status()
+                if background_preempt_requested():
+                    raise MaterializationDeferred(
+                        "background embedding yielded to runtime transition"
+                    )
                 data = resp.json()
                 if "data" not in data or not isinstance(data["data"], list):
                     raise ValueError(
@@ -613,6 +960,12 @@ class EmbeddingService:
                     )
                 return results
             except Exception as exc:
+                if isinstance(exc, MaterializationDeferred):
+                    raise
+                if background_preempt_requested():
+                    raise MaterializationDeferred(
+                        "background embedding yielded to runtime transition"
+                    ) from exc
                 last_error = exc
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
@@ -652,15 +1005,39 @@ class EmbeddingService:
         client = self._get_http_client()
         last_error: Exception | None = None
         for attempt in range(max_retries):
+            from superlocalmemory.core.materialization_control import (
+                MaterializationDeferred,
+            )
+            from superlocalmemory.core.recall_gate import (
+                background_preempt_requested,
+                is_background_work,
+            )
+            if background_preempt_requested():
+                raise MaterializationDeferred(
+                    "background embedding yielded to runtime transition"
+                )
             try:
-                resp = client.post(url, headers=headers, json=body)
+                request_kwargs = {"headers": headers, "json": body}
+                if is_background_work():
+                    request_kwargs["timeout"] = 3.5
+                resp = client.post(url, **request_kwargs)
                 resp.raise_for_status()
+                if background_preempt_requested():
+                    raise MaterializationDeferred(
+                        "background embedding yielded to runtime transition"
+                    )
                 data = resp.json()
                 results = []
                 for item in sorted(data["data"], key=lambda d: d["index"]):
                     results.append(item["embedding"])
                 return results
             except Exception as exc:
+                if isinstance(exc, MaterializationDeferred):
+                    raise
+                if background_preempt_requested():
+                    raise MaterializationDeferred(
+                        "background embedding yielded to runtime transition"
+                    ) from exc
                 last_error = exc
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)

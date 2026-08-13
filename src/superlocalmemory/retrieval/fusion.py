@@ -8,7 +8,7 @@ Single-pass RRF with k=15 for sharp rank discrimination on small candidate pools
 V1 had triple re-fusion which destroyed rankings — fixed in V2.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
-License: Elastic-2.0
+License: AGPL-3.0-or-later
 """
 from __future__ import annotations
 
@@ -74,5 +74,8 @@ def weighted_rrf(
             fused += w / (k + rank)
         results.append(FusionResult(fid, fused, ch_ranks, ch_scores))
 
-    results.sort(key=lambda r: r.fused_score, reverse=True)
+    # Deterministic total order: fused score descending, ties broken by fact_id.
+    # Sorting on score alone left tied results in set-iteration order, which
+    # varies with the process hash seed.
+    results.sort(key=lambda r: (-r.fused_score, r.fact_id))
     return results

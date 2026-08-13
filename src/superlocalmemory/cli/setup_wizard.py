@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 
 # ---------------------------------------------------------------------------
@@ -31,15 +32,9 @@ from pathlib import Path
 # WP-07: resolve via slm_home() so all 3 env aliases are honoured.
 # Fallback keeps stdlib-only path if the import fails during early bootstrap.
 def _resolve_slm_home() -> Path:
-    try:
-        from superlocalmemory.cli._lazy_init import slm_home
-        return slm_home()
-    except Exception:
-        return Path(os.environ.get("SL_MEMORY_PATH", "") or Path.home() / ".superlocalmemory")
+    from superlocalmemory.infra.data_root import canonical_data_root
 
-
-_SLM_HOME = _resolve_slm_home()
-_SETUP_MARKER = _SLM_HOME / ".setup-complete"
+    return canonical_data_root()
 _EMBED_MODEL = "nomic-ai/nomic-embed-text-v1.5"
 _RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-12-v2"
 # v3.6.10: compulsory LLMLingua-2 prose compression model (~560MB, aggressive mode).
@@ -61,7 +56,7 @@ def is_interactive() -> bool:
 
 def is_setup_complete() -> bool:
     """True if the setup wizard has been run at least once."""
-    return _SETUP_MARKER.exists()
+    return (_resolve_slm_home() / ".setup-complete").exists()
 
 
 def needs_setup() -> bool:
@@ -105,6 +100,25 @@ def _get_ram_gb() -> float:
     return 0.0
 
 
+def _ollama_available() -> bool:
+    """True if a local Ollama server is reachable (or its binary is installed).
+
+    v3.8.2: used to RECOMMEND Mode B at setup with a single keypress. Bounded
+    and fail-safe — a slow/absent Ollama never blocks or slows the wizard.
+    """
+    try:
+        import httpx
+
+        if httpx.get("http://localhost:11434/api/tags", timeout=1.5).status_code == 200:
+            return True
+    except Exception:
+        pass
+    try:
+        return shutil.which("ollama") is not None
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Model download
 # ---------------------------------------------------------------------------
@@ -119,17 +133,19 @@ def _download_model(model_name: str, label: str) -> bool:
     print(f"\n  Downloading {label}: {model_name}")
     print(f"  (this may take a few minutes on first run)\n")
 
+    # H-03: pass the model name as argv, never interpolated into executed
+    # source, so a crafted model_name cannot become arbitrary Python.
     script = (
-        f"import sys; "
-        f"from sentence_transformers import SentenceTransformer; "
-        f"m = SentenceTransformer('{model_name}', trust_remote_code=True); "
-        f"d = m.get_sentence_embedding_dimension(); "
-        f"print(f'OK dim={{d}}'); "
+        "import sys; "
+        "from sentence_transformers import SentenceTransformer; "
+        "m = SentenceTransformer(sys.argv[1], trust_remote_code=True); "
+        "d = m.get_sentence_embedding_dimension(); "
+        "print(f'OK dim={d}'); "
     )
 
     try:
         result = subprocess.run(
-            [sys.executable, "-c", script],
+            [sys.executable, "-c", script, model_name],
             timeout=600,  # 10 min for large model downloads
             capture_output=False,  # Show download progress
             text=True,
@@ -161,15 +177,16 @@ def _download_reranker(model_name: str) -> bool:
     print(f"\n  Downloading reranker: {model_name}")
     print(f"  (cross-encoder for result re-ranking)\n")
 
+    # H-03: model name via argv, never interpolated into executed source.
     script = (
-        f"from sentence_transformers import CrossEncoder; "
-        f"m = CrossEncoder('{model_name}', trust_remote_code=True); "
-        f"print('OK'); "
+        "import sys; from sentence_transformers import CrossEncoder; "
+        "m = CrossEncoder(sys.argv[1], trust_remote_code=True); "
+        "print('OK'); "
     )
 
     try:
         result = subprocess.run(
-            [sys.executable, "-c", script],
+            [sys.executable, "-c", script, model_name],
             timeout=300,
             capture_output=False,
             text=True,
@@ -200,16 +217,17 @@ def _download_compressor(model_name: str) -> bool:
     print(f"\n  Downloading compression model: {model_name}")
     print(f"  (LLMLingua-2 prose compressor, ~560MB — aggressive mode only)\n")
 
+    # H-03: model name via argv, never interpolated into executed source.
     script = (
-        "from llmlingua import PromptCompressor; "
-        f"PromptCompressor(model_name='{model_name}', use_llmlingua2=True, "
+        "import sys; from llmlingua import PromptCompressor; "
+        "PromptCompressor(model_name=sys.argv[1], use_llmlingua2=True, "
         "device_map='cpu'); "
         "print('OK')"
     )
 
     try:
         result = subprocess.run(
-            [sys.executable, "-c", script],
+            [sys.executable, "-c", script, model_name],
             timeout=900,  # 560MB on a slow link can exceed 5 min
             capture_output=False,
             text=True,
@@ -231,6 +249,82 @@ def _download_compressor(model_name: str) -> bool:
     except Exception as exc:
         print(f"  ✗ Compression model error: {exc}")
         return False
+
+
+# ---------------------------------------------------------------------------
+# Embedding-provider detection (v3.7.6 #72)
+# ---------------------------------------------------------------------------
+
+def _embedding_is_remote(config: Any) -> bool:
+    """True when embeddings come from a remote/OpenAI-compatible endpoint.
+
+    In that case the local sentence-transformers download (768d nomic) is
+    unnecessary and would only waste bandwidth/disk (#72). Detection is by
+    provider name or the presence of a configured HTTP endpoint.
+    """
+    emb = getattr(config, "embedding", None)
+    if emb is None:
+        return False
+    provider = (getattr(emb, "provider", "") or "").strip().lower()
+    endpoint = (
+        getattr(emb, "api_endpoint", "")
+        or getattr(emb, "base_url", "")
+        or ""
+    )
+    return provider in ("openai", "openai-compatible", "remote") or bool(endpoint)
+
+
+def _reranker_is_remote(config: Any) -> bool:
+    """True when reranking runs against a remote endpoint (v3.8.12, #105).
+
+    In that case the local ~130MB English cross-encoder download is pointless
+    — and worse, misleading, since it is not the model that will score recall.
+    Unlike embeddings, the endpoint alone is NOT sufficient: a stray endpoint
+    against a local backend is a misconfiguration the engine reports, not a
+    remote setup.
+    """
+    rt = getattr(config, "retrieval", None)
+    if rt is None:
+        return False
+    backend = (getattr(rt, "cross_encoder_backend", "") or "").strip().lower()
+    endpoint = getattr(rt, "cross_encoder_endpoint", "") or ""
+    return backend in ("openai", "remote") and bool(endpoint)
+
+
+# Remote-reranker keys the wizard never asks about. ``retrieval`` is otherwise
+# a mode-owned block that the wizard resets from the template, which would
+# silently delete a working remote endpoint on every re-run (#105).
+_USER_OWNED_RETRIEVAL_KEYS = (
+    "cross_encoder_backend",
+    "cross_encoder_endpoint",
+    "cross_encoder_api_key",
+    "cross_encoder_model",
+    "cross_encoder_timeout_seconds",
+)
+
+
+def _build_wizard_config(mode):
+    """Apply mode-owned presets without erasing existing user-owned blocks."""
+    from superlocalmemory.core.config import SLMConfig
+    from superlocalmemory.infra.data_root import state_path
+
+    template = SLMConfig.for_mode(mode)
+    if not state_path("config.json").exists():
+        return template
+    existing = SLMConfig.load()
+    existing.mode = mode
+    existing.llm = template.llm
+    preserved = {
+        key: getattr(existing.retrieval, key)
+        for key in _USER_OWNED_RETRIEVAL_KEYS
+        if hasattr(existing.retrieval, key)
+    }
+    existing.retrieval = template.retrieval
+    for key, value in preserved.items():
+        setattr(existing.retrieval, key, value)
+    existing.math = template.math
+    existing.channel_weights = template.channel_weights
+    return existing
 
 
 # ---------------------------------------------------------------------------
@@ -290,8 +384,9 @@ def _verify_installation() -> bool:
 
 def _mark_complete() -> None:
     """Write .setup-complete marker file."""
-    _SLM_HOME.mkdir(parents=True, exist_ok=True)
-    _SETUP_MARKER.write_text(
+    slm_root = _resolve_slm_home()
+    slm_root.mkdir(parents=True, exist_ok=True)
+    (slm_root / ".setup-complete").write_text(
         f"setup_completed={time.strftime('%Y-%m-%dT%H:%M:%S')}\n"
         f"python={sys.executable}\n"
         f"platform={platform.system()}\n"
@@ -311,10 +406,11 @@ def run_wizard(auto: bool = False) -> None:
               or CI environments).
     """
     interactive = is_interactive() and not auto
+    slm_root = _resolve_slm_home()
 
     print()
     print("╔══════════════════════════════════════════════════════════╗")
-    print("║  SuperLocalMemory V3 — The Unified Brain               ║")
+    print("║  SuperLocalMemory V4 — The Unified Brain               ║")
     print("║  by Varun Pratap Bhardwaj / Qualixar                   ║")
     print("╚══════════════════════════════════════════════════════════╝")
     print()
@@ -329,7 +425,7 @@ def run_wizard(auto: bool = False) -> None:
     print(f"  Platform: {platform.system()} {platform.machine()}")
     if ram_gb > 0:
         print(f"  RAM:      {ram_gb:.1f} GB {'✓' if ram_gb >= 4 else '⚠ (4GB+ recommended)'}")
-    print(f"  Data dir: {_SLM_HOME}")
+    print(f"  Data dir: {slm_root}")
 
     # Check sentence-transformers
     st_ok = False
@@ -347,14 +443,23 @@ def run_wizard(auto: bool = False) -> None:
         return
 
     # -- Step 2: Mode selection --
+    # v3.8.2: pre-detect Ollama so we can recommend Mode B with one keypress.
+    # No detection → zero-config Mode A. (Non-interactive always stays A: Mode B
+    # needs a pulled model, so we never assume it without the user confirming.)
+    ollama_present = _ollama_available()
+    default_mode = "b" if ollama_present else "a"
     print()
     print("─── Step 2/10: Choose Operating Mode ───")
     print()
-    print("  [A] Local Guardian (recommended)")
-    print("      Zero cloud. Zero LLM. Full privacy.")
-    print("      EU AI Act compliant. Works immediately.")
+    if ollama_present:
+        print("  ✓ Ollama detected on this machine — Mode B recommended.")
+        print("    Press Enter to accept, or pick another mode.")
+        print()
+    print("  [A] Local Guardian" + ("" if ollama_present else " (recommended)"))
+    print("      No model-provider call in the core memory path.")
+    print("      Review optional integrations and network policy for your deployment.")
     print()
-    print("  [B] Smart Local")
+    print("  [B] Smart Local" + (" (recommended — Ollama detected)" if ollama_present else ""))
     print("      Local LLM via Ollama for enrichment.")
     print("      Data stays on your machine.")
     print()
@@ -364,10 +469,13 @@ def run_wizard(auto: bool = False) -> None:
     print()
 
     if interactive:
-        choice = _prompt("  Select mode [A/B/C] (default: A): ", "a").lower()
+        choice = _prompt(
+            f"  Select mode [A/B/C] (default: {default_mode.upper()}): ",
+            default_mode,
+        ).lower()
     else:
         choice = "a"
-        print("  Auto-selecting Mode A (non-interactive)")
+        print("  Auto-selecting Mode A (non-interactive, zero-config)")
 
     if choice not in ("a", "b", "c"):
         print(f"  Invalid choice '{choice}', using Mode A.")
@@ -377,7 +485,7 @@ def run_wizard(auto: bool = False) -> None:
     from superlocalmemory.storage.models import Mode
 
     mode_map = {"a": Mode.A, "b": Mode.B, "c": Mode.C}
-    config = SLMConfig.for_mode(mode_map[choice])
+    config = _build_wizard_config(mode_map[choice])
 
     # -- Multi-scope (shared memory) opt-in — v3.6.15 --
     # OFF by default: your memories stay private to this profile (3.6.14 behaviour).
@@ -443,8 +551,8 @@ def run_wizard(auto: bool = False) -> None:
     code_graph_enabled = cg_choice in ("", "y", "yes")
 
     # Write code graph config
-    _SLM_HOME.mkdir(parents=True, exist_ok=True)
-    cg_config_path = _SLM_HOME / "code_graph_config.json"
+    slm_root.mkdir(parents=True, exist_ok=True)
+    cg_config_path = slm_root / "code_graph_config.json"
     import json
     cg_config_data = {"enabled": code_graph_enabled, "bridge_enabled": code_graph_enabled}
     cg_config_path.write_text(json.dumps(cg_config_data, indent=2))
@@ -455,11 +563,35 @@ def run_wizard(auto: bool = False) -> None:
     else:
         print(f"\n  ✓ CodeGraph disabled (enable later in {cg_config_path})")
 
+    # v3.8.2: up-front download summary so a large pull is never a surprise on
+    # a metered/slow link. Sizes approximate, one-time, cached locally.
+    if st_ok and not _embedding_is_remote(config):
+        print()
+        print("  Models to download (one-time, cached locally):")
+        print("    • Embedding model   ~500 MB  — required for semantic recall")
+        print("    • Reranker model    ~130 MB  — result quality")
+        print("    • Compression model ~560 MB  — optional (you'll be asked)")
+
     # -- Step 4: Download models --
     print()
+    # H-06 (CVE-2025-14926): a malicious HuggingFace checkpoint can execute code
+    # at load time. SLM only downloads its pinned defaults, but warn users who
+    # point config at a custom model.
+    print("  ⚠ Only install models from sources you trust — a malicious model")
+    print("    checkpoint can run code on your machine at load time. See SECURITY.md.")
     print("─── Step 4/10: Download Embedding Model ───")
 
-    if not st_ok:
+    if _embedding_is_remote(config):
+        # v3.7.6 (#72): a remote/OpenAI-compatible embedding endpoint supplies
+        # its own vectors (any width, e.g. 1024d Qwen3-Embedding), so pulling the
+        # local 768d nomic model would be wasted bandwidth and could imply a
+        # dimension that does not match the endpoint.
+        emb = config.embedding
+        print("  ✓ Skipped — remote/OpenAI-compatible embedding endpoint configured")
+        print(f"    provider={getattr(emb, 'provider', '?')}, "
+              f"dimension={getattr(emb, 'dimension', '?')}")
+        print("    No local embedding model needed.")
+    elif not st_ok:
         print("  ⚠ Skipped (sentence-transformers not installed)")
         print("    Models will download on first use.")
     else:
@@ -470,14 +602,39 @@ def run_wizard(auto: bool = False) -> None:
     print()
     print("─── Step 4b/10: Download Reranker Model ───")
 
-    if not st_ok:
+    if _reranker_is_remote(config):
+        # v3.8.12 (#105): a remote /v1/rerank endpoint scores the results, so
+        # the local English cross-encoder would be dead weight on disk.
+        rt = config.retrieval
+        print("  ✓ Skipped — remote rerank endpoint configured")
+        print(f"    backend={getattr(rt, 'cross_encoder_backend', '?')}, "
+              f"model={getattr(rt, 'cross_encoder_model', '?')}")
+        print("    No local reranker model needed.")
+    elif not st_ok:
         print("  ⚠ Skipped (sentence-transformers not installed)")
     else:
         _download_reranker(_RERANKER_MODEL)
 
     print()
-    print("─── Step 4c/10: Download Compression Model (LLMLingua-2) ───")
-    _download_compressor(_COMPRESSOR_MODEL)
+    print("─── Step 4c/10: Compression Model (LLMLingua-2, ~560MB) ───")
+    print("  Only used for aggressive prompt compression. It also downloads")
+    print("  automatically the first time you enable that feature — so skipping")
+    print("  here is safe.")
+    # v3.8.2: consent-gate the 560MB compressor (was unconditional). Skip by
+    # default; it lazy-downloads on first real use of compression.
+    if not st_ok:
+        print("  ⚠ Skipped (sentence-transformers not installed)")
+    elif interactive:
+        comp_choice = _prompt(
+            "  Download the ~560MB compression model now? [y/N] (default: N): ",
+            "n",
+        ).lower()
+        if comp_choice in ("y", "yes"):
+            _download_compressor(_COMPRESSOR_MODEL)
+        else:
+            print("  ✓ Skipped — downloads automatically when you enable compression.")
+    else:
+        print("  ✓ Skipped (non-interactive) — downloads on first use.")
 
     # -- Step 5: Daemon Configuration (v3.4.3) --
     print()
@@ -556,7 +713,7 @@ def run_wizard(auto: bool = False) -> None:
             if name in adapters_config:
                 adapters_config[name] = True
 
-    adapters_path = _SLM_HOME / "adapters.json"
+    adapters_path = slm_root / "adapters.json"
     import json as _json
     adapters_path.write_text(_json.dumps(
         {k: {"enabled": v, "tier": "polling"} for k, v in adapters_config.items()},
@@ -599,22 +756,26 @@ def run_wizard(auto: bool = False) -> None:
     print("  It detects degradation, generates improvements, and verifies them blindly.")
     print("  Requires an LLM backend (Claude CLI, Ollama, or API key).")
     print()
+    print("  OFF by default — when enabled it makes background LLM calls.")
     print("  [Y] Enable Skill Evolution")
-    print("  [N] Disable (can enable later: slm config set evolution.enabled true)")
+    print("  [N] Keep disabled (enable later: slm config set evolution.enabled true)")
     print()
 
+    # v3.8.2: default OFF (was Y) — consistent with the npm profiles and no
+    # surprise outbound LLM calls for a fresh user. Opt-in, not opt-out.
     if interactive:
-        evo_choice = _prompt("  Enable Skill Evolution? [Y/n] (default: Y): ", "y").lower()
+        evo_choice = _prompt("  Enable Skill Evolution? [y/N] (default: N): ", "n").lower()
     else:
-        evo_choice = "y"
-        print("  Auto-enabling Skill Evolution (non-interactive)")
+        evo_choice = "n"
+        print("  Skill Evolution stays OFF (non-interactive) — enable later with:")
+        print("    slm config set evolution.enabled true")
 
-    evolution_enabled = evo_choice in ("", "y", "yes")
+    evolution_enabled = evo_choice in ("y", "yes")
 
     # Write evolution config to config.json directly
     # (SLMConfig.save() doesn't serialize evolution)
-    _SLM_HOME.mkdir(parents=True, exist_ok=True)
-    evo_config_path = _SLM_HOME / "config.json"
+    slm_root.mkdir(parents=True, exist_ok=True)
+    evo_config_path = slm_root / "config.json"
     evo_cfg: dict = {}
     if evo_config_path.exists():
         try:
@@ -649,7 +810,7 @@ def run_wizard(auto: bool = False) -> None:
             prompt_v3426_options,
             validate_install_data_dir,
         )
-        ok, reason = validate_install_data_dir(_SLM_HOME)
+        ok, reason = validate_install_data_dir(slm_root)
         if not ok:
             print()
             print("  ⚠ Data directory check failed:")
@@ -657,10 +818,15 @@ def run_wizard(auto: bool = False) -> None:
                 print(f"    {line}")
             print()
         v3426_opts = prompt_v3426_options(interactive=interactive)
-        persist_v3426_options(v3426_opts, _SLM_HOME)
+        persist_v3426_options(v3426_opts, slm_root)
     except Exception as exc:
         # Wizard must never crash over an advisory feature.
         print(f"  (v3.4.26 options step skipped: {exc})")
+
+    # External IDE configuration and login-time services cross ownership
+    # boundaries. They require explicit consent even inside the setup wizard.
+    _configure_external_integrations(interactive=interactive)
+    _configure_autostart(interactive=interactive)
 
     # -- Done --
     _mark_complete()
@@ -692,27 +858,30 @@ def run_wizard(auto: bool = False) -> None:
     else:
         print("  Adapters: none (enable via: slm adapters enable gmail)")
     print()
+    # v3.8.2: surface component self-heal status so the user leaves setup
+    # KNOWING everything they need is present — or exactly what to run if not.
+    try:
+        from superlocalmemory.core import component_registry as _cr
+
+        _sum = _cr.snapshot(config)["summary"]
+        if _sum.get("healthy"):
+            print("  ✓ All components ready — models and dependencies present.")
+        else:
+            print(f"  ⚠ {_sum.get('missing', 0)} component(s) need attention.")
+            print("    SLM auto-repairs fixable ones on daemon start. To check/fix now:")
+            print("      slm doctor          (auto-fix: slm doctor --fix)")
+    except Exception:
+        pass
+    print()
     print("  Quick start:")
     print('    slm remember "your first memory"')
     print('    slm recall "search query"')
     print("    slm dashboard              → http://localhost:8765")
     print("    slm adapters enable gmail  → start Gmail ingestion")
     print()
-    # V3.4.4: Auto-install OS service for daemon persistence (survive reboots)
-    try:
-        from superlocalmemory.cli.service_installer import install_service
-        print("  Installing OS service for auto-start...")
-        if install_service():
-            print("  ✓ SLM will auto-start on login — zero friction.")
-        else:
-            print("  ⚠ OS service not installed (run: slm serve install)")
-    except Exception:
-        print("  ⚠ Could not install OS service (run: slm serve install)")
-
-    print()
     print("  Need help?")
-    print("    slm doctor     — diagnose issues")
-    print("    slm --help     — all commands")
+    print("    slm help       — every command, grouped (try: slm help self-heal)")
+    print("    slm doctor     — diagnose issues (auto-fix: slm doctor --fix)")
     print("    slm serve install — install auto-start service")
     print("    https://github.com/qualixar/superlocalmemory")
     print()
@@ -728,12 +897,14 @@ def check_first_use(command: str) -> None:
     Called from main.py before dispatching any command.
     Skips for commands that don't need setup (setup, hook, --version, --help).
 
-    On first use, also auto-installs Claude Code hooks so pip installs have
-    the same "it just works" experience as npm installs (npm does this via
-    postinstall; pip has no postinstall, so we do it here).
+    First use may initialize SLM-owned defaults, but it never edits an IDE,
+    installs a plugin, or creates an operating-system service. Those external
+    mutations require explicit consent inside ``slm setup``.
     """
     # Commands that work without setup
-    _SKIP_COMMANDS = {"setup", "init", "hook", "hooks", "reap", "mcp"}
+    _SKIP_COMMANDS = {
+        "setup", "init", "hook", "hooks", "reap", "mcp", "diagnostics",
+    }
     if command in _SKIP_COMMANDS:
         return
 
@@ -746,16 +917,15 @@ def check_first_use(command: str) -> None:
     # any lazy-init content (e.g. a pre-existing mode-A skeleton).
     if not is_interactive():
         try:
-            from superlocalmemory.core.config import SLMConfig, DEFAULT_BASE_DIR
+            from superlocalmemory.core.config import SLMConfig
             from superlocalmemory.storage.models import Mode
-            config_path = DEFAULT_BASE_DIR / "config.json"
+            config_path = _resolve_slm_home() / "config.json"
             if not config_path.exists():
                 cfg = SLMConfig.for_mode(Mode.A)
                 cfg.save(mode_change=True)
             _mark_complete()
         except Exception:
             pass
-        _maybe_install_hooks_on_first_use()
         return
 
     # Interactive: run the full wizard
@@ -763,39 +933,99 @@ def check_first_use(command: str) -> None:
     print("  First time using SuperLocalMemory!")
     print("  Running setup wizard...\n")
     run_wizard()
-    _maybe_install_hooks_on_first_use()
 
 
-def _maybe_install_hooks_on_first_use() -> None:
-    """Install Claude Code hooks on first SLM run — matches npm postinstall.
+def _configure_external_integrations(*, interactive: bool) -> bool:
+    """Request consent before editing Claude Code configuration.
 
-    Install/uninstall parity rules:
-      * Skip if the user explicitly opted out via ``slm hooks remove``
-        (creates ``~/.superlocalmemory/hooks/.hooks-disabled``).
-      * Skip if Claude Code isn't installed (no ``~/.claude/settings.json``
-        to merge into).
-      * Silent + best-effort: never fail a CLI command because of this.
+    v3.8.2: after the Claude Code step, a pip user can also wire every OTHER
+    detected IDE in one step (previously only Claude Code was offered here;
+    other IDEs required a manual `slm connect <ide>` each).
     """
+    print()
+    print("  Optional Claude Code integration can install the SLM plugin and hooks.")
+    if not interactive:
+        print("  Skipped in non-interactive setup. Run: slm connect claude-code")
+        return False
+    changed = False
+    choice = _prompt(
+        "  Install Claude Code plugin and hooks now? [y/N] (default: N): ",
+        "n",
+    ).lower()
+    if choice in ("y", "yes"):
+        changed = _install_external_integrations()
+    else:
+        print("  Skipped. Run `slm connect claude-code` when ready.")
+    # v3.8.2: offer to connect all other detected IDEs (Cursor, VS Code, …).
+    changed = _configure_other_ides(interactive=interactive) or changed
+    return changed
+
+
+def _configure_other_ides(*, interactive: bool) -> bool:
+    """Consent-gated: connect all OTHER detected IDEs (Cursor, VS Code, …).
+
+    Uses the same IDEConnector the dashboard uses. Best-effort — a failure to
+    detect or connect any single IDE never blocks setup.
+    """
+    if not interactive:
+        return False
     try:
-        opt_out = _SLM_HOME / "hooks" / ".hooks-disabled"
-        if opt_out.exists():
-            return
-        claude_settings = Path.home() / ".claude" / "settings.json"
-        if not claude_settings.exists():
-            return  # Claude Code not installed — nothing to hook into.
-        from superlocalmemory.hooks.claude_code_hooks import install_hooks
-        install_hooks()
+        from superlocalmemory.hooks.ide_connector import IDEConnector
+
+        connector = IDEConnector()
+        installed = [s for s in connector.get_status() if s.get("installed")]
     except Exception:
-        # Best-effort: parity-fallback, never block CLI.
+        return False
+    others = [s for s in installed if s.get("id") not in ("claude-code", "claude")]
+    if not others:
+        return False
+    names = ", ".join(s.get("name", s.get("id")) for s in others)
+    print()
+    print(f"  Detected other IDEs: {names}")
+    print("  SLM can wire them all so memory works across every editor.")
+    choice = _prompt("  Connect them now? [Y/n] (default: Y): ", "y").lower()
+    if choice not in ("", "y", "yes"):
+        print("  Skipped. Connect any later with: slm connect <ide>")
+        return False
+    changed = False
+    for s in others:
+        ide_id = s.get("id")
+        label = s.get("name", ide_id)
+        try:
+            if connector.connect(ide_id):
+                print(f"    ✓ {label}")
+                changed = True
+            else:
+                print(f"    ⚠ {label} — connect later: slm connect {ide_id}")
+        except Exception:
+            print(f"    ⚠ {label} — connect later: slm connect {ide_id}")
+    return changed
+
+
+def _install_external_integrations() -> bool:
+    """Install Claude Code hooks/plugin after explicit setup consent.
+
+    Installation rules:
+      * Skip if the user explicitly opted out via ``slm hooks remove``
+      * Skip hook configuration if Claude Code has no settings file.
+      * Best-effort: setup remains usable when Claude Code is unavailable.
+    """
+    changed = False
+    try:
+        opt_out = _resolve_slm_home() / "hooks" / ".hooks-disabled"
+        claude_settings = Path.home() / ".claude" / "settings.json"
+        if not opt_out.exists() and claude_settings.exists():
+            from superlocalmemory.hooks.claude_code_hooks import install_hooks
+            changed = bool(install_hooks()) or changed
+    except Exception:
+        # Best-effort: never block setup over an optional integration.
         pass
 
-    # T1-B: Auto-install Claude Code plugin (skills, agents, hooks).
-    # Runs after hooks install, best-effort — never blocks CLI startup.
-    _try_install_claude_plugin()
+    return _try_install_claude_plugin() or changed
 
 
-def _try_install_claude_plugin() -> None:
-    """Auto-install the Claude Code plugin on first pip/uvx SLM install.
+def _try_install_claude_plugin() -> bool:
+    """Install the Claude Code plugin after explicit setup consent.
 
     Runs ``claude plugin marketplace add qualixar/superlocalmemory`` then
     ``claude plugin install superlocalmemory@qualixar`` if the ``claude``
@@ -807,49 +1037,94 @@ def _try_install_claude_plugin() -> None:
 
     claude = shutil.which("claude")
     if not claude:
-        return  # Claude Code not in PATH — skip silently
+        print("  Claude Code CLI not found; plugin installation skipped.")
+        return False
 
     _run = lambda cmd: subprocess.run(  # noqa: E731
         cmd, capture_output=True, timeout=30, check=False
     )
 
     try:
-        _run([claude, "plugin", "marketplace", "add", "qualixar/superlocalmemory"])
+        marketplace = _run(
+            [claude, "plugin", "marketplace", "add", "qualixar/superlocalmemory"]
+        )
+        installed = _run(
+            [claude, "plugin", "install", "superlocalmemory@qualixar"]
+        )
+        return marketplace.returncode == 0 and installed.returncode == 0
     except Exception:
-        pass
+        return False
 
+
+def _configure_autostart(*, interactive: bool) -> bool:
+    """Request consent before creating a login-time service definition."""
+    print()
+    print("  Optional auto-start keeps the SLM daemon available after login.")
+    if not interactive:
+        print("  Skipped in non-interactive setup. Run: slm serve install")
+        return False
+    choice = _prompt(
+        "  Install the user-level auto-start service now? [y/N] (default: N): ",
+        "n",
+    ).lower()
+    if choice not in ("y", "yes"):
+        print("  Skipped. Run `slm serve install` when ready.")
+        return False
+    return _install_autostart_service()
+
+
+def _install_autostart_service() -> bool:
+    """Install the user service after explicit setup consent."""
     try:
-        _run([claude, "plugin", "install", "superlocalmemory@qualixar"])
+        from superlocalmemory.cli.service_installer import install_service
+
+        installed = bool(install_service())
+        if installed:
+            print("  ✓ User-level SLM auto-start service installed.")
+        else:
+            print("  ⚠ Service was not installed (run: slm serve install)")
+        return installed
     except Exception:
-        pass
+        print("  ⚠ Service was not installed (run: slm serve install)")
+        return False
 
 
 # ---------------------------------------------------------------------------
 # Mode C provider config (preserved from original)
 # ---------------------------------------------------------------------------
 
-def configure_provider(config: object) -> None:
-    """Configure LLM provider for Mode C."""
+def configure_provider(config: object, provider_name: str | None = None) -> None:
+    """Configure an LLM provider for Mode C.
+
+    When ``provider_name`` is supplied by ``slm provider set <provider>``,
+    configuration is non-interactive and resolves its credential from the
+    provider's documented environment variable. Omitting it preserves the
+    existing interactive picker.
+    """
     from superlocalmemory.core.config import SLMConfig
     from superlocalmemory.storage.models import Mode
 
     presets = SLMConfig.provider_presets()
 
-    print()
-    print("  Choose your LLM provider:")
-    print()
     providers = list(presets.keys())
-    for i, name in enumerate(providers, 1):
-        preset = presets[name]
-        print(f"    [{i}] {name.capitalize()} — {preset['model']}")
-    print()
+    interactive_selection = provider_name is None
+    if interactive_selection:
+        print()
+        print("  Choose your LLM provider:")
+        print()
+        for i, name in enumerate(providers, 1):
+            preset = presets[name]
+            print(f"    [{i}] {name.capitalize()} — {preset['model']}")
+        print()
 
-    idx = _prompt(f"  Select provider [1-{len(providers)}]: ", "1")
-    try:
-        provider_name = providers[int(idx) - 1]
-    except (ValueError, IndexError):
-        print("  Invalid choice. Using OpenAI.")
-        provider_name = "openai"
+        idx = _prompt(f"  Select provider [1-{len(providers)}]: ", "1")
+        try:
+            provider_name = providers[int(idx) - 1]
+        except (ValueError, IndexError):
+            print("  Invalid choice. Using OpenAI.")
+            provider_name = "openai"
+    elif provider_name not in presets:
+        raise ValueError(f"Unsupported provider: {provider_name}")
 
     preset = presets[provider_name]
 
@@ -861,18 +1136,27 @@ def configure_provider(config: object) -> None:
         if existing:
             print(f"  Found {env_key} in environment.")
             api_key = existing
-        elif is_interactive():
+        elif interactive_selection and is_interactive():
             api_key = _prompt(
                 f"  Enter your {provider_name.capitalize()} API key: ",
             )
 
-    updated = SLMConfig.for_mode(
-        Mode.C,
-        llm_provider=provider_name,
-        llm_model=preset["model"],
-        llm_api_key=api_key,
-        llm_api_base=preset["base_url"],
+    # Provider selection is an additive configuration operation.  Rebuilding
+    # via ``for_mode`` used to reset retrieval, scale-engine, evolution, and
+    # user-tuned embedding settings — surprising and unsafe after a user had
+    # configured a local or promoted Cozo/Lance deployment.  Keep every
+    # unrelated setting intact and change only the mode/provider contract.
+    from superlocalmemory.core.config import LLMConfig
+
+    updated = config if isinstance(config, SLMConfig) else SLMConfig.load()
+    updated.mode = Mode.C
+    updated.llm = LLMConfig(
+        provider=provider_name,
+        model=preset["model"],
+        api_key=api_key,
+        api_base=preset["base_url"],
     )
     updated.save(mode_change=True)
+    SLMConfig.write_current_mode(Mode.C, updated.base_dir)
     print(f"  Provider: {provider_name}")
     print(f"  Model: {preset['model']}")

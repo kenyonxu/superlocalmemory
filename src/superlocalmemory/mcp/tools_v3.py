@@ -14,6 +14,12 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
+from mcp.types import ToolAnnotations
+
+from superlocalmemory.core.admission import admits
+from superlocalmemory.core.operation_request import OperationKind
+from superlocalmemory.mcp.shared import authorize_mcp_mutation
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,7 +29,7 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 0. get_version (so IDEs can check compatibility)
     # ------------------------------------------------------------------
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_version() -> dict:
         """Get SuperLocalMemory version, Python version, and platform info."""
         try:
@@ -45,12 +51,13 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     # 1. set_mode
     # ------------------------------------------------------------------
     @server.tool()
+    @admits(OperationKind.MODE_CHANGE)
     async def set_mode(mode: str) -> dict:
         """Switch operating mode (a, b, or c).
 
-        Mode A: Local Guardian (zero LLM, EU AI Act full compliance).
-        Mode B: Smart Local (local Ollama LLM, EU AI Act full).
-        Mode C: Full Power (cloud LLM, best accuracy).
+        Mode A: Local Guardian (zero LLM, local embeddings only).
+        Mode B: Smart Local (local Ollama LLM, on-device inference).
+        Mode C: Full Power (configured cloud LLM provider, best accuracy).
 
         Resets the engine to apply the new mode configuration.
 
@@ -64,6 +71,14 @@ def register_v3_tools(server, get_engine: Callable) -> None:
                     "success": False,
                     "error": f"Invalid mode '{mode}'. Use 'a', 'b', or 'c'.",
                 }
+            engine = get_engine()
+            authorization = authorize_mcp_mutation(
+                engine,
+                "update",
+                mutation_source="mcp-set-mode",
+                profile_id=engine.profile_id,
+                content_preview=mode_lower,
+            )
             from superlocalmemory.core.config import SLMConfig
             from superlocalmemory.mcp.server import reset_engine
 
@@ -80,6 +95,7 @@ def register_v3_tools(server, get_engine: Callable) -> None:
             )
 
             reset_engine()
+            authorization.complete()
 
             return {
                 "success": True,
@@ -95,7 +111,7 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 2. get_mode
     # ------------------------------------------------------------------
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_mode() -> dict:
         """Get current operating mode and its capabilities.
 
@@ -124,7 +140,7 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 3. health
     # ------------------------------------------------------------------
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def health() -> dict:
         """Get system health including math layer status.
 
@@ -208,7 +224,7 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 4. consistency_check
     # ------------------------------------------------------------------
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def consistency_check(limit: int = 100) -> dict:
         """Run sheaf consistency check on stored memories.
 
@@ -265,8 +281,12 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 5. recall_trace
     # ------------------------------------------------------------------
-    @server.tool()
-    async def recall_trace(query: str, limit: int = 10) -> dict:
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def recall_trace(
+        query: str,
+        limit: int = 10,
+        as_of: str | None = None,
+    ) -> dict:
         """Recall with per-channel score breakdown.
 
         Like recall, but returns detailed channel-by-channel scores
@@ -275,14 +295,25 @@ def register_v3_tools(server, get_engine: Callable) -> None:
         Args:
             query: Natural-language search query.
             limit: Maximum results (default 10).
+            as_of: Optional ISO 8601 UTC datetime for point-in-time recall
+                (e.g. "2024-01-01T00:00:00Z"). Omit for current-state recall.
         """
         try:
             import asyncio
             from superlocalmemory.mcp._daemon_proxy import choose_pool
+            from superlocalmemory.retrieval.temporal_utils import normalize_as_of
+
+            # Normalize at MCP boundary before forwarding.
+            _as_of: str | None = None
+            if as_of:
+                _as_of = normalize_as_of(as_of)
+                if _as_of is None:
+                    return {"success": False, "error": "invalid_as_of"}
+
             # choose_pool().recall uses blocking urllib; run off the event loop
             # so recall_trace doesn't stall the MCP server for other tools.
             raw = await asyncio.to_thread(
-                lambda: choose_pool().recall(query=query, limit=limit)
+                lambda: choose_pool().recall(query=query, limit=limit, as_of=_as_of)
             )
             items = raw.get("results", []) if isinstance(raw, dict) else []
             results = []
@@ -290,8 +321,16 @@ def register_v3_tools(server, get_engine: Callable) -> None:
                 results.append({
                     "fact_id": item.get("fact_id", ""),
                     "content": item.get("content", ""),
-                    "final_score": round(float(item.get("score", 0.0)), 4),
+                    "score": round(float(item.get("score", 0.0)), 4),
+                    "relevance_score": round(
+                        float(item.get("relevance_score", item.get("score", 0.0))), 4
+                    ),
+                    "ranking_score": item.get("ranking_score"),
                     "confidence": round(float(item.get("confidence", 0.0)), 3),
+                    "memory_confidence": round(
+                        float(item.get("memory_confidence", item.get("confidence", 0.0))), 3
+                    ),
+                    "rank_position": int(item.get("rank_position", 0)),
                     "trust_score": round(float(item.get("trust_score", 0.0)), 3),
                     "channel_scores": item.get("channel_scores", {}) or {},
                     "evidence_chain": item.get("evidence_chain", []) or [],
@@ -307,6 +346,12 @@ def register_v3_tools(server, get_engine: Callable) -> None:
                 "channel_weights": raw.get("channel_weights", {}) if isinstance(raw, dict) else {},
                 "total_candidates": raw.get("total_candidates", 0) if isinstance(raw, dict) else 0,
                 "retrieval_time_ms": round(float(raw.get("retrieval_time_ms", 0.0)) if isinstance(raw, dict) else 0.0, 1),
+                "score_contract_version": raw.get("score_contract_version", "2") if isinstance(raw, dict) else "2",
+                "calibration_status": raw.get("calibration_status", "uncalibrated") if isinstance(raw, dict) else "uncalibrated",
+                "calibration_id": raw.get("calibration_id") if isinstance(raw, dict) else None,
+                "answer_confidence": raw.get("answer_confidence") if isinstance(raw, dict) else None,
+                "abstained": bool(raw.get("abstained", False)) if isinstance(raw, dict) else False,
+                "abstention_reason": raw.get("abstention_reason") if isinstance(raw, dict) else None,
             }
         except Exception as exc:
             logger.exception("recall_trace failed")
@@ -316,10 +361,10 @@ def register_v3_tools(server, get_engine: Callable) -> None:
 # -- Helpers ------------------------------------------------------------------
 
 def _mode_description(mode: str) -> str:
-    """Human-readable description for a mode."""
+    """Human-readable capability description for a mode (never a legal claim)."""
     descriptions = {
-        "a": "Local Guardian: zero LLM, full EU AI Act compliance",
-        "b": "Smart Local: local Ollama LLM, full EU AI Act compliance",
-        "c": "Full Power: cloud LLM, best accuracy, partial EU AI Act",
+        "a": "Local Guardian: zero LLM, local embeddings only",
+        "b": "Smart Local: local Ollama LLM, on-device inference",
+        "c": "Full Power: configured cloud LLM provider, best accuracy",
     }
     return descriptions.get(mode, "Unknown mode")

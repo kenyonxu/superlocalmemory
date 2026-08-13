@@ -1,9 +1,6 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
-#
-# ATTRIBUTION: CacheMetrics design pattern adapted from:
-#   omnicache_ai/core/metrics.py (MIT License)
 
 """Thread-safe atomic counters for all SLM Optimize operations."""
 
@@ -43,6 +40,7 @@ class MetricsCollector:
         self._latency_overhead_ms_sum: float = 0.0
         self._latency_samples: int = 0
         self._compress_runs: int = 0
+        self._lossy_compress_runs: int = 0
         self._compress_bytes_original: int = 0
         self._compress_bytes_after: int = 0
         self._cache_size_bytes: int = 0
@@ -69,17 +67,27 @@ class MetricsCollector:
         with self._data_lock:
             self._misses += 1
 
-    def on_compress(self, tokens_before: int, tokens_after: int) -> None:
+    def on_compress(self, tokens_before: int, tokens_after: int, lossy: bool = False) -> None:
         """Record a compression run. Arguments are word-count proxy estimates from _token_estimate().
 
         M-03: consistent naming — these are token estimates, not byte counts.
         Stored in compress_bytes_original/after fields for DB schema compat; unit is word-count.
+
+        ``lossy`` distinguishes a Layer-2 lossy (LLMLingua prose) run from a
+        lossless Layer-1/JSON-minify run; tracked in memory (not yet persisted).
         """
         with self._data_lock:
             self._compress_runs += 1
+            if lossy:
+                self._lossy_compress_runs += 1
             self._compress_bytes_original += max(0, tokens_before)
             self._compress_bytes_after += max(0, tokens_after)
             self._tokens_saved_compress += max(0, tokens_before - tokens_after)
+
+    def lossy_compress_runs(self) -> int:
+        """Session-scoped count of lossy (Layer-2) compression runs."""
+        with self._data_lock:
+            return self._lossy_compress_runs
 
     def on_eviction(self) -> None:
         """Record an eviction."""
@@ -135,6 +143,7 @@ class MetricsCollector:
             self._latency_overhead_ms_sum = 0.0
             self._latency_samples = 0
             self._compress_runs = 0
+            self._lossy_compress_runs = 0
             self._compress_bytes_original = 0
             self._compress_bytes_after = 0
             self._cache_size_bytes = 0

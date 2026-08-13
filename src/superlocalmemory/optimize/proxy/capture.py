@@ -9,7 +9,8 @@ Activation: set ``SLM_OPTIMIZE_CAPTURE=1`` in the daemon's environment. When on:
     at load time (see server._load_hooks), so capture never observes a mutated
     request or a cache hit; every line is a genuine upstream exchange.
   * each completed exchange is appended as one JSON line to
-    ``~/.superlocalmemory/optimize_capture.jsonl`` (0600, gitignored).
+    ``~/.superlocalmemory/optimize_capture.jsonl`` (owner-only: POSIX 0600 or
+    Windows owner DACL, gitignored).
 
 ISOLATION GUARANTEE: this module writes ONLY to optimize_capture.jsonl. It never
 opens memory.db, llmcache.db, or any SLM memory store. (Plan §9 hard rule.)
@@ -21,16 +22,19 @@ swallowed — it MUST NOT break the proxied request the user is waiting on.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import os
+import stat
 import threading
 from pathlib import Path
 from typing import Any
 
+from superlocalmemory.infra.data_root import state_path
+
 logger = logging.getLogger("slm.optimize.proxy.capture")
 
-_CAPTURE_DIRNAME = ".superlocalmemory"
 _CAPTURE_FILENAME = "optimize_capture.jsonl"
 _CAPTURE_ENV = "SLM_OPTIMIZE_CAPTURE"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -51,7 +55,299 @@ def capture_enabled() -> bool:
 
 
 def _capture_path() -> Path:
-    return Path.home() / _CAPTURE_DIRNAME / _CAPTURE_FILENAME
+    return state_path(_CAPTURE_FILENAME)
+
+
+def _is_windows() -> bool:
+    """Return whether the running platform uses Windows DACLs."""
+    return os.name == "nt"
+
+
+def _is_link_or_reparse(info: os.stat_result) -> bool:
+    """Reject POSIX symlinks and Windows reparse points before capture."""
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    attributes = getattr(info, "st_file_attributes", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(reparse and attributes & reparse)
+
+
+def _windows_owner_dacl(
+    win32api: Any,
+    win32con: Any,
+    win32security: Any,
+) -> tuple[Any, Any]:
+    """Build one protected owner-only DACL for a Windows capture file."""
+    import ntsecuritycon
+
+    token = win32security.OpenProcessToken(
+        win32api.GetCurrentProcess(),
+        win32con.TOKEN_QUERY,
+    )
+    try:
+        owner_sid = win32security.GetTokenInformation(
+            token,
+            win32security.TokenUser,
+        )[0]
+    finally:
+        token.Close()
+    dacl = win32security.ACL()
+    dacl.AddAccessAllowedAce(
+        win32security.ACL_REVISION,
+        ntsecuritycon.FILE_ALL_ACCESS,
+        owner_sid,
+    )
+    return owner_sid, dacl
+
+
+def _windows_dacl_is_owner_only(
+    security_descriptor: Any,
+    owner_sid: Any,
+    ntsecuritycon: Any,
+    win32security: Any,
+) -> bool:
+    """Return whether a live descriptor already matches the capture policy."""
+    def _same_sid(left: Any, right: Any) -> bool:
+        try:
+            return (
+                win32security.ConvertSidToStringSid(left)
+                == win32security.ConvertSidToStringSid(right)
+            )
+        except Exception:
+            return False
+
+    control, _revision = security_descriptor.GetSecurityDescriptorControl()
+    if not control & win32security.SE_DACL_PROTECTED:
+        return False
+
+    descriptor_owner = security_descriptor.GetSecurityDescriptorOwner()
+    if descriptor_owner is None or not _same_sid(
+        descriptor_owner,
+        owner_sid,
+    ):
+        return False
+
+    dacl = security_descriptor.GetSecurityDescriptorDacl()
+    if dacl is None or dacl.GetAceCount() != 1:
+        return False
+
+    ace = dacl.GetAce(0)
+    if not isinstance(ace, tuple) or len(ace) != 3:
+        return False
+    ace_header, access_mask, ace_sid = ace
+    if (
+        not isinstance(ace_header, tuple)
+        or not ace_header
+        or ace_header[0] != win32security.ACCESS_ALLOWED_ACE_TYPE
+    ):
+        return False
+    if access_mask & ntsecuritycon.FILE_ALL_ACCESS != ntsecuritycon.FILE_ALL_ACCESS:
+        return False
+    return _same_sid(ace_sid, owner_sid)
+
+
+def _open_windows_capture_append(path: Path) -> int:
+    """Create/open a Windows file with append + WRITE_DAC on one handle."""
+    try:
+        import msvcrt
+
+        import ntsecuritycon
+        import win32api
+        import win32con
+        import win32file
+        import win32security
+    except ImportError as exc:
+        raise OSError("Windows capture ACL support is unavailable") from exc
+
+    handle = None
+    try:
+        # A creation-time descriptor prevents a newly created capture file from
+        # ever inheriting a broader parent DACL. For an existing file Windows
+        # ignores this descriptor; _enforce_owner_only_permissions replaces
+        # that DACL through the same WRITE_DAC-capable handle before writing.
+        owner_sid, dacl = _windows_owner_dacl(
+            win32api,
+            win32con,
+            win32security,
+        )
+        security_attributes = win32security.SECURITY_ATTRIBUTES()
+        security_attributes.bInheritHandle = False
+        security_attributes.SECURITY_DESCRIPTOR.SetSecurityDescriptorDacl(
+            1,
+            dacl,
+            0,
+        )
+        security_attributes.SECURITY_DESCRIPTOR.SetSecurityDescriptorControl(
+            win32security.SE_DACL_PROTECTED,
+            win32security.SE_DACL_PROTECTED,
+        )
+        desired_access = (
+            ntsecuritycon.FILE_APPEND_DATA
+            | ntsecuritycon.WRITE_DAC
+            | ntsecuritycon.READ_CONTROL
+        )
+        share_mode = (
+            win32con.FILE_SHARE_READ
+            | win32con.FILE_SHARE_WRITE
+            | win32con.FILE_SHARE_DELETE
+        )
+        file_flags = (
+            win32con.FILE_ATTRIBUTE_NORMAL
+            # pywin32 does not export this SDK constant from win32con on
+            # every supported Python build. Keep the Microsoft-defined value
+            # as a named fallback rather than silently following a reparse.
+            | getattr(win32con, "FILE_FLAG_OPEN_REPARSE_POINT", 0x00200000)
+        )
+        try:
+            # CREATE_NEW is the only race-safe proof that the protected
+            # SECURITY_ATTRIBUTES were applied to this exact file.  OPEN_ALWAYS
+            # would require trusting GetLastError after the pywin32 wrapper has
+            # returned, which is not a documented preservation boundary.
+            handle = win32file.CreateFile(
+                os.fspath(path),
+                desired_access,
+                share_mode,
+                security_attributes,
+                getattr(win32con, "CREATE_NEW", 1),
+                file_flags,
+                None,
+            )
+            created_new = True
+        except Exception as exc:
+            winerror = getattr(exc, "winerror", None)
+            if winerror is None and exc.args:
+                winerror = exc.args[0]
+            if winerror != getattr(win32con, "ERROR_FILE_EXISTS", 80):
+                raise
+            # The creation descriptor is ignored for existing files. Reopen
+            # the exact path without following a reparse point, then replace
+            # its DACL through this WRITE_DAC-capable handle before appending.
+            handle = win32file.CreateFile(
+                os.fspath(path),
+                desired_access,
+                share_mode,
+                None,
+                getattr(win32con, "OPEN_EXISTING", 3),
+                file_flags,
+                None,
+            )
+            created_new = False
+        file_info = win32file.GetFileInformationByHandle(handle)
+        if file_info[0] & win32con.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise OSError(
+                errno.ELOOP,
+                "capture path is a Windows reparse point",
+                path,
+            )
+        if not created_new:
+            try:
+                query_flags = (
+                    win32security.OWNER_SECURITY_INFORMATION
+                    | win32security.DACL_SECURITY_INFORMATION
+                )
+                descriptor = win32security.GetSecurityInfo(
+                    handle,
+                    win32security.SE_FILE_OBJECT,
+                    query_flags,
+                )
+                if not _windows_dacl_is_owner_only(
+                    descriptor,
+                    owner_sid,
+                    ntsecuritycon,
+                    win32security,
+                ):
+                    # Existing files ignore the creation security descriptor,
+                    # so repair an unsafe DACL while this is still the original
+                    # CreateFile handle carrying WRITE_DAC. Avoid rewriting an
+                    # already-protected DACL: Windows may correctly deny that
+                    # redundant mutation even though append access is allowed.
+                    win32security.SetSecurityInfo(
+                        handle,
+                        win32security.SE_FILE_OBJECT,
+                        win32security.DACL_SECURITY_INFORMATION
+                        | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+                        None,
+                        None,
+                        dacl,
+                        None,
+                    )
+                    descriptor = win32security.GetSecurityInfo(
+                        handle,
+                        win32security.SE_FILE_OBJECT,
+                        query_flags,
+                    )
+                    if not _windows_dacl_is_owner_only(
+                        descriptor,
+                        owner_sid,
+                        ntsecuritycon,
+                        win32security,
+                    ):
+                        raise OSError(
+                            "Windows capture ACL verification failed after repair"
+                        )
+            except Exception as exc:
+                raise OSError(
+                    "Windows capture ACL could not be enforced "
+                    f"({type(exc).__name__}: {exc})"
+                ) from exc
+
+        # Transfer the native handle to Python's CRT descriptor exactly once.
+        raw_handle = handle.Detach()
+        handle = None
+        try:
+            return msvcrt.open_osfhandle(
+                raw_handle,
+                os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0),
+            )
+        except BaseException:
+            win32api.CloseHandle(raw_handle)
+            raise
+    except OSError:
+        raise
+    except Exception as exc:
+        raise OSError(f"Windows secure capture open failed: {exc}") from exc
+    finally:
+        if handle is not None:
+            handle.Close()
+
+
+def _open_capture_append(path: Path) -> int:
+    """Open one append descriptor without following or racing a link target."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        before = None
+    if before is not None and _is_link_or_reparse(before):
+        raise OSError(errno.ELOOP, "capture path is a link or reparse point", path)
+
+    if _is_windows():
+        fd = _open_windows_capture_append(path)
+    else:
+        flags = os.O_CREAT | os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
+    try:
+        opened = os.fstat(fd)
+        current = path.lstat()
+        if (
+            _is_link_or_reparse(current)
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise OSError(
+                errno.ELOOP,
+                "capture path changed during secure open",
+                path,
+            )
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _enforce_owner_only_permissions(fd: int) -> None:
+    """Apply owner-only access control through the already-verified handle."""
+    if not _is_windows():
+        os.fchmod(fd, 0o600)
+        return
+    # _open_windows_capture_append applies the protected DACL on the original
+    # WRITE_DAC-capable CreateFile handle before CRT descriptor transfer.
 
 
 class ShadowCapture:
@@ -94,10 +390,10 @@ class ShadowCapture:
         Fail-open: any error is logged and False is returned; never raised.
 
         Security: opens with a single ``os.open`` carrying ``O_CREAT |
-        O_APPEND | O_NOFOLLOW`` and mode ``0o600`` on EVERY write. O_NOFOLLOW
-        refuses a symlink pre-placed at the path (symlink-append attack), and
-        the unconditional 0600-on-create removes the stat/exists TOCTOU that
-        could otherwise drop the file to the process umask.
+        O_APPEND`` and mode ``0o600`` on every write. POSIX adds O_NOFOLLOW;
+        all platforms reject link/reparse metadata and verify that the opened
+        descriptor still identifies the current path. Permissions are then
+        enforced through that verified descriptor before any data is written.
         """
         try:
             line = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
@@ -108,9 +404,20 @@ class ShadowCapture:
         try:
             with self._write_lock:
                 self._path.parent.mkdir(parents=True, exist_ok=True)
-                flags = os.O_CREAT | os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
-                fd = os.open(self._path, flags, 0o600)
-                with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                fd = _open_capture_append(self._path)
+                try:
+                    # Enforce the ACL through the verified descriptor so a
+                    # pathname swap cannot redirect chmod/icacls elsewhere.
+                    _enforce_owner_only_permissions(fd)
+                    # fdopen transfers descriptor ownership only after it
+                    # returns successfully. Keep this conversion inside the
+                    # explicit-close boundary so an allocation/codec failure
+                    # cannot leak one descriptor per captured request.
+                    fh = os.fdopen(fd, "a", encoding="utf-8")
+                except BaseException:
+                    os.close(fd)
+                    raise
+                with fh:
                     fh.write(line + "\n")
                 self._count += 1
             return True

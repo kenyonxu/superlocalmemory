@@ -20,9 +20,8 @@ from __future__ import annotations
 
 import threading
 
-import pytest
-
 from superlocalmemory.cli import pending_store
+from superlocalmemory.storage.models import AtomicFact, MemoryRecord
 
 
 def _scope_of(engine, fact_id: str) -> str:
@@ -124,6 +123,52 @@ class TestRecallSharedOffByDefault:
             "octopus", include_global=True, include_shared=True).results}
         assert default == forced
 
+    def test_full_recall_returns_global_only_after_explicit_opt_in(
+        self, engine_with_mock_deps,
+    ):
+        eng = engine_with_mock_deps
+        eng._db.execute(
+            "INSERT OR IGNORE INTO profiles (profile_id, name, description) "
+            "VALUES ('publisher', 'publisher', '')"
+        )
+        for fact_id, scope, shared_with in (
+            ("global-quasar", "global", None),
+            ("private-quasar", "personal", None),
+            ("project-quasar", "project", None),
+            ("shared-quasar", "shared", ["default"]),
+            ("denied-quasar", "shared", ["someone-else"]),
+        ):
+            memory = MemoryRecord(
+                memory_id=f"m-{fact_id}", profile_id="publisher",
+                scope=scope, shared_with=shared_with,
+                content=f"quasar-release-token {fact_id}",
+            )
+            eng._db.store_memory(memory)
+            eng._db.store_fact(AtomicFact(
+                fact_id=fact_id, memory_id=memory.memory_id,
+                profile_id="publisher", scope=scope, shared_with=shared_with,
+                content=f"quasar-release-token {fact_id}",
+                embedding=eng._embedder.embed(f"quasar-release-token {fact_id}"),
+            ))
+
+        default_ids = {
+            result.fact.fact_id
+            for result in eng.recall("quasar-release-token").results
+        }
+        opted_in_ids = {
+            result.fact.fact_id
+            for result in eng.recall(
+                "quasar-release-token", include_global=True, include_shared=True,
+            ).results
+        }
+
+        assert "global-quasar" not in default_ids
+        assert "global-quasar" in opted_in_ids
+        assert "shared-quasar" in opted_in_ids
+        assert "private-quasar" not in opted_in_ids
+        assert "project-quasar" not in opted_in_ids
+        assert "denied-quasar" not in opted_in_ids
+
 
 # ---------------------------------------------------------------------------
 # Concurrency — scope flags must not leak across concurrent recalls that share
@@ -139,18 +184,29 @@ class TestConcurrentRecallScopeIsolation:
         obs_lock = threading.Lock()
         orig = re._run_channels
 
-        def _spy(query, profile_id, strat):
-            # Capture the scope flag visible on a shared channel AT execution
-            # time, with a tiny stall to widen the interleaving window. Under
-            # the scope-lock this must always equal the calling recall's flag.
-            ch = re._semantic
-            seen_g = getattr(ch, "include_global", None)
+        def _spy(
+            query, profile_id, strat,
+            *,
+            extra_disabled_channels=None,
+            include_global=False,
+            include_shared=False,
+            as_of=None,
+        ):
+            # v3.7.9: flags now travel as explicit kwargs rather than being set
+            # as attributes on shared channel instances. Capture the kwargs
+            # directly; no need to inspect channel attributes.
+            # v3.4.64: extra_disabled_channels also travels as an explicit kwarg —
+            # accept it so the spy does not break when fast=True callers pass it.
             import time as _t
-            _t.sleep(0.002)
-            seen_s = getattr(ch, "include_shared", None)
+            _t.sleep(0.002)  # widen the interleaving window
             with obs_lock:
-                observations.append((seen_g, seen_s))
-            return orig(query, profile_id, strat)
+                observations.append((include_global, include_shared))
+            return orig(
+                query, profile_id, strat,
+                extra_disabled_channels=extra_disabled_channels,
+                include_global=include_global, include_shared=include_shared,
+                as_of=as_of,
+            )
 
         re._run_channels = _spy
         try:
@@ -165,12 +221,85 @@ class TestConcurrentRecallScopeIsolation:
         finally:
             re._run_channels = orig
 
-        # Every observation must be internally consistent: a recall that set
-        # include_global also set include_shared to the same value, and the two
-        # flags were never a torn (True, False) / (False, True) mix from an
-        # interleaved concurrent recall.
+        # Every observation must be internally consistent: a recall that passed
+        # include_global=True also passed include_shared=True (and vice versa),
+        # so the two flags must always be equal — never a torn (True, False) /
+        # (False, True) mix leaking from a concurrent recall.
         assert observations
         assert all(g == s for g, s in observations), observations
+
+    def test_final_fact_load_uses_call_local_scope_not_shared_state(
+        self, engine_with_mock_deps,
+    ):
+        eng = engine_with_mock_deps
+        eng.store_fast("otter final-load scope probe")
+        retrieval = eng._retrieval_engine
+        original_load = retrieval._load_facts
+        rendezvous = threading.Barrier(2, timeout=10)
+        observations: list[tuple[bool, bool, bool]] = []
+        obs_lock = threading.Lock()
+
+        def _spy_load(
+            fused,
+            profile_id,
+            *,
+            include_global=None,
+            include_shared=None,
+        ):
+            expected = threading.current_thread().name == "scope-opted-in"
+            rendezvous.wait()
+            if include_global is None:
+                # Legacy implementation reads mutable engine-wide flags here.
+                observed_global = bool(retrieval._include_global)
+                observed_shared = bool(retrieval._include_shared)
+                result = original_load(fused, profile_id)
+            else:
+                observed_global = bool(include_global)
+                observed_shared = bool(include_shared)
+                result = original_load(
+                    fused,
+                    profile_id,
+                    include_global=include_global,
+                    include_shared=include_shared,
+                )
+            with obs_lock:
+                observations.append(
+                    (expected, observed_global, observed_shared)
+                )
+            return result
+
+        retrieval._load_facts = _spy_load
+        try:
+            opted_in = threading.Thread(
+                target=lambda: eng.recall(
+                    "otter",
+                    include_global=True,
+                    include_shared=True,
+                ),
+                name="scope-opted-in",
+            )
+            private = threading.Thread(
+                target=lambda: eng.recall(
+                    "otter",
+                    include_global=False,
+                    include_shared=False,
+                ),
+                name="scope-private",
+            )
+            opted_in.start()
+            private.start()
+            opted_in.join(timeout=20)
+            private.join(timeout=20)
+        finally:
+            retrieval._load_facts = original_load
+
+        assert not opted_in.is_alive()
+        assert not private.is_alive()
+        assert len(observations) == 2
+        assert all(
+            expected == observed_global == observed_shared
+            for expected, observed_global, observed_shared in observations
+        ), observations
 
 
 # ---------------------------------------------------------------------------

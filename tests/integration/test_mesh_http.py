@@ -11,6 +11,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,12 @@ from fastapi.testclient import TestClient
 
 from superlocalmemory.mesh.broker import MeshBroker
 from superlocalmemory.server.routes import mesh as mesh_routes
+
+
+DAEMON_HEADERS = {
+    "X-SLM-Daemon-Capability": "mesh-capability",
+    "X-SLM-Target-Instance": "mesh-instance",
+}
 
 
 def _init_mesh_schema(db_path: str) -> None:
@@ -47,6 +54,11 @@ def _app_with_broker(secret: str | None = None) -> tuple[FastAPI, MeshBroker]:
     app = FastAPI()
     app.state.mesh_broker = broker
     app.state.config = None
+    app.state.daemon_descriptor = SimpleNamespace(
+        capability="mesh-capability",
+        instance_id="mesh-instance",
+        capability_fingerprint="mesh-fingerprint",
+    )
     app.include_router(mesh_routes.router)
     return app, broker
 
@@ -54,11 +66,15 @@ def _app_with_broker(secret: str | None = None) -> tuple[FastAPI, MeshBroker]:
 def test_register_and_peers_over_http() -> None:
     app, _ = _app_with_broker()
     c = TestClient(app)
-    r = c.post("/mesh/register", json={"session_id": "sess-1", "summary": "w"})
+    r = c.post(
+        "/mesh/register",
+        json={"session_id": "sess-1", "summary": "w"},
+        headers=DAEMON_HEADERS,
+    )
     assert r.status_code == 200
     body = r.json()
     assert body.get("peer_id")
-    r2 = c.get("/mesh/peers")
+    r2 = c.get("/mesh/peers", headers=DAEMON_HEADERS)
     assert r2.status_code == 200
     peers = r2.json().get("peers", [])
     assert any(p.get("session_id") == "sess-1" for p in peers)
@@ -81,11 +97,32 @@ def test_secret_accepts_correct_header() -> None:
     assert r.status_code == 200
 
 
-def test_no_secret_allows_all() -> None:
+def test_no_secret_still_requires_local_capability() -> None:
     app, _ = _app_with_broker(secret=None)
     c = TestClient(app)
     r = c.post("/mesh/register", json={"session_id": "s"})
-    assert r.status_code == 200
+    assert r.status_code == 403
+    accepted = c.post(
+        "/mesh/register", json={"session_id": "s"}, headers=DAEMON_HEADERS,
+    )
+    assert accepted.status_code == 200
+
+
+def test_mesh_state_rejects_secret_bearing_values() -> None:
+    app, _ = _app_with_broker(secret=None)
+    c = TestClient(app)
+
+    response = c.post(
+        "/mesh/state",
+        json={
+            "key": "provider_api_key",
+            "value": "sk-super-secret-value-1234567890",
+            "set_by": "peer",
+        },
+        headers=DAEMON_HEADERS,
+    )
+
+    assert response.status_code == 422
 
 
 # ── v3.6.20: Bearer token support (issue #60) ───────────────────────────────
@@ -179,3 +216,54 @@ def test_send_endpoint_bearer_auth() -> None:
     )
     assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
     assert r.json().get("ok") is True
+
+
+def test_send_does_not_block_event_loop() -> None:
+    """M01 regression: a slow remote-peer delivery must NOT stall the daemon
+    event loop for everyone else. send_message is offloaded via
+    asyncio.to_thread, so a concurrent /peers call still returns promptly while
+    /send is mid-flight in a blocking network call."""
+    import asyncio
+    import time
+
+    httpx = pytest.importorskip("httpx")
+    app, broker = _app_with_broker()
+
+    # Simulate a slow remote delivery (blocking I/O, like an httpx timeout).
+    def slow_send(*args, **kwargs):
+        time.sleep(0.5)
+        return {"ok": True, "id": 1, "target_type": "peer"}
+
+    broker.send_message = slow_send  # type: ignore[assignment]
+
+    async def run() -> float:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            start = time.monotonic()
+            peers_elapsed: dict[str, float] = {}
+
+            async def do_send() -> None:
+                await client.post(
+                    "/mesh/send",
+                    json={"from_peer": "a", "to_peer": "b",
+                          "content": "hi", "type": "text"},
+                    headers=DAEMON_HEADERS,
+                )
+
+            async def do_peers() -> None:
+                await asyncio.sleep(0.05)  # let /send start first
+                await client.get("/mesh/peers", headers=DAEMON_HEADERS)
+                peers_elapsed["t"] = time.monotonic() - start
+
+            await asyncio.gather(do_send(), do_peers())
+            return peers_elapsed["t"]
+
+    peers_completed_at = asyncio.run(run())
+    # Blocked loop → /peers can't finish until the 0.5s send returns (~0.5s).
+    # Offloaded → /peers finishes right after its 0.05s pre-sleep.
+    assert peers_completed_at < 0.3, (
+        f"/mesh/peers completed {peers_completed_at:.2f}s in — event loop is "
+        "blocked behind a slow /send (M01 regression)"
+    )

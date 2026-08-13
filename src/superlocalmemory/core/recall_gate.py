@@ -14,23 +14,82 @@ recall.
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
+from typing import Callable, Iterator
 
-_lock = threading.Lock()
+_condition = threading.Condition(threading.Lock())
 _active = 0
+_work_context = threading.local()
 
 
 def begin_recall() -> None:
     global _active
-    with _lock:
+    with _condition:
         _active += 1
 
 
 def end_recall() -> None:
     global _active
-    with _lock:
+    with _condition:
         _active = max(0, _active - 1)
+        if _active == 0:
+            _condition.notify_all()
 
 
 def in_flight() -> int:
-    with _lock:
+    with _condition:
         return _active
+
+
+@contextmanager
+def background_work(
+    *,
+    preempt_requested: Callable[[], bool] | None = None,
+) -> Iterator[None]:
+    """Mark best-effort work that must yield shared inference to recall.
+
+    The marker is thread-local because materialization, health probes, and
+    interactive handlers all share one resident engine and one embedder.
+    Nested callers restore the previous marker on exit.  A daemon-owned
+    materializer may also provide a preemption callback for a profile/runtime
+    reconfigure.  Inference clients use that callback to cut a bounded
+    background request short instead of holding the transition drain lease.
+    """
+    previous = bool(getattr(_work_context, "background", False))
+    previous_preempt = getattr(_work_context, "preempt_requested", None)
+    _work_context.background = True
+    _work_context.preempt_requested = (
+        preempt_requested if preempt_requested is not None else previous_preempt
+    )
+    try:
+        yield
+    finally:
+        _work_context.background = previous
+        _work_context.preempt_requested = previous_preempt
+
+
+def is_background_work() -> bool:
+    """Return whether the current thread is running best-effort work."""
+    return bool(getattr(_work_context, "background", False))
+
+
+def background_preempt_requested() -> bool:
+    """Return whether daemon-owned background work must release its lease."""
+    callback = getattr(_work_context, "preempt_requested", None)
+    if not callable(callback):
+        return False
+    try:
+        return bool(callback())
+    except Exception:
+        # A status read is advisory.  It must not crash a materializer or turn
+        # a valid recall into an ingestion failure.
+        return False
+
+
+def wait_for_foreground_idle() -> None:
+    """Block background inference while an interactive recall is active."""
+    if not is_background_work():
+        return
+    with _condition:
+        while _active > 0:
+            _condition.wait(timeout=0.1)

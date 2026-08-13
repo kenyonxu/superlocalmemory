@@ -8,10 +8,11 @@ V3.3.13: Periodically triggers Langevin/Ebbinghaus/Sheaf maintenance
 so users don't need to call run_maintenance manually.
 
 Configurable interval via ForgettingConfig.scheduler_interval_minutes.
-Defaults to 30 min. Disabled during benchmarks (no config.forgetting.enabled).
+Defaults to 30 min. Optional forgetting/math work follows
+``config.forgetting.enabled``; tier evaluation and bounded housekeeping do not.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
-License: Elastic-2.0
+License: AGPL-3.0-or-later
 """
 
 from __future__ import annotations
@@ -39,10 +40,16 @@ class MaintenanceScheduler:
         db: DatabaseManager,
         config: SLMConfig,
         profile_id: str = "default",
+        embedder: object | None = None,
     ) -> None:
         self._db = db
         self._config = config
         self._profile_id = profile_id
+        # v3.8.2 self-heal: when provided, periodic maintenance backfills
+        # NULL embeddings so a DB stays fully queryable over time even if
+        # facts were stored while the embedder was unavailable. Runs
+        # independently of forgetting.enabled (see _run).
+        self._embedder = embedder
         self._timer: threading.Timer | None = None
         self._running = False
         self._interval = config.forgetting.scheduler_interval_minutes * 60.0
@@ -53,10 +60,31 @@ class MaintenanceScheduler:
             return
         self._running = True
         self._schedule_next()
+        # v3.8.5: one-shot activation-cache GC ~90s after boot so an upgrade
+        # backlog (observed 83k expired rows) clears promptly instead of waiting
+        # a full interval — delayed past boot warmup so it never competes for
+        # the write lock during the startup window.
+        self._initial_gc_timer = threading.Timer(90.0, self._initial_cache_gc)
+        self._initial_gc_timer.daemon = True
+        self._initial_gc_timer.start()
         logger.info(
             "Maintenance scheduler started (interval=%dm)",
             self._config.forgetting.scheduler_interval_minutes,
         )
+
+    def _initial_cache_gc(self) -> None:
+        """Best-effort one-shot activation-cache GC shortly after boot."""
+        if not self._running:
+            return
+        try:
+            deleted = self._db.cleanup_activation_cache()
+            if deleted > 0:
+                logger.info(
+                    "Activation-cache GC (startup): %d expired rows removed",
+                    deleted,
+                )
+        except Exception as exc:
+            logger.debug("Startup activation-cache GC skipped: %s", exc)
 
     def stop(self) -> None:
         """Stop the scheduler. Idempotent."""
@@ -64,6 +92,10 @@ class MaintenanceScheduler:
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
+        _gc_timer = getattr(self, "_initial_gc_timer", None)
+        if _gc_timer is not None:
+            _gc_timer.cancel()
+            self._initial_gc_timer = None
         logger.info("Maintenance scheduler stopped")
 
     def _schedule_next(self) -> None:
@@ -78,32 +110,96 @@ class MaintenanceScheduler:
         """Execute maintenance + auto-backup check, then schedule next run."""
         if not self._running:
             return
-        try:
-            from superlocalmemory.core.maintenance import run_maintenance
-            counts = run_maintenance(self._db, self._config, self._profile_id)
-            logger.info("Scheduled maintenance complete: %s", counts)
-        except Exception as exc:
-            logger.warning("Scheduled maintenance failed: %s", exc)
+        # v3.8.2 self-heal: bounded NULL-embedding backfill runs every cycle
+        # INDEPENDENTLY of forgetting.enabled and across ALL profiles — a fact
+        # stored while the embedder was down must become queryable again without
+        # the user touching anything. Idempotent + bounded (200/pass) so it
+        # converges quietly and is a no-op once coverage is complete.
+        if self._embedder is not None:
+            try:
+                from superlocalmemory.storage.embedding_migrator import (
+                    backfill_missing_embeddings,
+                )
+                r = backfill_missing_embeddings(
+                    self._config, self._db, self._embedder,
+                    limit=50, all_profiles=True,
+                )
+                if r.get("embedded"):
+                    logger.info(
+                        "Self-heal backfill: %d embedded, %d remaining",
+                        r["embedded"], r["remaining_null"],
+                    )
+            except Exception as exc:
+                logger.debug("Self-heal backfill skipped: %s", exc)
 
-        # V3.4.11: Graph pruning (remove orphan edges)
-        try:
-            from superlocalmemory.core.graph_pruner import prune_graph
-            prune_stats = prune_graph(self._db.db_path, self._profile_id)
-            removed = prune_stats["total_before"] - prune_stats["total_after"]
-            if removed > 0:
-                logger.info("Graph pruning: %d edges removed", removed)
-        except Exception as exc:
-            logger.debug("Graph pruning skipped: %s", exc)
+        for profile_id in self._profile_ids():
+            if self._config.forgetting.enabled:
+                try:
+                    from superlocalmemory.core.maintenance import run_maintenance
+                    counts = run_maintenance(self._db, self._config, profile_id)
+                    logger.info(
+                        "Scheduled maintenance complete for %s: %s",
+                        profile_id,
+                        counts,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Scheduled maintenance failed for %s: %s",
+                        profile_id,
+                        exc,
+                    )
 
-        # V3.4.11: Run tier evaluation (demote old facts)
-        try:
-            from superlocalmemory.core.tier_manager import evaluate_tiers
-            stats = evaluate_tiers(self._db, self._profile_id)
-            demoted = stats["demoted_to_warm"] + stats["demoted_to_cold"] + stats["demoted_to_archive"]
-            if demoted > 0:
-                logger.info("Tier evaluation: %d facts demoted", demoted)
-        except Exception as exc:
-            logger.debug("Tier evaluation skipped: %s", exc)
+            # V3.4.11: Graph pruning (remove orphan edges)
+            # v3.8.4-G: thread GraphPruningConfig params so dashboard changes
+            # persist and take effect without a daemon restart.
+            try:
+                from superlocalmemory.core.graph_pruner import prune_graph
+                gp = self._config.graph_pruning
+                if not gp.enabled:
+                    logger.debug(
+                        "Graph pruning disabled by config for %s — skipping",
+                        profile_id,
+                    )
+                else:
+                    # Fix A: pass DatabaseManager directly → writes serialised through _lock
+                    prune_stats = prune_graph(
+                        self._db,
+                        profile_id,
+                        max_degree=gp.max_degree_per_node,
+                        min_edge_weight=gp.min_edge_weight,
+                    )
+                    removed = prune_stats["total_before"] - prune_stats["total_after"]
+                    if removed > 0:
+                        logger.info(
+                            "Graph pruning for %s: %d edges removed", profile_id, removed
+                        )
+            except AttributeError:
+                # Older SLMConfig without graph_pruning field (upgrade safety)
+                from superlocalmemory.core.graph_pruner import prune_graph
+                prune_stats = prune_graph(self._db, profile_id)
+                removed = prune_stats["total_before"] - prune_stats["total_after"]
+                if removed > 0:
+                    logger.info("Graph pruning for %s: %d edges removed", profile_id, removed)
+            except Exception as exc:
+                logger.debug("Graph pruning skipped for %s: %s", profile_id, exc)
+
+            # Lifecycle evaluation must cover every stored profile, not only
+            # whichever profile was active when the engine started.
+            try:
+                from superlocalmemory.core.tier_manager import evaluate_tiers
+                stats = evaluate_tiers(self._db, profile_id)
+                demoted = stats["demoted_to_warm"] + stats["demoted_to_cold"] + stats["demoted_to_archive"]
+                if demoted > 0:
+                    logger.info("Tier evaluation for %s: %d facts demoted", profile_id, demoted)
+            except Exception as exc:
+                logger.debug("Tier evaluation skipped for %s: %s", profile_id, exc)
+
+            # v3.6.6 F-5: Daily core-block recompile with hygiene.
+            try:
+                from superlocalmemory.core.block_hygiene import _recompile_core_blocks
+                _recompile_core_blocks(self._db, self._config, profile_id)
+            except Exception as exc:
+                logger.debug("Core-block recompile skipped for %s: %s", profile_id, exc)
 
         # V3.4.10: Check if auto-backup is due
         try:
@@ -124,16 +220,34 @@ class MaintenanceScheduler:
         except Exception as exc:
             logger.debug("Pending cleanup skipped: %s", exc)
 
-        # v3.6.6 F-5: Daily core-block recompile with hygiene (dedup + char cap).
-        # Ensures blocks stay clean even when purge or new facts arrive between
-        # session-init recompiles.
+        # v3.8.5: GC the spreading-activation result cache. Neither cleanup path
+        # was ever wired in, so activation_cache grew without bound (observed
+        # 83k expired rows, oldest ~3.5 months). Batched + DB-wide (expiry is
+        # not profile-scoped), so it runs once per cycle rather than per profile.
         try:
-            from superlocalmemory.core.block_hygiene import _recompile_core_blocks
-            _recompile_core_blocks(self._db, self._config, self._profile_id)
+            deleted = self._db.cleanup_activation_cache()
+            if deleted > 0:
+                logger.info("Activation-cache GC: %d expired rows removed", deleted)
         except Exception as exc:
-            logger.debug("Core-block recompile skipped: %s", exc)
+            logger.debug("Activation-cache GC skipped: %s", exc)
 
         self._schedule_next()
+
+    def _profile_ids(self) -> tuple[str, ...]:
+        """Return every persisted profile with a deterministic fallback."""
+        try:
+            rows = self._db.execute(
+                "SELECT profile_id FROM profiles ORDER BY profile_id",
+                (),
+            )
+            profiles = tuple(
+                dict.fromkeys(str(row["profile_id"]) for row in rows if row["profile_id"])
+            )
+            if profiles:
+                return profiles
+        except Exception as exc:
+            logger.debug("Profile enumeration failed: %s", exc)
+        return (self._profile_id,)
 
     def _sync_cloud_destinations(self, manager: object) -> None:
         """Push latest backup to configured cloud destinations."""

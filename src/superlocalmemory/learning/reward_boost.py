@@ -23,6 +23,7 @@ from pathlib import Path
 from superlocalmemory.learning.fact_outcome_joins import (
     aggregate_reward_for_fact,
 )
+from superlocalmemory.storage.write_lock import get_write_lock
 
 
 # H-12/H-P-01: single-pass JSON1 aggregation across ALL facts for a profile.
@@ -123,45 +124,54 @@ def apply_strong_memory_boost(
 
     Returns number of rows boosted.
     """
-    conn = sqlite3.connect(str(memory_db_path), timeout=10.0)
-    conn.execute("PRAGMA busy_timeout=2000")
-    boosted = 0
+    # READ phase — no write lock needed (WAL allows concurrent reads).
+    conn_r = sqlite3.connect(str(memory_db_path), timeout=10.0)
     try:
-        rows = conn.execute(
+        rows = conn_r.execute(
             "SELECT fact_id FROM atomic_facts WHERE profile_id=? "
             "  AND (archive_status IS NULL OR archive_status='live')",
             (profile_id,),
         ).fetchall()
         if not rows:
+            conn_r.close()
             return 0
-
         # H-12/H-P-01: single JSON1 GROUP BY replaces the per-fact loop.
-        # Fallback to per-fact helper preserves legacy behaviour on
-        # SQLite without JSON1.
-        stats = _bulk_fact_reward_stats(conn, profile_id)
-        conn.execute("BEGIN IMMEDIATE")
-        for (fid,) in rows:
-            if stats:
-                count, mean = stats.get(fid, _MISS)
-            else:
-                count, mean = aggregate_reward_for_fact(conn, profile_id, fid)
-            if count < STRONG_BOOST_MIN_OUTCOMES:
-                continue
-            if mean <= STRONG_BOOST_MIN_MEAN:
-                continue
-            conn.execute(
-                "UPDATE atomic_facts "
-                "SET retrieval_prior = MIN(COALESCE(retrieval_prior, 0) + ?, ?) "
-                "WHERE fact_id=?",
-                (STRONG_BOOST_INCREMENT, STRONG_BOOST_CAP, fid),
-            )
-            boosted += 1
-        conn.commit()
-    except sqlite3.Error as exc:
-        conn.rollback()
-        logger.warning("apply_strong_memory_boost rollback: %s", exc)
+        stats = _bulk_fact_reward_stats(conn_r, profile_id)
     finally:
-        conn.close()
+        conn_r.close()
+
+    # WRITE phase — acquire the process-level write lock BEFORE opening the
+    # write connection.  This serialises BEGIN IMMEDIATE → commit with all
+    # other in-process writers (DatabaseManager, VectorStore, adapter sync),
+    # eliminating SQLITE_BUSY races at the SQLite WAL layer.
+    boosted = 0
+    with get_write_lock(memory_db_path):
+        conn = sqlite3.connect(str(memory_db_path), timeout=10.0)
+        conn.execute("PRAGMA busy_timeout=2000")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for (fid,) in rows:
+                if stats:
+                    count, mean = stats.get(fid, _MISS)
+                else:
+                    count, mean = aggregate_reward_for_fact(conn, profile_id, fid)
+                if count < STRONG_BOOST_MIN_OUTCOMES:
+                    continue
+                if mean <= STRONG_BOOST_MIN_MEAN:
+                    continue
+                conn.execute(
+                    "UPDATE atomic_facts "
+                    "SET retrieval_prior = MIN(COALESCE(retrieval_prior, 0) + ?, ?) "
+                    "WHERE fact_id=?",
+                    (STRONG_BOOST_INCREMENT, STRONG_BOOST_CAP, fid),
+                )
+                boosted += 1
+            conn.commit()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            logger.warning("apply_strong_memory_boost rollback: %s", exc)
+        finally:
+            conn.close()
     return boosted
 
 

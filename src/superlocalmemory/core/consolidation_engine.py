@@ -49,6 +49,59 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _recompute_entity_communities(
+    db: Any, profile_id: str, summarizer: Any = None,
+) -> dict[str, int]:
+    """Wave Q: rebuild the entity-community backbone + summaries (fail-open).
+
+    Shared spine for Q2 community summaries and Q3 progressive abstraction.
+    Runs in the background consolidation lane; never blocks store/recall.
+    Community detection and summary generation are independently fail-open.
+    """
+    result: dict[str, int] = {"entity_count": 0, "community_count": 0}
+    try:
+        from superlocalmemory.core.entity_community import EntityCommunityBuilder
+
+        result = EntityCommunityBuilder(db).compute_and_store(profile_id)
+        logger.info(
+            "Background entity-community: %d entities, %d communities",
+            result.get("entity_count", 0),
+            result.get("community_count", 0),
+        )
+    except Exception as exc:
+        logger.debug("Entity-community recompute failed (non-fatal): %s", exc)
+        return result
+
+    # Wave Q2: one synthesized report per community (rides on the backbone).
+    try:
+        from superlocalmemory.core.community_summary import CommunitySummaryBuilder
+
+        summ = CommunitySummaryBuilder(db, summarizer=summarizer).compute_and_store(
+            profile_id,
+        )
+        result["summaries_written"] = summ.get("summaries_written", 0)
+        logger.info(
+            "Background community summaries: %d written",
+            summ.get("summaries_written", 0),
+        )
+    except Exception as exc:
+        logger.debug("Community summaries failed (non-fatal): %s", exc)
+
+    # Wave Q3: persona roll-up (top tier over the community summaries).
+    try:
+        from superlocalmemory.core.progressive_abstraction import (
+            ProgressiveAbstraction,
+        )
+
+        pa = ProgressiveAbstraction(db, summarizer=summarizer).compute_and_store(
+            profile_id,
+        )
+        result["persona_built"] = bool(pa.get("built", False))
+    except Exception as exc:
+        logger.debug("Persona roll-up failed (non-fatal): %s", exc)
+    return result
+
+
 class ConsolidationEngine:
     """Sleep-time memory consolidation with 6-step cycle.
 
@@ -79,13 +132,13 @@ class ConsolidationEngine:
         ccq_worker: CCQWorker | None = None,
     ) -> None:
         self._db = db
-        self._config = config
+        self._consolidation_config = config
         self._summarizer = summarizer
         self._behavioral = behavioral_store
         self._auto_linker = auto_linker
         self._graph_analyzer = graph_analyzer
         self._temporal_validator = temporal_validator
-        self._slm_config = slm_config
+        self._config = slm_config
         self._ccq_worker = ccq_worker
         self._mode = slm_config.mode.value if slm_config else "a"
         self._store_count: int = 0  # For step-count trigger (L7)
@@ -160,10 +213,9 @@ class ConsolidationEngine:
                             def mine(self, *a, **kw): return []
                     from superlocalmemory.hooks.auto_parameterize import AutoParameterizeHook
                     from superlocalmemory.core.config import ParameterizationConfig
-                    from pathlib import Path as _Path
-
-                    p_config = getattr(self._slm_config, "parameterization", ParameterizationConfig())
-                    learning_db = str(_Path.home() / ".superlocalmemory" / "learning.db")
+                    p_config = getattr(self._config, "parameterization", ParameterizationConfig())
+                    from superlocalmemory.infra.data_root import state_path
+                    learning_db = str(state_path("learning.db"))
                     beh_store = BehavioralPatternStore(learning_db)
                     cross_proj = CrossProjectAggregator(self._db)
                     wf_miner = WorkflowMiner(self._db)
@@ -194,7 +246,7 @@ class ConsolidationEngine:
                 # Never on recall/remember hot path. Budget: max 3 per cycle.
                 try:
                     from superlocalmemory.evolution.skill_evolver import SkillEvolver
-                    evolver = SkillEvolver(self._db.db_path)
+                    evolver = SkillEvolver(self._db.db_path, self._config)
                     results["skill_evolution"] = evolver.run_consolidation_cycle(profile_id)
                 except Exception as exc:
                     logger.debug("Skill evolution (non-fatal): %s", exc)
@@ -234,11 +286,11 @@ class ConsolidationEngine:
 
         Returns True if lightweight consolidation was triggered.
         """
-        if not self._config.enabled:
+        if not self._consolidation_config.enabled:
             return False
 
         self._store_count += 1
-        if self._store_count >= self._config.step_count_trigger:
+        if self._store_count >= self._consolidation_config.step_count_trigger:
             self._store_count = 0
             self.consolidate(profile_id, lightweight=True)
             # V3.4.2: Queue graph analysis in background (non-blocking)
@@ -255,21 +307,27 @@ class ConsolidationEngine:
         activation. Takes ~200-800ms, runs on daemon thread, zero impact
         on store/recall latency.
         """
-        if self._graph_analyzer is None:
-            return
         analyzer = self._graph_analyzer
         pid = profile_id
+        db = self._db
+        summarizer = self._summarizer
 
         def _run() -> None:
-            try:
-                result = analyzer.compute_and_store(pid)
-                logger.info(
-                    "Background graph analysis complete: %d nodes, %d communities",
-                    result.get("node_count", 0),
-                    result.get("community_count", 0),
-                )
-            except Exception as exc:
-                logger.debug("Background graph analysis failed (non-fatal): %s", exc)
+            if analyzer is not None:
+                try:
+                    result = analyzer.compute_and_store(pid)
+                    logger.info(
+                        "Background graph analysis complete: %d nodes, "
+                        "%d communities",
+                        result.get("node_count", 0),
+                        result.get("community_count", 0),
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "Background graph analysis failed (non-fatal): %s", exc,
+                    )
+            # Wave Q: entity-community backbone + summaries (Q2/Q3 spine).
+            _recompute_entity_communities(db, pid, summarizer)
 
         t = threading.Thread(target=_run, daemon=True, name="graph-analysis-bg")
         t.start()
@@ -330,7 +388,7 @@ class ConsolidationEngine:
           - learned_preferences: opinion facts with confidence >= threshold
         """
         blocks_compiled = 0
-        block_limit = self._config.block_char_limit
+        block_limit = self._consolidation_config.block_char_limit
 
         # 1. user_profile: top semantic/opinion facts by access
         user_facts = self._get_top_facts(
@@ -381,7 +439,7 @@ class ConsolidationEngine:
             "GROUP BY f.fact_id "
             "HAVING COUNT(a.log_id) >= ? "
             "ORDER BY COUNT(a.log_id) DESC LIMIT 5",
-            (profile_id, self._config.promotion_min_access),
+            (profile_id, self._consolidation_config.promotion_min_access),
         )
         self._store_core_block(
             profile_id, "active_decisions",
@@ -396,7 +454,7 @@ class ConsolidationEngine:
             "WHERE profile_id = ? AND fact_type = 'opinion' "
             "AND confidence >= ? AND lifecycle = 'active' "
             "ORDER BY confidence DESC LIMIT 5",
-            (profile_id, self._config.promotion_min_trust),
+            (profile_id, self._consolidation_config.promotion_min_trust),
         )
         self._store_core_block(
             profile_id, "learned_preferences",
@@ -433,7 +491,7 @@ class ConsolidationEngine:
                     summary = self._summarizer.summarize_cluster(fact_dicts)
                     self._store_core_block(
                         profile_id, block_type,
-                        summary[:self._config.block_char_limit],
+                        summary[:self._consolidation_config.block_char_limit],
                         [f["fact_id"] for f in facts],
                         compiled_by="llm",
                     )
@@ -466,7 +524,7 @@ class ConsolidationEngine:
             "WHERE f.profile_id = ? AND f.lifecycle = 'active' "
             "GROUP BY f.fact_id "
             "HAVING COUNT(a.log_id) >= ?",
-            (profile_id, self._config.promotion_min_access),
+            (profile_id, self._consolidation_config.promotion_min_access),
         )
 
         promoted = 0
@@ -479,14 +537,17 @@ class ConsolidationEngine:
                 continue
 
             # Trust check
-            if d.get("confidence", 0) < self._config.promotion_min_trust:
+            if d.get("confidence", 0) < self._consolidation_config.promotion_min_trust:
                 continue
 
             # Promote: active -> warm (lifecycle transition)
-            self._db.execute(
-                "UPDATE atomic_facts SET lifecycle = 'warm' "
-                "WHERE fact_id = ? AND lifecycle = 'active'",
-                (fact_id,),
+            from superlocalmemory.core.lifecycle_state import set_fact_lifecycle_zone
+            set_fact_lifecycle_zone(
+                self._db,
+                [fact_id],
+                "warm",
+                profile_id=profile_id,
+                from_atomic=("active",),
             )
             promoted += 1
 
@@ -508,15 +569,21 @@ class ConsolidationEngine:
                 fact_id, profile_id,
             )
 
-        # Fallback: direct SQL check
+        # Fallback: direct SQL check. Must consider BOTH valid_until (valid-time
+        # expiry) AND system_expired_at (transaction-time expiry) — a fact that
+        # was invalidated/erased sets system_expired_at, and ignoring it would
+        # let a GDPR-erased/superseded fact be promoted back into warm lifecycle.
         rows = self._db.execute(
-            "SELECT valid_until FROM fact_temporal_validity "
+            "SELECT valid_until, system_expired_at FROM fact_temporal_validity "
             "WHERE fact_id = ? AND profile_id = ?",
             (fact_id, profile_id),
         )
         if not rows:
             return True  # No temporal record = valid
-        valid_until = dict(rows[0]).get("valid_until")
+        row = dict(rows[0])
+        if row.get("system_expired_at") is not None:
+            return False  # transaction-time expired (invalidated/erased)
+        valid_until = row.get("valid_until")
         if valid_until is None:
             return True  # Open-ended validity
         try:
@@ -539,7 +606,7 @@ class ConsolidationEngine:
             return {"decayed": 0}
         try:
             decayed = self._auto_linker.decay_unused(
-                profile_id, days_threshold=self._config.decay_days_threshold,
+                profile_id, days_threshold=self._consolidation_config.decay_days_threshold,
             )
             return {"decayed": decayed}
         except Exception as exc:
@@ -553,14 +620,22 @@ class ConsolidationEngine:
     def _step5_recompute_graph(
         self, profile_id: str,
     ) -> dict[str, Any]:
-        """Recompute PageRank + communities.  Delegates to GraphAnalyzer."""
-        if self._graph_analyzer is None:
-            return {"node_count": 0, "community_count": 0}
-        try:
-            return self._graph_analyzer.compute_and_store(profile_id)
-        except Exception as exc:
-            logger.warning("Graph recompute failed: %s", exc)
-            return {"node_count": 0, "community_count": 0}
+        """Recompute PageRank + communities.  Delegates to GraphAnalyzer.
+
+        Wave Q: also rebuilds the entity-community backbone (Q2/Q3 spine).
+        """
+        result: dict[str, Any] = {"node_count": 0, "community_count": 0}
+        if self._graph_analyzer is not None:
+            try:
+                result = self._graph_analyzer.compute_and_store(profile_id)
+            except Exception as exc:
+                logger.warning("Graph recompute failed: %s", exc)
+        ec = _recompute_entity_communities(
+            self._db, profile_id, self._summarizer,
+        )
+        result["entity_community_count"] = ec.get("community_count", 0)
+        result["community_summaries"] = ec.get("summaries_written", 0)
+        return result
 
     # ------------------------------------------------------------------
     # Step 6: Derive Associations
@@ -633,93 +708,99 @@ class ConsolidationEngine:
         Uses 'custom' category because the soft_prompt_templates CHECK
         constraint does not include 'skill_evolution'. The content is
         prefixed with [SKILL_EVOLUTION] for easy filtering.
+
+        Concurrency fix (v3.8.4): all writes routed through memory_write()
+        so the process write lock (get_write_lock) serialises in-process
+        writers and proper busy_timeout handles cross-process races.
+        No slow ops are held inside the write lock — this method has none.
         """
-        import sqlite3 as _sqlite3
+        from superlocalmemory.storage.memory_write import memory_read, memory_write
 
-        db_path = str(self._db.db_path)
+        db_path = self._db.db_path
 
-        conn = _sqlite3.connect(db_path, timeout=10)
-        conn.row_factory = _sqlite3.Row
-
-        # Fetch promoted evolutions
+        # Phase 1: read-only fetch — does NOT hold the write lock.
         try:
-            promoted_rows = conn.execute(
-                "SELECT id, skill_name, parent_skill_id, evolution_type, "
-                "mutation_summary, created_at "
-                "FROM skill_evolution_log "
-                "WHERE status = 'promoted' "
-                "ORDER BY created_at DESC LIMIT 20",
-            ).fetchall()
-        except _sqlite3.OperationalError:
+            with memory_read(db_path) as rconn:
+                promoted_rows = [
+                    dict(r)
+                    for r in rconn.execute(
+                        "SELECT id, skill_name, parent_skill_id, evolution_type, "
+                        "mutation_summary, created_at "
+                        "FROM skill_evolution_log "
+                        "WHERE status = 'promoted' "
+                        "ORDER BY created_at DESC LIMIT 20",
+                    ).fetchall()
+                ]
+        except Exception:
             # Table may not exist yet
-            conn.close()
             return {"created": 0, "message": "skill_evolution_log table not found"}
 
-        created_count = 0
+        if not promoted_rows:
+            return {"promoted_skills_found": 0, "soft_prompts_created": 0}
+
         now = datetime.now(timezone.utc).isoformat()
+        created_count = 0
 
-        for row in promoted_rows:
-            r = dict(row)
-            skill_name = r["skill_name"]
-            parent = r.get("parent_skill_id") or skill_name
-            evo_type = r["evolution_type"]
-            summary = r.get("mutation_summary", "")
-            evo_id = r["id"]
+        # Phase 2: short write transaction — hold the write lock for the
+        # INSERT/UPDATE loop only (pure SQL, no network / embed calls).
+        with memory_write(db_path) as conn:
+            for r in promoted_rows:
+                skill_name = r["skill_name"]
+                parent = r.get("parent_skill_id") or skill_name
+                evo_type = r["evolution_type"]
+                summary_txt = r.get("mutation_summary", "")
+                evo_id = r["id"]
 
-            # Build prompt content
-            content = (
-                f"[SKILL_EVOLUTION] Evolved skill: '{skill_name}' "
-                f"({'replaces' if evo_type == 'fix' else 'extends'} '{parent}' "
-                f"via {evo_type}). {summary}. "
-                f"Use the evolved version for better results."
-            )
+                content = (
+                    f"[SKILL_EVOLUTION] Evolved skill: '{skill_name}' "
+                    f"({'replaces' if evo_type == 'fix' else 'extends'} '{parent}' "
+                    f"via {evo_type}). {summary_txt}. "
+                    f"Use the evolved version for better results."
+                )
+                prompt_id = f"evo-{evo_id}"
 
-            # Use a deterministic prompt_id based on the evolution record
-            prompt_id = f"evo-{evo_id}"
+                existing = conn.execute(
+                    "SELECT prompt_id FROM soft_prompt_templates WHERE prompt_id = ?",
+                    (prompt_id,),
+                ).fetchone()
 
-            # Check if prompt already exists
-            existing = conn.execute(
-                "SELECT prompt_id FROM soft_prompt_templates WHERE prompt_id = ?",
-                (prompt_id,),
-            ).fetchone()
+                if existing:
+                    # M-REPLACE: Update existing record instead of INSERT OR REPLACE
+                    # to avoid silently dropping columns with defaults.
+                    try:
+                        conn.execute(
+                            "UPDATE soft_prompt_templates "
+                            "SET content = ?, updated_at = ? "
+                            "WHERE prompt_id = ?",
+                            (content, now, prompt_id),
+                        )
+                    except Exception as upd_exc:
+                        logger.debug(
+                            "Failed to update soft prompt %s: %s", prompt_id, upd_exc
+                        )
+                    continue
 
-            if existing:
-                # M-REPLACE: Update existing record instead of INSERT OR REPLACE
-                # to avoid silently dropping columns with defaults
                 try:
-                    conn.execute(
-                        "UPDATE soft_prompt_templates "
-                        "SET content = ?, updated_at = ? "
-                        "WHERE prompt_id = ?",
-                        (content, now, prompt_id),
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO soft_prompt_templates "
+                        "(prompt_id, profile_id, category, content, source_pattern_ids, "
+                        " confidence, effectiveness, token_count, retention_score, "
+                        " active, version, created_at, updated_at) "
+                        "VALUES (?, ?, 'custom', ?, ?, 0.8, 0.5, ?, 1.0, 1, 1, ?, ?)",
+                        (
+                            prompt_id, profile_id, content,
+                            json.dumps([evo_id]),
+                            len(content.split()),
+                            now, now,
+                        ),
                     )
-                except _sqlite3.OperationalError as upd_exc:
-                    logger.debug("Failed to update soft prompt %s: %s", prompt_id, upd_exc)
-                continue
-
-            try:
-                conn.execute(
-                    "INSERT OR IGNORE INTO soft_prompt_templates "
-                    "(prompt_id, profile_id, category, content, source_pattern_ids, "
-                    " confidence, effectiveness, token_count, retention_score, "
-                    " active, version, created_at, updated_at) "
-                    "VALUES (?, ?, 'custom', ?, ?, 0.8, 0.5, ?, 1.0, 1, 1, ?, ?)",
-                    (prompt_id, profile_id, content,
-                     json.dumps([evo_id]),
-                     len(content.split()),  # Rough token estimate
-                     now, now),
-                )
-                if conn.total_changes:
-                    created_count += 1
-            except _sqlite3.IntegrityError:
-                # Unique constraint on (profile_id, category) WHERE active=1
-                logger.debug(
-                    "Skipping soft prompt for %s: unique constraint on active custom",
-                    skill_name,
-                )
-
-        conn.commit()
-        conn.close()
+                    if cur.rowcount > 0:
+                        created_count += 1
+                except Exception as ins_exc:
+                    # Unique constraint on (profile_id, category) WHERE active=1
+                    logger.debug(
+                        "Skipping soft prompt for %s: %s", skill_name, ins_exc
+                    )
 
         return {
             "promoted_skills_found": len(promoted_rows),

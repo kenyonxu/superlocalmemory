@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -38,10 +39,10 @@ from superlocalmemory.core.security_primitives import (
     redact_secrets,
     safe_resolve,
 )
+from superlocalmemory.infra.data_root import DynamicStatePath, canonical_data_root
 
-
-CACHE_DB_DEFAULT: Path = Path.home() / ".superlocalmemory" / "active_brain_cache.db"
-INSTALL_TOKEN_DEFAULT: Path = Path.home() / ".superlocalmemory" / ".install_token"
+CACHE_DB_DEFAULT = DynamicStatePath("active_brain_cache.db")
+INSTALL_TOKEN_DEFAULT = DynamicStatePath(".install_token")
 
 TTL_SECONDS: int = 120
 CLEANUP_HORIZON_SECONDS: int = 600
@@ -64,6 +65,18 @@ class CacheEntry:
     provenance: str = "tool_observation"
     computed_at: int = 0
     byte_size: int = 0
+    profile_id: str = "default"
+
+
+def _active_profile_fallback(home: Path) -> str:
+    """Resolve the active profile for the cache reader hot path (stdlib only,
+    never raises). Two profiles can share a session_id, so cached context MUST
+    be keyed by profile or one tenant reads another's context."""
+    try:
+        raw = (home / "profiles.json").read_text(encoding="utf-8")
+        return json.loads(raw).get("active_profile", "default") or "default"
+    except Exception:
+        return "default"
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +103,44 @@ def _read_install_token(home: Path) -> str | None:
     return token or None
 
 
+def _ensure_install_token_at(home: Path) -> str:
+    """Create/read the binding token for an explicit cache namespace.
+
+    The shared security primitive owns the canonical namespace. This bounded
+    variant preserves ``home_dir`` as a real override without mutating global
+    path state or routing an explicit cache through the canonical token.
+    """
+    if home.resolve(strict=False) == canonical_data_root():
+        return ensure_install_token()
+
+    token_path = home / ".install_token"
+    try:
+        token = token_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        token = ""
+    if token:
+        return token
+
+    token = secrets.token_hex(32)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(str(token_path), flags, 0o600)
+        try:
+            os.write(fd, token.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except FileExistsError:
+        existing = token_path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+        raise RuntimeError(f"install token is empty: {token_path}")
+    if os.name != "nt":
+        os.chmod(token_path, 0o600)
+    return token
+
+
 # ---------------------------------------------------------------------------
 # Writer (daemon-side)
 # ---------------------------------------------------------------------------
@@ -108,10 +159,14 @@ class ContextCache:
         db_path: Path | None = None,
         home_dir: Path | None = None,
     ) -> None:
-        self._home = home_dir or (Path.home() / ".superlocalmemory")
+        self._home = Path(home_dir) if home_dir is not None else canonical_data_root()
         self._home.mkdir(parents=True, exist_ok=True)
 
-        raw = db_path or (self._home / "active_brain_cache.db")
+        raw = db_path or (
+            Path(CACHE_DB_DEFAULT)
+            if home_dir is None
+            else self._home / "active_brain_cache.db"
+        )
         self._db_path = safe_resolve(self._home, Path(raw).name) \
             if Path(raw).parent == self._home else \
             safe_resolve(self._home, raw)
@@ -156,9 +211,24 @@ class ContextCache:
         return conn
 
     def _bootstrap_schema_and_meta(self) -> None:
+        # Isolation: cached context is keyed by profile so two tenants sharing a
+        # session_id cannot read each other's context. Older cache files lack
+        # the profile_id column — the cache is ephemeral (120s TTL), so drop and
+        # recreate rather than run a rebuild migration.
+        try:
+            cols = {
+                r[1] for r in self._write_conn.execute(
+                    "PRAGMA table_info(context_entries)"
+                ).fetchall()
+            }
+            if cols and "profile_id" not in cols:
+                self._write_conn.execute("DROP TABLE context_entries")
+        except sqlite3.Error:  # pragma: no cover — defensive
+            pass
         self._write_conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS context_entries (
+                profile_id  TEXT NOT NULL DEFAULT 'default',
                 session_id  TEXT NOT NULL,
                 topic_sig   TEXT NOT NULL,
                 content     TEXT NOT NULL,
@@ -166,11 +236,11 @@ class ContextCache:
                 provenance  TEXT NOT NULL DEFAULT 'tool_observation',
                 computed_at INTEGER NOT NULL,
                 byte_size   INTEGER NOT NULL,
-                PRIMARY KEY (session_id, topic_sig)
+                PRIMARY KEY (profile_id, session_id, topic_sig)
             ) WITHOUT ROWID;
 
             CREATE INDEX IF NOT EXISTS idx_ctx_session_time
-                ON context_entries(session_id, computed_at);
+                ON context_entries(profile_id, session_id, computed_at);
             CREATE INDEX IF NOT EXISTS idx_ctx_time
                 ON context_entries(computed_at);
 
@@ -181,7 +251,7 @@ class ContextCache:
             );
             """
         )
-        token = ensure_install_token()
+        token = _ensure_install_token_at(self._home)
         now = int(time.time())
         self._write_conn.execute(
             "INSERT OR IGNORE INTO slm_meta (key, value, created_at) "
@@ -220,26 +290,38 @@ class ContextCache:
         self._write_conn.execute(
             """
             INSERT OR REPLACE INTO context_entries
-                (session_id, topic_sig, content, fact_ids,
+                (profile_id, session_id, topic_sig, content, fact_ids,
                  provenance, computed_at, byte_size)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (entry.session_id, entry.topic_sig, content, fact_ids_json,
-             entry.provenance, computed_at, byte_size),
+            (entry.profile_id or "default", entry.session_id, entry.topic_sig,
+             content, fact_ids_json, entry.provenance, computed_at, byte_size),
         )
 
     # -- Cleanup ------------------------------------------------------------
 
     def cleanup_session(
         self, session_id: str, *, older_than: int = CLEANUP_HORIZON_SECONDS,
+        profile_id: str | None = None,
     ) -> int:
-        """Delete rows for ``session_id`` older than ``older_than`` seconds."""
+        """Delete rows for ``session_id`` older than ``older_than`` seconds.
+
+        When ``profile_id`` is given the delete is tenant-scoped so a cleanup on
+        a shared session_id cannot wipe another profile's cached context.
+        """
         cutoff = int(time.time()) - older_than
-        cur = self._write_conn.execute(
-            "DELETE FROM context_entries "
-            "WHERE session_id=? AND computed_at < ?",
-            (session_id, cutoff),
-        )
+        if profile_id is not None:
+            cur = self._write_conn.execute(
+                "DELETE FROM context_entries "
+                "WHERE profile_id=? AND session_id=? AND computed_at < ?",
+                (profile_id, session_id, cutoff),
+            )
+        else:
+            cur = self._write_conn.execute(
+                "DELETE FROM context_entries "
+                "WHERE session_id=? AND computed_at < ?",
+                (session_id, cutoff),
+            )
         return cur.rowcount
 
     def cleanup_global_lru(self) -> int:
@@ -266,17 +348,17 @@ class ContextCache:
         target = int(MAX_BYTES * 0.9)
         while total > target:
             rows = self._write_conn.execute(
-                "SELECT session_id, topic_sig, byte_size "
+                "SELECT profile_id, session_id, topic_sig, byte_size "
                 "FROM context_entries "
                 "ORDER BY computed_at ASC LIMIT 100",
             ).fetchall()
             if not rows:  # pragma: no cover — reached only if table empties mid-sweep
                 break
-            for sess, sig, size in rows:
+            for pid, sess, sig, size in rows:
                 self._write_conn.execute(
                     "DELETE FROM context_entries "
-                    "WHERE session_id=? AND topic_sig=?",
-                    (sess, sig),
+                    "WHERE profile_id=? AND session_id=? AND topic_sig=?",
+                    (pid, sess, sig),
                 )
                 deleted += 1
                 total -= size
@@ -302,6 +384,7 @@ def read_entry_fast(
     *,
     db_path: Path | None = None,
     home_dir: Path | None = None,
+    profile_id: str | None = None,
 ) -> CacheEntry | None:
     """Hot-path reader used by the UserPromptSubmit hook.
 
@@ -313,12 +396,17 @@ def read_entry_fast(
       - stdlib-only — no heavy imports, no daemon HTTP call.
     """
     try:
-        home = home_dir or (Path.home() / ".superlocalmemory")
+        home = Path(home_dir) if home_dir is not None else canonical_data_root()
         if not home.exists():
             return None
 
         requested = db_path or Path(
-            os.environ.get("SLM_CACHE_DB") or (home / "active_brain_cache.db"),
+            os.environ.get("SLM_CACHE_DB")
+            or (
+                Path(CACHE_DB_DEFAULT)
+                if home_dir is None
+                else home / "active_brain_cache.db"
+            ),
         )
         try:
             resolved = safe_resolve(home, Path(requested).resolve())
@@ -349,14 +437,17 @@ def read_entry_fast(
                 return None
 
             now = int(time.time())
+            # Scope to the active profile so a shared session_id cannot read
+            # another tenant's cached context.
+            pid = profile_id or _active_profile_fallback(home)
             row = conn.execute(
                 """
                 SELECT content, fact_ids, provenance, computed_at, byte_size
                 FROM context_entries
-                WHERE session_id=? AND topic_sig=?
+                WHERE profile_id=? AND session_id=? AND topic_sig=?
                   AND computed_at > ?
                 """,
-                (session_id, topic_sig, now - TTL_SECONDS),
+                (pid, session_id, topic_sig, now - TTL_SECONDS),
             ).fetchone()
         finally:
             try:
@@ -387,6 +478,33 @@ def read_entry_fast(
         return None
 
 
+def purge_profile_from_cache_db(db_path: Path, profile_id: str) -> int:
+    """Delete all ``context_entries`` rows for *profile_id* from a cache DB file.
+
+    Opens the file with a direct write connection (no URI, no read-only flag)
+    so it works even when the daemon is not running. Returns the number of rows
+    deleted. Never raises — any error returns 0 so callers can remain
+    fail-open.
+    """
+    try:
+        if not Path(db_path).exists():
+            return 0
+        conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=2.0)
+        try:
+            cur = conn.execute(
+                "DELETE FROM context_entries WHERE profile_id = ?",
+                (profile_id,),
+            )
+            return cur.rowcount
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+    except Exception:
+        return 0
+
+
 __all__ = (
     "CACHE_DB_DEFAULT",
     "CLEANUP_HORIZON_SECONDS",
@@ -396,5 +514,6 @@ __all__ = (
     "MAX_CONTENT_CHARS",
     "SCHEMA_VERSION",
     "TTL_SECONDS",
+    "purge_profile_from_cache_db",
     "read_entry_fast",
 )

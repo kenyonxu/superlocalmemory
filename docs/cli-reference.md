@@ -1,5 +1,5 @@
 # CLI Reference
-> SuperLocalMemory V3 Documentation
+> SuperLocalMemory V4 Documentation
 > https://superlocalmemory.com | Part of Qualixar
 
 Complete reference for the `slm` command-line interface.
@@ -10,7 +10,9 @@ Complete reference for the `slm` command-line interface.
 
 ### `slm setup`
 
-Run the interactive setup wizard. Guides you through mode selection, IDE connection, and verification.
+Run the interactive setup wizard. Package installation itself is
+non-interactive and does not install hooks, edit IDE configuration, start a
+daemon, or download a model. `slm setup` is the explicit activation boundary.
 
 ```bash
 slm setup
@@ -47,7 +49,9 @@ slm connect cursor    # Configure Cursor specifically
 slm connect claude    # Configure Claude Code specifically
 ```
 
-Supported IDEs: `claude`, `cursor`, `vscode`, `windsurf`, `gemini`, `jetbrains`, `continue`, `zed`
+Run `slm connect --list` for the client names supported by the installed
+release. A documented configuration is not a claim that every client has
+passed the frozen V3.7 cross-client matrix.
 
 ## Memory Operations
 
@@ -58,28 +62,39 @@ Store a memory.
 ```bash
 slm remember "API rate limit is 100 req/min on staging"
 slm remember "Use camelCase for JS, snake_case for Python" --tags "style,convention"
-slm remember "Maria owns the auth service" --tags "team,ownership"
+slm remember "Maria owns the auth service" --scope shared --shared-with team-a
+slm remember "Wait for all enrichment" --sync --json
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--tags "a,b"` | Comma-separated tags for categorization |
-| `--profile name` | Store in a specific profile (overrides active profile) |
+| `--sync` | Wait until declared derivation and projector stages complete |
+| `--scope` | `personal`, `shared`, or `global` visibility |
+| `--shared-with` | Comma-separated profile IDs for shared scope |
+| `--json` | Emit the operation receipt and materialization state |
+
+Without `--sync`, the daemon returns after the memory is `queryable`; canonical
+enrichment continues in the background. If the daemon cannot start, the CLI
+stores raw evidence in the legacy offline spool. That spool is a compatibility
+input: replay submits the same source/idempotency identity through M018 before
+marking it done.
 
 ### `slm recall "query" [options]`
 
-Search your memories. Returns the most relevant results.
+Search your memories. Returns ranked evidence under [Score Contract
+v2](retrieval-score-contract.md).
 
 ```bash
 slm recall "rate limit"
 slm recall "who owns auth" --limit 5
-slm recall "database config" --profile work
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--limit N` | 10 | Maximum results to return |
-| `--profile name` | active | Search in a specific profile |
+| `--limit N` | 20 | Maximum results to return |
+| `--include-global` | off | Include global-scope facts when authorized |
+| `--include-shared` | off | Include facts shared with the active profile |
 
 ### `slm search "query" [options]`
 
@@ -87,19 +102,45 @@ Alias for `slm recall`. Same behavior, same options.
 
 ### `slm forget "query" [options]`
 
-Delete memories matching a query.
+Delete memories matching a fuzzy query (v4: `query` is positional, optional
+when used with `--dry-run`; there is **no** `slm forget --id` — use `slm
+delete <fact_id>` for exact ID deletion).
 
 ```bash
-slm forget "old staging credentials"
-slm forget --id 42                    # Delete by memory ID
-slm forget --before "2026-01-01"      # Delete memories before a date
+slm forget "old staging credentials"             # Confirm before deletion
+slm forget "old staging credentials" --dry-run   # Preview only
+slm forget "old staging credentials" --yes       # Skip confirmation
+slm forget --dry-run                            # Preview all memories when no query
 ```
 
 | Option | Description |
 |--------|-------------|
-| `--id N` | Delete a specific memory by ID |
-| `--before "date"` | Delete all memories before this date |
-| `--confirm` | Skip the confirmation prompt |
+| `--dry-run` | Preview matches without deleting |
+| `--yes`, `-y` | Skip the confirmation prompt |
+| `--json` | Emit structured preview or mutation output |
+
+Use `slm delete <fact_id>` for precise deletion by ID. See
+`docs/auto-memory.md` for the same correction (fuzzy `forget`, precise
+`delete`).
+
+### `slm delete <fact_id>`
+
+Delete a specific memory by its exact fact ID. Use `slm list --json` or `slm recall --json` to obtain fact IDs.
+
+```bash
+slm delete abc123
+slm delete abc123 --yes    # Skip confirmation
+slm delete abc123 --json
+```
+
+### `slm update <fact_id> <content>`
+
+Edit the content of a specific memory by its exact fact ID. The fact must belong to the active profile.
+
+```bash
+slm update abc123 "API rate limit is now 200 req/min on staging"
+slm update abc123 "Updated content" --json
+```
 
 ### `slm list [options]`
 
@@ -120,11 +161,10 @@ Recall with a channel-by-channel breakdown. Shows how each retrieval channel con
 slm trace "database port"
 ```
 
-Output shows scores from each channel:
-- Semantic (vector similarity)
-- BM25 (keyword matching)
-- Entity Graph (relationship traversal)
-- Temporal (time-based relevance)
+Output exposes the channels that contributed to each result. The current
+candidate producers are dense semantic, BM25 lexical, temporal, Hopfield
+associative, and spreading activation. Entity-graph information can enhance a
+post-fusion score but is not a separate candidate producer.
 
 ### `slm health`
 
@@ -141,30 +181,36 @@ Reports status of:
 - Embedding model status
 - Database integrity
 
-### `slm consistency`
-
-Run a consistency check across your memories. Detects contradictions and outdated information.
-
-```bash
-slm consistency
-```
-
 ## Migration
 
-### `slm migrate [options]`
+### `slm migrate`
 
-Migrate a V2 database to V3 format.
+Migrate a V2 database to V3 format (one-shot; no `--dry-run`).
 
 ```bash
 slm migrate                # Run migration
-slm migrate --dry-run      # Preview what will change
-slm migrate --rollback     # Undo migration (within 30 days)
+slm migrate --rollback     # V2-to-V3 rollback only; restore a verified backup if it fails
 ```
 
-| Option | Description |
-|--------|-------------|
-| `--dry-run` | Show what would change without modifying anything |
-| `--rollback` | Revert to V2 format (backup must exist) |
+> There is no `slm migrate --dry-run`, no `slm consistency` (use `slm health`
+> / `slm trace` / `slm ops`), no automatic 30-day rollback window, and the
+> migrator is not globally transactional/zero-loss — it spans file copies,
+> SQLite commits and a symlink. Verify a complete offline whole-root backup
+> (`slm serve stop` first, include WAL/SHM + `lance/` if present) before
+> migrating. Downgrade of V4 additive DBs is unsupported; see
+> `slm db migrate` below.
+
+`slm migrate --rollback` is only for the legacy V2-to-V3 migrator. It is
+different from `slm db migrate`, whose V4 additive migrations are forward-only
+and have no `--rollback` option.
+
+### V4 additive DB migrations (`slm db migrate`)
+
+Current V4 ships `M038_learning_feedback_channel` (eager, `learning` DB) and
+`M039_scene_fact_members` (deferred, `memory` DB — profile-scoped composite
+`scene_fact_members` with FKs to `memory_scenes(profile_id, scene_id)` and
+`atomic_facts(profile_id, fact_id)`). Both auto-apply at startup; no manual
+migration is normally required.
 
 ## Profile Management
 
@@ -176,8 +222,7 @@ Manage memory profiles (isolated memory contexts).
 slm profile list                  # List all profiles
 slm profile switch work           # Switch to "work" profile
 slm profile create client-acme    # Create a new profile
-slm profile delete old-project    # Delete a profile
-slm profile export work > backup.json  # Export a profile
+slm profile list --json           # Structured profile inventory
 ```
 
 ## System & Maintenance
@@ -190,71 +235,42 @@ Show system status: mode, profile, memory count, database location, health.
 slm status
 ```
 
-### `slm compact`
-
-Compress and optimize the memory database. Merges redundant memories and reclaims space.
-
-```bash
-slm compact
-```
-
-### `slm backup`
-
-Check backup status or create a manual backup.
-
-```bash
-slm backup              # Show backup status
-slm backup create       # Create a backup now
-```
-
-### `slm audit [options]`
-
-View the audit trail. Shows all memory operations with timestamps and hash-chain verification.
-
-```bash
-slm audit               # Recent audit entries
-slm audit --limit 100   # Last 100 entries
-slm audit --verify      # Verify hash-chain integrity
-```
-
-### `slm retention [policy]`
-
-Manage retention policies.
-
-```bash
-slm retention                          # Show current policy
-slm retention set gdpr-30d            # Apply GDPR 30-day policy
-slm retention set hipaa-7y            # Apply HIPAA 7-year policy
-slm retention set custom --days 90    # Custom retention period
-```
-
 ## Global Options
 
-These options work with any command:
+Global metadata options are activation-free. Command-specific options appear in
+`slm <command> --help`; do not assume that an option accepted by one command is
+global.
 
 | Option | Description |
 |--------|-------------|
 | `--help` | Show help for a command |
 | `--version` | Show SLM version |
-| `--verbose` | Show detailed output |
-| `--json` | Output structured JSON with agent-native envelope (for AI agents, scripts, CI/CD) |
-| `--profile name` | Override the active profile for this command |
 
 ## Agent-Native JSON Output
 
-All data-returning commands support `--json` for structured output. The envelope follows the 2026 agent-native CLI standard:
+Commands that advertise `--json` emit structured output. Recall results use
+Score Contract v2:
 
 ```json
 {
   "success": true,
   "command": "recall",
-  "version": "3.0.22",
+  "version": "<installed-version>",
   "data": {
     "results": [
-      {"fact_id": "abc123", "score": 0.87, "content": "Database uses PostgreSQL 16"}
+      {
+        "fact_id": "abc123",
+        "content": "Database uses PostgreSQL 16",
+        "relevance_score": 0.87,
+        "ranking_score": 0.0132,
+        "memory_confidence": 0.7,
+        "rank_position": 1
+      }
     ],
     "count": 1,
-    "query_type": "semantic"
+    "score_contract_version": "2",
+    "calibration_status": "uncalibrated",
+    "answer_confidence": null
   },
   "next_actions": [
     {"command": "slm list --json", "description": "List recent memories"}
@@ -262,9 +278,8 @@ All data-returning commands support `--json` for structured output. The envelope
 }
 ```
 
-### Supported Commands
-
-`recall`, `remember`, `list`, `status`, `health`, `trace`, `forget`, `delete`, `update`, `mode`, `profile`, `connect`
+Check `slm <command> --help` before scripting a surface; structured-output
+support is explicit per command and may expand between releases.
 
 ### Usage with jq
 
@@ -324,7 +339,7 @@ slm remember "CI/CD via GitHub Actions, deploys on merge to main"
 
 ---
 
-## Optimize Commands (v3.6)
+## Optimize Commands
 
 SLM v3.6 adds the **Optimize** layer — Cache + Compress + Align for LLM cost reduction.
 
@@ -344,7 +359,9 @@ slm optimize savings --json
 
 ### `slm cache status|clear|invalidate|ttl|semantic`
 
-Cache sub-control — exact and semantic tiers.
+Cache sub-control. Exact cache is the stable path. Semantic cache remains
+experimental and must not be treated as enabled production behavior without a
+release-linked precision, invalidation, and tenant-isolation report.
 
 ```bash
 slm cache status                   # Entry count, DB size, TTLs, hit rate
@@ -355,18 +372,17 @@ slm cache ttl --semantic 3600      # Set semantic TTL
 slm cache semantic on|off          # Enable/disable semantic cache
 ```
 
-### `slm compress status|mode|code|prose|ccr|align`
+### `slm compress status|mode|prose`
 
-Compression sub-control — per-channel toggles.
+Compression sub-control — active subcommands.
 
 ```bash
 slm compress status                # Mode + per-channel state
 slm compress mode safe|aggressive  # Set aggressiveness
-slm compress code on|off           # Code/JSON compression
-slm compress prose on|off          # Prose compression (opt-in)
-slm compress ccr on|off            # Reversible context retrieval
-slm compress align on|off          # Prefix stabilization
+slm compress prose on|off          # Prose compression (opt-in, aggressive mode only)
 ```
+
+> **Removed in v3.6.10:** `slm compress code`, `slm compress ccr`, and `slm compress align` no longer perform meaningful work and print a migration notice when invoked. Use `slm compress prose on` for prose-level compression.
 
 ### `slm proxy [options]`
 
@@ -409,4 +425,448 @@ Full details: [docs/optimize-cli.md](./optimize-cli.md)
 
 ---
 
-*SuperLocalMemory V3 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*
+## Daemon and System
+
+### `slm init`
+
+One-command first-time setup: mode selection, hook installation, IDE configuration, and optional warmup. Equivalent to running `slm setup` then `slm hooks install` then `slm connect` then `slm warmup` interactively.
+
+```bash
+slm init           # Interactive wizard covering all setup steps
+slm init --mode a  # Non-interactive: Mode A, no hooks, no IDE config
+```
+
+| Option | Description |
+|--------|-------------|
+| `--mode a/b/c` | Set operating mode non-interactively |
+| `--no-hooks` | Skip hook installation |
+| `--no-ide` | Skip IDE configuration |
+
+### `slm doctor`
+
+Pre-flight check: verifies dependencies, embedding worker, daemon connectivity, and configuration. Run after any install or upgrade.
+
+```bash
+slm doctor
+slm doctor --json   # Structured output
+```
+
+### `slm warmup`
+
+Pre-download the embedding model (~500MB). Prevents the first-use download lag.
+
+```bash
+slm warmup
+```
+
+### `slm dashboard`
+
+Open the local web dashboard. Requires the daemon to be running.
+
+```bash
+slm dashboard           # Opens at http://localhost:8765
+slm dashboard --port 9000
+```
+
+### `slm serve [start|stop]`
+
+Start or stop the background daemon. The daemon enables instant CLI response and is required by the dashboard, MCP server, and most commands.
+
+```bash
+slm serve start    # Start daemon (auto-started on most commands)
+slm serve stop     # Stop daemon
+```
+
+### `slm restart`
+
+Restart the daemon — required after configuration changes that cannot take effect at runtime.
+
+```bash
+slm restart
+slm restart --json
+```
+
+### `slm mcp`
+
+Start the MCP server in stdio transport mode. Used by IDE configurations that require a subprocess-based MCP server.
+
+```bash
+slm mcp
+```
+
+For HTTP transport (recommended), the daemon exposes `/mcp/` automatically. See [docs/mcp-tools.md](./mcp-tools.md).
+
+### `slm rotate-token`
+
+Rotate the SLM install token. Run `slm restart` afterward to pick up the new token.
+
+```bash
+slm rotate-token
+```
+
+### `slm disable [--reason "..."]`
+
+Globally disable SLM. Writes a `.disabled` marker and stops the daemon. All subsequent commands that require the daemon return an informational message until `slm enable` is run.
+
+```bash
+slm disable
+slm disable --reason "maintenance window"
+```
+
+### `slm enable`
+
+Remove the `.disabled` marker. Prints the command to start the daemon.
+
+```bash
+slm enable
+```
+
+### `slm clear-cache`
+
+Wipe regenerable caches. `memory.db` and `learning.db` are preserved — only derived caches and optimization state are cleared.
+
+```bash
+slm clear-cache
+```
+
+### `slm reconfigure`
+
+Re-run the interactive post-install configurator. Use to change the performance profile, operating mode, or deployment tier without a full reinstall.
+
+```bash
+slm reconfigure
+```
+
+### `slm reap [--force] [--all]`
+
+Find and optionally kill orphaned SLM processes.
+
+```bash
+slm reap            # Dry-run: list orphans
+slm reap --force    # Kill orphaned processes
+slm reap --all      # Kill ALL slm mcp processes (use after IDE switch)
+slm reap --json
+```
+
+---
+
+## Hooks and IDE Integration
+
+### `slm hooks install|uninstall|status`
+
+Manage auto-capture hooks for Claude Code and Codex.
+
+```bash
+slm hooks install              # Install for Claude Code (default)
+slm hooks install --agent codex  # Install for Codex
+slm hooks uninstall
+slm hooks status
+```
+
+| Option | Description |
+|--------|-------------|
+| `--agent codex` | Target Codex instead of Claude Code |
+| `--global` | Install in global config (all projects) |
+| `--project` | Install in project-local config |
+| `--dry-run` | Preview changes without writing |
+
+### `slm codex install|remove|status`
+
+Manage SLM add-ons for Codex: skills, subagents, and lifecycle hooks.
+
+```bash
+slm codex install       # Add SLM-owned skills, agents, hooks to Codex
+slm codex remove        # Remove SLM-owned files from Codex
+slm codex status        # Verify installation
+slm codex install --dry-run
+```
+
+`slm codex install` is additive — it does not replace other agents' hooks or rewrite `~/.codex/config.toml`. MCP wiring is a separate step: `slm connect codex`.
+
+### `slm connect [ide]`
+
+Auto-configure an IDE integration. Detects the installed IDE and writes the appropriate MCP config snippet.
+
+```bash
+slm connect                # Auto-detect and configure all IDEs
+slm connect claude-code    # Claude Code specifically
+slm connect cursor         # Cursor
+slm connect codex          # Codex MCP wiring
+slm connect --list         # Show all supported IDEs
+```
+
+---
+
+## Sessions and Lifecycle
+
+### `slm session open|close`
+
+Manage named sessions for context grouping and temporal summaries.
+
+```bash
+slm session open --project-path /path/to/project  # Warm context for a project
+slm session open --query "auth service work"       # Explicit query
+slm session close                                  # Close and summarize
+slm session close --session-id abc123
+```
+
+### `slm session-context [query]`
+
+Print session context for use by hooks. Returns relevant memories for the current project path or an explicit query.
+
+```bash
+slm session-context                         # Auto-derive from cwd
+slm session-context "auth service"          # Explicit query
+slm session-context --max-results 5 --json
+```
+
+### `slm observe [content]`
+
+Submit content for automatic capture evaluation. The system decides whether the content contains a decision, bug fix, or preference worth storing.
+
+```bash
+echo "Decided to use WebSocket over SSE" | slm observe
+slm observe "API rate limit is 100 req/min on staging"
+```
+
+---
+
+## V3.3 Lifecycle Commands
+
+### `slm decay [--execute]`
+
+Run the Ebbinghaus forgetting decay cycle. Default is dry-run.
+
+```bash
+slm decay                   # Preview transitions
+slm decay --execute         # Apply zone transitions
+slm decay --profile work --execute
+slm decay --json
+```
+
+### `slm quantize [--execute]`
+
+Run the EAP embedding quantization cycle. Default is dry-run.
+
+```bash
+slm quantize                # Preview changes
+slm quantize --execute      # Apply precision changes
+slm quantize --json
+```
+
+### `slm consolidate [--cognitive]`
+
+Run the memory consolidation pipeline.
+
+```bash
+slm consolidate                      # Standard consolidation
+slm consolidate --cognitive          # Include CCQ cognitive consolidation
+slm consolidate --dry-run            # Preview
+slm consolidate --profile work
+slm consolidate --json
+```
+
+### `slm soft-prompts`
+
+List active soft prompts — patterns the system has automatically learned from usage.
+
+```bash
+slm soft-prompts
+slm soft-prompts --profile work --json
+```
+
+---
+
+## Data and Evidence
+
+### `slm evidence export|verify|import|rebuild`
+
+Export, verify, import, or rebuild versioned memory evidence bundles. Evidence bundles are deterministic, checksummed JSONL archives.
+
+```bash
+slm evidence export /path/to/bundle.jsonl --profile default
+slm evidence verify /path/to/bundle.jsonl
+slm evidence import /path/to/bundle.jsonl --execute
+slm evidence import /path/to/bundle.jsonl --replace --execute
+slm evidence rebuild --execute   # Rebuild derived lexical state
+```
+
+| Subcommand | Description |
+|-----------|-------------|
+| `export <dest>` | Write a deterministic checksummed JSONL bundle |
+| `verify <bundle>` | Verify checksums and source reconciliation |
+| `import <bundle>` | Import relational truth (dry-run unless `--execute`) |
+| `rebuild` | Rebuild derived lexical state (dry-run unless `--execute`) |
+
+### `slm diagnostics export <dest>`
+
+Export bounded local operational aggregates. Produces a content-free JSON report (no memory content, no secrets) for manual inspection or support.
+
+```bash
+slm diagnostics export /path/to/report.json
+```
+
+### `slm benchmark`
+
+Run the evo-memory benchmark against an isolated temporary database. Never reads or writes user data.
+
+```bash
+slm benchmark
+slm benchmark --json
+```
+
+---
+
+## Configuration and Adapters
+
+### `slm config get|set <key> [value]`
+
+Get or set runtime configuration values using dot notation.
+
+```bash
+slm config get evolution.enabled
+slm config set evolution.enabled true
+slm config set security.require_login true
+slm config set retention.default_policy gdpr-30d
+slm config set embedding.model nomic-embed-text-v1.5
+```
+
+Common keys:
+
+| Key | Description |
+|-----|-------------|
+| `evolution.enabled` | Enable/disable skill evolution |
+| `security.require_login` | Require login for dashboard and API |
+| `retention.default_policy` | `indefinite`, `gdpr-30d`, `hipaa-7y`, `custom` |
+| `embedding.model` | Embedding model name |
+| `mesh.discovery` | `on`/`off` for mDNS peer discovery |
+
+### `slm adapters [subcommand]`
+
+Manage ingestion adapters: Gmail, Calendar, and Transcript.
+
+```bash
+slm adapters list                  # List all adapters and their status
+slm adapters enable gmail          # Enable Gmail adapter
+slm adapters disable gmail         # Disable Gmail adapter
+slm adapters start gmail           # Start adapter ingestion
+slm adapters stop gmail            # Stop adapter ingestion
+slm adapters status gmail          # Check adapter status
+```
+
+### `slm ingest [--source ecc|jsonl]`
+
+Import external observations into SLM's learning system.
+
+```bash
+slm ingest --source ecc            # Import Claude Code (ECC) sessions
+slm ingest --source jsonl --file /path/to/data.jsonl
+slm ingest --source ecc --dry-run  # Preview without writing
+```
+
+Supported sources:
+- `ecc` — Claude Code sessions (auto-discovers ECC observation files)
+- `jsonl` — Generic JSONL with `content` and optional `timestamp` fields
+
+### `slm evolve [--session <id>] [--profile <id>]`
+
+Run post-session skill evolution. Normally called automatically by the Stop hook; invoke manually to process a specific session.
+
+```bash
+slm evolve
+slm evolve --session abc123 --profile work
+```
+
+---
+
+## Bounded Loops (v3.8.0)
+
+### `slm loop demo [--iterations N] [--json]`
+
+Run the keyless convergence demo. A stub proposer runs laps against a deterministic gate (fails twice, passes on lap 3). Every lap is written to SLM memory under tag `loop:convergence-demo` and is visible on the dashboard.
+
+```bash
+slm loop demo
+slm loop demo --iterations 5
+slm loop demo --json
+```
+
+Confirms the bounded-loop engine, SLM ledger, and gate mechanism end to end without a credentialed agent or a running daemon. Use it to verify the installation after an upgrade.
+
+### `slm loop history [--name NAME] [--json]`
+
+List recorded runs for a loop name from the SLM ledger.
+
+```bash
+slm loop history                          # defaults to "convergence-demo"
+slm loop history --name deploy-gate
+slm loop history --name deploy-gate --json
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--name NAME` | `convergence-demo` | Loop name to query |
+| `--json` | off | Emit structured JSON |
+
+### `slm loop show <run_id> [--json]`
+
+Show every lap of one run, in order.
+
+```bash
+slm loop show <run_id>
+slm loop show <run_id> --json
+```
+
+`run_id` is printed by `slm loop demo` and returned by the `slm_loop_run` MCP tool. Each lap row records `decision`, gate pass/fail, detail text, and token budget.
+
+The MCP equivalents are `slm_loop_run`, `slm_loop_history`, and `slm_loop_show`. See [MCP Tools Reference → Bounded-Loop Tools](mcp-tools.md#bounded-loop-tools-v380).
+
+---
+
+## Database Maintenance
+
+### `slm db migrate [status|--dry-run]`
+
+Inspect or run additive database schema migrations — **forward-only** (no
+`--rollback`).
+
+```bash
+slm db migrate --status    # Show migration_log status (no writes)
+slm db migrate --dry-run   # Preview what would change (no writes)
+slm db migrate             # Apply pending migrations (forward-only)
+```
+
+### `slm ops list|resolve|status`
+
+Inspect and remediate failed, stuck, or degraded governed operations.
+
+```bash
+slm ops list --profile work --json
+slm ops status --json
+slm ops resolve <operation_id> --action retry
+slm ops resolve <operation_id> --action force_reconcile
+slm ops resolve <operation_id> --action cancel
+```
+
+`resolve` is an administrator action. Obtain the operation ID from `slm ops
+list` and choose the remediation action deliberately; it can re-drive or
+cancel durable work.
+
+### `slm db scale status|prepare|verify|promote|rollback|adopt`
+
+Manage the optional Scale Engine (CozoDB graph + LanceDB vector projections).
+
+```bash
+slm db scale status                              # Show current Scale Engine state
+slm db scale prepare                             # Stage a new projection
+slm db scale verify --stage-id <id>             # Verify parity with canonical SQLite
+slm db scale promote --stage-id <id>            # Promote verified projection
+slm db scale rollback --backup-id <id>          # Roll back to a prior projection
+slm db scale adopt                               # Adopt a detected pre-v3.7 projection
+```
+
+SQLite + sqlite-vec remain canonical. Projections are parity-gated; a failed verify leaves recall on SQLite with the rejected manifest retained for inspection.
+
+---
+
+*SuperLocalMemory V4 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*

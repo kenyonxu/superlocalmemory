@@ -15,7 +15,9 @@ DOC-CORRECT layout (v3.6.14):
 
 Tests verify:
   - plugin.json: full §5 schema (name, version, description, author{Qualixar}, repo, keywords,
-    mcpServers pointer, hooks pointer) — lives at plugin/.claude-plugin/plugin.json
+    mcpServers pointer) — lives at plugin/.claude-plugin/plugin.json. Claude Code
+    automatically discovers plugin/hooks/hooks.json, so the manifest must not
+    declare that standard file a second time.
   - .mcp.json: command ends with /venv/bin/slm, contains ${CLAUDE_PLUGIN_DATA}, args==["mcp"],
     NEVER bare "slm"/"python"/"superlocalmemory.mcp", env SLM_MCP_PROFILE=code, SLM_DATA_DIR set
   - marketplace.json: at repo root .claude-plugin/, NO version key in plugin entry, source="./plugin"
@@ -66,6 +68,16 @@ def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _ensure_plugin_generated() -> None:
+    """Regenerate ignored plugin outputs before checking the plugin layout."""
+    subprocess.run(
+        ["node", "scripts/build-plugin.mjs", "--quiet"],
+        cwd=REPO,
+        check=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # T1 — plugin.json: at plugin/.claude-plugin/plugin.json
 # ---------------------------------------------------------------------------
@@ -83,8 +95,9 @@ class TestPluginJson:
 
     def test_plugin_json_has_version(self) -> None:
         data = _load_json(PLUGIN_CLAUDE_DIR / "plugin.json")
+        manifest = _load_json(PLUGIN_SRC / "manifest.json")
         assert "version" in data, "plugin.json missing 'version'"
-        assert data["version"] == "3.6.22"
+        assert data["version"] == manifest["version"]
 
     def test_plugin_json_has_description(self) -> None:
         data = _load_json(PLUGIN_CLAUDE_DIR / "plugin.json")
@@ -136,12 +149,11 @@ class TestPluginJson:
             f"mcpServers must point to .mcp.json, got {data['mcpServers']!r}"
         )
 
-    def test_plugin_json_has_hooks_pointer(self) -> None:
+    def test_plugin_json_does_not_duplicate_standard_hooks_file(self) -> None:
         data = _load_json(PLUGIN_CLAUDE_DIR / "plugin.json")
-        assert "hooks" in data, "plugin.json missing 'hooks' pointer"
-        hooks_ptr = str(data["hooks"])
-        assert "hooks.json" in hooks_ptr, (
-            f"hooks must reference hooks.json, got {data['hooks']!r}"
+        assert "hooks" not in data, (
+            "Claude Code auto-loads plugin/hooks/hooks.json; declaring it in the "
+            "manifest causes a duplicate-hook load failure"
         )
 
 
@@ -226,7 +238,7 @@ class TestMcpJson:
         )
 
     def test_mcp_env_slm_mcp_profile_is_code(self) -> None:
-        """v3.6.14: profile must be 'code' (20 tools, includes graph intelligence)."""
+        """v3.6.14: profile must be 'code' (24 tools: graph intelligence + bounded loops)."""
         server = self._get_server()
         env = server.get("env", {})
         assert env.get("SLM_MCP_PROFILE") == "code", (
@@ -372,12 +384,10 @@ class TestSkillsLayout:
                 f"plugin/skills/{skill}/SKILL.md not found — expected 7 skills in v3.6.14"
             )
 
-    def test_no_commands_dir_in_plugin(self) -> None:
-        """Commands are folded into skills in v3.6.14; no plugin/commands/ dir."""
-        commands_dir = PLUGIN_ROOT / "commands"
-        assert not commands_dir.exists(), (
-            f"plugin/commands/ must not exist — commands folded into skills in v3.6.14"
-        )
+    def test_commands_dir_ships_slm_loop(self) -> None:
+        """v3.8.0: the /slm-loop bounded-loop command ships in plugin/commands/."""
+        cmd = PLUGIN_ROOT / "commands" / "slm-loop.md"
+        assert cmd.exists(), "plugin/commands/slm-loop.md must exist (v3.8.0)"
 
     def test_no_old_skills_in_plugin(self) -> None:
         """Old skills (slm-build-graph, slm-list-recent, etc.) must not exist."""
@@ -474,3 +484,19 @@ class TestGeneratorRoundTrip:
         assert src.read_text(encoding="utf-8") == out.read_text(encoding="utf-8"), (
             "plugin/requirements.txt must match plugin-src/requirements.txt byte-for-byte"
         )
+
+
+class TestPluginDaemonOwnership:
+    """Every plugin MCP process must join its namespace daemon first."""
+
+    def test_posix_launcher_starts_daemon_before_mcp(self) -> None:
+        launcher = PLUGIN_SRC / "scripts" / "slm-launch"
+        source = launcher.read_text(encoding="utf-8")
+        assert "serve start" in source
+        assert source.index("serve start") < source.rindex(" mcp")
+
+    def test_windows_launcher_starts_daemon_before_mcp(self) -> None:
+        launcher = PLUGIN_SRC / "scripts" / "slm-launch.bat"
+        source = launcher.read_text(encoding="utf-8")
+        assert "serve start" in source
+        assert source.index("serve start") < source.rindex(" mcp")

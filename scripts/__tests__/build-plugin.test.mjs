@@ -19,7 +19,7 @@ import { spawnSync } from 'node:child_process';
 // Module path (relative to this file location: scripts/__tests__/)
 // ---------------------------------------------------------------------------
 const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
-const SCRIPT_PATH = path.resolve(import.meta.dirname, '../build-plugin.js');
+const SCRIPT_PATH = path.resolve(import.meta.dirname, '../build-plugin.mjs');
 
 // Lazy-import the module (it exports pure functions)
 let mod;
@@ -551,7 +551,11 @@ describe('REGRESSION: prune scoped to plugin/ only', () => {
 // TEST 16 — Full build on real REPO_ROOT succeeds + --check exits 0
 // ---------------------------------------------------------------------------
 describe('Integration: real repo build', () => {
-  test('node build-plugin.js succeeds on real repo', () => {
+  test('plugin builder declares its ESM format by extension', () => {
+    assert.equal(path.extname(SCRIPT_PATH), '.mjs');
+  });
+
+  test('node build-plugin.mjs succeeds on real repo', () => {
     const result = spawnSync(
       process.execPath,
       [SCRIPT_PATH, '--quiet'],
@@ -562,6 +566,11 @@ describe('Integration: real repo build', () => {
       console.error('STDERR:', result.stderr);
     }
     assert.equal(result.status, 0, `build exited ${result.status}: ${result.stderr}`);
+    assert.doesNotMatch(
+      result.stderr,
+      /MODULE_TYPELESS_PACKAGE_JSON/,
+      'plugin builder must use an unambiguous Node module format'
+    );
   });
 
   test('--check exits 0 after build', () => {
@@ -573,11 +582,13 @@ describe('Integration: real repo build', () => {
     assert.equal(result.status, 0, `--check exited ${result.status}: ${result.stdout}${result.stderr}`);
   });
 
-  test('plugin/.claude-plugin/plugin.json exists with version=3.6.14', () => {
+  test('plugin/.claude-plugin/plugin.json matches the source manifest version', () => {
     const p = path.join(REPO_ROOT, 'plugin', '.claude-plugin', 'plugin.json');
+    const manifestPath = path.join(REPO_ROOT, 'plugin-src', 'manifest.json');
     assert.ok(fs.existsSync(p), 'plugin/.claude-plugin/plugin.json must exist');
     const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
-    assert.equal(parsed.version, '3.6.14');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    assert.equal(parsed.version, manifest.version);
     assert.equal(parsed.author.name, 'Qualixar');
     assert.ok(parsed.author.url, 'author.url must be present');
   });
@@ -606,8 +617,15 @@ describe('Integration: real repo build', () => {
     }
   });
 
-  test('no commands/ dir exists in plugin/', () => {
-    const commandsDir = path.join(REPO_ROOT, 'plugin', 'commands');
-    assert.ok(!fs.existsSync(commandsDir), 'plugin/commands/ must not exist');
+  test('commands/ ships the slm-loop bounded-loop command', () => {
+    const cmd = path.join(REPO_ROOT, 'plugin', 'commands', 'slm-loop.md');
+    assert.ok(fs.existsSync(cmd), 'plugin/commands/slm-loop.md must exist');
+    const body = fs.readFileSync(cmd, 'utf8');
+    assert.ok(/bounded loop/i.test(body), 'command must describe a bounded loop');
+  });
+
+  test('slm-loop-runner agent ships in plugin/agents/', () => {
+    const agent = path.join(REPO_ROOT, 'plugin', 'agents', 'slm-loop-runner.md');
+    assert.ok(fs.existsSync(agent), 'plugin/agents/slm-loop-runner.md must exist');
   });
 });

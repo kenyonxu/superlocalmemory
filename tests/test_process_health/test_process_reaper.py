@@ -202,10 +202,18 @@ class TestKillOrphan:
         proc = subprocess.Popen([sys.executable, str(script)])
         time.sleep(0.5)  # Let it start and register handler
 
-        result = kill_orphan(proc.pid, graceful_timeout_seconds=1.0)
+        try:
+            result = kill_orphan(proc.pid, graceful_timeout_seconds=1.0)
+        finally:
+            # This test created the child, so it must reap it. kill_orphan only
+            # owns a PID and production targets are normally unrelated orphans.
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
 
         assert result["killed"] is True
         assert result["method"] == "sigkill"
+        assert proc.returncode == -signal.SIGKILL
 
     def test_kill_already_dead_process(self) -> None:
         """Killing a dead process returns already_dead."""
@@ -1167,6 +1175,53 @@ class TestReapStaleOrphanKillPath:
 # ---------------------------------------------------------------------------
 class TestReapStaleUntrackedOrphans:
     """Cover the untracked orphan scan in reap_stale_on_startup."""
+
+    def test_startup_never_kills_untracked_unified_daemon(
+        self, tmp_pid_file: Path, monkeypatch
+    ) -> None:
+        """An isolated data-root startup must not kill another live daemon."""
+        from superlocalmemory.infra.pid_manager import PidManager
+        from superlocalmemory.infra.process_reaper import (
+            ReaperConfig,
+            SlmProcessInfo,
+            reap_stale_on_startup,
+        )
+
+        config = ReaperConfig(orphan_age_threshold_hours=0.0)
+        mgr = PidManager(tmp_pid_file)
+        live_daemon = SlmProcessInfo(
+            pid=77779,
+            ppid=1,
+            start_time=time.time() - 18000,
+            command=(
+                "python -m superlocalmemory.server.unified_daemon "
+                "--start --port=8765"
+            ),
+            is_orphan=True,
+            parent_name="init",
+            age_hours=5.0,
+        )
+        kill_mock = MagicMock(
+            return_value={
+                "pid": live_daemon.pid,
+                "killed": True,
+                "method": "sigterm",
+                "error": None,
+            }
+        )
+        monkeypatch.setattr(
+            "superlocalmemory.infra.process_reaper.find_orphans",
+            lambda cfg: [live_daemon],
+        )
+        monkeypatch.setattr(
+            "superlocalmemory.infra.process_reaper.kill_orphan", kill_mock
+        )
+
+        result = reap_stale_on_startup(config, mgr)
+
+        assert result["orphans_found"] == 0
+        assert result["orphans_killed"] == 0
+        kill_mock.assert_not_called()
 
     def test_startup_kills_untracked_orphan(
         self, tmp_pid_file: Path, monkeypatch

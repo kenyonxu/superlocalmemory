@@ -38,7 +38,7 @@ is_valid = QualixarSigner.verify(signed_output)
 
 ### Research Papers
 
-SuperLocalMemory is backed by three peer-reviewed research papers:
+SuperLocalMemory is backed by three public research preprints (arXiv preprints):
 
 1. **Paper 1 — Trust & Behavioral Foundations** (arXiv:2603.02240)
    Bayesian trust defense, behavioral pattern mining, OWASP-aligned memory poisoning protection.
@@ -47,7 +47,7 @@ SuperLocalMemory is backed by three peer-reviewed research papers:
    Fisher-Rao geodesic distance, cellular sheaf cohomology, Riemannian Langevin lifecycle dynamics.
 
 3. **Paper 3 — The Living Brain** (arXiv:2604.04514)
-   FRQAD mixed-precision metric, Ebbinghaus adaptive forgetting, 7-channel cognitive retrieval, memory parameterization, trust-weighted forgetting.
+   FRQAD mixed-precision metric, Ebbinghaus adaptive forgetting, five candidate producers plus entity-graph enhancement, memory parameterization, trust-weighted forgetting.
 
 ### Research Initiative
 
@@ -61,11 +61,11 @@ SuperLocalMemory uses the following open-source libraries:
 - NumPy (BSD-3-Clause) — Numerical operations
 - SciPy (BSD-3-Clause) — Numerical optimization (used by vCache MLE logistic refit)
 
-See [requirements.txt](requirements.txt) for the full dependency list.
+See [pyproject.toml](pyproject.toml) for the full dependency list.
 
 ### Optimize Module — Research Citations (v3.6)
 
-The Optimize module (LLD-03 / LLD-04) builds on peer-reviewed work.
+The Optimize module (LLD-03 / LLD-04) builds on cited public research.
 The Implementer verified each arXiv ID against arxiv.org before citation.
 
 | Component | Source | License / Note |
@@ -74,10 +74,8 @@ The Implementer verified each arXiv ID against arxiv.org before citation.
 | **CacheAttack** (86% response hijack, 90.6% agentic) | arXiv:2601.23088 | Threat model. The 90.6% figure is [UNVERIFIED — body-only, RA-18]; the 86% figure is verified from the abstract. |
 | **SAFE-CACHE** (centroid-based adversarial defense) | Nature Scientific Reports 2026 | [CITATION-NEEDED-ONLINE — exact paper verified, but exact defense figures are body-only.] Defense reduced attack success from 52.77% to 14.27% per the paper. |
 | **ContextCache** (multi-turn context-aware keys) | arXiv:2506.22791 | §3 — context-aware cache keys prevent false reuse across semantically overlapping but conversationally distinct turns. |
-| **LLMLingua-2** (prose compression) | arXiv:2403.12968 (Microsoft Research) | MIT license. Models: `microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank` (default) and `microsoft/llmlingua-2-xlm-roberta-large-meetingbank`. Off by default, opt-in via `compress_prose=True` + `compress_mode="aggressive"`. **Originals always stored in CCR before lossy compression — reversible via `headroom_retrieve`.** |
+| **LLMLingua-2** (prose compression) | arXiv:2403.12968 (Microsoft Research) | MIT license. Models: `microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank` (default) and `microsoft/llmlingua-2-xlm-roberta-large-meetingbank`. Off by default, opt-in via `compress_prose=True` + `compress_mode="aggressive"`. **Originals always stored in CCR before lossy compression — reversible via `slm_ccr_retrieve`.** |
 | **LongLLMLingua** (RAG compression) | arXiv:2310.06839 | Not used in Phase 3. Documented for Phase 4 RAG integration. |
-| **Headroom** (router, JSON handler, code handler, aligner) | github.com/qualixar/headroom (Apache-2.0) | Patterns adapted with attribution: `ContentRouter`, `JSONStructureHandler`, `CodeLanguage` enum, `CacheAligner._classify_token`. |
-| **omnicache-ai** (test fixture patterns) | github.com/qualixar/omnicache-ai (Apache-2.0) | Deterministic hash-to-vector embedding fixture for tests. |
 
 **Two fabricated arXiv IDs were caught and fixed during the LLD-10 audit:**
 `2501.05064` and `2404.12693` (both previously wrong vCache labels). The

@@ -29,6 +29,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from superlocalmemory.storage.write_lock import get_write_lock
+
 logger = logging.getLogger(__name__)
 
 
@@ -55,64 +57,67 @@ def apply_merges(
     if not candidates:
         return 0
 
-    conn = sqlite3.connect(str(memory_db_path), timeout=10.0)
-    conn.execute("PRAGMA busy_timeout=2000")
+    # Acquire the process-level write lock BEFORE opening the sqlite3
+    # connection.  This serialises BEGIN IMMEDIATE → commit with all other
+    # in-process writers (DatabaseManager, VectorStore, adapter sync,
+    # reward_archive), eliminating SQLITE_BUSY races at the WAL layer.
     applied = 0
-    # S-L02: track the candidate list in flight so a rollback diagnostic
-    # can blame the exact set of (canonical, merged) pairs instead of a
-    # blanket "rollback" message. Operators on the dashboard previously
-    # saw zero fidelity about which candidates were in the transaction
-    # at commit-time.
-    in_flight: list[tuple[str, str]] = []
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        for canonical_id, merged_id, cos, jac in candidates:
-            # Skip if already merged in a prior cycle.
-            row = conn.execute(
-                "SELECT archive_status FROM atomic_facts WHERE fact_id=?",
-                (merged_id,),
-            ).fetchone()
-            if row is None:
-                continue
-            if row[0] == "merged":
-                continue
+    with get_write_lock(memory_db_path):
+        conn = sqlite3.connect(str(memory_db_path), timeout=10.0)
+        conn.execute("PRAGMA busy_timeout=2000")
+        # S-L02: track the candidate list in flight so a rollback diagnostic
+        # can blame the exact set of (canonical, merged) pairs instead of a
+        # blanket "rollback" message.
+        in_flight: list[tuple[str, str]] = []
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for canonical_id, merged_id, cos, jac in candidates:
+                # Skip if already merged in a prior cycle.
+                row = conn.execute(
+                    "SELECT archive_status FROM atomic_facts WHERE fact_id=?",
+                    (merged_id,),
+                ).fetchone()
+                if row is None:
+                    continue
+                if row[0] == "merged":
+                    continue
 
-            conn.execute(
-                "INSERT INTO memory_merge_log "
-                "(merge_id, profile_id, canonical_fact_id, merged_fact_id, "
-                " cosine_sim, entity_jaccard, merged_at, reversible) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
-                (
-                    str(uuid.uuid4()),
-                    profile_id,
-                    canonical_id,
-                    merged_id,
-                    float(cos),
-                    float(jac),
-                    _iso_now(),
-                ),
+                conn.execute(
+                    "INSERT INTO memory_merge_log "
+                    "(merge_id, profile_id, canonical_fact_id, merged_fact_id, "
+                    " cosine_sim, entity_jaccard, merged_at, reversible) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+                    (
+                        str(uuid.uuid4()),
+                        profile_id,
+                        canonical_id,
+                        merged_id,
+                        float(cos),
+                        float(jac),
+                        _iso_now(),
+                    ),
+                )
+                conn.execute(
+                    "UPDATE atomic_facts "
+                    "SET archive_status='merged', "
+                    "    archive_reason='cosine_dup', "
+                    "    merged_into=? "
+                    "WHERE fact_id=?",
+                    (canonical_id, merged_id),
+                )
+                applied += 1
+                in_flight.append((canonical_id, merged_id))
+            conn.commit()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            logger.warning(
+                "apply_merges rollback: profile=%s pre-rollback_applied=%d "
+                "in_flight=%s error=%s",
+                profile_id, applied, in_flight, exc,
             )
-            conn.execute(
-                "UPDATE atomic_facts "
-                "SET archive_status='merged', "
-                "    archive_reason='cosine_dup', "
-                "    merged_into=? "
-                "WHERE fact_id=?",
-                (canonical_id, merged_id),
-            )
-            applied += 1
-            in_flight.append((canonical_id, merged_id))
-        conn.commit()
-    except sqlite3.Error as exc:
-        conn.rollback()
-        logger.warning(
-            "apply_merges rollback: profile=%s pre-rollback_applied=%d "
-            "in_flight=%s error=%s",
-            profile_id, applied, in_flight, exc,
-        )
-        applied = 0
-    finally:
-        conn.close()
+            applied = 0
+        finally:
+            conn.close()
     return applied
 
 
@@ -122,39 +127,49 @@ def unmerge(memory_db_path: str | Path, merge_id: str) -> bool:
     Flips the merged fact's archive_status back to 'live', clears
     merged_into, and marks the log row ``reversible=0``.
     """
-    conn = sqlite3.connect(str(memory_db_path), timeout=10.0)
-    conn.execute("PRAGMA busy_timeout=2000")
+    # READ phase — check reversibility without holding the write lock.
+    conn_r = sqlite3.connect(str(memory_db_path), timeout=10.0)
     try:
-        row = conn.execute(
+        row = conn_r.execute(
             "SELECT merged_fact_id, reversible FROM memory_merge_log "
             "WHERE merge_id=?",
             (merge_id,),
         ).fetchone()
-        if row is None:
-            return False
-        merged_fid, reversible = row
-        if not reversible:
-            return False
-
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute(
-            "UPDATE atomic_facts "
-            "SET archive_status='live', archive_reason=NULL, merged_into=NULL "
-            "WHERE fact_id=?",
-            (merged_fid,),
-        )
-        conn.execute(
-            "UPDATE memory_merge_log SET reversible=0 WHERE merge_id=?",
-            (merge_id,),
-        )
-        conn.commit()
-        return True
-    except sqlite3.Error as exc:
-        conn.rollback()
-        logger.warning("unmerge rollback: %s", exc)
-        return False
     finally:
-        conn.close()
+        conn_r.close()
+
+    if row is None:
+        return False
+    merged_fid, reversible = row
+    if not reversible:
+        return False
+
+    # WRITE phase — acquire the process-level write lock before
+    # opening the write connection, serialising with all other in-process
+    # writers and eliminating SQLITE_BUSY at the WAL layer.
+    with get_write_lock(memory_db_path):
+        conn = sqlite3.connect(str(memory_db_path), timeout=10.0)
+        conn.execute("PRAGMA busy_timeout=2000")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE atomic_facts "
+                "SET archive_status='live', archive_reason=NULL, merged_into=NULL "
+                "WHERE fact_id=?",
+                (merged_fid,),
+            )
+            conn.execute(
+                "UPDATE memory_merge_log SET reversible=0 WHERE merge_id=?",
+                (merge_id,),
+            )
+            conn.commit()
+            return True
+        except sqlite3.Error as exc:
+            conn.rollback()
+            logger.warning("unmerge rollback: %s", exc)
+            return False
+        finally:
+            conn.close()
 
 
 __all__ = ("apply_merges", "unmerge")

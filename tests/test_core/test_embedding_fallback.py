@@ -240,16 +240,76 @@ class TestEmbeddingServiceTimeout:
 
     def test_readline_with_timeout_returns_empty_on_timeout(self) -> None:
         """Slow case: no data arrives → returns empty string."""
-        # Use a mock stream whose readline blocks for longer than timeout
-        slow_stream = MagicMock()
+        import os
 
-        def _slow_readline():
-            time.sleep(5.0)  # Simulate a hang
-            return '{"ok": true}\n'
+        # Real pipe with no writer data — production hang shape, no mock sleep
+        # threads left behind to pollute later tests.
+        r_fd, w_fd = os.pipe()
+        stream = os.fdopen(r_fd, "r")
+        try:
+            result = EmbeddingService._readline_with_timeout(
+                stream, timeout_seconds=0.1,
+            )
+            assert result == ""
+        finally:
+            try:
+                os.close(w_fd)
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
 
-        slow_stream.readline = _slow_readline
-        result = EmbeddingService._readline_with_timeout(slow_stream, timeout_seconds=0.3)
-        assert result == ""
+    def test_readline_with_timeout_does_not_leak_reader_threads(self) -> None:
+        """Timeout must not abandon blocked reader threads (FD + thread leak).
+
+        Production shape: a real pipe whose write end never produces a line.
+        N induced timeouts must leave ZERO new surviving threads whose name
+        contains ``_read`` — the pre-fix thread-per-read path abandoned one
+        daemon thread per timeout while it stayed blocked in readline().
+        """
+        import os
+
+        n = 5
+        held: list[tuple[object, int]] = []
+        before_ids = {t.ident for t in threading.enumerate()}
+        try:
+            for _ in range(n):
+                r_fd, w_fd = os.pipe()
+                # Keep write end open so a blocking readline would hang forever
+                # without a proper timeout implementation.
+                stream = os.fdopen(r_fd, "r")
+                held.append((stream, w_fd))
+                result = EmbeddingService._readline_with_timeout(stream, 0.05)
+                assert result == ""
+
+            # Brief settle — any correctly-joined/never-spawned reader is gone.
+            time.sleep(0.05)
+            survivors = [
+                t for t in threading.enumerate()
+                if t.is_alive()
+                and t.ident not in before_ids
+                and "_read" in (t.name or "")
+            ]
+            assert survivors == [], (
+                f"leaked {len(survivors)} reader thread(s) after {n} timeouts: "
+                f"{[t.name for t in survivors]}"
+            )
+        finally:
+            # Unblock any abandoned readers via write-end EOF first.
+            # Concurrent TextIOWrapper.close() on the read side while another
+            # thread is inside readline() can deadlock on macOS.
+            for _stream, w_fd in held:
+                try:
+                    os.close(w_fd)
+                except Exception:
+                    pass
+            for stream, _w_fd in held:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
 
     def test_readline_with_timeout_propagates_error(self) -> None:
         """Error case: stream raises → exception propagated."""
@@ -257,3 +317,112 @@ class TestEmbeddingServiceTimeout:
         stream.readline.side_effect = OSError("broken pipe")
         with pytest.raises(OSError, match="broken pipe"):
             EmbeddingService._readline_with_timeout(stream, timeout_seconds=5.0)
+
+    def test_worker_dependency_import_failure_is_reported_not_crashed(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A broken local ML stack must emit a protocol error, not exit silently."""
+        import builtins
+        from superlocalmemory.core import embedding_worker
+
+        real_import = builtins.__import__
+
+        def _blocked_import(name, *args, **kwargs):
+            if name == "sentence_transformers":
+                raise ValueError("incompatible local numpy installation")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _blocked_import)
+        assert embedding_worker._load_embedding_model("local-model") == (None, "")
+
+    def test_terminal_worker_error_disables_repeated_respawns(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A reported dependency failure must not churn workers on each recall."""
+        import io
+
+        service = EmbeddingService(EmbeddingConfig())
+        worker = MagicMock()
+        worker.stdin = io.StringIO()
+        worker.stdout = io.StringIO(
+            '{"ok": false, "error": "sentence-transformers unavailable"}\n',
+        )
+        service._worker_proc = worker
+        monkeypatch.setattr(service, "_ensure_worker", lambda: None)
+        killed = MagicMock()
+        monkeypatch.setattr(service, "_kill_worker", killed)
+
+        assert service._subprocess_embed(["dependency failure witness"]) is None
+        assert service.is_available is False
+        killed.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Availability tri-state (regression for v3.7.8 self-heal brick)
+# ---------------------------------------------------------------------------
+
+class TestEmbeddingAvailabilityTriState:
+    """The ``_available`` flag is a tri-state and recall-health depends on it.
+
+    v3.7.8 added ``if not self._available: return None`` to ``_subprocess_embed``.
+    ``recall_health._heal_embedder`` sets ``_available = None`` to force a
+    re-probe (the OllamaEmbedder convention). Because ``None`` is falsy, that
+    guard made every self-heal tick short-circuit the probe embed and leave the
+    flag stuck at ``None`` — permanently bricking the local subprocess worker
+    (semantic/hopfield/spreading_activation dead) until the daemon restarted,
+    and re-bricking on the first heal tick after each restart.
+    """
+
+    def _wire_ok_worker(self, service, monkeypatch, vectors):
+        import io
+        import json as _json
+
+        worker = MagicMock()
+        worker.stdin = io.StringIO()
+        worker.stdout = io.StringIO(
+            _json.dumps({"ok": True, "vectors": vectors, "dim": len(vectors[0])})
+            + "\n",
+        )
+
+        def _ensure() -> None:
+            service._worker_proc = worker
+
+        monkeypatch.setattr(service, "_ensure_worker", _ensure)
+        monkeypatch.setattr(service, "_reset_idle_timer", lambda: None)
+        return worker
+
+    def test_none_availability_reprobes_and_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """self-heal set ``_available = None`` — the next embed must re-probe the
+        worker, not short-circuit to None."""
+        service = EmbeddingService(EmbeddingConfig())
+        service._available = None  # recall_health._heal_embedder reset
+        self._wire_ok_worker(service, monkeypatch, [[0.1, 0.2, 0.3]])
+
+        assert service._subprocess_embed(["heal probe"]) == [[0.1, 0.2, 0.3]]
+
+    def test_successful_embed_resets_available_to_true(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A proven-healthy embed clears the transient ``None`` back to True so
+        the flag no longer lingers falsy."""
+        service = EmbeddingService(EmbeddingConfig())
+        service._available = None
+        self._wire_ok_worker(service, monkeypatch, [[1.0, 2.0]])
+
+        service._subprocess_embed(["witness"])
+        assert service._available is True
+
+    def test_explicit_false_still_short_circuits(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A terminal disable (``False``) must still block without touching the
+        worker — preserves the v3.7.8 "don't churn a dead worker" intent."""
+        service = EmbeddingService(EmbeddingConfig())
+        service._available = False
+        ensure = MagicMock()
+        monkeypatch.setattr(service, "_ensure_worker", ensure)
+
+        assert service._subprocess_embed(["blocked"]) is None
+        ensure.assert_not_called()

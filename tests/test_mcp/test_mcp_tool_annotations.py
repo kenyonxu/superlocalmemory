@@ -13,7 +13,7 @@ MASTER-PLAN-V5-ADDENDUM.md §1.11 + M-C-19 + T-H-08.
 
 Also verifies destructive operations (delete_memory, forget) are marked
 `destructiveHint=True` so clients can require confirmation, and
-idempotent operations (remember, update_memory) are marked
+idempotent operations (currently update_memory) are marked
 `idempotentHint=True` so clients can retry safely.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
@@ -24,7 +24,18 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from superlocalmemory.mcp.http_transport import SLMFastMCP
+
+
+def _ann_flag(ann: object | None, camel: str, snake: str) -> object:
+    """Read an annotation hint under either camelCase (wire) or snake_case (model)."""
+    if ann is None:
+        return None
+    val = getattr(ann, camel, None)
+    if val is not None:
+        return val
+    return getattr(ann, snake, None)
+
 
 
 # Tools whose calls MUST be side-effect-free — safe to parallel-dispatch.
@@ -56,23 +67,24 @@ DESTRUCTIVE_TOOLS: set[str] = {
 
 # Tools that can be safely retried — same input produces same outcome.
 IDEMPOTENT_TOOLS: set[str] = {
-    # content_hash dedup on pending.db (Invariant 6)
-    "remember",
     # same update applied twice = same state
     "update_memory",
-    # reinforce/contradict are idempotent per assertion_id
+}
+
+NON_IDEMPOTENT_MUTATIONS: set[str] = {
+    "remember",
     "reinforce_assertion",
     "contradict_assertion",
 }
 
 
-def _build_server_with_all_tools() -> FastMCP:
-    """Register every tool on a fresh FastMCP instance (SLM_MCP_ALL_TOOLS path)."""
+def _build_server_with_all_tools() -> SLMFastMCP:
+    """Register every tool on a fresh SLMFastMCP instance (SLM_MCP_ALL_TOOLS path)."""
     import os
 
     os.environ["SLM_MCP_ALL_TOOLS"] = "1"
 
-    server = FastMCP("SLM test")
+    server = SLMFastMCP("SLM test")
     # Dummy get_engine that returns a MagicMock — tool wiring doesn't
     # execute bodies at registration time, so this is safe.
     get_engine = MagicMock()
@@ -97,7 +109,7 @@ def _build_server_with_all_tools() -> FastMCP:
     return server
 
 
-def _tool_map(server: FastMCP) -> dict[str, object]:
+def _tool_map(server: SLMFastMCP) -> dict[str, object]:
     return {t.name: t for t in server._tool_manager.list_tools()}
 
 
@@ -120,7 +132,7 @@ def test_read_only_tools_have_readOnlyHint_true(tools: dict[str, object]) -> Non
             missing.append(name)
             continue
         ann = getattr(tool, "annotations", None)
-        if ann is None or getattr(ann, "readOnlyHint", None) is not True:
+        if ann is None or _ann_flag(ann, "readOnlyHint", "read_only_hint") is not True:
             wrong.append((name, ann))
     assert not missing, f"Expected read-only tools not registered: {missing}"
     assert not wrong, (
@@ -138,7 +150,11 @@ def test_write_tools_do_not_claim_readOnlyHint(tools: dict[str, object]) -> None
     """
     write_tools = {
         "remember", "delete_memory", "update_memory",
-        "session_init", "observe", "close_session",
+        # session_init excluded: verified read-only in tools_active.py — it recalls
+        # (pool_recall + get_pinned SELECT) and returns an in-memory session_id with no
+        # DB writes, the same read-only class as recall/search. It exposes no scope-
+        # escalation surface, so readOnlyHint=True is honest, not a mutation lie.
+        "observe", "close_session",
         "forget", "run_maintenance", "consolidate_cognitive",
         "set_mode", "report_outcome",
         "log_tool_event", "reinforce_assertion", "contradict_assertion",
@@ -153,7 +169,7 @@ def test_write_tools_do_not_claim_readOnlyHint(tools: dict[str, object]) -> None
         if tool is None:
             continue  # tool may not be registered in this build — skip
         ann = getattr(tool, "annotations", None)
-        if ann is not None and getattr(ann, "readOnlyHint", None) is True:
+        if ann is not None and _ann_flag(ann, "readOnlyHint", "read_only_hint") is True:
             liars.append(name)
     assert not liars, (
         "These mutating tools falsely claim readOnlyHint=True: "
@@ -172,7 +188,7 @@ def test_destructive_tools_have_destructiveHint_true(tools: dict[str, object]) -
         if tool is None:
             continue
         ann = getattr(tool, "annotations", None)
-        if ann is None or getattr(ann, "destructiveHint", None) is not True:
+        if ann is None or _ann_flag(ann, "destructiveHint", "destructive_hint") is not True:
             wrong.append(name)
     assert not wrong, (
         "These destructive tools MUST have destructiveHint=True: "
@@ -183,9 +199,7 @@ def test_destructive_tools_have_destructiveHint_true(tools: dict[str, object]) -
 def test_idempotent_tools_have_idempotentHint_true(tools: dict[str, object]) -> None:
     """Idempotent tools must be marked so clients can retry safely.
 
-    remember: content_hash dedup (Invariant 6)
     update_memory: same update = same state
-    reinforce/contradict: same assertion_id operation is idempotent
     """
     wrong: list[str] = []
     for name in sorted(IDEMPOTENT_TOOLS):
@@ -193,12 +207,27 @@ def test_idempotent_tools_have_idempotentHint_true(tools: dict[str, object]) -> 
         if tool is None:
             continue
         ann = getattr(tool, "annotations", None)
-        if ann is None or getattr(ann, "idempotentHint", None) is not True:
+        if ann is None or _ann_flag(ann, "idempotentHint", "idempotent_hint") is not True:
             wrong.append(name)
     assert not wrong, (
         "These idempotent tools MUST have idempotentHint=True: "
         f"{wrong}"
     )
+
+
+def test_non_idempotent_mutations_do_not_claim_safe_retry(
+    tools: dict[str, object],
+) -> None:
+    """Repeated state-changing calls must not advertise idempotency."""
+    liars: list[str] = []
+    for name in sorted(NON_IDEMPOTENT_MUTATIONS):
+        tool = tools.get(name)
+        if tool is None:
+            continue
+        ann = getattr(tool, "annotations", None)
+        if ann is not None and _ann_flag(ann, "idempotentHint", "idempotent_hint") is True:
+            liars.append(name)
+    assert not liars, f"These tools falsely claim idempotency: {liars}"
 
 
 def test_read_only_count_at_least_13(tools: dict[str, object]) -> None:
@@ -210,7 +239,7 @@ def test_read_only_count_at_least_13(tools: dict[str, object]) -> None:
     count = 0
     for tool in tools.values():
         ann = getattr(tool, "annotations", None)
-        if ann is not None and getattr(ann, "readOnlyHint", None) is True:
+        if ann is not None and _ann_flag(ann, "readOnlyHint", "read_only_hint") is True:
             count += 1
     assert count >= 12, (
         f"Only {count} tools have readOnlyHint=True; expected ≥ 12. "

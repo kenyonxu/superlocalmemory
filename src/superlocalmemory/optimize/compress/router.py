@@ -1,11 +1,6 @@
 # compress/router.py
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later
-#
-# Routing pattern adapted from:
-#   headroom/transforms/content_router.py (Apache-2.0, Headroom contributors)
-#   Specifically: ContentRouter._determine_strategy(), _strategy_from_detection()
-#   Attribution: See ATTRIBUTION.md.
 
 """CompressRouter — implements CompressHook, dispatches to sub-compressors.
 
@@ -18,14 +13,23 @@ import json
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from superlocalmemory.optimize.proxy.lifecycle import ProxyRequest, CompressHook
 from superlocalmemory.optimize.config.store import ConfigStore
 
+if TYPE_CHECKING:
+    from superlocalmemory.optimize.compress.align import CacheAligner
+    from superlocalmemory.optimize.compress.ccr import CCRStore
+    from superlocalmemory.optimize.compress.prose_llmlingua import LLMLinguaCompressor
+
 logger = logging.getLogger("slm.optimize.compress.router")
 
 _MIN_CHARS_FOR_COMPRESSION: int = 500
+# Above this size a JSON-looking payload is passed through untouched rather than
+# parsed — bounds worst-case parse cost on the hot path. Pretty-printed JSON in
+# the 0.5 KB–2 MB range (the common tool-output case) is losslessly minified.
+_MAX_JSON_MINIFY_CHARS: int = 2_000_000
 
 
 class CompressRouter:
@@ -138,8 +142,9 @@ class CompressRouter:
         try:
             saved = max(0, before_tokens - after_tokens)
             if self._metrics_counters is not None:
-                # M-02: pass before/after directly (bytes_original, bytes_after contract)
-                self._metrics_counters.on_compress(before_tokens, after_tokens)
+                # M-02: pass before/after directly (bytes_original, bytes_after contract).
+                # lossy distinguishes Layer-2 (LLMLingua) from lossless runs.
+                self._metrics_counters.on_compress(before_tokens, after_tokens, lossy)
             logger.debug("on_compress: saved=%d tokens lossy=%s", saved, lossy)
         except Exception as exc:
             logger.debug("on_compress metrics update failed (non-fatal): %s", exc)
@@ -266,25 +271,34 @@ class CompressRouter:
         if len(text) < _MIN_CHARS_FOR_COMPRESSION:
             return text, tokens_before, tokens_before, "none"
 
-        # K-01/K-02/K-03: NEVER compress structured content (JSON or code)
+        # K-01 refined (P4a): structured JSON is never *lossily* compressed, but it
+        # IS losslessly minified — parse → reserialize with no insignificant
+        # whitespace, which preserves the exact parsed value (see _json_minify for
+        # the duplicate-key + round-trip guards that keep it provably lossless).
+        # Code is still passed through untouched below.
         stripped = text.strip()
         if stripped.startswith(("{", "[")):
-            # PERF-02: for large content, structural bracket-match avoids O(n) json.loads().
-            # Conservative: matching outer brackets → treat as JSON and skip compression.
-            # K-01 mandate is safety-first: false-positive (non-JSON treated as JSON) is
-            # safe; false-negative (JSON compressed) would be a correctness violation.
-            _last = stripped[-1] if stripped else ""
-            if len(stripped) > 8192 and (
-                (stripped[0] == "{" and _last == "}") or (stripped[0] == "[" and _last == "]")
-            ):
-                return text, tokens_before, tokens_before, "none"  # large JSON → passthrough
+            _last = stripped[-1]
+            bracket_matched = (
+                (stripped[0] == "{" and _last == "}")
+                or (stripped[0] == "[" and _last == "]")
+            )
+            # PERF-02: over the size cap, a bracket-matched payload is assumed
+            # structured and skipped — avoids a pathological parse on the hot path.
+            if len(stripped) > _MAX_JSON_MINIFY_CHARS and bracket_matched:
+                return text, tokens_before, tokens_before, "none"
+            minified = _json_minify(stripped)
+            if minified is not None:
+                return minified, tokens_before, _token_estimate(minified), "json_minify"
+            # Not shrinkable: already-compact valid JSON passes through (K-01);
+            # anything that is not valid JSON falls through to prose/code handling.
             try:
                 json.loads(stripped)
-                return text, tokens_before, tokens_before, "none"  # valid JSON → passthrough
-            except json.JSONDecodeError:
+                return text, tokens_before, tokens_before, "none"  # already-compact JSON
+            except (json.JSONDecodeError, ValueError):
                 pass  # not valid JSON — treat as prose
-            except Exception as exc:
-                logger.warning("compress: unexpected error probing JSON content: %s", exc)
+            except RecursionError:
+                return text, tokens_before, tokens_before, "none"  # pathological nesting
 
         if _detect_language(text) is not None:
             return text, tokens_before, tokens_before, "none"  # code → passthrough
@@ -412,9 +426,20 @@ class CompressRouter:
     # ── Public convenience method (M-06) ──────────────────────────────────
 
     def compress_text(self, text: str, strategy: str = "auto") -> "CompressTextResult":
-        """Convenience method for test harness. NEVER raises."""
+        """Compress a single text blob (used by the slm_compress MCP tool). NEVER raises.
+
+        Honours ``compress_enabled``: when the operator has turned compression off
+        (``slm optimize off``) this is a pass-through, so the reported config state
+        and the tool's actual behaviour always agree (P4a config-honesty).
+        """
         try:
             cfg = self._get_config()
+            if not getattr(cfg, "compress_enabled", False):
+                t = _token_estimate(text)
+                return CompressTextResult(
+                    compressed_text=text, strategy="none",
+                    tokens_before=t, tokens_after=t, lossy=False,
+                )
             aggressive = cfg.compress_mode == "aggressive"
             compressed, tb, ta, strat = self._compress_text(
                 text, aggressive, request_id="eval", model="", tenant_id="default"
@@ -442,6 +467,13 @@ class CompressTextResult:
     In the default install (LLMLingua optional dep not installed), lossy is
     always False — install `llmlingua>=0.2.0` and set compress_prose=True +
     compress_mode="aggressive" to activate lossy compression.
+
+    L2 note: this result is produced by the NON-proxy compress_text() path,
+    where Layer 2 (lossy) can apply. The LIVE proxy path
+    (_compress_messages(is_proxy=True)) DISABLES Layer 2 by design (D5-B) so
+    real LLM traffic is never lossily rewritten — so proxy-path compression
+    will never report strategy="llmlingua2_prose"/lossy=True regardless of
+    compress_prose/compress_mode.
     """
     compressed_text: str
     strategy: str  # "normalize" | "llmlingua2_prose" | "none"
@@ -454,6 +486,62 @@ class CompressTextResult:
 
 def _token_estimate(text: str) -> int:
     return len(text.split()) if text else 0
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """object_pairs_hook that refuses JSON objects with duplicate keys.
+
+    Reserializing ``{"a":1,"a":2}`` keeps only the last value, which is lossy —
+    so we bail on such inputs rather than silently drop data. Applied at every
+    nesting level by json.loads.
+    """
+    seen: set[str] = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise ValueError("duplicate JSON object key")
+        seen.add(key)
+    return dict(pairs)
+
+
+def _reject_nonfinite(_constant: str) -> None:
+    """parse_constant hook that refuses NaN / Infinity / -Infinity.
+
+    These are not valid standard JSON and reserializing them would emit a
+    non-standard token a strict downstream parser could reject — so we pass the
+    original through untouched rather than rewrite it.
+    """
+    raise ValueError(f"non-finite JSON constant: {_constant}")
+
+
+def _json_minify(text: str) -> str | None:
+    """Losslessly minify a JSON document by removing insignificant whitespace.
+
+    Returns the compact form ONLY when it is strictly shorter than ``text`` AND
+    provably round-trips to the same parsed value; otherwise ``None`` (the caller
+    passes the original through untouched). Pure stdlib, zero-LLM — safe in every
+    mode including Mode A.
+
+    Losslessness guards:
+      - duplicate object keys are rejected (reserialization would drop data);
+      - NaN / Infinity constants are rejected (non-standard, reserialization risk);
+      - the compact form is re-parsed and compared to the original value as a
+        final belt-and-suspenders check before any rewrite is accepted.
+    """
+    stripped = text.strip()
+    if not stripped or stripped[0] not in "{[":
+        return None
+    try:
+        value = json.loads(
+            stripped,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite,
+        )
+        compact = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        if json.loads(compact) != value:
+            return None  # representation not stable → do not rewrite
+    except (ValueError, RecursionError):
+        return None
+    return compact if len(compact) < len(text) else None
 
 
 def _msg_has_tool_result(msg: dict) -> bool:

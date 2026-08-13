@@ -359,20 +359,13 @@ V32_DDL: list[str] = [
         ON soft_prompt_templates(profile_id, active);
     CREATE INDEX IF NOT EXISTS idx_soft_prompt_category
         ON soft_prompt_templates(profile_id, category);
+    CREATE INDEX IF NOT EXISTS idx_soft_prompts_profile_active_category
+        ON soft_prompt_templates(profile_id, active, category, prompt_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_soft_prompt_unique_cat
         ON soft_prompt_templates(profile_id, category)
         WHERE active = 1;
     """,
 ]
-
-# vec0 virtual table DDL — executed by VectorStore ONLY (requires extension loaded first).
-# NOT in V32_DDL because executescript cannot load extensions mid-script.
-V32_VEC0_DDL: Final[str] = """
-CREATE VIRTUAL TABLE IF NOT EXISTS fact_embeddings USING vec0(
-    profile_id TEXT PARTITION KEY,
-    embedding float[768] distance_metric=cosine
-);
-"""
 
 # ---------------------------------------------------------------------------
 # Rollback DDL (reverse FK order -- Rule 20)

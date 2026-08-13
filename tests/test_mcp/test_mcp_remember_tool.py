@@ -18,6 +18,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -74,9 +75,7 @@ class TestRememberTool:
     """Core behavior of the remember MCP tool."""
 
     @patch("superlocalmemory.mcp.tools_core._emit_event")
-    @patch("superlocalmemory.mcp.tools_core.WorkerPool", create=True)
-    @patch("superlocalmemory.core.worker_pool.WorkerPool")
-    def test_remember_success_returns_fact_ids(self, mock_wp_mod, _wp_create, mock_emit):
+    def test_remember_success_returns_fact_ids(self, mock_emit):
         """Successful store returns success=True with fact_ids list."""
         pool = MagicMock()
         pool.store.return_value = {
@@ -84,11 +83,11 @@ class TestRememberTool:
             "fact_ids": ["f-001", "f-002"],
             "count": 2,
         }
-        mock_wp_mod.shared.return_value = pool
-
         remember = _get_remember_tool()
 
-        with patch("superlocalmemory.core.worker_pool.WorkerPool.shared", return_value=pool):
+        with patch(
+            "superlocalmemory.mcp._daemon_proxy.choose_pool", return_value=pool,
+        ):
             result = asyncio.run(remember("Test content about Python"))
 
         assert result["success"] is True
@@ -100,55 +99,105 @@ class TestRememberTool:
     @pytest.mark.slow
     @patch("superlocalmemory.mcp.tools_core._emit_event")
     def test_remember_returns_pending_id(self, mock_emit):
-        """V3.3.27: Store-first pattern returns pending ID for background processing.
+        """Offline canonical ingestion returns a truthful durable receipt.
 
-        Marked ``slow`` (Stage 7 delivery-lead review): spawns a real
-        worker subprocess and blocks ~100s on its ready-signal, which
-        single-handedly doubled the default suite runtime. Runs under
-        ``pytest -m slow``; default config excludes it.
+        The historical regression lived in the real worker slow lane. The
+        suite-level heavy-worker guard now supplies the same public receipt
+        contract without loading models, while the worker receipt itself is
+        covered in ``test_recall_worker_write_identity``.
         """
         remember = _get_remember_tool()
         result = asyncio.run(remember("Test content for pending store"))
         assert result["success"] is True
-        assert result.get("pending") is True
+        assert result["materialization_state"] == "complete"
+        assert result["pending"] is False
+        assert result["pending_id"] is None
+        assert result["operation_id"]
+        assert result["fact_ids"]
+        assert all(not fact_id.startswith("pending:") for fact_id in result["fact_ids"])
+
+    def test_remember_preserves_worker_materialization_receipt(self):
+        """The MCP surface must not relabel a queryable operation complete."""
+        remember = _get_remember_tool()
+        pool = MagicMock()
+        pool.store.return_value = {
+            "ok": True,
+            "fact_ids": ["queryable-fact"],
+            "count": 1,
+            "operation_id": "operation-42",
+            "pending_id": "operation-42",
+            "materialization_state": "queryable",
+        }
+
+        with patch(
+            "superlocalmemory.mcp._daemon_proxy.choose_pool",
+            return_value=pool,
+        ):
+            result = asyncio.run(remember("queryable canonical fact"))
+
+        assert result["success"] is True
+        assert result["materialization_state"] == "queryable"
+        assert result["operation_id"] == "operation-42"
+        assert result["pending"] is True
+        assert result["pending_id"] == "operation-42"
+        assert result["fact_ids"] == ["queryable-fact"]
 
     @patch("superlocalmemory.mcp.tools_core._emit_event")
-    def test_remember_routes_to_pending_store(self, mock_emit):
-        """v3.4.32: remember writes to pending.db only — daemon materializer
-        drains the queue with recall priority. No redundant pool.store call."""
+    def test_remember_routes_to_canonical_worker(self, mock_emit):
+        """Daemon-offline remember uses the capability-owned worker."""
         remember = _get_remember_tool()
+        pool = MagicMock()
+        pool.store.return_value = {
+            "ok": True,
+            "fact_ids": ["fact-42"],
+            "count": 1,
+        }
 
-        with patch("superlocalmemory.cli.pending_store.store_pending",
-                   return_value=42) as mock_store:
+        with patch(
+            "superlocalmemory.mcp._daemon_proxy.choose_pool",
+            return_value=pool,
+        ):
             result = asyncio.run(
                 remember("important fact", tags="python", project="slm")
             )
 
-        mock_store.assert_called_once()
-        call_args = mock_store.call_args
-        assert call_args[0][0] == "important fact"
-        assert call_args[1]["tags"] == "python"
-        assert call_args[1]["metadata"]["project"] == "slm"
+        pool.store.assert_called_once()
+        call_args = pool.store.call_args
+        assert call_args.args[0] == "important fact"
+        assert call_args.args[1]["tags"] == "python"
+        assert call_args.args[1]["project"] == "slm"
+        assert call_args.args[1]["idempotency_key"].startswith("mcp")
         assert result["success"] is True
-        assert result["pending"] is True
-        assert result["pending_id"] == 42
-        assert result["fact_ids"] == ["pending:42"]
+        assert result["pending"] is False
+        assert result["pending_id"] is None
+        assert result["fact_ids"] == ["fact-42"]
 
-    def test_remember_stores_to_pending_with_metadata(self):
-        """V3.3.27: Store-first pattern saves content and metadata to pending.db."""
+    def test_remember_sends_metadata_to_canonical_worker(self):
+        """Offline canonical ingestion preserves untrusted source metadata."""
         remember = _get_remember_tool()
+        pool = MagicMock()
+        pool.store.return_value = {
+            "ok": True,
+            "fact_ids": ["fact-meta"],
+            "count": 1,
+        }
 
-        result = asyncio.run(remember(
-            "meta test content for pending store",
-            tags="ai,ml", project="qclaw",
-            importance=9, agent_id="test-agent",
-        ))
+        with patch(
+            "superlocalmemory.mcp._daemon_proxy.choose_pool",
+            return_value=pool,
+        ):
+            result = asyncio.run(remember(
+                "meta test content for canonical store",
+                tags="ai,ml", project="qclaw",
+                importance=9, agent_id="test-agent",
+            ))
 
         assert result["success"] is True
-        assert result.get("pending") is True
-        # Verify pending ID is returned
-        assert len(result["fact_ids"]) == 1
-        assert result["fact_ids"][0].startswith("pending:")
+        assert result.get("pending") is False
+        metadata = pool.store.call_args.args[1]
+        assert metadata["agent_id"] == "test-agent"
+        assert metadata["project"] == "qclaw"
+        assert metadata["importance"] == 9
 
 
 # ---------------------------------------------------------------------------
@@ -159,31 +208,75 @@ class TestRememberEdgeCases:
     """Edge case handling for the remember tool."""
 
     def test_remember_empty_content_handled(self):
-        """V3.3.27: Empty string content does not crash the store-first path."""
+        """Empty string rejection is returned without raw staging."""
         remember = _get_remember_tool()
-        result = asyncio.run(remember(""))
-        # Should not raise — store_pending accepts any content
+        pool = MagicMock()
+        pool.store.return_value = {"ok": True, "fact_ids": [], "count": 0}
+        with patch(
+            "superlocalmemory.mcp._daemon_proxy.choose_pool",
+            return_value=pool,
+        ):
+            result = asyncio.run(remember(""))
         assert result["success"] is True
 
-    def test_remember_worker_pool_exception_still_stores_pending(self):
-        """V3.3.27: When WorkerPool crashes, data is still safe in pending.db."""
+    def test_remember_daemon_proxy_exception_fails_closed(self):
+        """A daemon-proxy failure is retryable and cannot bypass ownership."""
         remember = _get_remember_tool()
+        pool = MagicMock()
+        pool.store.side_effect = RuntimeError("daemon proxy crashed")
 
         with patch(
-            "superlocalmemory.core.worker_pool.WorkerPool.shared",
-            side_effect=RuntimeError("worker crashed"),
+            "superlocalmemory.mcp._daemon_proxy.choose_pool",
+            return_value=pool,
         ):
             result = asyncio.run(remember("boom"))
 
-        assert result["success"] is True
-        assert result.get("pending") is True
+        assert result["success"] is False
+        assert result["code"] == "DAEMON_UNAVAILABLE"
+        assert result["retryable"] is True
 
-    def test_remember_agent_id_included_in_result(self):
-        """V3.3.27: agent_id is included in the store-first result."""
+    def test_remember_resolves_offline_pool_outside_event_loop(self):
+        """Mounted HTTP fallback cannot synchronously probe its own daemon."""
         remember = _get_remember_tool()
-        result = asyncio.run(remember("agent test", agent_id="claude-opus"))
+        event_loop_threads: list[int] = []
+        choose_pool_threads: list[int] = []
+        pool = MagicMock()
+        pool.store.return_value = {
+            "ok": True,
+            "fact_ids": ["thread-safe-fact"],
+            "count": 1,
+        }
+
+        def choose_pool():
+            choose_pool_threads.append(threading.get_ident())
+            return pool
+
+        async def invoke():
+            event_loop_threads.append(threading.get_ident())
+            return await remember("offline thread-boundary witness")
+
+        with patch(
+            "superlocalmemory.mcp._daemon_proxy.choose_pool",
+            side_effect=choose_pool,
+        ):
+            result = asyncio.run(invoke())
+
         assert result["success"] is True
-        assert result.get("pending") is True
+        assert choose_pool_threads
+        assert choose_pool_threads[0] != event_loop_threads[0]
+
+    def test_remember_agent_id_is_untrusted_worker_metadata(self):
+        """Caller agent ID is audit metadata, not the trusted actor."""
+        remember = _get_remember_tool()
+        pool = MagicMock()
+        pool.store.return_value = {"ok": True, "fact_ids": ["fact-a"], "count": 1}
+        with patch(
+            "superlocalmemory.mcp._daemon_proxy.choose_pool",
+            return_value=pool,
+        ):
+            result = asyncio.run(remember("agent test", agent_id="claude-opus"))
+        assert result["success"] is True
+        assert pool.store.call_args.args[1]["agent_id"] == "claude-opus"
 
 
 class TestRememberWriteThrough:
@@ -203,3 +296,83 @@ class TestRememberWriteThrough:
         assert result["success"] is True
         assert result["fact_ids"] == ["abc123"]
         assert result["pending"] is False
+
+    def test_remember_never_spawns_a_second_writer_when_daemon_is_unavailable(
+        self, monkeypatch,
+    ) -> None:
+        """A known daemon may be retrying a writer lock; do not bypass it.
+
+        Falling back to a local WorkerPool after the daemon was positively
+        identified creates a second database writer, which turns a transient
+        collision into repeated lock failures under parallel MCP clients.
+        """
+        import superlocalmemory.cli.daemon as _d
+
+        monkeypatch.setattr(_d, "is_daemon_running", lambda *a, **k: True)
+        monkeypatch.setattr(_d, "daemon_request", lambda *a, **k: None)
+
+        remember = _get_remember_tool()
+        with patch(
+            "superlocalmemory.mcp._daemon_proxy.choose_pool",
+            side_effect=AssertionError("a live daemon must retain write ownership"),
+        ):
+            result = asyncio.run(remember("do not fork a writer"))
+
+        assert result["success"] is False
+        assert result["retryable"] is True
+        assert "daemon" in result["error"].lower()
+
+    def test_remember_daemon_request_exception_never_falls_back_to_local_writer(
+        self, monkeypatch,
+    ) -> None:
+        """A timed-out owned daemon remains the sole canonical writer."""
+        import superlocalmemory.cli.daemon as _d
+
+        monkeypatch.setattr(_d, "is_daemon_running", lambda *a, **k: True)
+
+        def unavailable(*args, **kwargs):
+            raise TimeoutError("canonical daemon request timed out")
+
+        monkeypatch.setattr(_d, "daemon_request", unavailable)
+        choose_pool = MagicMock()
+
+        remember = _get_remember_tool()
+        with patch(
+            "superlocalmemory.mcp._daemon_proxy.choose_pool",
+            choose_pool,
+        ):
+            result = asyncio.run(remember("retain daemon ownership"))
+
+        assert result["success"] is False
+        assert result["code"] == "DAEMON_UNAVAILABLE"
+        assert result["retryable"] is True
+        choose_pool.assert_not_called()
+
+    def test_complete_empty_write_never_fabricates_pending_fact_id(
+        self, monkeypatch,
+    ) -> None:
+        import superlocalmemory.cli.daemon as _d
+
+        monkeypatch.setattr(_d, "is_daemon_running", lambda *a, **k: True)
+        monkeypatch.setattr(
+            _d,
+            "daemon_request",
+            lambda method, path, body=None: {
+                "ok": True,
+                "fact_ids": [],
+                "count": 0,
+                "operation_id": "operation-empty",
+                "pending_id": None,
+                "materialization_state": "complete",
+            },
+        )
+
+        remember = _get_remember_tool()
+        result = asyncio.run(remember("content rejected after admission"))
+
+        assert result["success"] is True
+        assert result["materialization_state"] == "complete"
+        assert result["pending"] is False
+        assert result["pending_id"] is None
+        assert result["fact_ids"] == []
+        assert result["count"] == 0

@@ -13,21 +13,60 @@ and self._version. get() acquires a read-lock; save() acquires a write-lock.
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
 import threading
-import time
+import weakref
 from pathlib import Path
 from typing import Any, Callable
 
-from superlocalmemory.optimize.config.schema import OptimizeConfig
+from superlocalmemory.infra.data_root import DynamicStatePath
 from superlocalmemory.optimize.config.defaults import DEFAULT_OPTIMIZE_CONFIG
+from superlocalmemory.optimize.config.schema import OptimizeConfig
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_CONFIG_PATH: Path = Path.home() / ".superlocalmemory" / "optimize.json"
+_DEFAULT_CONFIG_PATH = DynamicStatePath("optimize.json")
 _POLL_INTERVAL_SECONDS: float = 2.0
+
+# ---- watchdog shutdown safety -------------------------------------------
+# Each started watchdog runs in a daemon thread. At interpreter shutdown CPython
+# kills daemon threads abruptly; on macOS, with the ``watchdog`` fsevents C
+# extension also loaded in-process, a daemon thread still executing while the
+# interpreter finalizes can race the teardown and SIGSEGV. We track every store
+# that has a live watchdog and stop+join them from an ``atexit`` hook — atexit
+# callbacks run BEFORE daemon threads are terminated, so no watchdog thread is
+# still alive when CPython finalizes.
+_active_stores: "weakref.WeakSet[ConfigStore]" = weakref.WeakSet()
+_registry_lock = threading.Lock()
+_atexit_registered = False
+
+
+def _register_active_store(store: "ConfigStore") -> None:
+    """Track a store with a running watchdog; install the atexit hook once."""
+    global _atexit_registered
+    with _registry_lock:
+        _active_stores.add(store)
+        if not _atexit_registered:
+            atexit.register(_stop_all_watchdogs)
+            _atexit_registered = True
+
+
+def _stop_all_watchdogs() -> None:
+    """Stop+join every registered watchdog. Idempotent; safe at interpreter exit.
+
+    Also invoked by the test harness at session finish (see tests/conftest.py)
+    so no leaked watchdog thread survives into interpreter finalization.
+    """
+    with _registry_lock:
+        stores = list(_active_stores)
+    for store in stores:
+        try:
+            store.stop_watchdog()
+        except Exception:
+            pass
 
 
 class ConfigStore:
@@ -38,7 +77,9 @@ class ConfigStore:
         config_path: Path | None = None,
         poll_interval: float = _POLL_INTERVAL_SECONDS,
     ) -> None:
-        self._config_path = Path(config_path) if config_path else _DEFAULT_CONFIG_PATH
+        self._config_path = Path(
+            config_path if config_path is not None else _DEFAULT_CONFIG_PATH
+        )
         self._poll_interval_seconds = float(poll_interval)
         self._lock = threading.RLock()
         self._change_callbacks: list[Callable[[OptimizeConfig], None]] = []
@@ -123,6 +164,10 @@ class ConfigStore:
                 daemon=True,
             )
             self._watchdog_thread.start()
+        # Register outside self._lock — _register_active_store takes the module
+        # registry lock, and the idempotent early-return above already covers a
+        # re-start (the store stays registered from the first start).
+        _register_active_store(self)
 
     def stop_watchdog(self) -> None:
         """Signal the watchdog thread to stop and join it (timeout=5s)."""
@@ -132,6 +177,8 @@ class ConfigStore:
             t.join(timeout=5.0)
         with self._lock:
             self._watchdog_thread = None
+        with _registry_lock:
+            _active_stores.discard(self)
 
     def version(self) -> int:
         with self._lock:

@@ -50,7 +50,18 @@ slm-time-papers/
 # file path, and production code (security_primitives, recall_pipeline, etc.)
 # is writing to that str()-coerced path. Fix: use a real tmp_path/fake_home
 # in the patch. Root cause isolated + fixed by WP-16 in v3.6.14.
+# v3.8.11: the leak recurred in a second shape — a DIRECTORY "MagicMock/mock/
+# <id>/" from a mock-derived path hitting mkdir() instead of os.open(). It has
+# no angle brackets, so the pattern below did not match it and it sat untracked
+# in the working tree unnoticed. Both shapes are ignored now; the CI guard
+# tests/test_ci_guards/test_no_magicmock_artifacts.py still FAILS on either,
+# because ignoring the symptom must never hide the test bug.
 <MagicMock*
+# Directory form: a MagicMock coerced to "MagicMock" then mkdir'd, leaving
+# MagicMock/mock/<id> trees. Same root cause as above — unconfigured mock as a path.
+MagicMock/
+# Isolated test data root (SLM_TEST_ISOLATION) — embedding-worker pid etc.
+.pytest_tmp_data/
 # Empty sentinel sometimes left by shell redirect typos
 /x
 
@@ -105,7 +116,9 @@ venv/
 .venv/
 env/
 ENV/
-uv.lock
+# Optional integration fixtures resolve their own ephemeral environments in
+# focused tests; the release SBOM is bound only to the committed root lock.
+ide/integrations/*/uv.lock
 
 # ==== SECRETS & TOKENS (Never commit) ====
 .mcpregistry_github_token
@@ -124,6 +137,8 @@ Thumbs.db
 
 # ==== IDE ====
 .vscode/
+!copilot-plugin/.vscode/
+!copilot-plugin/.vscode/mcp.json
 .idea/
 *.swp
 *.swo
@@ -140,6 +155,9 @@ website/.astro/
 
 # ==== INTERNAL DOCS (Not for public repo) ====
 CLAUDE.md
+# The Claude Code plugin rules are a generated public runtime artifact, not an
+# internal repository instruction file.
+!plugin/CLAUDE.md
 FIXES-*.md
 STATUS-SUMMARY-*.md
 TASK-*.md
@@ -207,3 +225,12 @@ AUDIT-*.md
 optimize_capture.jsonl
 **/optimize_capture.jsonl
 SLM_3.6.15_DRAFTS.md
+
+# Working scratchpad — internal build/audit notes, screenshots (never ship)
+scratchpad/
+.playwright-cli/
+
+# Internal, dated release-process artifacts. Their point-in-time gate claims go
+# stale on the next commit, and a plan published with any item open reads as
+# self-documented non-compliance (F-11). Public record of shipped work = CHANGELOG.md.
+docs/audits/

@@ -15,6 +15,16 @@ All route handlers live in routes/ directory:
     routes/events.py    -- /events/stream (SSE), /api/events [v2.5]
     routes/agents.py    -- /api/agents, /api/trust [v2.5]
     routes/ws.py        -- /ws/updates (WebSocket)
+
+v3.7.8 (WS3 F4): ``create_app()`` in this module is a standalone/legacy app
+factory, NOT the app the running daemon serves -- that is
+``superlocalmemory.server.unified_daemon:create_app`` (see that module's
+uvicorn config). This module's ``auth_middleware`` keeps the older,
+unconditional ``check_api_key``-only write gate (no daemon-capability /
+install-token identity layer, no ``SLM_REQUIRE_API_KEY_LOOPBACK`` opt-in --
+see ``infra/auth_middleware.py`` for that). Treat this file as a standalone
+entry point only; the production write-auth boundary lives in
+``unified_daemon.py``.
 """
 
 import logging
@@ -33,7 +43,7 @@ sys.path = [p for p in sys.path if p not in ("", _script_dir)]
 try:
     from fastapi import FastAPI
     from fastapi.staticfiles import StaticFiles
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, RedirectResponse
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.middleware.gzip import GZipMiddleware
     import uvicorn
@@ -45,21 +55,25 @@ except ImportError:
 
 from superlocalmemory.server.security_middleware import SecurityHeadersMiddleware
 
-# V3 Paths (migrated from ~/.claude-memory to ~/.superlocalmemory)
-MEMORY_DIR = Path.home() / ".superlocalmemory"
-DB_PATH = MEMORY_DIR / "memory.db"
-# V3.3.21: UI shipped inside the package for pip/npm installs.
-# Check package location first, then fall back to repo root for dev mode.
-_PKG_UI = Path(__file__).resolve().parent.parent / "ui"
-_REPO_UI = Path(__file__).resolve().parent.parent.parent.parent / "ui"
-UI_DIR = _PKG_UI if (_PKG_UI / "index.html").exists() else _REPO_UI
+# V3 Paths — reuse the lazy resolvers from routes.helpers so the dashboard
+# honours SLM_DATA_DIR / SL_MEMORY_PATH / SLM_HOME / config.json:base_dir
+# exactly like the CLI. Previously this hardcoded ~/.superlocalmemory, which
+# caused dashboard-created profiles to land in a different memory.db than
+# `slm profile list` reads when a custom data dir was configured.
+from superlocalmemory.server.routes.helpers import MEMORY_DIR, DB_PATH
+# V3.3.21+: the dashboard ships inside the package (superlocalmemory/ui) for
+# every install path — pip, npm, and editable checkouts. The legacy repo-root
+# ui/ dev fallback was retired in v3.8.0 when that copy was deleted; the
+# packaged directory is authoritative. A missing dir is surfaced at request
+# time (see the "UI not found" handler below).
+UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     application = FastAPI(
-        title="SuperLocalMemory V3 UI Server",
-        description="Memory Dashboard with V3 Engine, Trust, Learning, and Compliance",
+        title="SuperLocalMemory V4 UI Server",
+        description="Governed memory dashboard with trust, learning, and compliance controls.",
         version=SLM_VERSION,
         docs_url="/api/docs",
         redoc_url="/api/redoc",
@@ -90,6 +104,16 @@ def create_app() -> FastAPI:
         _rl_write, _rl_read, _rl_window = rate_limit_config()
         _write_limiter = RateLimiter(max_requests=_rl_write, window_seconds=_rl_window)
         _read_limiter = RateLimiter(max_requests=_rl_read, window_seconds=_rl_window)
+
+        # Task #47: register for runtime reconfiguration via the dashboard.
+        try:
+            from superlocalmemory.infra.rate_limiter import (
+                register_managed as _reg_rl,
+            )
+            _reg_rl("write", _write_limiter)
+            _reg_rl("read", _read_limiter)
+        except Exception:
+            pass
 
         @application.middleware("http")
         async def rate_limit_middleware(request, call_next):
@@ -160,6 +184,10 @@ def create_app() -> FastAPI:
     from superlocalmemory.server.routes.v3_api import router as v3_router
     application.include_router(v3_router)
 
+    # Config endpoints (storage, daemon, mesh, trust, forgetting)
+    from superlocalmemory.server.routes.config_api import router as config_api_router
+    application.include_router(config_api_router)
+
     # v3.4.1: Chat SSE + Insights + Timeline endpoints
     for _module_name_v341 in ("chat",):
         try:
@@ -196,14 +224,19 @@ def create_app() -> FastAPI:
         if not index_path.exists():
             return (
                 "<!DOCTYPE html><html><head>"
-                "<title>SuperLocalMemory V3</title></head>"
+                "<title>SuperLocalMemory V4</title></head>"
                 "<body style='font-family:Arial;padding:40px'>"
-                "<h1>SuperLocalMemory V3 UI Server Running</h1>"
+                "<h1>SuperLocalMemory V4 UI Server Running</h1>"
                 "<p>UI not found. Check ui/index.html</p>"
                 "<p><a href='/api/docs'>API Documentation</a></p>"
                 "</body></html>"
             )
         return index_path.read_text()
+
+    @application.get("/favicon.ico", include_in_schema=False)
+    async def favicon():
+        """Serve the packaged SVG icon for browsers that request favicon.ico."""
+        return RedirectResponse(url="/static/favicon.svg", status_code=307)
 
     @application.get("/health")
     async def health_check():
@@ -262,7 +295,7 @@ if __name__ == "__main__":
     import argparse
     import socket
 
-    parser = argparse.ArgumentParser(description="SuperLocalMemory V3 - Web Dashboard")
+    parser = argparse.ArgumentParser(description="SuperLocalMemory V4 - Web Dashboard")
     parser.add_argument("--port", type=int, default=8765, help="Port (default 8765)")
     parser.add_argument("--profile", type=str, default=None, help="Memory profile")
     args = parser.parse_args()
@@ -282,7 +315,7 @@ if __name__ == "__main__":
         print(f"\n  Port {args.port} in use -- using {ui_port} instead\n")
 
     print("=" * 70)
-    print("  SuperLocalMemory V3 - Web Dashboard")
+    print("  SuperLocalMemory V4 - Web Dashboard")
     print("  Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar")
     print("=" * 70)
     print(f"  Database:  {DB_PATH}")

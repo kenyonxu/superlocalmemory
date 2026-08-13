@@ -1,8 +1,8 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
-# Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
+# Part of SuperLocalMemory V4 | https://qualixar.com | https://varunpratap.com
 
-"""SuperLocalMemory V3 — MCP Server.
+"""SuperLocalMemory V4 — MCP Server.
 
 Clean MCP server calling V3 MemoryEngine. Supports all MCP-compatible IDEs.
 
@@ -27,11 +27,13 @@ _os.environ.setdefault('SLM_SKIP_DEP_CHECK', '1')
 import logging
 import sys
 
-from mcp.server.fastmcp import FastMCP
+from superlocalmemory import __version__ as _slm_version
+from superlocalmemory.mcp.http_transport import SLMFastMCP
 
 logger = logging.getLogger(__name__)
 
-server = FastMCP("SuperLocalMemory V3")
+# mcp 2.0.0: MCPServer takes version= directly (no private _mcp_server poke).
+server = SLMFastMCP("SuperLocalMemory V4", version=_slm_version)
 
 # Lazy engine singleton -------------------------------------------------------
 
@@ -75,13 +77,13 @@ def reset_engine():
 
 # Register tools and resources -------------------------------------------------
 #
-# Essential-only default: 25 base tools + 8 mesh tools = 33 registered
+# Essential-only default: 34 base tools + 8 mesh tools = 42 registered
 # when mesh is enabled. Set ``SLM_MCP_ALL_TOOLS=1`` to expose the full
 # toolset. Rationale: IDEs cap at 50-100 tools total (Cursor,
 # Antigravity, Windsurf) and a maximal SLM registration crowds out
 # other MCP servers the user may have installed.
 # Admin/diagnostics tools remain available via CLI (`slm <command>`).
-# Set SLM_MCP_ALL_TOOLS=1 to enable all 38 tools (power users).
+# Set SLM_MCP_ALL_TOOLS=1 to enable all 87 tools (power users).
 
 import os as _os_reg
 
@@ -89,6 +91,7 @@ _ESSENTIAL_TOOLS: set[str] = {
     # Core memory operations (8)
     "remember", "recall", "search", "fetch",
     "list_recent", "delete_memory", "update_memory", "get_status",
+    "switch_profile",
     # Session lifecycle (3)
     "session_init", "observe", "close_session",
     # Feedback / learning signals — reachable Dash-Core path for
@@ -96,6 +99,11 @@ _ESSENTIAL_TOOLS: set[str] = {
     "report_feedback",
     # Memory management (2)
     "forget", "run_maintenance",
+    # NOTE: prestage_context IS registered (see register_prestage_tool below)
+    # but is deliberately absent from the default surface. _ESSENTIAL_TOOLS must
+    # stay at 42 to match the full42 profile: the profile names are a
+    # user-facing config contract and the published tool-count table depends on
+    # them. New tools reach users via the `whole` profile until a rename ships.
     # Infinite memory + learning (4)
     "consolidate_cognitive", "get_soft_prompts",
     "set_mode", "report_outcome",
@@ -106,6 +114,10 @@ _ESSENTIAL_TOOLS: set[str] = {
     "evolve_skill", "skill_health", "skill_lineage",
     # v3.6.11: Surface B Optimize tools (5)
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
+    # v3.8.0: bounded-loop tools (3) — CLI + /slm-loop command + MCP. Kept in
+    # the default exposure so any MCP client discovers gated loops, not just
+    # profile=code/full/power sessions.
+    "slm_loop_run", "slm_loop_history", "slm_loop_show",
 }
 
 # v3.4.4: Mesh tools — enabled if mesh_enabled in config or SLM_MCP_MESH_TOOLS=1
@@ -137,43 +149,21 @@ _user_allowlist_str = _os_reg.environ.get("SLM_MCP_TOOLS", "").strip()
 
 # ---------------------------------------------------------------------------
 # v3.6.14 WP-01: Named profile definitions
+# Extracted to mcp/profiles.py (v3.8.0) — pure data, no side effects.
+# All names re-exported here for backward compatibility with existing tests
+# and any code that imports them from this module.
 # ---------------------------------------------------------------------------
 
-_PROFILE_CORE = frozenset({  # 14
-    "remember", "recall", "search", "fetch", "list_recent", "update_memory", "forget",
-    "session_init", "close_session",
-    "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
-})
-_PROFILE_CODE = _PROFILE_CORE | frozenset({  # 20
-    "build_code_graph", "get_blast_radius", "query_graph",
-    "semantic_search_code", "get_review_context", "detect_changes",
-})
-_PROFILE_FULL_MESH = frozenset({  # 8
-    "mesh_summary", "mesh_peers", "mesh_send", "mesh_inbox",
-    "mesh_state", "mesh_lock", "mesh_events", "mesh_status",
-})
-_PROFILE_FULL = frozenset({  # 30 base — EXPLICIT literal, NOT runtime _ESSENTIAL_TOOLS (OQ-2)
-    "remember", "recall", "search", "fetch", "list_recent", "delete_memory", "update_memory",
-    "get_status", "session_init", "observe", "close_session", "report_feedback", "forget",
-    "run_maintenance", "consolidate_cognitive", "get_soft_prompts", "set_mode", "report_outcome",
-    "log_tool_event", "get_assertions", "reinforce_assertion", "contradict_assertion",
-    "evolve_skill", "skill_health", "skill_lineage",
-    "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
-}) | _PROFILE_FULL_MESH  # 38
-_PROFILE_POWER = _PROFILE_FULL | frozenset({  # 50
-    "get_version", "get_mode", "health", "consistency_check", "recall_trace",
-    "get_lifecycle_status", "set_retention_policy", "compact_memories",
-    "get_behavioral_patterns", "audit_trail", "quantize", "get_retention_stats",
-})
-_PROFILE_MESH = _PROFILE_FULL_MESH  # 8
-
-_PROFILE_DEFINITIONS: dict[str, frozenset[str]] = {
-    "core": _PROFILE_CORE,
-    "code": _PROFILE_CODE,
-    "full": _PROFILE_FULL,
-    "power": _PROFILE_POWER,
-    "mesh": _PROFILE_MESH,
-}  # "whole" intentionally absent — maps to raw server (D-2 LOCKED)
+from superlocalmemory.mcp.profiles import (  # noqa: E402 (after env setups above)
+    _PROFILE_CORE,
+    _PROFILE_CODE,
+    _PROFILE_FULL_MESH,
+    _PROFILE_FULL,
+    _PROFILE_POWER,
+    _PROFILE_MESH,
+    _PROFILE_DEFINITIONS,
+    _PROFILE_ALIASES,
+)
 
 _profile = _os_reg.environ.get("SLM_MCP_PROFILE", "").strip().lower()
 
@@ -188,19 +178,26 @@ def _resolve_profile_allowed(
     Returns:
         None  — for "" (no selection) or "whole" (raw server, all tools).
         frozenset — the profile's tool set for known profiles.
-        essential — fail-open fallback for unknown non-empty profiles (+ warning).
+
+    Raises:
+        ValueError: if ``profile`` is neither canonical nor an explicitly
+            supported compatibility alias.
     """
-    if not profile or profile == "whole":
+    canonical = _PROFILE_ALIASES.get(profile, profile)
+    if canonical != profile:
+        logger.warning(
+            "SLM_MCP_PROFILE=%r is deprecated; use %r instead.",
+            profile,
+            canonical,
+        )
+    if not canonical or canonical == "whole":
         return None
-    if profile in definitions:
-        return definitions[profile]
-    logger.warning(
-        "SLM_MCP_PROFILE=%r is not a recognised profile "
-        "(valid: %s, whole); falling back to essential tools.",
-        profile,
-        ", ".join(sorted(definitions)),
+    if canonical in definitions:
+        return definitions[canonical]
+    valid = ", ".join((*sorted(definitions), "whole"))
+    raise ValueError(
+        f"SLM_MCP_PROFILE={profile!r} is not recognised; valid profiles: {valid}"
     )
-    return essential
 
 
 class _FilteredServer:
@@ -213,7 +210,7 @@ class _FilteredServer:
     """
     __slots__ = ("_server", "_allowed")
 
-    def __init__(self, real_server: FastMCP, allowed: frozenset[str]) -> None:
+    def __init__(self, real_server: SLMFastMCP, allowed: frozenset[str]) -> None:
         self._server = real_server
         self._allowed = allowed
 
@@ -237,7 +234,14 @@ elif _user_allowlist_str:
 elif _profile == "whole":
     _target = server                                                              # NEW raw-server
 elif _profile:
-    _target = _FilteredServer(server, _resolve_profile_allowed(_profile, _PROFILE_DEFINITIONS, _ESSENTIAL_TOOLS))  # NEW
+    _profile_allowed = _resolve_profile_allowed(
+        _profile, _PROFILE_DEFINITIONS, _ESSENTIAL_TOOLS
+    )
+    _target = (
+        server
+        if _profile_allowed is None
+        else _FilteredServer(server, _profile_allowed)
+    )
 else:
     _target = _FilteredServer(server, _ESSENTIAL_TOOLS)                          # default (unchanged)
 
@@ -264,31 +268,64 @@ register_learning_tools(_target, get_engine)  # v3.4.7: Two-way learning tools
 register_evolution_tools(_target, get_engine)  # v3.4.11: Skill evolution tools
 from superlocalmemory.mcp.tools_optimize import register_optimize_tools
 register_optimize_tools(_target)  # v3.6.11: Surface B Optimize tools (proxy-free)
+from superlocalmemory.mcp.tools_loops import register_loop_tools
+register_loop_tools(_target, get_engine)  # v3.8.0: bounded-loop tools (CLI+command+MCP)
+from superlocalmemory.mcp.tools_ops import register_ops_tools
+register_ops_tools(_target, get_engine)  # Wave-3: operational recovery & admin remediation
+from superlocalmemory.mcp.tools_context import register_prestage_tool
 
 
-# V3.3.21: Eager engine warmup — start initializing BEFORE first tool call.
-# The MCP server process starts when the IDE launches. Previously, the engine
-# was lazy-loaded on first tool call → 23s cold start for the user.
-# Now: engine starts warming in a background thread immediately. By the time
-# the first tool call arrives (1-2s later), the engine is already warm.
-# This applies to ALL IDEs: Claude Code, Cursor, Antigravity, Gemini CLI, etc.
-def _eager_warmup() -> None:
-    """Pre-warm LIGHT engine + ensure daemon is running + auto-register mesh.
-
-    LIGHT engine init is cheap (DB only, ~100 ms). The real reason this
-    stays in a background thread is the follow-on side effects
-    (``ensure_daemon``, ``auto_register_mesh``) which do I/O.
-    """
-    import logging
-    _logger = logging.getLogger(__name__)
+def _prestage_recall(query: str, limit: int, profile_id: str, as_of: str | None = None):
+    """Bridge engine.recall → prestage_context recall_fn shape."""
+    engine = get_engine()
+    if hasattr(engine, "profile_id") and profile_id:
+        try:
+            engine.profile_id = profile_id
+        except Exception:
+            pass
     try:
-        get_engine()
-        _logger.info("MCP engine pre-warmed successfully")
-    except Exception as exc:
-        _logger.warning("MCP engine pre-warmup failed: %s", exc)
+        if as_of is not None:
+            results = engine.recall(query, limit=limit, as_of=as_of)
+        else:
+            results = engine.recall(query, limit=limit)
+    except TypeError:
+        results = engine.recall(query, limit=limit)
+    out: list[dict] = []
+    for r in results or []:
+        if isinstance(r, dict):
+            out.append({
+                "id": str(r.get("fact_id") or r.get("id") or ""),
+                "text": str(r.get("content") or r.get("text") or ""),
+                "score": float(r.get("score") or r.get("relevance_score") or 0.0),
+                "source": str(r.get("source") or "recall"),
+            })
+        else:
+            out.append({
+                "id": str(getattr(r, "fact_id", "") or ""),
+                "text": str(getattr(r, "content", "") or ""),
+                "score": float(getattr(r, "score", 0.0) or 0.0),
+                "source": "recall",
+            })
+    return out
 
-    # Measurement / test harnesses set this to skip daemon-start and
-    # mesh-register. The LIGHT engine init above still runs.
+
+register_prestage_tool(_target, _prestage_recall)
+
+
+# Keep stdio MCP processes thin until a tool truly needs a local LIGHT engine.
+# Every open IDE/task owns a stdio process; eagerly opening memory.db in all of
+# them multiplied RAM and SQLite writers on machines with many long-lived
+# sessions. The shared daemon owns model warmup and common remember/recall work.
+def _eager_warmup() -> None:
+    """Ensure the shared daemon is running without opening a per-client engine.
+
+    Mesh registration is intentionally lazy: a local stdio session is not a
+    remote peer, and heartbeat writes should begin only after a mesh tool is
+    actually used.
+    """
+    _logger = logging.getLogger(__name__)
+
+    # Measurement / test harnesses set this to skip daemon-start.
     if _os.environ.get("SLM_DISABLE_WARMUP_SIDE_EFFECTS") == "1":
         return
 
@@ -301,22 +338,12 @@ def _eager_warmup() -> None:
     except Exception as exc:
         _logger.warning("Daemon auto-start failed: %s", exc)
 
-    # V3.4.6: Auto-register this MCP session as a mesh peer immediately.
-    # Previously, registration was lazy (only on first mesh tool call).
-    # Now every Claude session appears on the mesh from startup.
-    try:
-        from superlocalmemory.mcp.tools_mesh import auto_register_mesh
-        auto_register_mesh()
-        _logger.info("Mesh peer auto-registered at startup")
-    except Exception as exc:
-        _logger.warning("Mesh auto-register failed: %s", exc)
-
 import threading
 
 # v3.6.7: Suppress standalone-process behaviours when the MCP server is
 # imported inside the daemon (SLM_MCP_EMBEDDED=1). Three threads are safe
 # to run in a dedicated `slm mcp` subprocess but harmful inside the daemon:
-#   mcp-warmup      — creates a LIGHT engine duplicate; daemon has a FULL one.
+#   mcp-warmup      — ensures the shared daemon only; never creates an engine.
 #   parent-watchdog — calls os._exit(0) if its parent IDE quits, which would
 #                     kill the daemon along with it.
 #   stdin-eof-monitor — monitors stdin pipe; meaningless inside the daemon.

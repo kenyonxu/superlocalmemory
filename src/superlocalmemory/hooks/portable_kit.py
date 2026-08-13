@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 SLM_MARKER_START = "<!-- SLM-START -->"
 SLM_MARKER_END = "<!-- SLM-END -->"
 
+# Valid transport values for connect_ide() and slm connect --transport.
+# "stdio"           — default, zero regression; uses desc.server_block as-is.
+# "http"            — native MCP Streamable-HTTP; requires daemon at :daemon_port.
+# "http-mcp-remote" — mcp-remote stdio bridge for stdio-only clients.
+VALID_TRANSPORTS: frozenset[str] = frozenset({"stdio", "http", "http-mcp-remote"})
+
 CLAUDE_CODE_PLUGIN_POINTER = (
     "slm connect claude-code: Claude Code is configured via the SLM plugin (WP-06).\n"
     "Run: slm plugin install  OR  see plugin-src/ for manual installation.\n"
@@ -139,7 +145,7 @@ IDE_MATRIX: dict[str, IDEDescriptor] = {
         mcp_path_project=".mcp.json",
         server_key="mcpServers",
         fmt="json",
-        agents_md_path=None,
+        agents_md_path=".junie/AGENTS.md",  # Junie guidelines file (GA) — carries memory + optimize protocol
         server_block={"command": "slm", "args": ["mcp"], "type": "stdio"},
         caveats="path per product [CN-ONLINE]",
     ),
@@ -240,16 +246,27 @@ def connect_ide(
     here: bool = False,
     profile: str | None = None,
     agents_md_source: Callable[[], str] | None = None,
+    dry_run: bool = False,
+    transport: str = "stdio",
+    daemon_port: int = 8765,
 ) -> dict[str, Any]:
     """Wire SLM into the target IDE config via merge-not-clobber.
 
+    Args:
+        transport: MCP transport to write into the config.
+            "stdio" (default, zero regression) — uses the IDE's canonical server_block.
+            "http" — native MCP Streamable-HTTP block; requires SLM daemon at daemon_port.
+            "http-mcp-remote" — stdio bridge via mcp-remote for stdio-only clients.
+        daemon_port: Daemon listen port for http / http-mcp-remote (default 8765).
+
     Returns a result dict:
-        {ide, mcp_config: wrote|merged|unchanged|skipped|error,
+        {ide, transport, mcp_config: wrote|merged|unchanged|would_write|skipped|error,
          mcp_path, agents_md: wrote|skipped(...)|unchanged|error,
          servers_preserved: int, error: str|None}
     """
     result: dict[str, Any] = {
         "ide": ide_id,
+        "transport": transport,
         "mcp_config": "error",
         "mcp_path": "",
         "agents_md": "skipped(not-run)",
@@ -257,11 +274,26 @@ def connect_ide(
         "error": None,
     }
 
+    # Step 0 — validate transport
+    if transport not in VALID_TRANSPORTS:
+        result["error"] = (
+            f"Invalid transport '{transport}'. "
+            f"Valid choices: {', '.join(sorted(VALID_TRANSPORTS))}"
+        )
+        return result
+
     # Step 1 — resolve
     desc = resolve_descriptor(ide_id)
     if desc is None:
         result["error"] = (
             f"Unknown IDE '{ide_id}'. Supported: {', '.join(supported_ides())}"
+        )
+        return result
+
+    if ide_id == "vscode-copilot" and not here:
+        result["error"] = (
+            "VS Code / Copilot integration is project-scoped. "
+            "Run `slm connect vscode-copilot --here` from the project root."
         )
         return result
 
@@ -295,9 +327,25 @@ def connect_ide(
         # File is untouched (we never wrote; abort)
         return result
 
-    # Step 4 — extract server container
-    # For continue (yaml list), special-case
+    # Step 4 — daemon health-check for HTTP transports (advisory, never blocks write)
+    if transport in ("http", "http-mcp-remote") and desc.fmt != "":
+        if not _check_daemon_health(daemon_port):
+            print(
+                f"[SLM] Warning: daemon not reachable at http://127.0.0.1:{daemon_port}/api/v3/health. "
+                f"Run `slm serve start` to start it, or `slm serve install` to register as an OS service.",
+                file=sys.stderr,
+            )
+
+    # Step 5 — extract server container and build block
+    # For YAML-format IDEs (continue.dev), transport is ignored — their block
+    # structure is list-based and incompatible with the JSON http/mcp-remote block.
     if desc.fmt == "yaml":
+        if transport != "stdio":
+            logger.warning(
+                "transport=%r is not supported for YAML-format IDE %r; using stdio fallback.",
+                transport,
+                ide_id,
+            )
         mcp_status, servers_preserved = _merge_yaml_list(
             data, desc, profile
         )
@@ -308,10 +356,8 @@ def connect_ide(
         pre_count = len(servers)
         pre_slm = copy.deepcopy(servers.get("superlocalmemory"))
 
-        # Step 5 — merge
-        block = copy.deepcopy(desc.server_block)
-        if profile:
-            block.setdefault("env", {})["SLM_MCP_PROFILE"] = profile
+        # Build the server block for the requested transport
+        block = _build_server_block(desc, transport, daemon_port, profile)
 
         servers["superlocalmemory"] = block
 
@@ -325,7 +371,28 @@ def connect_ide(
         result["servers_preserved"] = max(0, pre_count - (0 if pre_slm is None else 1))
         result["mcp_config"] = mcp_status
 
-    # Step 6 — atomic write
+    # Step 6 — atomic write. A dry run deliberately exercises the merge and
+    # packaged-asset lookup path without touching a user-owned IDE config.
+    if dry_run:
+        result["mcp_config"] = "would_write"
+        if desc.agents_md_path is None:
+            result["agents_md"] = "skipped(unsupported)"
+        elif agents_md_source is None:
+            result["agents_md"] = "skipped(no-source)"
+        else:
+            try:
+                source_content = agents_md_source()
+            except Exception as exc:
+                result["agents_md"] = "error(source-unavailable)"
+                result["error"] = f"AGENTS.md asset lookup failed: {exc}"
+                return result
+            if not isinstance(source_content, str) or not source_content.strip():
+                result["agents_md"] = "error(empty-source)"
+                result["error"] = "AGENTS.md asset is empty"
+                return result
+            result["agents_md"] = "would_write"
+        return result
+
     try:
         _atomic_write(config_path, data, desc.fmt)
     except Exception as exc:
@@ -345,6 +412,61 @@ def connect_ide(
     )
 
     return result
+
+
+def connect_many(
+    ide_ids: list[str],
+    *,
+    home: Path | None = None,
+    project: Path | None = None,
+    here: bool = False,
+    profile: str | None = None,
+    agents_md_source: Callable[[], str] | None = None,
+    transport: str = "stdio",
+    daemon_port: int = 8765,
+) -> list[dict[str, Any]]:
+    """Wire SLM into multiple IDE configs via non-destructive merge.
+
+    Iterates over ``ide_ids`` and calls :func:`connect_ide` for each entry.
+    Each IDE is processed independently — a failure on one IDE does NOT abort
+    the remaining targets.
+
+    The underlying :func:`connect_ide` is MERGE-NOT-CLOBBER:
+    - Only the ``superlocalmemory`` server key is touched.
+    - All other MCP servers + top-level keys are preserved byte-for-byte.
+    - Writes are atomic (.tmp + os.replace).
+
+    Args:
+        ide_ids: IDE ids to wire (from :data:`IDE_MATRIX`).  Pass an empty
+            list to no-op.  Unknown ids produce error entries in the output.
+        home: Override ``$HOME`` (test hook).
+        project: Project root for ``here=True`` installs.
+        here: When True, write to project-relative path instead of global.
+        profile: Inject ``SLM_MCP_PROFILE`` env-var (stdio) or URL param (http).
+        agents_md_source: Callable returning AGENTS.md content to append.
+        transport: MCP transport to use for all IDEs ("stdio", "http",
+            "http-mcp-remote"). Default "stdio" preserves existing behavior.
+        daemon_port: Daemon listen port for http/http-mcp-remote (default 8765).
+
+    Returns:
+        List of per-IDE result dicts, one per input id.  Each dict has the
+        same shape as :func:`connect_ide`'s return value::
+
+            {ide, transport, mcp_config, mcp_path, agents_md, servers_preserved, error}
+    """
+    return [
+        connect_ide(
+            ide_id,
+            home=home,
+            project=project,
+            here=here,
+            profile=profile,
+            agents_md_source=agents_md_source,
+            transport=transport,
+            daemon_port=daemon_port,
+        )
+        for ide_id in ide_ids
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +552,57 @@ def _merge_yaml_list(
         return "wrote", pre_count
 
 
+def _build_server_block(
+    desc: IDEDescriptor,
+    transport: str,
+    daemon_port: int,
+    profile: str | None,
+) -> dict[str, Any]:
+    """Return the server block for the requested transport.
+
+    YAML and TOML IDEs use a format-specific block structure that is
+    incompatible with the JSON http/mcp-remote block — caller should never
+    reach here for those (they take the yaml branch in connect_ide).
+    For JSON-format IDEs:
+      "stdio"           → copy of desc.server_block with optional SLM_MCP_PROFILE env
+      "http"            → native MCP HTTP block; profile goes as URL query param
+      "http-mcp-remote" → mcp-remote stdio bridge; profile appended to proxied URL
+    """
+    base_url = f"http://127.0.0.1:{daemon_port}/mcp/"
+
+    if transport == "http":
+        url = base_url + (f"?profile={profile}" if profile else "")
+        return {"type": "http", "url": url}
+
+    if transport == "http-mcp-remote":
+        url = base_url + (f"?profile={profile}" if profile else "")
+        return {"type": "stdio", "command": "mcp-remote", "args": [url]}
+
+    # Default: stdio — preserve existing behavior exactly
+    block = copy.deepcopy(desc.server_block)
+    if profile:
+        block.setdefault("env", {})["SLM_MCP_PROFILE"] = profile
+    return block
+
+
+def _check_daemon_health(daemon_port: int, timeout: float = 2.0) -> bool:
+    """Non-blocking probe of the SLM daemon health endpoint.
+
+    Returns True if the daemon responds with HTTP 200, False otherwise.
+    Never raises — all exceptions are caught and treated as "unreachable".
+    """
+    try:
+        import urllib.request
+        import urllib.error
+
+        url = f"http://127.0.0.1:{daemon_port}/api/v3/health"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
 def _atomic_write(path: Path, data: dict[str, Any], fmt: str) -> None:
     """Serialize data and atomically write to path (.tmp + os.replace)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -480,6 +653,9 @@ def _handle_agents_md(
     except Exception as exc:
         logger.warning("agents_md_source() failed: %s — skipping AGENTS.md write", exc)
         return "skipped(source-error)"
+    if not isinstance(source_content, str) or not source_content.strip():
+        logger.warning("agents_md_source() returned no content — skipping AGENTS.md write")
+        return "skipped(no-source-content)"
 
     # Read existing content
     existing = ""
@@ -504,3 +680,68 @@ def _handle_agents_md(
     _tmp.write_text(existing + section, encoding="utf-8")
     os.replace(_tmp, agents_path)
     return "wrote"
+
+
+# ---------------------------------------------------------------------------
+# __main__ — `python -m superlocalmemory.hooks.portable_kit [ids...]`
+#
+# Used by the npm installer to execute non-destructive IDE connects when
+# Python is available at postinstall time. If Python / the package is not
+# importable the installer records a pending_ide_connections.json instead.
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":  # pragma: no cover
+    import argparse as _argparse
+
+    _parser = _argparse.ArgumentParser(
+        description="SLM IDE connector — non-destructive merge-not-clobber."
+    )
+    _parser.add_argument(
+        "ide_ids",
+        nargs="*",
+        metavar="IDE",
+        help=(
+            "IDE ids to connect.  Pass 'all' to connect every supported IDE "
+            "(excluding claude-code which uses the WP-06 plugin)."
+        ),
+    )
+    _parser.add_argument("--home", help="Override home directory (test hook).")
+    _parser.add_argument("--profile", help="SLM_MCP_PROFILE to inject.")
+    _parser.add_argument(
+        "--list", action="store_true",
+        help="Print supported IDE ids with display names and exit.",
+    )
+    _args = _parser.parse_args()
+
+    if _args.list:
+        for _id, _desc in IDE_MATRIX.items():
+            _flag = "[OUT]" if not _desc.fmt else ""
+            print(f"  {_id:22s} {_desc.display} {_flag}".rstrip())
+        sys.exit(0)
+
+    _home = Path(_args.home) if _args.home else None
+
+    # Resolve targets: "all" → every MCP-capable IDE (fmt != ""), else explicit list.
+    if "all" in _args.ide_ids:
+        _targets = [k for k, d in IDE_MATRIX.items() if d.fmt]
+    else:
+        _targets = [t for t in _args.ide_ids if t]
+
+    if not _targets:
+        print("No IDE ids given. Pass ide ids or 'all'. Use --list to see options.")
+        sys.exit(0)
+
+    _results = connect_many(_targets, home=_home, profile=_args.profile)
+    _ok = 0
+    _fail = 0
+    for _r in _results:
+        _err = _r.get("error")
+        _status = _r.get("mcp_config", "error")
+        if _err:
+            print(f"  ERROR     {_r['ide']}: {_err}", file=sys.stderr)
+            _fail += 1
+        else:
+            print(f"  {_status.upper():9s} {_r['ide']} → {_r.get('mcp_path', '')}")
+            _ok += 1
+    print(f"\n{_ok} connected, {_fail} errors.")
+    sys.exit(0 if _fail == 0 else 1)

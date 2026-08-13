@@ -11,12 +11,17 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 
 from __future__ import annotations
 
-from typing import Optional
+import re
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/mesh", tags=["mesh"])
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+_STALE_AFTER = timedelta(minutes=5)
+_EXPIRE_AFTER = timedelta(minutes=30)
 
 
 # -- Request models --
@@ -85,8 +90,11 @@ def _get_broker(request: Request):
     secret = getattr(broker, "_shared_secret", None)
     if secret:
         client_host = request.client.host if request.client else ""
-        if client_host not in ("127.0.0.1", "::1", "localhost"):
+        from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
+
+        if not _is_loopback_host(client_host):
             import hmac
+
             from superlocalmemory.core.security_primitives import verify_install_token
 
             # Path 1: install token — dashboard/browser callers hold this and
@@ -104,62 +112,327 @@ def _get_broker(request: Request):
             )
             if not presented or not hmac.compare_digest(presented, secret):
                 raise HTTPException(401, detail="invalid or missing credential")
+        # TEST-1/SEC: When a fleet secret is configured, it is the primary auth
+        # mechanism. Loopback callers are trusted by transport and need no further
+        # proof. Only fall through to require_write_actor when NO secret is configured
+        # (install-token-only, single-machine mode).
+        return broker
+
+    # Loopback is a transport property, not an identity.  Every mesh read and
+    # write must prove the install/API/process capability because peer inboxes,
+    # coordination state, and project paths can be sensitive.
+    from superlocalmemory.server.write_identity import require_write_actor
+
+    require_write_actor(
+        request,
+        getattr(request.app.state, "daemon_descriptor", None),
+        actor_kind="mesh-route",
+    )
     return broker
+
+
+def _active_profile() -> str:
+    """Resolve the tenant (profile) for this mesh request.
+
+    The mesh is a per-tenant coordination bus: peers, messages, shared state,
+    and locks are all scoped to the active profile so one tenant never sees
+    another's coordination traffic. Resolved from the request ContextVar set by
+    ProfileRuntimeMiddleware (falls back to the configured active profile).
+    """
+    from superlocalmemory.server.routes.helpers import get_active_profile
+
+    return get_active_profile()
+
+
+_SECRET_KEY = re.compile(
+    r"(?:^|[_\-.])(api[_\-.]?key|secret|token|password|credential)(?:$|[_\-.])",
+    re.IGNORECASE,
+)
+
+
+def _reject_secret_state(key: str, value: str) -> None:
+    """Refuse secret material in the plaintext coordination store."""
+    from superlocalmemory.core.security_primitives import redact_secrets
+
+    if _SECRET_KEY.search(key) or redact_secrets(value) != value:
+        raise HTTPException(
+            422,
+            detail="Mesh state is coordination metadata; secret values are prohibited",
+        )
 
 
 # -- Routes --
 
 @router.post("/register")
-async def register(req: RegisterRequest, request: Request):
+def register(req: RegisterRequest, request: Request):
     broker = _get_broker(request)
     if not req.session_id:
         raise HTTPException(400, detail="session_id required")
     return broker.register_peer(
         req.session_id, req.summary, req.host, req.port,
-        req.project_path, req.agent_type,
+        req.project_path, req.agent_type, profile_id=_active_profile(),
     )
 
 
 @router.post("/deregister")
-async def deregister(req: DeregisterRequest, request: Request):
+def deregister(req: DeregisterRequest, request: Request):
     broker = _get_broker(request)
-    result = broker.deregister_peer(req.peer_id)
+    result = broker.deregister_peer(req.peer_id, profile_id=_active_profile())
     if not result.get("ok"):
         raise HTTPException(404, detail=result.get("error", "peer not found"))
     return result
 
 
+def _peer_activity_counts(request: Request, session_ids: list[str]) -> dict:
+    """Per-session {tool_count, memory_count} for the active profile.
+
+    Each mesh peer IS an agent session, so its activity is the tool events it
+    logged and the memories it contributed under the current profile. Batched
+    to a single grouped query per table. Fail-soft: returns {} on any error so
+    the peer list still renders.
+    """
+    if not session_ids:
+        return {}
+    try:
+        from superlocalmemory.server.routes.helpers import (
+            get_active_profile,
+            get_engine_lazy,
+        )
+        engine = get_engine_lazy(request.app.state)
+        if engine is None:
+            return {}
+        profile = get_active_profile()
+        placeholders = ",".join("?" * len(session_ids))
+        params = [profile, *session_ids]
+        counts: dict[str, dict] = {sid: {"tool_count": 0, "memory_count": 0}
+                                   for sid in session_ids}
+        for table, key in (("tool_events", "tool_count"),
+                            ("memories", "memory_count")):
+            try:
+                rows = engine._db.execute(
+                    f"SELECT session_id, COUNT(*) AS n FROM {table} "
+                    f"WHERE profile_id = ? AND session_id IN ({placeholders}) "
+                    "GROUP BY session_id",
+                    tuple(params),
+                )
+                for r in rows:
+                    d = dict(r)
+                    sid = d.get("session_id")
+                    if sid in counts:
+                        counts[sid][key] = d.get("n", 0)
+            except Exception:
+                continue
+        return counts
+    except Exception:
+        return {}
+
+
+def _parse_heartbeat(value: object) -> datetime | None:
+    """Parse a stored heartbeat as UTC without trusting malformed values."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _mesh_read_model(records: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Return bounded remote peers and local sessions with read-time liveness.
+
+    The broker persists local agent sessions in ``mesh_peers`` for messaging.
+    That storage detail must not make them look like remote mesh neighbours in
+    the dashboard. Classification is read-only so an ordinary dashboard GET
+    neither mutates a live database nor waits for the five-minute cleanup loop.
+    """
+    now = datetime.now(timezone.utc)
+    remote: list[dict] = []
+    local: list[dict] = []
+    for record in records:
+        heartbeat = _parse_heartbeat(record.get("last_heartbeat"))
+        if heartbeat is None:
+            continue
+        age = now - heartbeat
+        if age >= _EXPIRE_AFTER:
+            continue
+        stale_at = heartbeat + _STALE_AFTER
+        expires_at = heartbeat + _EXPIRE_AFTER
+        status = "active" if age < _STALE_AFTER else "stale"
+        normalized = {
+            **record,
+            "status": status,
+            "stale_at": stale_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+        }
+        # display-only — not an auth decision; is_loopback() handles IPv4-mapped forms
+        # such as "::ffff:127.0.0.1" that _LOOPBACK_HOSTS misses.
+        from superlocalmemory.server.loopback import is_loopback as _is_loopback
+        if _is_loopback(str(record.get("host") or "").lower()):
+            local.append(normalized)
+        else:
+            remote.append(normalized)
+    return remote, local
+
+
+def _mesh_counts(remote: list[dict], local: list[dict]) -> dict:
+    """Expose active counts separately while retaining the legacy total key."""
+    active_remote = sum(peer["status"] == "active" for peer in remote)
+    active_local = sum(session["status"] == "active" for session in local)
+    return {
+        "peer_count": active_remote + active_local,
+        "active_peer_count": active_remote + active_local,
+        "remote_peer_count": active_remote,
+        "local_session_count": active_local,
+        "stale_peer_count": sum(peer["status"] == "stale" for peer in remote),
+        "stale_local_session_count": sum(session["status"] == "stale" for session in local),
+    }
+
+
 @router.get("/peers")
-async def peers(request: Request):
+def peers(request: Request, view: str = "all"):
     broker = _get_broker(request)
-    return {"peers": broker.list_all_peers()}
+    if view not in {"all", "remote", "local"}:
+        raise HTTPException(422, detail="view must be all, remote, or local")
+    remote_peers, local_sessions = _mesh_read_model(
+        broker.list_all_peers(_active_profile()),
+    )
+    peer_list = (
+        remote_peers if view == "remote" else
+        local_sessions if view == "local" else
+        [*remote_peers, *local_sessions]
+    )
+    session_ids = [p.get("session_id") for p in peer_list if p.get("session_id")]
+    counts = _peer_activity_counts(request, session_ids)
+    enriched = []
+    for p in peer_list:
+        c = counts.get(p.get("session_id"), {})
+        enriched.append({
+            **p,
+            "tool_count": c.get("tool_count", 0),
+            "memory_count": c.get("memory_count", 0),
+        })
+    return {
+        "peers": enriched,
+        "remote_peers": remote_peers,
+        "local_sessions": local_sessions,
+        "view": view,
+        **_mesh_counts(remote_peers, local_sessions),
+    }
 
 
 @router.post("/heartbeat")
-async def heartbeat(req: HeartbeatRequest, request: Request):
+def heartbeat(req: HeartbeatRequest, request: Request):
+    """Update peer liveness without blocking the daemon's async event loop."""
     broker = _get_broker(request)
-    result = broker.heartbeat(req.peer_id)
+    result = broker.heartbeat(req.peer_id, profile_id=_active_profile())
     if not result.get("ok"):
         raise HTTPException(404, detail=result.get("error", "peer not found"))
     return result
 
 
 @router.post("/summary")
-async def summary(req: SummaryRequest, request: Request):
+def summary(req: SummaryRequest, request: Request):
     broker = _get_broker(request)
-    result = broker.update_summary(req.peer_id, req.summary)
+    result = broker.update_summary(req.peer_id, req.summary,
+                                   profile_id=_active_profile())
     if not result.get("ok"):
         raise HTTPException(404, detail=result.get("error", "peer not found"))
     return result
 
 
 @router.post("/send")
-async def send(req: SendRequest, request: Request):
+def send(req: SendRequest, request: Request):
     broker = _get_broker(request)
     to_target = req.to_peer or req.to  # v3.4.6: accept both field names
     if not to_target:
         raise HTTPException(400, detail="'to' or 'to_peer' required")
-    result = broker.send_message(req.from_peer, to_target, req.content, req.type)
+    profile = _active_profile()
+
+    # 3a-1 + 3a-2: Apply signature verification and admission gate for non-loopback.
+    client_host = request.client.host if request.client else "127.0.0.1"
+    from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
+    _is_lb = _is_loopback_host(client_host)
+
+    if not _is_lb:
+        from superlocalmemory.mesh.broker_security import (
+            check_mesh_message_signature,
+            is_strict_identity,
+        )
+        config = getattr(request.app.state, "config", None)
+        strict = is_strict_identity(config)
+        fleet_secret = getattr(broker, "_shared_secret", None)
+
+        # SEC-4 (hardened): identity resolution per mode.
+        #  - COMPAT (default): fleet secret verifies (or unsigned legacy accepted).
+        #  - STRICT: the sender MUST be a registered peer with its own per-peer key.
+        #    There is NO fleet-secret fallback in strict mode — unregistered
+        #    from_peer, a NULL peer_key, or a DB error all FAIL CLOSED. (The old
+        #    fleet fallback was an impersonation escape hatch: any fleet-secret
+        #    holder could claim an unregistered/legacy from_peer.)
+        verify_secret = fleet_secret
+        if strict:
+            if not req.from_peer:
+                raise HTTPException(401, detail="strict identity: from_peer required")
+            import sqlite3 as _sqlite3
+            try:
+                _conn = _sqlite3.connect(broker._db_path, timeout=3)
+                _conn.row_factory = _sqlite3.Row
+                _row = _conn.execute(
+                    "SELECT peer_key FROM mesh_peers WHERE peer_id=? LIMIT 1",
+                    (req.from_peer,),
+                ).fetchone()
+                _conn.close()
+            except _sqlite3.Error:
+                raise HTTPException(503, detail="strict identity: peer key lookup failed")
+            if not _row or not _row["peer_key"]:
+                raise HTTPException(
+                    401,
+                    detail="strict identity: from_peer is not a registered peer with a per-peer key",
+                )
+            verify_secret = str(_row["peer_key"])
+
+        sig_err = check_mesh_message_signature(
+            verify_secret,
+            req.from_peer,
+            to_target,
+            req.content,
+            request.headers.get("x-mesh-sig"),
+            request.headers.get("x-mesh-nonce"),
+            request.headers.get("x-mesh-ts"),
+            is_loopback=False,
+            strict=strict,
+        )
+        if sig_err is not None:
+            raise HTTPException(401, detail=sig_err.get("error", "signature error"))
+
+        # Admission gate parity (closes Wave-1 P1 bypass for inbound remote send).
+        try:
+            from superlocalmemory.core.admission import (
+                AdmissionDenied,
+                admit,
+                resolve_actor,
+            )
+            from superlocalmemory.core.actor_context import Transport
+            from superlocalmemory.core.operation_request import OperationKind
+        except ImportError:
+            AdmissionDenied = None  # type: ignore[assignment,misc]
+
+        if AdmissionDenied is not None:
+            try:
+                actor = resolve_actor(Transport.HTTP, client_host=client_host)
+                admit(OperationKind.MESH_SEND, actor)
+            except AdmissionDenied as exc:
+                raise HTTPException(403, detail=str(exc))
+
+    # This sync FastAPI route already runs in the worker thread pool, so the
+    # broker's SQLite retries and optional remote HTTP delivery cannot block
+    # the daemon event loop.
+    result = broker.send_message(
+        req.from_peer, to_target, req.content, req.type, "", profile,
+    )
     if not result.get("ok"):
         status = 413 if "too large" in result.get("error", "") else 404
         raise HTTPException(status, detail=result.get("error", ""))
@@ -167,65 +440,78 @@ async def send(req: SendRequest, request: Request):
 
 
 @router.get("/inbox/{peer_id}")
-async def inbox(peer_id: str, request: Request, project_path: str = ""):
+def inbox(peer_id: str, request: Request, project_path: str = ""):
     broker = _get_broker(request)
-    return {"messages": broker.get_inbox(peer_id, project_path)}
+    return {"messages": broker.get_inbox(peer_id, project_path,
+                                         profile_id=_active_profile())}
 
 
 @router.post("/inbox/{peer_id}/read")
-async def mark_read(peer_id: str, req: ReadRequest, request: Request):
+def mark_read(peer_id: str, req: ReadRequest, request: Request):
     broker = _get_broker(request)
-    return broker.mark_read(peer_id, req.message_ids)
+    return broker.mark_read(peer_id, req.message_ids,
+                            profile_id=_active_profile())
 
 
 @router.get("/pending/{peer_id}")
-async def pending(peer_id: str, request: Request, project_path: str = ""):
+def pending(peer_id: str, request: Request, project_path: str = ""):
     """Get pending broadcast/project messages for this peer."""
     broker = _get_broker(request)
-    messages = broker.get_pending(peer_id, project_path)
+    messages = broker.get_pending(peer_id, project_path,
+                                  profile_id=_active_profile())
     return {"messages": messages, "count": len(messages)}
 
 
 @router.get("/state")
-async def state_all(request: Request):
+def state_all(request: Request):
     broker = _get_broker(request)
-    return {"state": broker.get_state()}
+    return {"state": broker.get_state(profile_id=_active_profile())}
 
 
 @router.post("/state")
-async def state_set(req: StateSetRequest, request: Request):
+def state_set(req: StateSetRequest, request: Request):
     broker = _get_broker(request)
     if not req.key:
         raise HTTPException(400, detail="key required")
-    return broker.set_state(req.key, req.value, req.set_by)
+    _reject_secret_state(req.key, req.value)
+    return broker.set_state(req.key, req.value, req.set_by,
+                            profile_id=_active_profile())
 
 
 @router.get("/state/{key}")
-async def state_get(key: str, request: Request):
+def state_get(key: str, request: Request):
     broker = _get_broker(request)
-    result = broker.get_state_key(key)
+    result = broker.get_state_key(key, profile_id=_active_profile())
     if result is None:
         raise HTTPException(404, detail="key not found")
     return result
 
 
 @router.post("/lock")
-async def lock(req: LockRequest, request: Request):
+def lock(req: LockRequest, request: Request):
     broker = _get_broker(request)
     if not req.file_path or not req.locked_by:
         raise HTTPException(400, detail="file_path and locked_by required")
     if req.action not in ("acquire", "release", "query"):
         raise HTTPException(400, detail="action must be acquire, release, or query")
-    return broker.lock_action(req.file_path, req.locked_by, req.action)
+    return broker.lock_action(req.file_path, req.locked_by, req.action,
+                              profile_id=_active_profile())
 
 
 @router.get("/events")
-async def events(request: Request):
+def events(request: Request):
     broker = _get_broker(request)
-    return {"events": broker.get_events()}
+    return {"events": broker.get_events(profile_id=_active_profile())}
 
 
 @router.get("/status")
-async def status(request: Request):
+def status(request: Request):
     broker = _get_broker(request)
-    return broker.get_status()
+    broker_status = broker.get_status(profile_id=_active_profile())
+    remote_peers, local_sessions = _mesh_read_model(
+        broker.list_all_peers(_active_profile()),
+    )
+    return {
+        **broker_status,
+        **_mesh_counts(remote_peers, local_sessions),
+    }

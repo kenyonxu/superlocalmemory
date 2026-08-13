@@ -1,6 +1,6 @@
-# Contributing to SuperLocalMemory V3
+# Contributing to SuperLocalMemory V4
 
-Thank you for considering contributing to SuperLocalMemory V3! This document provides guidelines and instructions for contributing to the project.
+Thank you for considering contributing to SuperLocalMemory V4! This document provides guidelines and instructions for contributing to the project.
 
 ---
 
@@ -74,7 +74,8 @@ Look for issues labeled:
 
 ### Prerequisites
 
-- Python 3.8 or higher
+- Python >=3.11,<3.15 (3.11, 3.12, 3.13, 3.14)
+- Supported platforms: Apple Silicon macOS, 64-bit Windows, 64-bit Linux
 - SQLite3 (usually pre-installed)
 - Git
 - Text editor or IDE (VS Code, PyCharm, etc.)
@@ -109,12 +110,10 @@ source .venv/bin/activate
 ### Step 3: Install Development Dependencies
 
 ```bash
-# Install project (no external dependencies for core)
-# For development/testing:
-pip install pytest pytest-cov black flake8
-
-# Optional: Install optional dependencies
-pip install scikit-learn leidenalg
+# Install the project in an isolated development environment
+python3 -m venv .venv
+source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
 ```
 
 ### Step 4: Verify Setup
@@ -127,13 +126,11 @@ pytest tests/
 flake8 src/
 black --check src/
 
-# Run installation
-# On macOS/Linux:
-./install.sh
-# Activate virtual environment
+# Verify the repository-clone installer without changing the tool environment
+./scripts/install.sh install --dry-run
 
 # On Windows:
-./install.ps1
+.\scripts\install.ps1 -Action Install -DryRun
 
 # Test basic functionality
 slm status
@@ -166,7 +163,7 @@ superlocalmemory/
 │   │   └── migrate_cmd.py            # V2→V3 migration
 │   ├── core/                       # Core engine + config
 │   ├── storage/                    # Database layer (SQLite + sqlite-vec)
-│   ├── retrieval/                  # 7-channel retrieval
+│   ├── retrieval/                  # five candidate producers plus graph enhancement
 │   ├── dynamics/                   # EAP scheduler, SAGQ
 │   ├── math/                       # Fisher-Rao, FRQAD, Ebbinghaus, Hopfield, TurboQuant
 │   ├── encoding/                   # Embeddings, fact extraction, CCQ consolidation
@@ -175,7 +172,7 @@ superlocalmemory/
 │   ├── learning/                   # LightGBM adaptive re-ranking
 │   ├── parameterization/           # Soft prompt generation
 │   ├── hooks/                      # Claude Code hooks
-│   ├── mcp/                        # MCP server & 60 tools
+│   ├── mcp/                        # MCP server & profile-selected tools (14–87)
 │   ├── server/                     # Dashboard API server
 │   ├── code_graph/                 # Code knowledge graph (rustworkx)
 │   └── ui/                        # Dashboard frontend
@@ -423,9 +420,9 @@ flake8 src/ --max-line-length=100
 # Test
 pytest tests/
 
-# Verify installation
-./install.sh
-memory-status
+# Verify installer command generation
+./scripts/install.sh install --dry-run
+slm status
 ```
 
 ### Step 3: Commit Changes
@@ -651,7 +648,7 @@ Maintainers are responsible for:
 
 ## License
 
-By contributing to SuperLocalMemory V3, you agree that your contributions will be licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+By contributing to SuperLocalMemory V4, you agree that your contributions will be licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
 See [LICENSE](LICENSE) for details.
 
@@ -667,9 +664,9 @@ See [LICENSE](LICENSE) for details.
 - [pytest Documentation](https://docs.pytest.org/)
 
 **Knowledge Graphs:**
-- [GraphRAG Paper](https://example.com)
-- [Leiden Algorithm](https://example.com)
-- [TF-IDF Explained](https://example.com)
+- [GraphRAG Paper](https://arxiv.org/abs/2404.16130)
+- [Leiden Algorithm](https://www.nature.com/articles/s41598-019-41695-z)
+- [TF-IDF Explained](https://scikit-learn.org/stable/modules/feature_extraction.html#tfidf-term-weighting)
 
 **SQLite:**
 - [SQLite Documentation](https://www.sqlite.org/docs.html)
@@ -677,9 +674,9 @@ See [LICENSE](LICENSE) for details.
 
 ### Project Documentation
 
-- [Architecture](ARCHITECTURE.md) - Technical design
-- [Installation](INSTALL.md) - Setup guide
-- [Quick Start](QUICKSTART.md) - First steps
+- [Architecture](docs/ARCHITECTURE.md) - Technical design
+- [Installation](docs/getting-started.md) - Setup guide
+- [Quick Start](docs/getting-started.md) - First steps
 - [Security](SECURITY.md) - Security policy
 
 ---
@@ -689,7 +686,7 @@ See [LICENSE](LICENSE) for details.
 **Varun Pratap Bhardwaj**
 *Solution Architect*
 
-SuperLocalMemory V3 - Intelligent local memory system for AI coding assistants.
+SuperLocalMemory V4 - Intelligent local memory system for AI coding assistants.
 
 ---
 
@@ -701,6 +698,6 @@ Don't hesitate to ask! We're here to help.
 - Start a discussion
 - Reach out to maintainers
 
-**Thank you for contributing to SuperLocalMemory V3!**
+**Thank you for contributing to SuperLocalMemory V4!**
 
 Your contributions help make intelligent, local-first memory accessible to everyone.

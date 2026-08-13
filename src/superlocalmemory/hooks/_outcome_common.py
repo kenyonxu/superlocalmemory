@@ -36,13 +36,19 @@ import time
 from pathlib import Path
 from typing import IO, Optional
 
-
 # ---------------------------------------------------------------------------
 # Budget constants
 # ---------------------------------------------------------------------------
 
-#: Hot-path SQLite busy timeout (ms). Fail fast rather than block a host tool.
-BUSY_TIMEOUT_MS: int = 50
+#: Hot-path SQLite busy timeout (ms).
+#
+# Raised to 10 000 ms to match the daemon's SLM_DB_BUSY_TIMEOUT_MS default.
+# Hooks run as a SEPARATE OS process — the daemon's threading.RLock write-lock
+# cannot help cross-process — so PRAGMA busy_timeout is the ONLY lever that
+# prevents SQLITE_BUSY when the daemon or CLI holds the WAL write lock.
+# 10 s is long enough to outlast a typical daemon write cycle while staying
+# safely below Claude Code's hook-kill timeout.
+BUSY_TIMEOUT_MS: int = 10_000
 
 #: Cap on tool_response bytes scanned — bounds substring work to O(100 KB).
 SCAN_BYTES_CAP: int = 100_000
@@ -63,17 +69,19 @@ PERF_LOG_CHECK_EVERY: int = 256  # check size every N writes, not every write
 
 
 def slm_home() -> Path:
-    """Return ``~/.superlocalmemory`` honouring ``SLM_HOME`` override.
+    """Return the canonical runtime-state root for outcome hooks.
 
-    ``SLM_HOME`` exists solely so unit tests can isolate filesystem state.
-    Production code sets nothing and falls back to the home-directory path.
+    The central resolver owns environment alias precedence. Keeping that
+    policy out of this hot-path module prevents hooks from silently selecting
+    a different database than the daemon or MCP server.
 
     SEC-M6 — first-creation chmod's the dir to 0700 so the audit marker
     in ``ram_lock.sem`` (``{pid}:{name}``) and session-state files are
     not world-readable on shared hosts.
     """
-    override = os.environ.get("SLM_HOME", "").strip()
-    base = Path(override) if override else (Path.home() / ".superlocalmemory")
+    from superlocalmemory.infra.data_root import canonical_data_root
+
+    base = canonical_data_root()
     try:
         if not base.exists():
             base.mkdir(parents=True, exist_ok=True)
@@ -266,7 +274,7 @@ _PERF_LOG_FD: Optional[IO[str]] = None
 _PERF_LOG_PATH: Optional[Path] = None
 # S9-W3 M-PERF-02: RLock (not Lock) so a reentrant acquire during
 # atexit shutdown — e.g. a handler that calls ``log_perf`` while
-# ``_perf_log_flush`` already holds the lock — does not deadlock
+# ``close_perf_log`` already holds the lock — does not deadlock
 # the interpreter for the 30s graceful-shutdown timeout.
 _PERF_LOG_LOCK = threading.RLock()
 _PERF_LOG_WRITE_COUNT: int = 0  # SEC-M4 — rotation cadence counter
@@ -340,8 +348,12 @@ def _maybe_rotate_perf_log(path: Path) -> None:
         pass
 
 
-def _perf_log_flush() -> None:
-    """Flush the cached perf log fd (atexit hook). Never raises."""
+def close_perf_log() -> None:
+    """Flush and close the process-owned perf-log stream. Never raises.
+
+    Long-lived hosts and isolated tests can call this at their lifecycle
+    boundary; the atexit registration remains the final safety net.
+    """
     global _PERF_LOG_FD
     with _PERF_LOG_LOCK:
         fd = _PERF_LOG_FD
@@ -358,7 +370,12 @@ def _perf_log_flush() -> None:
         pass
 
 
-atexit.register(_perf_log_flush)
+def _perf_log_flush() -> None:
+    """Backward-compatible private alias for existing daemon shutdown code."""
+    close_perf_log()
+
+
+atexit.register(close_perf_log)
 
 
 #: S9-W3 C8: rotation flag set on hot path, drained on exit / next
@@ -407,7 +424,7 @@ def log_perf(hook_name: str, duration_ms: float, outcome: str) -> None:
 
     Best-effort: disk full / unwritable dir → silently skip. Uses a
     module-level append-only fd opened on first use and flushed on
-    process exit via :func:`_perf_log_flush`.
+    process exit via :func:`close_perf_log`.
 
     S9-W3 C8: the rotation/rename/reopen workflow has moved OFF the
     hot-path lock. Previously every 256th call held the lock across

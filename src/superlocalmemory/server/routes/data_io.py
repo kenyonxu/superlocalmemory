@@ -6,8 +6,10 @@
 
 Routes: /api/export, /api/import
 """
+import asyncio
 import io
 import gzip
+import hashlib
 import json
 import logging
 from typing import Optional
@@ -16,9 +18,28 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 
-from .helpers import get_db_connection, dict_factory, get_active_profile, DB_PATH
+from .helpers import (
+    DB_PATH,
+    dict_factory,
+    get_active_profile,
+    get_db_connection,
+    require_engine,
+)
 
 logger = logging.getLogger("superlocalmemory.routes.data_io")
+
+# Hard cap on the total decompressed byte count for gzip imports.
+# Bounding the compressed upload size alone does not prevent a decompression
+# bomb: a few kilobytes of input can expand to gigabytes.  This cap is checked
+# incrementally during streaming decompression so the full expanded content is
+# never materialized before the guard fires.
+_MAX_DECOMPRESSED_BYTES: int = 200 * 1024 * 1024  # 200 MB
+
+
+def _internal_error(detail: str = "Internal server error") -> HTTPException:
+    """SEC-H-02: log full traceback server-side; return a generic message to the client."""
+    logger.exception("data_io route error")
+    return HTTPException(status_code=500, detail=detail)
 
 # WebSocket manager reference (set by ui_server.py at startup)
 ws_manager = None
@@ -28,11 +49,19 @@ router = APIRouter()
 
 @router.get("/api/export")
 async def export_memories(
+    request: Request,
     format: str = Query("json", pattern="^(json|jsonl|csv)$"),
     category: Optional[str] = None,
     project_name: Optional[str] = None,
 ):
     """Export memories as JSON, JSONL, or CSV."""
+    # Bulk data export. This GET is not covered by the mutation middleware and
+    # is reached both by a plain fetch and a top-level navigation, neither of
+    # which carries a credential header — so gate on the loopback-trusted
+    # mutation boundary: local owner allowed, remote uncredentialed fails closed.
+    from superlocalmemory.server.write_identity import require_http_mutation_actor
+    require_http_mutation_actor(request, getattr(request.app.state, "daemon_descriptor", None),
+                                actor_kind="data-export")
     try:
         conn = get_db_connection()
         conn.row_factory = dict_factory
@@ -121,22 +150,49 @@ async def export_memories(
             },
         )
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Export error: {str(e)}")
+    except Exception:
+        raise _internal_error("Export error")
 
 
 @router.post("/api/import")
 async def import_memories(request: Request, file: UploadFile = File(...)):
     """Import memories from JSON file using V3 engine."""
     try:
-        content = await file.read()
+        # Bound the upload so a huge file cannot OOM the daemon (read one byte
+        # past the cap to detect oversize without buffering the whole payload).
+        _MAX_IMPORT_BYTES = 50 * 1024 * 1024
+        content = await file.read(_MAX_IMPORT_BYTES + 1)
+        if len(content) > _MAX_IMPORT_BYTES:
+            raise HTTPException(status_code=413,
+                                detail="Import file exceeds the 50 MB limit")
         if file.filename and file.filename.endswith('.gz'):
-            content = gzip.decompress(content)
+            # Stream-decompress with an incremental byte counter so the full
+            # expanded payload is never allocated before the guard fires.
+            _chunk_size = 65_536
+            chunks: list[bytes] = []
+            total_decompressed = 0
+            with gzip.GzipFile(fileobj=io.BytesIO(content)) as _gz:
+                while True:
+                    chunk = _gz.read(_chunk_size)
+                    if not chunk:
+                        break
+                    total_decompressed += len(chunk)
+                    if total_decompressed > _MAX_DECOMPRESSED_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=(
+                                f"Decompressed content exceeds the "
+                                f"{_MAX_DECOMPRESSED_BYTES // (1024 * 1024)} MB limit"
+                            ),
+                        )
+                    chunks.append(chunk)
+            content = b"".join(chunks)
 
         try:
             data = json.loads(content)
-        except json.JSONDecodeError as e:
-            raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+        except json.JSONDecodeError:
+            logger.warning("import: invalid JSON payload")
+            raise HTTPException(status_code=400, detail="Invalid JSON format")
 
         if isinstance(data, dict) and 'memories' in data:
             memories = data['memories']
@@ -147,10 +203,28 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
                 status_code=400, detail="Invalid format: expected 'memories' array",
             )
 
-        engine = getattr(request.app.state, "engine", None)
+        engine = require_engine(request)
+        from superlocalmemory.core.engine_ingestion import (
+            build_engine_ingestion_command,
+        )
+        from superlocalmemory.core.ingestion_command import (
+            IngestionRequest,
+            IngestionState,
+        )
+
+        command = build_engine_ingestion_command(engine)
+        from superlocalmemory.server.write_identity import (
+            authenticated_request_actor,
+        )
+        actor_id = authenticated_request_actor(
+            request,
+            actor_kind="http-import",
+        )
+        file_digest = hashlib.sha256(content).hexdigest()
         imported = 0
         skipped = 0
         errors = []
+        operation_ids: list[str] = []
 
         for idx, memory in enumerate(memories):
             try:
@@ -158,30 +232,49 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
                 if not memory_content:
                     errors.append(f"Memory {idx}: missing 'content' field")
                     continue
+                # Imported content is untrusted: scrub secrets before it reaches
+                # any durable or queryable store, exactly as the canonical
+                # ingest path does.
+                from superlocalmemory.core.ingest_policy import scrub_secrets_for_ingest
+                _scrub = scrub_secrets_for_ingest(memory_content)
+                if _scrub.redacted:
+                    memory_content = _scrub.content
 
-                if engine:
-                    engine.store(
-                        content=memory_content,
-                        session_id=memory.get('session_id', ''),
-                        metadata={
-                            "project_name": memory.get('project_name'),
-                            "category": memory.get('category'),
-                            "tags": memory.get('tags', ''),
-                        },
+                metadata = {
+                    "project_name": memory.get('project_name'),
+                    "category": memory.get('category'),
+                    "tags": memory.get('tags', ''),
+                }
+                for _field in (
+                    "fact_type", "confidence", "importance", "entities",
+                    "canonical_entities", "referenced_date", "pinned",
+                ):
+                    if _field in memory:
+                        metadata[_field] = memory[_field]
+                receipt, created = command.submit_with_status(IngestionRequest(
+                    content=memory_content,
+                    profile_id=engine._profile_id,
+                    source_type="http-import",
+                    idempotency_key=f"import:{file_digest}:{idx}",
+                    metadata=metadata,
+                    scope=memory.get("scope") or "personal",
+                    shared_with=tuple(memory.get("shared_with") or ()),
+                    trusted_actor_id=actor_id,
+                    session_id=memory.get('session_id', ''),
+                    session_date=memory.get('session_date') or "",
+                    speaker=memory.get('speaker') or "",
+                    role=memory.get('role') or "user",
+                ))
+                completed = await asyncio.to_thread(command.materialize, receipt.operation_id)
+                if completed.state is not IngestionState.COMPLETE:
+                    raise RuntimeError(
+                        completed.last_error or "canonical import failed"
                     )
+                operation_ids.append(completed.operation_id)
+                if created:
+                    imported += 1
                 else:
-                    # Fallback: direct DB insert
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "INSERT INTO atomic_facts (content, profile_id, session_id) "
-                        "VALUES (?, ?, ?)",
-                        (memory_content, get_active_profile(), memory.get('session_id', '')),
-                    )
-                    conn.commit()
-                    conn.close()
-
-                imported += 1
+                    skipped += 1
 
                 if ws_manager:
                     await ws_manager.broadcast({
@@ -193,15 +286,16 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
                 if "UNIQUE constraint failed" in str(e):
                     skipped += 1
                 else:
-                    errors.append(f"Memory {idx}: {str(e)}")
+                    logger.warning("import: memory %d failed: %s", idx, e)
+                    errors.append(f"Memory {idx}: import failed")
 
         return {
             "success": True, "imported_count": imported,
             "skipped_count": skipped, "total_processed": len(memories),
-            "errors": errors[:10],
+            "errors": errors[:10], "operation_ids": operation_ids,
         }
 
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Import error: {str(e)}")
+    except Exception:
+        raise _internal_error("Import error")

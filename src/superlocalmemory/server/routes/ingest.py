@@ -14,12 +14,11 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 router = APIRouter(tags=["ingestion"])
 
@@ -29,7 +28,9 @@ _active_lock = threading.Lock()
 
 
 class IngestRequest(BaseModel):
-    content: str
+    # Cap ingest content (~1 MB) so a single call cannot exhaust memory through
+    # the embedding/tokenizer pipeline.
+    content: str = Field(..., max_length=1_000_000)
     source_type: str
     dedup_key: str
     metadata: dict = {}
@@ -65,42 +66,61 @@ async def ingest(req: IngestRequest, request: Request):
         _active_count += 1
 
     try:
-        # Dedup check
-        conn = sqlite3.connect(str(engine._config.db_path))
-        try:
-            existing = conn.execute(
-                "SELECT id FROM ingestion_log WHERE source_type=? AND dedup_key=?",
-                (req.source_type, req.dedup_key),
-            ).fetchone()
-            if existing:
-                return {"ingested": False, "reason": "already_ingested"}
-        finally:
-            conn.close()
+        from superlocalmemory.core.engine_ingestion import (
+            build_engine_ingestion_command,
+        )
+        from superlocalmemory.core.ingestion_command import (
+            IngestionRequest,
+            IngestionState,
+        )
 
-        # Store via engine
-        metadata = {**req.metadata, "source_type": req.source_type}
-        fact_ids = engine.store(req.content, metadata=metadata)
-
-        # Log to ingestion_log
-        conn = sqlite3.connect(str(engine._config.db_path))
-        try:
-            conn.execute(
-                "INSERT OR IGNORE INTO ingestion_log "
-                "(source_type, dedup_key, fact_ids, metadata, status, ingested_at) "
-                "VALUES (?, ?, ?, ?, 'ingested', ?)",
-                (
-                    req.source_type,
-                    req.dedup_key,
-                    json.dumps(fact_ids),
-                    json.dumps(req.metadata),
-                    datetime.now(timezone.utc).isoformat(),
-                ),
+        from superlocalmemory.server.write_identity import (
+            authenticated_request_actor,
+        )
+        actor_id = authenticated_request_actor(
+            request,
+            actor_kind="http-ingest",
+        )
+        command = build_engine_ingestion_command(engine)
+        receipt, created = command.submit_with_status(IngestionRequest(
+            content=req.content,
+            profile_id=engine._profile_id,
+            source_type=req.source_type,
+            idempotency_key=req.dedup_key,
+            metadata=dict(req.metadata),
+            trusted_actor_id=actor_id,
+        ))
+        completed = command.materialize(receipt.operation_id)
+        if completed.state is not IngestionState.COMPLETE:
+            raise RuntimeError(
+                completed.last_error or "canonical adapter ingestion failed"
             )
-            conn.commit()
-        finally:
-            conn.close()
+        fact_ids = list(completed.fact_ids)
 
-        return {"ingested": True, "fact_ids": fact_ids}
+        # Compatibility ledger for existing dashboards. M018 is the source of
+        # truth; retries repair this row without repeating the canonical write.
+        engine._db.execute(
+            "INSERT OR IGNORE INTO ingestion_log "
+            "(profile_id, source_type, dedup_key, fact_ids, metadata, status, ingested_at) "
+            "VALUES (?, ?, ?, ?, ?, 'ingested', ?)",
+            (
+                engine._profile_id,
+                req.source_type,
+                req.dedup_key,
+                json.dumps(fact_ids),
+                json.dumps(req.metadata),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+        result = {
+            "ingested": created,
+            "operation_id": completed.operation_id,
+            "fact_ids": fact_ids,
+        }
+        if not created:
+            result["reason"] = "already_ingested"
+        return result
 
     except Exception as exc:
         raise HTTPException(500, detail=str(exc))

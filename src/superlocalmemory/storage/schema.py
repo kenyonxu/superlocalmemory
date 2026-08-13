@@ -38,9 +38,12 @@ _TABLES: Final[tuple[str, ...]] = (
     "memories",
     "atomic_facts",
     "canonical_entities",
+    "fact_entity_associations",
+    "fact_entity_association_repair_state",
     "entity_aliases",
     "entity_profiles",
     "memory_scenes",
+    "scene_fact_members",
     "temporal_events",
     "graph_edges",
     "consolidation_log",
@@ -52,10 +55,14 @@ _TABLES: Final[tuple[str, ...]] = (
     "compliance_audit",
     "bm25_tokens",
     "config",
+    "entity_communities",
+    "community_summaries",
+    "persona_summary",
 )
 
 _FTS_TABLES: Final[tuple[str, ...]] = (
     "atomic_facts_fts",
+    "fact_expansion_fts",
 )
 
 
@@ -173,6 +180,8 @@ CREATE TABLE IF NOT EXISTS atomic_facts (
     embedding          TEXT,
     fisher_mean        TEXT,
     fisher_variance    TEXT,
+    -- Tracks how many accesses had Fisher applied; delta-based update in maintenance
+    fisher_last_applied_access INTEGER NOT NULL DEFAULT 0,
 
     -- Lifecycle
     lifecycle          TEXT NOT NULL DEFAULT 'active'
@@ -282,6 +291,24 @@ END;
 
 
 # ---------------------------------------------------------------------------
+# Fact expansion FTS (Phase 4, T3b — fact-augmented key expansion)
+# ---------------------------------------------------------------------------
+# Standalone (NOT external-content) FTS5 holding per-fact alternate keys
+# (entity aliases + paraphrases). Kept separate from atomic_facts_fts so the
+# proven content index and its triggers are never touched. Populated by
+# core.key_expander on store (and backfilled), queried as an additive UNION in
+# the BM25 channel. fact_id is stored so results can be scope-JOINed to
+# atomic_facts.
+_SQL_FACT_EXPANSION_FTS: Final[str] = """
+CREATE VIRTUAL TABLE IF NOT EXISTS fact_expansion_fts
+    USING fts5(
+        fact_id UNINDEXED,
+        alt_keys
+    );
+"""
+
+
+# ---------------------------------------------------------------------------
 # Canonical entities
 # ---------------------------------------------------------------------------
 
@@ -306,7 +333,52 @@ CREATE INDEX IF NOT EXISTS idx_entities_profile
 CREATE INDEX IF NOT EXISTS idx_entities_name_lower
     ON canonical_entities (profile_id, canonical_name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_entities_type
-    ON canonical_entities (profile_id, entity_type);"""
+    ON canonical_entities (profile_id, entity_type);
+CREATE INDEX IF NOT EXISTS idx_entities_profile_fact_count
+    ON canonical_entities (profile_id, fact_count DESC);
+CREATE INDEX IF NOT EXISTS idx_entities_profile_type_fact_count
+    ON canonical_entities (
+        profile_id, entity_type COLLATE NOCASE, fact_count DESC
+    );"""
+
+
+# ---------------------------------------------------------------------------
+# Normalized fact/entity associations (also the ingestion effect ledger)
+# ---------------------------------------------------------------------------
+
+_SQL_FACT_ENTITY_ASSOCIATIONS: Final[str] = """
+CREATE TABLE IF NOT EXISTS fact_entity_associations (
+    profile_id TEXT NOT NULL,
+    fact_id TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    first_operation_id TEXT NOT NULL DEFAULT '',
+    count_applied INTEGER NOT NULL DEFAULT 0
+        CHECK (count_applied IN (0, 1)),
+    created_at TEXT NOT NULL DEFAULT (
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    ),
+    PRIMARY KEY (profile_id, fact_id, entity_id),
+    FOREIGN KEY (fact_id) REFERENCES atomic_facts(fact_id) ON DELETE CASCADE,
+    FOREIGN KEY (entity_id)
+        REFERENCES canonical_entities(entity_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_fact_entity_associations_entity
+    ON fact_entity_associations(profile_id, entity_id, fact_id);
+CREATE TABLE IF NOT EXISTS fact_entity_association_repair_state (
+    repair_key TEXT PRIMARY KEY,
+    state TEXT NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending', 'running', 'retrying', 'complete')),
+    target_fact_rowid INTEGER NOT NULL DEFAULT -1,
+    last_fact_rowid INTEGER NOT NULL DEFAULT 0,
+    scanned INTEGER NOT NULL DEFAULT 0,
+    inserted INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO fact_entity_association_repair_state
+    (repair_key, state, target_fact_rowid, updated_at)
+VALUES ('historical-backfill', 'pending', -1, '');
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +388,7 @@ CREATE INDEX IF NOT EXISTS idx_entities_type
 _SQL_ENTITY_ALIASES: Final[str] = """
 CREATE TABLE IF NOT EXISTS entity_aliases (
     alias_id    TEXT PRIMARY KEY,
+    profile_id  TEXT NOT NULL DEFAULT 'default',
     entity_id   TEXT NOT NULL,
     alias       TEXT NOT NULL,
     confidence  REAL NOT NULL DEFAULT 1.0,
@@ -329,6 +402,10 @@ CREATE INDEX IF NOT EXISTS idx_aliases_entity
     ON entity_aliases (entity_id);
 CREATE INDEX IF NOT EXISTS idx_aliases_lookup
     ON entity_aliases (alias COLLATE NOCASE);
+-- NOTE: the (profile_id, entity_id) index is created by migration M022, NOT
+-- here. On an upgrading DB this DDL runs at engine init BEFORE the deferred
+-- M022 adds the profile_id column, so referencing it here would fail engine
+-- init with "no such column: profile_id".
 """
 
 
@@ -378,6 +455,67 @@ CREATE TABLE IF NOT EXISTS memory_scenes (
 
 CREATE INDEX IF NOT EXISTS idx_scenes_profile
     ON memory_scenes (profile_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_scenes_profile_scene
+    ON memory_scenes (profile_id, scene_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_facts_profile_fact
+    ON atomic_facts (profile_id, fact_id);
+"""
+
+
+# ---------------------------------------------------------------------------
+# Normalized scene/fact membership projection (bounded scene assignment)
+# ---------------------------------------------------------------------------
+
+_SQL_SCENE_FACT_MEMBERS: Final[str] = """
+CREATE TABLE IF NOT EXISTS scene_fact_members (
+    profile_id TEXT NOT NULL,
+    scene_id   TEXT NOT NULL,
+    fact_id    TEXT NOT NULL,
+    position   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (scene_id, fact_id),
+    FOREIGN KEY (profile_id, scene_id)
+        REFERENCES memory_scenes(profile_id, scene_id) ON DELETE CASCADE,
+    FOREIGN KEY (profile_id, fact_id)
+        REFERENCES atomic_facts(profile_id, fact_id) ON DELETE CASCADE,
+    FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_scene_fact_members_lookup
+    ON scene_fact_members (profile_id, fact_id, scene_id);
+CREATE INDEX IF NOT EXISTS idx_scene_fact_members_order
+    ON scene_fact_members (scene_id, position);
+
+CREATE TRIGGER IF NOT EXISTS trg_scene_fact_members_insert
+AFTER INSERT ON memory_scenes
+BEGIN
+    DELETE FROM scene_fact_members WHERE scene_id = NEW.scene_id;
+    INSERT OR IGNORE INTO scene_fact_members
+        (profile_id, scene_id, fact_id, position)
+    SELECT NEW.profile_id, NEW.scene_id, af.fact_id, CAST(member.key AS INTEGER)
+    FROM json_each(
+        CASE WHEN json_valid(NEW.fact_ids_json)
+             THEN NEW.fact_ids_json ELSE '[]' END
+    ) AS member
+    JOIN atomic_facts AS af
+      ON af.fact_id = member.value
+     AND af.profile_id = NEW.profile_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_scene_fact_members_update
+AFTER UPDATE OF profile_id, fact_ids_json ON memory_scenes
+BEGIN
+    DELETE FROM scene_fact_members WHERE scene_id = NEW.scene_id;
+    INSERT OR IGNORE INTO scene_fact_members
+        (profile_id, scene_id, fact_id, position)
+    SELECT NEW.profile_id, NEW.scene_id, af.fact_id, CAST(member.key AS INTEGER)
+    FROM json_each(
+        CASE WHEN json_valid(NEW.fact_ids_json)
+             THEN NEW.fact_ids_json ELSE '[]' END
+    ) AS member
+    JOIN atomic_facts AS af
+      ON af.fact_id = member.value
+     AND af.profile_id = NEW.profile_id;
+END;
 """
 
 
@@ -663,6 +801,58 @@ CREATE TABLE IF NOT EXISTS config (
 );
 """
 
+# Wave Q: entity-community backbone (additive; safe on existing DBs).
+# One row per (profile, entity) mapping to the community it belongs to,
+# computed by Louvain over the entity co-occurrence graph in the background.
+# Shared spine for Q2 community summaries and Q3 progressive abstraction.
+_SQL_ENTITY_COMMUNITIES: Final[str] = """
+CREATE TABLE IF NOT EXISTS entity_communities (
+    profile_id  TEXT    NOT NULL,
+    entity_id   TEXT    NOT NULL,
+    community_id INTEGER NOT NULL,
+    computed_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (profile_id, entity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_entity_comm_profile
+    ON entity_communities(profile_id);
+CREATE INDEX IF NOT EXISTS idx_entity_comm_cid
+    ON entity_communities(profile_id, community_id);
+"""
+
+# Wave Q2: one synthesized report per entity community (additive; safe on
+# existing DBs). Generated in the background after entity_communities; the
+# summary excludes superseded facts. member_fact_ids enables drill-down.
+_SQL_COMMUNITY_SUMMARIES: Final[str] = """
+CREATE TABLE IF NOT EXISTS community_summaries (
+    profile_id      TEXT    NOT NULL,
+    community_id    INTEGER NOT NULL,
+    summary         TEXT    NOT NULL DEFAULT '',
+    keywords        TEXT    NOT NULL DEFAULT '',
+    entity_ids_json TEXT    NOT NULL DEFAULT '[]',
+    fact_ids_json   TEXT    NOT NULL DEFAULT '[]',
+    fact_count      INTEGER NOT NULL DEFAULT 0,
+    computed_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (profile_id, community_id)
+);
+CREATE INDEX IF NOT EXISTS idx_comm_summ_profile
+    ON community_summaries(profile_id);
+"""
+
+# Wave Q3: progressive-abstraction top tier — one persona roll-up per profile
+# consuming the top community summaries (additive; safe on existing DBs).
+# Recall-gated (never auto-injected into hot recall) and size-bounded to avoid
+# the V3.4.40 summary-pollution regression. Drill-down: community_ids_json →
+# communities → their member facts.
+_SQL_PERSONA_SUMMARY: Final[str] = """
+CREATE TABLE IF NOT EXISTS persona_summary (
+    profile_id         TEXT PRIMARY KEY,
+    summary            TEXT NOT NULL DEFAULT '',
+    keywords           TEXT NOT NULL DEFAULT '',
+    community_ids_json TEXT NOT NULL DEFAULT '[]',
+    computed_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
 # ---------------------------------------------------------------------------
 # Ordered DDL list (tables before FTS, respects FK order)
 # ---------------------------------------------------------------------------
@@ -673,9 +863,11 @@ _DDL_ORDERED: Final[tuple[str, ...]] = (
     _SQL_MEMORIES,
     _SQL_ATOMIC_FACTS,
     _SQL_CANONICAL_ENTITIES,
+    _SQL_FACT_ENTITY_ASSOCIATIONS,
     _SQL_ENTITY_ALIASES,
     _SQL_ENTITY_PROFILES,
     _SQL_MEMORY_SCENES,
+    _SQL_SCENE_FACT_MEMBERS,
     _SQL_TEMPORAL_EVENTS,
     _SQL_GRAPH_EDGES,
     _SQL_CONSOLIDATION_LOG,
@@ -691,6 +883,14 @@ _DDL_ORDERED: Final[tuple[str, ...]] = (
     _SQL_V2_MIGRATION_CLEANUP,
     # FTS5 must come after atomic_facts (content table) AND after cleanup
     _SQL_ATOMIC_FACTS_FTS,
+    # T3b: standalone expansion FTS (additive; safe on existing DBs)
+    _SQL_FACT_EXPANSION_FTS,
+    # Wave Q: entity-community backbone (additive; safe on existing DBs)
+    _SQL_ENTITY_COMMUNITIES,
+    # Wave Q2: community summaries (additive; safe on existing DBs)
+    _SQL_COMMUNITY_SUMMARIES,
+    # Wave Q3: persona roll-up tier (additive; safe on existing DBs)
+    _SQL_PERSONA_SUMMARY,
 )
 
 
@@ -752,6 +952,8 @@ def drop_all_tables(conn: sqlite3.Connection) -> None:
         "atomic_facts_fts_insert",
         "atomic_facts_fts_delete",
         "atomic_facts_fts_update",
+        "trg_scene_fact_members_insert",
+        "trg_scene_fact_members_update",
     ):
         conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
 

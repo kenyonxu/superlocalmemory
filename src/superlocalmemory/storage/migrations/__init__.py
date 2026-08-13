@@ -24,6 +24,12 @@ from . import (
     M004_cross_platform_sync_log,
     M005_bandit_tables,
     M015_add_pinned_column,
+    M019_derivation_lineage,
+    M020_model_state_integrity,
+    M029_behavioral_history_indexes,
+    M030_entity_explorer_indexes,
+    M038_learning_feedback_channel,
+    M039_scene_fact_members,
 )
 
 # ---------------------------------------------------------------------------
@@ -72,6 +78,13 @@ __all__ = (
     "M003_migration_log",
     "M004_cross_platform_sync_log",
     "M005_bandit_tables",
+    "M015_add_pinned_column",
+    "M019_derivation_lineage",
+    "M020_model_state_integrity",
+    "M029_behavioral_history_indexes",
+    "M030_entity_explorer_indexes",
+    "M038_learning_feedback_channel",
+    "M039_scene_fact_members",
     # Legacy re-exports (backward compat):
     "CURRENT_SCHEMA_VERSION",
     "get_schema_version",

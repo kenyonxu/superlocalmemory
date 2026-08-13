@@ -13,18 +13,21 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
-from typing import Any
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
-from superlocalmemory.server.routes.helpers import DB_PATH, get_active_profile
+from superlocalmemory.server.routes.helpers import DB_PATH, get_active_profile, get_read_connection
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v3/timeline", tags=["timeline"])
 
 VALID_RANGES = {"1d", "7d", "30d", "90d", "365d"}
-VALID_GROUP_BY = {"category", "community"}
+# ``date`` is the dashboard's chronological view.  It does not need an extra
+# enrichment pass because each returned event already carries its timestamp,
+# but it is a first-class grouping selection and must not be rejected at the
+# API boundary.
+VALID_GROUP_BY = {"category", "community", "date"}
 INTERNAL_CEILING = 5000
 
 
@@ -61,8 +64,7 @@ async def get_timeline(
     if not DB_PATH.exists():
         return {"range": range, "group_by": group_by, "count": 0, "events": [], "total_available": 0, "offset": 0}
 
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
+    conn = get_read_connection(DB_PATH)
 
     try:
         start_date = conn.execute("SELECT datetime('now', ?)", (modifier,)).fetchone()[0]

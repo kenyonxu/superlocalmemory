@@ -28,18 +28,16 @@ from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
 
 _HELP_EPILOG = """\
 operating modes:
-  Mode A  Local Guardian — Zero cloud, zero LLM. All processing stays on
-          your machine. Full EU AI Act compliance. Best for privacy-first
-          use, air-gapped systems, and regulated environments.
-          Retrieval score: 74.8% on LoCoMo benchmark.
+  Mode A  Local Guardian — No model-provider call in the core memory path.
+          Optional integrations, backup, and downloads have separate network
+          behavior; assess the complete deployment for privacy requirements.
 
   Mode B  Smart Local — Uses a local Ollama LLM for summarization and
-          enrichment. Data never leaves your network. EU AI Act compliant.
-          Requires: ollama running locally with a model pulled.
+          enrichment. The Ollama endpoint and enabled integrations determine
+          the data path. Requires: ollama running with a model pulled.
 
   Mode C  Full Power — Uses a cloud LLM (OpenAI, Anthropic, etc.) for
-          maximum accuracy. Best retrieval quality, agentic multi-hop.
-          Retrieval score: 87.7% on LoCoMo benchmark.
+          provider-assisted enrichment and retrieval behavior.
 
 quick start:
   slm setup                   Interactive first-time setup
@@ -66,8 +64,40 @@ examples:
 documentation:
   Website:    https://superlocalmemory.com
   GitHub:     https://github.com/qualixar/superlocalmemory
-  Paper:      https://arxiv.org/abs/2603.14588
+  Paper:      https://arxiv.org/abs/2608.08253
 """
+
+
+_NO_DAEMON_COMMANDS = {
+    "setup", "mode", "provider", "connect", "migrate", "mcp", "warmup", "hooks", "codex",
+    "config", "evolve", "db",
+    # v3.4.22 escape hatches — never auto-start the daemon on these.
+    "disable", "enable", "clear-cache", "reconfigure", "benchmark",
+    "rotate-token",
+    "evidence",
+    "diagnostics",
+    # LLD-06 — agents launched through wrap start the daemon on demand.
+    "wrap",
+    # V3.6 Optimize commands that are config read/write only.
+    "optimize", "cache", "compress", "help-optimize",
+    # Bounded loops use an in-process engine store, not the daemon.
+    "loop",
+    # v3.8.2 super-help is pure text — never touch the daemon.
+    "help",
+    # Lifecycle orchestration must run before any global auto-start hook.
+    "serve", "restart",
+}
+
+
+def _command_requires_daemon(args: argparse.Namespace) -> bool:
+    """Return whether global dispatch should ensure the daemon first.
+
+    All ``serve`` actions and ``restart`` own daemon inspection or mutation;
+    global dispatch must not race or duplicate those handlers.
+    """
+    if args.command in _NO_DAEMON_COMMANDS:
+        return False
+    return True
 
 
 def main() -> None:
@@ -78,11 +108,25 @@ def main() -> None:
         handle_hook(sys.argv[2])
         return
 
+    # Metadata inspection is activation-free. Package managers, users, and CI
+    # must be able to inspect a newly installed executable without creating an
+    # SLM data root, config, version marker, daemon, hooks, or models.
+    _is_metadata_cmd = (
+        len(sys.argv) == 1
+        or any(arg in {"-h", "--help"} for arg in sys.argv[1:])
+        or (len(sys.argv) == 2 and sys.argv[1] in {"-v", "--version"})
+    )
+    _is_connect_dry_run = (
+        len(sys.argv) >= 2
+        and sys.argv[1] == "connect"
+        and "--dry-run" in sys.argv[2:]
+    )
+
     # WP-07: lazy first-run init — runs after hook/mcp fast-paths so stdout
     # is never polluted on those paths (CRIT-3, MCP JSON-RPC purity).
     # Guarded: any failure must not crash the CLI (AC4).
     _is_mcp_cmd = len(sys.argv) >= 2 and sys.argv[1] == "mcp"
-    if not _is_mcp_cmd:
+    if not _is_mcp_cmd and not _is_metadata_cmd and not _is_connect_dry_run:
         try:
             from superlocalmemory.cli._lazy_init import _ensure_initialized
             _ensure_initialized()
@@ -102,7 +146,7 @@ def main() -> None:
 
     # One-time post-upgrade banner — silent for fresh installs and
     # same-version runs. Guarded against I/O errors internally.
-    if not _is_mcp_stdio:
+    if not _is_mcp_stdio and not _is_metadata_cmd and not _is_connect_dry_run:
         from superlocalmemory.cli.version_banner import check_and_emit_upgrade_banner
         if check_and_emit_upgrade_banner(_ver):
             # First post-upgrade invocation: apply the data-dir migration if
@@ -110,7 +154,6 @@ def main() -> None:
             # we defer — the next daemon start picks it up.
             try:
                 import logging as _logging
-                from pathlib import Path as _P
                 from superlocalmemory.migrations.v3_4_25_to_v3_4_26 import (
                     migrate_if_safe as _migrate_if_safe,
                 )
@@ -136,7 +179,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="slm",
-        description=f"SuperLocalMemory V3 ({_ver}) — AI agent memory with mathematical foundations",
+        description=f"SuperLocalMemory V4 ({_ver}) — AI agent memory with mathematical foundations",
         epilog=_HELP_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -176,8 +219,13 @@ def main() -> None:
     provider_p.add_argument(
         "action", nargs="?", choices=["set"], help="Action",
     )
+    provider_p.add_argument(
+        "provider", nargs="?",
+        choices=["openai", "anthropic", "azure", "ollama", "openrouter"],
+        help="Provider to configure; omit to use the interactive selector",
+    )
 
-    connect_p = sub.add_parser("connect", help="Auto-configure IDE integrations (17+ IDEs)")
+    connect_p = sub.add_parser("connect", help="Auto-configure a supported IDE integration")
     connect_p.add_argument("ide", nargs="?", help="Specific IDE to configure (e.g. cursor, codex, continue)")
     connect_p.add_argument(
         "--list", action="store_true", help="List all supported IDEs",
@@ -204,6 +252,36 @@ def main() -> None:
         "--dry-run", action="store_true", dest="dry_run", default=False,
         help="Show what would be written without making changes",
     )
+    # Workstream C — transport flexibility (3.8.4)
+    connect_p.add_argument(
+        "--transport",
+        choices=["stdio", "http", "http-mcp-remote"],
+        default="stdio",
+        dest="transport",
+        help=(
+            "MCP transport to write into the IDE config. "
+            "stdio (default, zero regression) | "
+            "http (native Streamable-HTTP, requires SLM daemon) | "
+            "http-mcp-remote (stdio bridge via mcp-remote for stdio-only clients)"
+        ),
+    )
+    connect_p.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        dest="daemon_port",
+        help="SLM daemon port for http/http-mcp-remote transport (default: 8765)",
+    )
+    connect_p.add_argument(
+        "--verify",
+        action="store_true",
+        default=False,
+        dest="verify",
+        help=(
+            "After writing the config, probe the daemon health endpoint to confirm "
+            "the transport is reachable (only meaningful for --transport http)"
+        ),
+    )
 
     migrate_p = sub.add_parser("migrate", help="Migrate data from V2 to V3 schema")
     migrate_p.add_argument(
@@ -224,6 +302,56 @@ def main() -> None:
     db_mig_p.add_argument(
         "--dry-run", action="store_true",
         help="Report what would change without applying",
+    )
+    db_scale_p = db_sub.add_parser(
+        "scale",
+        help="Safely stage and promote optional CozoDB/LanceDB projections",
+    )
+    db_scale_p.add_argument(
+        "scale_action",
+        choices=("status", "adopt", "prepare", "verify", "promote", "rollback"),
+        help="Lifecycle action. Adopt confirms a detected legacy projection; prepare and verify never mutate active paths.",
+    )
+    db_scale_p.add_argument("--stage-id", help="Stage identifier required by verify/promote")
+    db_scale_p.add_argument("--backup-id", help="Backup identifier required by rollback")
+
+    db_reembed_p = db_sub.add_parser(
+        "reembed",
+        help="Backfill NULL embeddings (facts never embedded)",
+    )
+    db_reembed_p.add_argument(
+        "--missing-only",
+        action="store_true",
+        default=True,
+        dest="missing_only",
+        help="Only embed facts with NULL embedding (default and only mode)",
+    )
+    db_reembed_p.add_argument(
+        "--all-profiles",
+        action="store_true",
+        default=False,
+        dest="all_profiles",
+        help="Process all profiles (default: active profile only)",
+    )
+    db_reembed_p.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum facts to embed per run (default: no limit)",
+    )
+    db_reembed_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Output structured JSON",
+    )
+
+    # -- Mesh inspection (v3.7.9, M-03) --------------------------------
+    mesh_p = sub.add_parser("mesh", help="Inspect the local agent mesh (status/peers)")
+    mesh_p.add_argument(
+        "mesh_action",
+        choices=("status", "peers"),
+        help="status: broker health + stats; peers: active peer sessions",
     )
 
     # -- Memory Operations ---------------------------------------------
@@ -247,7 +375,7 @@ def main() -> None:
 
     # v3.6.12 (parity-3): `search` is an alias of `recall` so the CLI has the
     # same search verb the MCP exposes (handlers dict maps both to cmd_recall).
-    recall_p = sub.add_parser("recall", aliases=["search"], help="Semantic search with 4-channel retrieval")
+    recall_p = sub.add_parser("recall", aliases=["search"], help="Multi-channel memory retrieval")
     recall_p.add_argument("query", help="Search query")
     recall_p.add_argument(
         "--limit", type=int, default=CANONICAL_RECALL_LIMIT,
@@ -255,10 +383,24 @@ def main() -> None:
     )
     recall_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
     recall_p.add_argument(
+        "--window", default="",
+        help="Restrict results to an event-time range: a relative span "
+             "(24h, 7d, 30d, 1y) or an explicit range (2026-07-01..2026-07-31). "
+             "Default: no time filter.",
+    )
+    recall_p.add_argument(
+        "--as-of", dest="as_of", default="",
+        help="Point-in-time recall: an ISO-8601 timestamp "
+             "(2026-01-01T00:00:00+00:00) that pins retrieval to a temporal "
+             "snapshot. Default: current-state recall.",
+    )
+    recall_p.add_argument(
         "--fast", action="store_true",
-        help="Skip SpreadingActivation 5th channel for sub-second response. "
-             "Other 4 channels (semantic, lexical, temporal, structural) still run. "
-             "Use when you need recall before a tool call (e.g. before WebSearch).",
+        help="Force-skip the internal agentic verification round (all six retrieval "
+             "channels + reranker still run). This is already the default (client-driven "
+             "agentic): SLM returns fast local results + confidence signals and lets the "
+             "calling LLM re-query on low confidence. Pass --fast to guarantee the fast "
+             "path even where the server is configured for internal agentic.",
     )
     # v3.6.15: shared memory is opt-in. Unset (None) → resolve the configured
     # default (recall_include_global/shared, both False by default). Explicit
@@ -280,10 +422,19 @@ def main() -> None:
         "--no-shared", dest="include_shared", action="store_false", default=None,
         help="Exclude shared-scope facts from retrieval",
     )
+    # v3.8.2 client-driven agentic: agents parsing --json should ACT on the
+    # confidence signals rather than expect a server-side LLM to reformulate.
+    recall_p.epilog = (
+        "AGENT GUIDANCE (--json): recall returns fast local results plus "
+        "confidence signals. If 'no_confident_match' is true or "
+        "'answer_confidence' is low, rewrite the query into 1-3 more specific "
+        "sub-queries and call recall again before concluding nothing was found. "
+        "Confident match -> use it directly."
+    )
 
     forget_p = sub.add_parser("forget", help="Delete memories matching a query (fuzzy)")
-    forget_p.add_argument("query", help="Query to match for deletion")
-    forget_p.add_argument("--dry-run", action="store_true", default=False, help="Preview matches without deleting")
+    forget_p.add_argument("query", nargs="?", default=None, help="Query to match for deletion. Optional with --dry-run (previews all memories).")
+    forget_p.add_argument("--dry-run", action="store_true", default=False, help="Preview matches without deleting. With no query, previews every memory.")
     forget_p.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
     forget_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
@@ -311,7 +462,7 @@ def main() -> None:
         help="Show extended status: migration log, daemon port, disabled marker, last version",
     )
 
-    health_p = sub.add_parser("health", help="Math layer health (Fisher-Rao, Sheaf, Langevin)")
+    health_p = sub.add_parser("health", help="Math layer health (scoring, consistency, and lifecycle layers)")
     health_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     trace_p = sub.add_parser("trace", help="Recall with per-channel score breakdown")
@@ -325,6 +476,21 @@ def main() -> None:
     doctor_p.add_argument(
         "--quick", action="store_true",
         help="Run only the fast checks (deps + config); skip daemon/embedding probes",
+    )
+    doctor_p.add_argument(
+        "--fix", action="store_true",
+        help="Auto-repair fixable components (re-download missing models, "
+             "install sqlite-vec) before checking, then report",
+    )
+
+    # v3.8.2 super-help — grouped overview of every command + focused topics.
+    help_p = sub.add_parser(
+        "help",
+        help="Grouped overview of all commands + topics (modes, config, self-heal)",
+    )
+    help_p.add_argument(
+        "topic", nargs="?",
+        help="Optional topic: modes | config | self-heal",
     )
 
     # LLD-06 §6.6 — `slm wrap <agent> [args...]` activates the Optimize
@@ -353,7 +519,7 @@ def main() -> None:
     sub.add_parser("mcp", help="Start MCP server (stdio transport for IDE integration)")
     sub.add_parser("warmup", help="Pre-download embedding model (~500MB, one-time)")
 
-    dashboard_p = sub.add_parser("dashboard", help="Open 17-tab web dashboard")
+    dashboard_p = sub.add_parser("dashboard", help="Open web dashboard")
     dashboard_p.add_argument(
         "--port", type=int, default=8765, help="Port (default 8765)",
     )
@@ -386,7 +552,7 @@ def main() -> None:
     profile_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     # -- Active Memory (V3.1) ------------------------------------------
-    hooks_p = sub.add_parser("hooks", help="Manage Claude Code hooks for auto memory injection")
+    hooks_p = sub.add_parser("hooks", help="Manage additive Claude Code or Codex hooks")
     hooks_p.add_argument(
         "action", nargs="?", default="status",
         choices=["install", "remove", "status"], help="Action (default: status)",
@@ -395,6 +561,18 @@ def main() -> None:
         "--gate", action="store_true",
         help="Enable PreToolUse gate (experimental — blocks tools until session_init)",
     )
+    hooks_p.add_argument(
+        "--agent", choices=["claude", "codex"], default="claude",
+        help="Target agent (default: claude)",
+    )
+    hooks_p.add_argument(
+        "--dry-run", action="store_true",
+        help="Show whether the additive change is valid without writing files",
+    )
+
+    codex_p = sub.add_parser("codex", help="Install or inspect explicit Codex SLM add-ons")
+    codex_p.add_argument("action", nargs="?", default="status", choices=["install", "remove", "status"])
+    codex_p.add_argument("--dry-run", action="store_true", help="Validate without writing user files")
 
     ctx_p = sub.add_parser("session-context", help="Print session context (for hooks)")
     ctx_p.add_argument("query", nargs="?", default="", help="Optional context query")
@@ -568,6 +746,55 @@ def main() -> None:
         help="Emit JSON result instead of human-readable summary",
     )
 
+    evidence_p = sub.add_parser(
+        "evidence",
+        help="Export, verify, import, or rebuild versioned memory evidence",
+    )
+    evidence_sub = evidence_p.add_subparsers(
+        dest="evidence_command", title="evidence subcommands",
+    )
+    evidence_export = evidence_sub.add_parser(
+        "export", help="Write a deterministic checksummed JSONL bundle",
+    )
+    evidence_export.add_argument("destination")
+    evidence_export.add_argument("--profile", default="default")
+    evidence_export.add_argument("--json", action="store_true")
+    evidence_verify = evidence_sub.add_parser(
+        "verify", help="Verify checksums and source reconciliation",
+    )
+    evidence_verify.add_argument("bundle")
+    evidence_verify.add_argument("--json", action="store_true")
+    evidence_import = evidence_sub.add_parser(
+        "import", help="Import relational truth (dry-run unless --execute)",
+    )
+    evidence_import.add_argument("bundle")
+    evidence_import.add_argument("--profile", default="default")
+    evidence_import.add_argument("--replace", action="store_true")
+    evidence_import.add_argument("--rollback-dir", default=None)
+    evidence_import.add_argument("--execute", action="store_true")
+    evidence_import.add_argument("--json", action="store_true")
+    evidence_rebuild = evidence_sub.add_parser(
+        "rebuild", help="Rebuild derived lexical state (dry-run unless --execute)",
+    )
+    evidence_rebuild.add_argument("--profile", default="default")
+    evidence_rebuild.add_argument("--execute", action="store_true")
+    evidence_rebuild.add_argument("--json", action="store_true")
+
+    diagnostics_p = sub.add_parser(
+        "diagnostics",
+        help="Export bounded local operational aggregates (manual only)",
+    )
+    diagnostics_sub = diagnostics_p.add_subparsers(
+        dest="diagnostics_command", title="diagnostics subcommands",
+    )
+    diagnostics_export = diagnostics_sub.add_parser(
+        "export", help="Write a deterministic content-free JSON report",
+    )
+    diagnostics_export.add_argument("destination")
+    diagnostics_export.add_argument(
+        "--json", action="store_true", help="Output structured JSON",
+    )
+
     # S-M07: install-token rotation.
     sub.add_parser(
         "rotate-token",
@@ -663,6 +890,52 @@ def main() -> None:
 
     # ---- end SLM v3.6 Optimize subcommands ----
 
+    # slm loop demo|history|show — bounded, gate-verified agent loops (v3.8.0)
+    loop_p = sub.add_parser(
+        "loop",
+        help="Bounded loops: gate-verified agent loops with an SLM-backed ledger",
+    )
+    loop_sub = loop_p.add_subparsers(dest="loop_command", title="loop subcommands")
+    loop_demo_p = loop_sub.add_parser(
+        "demo", help="Run the keyless convergence demo (proves engine + ledger)")
+    loop_demo_p.add_argument(
+        "--iterations", type=int, default=10, help="Max iterations (default: 10)")
+    loop_hist_p = loop_sub.add_parser("history", help="List recorded loop runs")
+    loop_hist_p.add_argument(
+        "--name", default=None, help="Loop name (default: convergence-demo)")
+    loop_show_p = loop_sub.add_parser("show", help="Show every lap of one run")
+    loop_show_p.add_argument("run_id", help="Run id (from history)")
+    for _sp in loop_sub.choices.values():
+        _sp.add_argument("--json", action="store_true",
+                         help="Output structured JSON (agent-native)")
+
+    # Wave-3: operational recovery & admin remediation
+    ops_p = sub.add_parser(
+        "ops",
+        help="Operational recovery: list failures, resolve stuck ops, check status",
+    )
+    ops_sub = ops_p.add_subparsers(dest="ops_command", title="ops subcommands")
+    ops_list_p = ops_sub.add_parser(
+        "list", help="List all failed, stuck, or degraded operations (admin)")
+    ops_list_p.add_argument(
+        "--profile", default=None, metavar="PROFILE",
+        help="Filter results to a specific profile (default: all)")
+    ops_list_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON (agent-native)")
+    ops_resolve_p = ops_sub.add_parser(
+        "resolve", help="Admin action: retry / force-reconcile / cancel a stuck op")
+    ops_resolve_p.add_argument("operation_id", help="Operation ID from slm ops list")
+    ops_resolve_p.add_argument(
+        "--action", required=True,
+        choices=["retry", "force_reconcile", "cancel"],
+        help="Remediation action to apply")
+    ops_resolve_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON (agent-native)")
+    ops_status_p = ops_sub.add_parser(
+        "status", help="Quick failure count + writer stall overview")
+    ops_status_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON (agent-native)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -670,27 +943,14 @@ def main() -> None:
         sys.exit(0)
 
     # V3.3.19: Auto-trigger setup wizard on first use
-    from superlocalmemory.cli.setup_wizard import check_first_use
-    check_first_use(args.command)
+    if not (args.command == "connect" and getattr(args, "dry_run", False)):
+        from superlocalmemory.cli.setup_wizard import check_first_use
+        check_first_use(args.command)
 
     # V3.4.4: Auto-start daemon for all commands that need it.
     # SLM is always-on — close laptop, reboot, crash: daemon auto-recovers.
     # Cross-platform: macOS + Windows + Linux.
-    _NO_DAEMON_COMMANDS = {
-        "setup", "mode", "provider", "connect", "migrate", "mcp", "warmup",
-        "config", "evolve", "db",
-        # v3.4.22 escape hatches — never auto-start the daemon on these.
-        "disable", "enable", "clear-cache", "reconfigure", "benchmark",
-        "rotate-token",
-        # LLD-06 — `slm wrap` may launch the agent binary directly without
-        # needing the daemon running (the agent will start the daemon on
-        # first LLM call, or the wrap command can be --dry-run).
-        "wrap",
-        # V3.6 Optimize commands that are config read/write only (no daemon needed)
-        "optimize", "cache", "compress", "help-optimize",
-        # NOTE: "proxy" NOT here — proxy needs daemon running
-    }
-    if args.command not in _NO_DAEMON_COMMANDS:
+    if _command_requires_daemon(args):
         try:
             from superlocalmemory.cli.daemon import ensure_daemon
             ensure_daemon()  # Starts daemon if not running; no-op if already up

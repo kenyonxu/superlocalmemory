@@ -1,7 +1,7 @@
 /**
  * SuperLocalMemory V2 - Feedback Module (v2.7.4)
  * Copyright (c) 2026 Varun Pratap Bhardwaj
- * Licensed under Elastic License 2.0
+ * Licensed under GNU Affero General Public License v3.0 or later
  *
  * Collects implicit and explicit feedback signals from dashboard
  * interactions. All data stays 100% local.
@@ -312,8 +312,14 @@ function showPrivacyDetails() {
 /**
  * Reset all learning data.
  */
-function resetLearningData() {
-    if (!confirm('Reset all learning data? Your memories will be preserved.')) return;
+async function resetLearningData() {
+    var confirmed = await confirmDestructive({
+        title: 'Reset learning data',
+        target: 'All learned patterns and ranking signals',
+        consequence: 'Your memories will be preserved.',
+        confirmLabel: 'Reset',
+    });
+    if (!confirmed) return;
 
     fetch('/api/learning/reset', {method: 'POST'})
     .then(function(r) { return r.json(); })

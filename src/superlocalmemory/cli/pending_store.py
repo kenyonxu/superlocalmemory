@@ -18,38 +18,47 @@ Uses a separate `pending.db` file — never touches memory.db directly.
 Stdlib only — no SLM imports (must be fast).
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
-License: Elastic-2.0
+License: AGPL-3.0-or-later
 """
 
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import time
 from pathlib import Path
 
 
 def _default_dir() -> Path:
-    """Honor SLM_DATA_DIR so tests can isolate via tmp_path."""
-    return Path(os.environ.get("SLM_DATA_DIR") or Path.home() / ".superlocalmemory")
+    """Resolve the pending queue inside the canonical process namespace."""
+    from superlocalmemory.infra.data_root import canonical_data_root
+    return canonical_data_root()
 
 
 _PENDING_DB = "pending.db"
 _MAX_RETRIES = 3
 _STUCK_DAYS = 7
-_DEAD_LETTER_DAYS = 30
+_MAX_RETRY_DELAY_SECONDS = 3600
+
+# Fix F: hard cap on pending.db retries. After this many failed attempts the
+# item transitions to status='dead_letter' (next_retry_at=NULL) so it is
+# permanently excluded from the work queue.  Value chosen to survive transient
+# engine unavailability (12h at 30-min drain intervals) while still providing
+# a definitive signal for genuinely poisoned content.
+_MAX_RETRY_COUNT: int = 20
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS pending_memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id TEXT NOT NULL DEFAULT 'default',
     content TEXT NOT NULL,
     tags TEXT DEFAULT '',
     metadata TEXT DEFAULT '{}',
     created_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     error TEXT DEFAULT NULL,
-    retry_count INTEGER DEFAULT 0
+    retry_count INTEGER DEFAULT 0,
+    next_retry_at REAL DEFAULT 0
 );
 """
 
@@ -61,7 +70,40 @@ def _get_db(base_dir: Path | None = None) -> sqlite3.Connection:
     db_path = d / _PENDING_DB
     conn = sqlite3.connect(str(db_path), timeout=5)
     conn.execute("PRAGMA journal_mode=WAL")
+    # C4: pending queue can hold not-yet-materialized memory content owner-only.
+    try:
+        from superlocalmemory.core.security_primitives import harden_db_perms
+        harden_db_perms(db_path)
+    except Exception:
+        pass
     conn.execute(_SCHEMA)
+    columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(pending_memories)").fetchall()
+    }
+    if "next_retry_at" not in columns:
+        conn.execute(
+            "ALTER TABLE pending_memories ADD COLUMN "
+            "next_retry_at REAL DEFAULT 0"
+        )
+        conn.commit()
+    # Per-profile isolation: a queued item must materialize under the profile
+    # that was active when it was enqueued — never under whatever profile is
+    # active at drain time. Existing rows backfill to 'default'.
+    if "profile_id" not in columns:
+        conn.execute(
+            "ALTER TABLE pending_memories ADD COLUMN "
+            "profile_id TEXT NOT NULL DEFAULT 'default'"
+        )
+        conn.commit()
+    # Pre-V3.7 rows were terminally hidden after three failures. Restore them
+    # to the retry queue; M018 makes replay idempotent and no raw evidence may
+    # remain stranded solely because an older version exhausted its counter.
+    conn.execute(
+        "UPDATE pending_memories SET status='pending', next_retry_at=0 "
+        "WHERE status='failed'"
+    )
+    conn.commit()
     return conn
 
 
@@ -70,8 +112,12 @@ def store_pending(
     tags: str = "",
     metadata: dict | None = None,
     base_dir: Path | None = None,
+    profile_id: str = "default",
 ) -> int:
-    """Store content in pending table. Returns the row ID.
+    """Store content in pending table under a profile. Returns the row ID.
+
+    ``profile_id`` captures the profile active at ENQUEUE time so a later
+    profile switch can never redirect this memory to a different profile.
 
     This is intentionally FAST — no engine init, no embedding, no model loading.
     Just a raw SQLite INSERT (~0.1s).
@@ -79,9 +125,11 @@ def store_pending(
     conn = _get_db(base_dir)
     try:
         cur = conn.execute(
-            "INSERT INTO pending_memories (content, tags, metadata, created_at, status) "
-            "VALUES (?, ?, ?, ?, 'pending')",
-            (content, tags, json.dumps(metadata or {}), time.strftime("%Y-%m-%dT%H:%M:%S")),
+            "INSERT INTO pending_memories "
+            "(profile_id, content, tags, metadata, created_at, status) "
+            "VALUES (?, ?, ?, ?, ?, 'pending')",
+            (profile_id, content, tags, json.dumps(metadata or {}),
+             time.strftime("%Y-%m-%dT%H:%M:%S")),
         )
         conn.commit()
         return cur.lastrowid or 0
@@ -89,19 +137,34 @@ def store_pending(
         conn.close()
 
 
-def get_pending(base_dir: Path | None = None, limit: int = 50) -> list[dict]:
-    """Get unprocessed pending memories."""
+def get_pending(
+    base_dir: Path | None = None,
+    limit: int = 50,
+    profile_id: str | None = None,
+) -> list[dict]:
+    """Get unprocessed pending memories, optionally scoped to one profile.
+
+    The drain passes ``profile_id`` = its engine's active profile so it only
+    ever claims items enqueued under that profile. Items for other profiles
+    wait until their profile is active — never materialized under the wrong one.
+    """
     conn = _get_db(base_dir)
     try:
-        rows = conn.execute(
-            "SELECT id, content, tags, metadata, created_at, retry_count "
+        query = (
+            "SELECT id, content, tags, metadata, created_at, retry_count, profile_id "
             "FROM pending_memories WHERE status = 'pending' "
-            "ORDER BY id ASC LIMIT ?",
-            (limit,),
-        ).fetchall()
+            "AND COALESCE(next_retry_at, 0) <= ?"
+        )
+        params: list = [time.time()]
+        if profile_id is not None:
+            query += " AND profile_id = ?"
+            params.append(profile_id)
+        query += " ORDER BY id ASC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
         return [
             {"id": r[0], "content": r[1], "tags": r[2], "metadata": r[3],
-             "created_at": r[4], "retry_count": r[5]}
+             "created_at": r[4], "retry_count": r[5], "profile_id": r[6]}
             for r in rows
         ]
     finally:
@@ -124,21 +187,48 @@ def mark_done(row_id: int, base_dir: Path | None = None) -> None:
 def mark_failed(row_id: int, error: str, base_dir: Path | None = None) -> None:
     """Mark a pending memory as failed with error message.
 
-    v3.4.38: Now retry-aware. If retry_count < _MAX_RETRIES, keeps status as
-    'pending' so the materializer will retry on next iteration. Only marks
-    permanently failed after _MAX_RETRIES (3) attempts. The previous behavior
-    permanently lost 18 memories between April 15-26, 2026 to transient errors.
+    Fix F: when the retry counter reaches _MAX_RETRY_COUNT the item transitions
+    to ``status='dead_letter'`` with ``next_retry_at=NULL``.  Dead-lettered
+    items are excluded from the work queue (``get_pending`` filters
+    ``status='pending'``) and are not resurrected by the startup
+    ``UPDATE…WHERE status='failed'`` sweep (which targets only 'failed', not
+    'dead_letter').  This gives operators a stable, inspectable record of
+    genuinely poisoned content instead of an infinite retry loop.
+
+    Below the cap, failures stay pending with bounded exponential backoff;
+    M018 idempotency makes repeated replay safe once the canonical operation
+    has been created.
     """
     conn = _get_db(base_dir)
     try:
-        # Increment retry count and conditionally update status
-        conn.execute(
-            "UPDATE pending_memories SET error = ?, "
-            "retry_count = retry_count + 1, "
-            "status = CASE WHEN retry_count + 1 >= ? THEN 'failed' ELSE 'pending' END "
-            "WHERE id = ?",
-            (error, _MAX_RETRIES, row_id),
-        )
+        row = conn.execute(
+            "SELECT retry_count FROM pending_memories WHERE id=?",
+            (row_id,),
+        ).fetchone()
+        if row is None:
+            return
+        next_count = int(row[0] or 0) + 1
+        if next_count >= _MAX_RETRY_COUNT:
+            # Fix F: permanently exclude from work queue — dead-letter.
+            conn.execute(
+                "UPDATE pending_memories SET error = ?, "
+                "retry_count = retry_count + 1, "
+                "status = 'dead_letter', next_retry_at = NULL "
+                "WHERE id = ?",
+                (error, row_id),
+            )
+        else:
+            delay = 0 if next_count == 1 else min(
+                2 ** min(next_count - 1, 12),
+                _MAX_RETRY_DELAY_SECONDS,
+            )
+            conn.execute(
+                "UPDATE pending_memories SET error = ?, "
+                "retry_count = retry_count + 1, "
+                "status = 'pending', next_retry_at = ? "
+                "WHERE id = ?",
+                (error, time.time() + delay, row_id),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -179,11 +269,8 @@ def cleanup_done(days: int = 7, base_dir: Path | None = None) -> int:
 def cleanup_stale(base_dir: Path | None = None) -> dict[str, int]:
     """Sweep stale rows from pending.db. Runs periodically from the daemon.
 
-    Removes:
-    - `done` rows older than 7 days (already processed)
-    - `failed` rows that exceeded max retries (moved to dead-letter via deletion)
-    - `pending` rows stuck more than 7 days (test pollution, crashed workers)
-    - Everything older than 30 days regardless of status (hard cap)
+    Deletes only completed receipts. Pending and failed raw evidence is retained
+    regardless of age so maintenance can never become a data-loss path.
     """
     conn = _get_db(base_dir)
     try:
@@ -192,28 +279,18 @@ def cleanup_stale(base_dir: Path | None = None) -> dict[str, int]:
             "AND created_at < datetime('now', ?)",
             (f"-{_STUCK_DAYS} days",),
         ).rowcount
-        failed = conn.execute(
-            "DELETE FROM pending_memories WHERE status = 'failed' "
-            "AND retry_count >= ?",
-            (_MAX_RETRIES,),
-        ).rowcount
-        stuck = conn.execute(
-            "DELETE FROM pending_memories WHERE status = 'pending' "
-            "AND created_at < datetime('now', ?)",
-            (f"-{_STUCK_DAYS} days",),
-        ).rowcount
-        hard_cap = conn.execute(
-            "DELETE FROM pending_memories "
-            "WHERE created_at < datetime('now', ?)",
-            (f"-{_DEAD_LETTER_DAYS} days",),
-        ).rowcount
+        retained = conn.execute(
+            "SELECT COUNT(*) FROM pending_memories "
+            "WHERE status != 'done'"
+        ).fetchone()[0]
         conn.commit()
         return {
             "done": done,
-            "failed_over_retries": failed,
-            "stuck_pending": stuck,
-            "hard_cap_expired": hard_cap,
-            "total": done + failed + stuck + hard_cap,
+            "failed_over_retries": 0,
+            "stuck_pending": 0,
+            "hard_cap_expired": 0,
+            "retained_unprocessed": int(retained),
+            "total": done,
         }
     finally:
         conn.close()

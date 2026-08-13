@@ -18,7 +18,10 @@ from datetime import datetime, UTC
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from .helpers import DB_PATH
+from superlocalmemory.server.route_mutations import authorize_route_mutation
+from superlocalmemory.storage.memory_write import memory_read, memory_write
+
+from .helpers import DB_PATH, get_active_profile
 
 logger = logging.getLogger("superlocalmemory.routes.tiers")
 router = APIRouter()
@@ -34,15 +37,9 @@ class PinRequest(BaseModel):
 
 @contextmanager
 def _db():
-    """Context-managed DB connection with WAL + busy_timeout."""
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.row_factory = sqlite3.Row
-    try:
+    """Yield a short-lived query-only snapshot for tier dashboard reads."""
+    with memory_read(DB_PATH) as conn:
         yield conn
-    finally:
-        conn.close()
 
 
 def _validate_profile(profile_id: str) -> str:
@@ -53,9 +50,11 @@ def _validate_profile(profile_id: str) -> str:
 
 
 @router.get("/api/tiers/stats")
-async def tier_stats(profile_id: str = "default"):
+async def tier_stats(profile_id: str | None = None):
     """Get tier distribution stats."""
-    profile_id = _validate_profile(profile_id)
+    # Default to the ACTIVE profile, never the literal "default" — otherwise
+    # tier counts reflect the default profile regardless of which is active.
+    profile_id = _validate_profile(profile_id or get_active_profile())
 
     with _db() as conn:
         try:
@@ -96,15 +95,21 @@ async def tier_stats(profile_id: str = "default"):
 
 
 @router.post("/api/tiers/evaluate")
-async def evaluate_tiers_route(request: Request, profile_id: str = "default"):
+async def evaluate_tiers_route(request: Request, profile_id: str | None = None):
     """Manually trigger tier evaluation.
 
     Uses the shared engine (via lazy import) instead of re-initializing
     DatabaseManager on every request.
     """
-    profile_id = _validate_profile(profile_id)
+    profile_id = _validate_profile(profile_id or get_active_profile())
 
     try:
+        authorization = authorize_route_mutation(
+            request,
+            operation="update",
+            source_agent_id="http-tier-evaluate",
+            profile_id=profile_id,
+        )
         from superlocalmemory.core.tier_manager import evaluate_tiers
         from .helpers import get_engine_lazy
 
@@ -114,6 +119,7 @@ async def evaluate_tiers_route(request: Request, profile_id: str = "default"):
                 status_code=503, detail="Engine not initialized",
             )
         stats = evaluate_tiers(engine._db, profile_id)
+        authorization.complete()
         return {"success": True, "stats": stats}
     except HTTPException:
         raise
@@ -125,71 +131,92 @@ async def evaluate_tiers_route(request: Request, profile_id: str = "default"):
 
 
 @router.post("/api/tiers/pin")
-async def pin_fact_route(request: PinRequest, profile_id: str = "default"):
+async def pin_fact_route(
+    body: PinRequest,
+    request: Request,
+    profile_id: str | None = None,
+):
     """Pin a fact to stay in active tier forever.
 
     Validates fact exists in the specified profile before pinning.
     """
-    profile_id = _validate_profile(profile_id)
+    profile_id = _validate_profile(profile_id or get_active_profile())
+    authorization = authorize_route_mutation(
+        request,
+        operation="update",
+        source_agent_id="http-tier-pin",
+        profile_id=profile_id,
+        fact_id=body.fact_id,
+    )
 
-    with _db() as conn:
-        try:
+    # memory_write: process write lock + busy_timeout.
+    # SELECT + INSERT + lifecycle update are atomic inside the same connection.
+    try:
+        with memory_write(DB_PATH) as conn:
             # Verify fact exists in this profile
-            c = conn.cursor()
-            c.execute(
+            if conn.execute(
                 "SELECT fact_id FROM atomic_facts "
                 "WHERE fact_id = ? AND profile_id = ?",
-                (request.fact_id, profile_id),
-            )
-            if c.fetchone() is None:
+                (body.fact_id, profile_id),
+            ).fetchone() is None:
                 raise HTTPException(
                     status_code=404,
-                    detail=f"Fact {request.fact_id[:8]}... not found",
+                    detail=f"Fact {body.fact_id[:8]}... not found",
                 )
-
             now = datetime.now(UTC).isoformat()
             conn.execute(
                 "INSERT OR REPLACE INTO pinned_facts "
                 "(fact_id, profile_id, pinned_at, reason) "
                 "VALUES (?, ?, ?, ?)",
-                (request.fact_id, profile_id, now, request.reason),
+                (body.fact_id, profile_id, now, body.reason),
             )
-            conn.execute(
-                "UPDATE atomic_facts SET lifecycle = 'active' "
-                "WHERE fact_id = ? AND profile_id = ?",
-                (request.fact_id, profile_id),
+            from superlocalmemory.core.lifecycle_state import set_fact_lifecycle_zone
+            set_fact_lifecycle_zone(
+                conn, [body.fact_id], "active", profile_id=profile_id,
             )
-            conn.commit()
-            return {"success": True, "message": f"Fact {request.fact_id[:8]}... pinned"}
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error("pin_fact failed: %s", exc, exc_info=True)
-            raise HTTPException(
-                status_code=500, detail="Failed to pin fact",
-            ) from None
+        authorization.complete()
+        return {"success": True, "message": f"Fact {body.fact_id[:8]}... pinned"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("pin_fact failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=500, detail="Failed to pin fact",
+        ) from None
 
 
 @router.post("/api/tiers/unpin")
-async def unpin_fact_route(request: PinRequest, profile_id: str = "default"):
+async def unpin_fact_route(
+    body: PinRequest,
+    request: Request,
+    profile_id: str | None = None,
+):
     """Unpin a fact, allowing normal tier demotion.
 
     Lifecycle stays 'active' until the next tier evaluation cycle demotes it
     based on access patterns. This is intentional — immediate demotion would
     surprise the user.
     """
-    profile_id = _validate_profile(profile_id)
+    profile_id = _validate_profile(profile_id or get_active_profile())
+    authorization = authorize_route_mutation(
+        request,
+        operation="update",
+        source_agent_id="http-tier-unpin",
+        profile_id=profile_id,
+        fact_id=body.fact_id,
+    )
 
-    with _db() as conn:
-        try:
+    # memory_write: process write lock + busy_timeout.
+    try:
+        with memory_write(DB_PATH) as conn:
             conn.execute(
                 "DELETE FROM pinned_facts WHERE fact_id = ? AND profile_id = ?",
-                (request.fact_id, profile_id),
+                (body.fact_id, profile_id),
             )
-            conn.commit()
-            return {"success": True, "unpinned": True}
-        except Exception as exc:
-            logger.error("unpin_fact failed: %s", exc, exc_info=True)
-            raise HTTPException(
-                status_code=500, detail="Failed to unpin fact",
-            ) from None
+        authorization.complete()
+        return {"success": True, "unpinned": True}
+    except Exception as exc:
+        logger.error("unpin_fact failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=500, detail="Failed to unpin fact",
+        ) from None

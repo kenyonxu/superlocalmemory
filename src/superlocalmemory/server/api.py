@@ -6,6 +6,23 @@
 SuperLocalMemory V3 - FastAPI API Server
 Provides REST endpoints for memory visualization and exploration.
 Uses V3 MemoryEngine for all operations.
+
+v3.7.8 (WS3 F4): ``create_app()`` in this module is a standalone/legacy app
+factory. The running daemon serves ``superlocalmemory.server.unified_daemon:
+create_app`` (see ``unified_daemon.py``'s uvicorn config); THIS factory is
+reachable only via direct ``python -m superlocalmemory.server.api`` /
+programmatic use and the tests that exercise it directly
+(``tests/test_api/test_api_lifespan_contract.py``,
+``tests/test_security/test_rate_limit_e2e.py``). Its ``auth_middleware``
+below intentionally keeps the older, simpler ``check_api_key``-only gate
+(unconditional per-write check, no daemon-capability / install-token
+identity layer) because it predates and is independent of the unified
+daemon's richer ``write_identity.require_http_mutation_actor`` boundary and
+the ``SLM_REQUIRE_API_KEY_LOOPBACK`` opt-in (see
+``infra/auth_middleware.py``). Do not treat this module's auth posture as
+the production write boundary -- that is ``unified_daemon.py``'s
+``auth_middleware``. ``UI_DIR`` below is still imported by
+``unified_daemon.py`` and must not be removed.
 """
 
 import json
@@ -24,16 +41,17 @@ import uvicorn
 
 from superlocalmemory.server.security_middleware import SecurityHeadersMiddleware
 from superlocalmemory.server.routes.helpers import SLM_VERSION
+from superlocalmemory.infra.data_root import DynamicStatePath
 
 logger = logging.getLogger("superlocalmemory.api_server")
 
 # V3 paths
-MEMORY_DIR = Path.home() / ".superlocalmemory"
-DB_PATH = MEMORY_DIR / "memory.db"
-# V3.3.21: UI shipped inside the package for pip/npm installs.
-_PKG_UI = Path(__file__).resolve().parent.parent / "ui"
-_REPO_UI = Path(__file__).resolve().parent.parent.parent.parent / "ui"
-UI_DIR = _PKG_UI if (_PKG_UI / "index.html").exists() else _REPO_UI
+MEMORY_DIR = DynamicStatePath()
+DB_PATH = DynamicStatePath("memory.db")
+# V3.3.21+: the dashboard ships inside the package (superlocalmemory/ui) for
+# every install path. The legacy repo-root ui/ dev fallback was retired in
+# v3.8.0 when that copy was deleted; the packaged directory is authoritative.
+UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
 
 # ============================================================================
@@ -75,6 +93,12 @@ async def lifespan(application: FastAPI):
         application.state.engine = None
         application.state.config = None
 
+    # Event fan-out belongs to the same application lifecycle as the engine.
+    # Registering it through FastAPI.on_event created a second, deprecated
+    # startup path and made TestClient initialization emit warnings.
+    from superlocalmemory.server.routes.events import register_event_listener
+
+    register_event_listener()
     yield
 
     # Cleanup
@@ -85,8 +109,8 @@ async def lifespan(application: FastAPI):
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     application = FastAPI(
-        title="SuperLocalMemory V3 API",
-        description="V3 Memory Engine REST API",
+        title="SuperLocalMemory V4 API",
+        description="V4 Memory Engine REST API",
         version=SLM_VERSION,
         lifespan=lifespan,
     )
@@ -169,7 +193,7 @@ def create_app() -> FastAPI:
     from superlocalmemory.server.routes.profiles import router as profiles_router
     from superlocalmemory.server.routes.backup import router as backup_router
     from superlocalmemory.server.routes.data_io import router as data_io_router
-    from superlocalmemory.server.routes.events import router as events_router, register_event_listener
+    from superlocalmemory.server.routes.events import router as events_router
     from superlocalmemory.server.routes.agents import router as agents_router
     from superlocalmemory.server.routes.ws import router as ws_router, manager as ws_manager
     from superlocalmemory.server.routes.v3_api import router as v3_router
@@ -216,9 +240,9 @@ def create_app() -> FastAPI:
         index_path = UI_DIR / "index.html"
         if not index_path.exists():
             return (
-                "<html><head><title>SuperLocalMemory V3</title></head>"
+                "<html><head><title>SuperLocalMemory V4</title></head>"
                 "<body style='font-family:Arial;padding:40px'>"
-                "<h1>SuperLocalMemory V3 API Server Running</h1>"
+                "<h1>SuperLocalMemory V4 API Server Running</h1>"
                 "<p><a href='/docs'>API Documentation</a></p>"
                 "</body></html>"
             )
@@ -237,10 +261,6 @@ def create_app() -> FastAPI:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-    @application.on_event("startup")
-    async def startup_event():
-        register_event_listener()
-
     return application
 
 
@@ -252,7 +272,7 @@ def create_app() -> FastAPI:
 if __name__ == "__main__":
     app = create_app()
     print("=" * 60)
-    print("SuperLocalMemory V3 - API Server (standalone mode)")
+    print("SuperLocalMemory V4 - API Server (standalone mode)")
     print("=" * 60)
     print(f"Database: {DB_PATH}")
     print(f"UI Directory: {UI_DIR}")

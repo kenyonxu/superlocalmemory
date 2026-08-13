@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * SuperLocalMemory v3.4.21 — Interactive Postinstall
+ * SuperLocalMemory — Interactive Profile Configurator
  *
- * Per MASTER-PLAN-v3.4.21-FINAL.md §5 and IMPLEMENTATION-MANIFEST §D.3.
+ * Invoked explicitly by `slm reconfigure`; it is not an npm lifecycle hook.
  *
  * Responsibilities:
  *   1. Detect TTY; non-TTY (CI, piped stdin) → apply Balanced defaults
@@ -144,6 +144,8 @@ function parseArgs(argv) {
     home: null,
     replyFile: null,
     homeOutsideHome: false, // H-10: opt-in flag for --home outside $HOME
+    // v3.8.0: deployment mode — "personal" | "enterprise" (default: personal)
+    deployment: null,
   };
   for (const a of argv) {
     if (a === '--dry-run') args.dryRun = true;
@@ -152,6 +154,11 @@ function parseArgs(argv) {
     else if (a.startsWith('--profile=')) args.profile = a.slice('--profile='.length);
     else if (a.startsWith('--home=')) args.home = a.slice('--home='.length);
     else if (a.startsWith('--reply-file=')) args.replyFile = a.slice('--reply-file='.length);
+    else if (a.startsWith('--deployment=')) {
+      const val = a.slice('--deployment='.length).toLowerCase();
+      // Only accept known presets; silently ignore anything else (safe default: personal)
+      args.deployment = (val === 'enterprise') ? 'enterprise' : 'personal';
+    }
   }
   return args;
 }
@@ -164,6 +171,22 @@ const {
   validateReplyFileSchema,
   validateHomePath,
 } = require('./postinstall/validation.js');
+
+// v3.8.0 — deployment mode helpers (personal vs enterprise)
+const {
+  DEPLOYMENT_PRESETS,
+  DEFAULT_DEPLOYMENT_MODE,
+  promptDeploymentMode,
+  renderDeploymentBlock,
+} = require('./postinstall/deployment.js');
+
+// v3.8.0 — IDE multi-select + non-destructive connect
+const {
+  IDE_IDS,
+  IDE_DISPLAY,
+  promptIdeMultiselect,
+  executeIdeConnections,
+} = require('./postinstall/ide-multiselect.js');
 
 // ------------------------------------------------------------------------
 // TTY detection
@@ -198,8 +221,22 @@ function probeColdStartMs() {
   // synchronous spawn with timeout to keep total benchmark ≤15s.
   try {
     const { spawnSync } = require('child_process');
+    // Windows has no `python3`; use the py launcher (`py -3`) or fall back to
+    // `python`. Probing the wrong name returns a pessimistic estimate and
+    // downgrades the recommended profile on every Windows install.
+    let pythonBin = 'python3';
+    let pythonArgs = ['-c', 'pass'];
+    if (process.platform === 'win32') {
+      if (spawnSync('py', ['-3', '-c', 'pass'], { timeout: 1000 }).status === 0) {
+        pythonBin = 'py';
+        pythonArgs = ['-3', '-c', 'pass'];
+      } else {
+        pythonBin = 'python';
+        pythonArgs = ['-c', 'pass'];
+      }
+    }
     const start = Date.now();
-    const r = spawnSync('python3', ['-c', 'pass'], { timeout: 5000 });
+    const r = spawnSync(pythonBin, pythonArgs, { timeout: 5000 });
     const elapsed = Date.now() - start;
     if (r.error || r.status !== 0) return 2000; // pessimistic
     return elapsed;
@@ -337,6 +374,11 @@ function renderConfigToml(config) {
   lines.push('[telemetry]');
   lines.push(`mode = ${tomlEscape(config.telemetry)}`);
   lines.push('');
+  // v3.8.0: [deployment] block — only serialised for non-personal modes to
+  // avoid churning existing config.toml files (no-churn contract).
+  // renderDeploymentBlock() returns [] for personal (the default).
+  const depLines = renderDeploymentBlock(config.deployment || null);
+  for (const dl of depLines) lines.push(dl);
   return lines.join('\n');
 }
 
@@ -489,97 +531,15 @@ async function runInteractiveFlow(rl, recommendedProfile) {
 // under 60 LOC per Stage-8 G2 scope.
 function printLivingBrainDelta() {
   console.log('');
-  console.log('What\'s new in v3.6.18:');
+  console.log('Current setup guarantees:');
   console.log('  + session_init mandate hook — Claude calls ToolSearch→session_init first, every session');
-  console.log('  + Plugin auto-install on npm/pip install — skills, agents, hooks wired automatically');
+  console.log('  + External IDE integrations are installed only after explicit consent in `slm setup`');
   console.log('  + M017 migration — ccq_consolidated_blocks gets scope column (no more silent CCQ scope drop)');
   console.log('  + GC-safe test flags baked into pyproject.toml + Makefile (no more macOS ARM SIGSEGV)');
   console.log('What\'s unchanged:');
   console.log('  * Your memory.db — zero deletes, zero rewrites');
   console.log('  * Your profile settings');
   console.log('  * All CLI commands you already use');
-}
-
-// T1-B: Auto-install the Claude Code plugin after pip/npm install.
-// Best-effort: never fails the installer, never blocks the main flow.
-// Checks for `claude` CLI, then runs:
-//   1. claude plugin marketplace add qualixar/superlocalmemory
-//   2. claude plugin install superlocalmemory@qualixar
-//   3. slm hooks install
-async function tryInstallClaudePlugin() {
-  const { execFile } = require('child_process');
-  const { promisify } = require('util');
-  const execFileAsync = promisify(execFile);
-
-  // Find claude binary — try PATH first, then common install locations.
-  const claudeCandidates = ['claude'];
-  if (process.platform !== 'win32') {
-    claudeCandidates.push(
-      '/usr/local/bin/claude',
-      process.env.HOME + '/.npm-global/bin/claude',
-      process.env.HOME + '/.local/bin/claude',
-    );
-  }
-
-  let claudeBin = null;
-  for (const candidate of claudeCandidates) {
-    try {
-      await execFileAsync(candidate, ['--version'], { timeout: 5000 });
-      claudeBin = candidate;
-      break;
-    } catch (_e) { /* keep looking */ }
-  }
-
-  if (!claudeBin) {
-    // Claude Code not installed — print guidance and skip.
-    console.log('SLM: Claude Code CLI not found — skipping plugin auto-install.');
-    console.log('SLM: To install the plugin manually after installing Claude Code:');
-    console.log('SLM:   claude plugin marketplace add qualixar/superlocalmemory');
-    console.log('SLM:   claude plugin install superlocalmemory@qualixar');
-    console.log('SLM:   slm hooks install');
-    return;
-  }
-
-  console.log('SLM: Claude Code found — installing SLM plugin...');
-
-  // Step 1: Add marketplace
-  try {
-    await execFileAsync(claudeBin,
-      ['plugin', 'marketplace', 'add', 'qualixar/superlocalmemory'],
-      { timeout: 30000 });
-    console.log('SLM: marketplace added (qualixar/superlocalmemory)');
-  } catch (e) {
-    // "already exists" or network error — not fatal
-    console.log('SLM: marketplace add note: ' + (e.stderr || e.message || String(e)).trim().split('\n')[0]);
-  }
-
-  // Step 2: Install plugin
-  try {
-    await execFileAsync(claudeBin,
-      ['plugin', 'install', 'superlocalmemory@qualixar'],
-      { timeout: 30000 });
-    console.log('SLM: plugin installed (superlocalmemory@qualixar)');
-  } catch (e) {
-    console.log('SLM: plugin install note: ' + (e.stderr || e.message || String(e)).trim().split('\n')[0]);
-  }
-
-  // Step 3: Install hooks (only if not already current — avoids needless writes)
-  // `slm hooks install` uses atomic tmp-then-rename and only touches the SLM
-  // section of settings.json; all other Claude Code settings are preserved.
-  try {
-    const statusResult = await execFileAsync('slm', ['hooks', 'status', '--json'],
-      { timeout: 10000 }).catch(() => null);
-    const alreadyCurrent = statusResult &&
-      (() => { try { const s = JSON.parse(statusResult.stdout); return s.installed && !s.needs_upgrade; } catch { return false; } })();
-    if (!alreadyCurrent) {
-      await execFileAsync('slm', ['hooks', 'install'], { timeout: 15000 });
-      console.log('SLM: hooks installed into Claude Code settings');
-    } else {
-      console.log('SLM: hooks already current — skipped');
-    }
-  } catch (e) {
-    console.log('SLM: hooks install note: ' + (e.stderr || e.message || String(e)).trim().split('\n')[0]);
-  }
 }
 
 function printFirstRunChecklist(config) {
@@ -596,6 +556,14 @@ function printFirstRunChecklist(config) {
   console.log('  slm doctor                 — run health checks (DB, models, ports)');
   console.log('  slm health --watch         — live health ladder readout');
   console.log('  slm dashboard              — open the dashboard in your browser');
+  console.log('');
+  console.log('Available capability map (nothing external is enabled silently):');
+  console.log('  Memory + graph: dated episodic facts, entity graph, and local SQLite retrieval are ready.');
+  console.log('  Scale Engine: stage and verify CozoDB graph + LanceDB vector projections with `slm db scale prepare`.');
+  console.log('  Cache + compression: use the MCP optimize tools or `slm optimize on`; aggressive prose is opt-in.');
+  console.log('  Mesh: local coordination is available; configure a shared secret before exposing it to a LAN.');
+  console.log('  Adapters: Gmail, Calendar, and Transcript are OFF until `slm adapters enable <name>`.');
+  console.log('  IDE add-ons: install only SLM-owned integration with `slm hooks install --agent codex` or `--agent claude`.');
   if (config.skill_evolution_enabled) {
     // UX-L3: make the failure mode explicit to users who opted into
     // evolution. If three LLM calls fail, the circuit breaker trips — and
@@ -621,8 +589,11 @@ async function main() {
       return 2;
     }
   }
-  const homeDir = args.home || os.homedir();
-  const slmDir = path.join(homeDir, '.superlocalmemory');
+  const configuredRoot = process.env.SLM_DATA_DIR
+    || process.env.SL_MEMORY_PATH
+    || process.env.SLM_HOME
+    || path.join(os.homedir(), '.superlocalmemory');
+  const slmDir = args.home ? path.join(args.home, '.superlocalmemory') : configuredRoot;
   const cfgPath = path.join(slmDir, 'config.toml');
   const bakPath = path.join(slmDir, 'config.toml.bak');
 
@@ -697,12 +668,16 @@ async function main() {
     console.log(downgrade.line);
   }
 
+  // v3.8.0: resolve deployment preset (personal default; --deployment flag or TTY prompt).
+  let deploymentPreset = DEPLOYMENT_PRESETS[args.deployment] || DEPLOYMENT_PRESETS.personal;
+
   if (args.profile === 'custom' || (replyFileContents && replyFileContents.profile === 'custom')) {
     config = buildCustomConfig(replyFileContents || {});
   } else if (args.profile && PROFILES[args.profile]) {
     config = { profile: args.profile, ...PROFILES[args.profile] };
   } else if (nonInteractive) {
     // Non-TTY: silently apply recommended (benchmark-driven) profile.
+    // Deployment defaults to personal (no change to existing non-TTY behaviour).
     config = { profile: recommended, ...PROFILES[recommended] };
   } else {
     // Interactive TTY flow.
@@ -712,10 +687,23 @@ async function main() {
     });
     try {
       config = await runInteractiveFlow(rl, recommended);
+      // v3.8.0: deployment question (only in TTY if no --deployment flag given)
+      if (!args.deployment) {
+        deploymentPreset = await promptDeploymentMode(rl);
+      }
+      // v3.8.0: IDE multi-select (TTY only)
+      const selectedIdes = await promptIdeMultiselect(rl);
+      if (selectedIdes.length > 0) {
+        // Deferred — don't close rl yet so output lands before close message.
+        config._pendingIdes = selectedIdes;
+      }
     } finally {
       rl.close();
     }
   }
+
+  // Attach deployment to config object so renderConfigToml can serialise it.
+  config.deployment = deploymentPreset;
 
   // Dry-run: report only, no write.
   if (args.dryRun) {
@@ -763,21 +751,20 @@ async function main() {
       fs.closeSync(fd);
     }
     fs.renameSync(tmpPath, cfgPath);
-    console.log('SLM: wrote config.toml for profile=' + config.profile);
+    console.log('SLM: wrote config.toml for profile=' + config.profile +
+      (config.deployment && config.deployment.mode !== 'personal'
+        ? ' deployment=' + config.deployment.mode
+        : ''));
   } catch (e) {
     console.error('SLM: failed to write config.toml: ' + e.message);
     return 4;
   }
 
+  // v3.8.0: Execute IDE connections after config write so state is consistent.
+  if (config._pendingIdes) executeIdeConnections(config._pendingIdes, slmDir);
 
   // UX-G2: show the one-screen delta banner so upgraders see what shipped.
   printLivingBrainDelta();
-
-  // T1-B: Auto-install Claude Code plugin + hooks. Best-effort, non-blocking.
-  // Only runs on npm install (not --dry-run), when claude CLI is present.
-  if (!args.dryRun) {
-    await tryInstallClaudePlugin();
-  }
 
   printFirstRunChecklist(config);
   return 0;
@@ -813,4 +800,12 @@ module.exports = {
   PROFILES,
   CUSTOM_KNOB_ENUMS, // UX-M3
   printLivingBrainDelta, // UX-G2 (exposed for the test harness only)
+  // v3.8.0 — deployment
+  DEPLOYMENT_PRESETS,
+  DEFAULT_DEPLOYMENT_MODE,
+  renderDeploymentBlock,
+  // v3.8.0 — IDE multi-select
+  IDE_IDS,
+  IDE_DISPLAY,
+  executeIdeConnections,
 };

@@ -38,9 +38,9 @@ import dataclasses
 import json
 import logging
 import os
+import platform
 import re
 import sqlite3
-import struct
 import time
 import uuid
 import zlib
@@ -49,12 +49,13 @@ from pathlib import Path
 from typing import Any
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
 
-from superlocalmemory.storage.database import DatabaseManager
+from superlocalmemory.infra.data_root import DynamicStatePath, state_path
 from superlocalmemory.optimize.storage import schema as _schema
+from superlocalmemory.storage.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ MID_FILENAME: str = ".llmcache_key"
 SALT_PREFIX: str = "salt:"
 
 # C-06: persisted AES key — survives machine-id changes after first run
-_KEY_FILE: Path = Path.home() / LLMCACHE_DIRNAME / "opt-key.bin"
+_KEY_FILE = DynamicStatePath("opt-key.bin")
 
 _FORBIDDEN_MEMORY_TABLES: frozenset[str] = frozenset({
     "memories", "atomic_facts", "profiles", "canonical_entities",
@@ -198,7 +199,7 @@ class CacheDB:
 
     def __init__(self, db_path: Path | None = None) -> None:
         if db_path is None:
-            db_path = Path.home() / LLMCACHE_DIRNAME / LLMCACHE_DBNAME
+            db_path = state_path(LLMCACHE_DBNAME)
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         # If the file exists but is not a valid SQLite database (e.g. user
@@ -211,8 +212,12 @@ class CacheDB:
             try:
                 import sqlite3 as _sq
                 test_conn = _sq.connect(str(self._db_path))
-                test_conn.execute("PRAGMA schema_version")
-                test_conn.close()
+                try:
+                    test_conn.execute("PRAGMA schema_version")
+                finally:
+                    # Windows will not rename an open SQLite file. Always
+                    # release the probe before corrupt-file recovery runs.
+                    test_conn.close()
             except Exception as exc:
                 corrupt_sidecar = self._db_path.with_suffix(
                     self._db_path.suffix + ".corrupt"
@@ -285,11 +290,10 @@ class CacheDB:
 
     def _get_machine_id(self) -> str:
         """Return a stable machine identifier for AES key derivation."""
-        system = os.uname().sysname
+        system = platform.system()
         mid: str | None = None
         if system == "Darwin":
             try:
-                import plistlib
                 import subprocess
                 out = subprocess.run(
                     ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
@@ -310,7 +314,7 @@ class CacheDB:
             except OSError:
                 mid = None
         if not mid:
-            mid_file = Path.home() / LLMCACHE_DIRNAME / MID_FILENAME
+            mid_file = state_path(MID_FILENAME)
             if mid_file.exists():
                 try:
                     mid = mid_file.read_text(encoding="utf-8").strip()
@@ -334,9 +338,10 @@ class CacheDB:
         so changing the underlying machine-id string cannot invalidate existing
         cache entries.
         """
+        key_file = Path(_KEY_FILE)
         try:
-            if _KEY_FILE.exists():
-                key = _KEY_FILE.read_bytes()
+            if key_file.exists():
+                key = key_file.read_bytes()
                 if len(key) == 32:
                     return key
         except Exception as exc:
@@ -346,9 +351,9 @@ class CacheDB:
         machine_id = self._get_machine_id()
         key = self._derive_aes_key(machine_id, salt)
         try:
-            _KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
-            _KEY_FILE.write_bytes(key)
-            os.chmod(_KEY_FILE, 0o600)
+            key_file.parent.mkdir(parents=True, exist_ok=True)
+            key_file.write_bytes(key)
+            os.chmod(key_file, 0o600)
         except Exception as exc:
             logger.warning("CacheDB: could not persist AES key (fail-open): %s", exc)
         return key
@@ -900,6 +905,8 @@ class CacheDB:
         ccr_id: str,
         original: bytes,
         ttl_expires: float | None = None,
+        *,
+        tenant_id: str = "default",
     ) -> None:
         import hashlib
         try:
@@ -907,10 +914,11 @@ class CacheDB:
             encrypted = self._encrypt(compressed)
             self._db.execute(
                 "INSERT OR REPLACE INTO llmcache_ccr_originals "
-                "(ccr_id, original_blob, compressed_hash, byte_size_orig, byte_size_comp, ttl_expires) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(ccr_id, tenant_id, original_blob, compressed_hash, "
+                " byte_size_orig, byte_size_comp, ttl_expires) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
-                    ccr_id, encrypted,
+                    ccr_id, tenant_id, encrypted,
                     hashlib.sha256(original).hexdigest(),
                     len(original), len(compressed),
                     ttl_expires,
@@ -919,13 +927,14 @@ class CacheDB:
         except sqlite3.Error as exc:
             logger.warning("CacheDB.ccr_put failed: %s", exc)
 
-    def ccr_get(self, ccr_id: str) -> bytes | None:
+    def ccr_get(self, ccr_id: str, *, tenant_id: str = "default") -> bytes | None:
         try:
             rows = self._db.execute(
                 "SELECT original_blob FROM llmcache_ccr_originals "
                 "WHERE ccr_id = ? "
+                "AND tenant_id = ? "
                 "AND (ttl_expires IS NULL OR ttl_expires > ?)",
-                (ccr_id, time.time()),
+                (ccr_id, tenant_id, time.time()),
             )
             if not rows:
                 return None
@@ -947,15 +956,16 @@ class CacheDB:
         except sqlite3.Error as exc:
             logger.warning("CacheDB.ccr_update_compressed failed: %s", exc)
 
-    def ccr_delete(self, ccr_id: str) -> None:
-        """Delete a CCR row by ccr_id. Idempotent — warns on sqlite error, never raises.
+    def ccr_delete(self, ccr_id: str, *, tenant_id: str = "default") -> None:
+        """Delete a CCR row by ccr_id scoped to tenant. Idempotent — warns on sqlite error, never raises.
 
         WP-10 D6: defensive infra + sweep parity. Deleting a non-existent row is a no-op.
+        H-02: tenant_id guard prevents a tenant from deleting another tenant's CCR.
         """
         try:
             self._db.execute(
-                "DELETE FROM llmcache_ccr_originals WHERE ccr_id = ?",
-                (ccr_id,),
+                "DELETE FROM llmcache_ccr_originals WHERE ccr_id = ? AND tenant_id = ?",
+                (ccr_id, tenant_id),
             )
         except sqlite3.Error as exc:
             logger.warning("CacheDB.ccr_delete failed (non-fatal): %s", exc)
@@ -1047,6 +1057,30 @@ class CacheDB:
                 self._db.execute(sql, params)
         except sqlite3.Error as exc:
             logger.warning("CacheDB.metrics_flush failed: %s", exc)
+
+    # ---- KV counters (M2 — durable slm_cache_* hit/miss stats) ----
+
+    def kv_counter_incr(self, name: str, delta: int = 1) -> None:
+        """Atomically add ``delta`` to a named KV counter (fail-open)."""
+        try:
+            with self._db.transaction():
+                self._db.execute(
+                    "INSERT INTO llmcache_kv_counters(name, count) "
+                    "VALUES (:name, :delta) "
+                    "ON CONFLICT(name) DO UPDATE SET count = count + :delta",
+                    {"name": name, "delta": delta},
+                )
+        except sqlite3.Error as exc:
+            logger.debug("CacheDB.kv_counter_incr(%s) failed (non-fatal): %s", name, exc)
+
+    def kv_counters_load(self) -> dict[str, int]:
+        """Return all persisted KV counters as {name: count} (fail-open)."""
+        try:
+            rows = self._db.execute("SELECT name, count FROM llmcache_kv_counters")
+            return {r["name"]: r["count"] for r in rows}
+        except sqlite3.Error as exc:
+            logger.debug("CacheDB.kv_counters_load failed: %s", exc)
+            return {}
 
     # ---- convenience / non-contract helpers ----
 

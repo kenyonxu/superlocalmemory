@@ -22,6 +22,110 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def init_reranker(retrieval_config: Any) -> Any:
+    """Build the reranker the config asks for — remote endpoint or local worker.
+
+    v3.8.12 (issue #105). The remote branch is decided HERE, in the parent
+    process, before any subprocess exists. Spawning a worker whose only job
+    would be to forward an HTTP POST costs a fork, a machine-wide PID
+    singleton, and a warmup handshake for nothing — and issue #103 showed that
+    singleton blocking a reranker that was never local in the first place.
+
+    Misconfiguration is reported, never absorbed:
+      * remote backend with no/invalid endpoint -> reranking is DISABLED with
+        an error naming the fix. Quietly loading the English local model
+        instead would recreate the exact silent degradation #105 is about.
+      * endpoint set against a LOCAL backend -> error naming both keys, then
+        the local reranker runs as the backend actually requested. Before
+        3.8.12 this combination was dropped in silence (issue #103).
+
+    Returns the reranker, or None when reranking must stay off.
+    """
+    from superlocalmemory.retrieval.remote_reranker import (
+        RemoteReranker,
+        RemoteRerankerConfigError,
+        is_remote_cross_encoder_backend,
+        validate_remote_reranker_config,
+    )
+    from superlocalmemory.retrieval.reranker import CrossEncoderReranker
+
+    backend = getattr(retrieval_config, "cross_encoder_backend", "") or ""
+    endpoint = getattr(retrieval_config, "cross_encoder_endpoint", "") or ""
+    model = getattr(
+        retrieval_config, "cross_encoder_model",
+        "cross-encoder/ms-marco-MiniLM-L-12-v2",
+    )
+    remote_requested = is_remote_cross_encoder_backend(backend)
+
+    error = validate_remote_reranker_config(backend, endpoint)
+    if error and remote_requested:
+        logger.error(
+            "Remote reranker not started — %s Reranking is DISABLED; recall "
+            "returns fusion-ranked results.", error,
+        )
+        return None
+    if error:
+        logger.error(
+            "Reranker configuration conflict — %s Continuing with the local "
+            "cross-encoder as configured.", error,
+        )
+    elif remote_requested:
+        try:
+            return RemoteReranker(
+                model,
+                endpoint,
+                api_key=getattr(retrieval_config, "cross_encoder_api_key", ""),
+                backend=backend,
+                timeout_seconds=getattr(
+                    retrieval_config, "cross_encoder_timeout_seconds", 15.0,
+                ),
+            )
+        except RemoteRerankerConfigError as exc:
+            logger.error(
+                "Remote reranker not started — %s Reranking is DISABLED.", exc,
+            )
+            return None
+
+    return CrossEncoderReranker(model, backend=backend)
+
+
+def _log_reranker_warmup_status(reranker: Any) -> None:
+    """Record non-blocking reranker warmup state without alarming first-run users."""
+    from superlocalmemory.retrieval.remote_reranker import RemoteReranker
+
+    # isinstance, not a duck-typed attribute probe: MagicMock fabricates any
+    # attribute on demand, so ``getattr(reranker, "is_remote", False)`` would
+    # route every mocked reranker in the suite down the remote branch. Same
+    # hazard RetrievalEngine guards against when it checks the TYPE for
+    # ``rerank_with_status``.
+    if isinstance(reranker, RemoteReranker):
+        # The remote reranker logs its own probe outcome (endpoint, model, and
+        # the precise transport error). A second generic line about a local
+        # worker singleton would be noise at best and misleading at worst.
+        reranker.warmup_sync()
+        return
+    ready = reranker.warmup_sync(timeout=180)
+    if ready:
+        logger.info("Cross-encoder reranker warm and ready")
+        return
+    try:
+        from superlocalmemory.retrieval.reranker import _is_reranker_worker_alive
+
+        if _is_reranker_worker_alive():
+            logger.info(
+                "Cross-encoder reranker worker held by another process "
+                "(machine-wide singleton — usually the unified daemon); "
+                "this process will route reranking through that worker"
+            )
+            return
+    except Exception:
+        pass
+    logger.info(
+        "Cross-encoder reranker did not become ready during background warmup; "
+        "recalls use fallback scoring. Run 'slm doctor' for diagnostics."
+    )
+
+
 # ---------------------------------------------------------------------------
 # init_embedder  (was MemoryEngine._init_embedder + helpers)
 # ---------------------------------------------------------------------------
@@ -169,7 +273,10 @@ def init_encoding(
         db, embedder, llm, config.encoding,
     )
     observation_builder = ObservationBuilder(db)
-    scene_builder = SceneBuilder(db, embedder)
+    # V3.2: VectorStore (Phase 1) -- sqlite-vec KNN. Scene assignment also
+    # consumes it, so initialize it before the encoding component is wired.
+    vector_store = _init_vector_store(config)
+    scene_builder = SceneBuilder(db, embedder, vector_store=vector_store)
     entropy_gate = EntropyGate(
         embedder, config.encoding.entropy_threshold,
     )
@@ -180,9 +287,6 @@ def init_encoding(
         sheaf_checker = SheafConsistencyChecker(
             db, config.math.sheaf_contradiction_threshold,
         )
-
-    # V3.2: VectorStore (Phase 1) -- sqlite-vec KNN
-    vector_store = _init_vector_store(config)
 
     # V3.2: AccessLog (Phase 1) -- fact access tracking
     access_log = _init_access_log(db)
@@ -373,11 +477,6 @@ def _init_spreading_activation(
     vector_store: Any,
 ) -> Any | None:
     """Create SpreadingActivation for Phase 3 5th retrieval channel."""
-    # V3.3.21: Guard against None vector_store. Without embeddings, SA's
-    # search() crashes with "'NoneType' has no attribute 'search'".
-    if vector_store is None:
-        logger.debug("SpreadingActivation skipped: no vector_store")
-        return None
     try:
         from superlocalmemory.retrieval.spreading_activation import (
             SpreadingActivation,
@@ -396,6 +495,25 @@ def _init_spreading_activation(
         return None
 
 
+def _init_prompt_injector(config: SLMConfig, db: DatabaseManager) -> Any | None:
+    """Construct a profile-scoped PromptInjector for soft-prompt injection (P1-8).
+
+    Returns None when parameterization is disabled or construction fails.
+    Failure is fail-soft — soft-prompt absence must never block auto-invoke.
+    """
+    if not hasattr(config, "parameterization") or not config.parameterization.enabled:
+        return None
+    try:
+        from superlocalmemory.parameterization.prompt_injector import PromptInjector
+        from superlocalmemory.parameterization.soft_prompt_generator import SoftPromptGenerator
+
+        generator = SoftPromptGenerator(config.parameterization)
+        return PromptInjector(db=db, generator=generator, config=config.parameterization)
+    except Exception as exc:
+        logger.warning("PromptInjector init failed — soft-prompt injection disabled: %s", exc)
+        return None
+
+
 def _init_auto_invoker(
     config: SLMConfig,
     db: DatabaseManager,
@@ -403,20 +521,28 @@ def _init_auto_invoker(
     trust_scorer: Any,
     embedder: Any,
 ) -> Any | None:
-    """Create AutoInvoker for Phase 2 multi-signal retrieval."""
+    """Create AutoInvoker for Phase 2 multi-signal retrieval.
+
+    V3.3 (P1-8): A profile-scoped PromptInjector is constructed and wired in
+    so stored behavioral soft prompts are prepended to every session context.
+    The injector is fail-soft — its absence never blocks auto-invoke.
+    """
     if not hasattr(config, "auto_invoke") or not config.auto_invoke.enabled:
         return None
     try:
         from superlocalmemory.hooks.auto_invoker import AutoInvoker
+
+        prompt_injector = _init_prompt_injector(config, db)
         return AutoInvoker(
             db=db,
             vector_store=vector_store,
             trust_scorer=trust_scorer,
             embedder=embedder,
             config=config.auto_invoke,
+            prompt_injector=prompt_injector,
         )
     except Exception as exc:
-        logger.debug("AutoInvoker init failed: %s", exc)
+        logger.warning("AutoInvoker init failed — auto-invoke disabled: %s", exc)
         return None
 
 
@@ -490,13 +616,14 @@ def init_retrieval(
     trust_scorer: Any,
     vector_store: Any = None,
 ) -> Any:
-    """Create the RetrievalEngine with 6 channels. Returns it."""
+    """Create the RetrievalEngine — six candidate producers (semantic, BM25,
+    entity_graph, temporal, spreading_activation, hopfield) fused via RRF.
+    Returns the engine."""
     from superlocalmemory.retrieval.engine import RetrievalEngine
     from superlocalmemory.retrieval.semantic_channel import SemanticChannel
     from superlocalmemory.retrieval.bm25_channel import BM25Channel
     from superlocalmemory.retrieval.entity_channel import EntityGraphChannel
     from superlocalmemory.retrieval.temporal_channel import TemporalChannel
-    from superlocalmemory.retrieval.reranker import CrossEncoderReranker
     from superlocalmemory.retrieval.profile_channel import ProfileChannel
     from superlocalmemory.retrieval.bridge_discovery import BridgeDiscovery
 
@@ -529,10 +656,7 @@ def init_retrieval(
 
     reranker = None
     if config.retrieval.use_cross_encoder:
-        reranker = CrossEncoderReranker(
-            config.retrieval.cross_encoder_model,
-            backend=config.retrieval.cross_encoder_backend,
-        )
+        reranker = init_reranker(config.retrieval)
 
     profile_ch = ProfileChannel(db)
     bridge = BridgeDiscovery(db)
@@ -561,29 +685,12 @@ def init_retrieval(
     # trust in slm health / slm doctor output.
     if reranker is not None:
         import threading
-        def _log_warmup_status() -> None:
-            ready = reranker.warmup_sync(timeout=180)
-            if ready:
-                logger.info("Cross-encoder reranker warm and ready")
-                return
-            # warmup_sync returned False. Could be (a) singleton held by
-            # another process (benign), or (b) actual model load failure.
-            # Disambiguate by probing the singleton PID file.
-            try:
-                from superlocalmemory.retrieval.reranker import _is_reranker_worker_alive
-                if _is_reranker_worker_alive():
-                    logger.info(
-                        "Cross-encoder reranker worker held by another process "
-                        "(machine-wide singleton — usually the unified daemon); "
-                        "this process will route reranking through that worker"
-                    )
-                    return
-            except Exception:
-                pass
-            logger.warning(
-                "Cross-encoder reranker warmup failed — recalls will use fallback scoring"
-            )
-        t = threading.Thread(target=_log_warmup_status, daemon=True, name="ce-init-warmup")
+        t = threading.Thread(
+            target=_log_reranker_warmup_status,
+            args=(reranker,),
+            daemon=True,
+            name="ce-init-warmup",
+        )
         t.start()
 
     # Phase A: Register forgetting filter into the channel registry
@@ -592,6 +699,19 @@ def init_retrieval(
         register_forgetting_filter(engine._registry, db, config.forgetting)
     except Exception as exc:
         logger.debug("Forgetting filter registration failed: %s", exc)
+
+    # Phase 4 (T1): Register bi-temporal validity filter. Drops superseded /
+    # system-invalidated facts from retrieval so contradicted memories never
+    # resurface. Pure SQL, safe in all modes; no-op until a fact is invalidated.
+    try:
+        from superlocalmemory.retrieval.temporal_validity_filter import (
+            register_temporal_validity_filter,
+        )
+        register_temporal_validity_filter(
+            engine._registry, db, config.temporal_validator,
+        )
+    except Exception as exc:
+        logger.debug("Temporal validity filter registration failed: %s", exc)
 
     return engine
 
@@ -621,6 +741,8 @@ def wire_hooks(
         hooks.register_pre("store", lambda ctx: gate.check_write(
             ctx.get("agent_id", "unknown"), ctx.get("profile_id", profile_id)))
         hooks.register_pre("delete", lambda ctx: gate.check_delete(
+            ctx.get("agent_id", "unknown"), ctx.get("profile_id", profile_id)))
+        hooks.register_pre("update", lambda ctx: gate.check_write(
             ctx.get("agent_id", "unknown"), ctx.get("profile_id", profile_id)))
 
     # -- Post-store hooks (async, never block) --

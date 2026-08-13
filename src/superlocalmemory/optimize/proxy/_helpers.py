@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 from typing import Any, AsyncIterator, Callable
+from weakref import WeakKeyDictionary
 
 import httpx
 from fastapi.requests import Request
@@ -24,8 +25,10 @@ _get_running_loop = asyncio.get_running_loop
 logger = logging.getLogger("slm.optimize.proxy.helpers")
 
 # Per-callable cache of "does this hook method accept a tenant_id kwarg?".
-# Keyed by id() of the bound method's __func__ so it is stable per hook class.
-_HOOK_TENANT_SUPPORT: dict[int, bool] = {}
+# Keep the callable itself as the key. Integer id() values can be reused after
+# a hook class is collected, which can apply a stale legacy signature result
+# to a new tenant-aware hook and silently drop tenant isolation.
+_HOOK_TENANT_SUPPORT: WeakKeyDictionary[object, bool] = WeakKeyDictionary()
 
 
 def _accepts_tenant_id(fn: Callable) -> bool:
@@ -42,8 +45,12 @@ def _accepts_tenant_id(fn: Callable) -> bool:
     raises fails open to a cache MISS, never the shared namespace.
     """
     target = getattr(fn, "__func__", fn)
-    key = id(target)
-    cached = _HOOK_TENANT_SUPPORT.get(key)
+    try:
+        cached = _HOOK_TENANT_SUPPORT.get(target)
+    except TypeError:
+        # Some extension callables cannot be weak-referenced. Inspect them on
+        # every use instead of falling back to an unsafe integer identity.
+        cached = None
     if cached is None:
         try:
             params = inspect.signature(fn).parameters
@@ -53,7 +60,10 @@ def _accepts_tenant_id(fn: Callable) -> bool:
         except (ValueError, TypeError):
             # Builtins / C callables without a signature — assume legacy.
             cached = False
-        _HOOK_TENANT_SUPPORT[key] = cached
+        try:
+            _HOOK_TENANT_SUPPORT[target] = cached
+        except TypeError:
+            pass
     return cached
 
 # SEC-M-02 (CWE-400): reject oversized bodies to prevent compression-bomb DoS.
@@ -87,6 +97,9 @@ _HOP_BY_HOP = frozenset([
     "te", "trailer", "transfer-encoding", "upgrade", "host",
     "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
     "x-real-ip", "x-original-forwarded-for",
+    # ponytail: httpx decompresses gzip automatically; forwarding this header
+    # causes clients to double-decompress → ZlibError. Strip it here.
+    "content-encoding",
 ])
 
 _ANTHROPIC_FORWARD_HEADERS = frozenset([
@@ -142,6 +155,21 @@ def _redact_headers(headers: dict) -> dict:
     }
 
 
+def _active_profile_for_cache() -> str:
+    """Resolve the active memory profile for cache-tenant scoping.
+
+    Lazy import keeps the optimize layer free of a hard server dependency; any
+    failure falls back to 'default'. The profiles.json active_profile cache is
+    kept in sync on every switch, so this is correct for the daemon-mounted
+    proxy even outside an HTTP request context.
+    """
+    try:
+        from superlocalmemory.server.routes.helpers import get_active_profile
+        return get_active_profile() or "default"
+    except Exception:
+        return "default"
+
+
 def _derive_tenant_id(provider: str, raw_credential: "str | None") -> "str | None":
     """Derive a per-tenant isolation key from the raw (un-redacted) credential.
 
@@ -150,18 +178,27 @@ def _derive_tenant_id(provider: str, raw_credential: "str | None") -> "str | Non
     into CacheManager.check() / .store() so that two users sharing the same
     prompt but using different API keys receive independent cache namespaces.
 
+    ISOLATION (I-5): the active memory profile is folded into the key so two
+    profiles sharing the SAME API key never serve each other's cached LLM
+    responses. Cross-profile cache reuse is intentionally sacrificed for
+    tenant isolation (the accepted cost tradeoff for a multi-tenant memory DB).
+
     Returns None when no credential is present — callers must SKIP caching
     (never collapse to the default tenant) to prevent cross-tenant disclosure.
 
-    Output: 64-char lowercase hex SHA-256 of ``f"{provider}:{raw_credential}"``.
-    Provider is folded in so anthropic:K and openai:K are distinct tenants even
-    if the literal key string coincidentally matches.
+    Output: 64-char lowercase hex SHA-256 of
+    ``f"{profile}:{provider}:{raw_credential}"``. Provider is folded in so
+    anthropic:K and openai:K are distinct tenants even if the literal key
+    string coincidentally matches.
     """
     import hashlib as _hashlib
 
     if not raw_credential:
         return None
-    return _hashlib.sha256(f"{provider}:{raw_credential}".encode()).hexdigest()
+    profile = _active_profile_for_cache()
+    return _hashlib.sha256(
+        f"{profile}:{provider}:{raw_credential}".encode()
+    ).hexdigest()
 
 
 def _body_has_tools(body: dict) -> bool:

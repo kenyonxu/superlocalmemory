@@ -24,6 +24,10 @@ from typing import Callable
 
 from mcp.types import ToolAnnotations
 
+from superlocalmemory.core.admission import admits
+from superlocalmemory.core.operation_request import OperationKind
+from superlocalmemory.mcp.shared import authorize_mcp_mutation
+
 logger = logging.getLogger(__name__)
 
 _MAX_SUMMARY_LEN = 500  # Truncate input/output summaries
@@ -33,6 +37,7 @@ def register_learning_tools(server, get_engine: Callable) -> None:
     """Register learning MCP tools for two-way intelligence."""
 
     @server.tool()
+    @admits(OperationKind.REMEMBER)
     async def log_tool_event(
         tool_name: str,
         event_type: str = "invoke",
@@ -69,6 +74,13 @@ def register_learning_tools(server, get_engine: Callable) -> None:
         output_clean = _scrub(output_summary[:_MAX_SUMMARY_LEN])
 
         try:
+            authorization = authorize_mcp_mutation(
+                engine,
+                "update",
+                mutation_source="mcp-log-tool-event",
+                profile_id=engine.profile_id,
+                content_preview=tool_name,
+            )
             engine._db.execute(
                 "INSERT INTO tool_events "
                 "(session_id, profile_id, project_path, tool_name, event_type, "
@@ -77,6 +89,7 @@ def register_learning_tools(server, get_engine: Callable) -> None:
                 (session_id, engine.profile_id, project_path, tool_name,
                  event_type, input_clean, output_clean, duration_ms, metadata, now),
             )
+            authorization.complete()
             return {"success": True, "tool": tool_name, "event": event_type}
         except Exception as exc:
             logger.debug("log_tool_event failed: %s", exc)
@@ -133,7 +146,8 @@ def register_learning_tools(server, get_engine: Callable) -> None:
             logger.debug("get_assertions failed: %s", exc)
             return {"assertions": [], "count": 0, "error": str(exc)}
 
-    @server.tool(annotations=ToolAnnotations(idempotentHint=True))
+    @server.tool()
+    @admits(OperationKind.CORRECT)
     async def reinforce_assertion(assertion_id: str) -> dict:
         """Reinforce a behavioral assertion (increase confidence).
 
@@ -144,9 +158,26 @@ def register_learning_tools(server, get_engine: Callable) -> None:
             assertion_id: The assertion ID to reinforce
         """
         engine = get_engine()
-        return _update_assertion_confidence(engine._db, assertion_id, reinforce=True)
+        try:
+            authorization = authorize_mcp_mutation(
+                engine,
+                "update",
+                mutation_source="mcp-reinforce-assertion",
+                profile_id=engine.profile_id,
+                fact_id=assertion_id,
+            )
+            result = _update_assertion_confidence(
+                engine._db, assertion_id, reinforce=True,
+                profile_id=engine.profile_id,
+            )
+            if result.get("success"):
+                authorization.complete()
+            return result
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
-    @server.tool(annotations=ToolAnnotations(idempotentHint=True))
+    @server.tool()
+    @admits(OperationKind.FORGET)
     async def contradict_assertion(assertion_id: str) -> dict:
         """Contradict a behavioral assertion (decrease confidence).
 
@@ -157,17 +188,35 @@ def register_learning_tools(server, get_engine: Callable) -> None:
             assertion_id: The assertion ID to contradict
         """
         engine = get_engine()
-        return _update_assertion_confidence(engine._db, assertion_id, reinforce=False)
+        try:
+            authorization = authorize_mcp_mutation(
+                engine,
+                "delete",
+                mutation_source="mcp-contradict-assertion",
+                profile_id=engine.profile_id,
+                fact_id=assertion_id,
+            )
+            result = _update_assertion_confidence(
+                engine._db, assertion_id, reinforce=False,
+                profile_id=engine.profile_id,
+            )
+            if result.get("success"):
+                authorization.complete()
+            return result
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
 
-def _update_assertion_confidence(db, assertion_id: str, reinforce: bool) -> dict:
-    """Bayesian confidence update for behavioral assertions."""
+def _update_assertion_confidence(
+    db, assertion_id: str, reinforce: bool, profile_id: str,
+) -> dict:
+    """Bayesian confidence update for behavioral assertions, scoped to one profile."""
     now = datetime.now(timezone.utc).isoformat()
     try:
         row = db.execute(
             "SELECT confidence, reinforcement_count, contradiction_count "
-            "FROM behavioral_assertions WHERE id = ?",
-            (assertion_id,),
+            "FROM behavioral_assertions WHERE id = ? AND profile_id = ?",
+            (assertion_id, profile_id),
         )
         rows = list(row)
         if not rows:
@@ -181,22 +230,24 @@ def _update_assertion_confidence(db, assertion_id: str, reinforce: bool) -> dict
             db.execute(
                 "UPDATE behavioral_assertions SET confidence = ?, "
                 "reinforcement_count = reinforcement_count + 1, "
-                "last_reinforced_at = ?, updated_at = ? WHERE id = ?",
-                (round(new_conf, 4), now, now, assertion_id),
+                "last_reinforced_at = ?, updated_at = ? "
+                "WHERE id = ? AND profile_id = ?",
+                (round(new_conf, 4), now, now, assertion_id, profile_id),
             )
         else:
             new_conf = old_conf * 0.7  # 30% decay
             db.execute(
                 "UPDATE behavioral_assertions SET confidence = ?, "
                 "contradiction_count = contradiction_count + 1, "
-                "last_contradicted_at = ?, updated_at = ? WHERE id = ?",
-                (round(new_conf, 4), now, now, assertion_id),
+                "last_contradicted_at = ?, updated_at = ? "
+                "WHERE id = ? AND profile_id = ?",
+                (round(new_conf, 4), now, now, assertion_id, profile_id),
             )
             # Auto-delete if confidence drops below 0.2
             if new_conf < 0.2:
                 db.execute(
-                    "DELETE FROM behavioral_assertions WHERE id = ?",
-                    (assertion_id,),
+                    "DELETE FROM behavioral_assertions WHERE id = ? AND profile_id = ?",
+                    (assertion_id, profile_id),
                 )
                 return {
                     "success": True, "action": "deleted",

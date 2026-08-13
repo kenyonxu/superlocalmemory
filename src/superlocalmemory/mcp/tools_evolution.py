@@ -16,22 +16,21 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Callable
 
 from mcp.types import ToolAnnotations
+from superlocalmemory.core.admission import admits
+from superlocalmemory.core.operation_request import OperationKind
+from superlocalmemory.infra.data_root import state_path
+from superlocalmemory.storage.read_connection import ReadConnectionFactory
 
 logger = logging.getLogger(__name__)
-
-MEMORY_DB = Path.home() / ".superlocalmemory" / "memory.db"
-
 
 def register_evolution_tools(server, get_engine: Callable) -> None:
     """Register evolution MCP tools for skill evolution intelligence."""
 
     @server.tool()
+    @admits(OperationKind.EVOLVE_SKILL)
     async def evolve_skill(
         skill_name: str,
         evolution_type: str = "fix",
@@ -49,7 +48,7 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
         """
         try:
             # Check if evolution is enabled in config
-            config_path = Path.home() / ".superlocalmemory" / "config.json"
+            config_path = state_path("config.json")
             evo_cfg = {}
             if config_path.exists():
                 with open(config_path) as f:
@@ -82,7 +81,7 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
             class _Cfg:
                 evolution = _EvoCfg()
 
-            db_path = str(MEMORY_DB)
+            db_path = str(state_path("memory.db"))
             evolver = SkillEvolver(db_path, _Cfg())
 
             # Build candidate from manual trigger
@@ -100,11 +99,14 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
             engine = get_engine()
             profile_id = engine.profile_id if engine else "default"
 
-            evolver._store.reset_cycle()
-            outcome = evolver._process_candidate(candidate, profile_id)
+            evolver._store.reset_cycle(profile_id)
+            # audit-10 fix: go through evolve_candidate so the manual/MCP path
+            # runs under a budget cycle and honours the LLM-call / wall-time /
+            # per-day caps (previously _process_candidate ran uncapped here).
+            outcome = evolver.evolve_candidate(candidate, profile_id)
 
             # Fetch the latest record for this skill to return details
-            recent = evolver._store.get_skill_history(skill_name, limit=1)
+            recent = evolver._store.get_skill_history(skill_name, profile_id, limit=1)
             record_info = {}
             if recent:
                 r = recent[0]
@@ -145,10 +147,8 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
         try:
             engine = get_engine()
             profile_id = engine.profile_id if engine else "default"
-            db_path = str(MEMORY_DB)
-
-            conn = sqlite3.connect(db_path, timeout=10)
-            conn.row_factory = sqlite3.Row
+            db_path = state_path("memory.db")
+            conn = ReadConnectionFactory(db_path).open()
 
             # Gather per-skill invocation stats from tool_events
             # Skills are logged as tool_name='Skill' with actual skill name in input_summary
@@ -273,9 +273,10 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
             skill_name: Specific skill name (empty = all skills)
         """
         try:
-            db_path = str(MEMORY_DB)
-            conn = sqlite3.connect(db_path, timeout=10)
-            conn.row_factory = sqlite3.Row
+            engine = get_engine()
+            profile_id = engine.profile_id if engine else "default"
+            db_path = state_path("memory.db")
+            conn = ReadConnectionFactory(db_path).open()
 
             if skill_name:
                 rows = conn.execute(
@@ -283,9 +284,9 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
                     "trigger_type, generation, status, mutation_summary, "
                     "blind_verified, created_at, completed_at "
                     "FROM skill_evolution_log "
-                    "WHERE skill_name = ? OR parent_skill_id = ? "
+                    "WHERE profile_id = ? AND (skill_name = ? OR parent_skill_id = ?) "
                     "ORDER BY created_at ASC",
-                    (skill_name, skill_name),
+                    (profile_id, skill_name, skill_name),
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -293,7 +294,9 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
                     "trigger_type, generation, status, mutation_summary, "
                     "blind_verified, created_at, completed_at "
                     "FROM skill_evolution_log "
+                    "WHERE profile_id = ? "
                     "ORDER BY created_at DESC LIMIT 100",
+                    (profile_id,),
                 ).fetchall()
 
             conn.close()

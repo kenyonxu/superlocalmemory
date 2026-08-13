@@ -8,18 +8,19 @@ Searches by referenced_date (NOT just created_at like V1).
 Returns empty when query has no temporal signal (no recency noise).
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
-License: Elastic-2.0
+License: AGPL-3.0-or-later
 """
 from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from dateutil.parser import parse as dateutil_parse, ParserError
+from dateutil.parser import ParserError, parse as dateutil_parse
 
 from superlocalmemory.encoding.temporal_parser import TemporalParser
+from superlocalmemory.storage.database import _scope_where
 
 if TYPE_CHECKING:
     from superlocalmemory.storage.database import DatabaseManager
@@ -27,6 +28,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_PROXIMITY_DAYS: float = 365.0
+
+
+def _as_utc(dt: datetime | None) -> datetime | None:
+    """Coerce a datetime to timezone-aware UTC (naive values are assumed UTC).
+
+    Keeps proximity and interval comparisons from mixing naive and aware values.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _parse_iso(s: str | None) -> datetime | None:
@@ -38,11 +51,11 @@ def _parse_iso(s: str | None) -> datetime | None:
     # across thousands of events — that was ~2.6s of the recall. dateutil is
     # now only the fallback for non-ISO strings.
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return _as_utc(datetime.fromisoformat(s.replace("Z", "+00:00")))
     except (ValueError, TypeError):
         pass
     try:
-        return dateutil_parse(s)
+        return _as_utc(dateutil_parse(s))
     except (ParserError, ValueError, OverflowError, TypeError):
         return None
 
@@ -61,7 +74,14 @@ class TemporalChannel:
     def __init__(self, db: DatabaseManager) -> None:
         self._db = db
 
-    def search(self, query: str, profile_id: str, top_k: int = 30) -> list[tuple[str, float]]:
+    def search(
+        self,
+        query: str,
+        profile_id: str,
+        top_k: int = 30,
+        include_global: bool | None = None,
+        include_shared: bool | None = None,
+    ) -> list[tuple[str, float]]:
         """Search for temporally relevant facts.
 
         Two strategies:
@@ -71,22 +91,38 @@ class TemporalChannel:
 
         Returns empty only when query has no temporal signal AND no
         entity-temporal matches.
+
+        Args:
+            include_global: Include global-scope facts. Falls back to the
+                instance attribute when not supplied.
+            include_shared: Include shared-scope facts. Same fallback.
         """
+        if include_global is None:
+            include_global = bool(getattr(self, "include_global", False))
+        if include_shared is None:
+            include_shared = bool(getattr(self, "include_shared", False))
+
         parser = TemporalParser()
         dates = parser.extract_dates_from_text(query)
         query_dt = _parse_iso(dates.get("referenced_date"))
         if query_dt is None:
             query_dt = self._try_parse(query)
+        query_dt = _as_utc(query_dt)
 
         # Strategy 1: Entity-temporal metadata search
         # "When did Alice...?" → find all temporal events for Alice
-        entity_results = self._entity_temporal_search(query, profile_id)
+        entity_results = self._entity_temporal_search(
+            query, profile_id,
+            include_global=include_global, include_shared=include_shared,
+        )
 
         # Strategy 2: Date proximity search
         if query_dt is None and not entity_results:
             return []
 
-        events = self._load_events(profile_id)
+        events = self._load_events(
+            profile_id, include_global=include_global, include_shared=include_shared,
+        )
         scored: dict[str, float] = {}
 
         # Include entity-temporal results with high base score
@@ -123,13 +159,21 @@ class TemporalChannel:
         return results[:top_k]
 
     def _entity_temporal_search(
-        self, query: str, profile_id: str,
+        self,
+        query: str,
+        profile_id: str,
+        include_global: bool | None = None,
+        include_shared: bool | None = None,
     ) -> list[tuple[str, float]]:
         """Metadata-first: find temporal events for entities mentioned in query.
 
         "When did Alice do X?" → SQL filter by entity_id for Alice → return
         all temporal facts about Alice. High precision for entity+time queries.
         """
+        if include_global is None:
+            include_global = bool(getattr(self, "include_global", False))
+        if include_shared is None:
+            include_shared = bool(getattr(self, "include_shared", False))
         import re
         _PROPER_RE = re.compile(r"\b([A-Z][a-z]+)\b")
         names = [m.group(1) for m in _PROPER_RE.finditer(query)]
@@ -148,18 +192,24 @@ class TemporalChannel:
 
         results: list[tuple[str, float]] = []
         seen: set[str] = set()
+        where, params = _scope_where(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+            prefix="af",
+        )
 
         for name in names[:3]:  # Limit to first 3 entity mentions
-            # Look up entity ID
-            entity = self._db.get_entity_by_name(name, profile_id)
-            if entity is None:
-                continue
-
-            # Find all temporal events for this entity
+            # Resolve the entity and event in one scope-filtered query. Looking
+            # up the entity only in the requester's profile made global events
+            # owned by another profile undiscoverable before authorization was
+            # even evaluated.
             rows = self._db.execute(
-                "SELECT fact_id FROM temporal_events "
-                "WHERE profile_id = ? AND entity_id = ?",
-                (profile_id, entity.entity_id),
+                "SELECT te.fact_id FROM temporal_events AS te "
+                "JOIN canonical_entities AS ce ON ce.entity_id = te.entity_id "
+                "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
+                f"WHERE {where} AND LOWER(ce.canonical_name) = LOWER(?)",
+                (*params, name),
             )
             for row in rows:
                 fid = dict(row)["fact_id"]
@@ -172,12 +222,29 @@ class TemporalChannel:
 
         return results
 
-    def _load_events(self, profile_id: str) -> list[dict]:
+    def _load_events(
+        self,
+        profile_id: str,
+        include_global: bool | None = None,
+        include_shared: bool | None = None,
+    ) -> list[dict]:
+        if include_global is None:
+            include_global = bool(getattr(self, "include_global", False))
+        if include_shared is None:
+            include_shared = bool(getattr(self, "include_shared", False))
+        where, params = _scope_where(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+            prefix="af",
+        )
         rows = self._db.execute(
-            "SELECT fact_id, observation_date, referenced_date, "
-            "interval_start, interval_end "
-            "FROM temporal_events WHERE profile_id = ?",
-            (profile_id,),
+            "SELECT te.fact_id, te.observation_date, te.referenced_date, "
+            "te.interval_start, te.interval_end "
+            "FROM temporal_events AS te "
+            "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
+            f"WHERE {where}",
+            (*params,),
         )
         return [dict(r) for r in rows]
 

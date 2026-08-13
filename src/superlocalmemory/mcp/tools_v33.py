@@ -17,15 +17,16 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Callable
 
 from mcp.types import ToolAnnotations
 
 logger = logging.getLogger(__name__)
 
-MEMORY_DIR = Path.home() / ".superlocalmemory"
-DB_PATH = MEMORY_DIR / "memory.db"
+from superlocalmemory.core.admission import admits
+from superlocalmemory.core.operation_request import OperationKind
+from superlocalmemory.infra.data_root import state_path
+from superlocalmemory.mcp.shared import authorize_mcp_mutation
 
 
 def _try_daemon_post(path: str, body: dict, timeout_s: float = 60.0) -> dict | None:
@@ -62,7 +63,7 @@ def _emit_event(event_type: str, payload: dict | None = None,
     """Emit an event to the EventBus (best-effort, never raises)."""
     try:
         from superlocalmemory.infra.event_bus import EventBus
-        bus = EventBus.get_instance(str(DB_PATH))
+        bus = EventBus.get_instance(str(state_path("memory.db")))
         bus.emit(event_type, payload=payload, source_agent=source_agent,
                  source_protocol="mcp")
     except Exception:
@@ -76,8 +77,8 @@ def register_v33_tools(server, get_engine: Callable) -> None:
     # 1. forget — Ebbinghaus forgetting decay cycle
     # ------------------------------------------------------------------
     @server.tool(annotations=ToolAnnotations(destructiveHint=True))
+    @admits(OperationKind.FORGET)
     async def forget(
-        profile_id: str = "",
         dry_run: bool = True,
     ) -> dict:
         """Run Ebbinghaus forgetting decay cycle.
@@ -89,12 +90,11 @@ def register_v33_tools(server, get_engine: Callable) -> None:
         Run with dry_run=True first to preview changes.
 
         Args:
-            profile_id: Profile to process (default: active profile).
             dry_run: If True, compute stats but don't apply transitions.
         """
         try:
             engine = get_engine()
-            pid = profile_id or engine.profile_id
+            pid = engine.profile_id
 
             from superlocalmemory.math.ebbinghaus import EbbinghausCurve
             from superlocalmemory.learning.forgetting_scheduler import (
@@ -121,14 +121,22 @@ def register_v33_tools(server, get_engine: Callable) -> None:
                     total += int(r["cnt"])
                 result = {"total": total, "transitions": 0, "dry_run_zones": zones}
             else:
+                authorization = authorize_mcp_mutation(
+                    engine,
+                    "delete",
+                    mutation_source="mcp-forgetting-cycle",
+                    profile_id=pid,
+                )
                 result = scheduler.run_decay_cycle(pid, force=True)
+                authorization.complete()
 
-            _emit_event("forgetting.cycle_complete", {
-                "profile_id": pid,
-                "dry_run": dry_run,
-                "total": result.get("total", 0),
-                "transitions": result.get("transitions", 0),
-            })
+            if not dry_run:
+                _emit_event("forgetting.cycle_complete", {
+                    "profile_id": pid,
+                    "dry_run": False,
+                    "total": result.get("total", 0),
+                    "transitions": result.get("transitions", 0),
+                })
 
             return {"success": True, "dry_run": dry_run, **result}
 
@@ -140,8 +148,8 @@ def register_v33_tools(server, get_engine: Callable) -> None:
     # 2. quantize — EAP embedding quantization cycle
     # ------------------------------------------------------------------
     @server.tool()
+    @admits(OperationKind.CONSOLIDATE)
     async def quantize(
-        profile_id: str = "",
         dry_run: bool = True,
     ) -> dict:
         """Run EAP quantization cycle.
@@ -153,12 +161,11 @@ def register_v33_tools(server, get_engine: Callable) -> None:
         Run with dry_run=True first to preview changes.
 
         Args:
-            profile_id: Profile to process (default: active profile).
             dry_run: If True, compute stats but don't apply changes.
         """
         try:
             engine = get_engine()
-            pid = profile_id or engine.profile_id
+            pid = engine.profile_id
 
             from superlocalmemory.math.ebbinghaus import EbbinghausCurve
             from superlocalmemory.math.polar_quant import PolarQuantEncoder
@@ -183,15 +190,23 @@ def register_v33_tools(server, get_engine: Callable) -> None:
                 facts = engine._db.get_all_facts(pid)
                 result = {"total": len(facts), "would_quantize": 0, "dry_run": True}
             else:
+                authorization = authorize_mcp_mutation(
+                    engine,
+                    "update",
+                    mutation_source="mcp-quantization-cycle",
+                    profile_id=pid,
+                )
                 result = scheduler.run_eap_cycle(pid)
+                authorization.complete()
 
-            _emit_event("eap.cycle_complete", {
-                "profile_id": pid,
-                "dry_run": dry_run,
-                "total": result.get("total", 0),
-                "downgrades": result.get("downgrades", 0),
-                "upgrades": result.get("upgrades", 0),
-            })
+            if not dry_run:
+                _emit_event("eap.cycle_complete", {
+                    "profile_id": pid,
+                    "dry_run": False,
+                    "total": result.get("total", 0),
+                    "downgrades": result.get("downgrades", 0),
+                    "upgrades": result.get("upgrades", 0),
+                })
 
             return {"success": True, "dry_run": dry_run, **result}
 
@@ -203,21 +218,17 @@ def register_v33_tools(server, get_engine: Callable) -> None:
     # 3. consolidate_cognitive — CCQ cognitive consolidation
     # ------------------------------------------------------------------
     @server.tool()
-    async def consolidate_cognitive(
-        profile_id: str = "",
-    ) -> dict:
+    @admits(OperationKind.CONSOLIDATE)
+    async def consolidate_cognitive() -> dict:
         """Run CCQ cognitive consolidation pipeline.
 
         Extracts patterns from cold/archive memories by clustering
         related facts, generating gist summaries, and compressing
         source embeddings. Like sleep-time memory consolidation.
-
-        Args:
-            profile_id: Profile to process (default: active profile).
         """
         try:
             engine = get_engine()
-            pid = profile_id or engine.profile_id
+            pid = engine.profile_id
 
             # v3.4.26: prefer the daemon's /consolidate/cognitive endpoint
             # so the heavy CognitiveConsolidator import stays out of the
@@ -245,8 +256,15 @@ def register_v33_tools(server, get_engine: Callable) -> None:
                 CognitiveConsolidator,
             )
 
+            authorization = authorize_mcp_mutation(
+                engine,
+                "update",
+                mutation_source="mcp-cognitive-consolidation",
+                profile_id=pid,
+            )
             consolidator = CognitiveConsolidator(db=engine._db)
             result = consolidator.run_pipeline(pid)
+            authorization.complete()
 
             _emit_event("ccq.consolidation_complete", {
                 "profile_id": pid,
@@ -270,21 +288,16 @@ def register_v33_tools(server, get_engine: Callable) -> None:
     # 4. get_soft_prompts — Retrieve active soft prompts
     # ------------------------------------------------------------------
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def get_soft_prompts(
-        profile_id: str = "",
-    ) -> dict:
+    async def get_soft_prompts() -> dict:
         """Get active soft prompts (auto-learned user patterns).
 
         Returns soft prompt templates generated from behavioral
         patterns. These are injected into conversation context to
         personalize AI responses.
-
-        Args:
-            profile_id: Profile to query (default: active profile).
         """
         try:
             engine = get_engine()
-            pid = profile_id or engine.profile_id
+            pid = engine.profile_id
 
             rows = engine._db.execute(
                 "SELECT prompt_id, category, content, confidence, "
@@ -324,6 +337,7 @@ def register_v33_tools(server, get_engine: Callable) -> None:
     # 5. reap_processes — Find and kill orphaned SLM processes
     # ------------------------------------------------------------------
     @server.tool()
+    @admits(OperationKind.CONSOLIDATE)
     async def reap_processes(
         dry_run: bool = True,
     ) -> dict:
@@ -338,6 +352,14 @@ def register_v33_tools(server, get_engine: Callable) -> None:
             dry_run: If True, report orphans but don't kill them.
         """
         try:
+            engine = get_engine()
+            authorization = None
+            if not dry_run:
+                authorization = authorize_mcp_mutation(
+                    engine,
+                    "delete",
+                    mutation_source="mcp-process-reaper",
+                )
             from superlocalmemory.infra.process_reaper import (
                 cleanup_all_orphans,
                 ReaperConfig,
@@ -345,6 +367,8 @@ def register_v33_tools(server, get_engine: Callable) -> None:
 
             config = ReaperConfig()
             result = cleanup_all_orphans(config, dry_run=dry_run)
+            if authorization is not None:
+                authorization.complete()
 
             return {
                 "success": True,
@@ -362,22 +386,17 @@ def register_v33_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 6. get_retention_stats — Memory retention zone distribution
     # ------------------------------------------------------------------
-    @server.tool()
-    async def get_retention_stats(
-        profile_id: str = "",
-    ) -> dict:
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def get_retention_stats() -> dict:
         """Get memory retention statistics (zone distribution, decay rates).
 
         Queries the fact_retention table for zone counts and average
         retention scores per zone. Shows how memories are distributed
         across the Ebbinghaus decay lifecycle.
-
-        Args:
-            profile_id: Profile to query (default: active profile).
         """
         try:
             engine = get_engine()
-            pid = profile_id or engine.profile_id
+            pid = engine.profile_id
 
             # Zone distribution counts
             rows = engine._db.execute(
@@ -419,19 +438,17 @@ def register_v33_tools(server, get_engine: Callable) -> None:
     # 7. run_maintenance — V3.3.12: Combined periodic maintenance cycle
     # ------------------------------------------------------------------
     @server.tool()
-    async def run_maintenance(profile_id: str = "") -> dict:
+    @admits(OperationKind.CONSOLIDATE)
+    async def run_maintenance() -> dict:
         """Run all periodic maintenance tasks in a single call.
 
         Combines Langevin dynamics stepping, Ebbinghaus forgetting decay,
         and behavioral pattern mining into one convenient maintenance cycle.
         Clients should call this periodically (e.g., at session end).
-
-        Args:
-            profile_id: Profile to maintain (default: active profile).
         """
         try:
             engine = get_engine()
-            pid = profile_id or engine.profile_id
+            pid = engine.profile_id
 
             # v3.4.26: prefer the daemon so ForgettingScheduler /
             # ConsolidationWorker / EbbinghausCurve don't load inside
@@ -446,6 +463,12 @@ def register_v33_tools(server, get_engine: Callable) -> None:
                 daemon_result["via"] = "daemon"
                 return daemon_result
 
+            authorization = authorize_mcp_mutation(
+                engine,
+                "update",
+                mutation_source="mcp-maintenance-cycle",
+                profile_id=pid,
+            )
             results = {}
 
             # 1. Langevin dynamics step (lifecycle evolution)
@@ -476,6 +499,7 @@ def register_v33_tools(server, get_engine: Callable) -> None:
             except Exception as exc:
                 results["behavioral"] = {"error": str(exc)}
 
+            authorization.complete()
             return {"success": True, "profile": pid, **results}
 
         except Exception as exc:

@@ -1,0 +1,1042 @@
+# Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
+# Licensed under AGPL-3.0-or-later - see LICENSE file
+# Part of SuperLocalMemory V3
+
+"""Canonical durable-ingestion command and operation state machine.
+
+The command deliberately depends on injected queryable/materialization
+functions.  This keeps the durable contract testable while legacy write paths
+are migrated through an expand-migrate-contract rollout.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import sqlite3
+import threading
+import time
+import uuid
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable
+
+from superlocalmemory.core.materialization_control import MaterializationDeferred
+from superlocalmemory.storage.database import DatabaseManager
+
+logger = logging.getLogger("superlocalmemory.ingestion_command")
+
+_MATERIALIZATION_LOCKS = tuple(threading.RLock() for _ in range(64))
+_MAX_AUTOMATIC_MATERIALIZATION_ATTEMPTS = 10
+_NEVER_RETRY_AT = 9_999_999_999.0
+
+
+def _materialization_lock(operation_id: str) -> threading.RLock:
+    bucket = int(hashlib.sha256(operation_id.encode("utf-8")).hexdigest()[:8], 16)
+    return _MATERIALIZATION_LOCKS[bucket % len(_MATERIALIZATION_LOCKS)]
+
+
+class IngestionState(str, Enum):
+    RAW = "raw"
+    QUERYABLE = "queryable"
+    ENRICHING = "enriching"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+class IdempotencyConflict(ValueError):
+    """The same idempotency key was reused for different immutable evidence."""
+
+
+class IngestionRejectedError(RuntimeError):
+    """Deterministic evidence policy produced no queryable projection."""
+
+
+class InvalidStateTransition(RuntimeError):
+    """An ingestion operation attempted an illegal or stale transition."""
+
+
+class OperationInProgress(RuntimeError):
+    """Another live lease owner is materializing this operation."""
+
+
+class LeaseLost(OperationInProgress):
+    """The materializer no longer owns its durable operation lease."""
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionRequest:
+    content: str
+    profile_id: str
+    source_type: str
+    idempotency_key: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+    scope: str = "personal"
+    shared_with: tuple[str, ...] = ()
+    trusted_actor_id: str = ""
+    session_id: str = ""
+    session_date: str = ""
+    speaker: str = ""
+    role: str = "user"
+
+    def __post_init__(self) -> None:
+        if not self.content or not self.content.strip():
+            raise ValueError("content is required")
+        for name in ("profile_id", "source_type", "idempotency_key"):
+            if not str(getattr(self, name)).strip():
+                raise ValueError(f"{name} is required")
+        if self.scope not in {"personal", "project", "shared", "global"}:
+            raise ValueError(f"unsupported scope: {self.scope}")
+        object.__setattr__(self, "metadata", dict(self.metadata))
+        object.__setattr__(self, "shared_with", tuple(self.shared_with))
+
+    @property
+    def source_hash(self) -> str:
+        return hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionOperation:
+    operation_id: str
+    profile_id: str
+    source_type: str
+    idempotency_key: str
+    source_hash: str
+    raw_content: str
+    metadata: dict[str, Any]
+    scope: str
+    shared_with: tuple[str, ...]
+    trusted_actor_id: str
+    session_id: str
+    session_date: str
+    speaker: str
+    role: str
+    state: IngestionState
+    queryable_fact_ids: tuple[str, ...]
+    final_fact_ids: tuple[str, ...]
+    derivation_version: str
+    derivation_state: dict[str, bool]
+    lease_owner: str
+    lease_expires_at: float
+    next_retry_at: float
+    attempt_count: int
+    last_error: str
+    created_at: str
+    updated_at: str
+
+    @property
+    def fact_ids(self) -> tuple[str, ...]:
+        return self.final_fact_ids or self.queryable_fact_ids
+
+
+class IngestionOperationRepository:
+    """Persistence and compare-and-swap transitions for M018 operations."""
+
+    _ALLOWED: dict[IngestionState, frozenset[IngestionState]] = {
+        IngestionState.RAW: frozenset(
+            {IngestionState.QUERYABLE, IngestionState.FAILED}
+        ),
+        IngestionState.QUERYABLE: frozenset(
+            {IngestionState.ENRICHING, IngestionState.FAILED}
+        ),
+        IngestionState.ENRICHING: frozenset(
+            {IngestionState.COMPLETE, IngestionState.FAILED}
+        ),
+        IngestionState.FAILED: frozenset({IngestionState.ENRICHING}),
+        IngestionState.COMPLETE: frozenset(),
+    }
+
+    def __init__(self, db: DatabaseManager) -> None:
+        self.db = db
+
+    @staticmethod
+    def _from_row(row: Any) -> IngestionOperation:
+        data = dict(row)
+        return IngestionOperation(
+            operation_id=data["operation_id"],
+            profile_id=data["profile_id"],
+            source_type=data["source_type"],
+            idempotency_key=data["idempotency_key"],
+            source_hash=data["source_hash"],
+            raw_content=data["raw_content"],
+            metadata=json.loads(data["raw_metadata_json"] or "{}"),
+            scope=data["scope"],
+            shared_with=tuple(json.loads(data["shared_with_json"] or "[]")),
+            trusted_actor_id=data["trusted_actor_id"],
+            session_id=data["session_id"],
+            session_date=data["session_date"],
+            speaker=data["speaker"],
+            role=data["role"],
+            state=IngestionState(data["state"]),
+            queryable_fact_ids=tuple(
+                json.loads(data["queryable_fact_ids_json"] or "[]")
+            ),
+            final_fact_ids=tuple(json.loads(data["final_fact_ids_json"] or "[]")),
+            derivation_version=data["derivation_version"],
+            derivation_state=json.loads(data.get("derivation_state_json") or "{}"),
+            lease_owner=data.get("lease_owner") or "",
+            lease_expires_at=float(data.get("lease_expires_at") or 0),
+            next_retry_at=float(data.get("next_retry_at") or 0),
+            attempt_count=int(data["attempt_count"]),
+            last_error=data["last_error"],
+            created_at=data["created_at"],
+            updated_at=data["updated_at"],
+        )
+
+    def _find_request(self, request: IngestionRequest) -> IngestionOperation | None:
+        rows = self.db.execute(
+            "SELECT * FROM ingestion_operations "
+            "WHERE profile_id=? AND source_type=? AND idempotency_key=?",
+            (request.profile_id, request.source_type, request.idempotency_key),
+        )
+        return self._from_row(rows[0]) if rows else None
+
+    @staticmethod
+    def _assert_same_request(
+        existing: IngestionOperation, request: IngestionRequest
+    ) -> None:
+        comparable = (
+            existing.source_hash == request.source_hash,
+            existing.raw_content == request.content,
+            existing.metadata == request.metadata,
+            existing.scope == request.scope,
+            existing.shared_with == request.shared_with,
+            existing.trusted_actor_id == request.trusted_actor_id,
+            existing.session_id == request.session_id,
+            existing.session_date == request.session_date,
+            existing.speaker == request.speaker,
+            existing.role == request.role,
+        )
+        if not all(comparable):
+            raise IdempotencyConflict(
+                "idempotency key already belongs to different immutable evidence"
+            )
+
+    def create(self, request: IngestionRequest) -> IngestionOperation:
+        operation, _created = self.create_with_status(request)
+        return operation
+
+    def create_with_status(
+        self, request: IngestionRequest,
+    ) -> tuple[IngestionOperation, bool]:
+        existing = self._find_request(request)
+        if existing is not None:
+            self._assert_same_request(existing, request)
+            return existing, False
+
+        operation_id = uuid.uuid4().hex
+        try:
+            self.db.execute(
+                "INSERT INTO ingestion_operations "
+                "(operation_id, profile_id, source_type, idempotency_key, "
+                "source_hash, raw_content, raw_metadata_json, scope, "
+                "shared_with_json, trusted_actor_id, session_id, session_date, "
+                "speaker, role) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    operation_id,
+                    request.profile_id,
+                    request.source_type,
+                    request.idempotency_key,
+                    request.source_hash,
+                    request.content,
+                    _canonical_json(request.metadata),
+                    request.scope,
+                    _canonical_json(list(request.shared_with)),
+                    request.trusted_actor_id,
+                    request.session_id,
+                    request.session_date,
+                    request.speaker,
+                    request.role,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            concurrent = self._find_request(request)
+            if concurrent is None:
+                raise
+            self._assert_same_request(concurrent, request)
+            return concurrent, False
+        return self.get(operation_id), True
+
+    def get(self, operation_id: str) -> IngestionOperation:
+        rows = self.db.execute(
+            "SELECT * FROM ingestion_operations WHERE operation_id=?",
+            (operation_id,),
+        )
+        if not rows:
+            raise KeyError(operation_id)
+        return self._from_row(rows[0])
+
+    def list_operations(self) -> list[IngestionOperation]:
+        return [
+            self._from_row(row)
+            for row in self.db.execute(
+                "SELECT * FROM ingestion_operations ORDER BY created_at, operation_id"
+            )
+        ]
+
+    def list_materializable(
+        self,
+        *,
+        limit: int = 50,
+        min_queryable_age_seconds: float = 0.0,
+    ) -> list[IngestionOperation]:
+        """Return durable work in FIFO order for the background materializer.
+
+        A short age gate can protect a freshly admitted receipt from racing
+        the user's immediate recall on single-queue local model runtimes such
+        as Ollama.  Failed retries and expired leases remain immediately due.
+        """
+        now = time.time()
+        grace_modifier = f"-{max(0.0, float(min_queryable_age_seconds))} seconds"
+        return [
+            self._from_row(row)
+            for row in self.db.execute(
+                "SELECT * FROM ingestion_operations "
+                "WHERE attempt_count < ? AND ("
+                "(state='queryable' AND created_at <= "
+                "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)) "
+                "OR (state='failed' AND next_retry_at <= ?) "
+                "OR (state='enriching' AND lease_expires_at <= ?)) "
+                "ORDER BY created_at, rowid LIMIT ?",
+                (
+                    _MAX_AUTOMATIC_MATERIALIZATION_ATTEMPTS,
+                    grace_modifier,
+                    now,
+                    now,
+                    max(1, int(limit)),
+                ),
+            )
+        ]
+
+    def claim_enriching(
+        self,
+        operation_id: str,
+        *,
+        owner: str,
+        lease_seconds: float,
+    ) -> IngestionOperation:
+        """Claim queryable/failed work or reclaim an expired enrichment."""
+        now = time.time()
+        rows = self.db.execute(
+            "UPDATE ingestion_operations SET state='enriching', "
+            "lease_owner=?, lease_expires_at=?, "
+            "next_retry_at=0, attempt_count=attempt_count + "
+            "CASE WHEN state='enriching' AND lease_owner=? THEN 0 ELSE 1 END, "
+            "last_error='', "
+            "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE operation_id=? AND ("
+            "state IN ('queryable', 'failed') OR "
+            "(state='enriching' AND (lease_owner=? OR lease_expires_at <= ?))"
+            ") RETURNING *",
+            (owner, now + lease_seconds, owner, operation_id, owner, now),
+        )
+        if rows:
+            return self._from_row(rows[0])
+        current = self.get(operation_id)
+        if current.state is IngestionState.COMPLETE:
+            return current
+        raise OperationInProgress(
+            f"operation {operation_id} is leased by another worker"
+        )
+
+    def transition(
+        self,
+        operation_id: str,
+        *,
+        expected: IngestionState,
+        target: IngestionState,
+        queryable_fact_ids: tuple[str, ...] | None = None,
+        final_fact_ids: tuple[str, ...] | None = None,
+        derivation_version: str | None = None,
+        derivation_state: dict[str, bool] | None = None,
+        last_error: str | None = None,
+    ) -> IngestionOperation:
+        if target not in self._ALLOWED[expected]:
+            raise InvalidStateTransition(f"{expected.value} -> {target.value}")
+        rows = self.db.execute(
+            "UPDATE ingestion_operations SET state=?, "
+            "queryable_fact_ids_json=COALESCE(?, queryable_fact_ids_json), "
+            "final_fact_ids_json=COALESCE(?, final_fact_ids_json), "
+            "derivation_version=COALESCE(?, derivation_version), "
+            "derivation_state_json=COALESCE(?, derivation_state_json), "
+            "attempt_count=attempt_count + ?, "
+            "last_error=?, "
+            "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE operation_id=? AND state=? RETURNING *",
+            (
+                target.value,
+                _canonical_json(list(queryable_fact_ids))
+                if queryable_fact_ids is not None
+                else None,
+                _canonical_json(list(final_fact_ids))
+                if final_fact_ids is not None
+                else None,
+                derivation_version,
+                _canonical_json(derivation_state)
+                if derivation_state is not None
+                else None,
+                1 if target is IngestionState.ENRICHING else 0,
+                last_error or "",
+                operation_id,
+                expected.value,
+            ),
+        )
+        if not rows:
+            actual = self.get(operation_id).state
+            raise InvalidStateTransition(
+                f"expected {expected.value}, found {actual.value}"
+            )
+        return self._from_row(rows[0])
+
+    def checkpoint_enriching(
+        self,
+        operation_id: str,
+        *,
+        final_fact_ids: tuple[str, ...],
+        derivation_version: str,
+        derivation_state: dict[str, bool],
+        lease_owner: str,
+        lease_seconds: float,
+    ) -> IngestionOperation:
+        """Durably checkpoint relational derivation before external indexes."""
+        rows = self.db.execute(
+            "UPDATE ingestion_operations SET "
+            "final_fact_ids_json=?, derivation_version=?, "
+            "derivation_state_json=?, lease_expires_at=?, last_error='', "
+            "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE operation_id=? AND state='enriching' AND lease_owner=? "
+            "RETURNING *",
+            (
+                _canonical_json(list(final_fact_ids)),
+                derivation_version,
+                _canonical_json(derivation_state),
+                time.time() + max(1.0, float(lease_seconds)),
+                operation_id,
+                lease_owner,
+            ),
+        )
+        if not rows:
+            raise InvalidStateTransition("enriching checkpoint lost ownership")
+        operation = self._from_row(rows[0])
+        from superlocalmemory.core.derivation_lineage import capture_operation_lineage
+
+        capture_operation_lineage(
+            self.db,
+            operation_id=operation.operation_id,
+            profile_id=operation.profile_id,
+            raw_content=operation.raw_content,
+            fact_ids=operation.final_fact_ids,
+            derivation_version=operation.derivation_version,
+        )
+        return operation
+
+    def renew_enriching_lease(
+        self,
+        operation_id: str,
+        *,
+        owner: str,
+        lease_seconds: float,
+    ) -> bool:
+        """Extend a live lease only while the same owner still holds it."""
+        rows = self.db.execute(
+            "UPDATE ingestion_operations SET lease_expires_at=?, "
+            "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE operation_id=? AND state='enriching' AND lease_owner=? "
+            "RETURNING operation_id",
+            (
+                time.time() + max(1.0, float(lease_seconds)),
+                operation_id,
+                owner,
+            ),
+        )
+        return bool(rows)
+
+    def finish_enriching(
+        self,
+        operation_id: str,
+        *,
+        owner: str,
+        target: IngestionState,
+        final_fact_ids: tuple[str, ...] | None = None,
+        derivation_version: str | None = None,
+        derivation_state: dict[str, bool] | None = None,
+        last_error: str = "",
+    ) -> IngestionOperation:
+        """Finish only work owned by the caller's durable lease.
+
+        Fix E: when transitioning to FAILED and the operation has exhausted
+        ``_MAX_AUTOMATIC_MATERIALIZATION_ATTEMPTS``, atomically INSERT a row
+        into ``dead_letter_operations`` and set ``next_retry_at=0`` (no further
+        retries scheduled).  The original row in ``ingestion_operations`` is
+        retained — the dead-letter row is a supplemental audit record, not a
+        replacement.  Both writes happen inside a single ``db.transaction()``.
+
+        NOTE (Flaw 1 from CRIT): M031 may not exist if the live database has
+        not run migration_runner against it yet.  The INSERT is therefore
+        wrapped in a try/except so that an absent table degrades gracefully to
+        the pre-3.8.4 silent-FAILED behaviour rather than breaking ingestion.
+        Operators who have run ``slm migrate`` will get the DLQ row.
+        """
+        if target not in {IngestionState.COMPLETE, IngestionState.FAILED}:
+            raise InvalidStateTransition(f"enriching -> {target.value}")
+        current = self.get(operation_id)
+        # claim_enriching() already increments attempt_count before the
+        # materializer runs.  finish_enriching() records that claimed attempt;
+        # incrementing again here would dead-letter after only nine real tries
+        # while claiming that ten had run.
+        attempt_count = current.attempt_count
+        is_exhausted = (
+            target is IngestionState.FAILED
+            and attempt_count >= _MAX_AUTOMATIC_MATERIALIZATION_ATTEMPTS
+        )
+        # Fix E: exhausted → far-future retry_at so list_materializable's
+        # `next_retry_at <= now` clause never matches, excluding the
+        # dead-lettered op from the work queue permanently.
+        # 9_999_999_999 ≈ year 2286 — well beyond any reasonable operation window.
+        _NEVER_RETRY: float = 9_999_999_999.0
+        retry_at: float = _NEVER_RETRY if is_exhausted else 0.0
+        if target is IngestionState.FAILED and not is_exhausted:
+            delay = min(2 ** min(max(current.attempt_count, 1), 10), 300)
+            retry_at = time.time() + delay
+
+        try:
+            with self.db.transaction():
+                rows = self.db.execute(
+                    "UPDATE ingestion_operations SET state=?, "
+                    "final_fact_ids_json=COALESCE(?, final_fact_ids_json), "
+                    "derivation_version=COALESCE(?, derivation_version), "
+                    "derivation_state_json=COALESCE(?, derivation_state_json), "
+                    "lease_owner='', lease_expires_at=0, next_retry_at=?, last_error=?, "
+                    "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                    "WHERE operation_id=? AND state='enriching' AND lease_owner=? "
+                    "RETURNING *",
+                    (
+                        target.value,
+                        _canonical_json(list(final_fact_ids))
+                        if final_fact_ids is not None
+                        else None,
+                        derivation_version,
+                        _canonical_json(derivation_state)
+                        if derivation_state is not None
+                        else None,
+                        retry_at,
+                        last_error,
+                        operation_id,
+                        owner,
+                    ),
+                )
+                if not rows:
+                    raise InvalidStateTransition(
+                        "enriching lease ownership was lost"
+                    )
+                if is_exhausted:
+                    # Fix E: INSERT dead-letter row inside the same transaction.
+                    # Failure to write (e.g. M031 not yet migrated) must NOT
+                    # abort the state-machine UPDATE — catch at the outer level.
+                    self.db.execute(
+                        "INSERT INTO dead_letter_operations "
+                        "(original_op_id, operation_type, content, "
+                        " metadata_json, error, attempt_count, "
+                        " first_attempt_at, dead_lettered_at, profile_id) "
+                        "VALUES (?, 'M018', ?, ?, ?, ?, "
+                        " (SELECT CAST(strftime('%s', created_at) AS REAL) "
+                        "  FROM ingestion_operations WHERE operation_id=?), ?, ?)",
+                        (
+                            operation_id,
+                            current.raw_content,
+                            json.dumps(current.metadata, separators=(",", ":"))
+                            if current.metadata else None,
+                            last_error or current.last_error,
+                            attempt_count,
+                            operation_id,
+                            time.time(),
+                            current.profile_id,
+                        ),
+                    )
+                    logger.warning(
+                        "Operation %s exhausted %d attempts — moved to dead-letter. "
+                        "Last error: %s",
+                        operation_id,
+                        attempt_count,
+                        last_error or current.last_error,
+                    )
+        except InvalidStateTransition:
+            raise
+        except Exception as exc:
+            # Fix E graceful-degrade: if dead-letter INSERT fails (M031 absent),
+            # fall back to the pre-3.8.4 silent-FAILED state so ingestion
+            # continues unblocked.
+            logger.error(
+                "finish_enriching failed (dead-letter path): %s — retrying "
+                "without dead-letter INSERT",
+                exc,
+            )
+            rows = self.db.execute(
+                "UPDATE ingestion_operations SET state=?, "
+                "final_fact_ids_json=COALESCE(?, final_fact_ids_json), "
+                "derivation_version=COALESCE(?, derivation_version), "
+                "derivation_state_json=COALESCE(?, derivation_state_json), "
+                "lease_owner='', lease_expires_at=0, next_retry_at=?, last_error=?, "
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE operation_id=? AND state='enriching' AND lease_owner=? "
+                "RETURNING *",
+                (
+                    target.value,
+                    _canonical_json(list(final_fact_ids))
+                    if final_fact_ids is not None
+                    else None,
+                    derivation_version,
+                    _canonical_json(derivation_state)
+                    if derivation_state is not None
+                    else None,
+                    retry_at,
+                    last_error,
+                    operation_id,
+                    owner,
+                ),
+            )
+            if not rows:
+                raise InvalidStateTransition(
+                    "enriching lease ownership was lost"
+                ) from exc
+        return self._from_row(rows[0])
+
+    def defer_enriching(
+        self,
+        operation_id: str,
+        *,
+        owner: str,
+    ) -> IngestionOperation:
+        """Release a transition-preempted lease without consuming a retry.
+
+        Queryable evidence remains durable.  The compare-and-swap owner check
+        prevents a stale worker from requeueing work that another process has
+        already reclaimed.
+        """
+        rows = self.db.execute(
+            "UPDATE ingestion_operations SET state='queryable', "
+            "lease_owner='', lease_expires_at=0, next_retry_at=0, "
+            "attempt_count=CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, "
+            "last_error='', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE operation_id=? AND state='enriching' AND lease_owner=? "
+            "RETURNING *",
+            (operation_id, owner),
+        )
+        if not rows:
+            raise InvalidStateTransition("enriching lease ownership was lost")
+        return self._from_row(rows[0])
+
+    def reap_stuck_enriching(
+        self,
+        *,
+        now: float | None = None,
+        limit: int = 100,
+    ) -> list[str]:
+        """Terminalize expired enrichment leases that exhausted automatic retries.
+
+        ``list_materializable`` intentionally excludes operations at the retry
+        cap.  If a worker dies while such an operation is still ``enriching``,
+        it otherwise becomes a permanent phantom: no worker can reclaim it and
+        it never reaches a terminal state.  Queryable facts are already durable,
+        so reaping abandons only optional derivation work.
+
+        Each candidate is transitioned with a compare-and-swap update in its
+        own bounded transaction.  A dead-letter record is supplemental; an
+        older database without M031 is still terminalized safely.
+        """
+        cutoff = time.time() if now is None else float(now)
+        batch_limit = max(1, min(int(limit), 500))
+        candidates = self.db.execute(
+            "SELECT operation_id, attempt_count, last_error, raw_content, "
+            "raw_metadata_json, profile_id FROM ingestion_operations "
+            "WHERE state='enriching' AND lease_expires_at <= ? "
+            "AND attempt_count >= ? ORDER BY updated_at, operation_id LIMIT ?",
+            (
+                cutoff,
+                _MAX_AUTOMATIC_MATERIALIZATION_ATTEMPTS,
+                batch_limit,
+            ),
+        )
+        reaped: list[str] = []
+        for row in candidates:
+            data = dict(row)
+            operation_id = str(data["operation_id"])
+            terminal_error = (
+                data["last_error"]
+                or "reaped: enrichment exhausted automatic attempts"
+            )
+            try:
+                with self.db.transaction():
+                    updated = self.db.execute(
+                        "UPDATE ingestion_operations SET state='failed', "
+                        "lease_owner='', lease_expires_at=0, next_retry_at=?, "
+                        "last_error=?, "
+                        "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                        "WHERE operation_id=? AND state='enriching' "
+                        "AND lease_expires_at <= ? AND attempt_count >= ? "
+                        "RETURNING operation_id",
+                        (
+                            _NEVER_RETRY_AT,
+                            terminal_error,
+                            operation_id,
+                            cutoff,
+                            _MAX_AUTOMATIC_MATERIALIZATION_ATTEMPTS,
+                        ),
+                    )
+                    if not updated:
+                        continue
+                    try:
+                        self.db.execute(
+                            "INSERT INTO dead_letter_operations "
+                            "(original_op_id, operation_type, content, "
+                            "metadata_json, error, attempt_count, "
+                            "first_attempt_at, dead_lettered_at, profile_id) "
+                            "VALUES (?, 'M018', ?, ?, ?, ?, "
+                            "(SELECT CAST(strftime('%s', created_at) AS REAL) "
+                            "FROM ingestion_operations WHERE operation_id=?), ?, ?)",
+                            (
+                                operation_id,
+                                data["raw_content"],
+                                data["raw_metadata_json"] or None,
+                                terminal_error,
+                                int(data["attempt_count"]),
+                                operation_id,
+                                time.time(),
+                                data["profile_id"],
+                            ),
+                        )
+                    except sqlite3.OperationalError as exc:
+                        if "no such table" not in str(exc).lower():
+                            raise
+                        logger.info(
+                            "Dead-letter table unavailable while reaping %s; "
+                            "terminal transition preserved",
+                            operation_id,
+                        )
+            except Exception:
+                logger.exception(
+                    "Failed to reap exhausted ingestion operation %s",
+                    operation_id,
+                )
+                continue
+            reaped.append(operation_id)
+            logger.warning(
+                "Reaped exhausted ingestion operation %s at attempt %d",
+                operation_id,
+                int(data["attempt_count"]),
+            )
+        return reaped
+
+
+@dataclass(frozen=True, slots=True)
+class MaterializationResult:
+    """Final fact IDs plus the declared derivation stages actually completed."""
+
+    fact_ids: tuple[str, ...]
+    derivation_state: dict[str, bool]
+    last_error: str = ""
+
+
+QueryableWriter = Callable[[IngestionRequest, str], list[str]]
+AdmissionValidator = Callable[[IngestionRequest], None]
+Materializer = Callable[
+    [IngestionOperation],
+    list[str] | tuple[str, ...] | MaterializationResult,
+]
+Projector = Callable[[IngestionOperation], dict[str, bool]]
+
+
+class IngestionCommand:
+    """Coordinates durable submission and idempotent enrichment."""
+
+    def __init__(
+        self,
+        repository: IngestionOperationRepository,
+        *,
+        write_queryable: QueryableWriter,
+        materialize: Materializer,
+        validate_admission: AdmissionValidator | None = None,
+        project: Projector | None = None,
+        derivation_version: str = "v3.7-ingestion-1",
+        lease_seconds: float = 900.0,
+    ) -> None:
+        self.repository = repository
+        self._write_queryable = write_queryable
+        self._materializer = materialize
+        self._validate_admission = validate_admission
+        self._projector = project
+        self._derivation_version = derivation_version
+        self._lease_seconds = max(1.0, float(lease_seconds))
+        self._owner = f"ingestion-worker:{uuid.uuid4().hex}"
+
+    def _run_with_lease_heartbeat(
+        self,
+        operation_id: str,
+        callback: Callable[[], Any],
+    ) -> Any:
+        """Run slow work while periodically renewing its owner-bound lease."""
+        stop = threading.Event()
+        lost = threading.Event()
+        interval = min(30.0, max(0.1, self._lease_seconds / 3.0))
+
+        def heartbeat() -> None:
+            # F9 fix: outer broad catch ensures lost.set() is always called
+            # when the heartbeat thread dies for any reason (not just sqlite3.Error).
+            # Without this, an AttributeError or unexpected exception would kill
+            # the thread silently, leaving lost=False while the lease has expired.
+            try:
+                while not stop.wait(interval):
+                    try:
+                        renewed = self.repository.renew_enriching_lease(
+                            operation_id,
+                            owner=self._owner,
+                            lease_seconds=self._lease_seconds,
+                        )
+                    except sqlite3.Error:
+                        continue
+                    if not renewed:
+                        lost.set()
+                        return
+            except Exception:
+                logger.warning(
+                    "heartbeat thread died unexpectedly for operation %s — "
+                    "signalling lease lost",
+                    operation_id,
+                    exc_info=True,
+                )
+                lost.set()
+
+        thread = threading.Thread(
+            target=heartbeat,
+            name=f"ingestion-lease-heartbeat:{operation_id[:8]}",
+            daemon=True,
+        )
+        thread.start()
+        try:
+            result = callback()
+        finally:
+            stop.set()
+            thread.join(timeout=max(1.0, interval * 2))
+            # F7 fix: check inside finally so LeaseLost wins even when callback
+            # raised.  Without this, the original exception would propagate and
+            # the LeaseLost signal would be masked.
+            if lost.is_set():
+                raise LeaseLost(
+                    f"ingestion lease lost for operation {operation_id}"
+                )
+        return result
+
+    def submit(self, request: IngestionRequest) -> IngestionOperation:
+        operation, _created = self.submit_with_status(request)
+        return operation
+
+    def submit_with_status(
+        self, request: IngestionRequest,
+    ) -> tuple[IngestionOperation, bool]:
+        """Submit once and report whether this call created the operation."""
+        # Trust/authentication and deterministic policy checks belong before
+        # the durable transaction.  They may reject, log, or consult policy,
+        # but must never extend SQLite's writer critical section.
+        if self._validate_admission is not None:
+            self._validate_admission(request)
+        with self.repository.db.transaction():
+            operation, created = self.repository.create_with_status(request)
+            if operation.state is not IngestionState.RAW:
+                return operation, created
+            fact_ids = tuple(self._write_queryable(request, operation.operation_id))
+            if not fact_ids:
+                raise IngestionRejectedError("ingestion produced no queryable facts")
+            receipt = self.repository.transition(
+                operation.operation_id,
+                expected=IngestionState.RAW,
+                target=IngestionState.QUERYABLE,
+                queryable_fact_ids=fact_ids,
+            )
+            return receipt, created
+
+    def materialize(self, operation_id: str) -> IngestionOperation:
+        # Coalesce in-process HTTP/background/worker races for the same
+        # operation. Database compare-and-swap remains the cross-process gate.
+        with _materialization_lock(operation_id):
+            return self._materialize_locked(operation_id)
+
+    def _materialize_locked(
+        self,
+        operation_id: str,
+        *,
+        force: bool = False,
+    ) -> IngestionOperation:
+        operation = self.repository.get(operation_id)
+        if operation.state is IngestionState.COMPLETE:
+            return operation
+        # Fix E: guard against re-attempting exhausted (dead-lettered) operations.
+        # claim_enriching increments the count before each real attempt, and
+        # finish_enriching dead-letters the failure whose count reaches the
+        # cap. A subsequent materialize() call sees count==cap and must not
+        # re-claim or insert another dead-letter row.
+        # ``force=True`` is the operator escape hatch used by retry() — it bypasses
+        # this guard so an admin can manually re-enqueue a dead-lettered operation.
+        if (
+            not force
+            and operation.state is IngestionState.FAILED
+            and operation.attempt_count >= _MAX_AUTOMATIC_MATERIALIZATION_ATTEMPTS
+        ):
+            # Already dead-lettered — return FAILED without re-claiming.
+            return operation
+        if operation.state not in {
+            IngestionState.QUERYABLE,
+            IngestionState.ENRICHING,
+            IngestionState.FAILED,
+        }:
+            raise InvalidStateTransition(
+                f"cannot materialize operation in {operation.state.value}"
+            )
+        enriching = self.repository.claim_enriching(
+            operation_id,
+            owner=self._owner,
+            lease_seconds=self._lease_seconds,
+        )
+        if enriching.state is IngestionState.COMPLETE:
+            return enriching
+        if (
+            enriching.final_fact_ids
+            and all(enriching.derivation_state.values())
+        ):
+            return self._project_and_complete(enriching)
+        try:
+            # Materialization is a durable saga, not one long SQLite
+            # transaction. Extractors, embedders, and local model calls can
+            # take minutes on a mature installation; keeping a write
+            # transaction open across that work blocks every interactive
+            # remember/update/delete and makes the dashboard appear dead.
+            #
+            # The materializer commits its relational checkpoints in short
+            # database operations. The operation lease and derivation state
+            # remain the recovery boundary, and only the final state-machine
+            # checkpoint is grouped atomically below.
+            materialized = self._run_with_lease_heartbeat(
+                operation_id,
+                lambda: self._materializer(enriching),
+            )
+            if isinstance(materialized, MaterializationResult):
+                fact_ids = tuple(materialized.fact_ids)
+                derivation_state = dict(materialized.derivation_state)
+                materialization_error = materialized.last_error
+            else:
+                fact_ids = tuple(materialized)
+                derivation_state = {"materializer": True}
+                materialization_error = ""
+            if not fact_ids:
+                raise RuntimeError("materialization produced no final facts")
+            incomplete = sorted(
+                name for name, complete in derivation_state.items()
+                if not complete
+            )
+            with self.repository.db.transaction():
+                checkpointed = self.repository.checkpoint_enriching(
+                    operation_id,
+                    final_fact_ids=fact_ids,
+                    derivation_version=self._derivation_version,
+                    derivation_state=derivation_state,
+                    lease_owner=self._owner,
+                    lease_seconds=self._lease_seconds,
+                )
+            if materialization_error or incomplete:
+                error = materialization_error or (
+                    "incomplete derivation stages: " + ", ".join(incomplete)
+                )
+                return self.repository.finish_enriching(
+                    operation_id,
+                    owner=self._owner,
+                    target=IngestionState.FAILED,
+                    final_fact_ids=fact_ids,
+                    derivation_version=self._derivation_version,
+                    derivation_state=derivation_state,
+                    last_error=error,
+                )
+        except LeaseLost:
+            raise
+        except MaterializationDeferred:
+            return self.repository.defer_enriching(
+                operation_id,
+                owner=self._owner,
+            )
+        except Exception as exc:
+            return self.repository.finish_enriching(
+                operation_id,
+                owner=self._owner,
+                target=IngestionState.FAILED,
+                last_error=str(exc),
+            )
+        return self._project_and_complete(checkpointed)
+
+    def _project_and_complete(
+        self, operation: IngestionOperation,
+    ) -> IngestionOperation:
+        try:
+            # The relational checkpoint extends ownership before optional ANN
+            # and vector projectors, whose cold-start latency can be material.
+            # Re-claiming with the same owner renews the lease atomically.
+            operation = self.repository.claim_enriching(
+                operation.operation_id,
+                owner=self._owner,
+                lease_seconds=self._lease_seconds,
+            )
+            projection_state = self._run_with_lease_heartbeat(
+                operation.operation_id,
+                lambda: (
+                    dict(self._projector(operation))
+                    if self._projector is not None
+                    else {}
+                ),
+            )
+            combined = {**operation.derivation_state, **projection_state}
+            incomplete = sorted(
+                name for name, complete in combined.items() if not complete
+            )
+            if incomplete:
+                raise RuntimeError(
+                    "incomplete derivation stages: " + ", ".join(incomplete)
+                )
+            return self.repository.finish_enriching(
+                operation.operation_id,
+                owner=self._owner,
+                target=IngestionState.COMPLETE,
+                final_fact_ids=operation.final_fact_ids,
+                derivation_version=self._derivation_version,
+                derivation_state=combined,
+            )
+        except LeaseLost:
+            raise
+        except MaterializationDeferred:
+            return self.repository.defer_enriching(
+                operation.operation_id,
+                owner=self._owner,
+            )
+        except Exception as exc:
+            return self.repository.finish_enriching(
+                operation.operation_id,
+                owner=self._owner,
+                target=IngestionState.FAILED,
+                last_error=str(exc),
+            )
+
+    def retry(self, operation_id: str) -> IngestionOperation:
+        """Operator escape hatch: force-retry a FAILED operation regardless of
+        attempt_count.  Bypasses the Fix E dead-letter guard so an admin can
+        manually re-enqueue an exhausted operation after configuration repair.
+        """
+        operation = self.repository.get(operation_id)
+        if operation.state is not IngestionState.FAILED:
+            raise InvalidStateTransition(
+                f"cannot retry operation in {operation.state.value}"
+            )
+        # force=True bypasses the _MAX_AUTOMATIC_MATERIALIZATION_ATTEMPTS guard.
+        with _materialization_lock(operation_id):
+            return self._materialize_locked(operation_id, force=True)

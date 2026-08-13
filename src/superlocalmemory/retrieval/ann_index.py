@@ -12,7 +12,7 @@ scale we target (up to 100K facts). At that scale, a single cosine
 scan takes ~5ms on CPU which is well within our latency budget.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
-License: Elastic-2.0
+License: AGPL-3.0-or-later
 """
 
 from __future__ import annotations
@@ -57,6 +57,11 @@ class ANNIndex:
     def dimension(self) -> int:
         """Embedding dimension this index was created for."""
         return self._dim
+
+    def contains(self, fact_id: str) -> bool:
+        """Return True if the index currently holds this fact."""
+        with self._lock:
+            return fact_id in self._id_to_idx
 
     # ------------------------------------------------------------------
     # Mutation

@@ -12,10 +12,18 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from .helpers import DB_PATH
+from superlocalmemory.infra.data_root import state_path
+
+from .helpers import DB_PATH, get_read_connection
 
 logger = logging.getLogger("superlocalmemory.routes.agents")
 router = APIRouter()
+
+
+def _internal_error(detail: str = "Internal server error") -> HTTPException:
+    """SEC-H-02: log full traceback server-side; return a generic message to the client."""
+    logger.exception("agents route error")
+    return HTTPException(status_code=500, detail=detail)
 
 # Feature flag: V3 trust scorer
 TRUST_AVAILABLE = False
@@ -33,6 +41,10 @@ except ImportError:
     pass
 
 
+def _registry_path():
+    return state_path("agents.json")
+
+
 @router.get("/api/agents")
 async def get_agents(
     request: Request,
@@ -43,17 +55,15 @@ async def get_agents(
     if not REGISTRY_AVAILABLE:
         return {"agents": [], "count": 0, "message": "Agent registry not available"}
     try:
-        from pathlib import Path
-        registry_path = Path.home() / ".superlocalmemory" / "agents.json"
-        registry = AgentRegistry(persist_path=registry_path)
+        registry = AgentRegistry(persist_path=_registry_path())
         agents = registry.list_agents()
         return {
             "agents": agents,
             "count": len(agents),
             "stats": {"total_agents": len(agents)},
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Agent registry error: {str(e)}")
+    except Exception:
+        raise _internal_error("Agent registry error")
 
 
 @router.get("/api/agents/stats")
@@ -62,13 +72,93 @@ async def get_agent_stats(request: Request):
     if not REGISTRY_AVAILABLE:
         return {"total_agents": 0, "message": "Agent registry not available"}
     try:
-        from pathlib import Path
-        registry_path = Path.home() / ".superlocalmemory" / "agents.json"
-        registry = AgentRegistry(persist_path=registry_path)
+        registry = AgentRegistry(persist_path=_registry_path())
         agents = registry.list_agents()
         return {"total_agents": len(agents)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Agent stats error: {str(e)}")
+    except Exception:
+        raise _internal_error("Agent stats error")
+
+
+@router.get("/api/agents/memory-activity")
+async def get_agent_memory_activity(
+    request: Request,
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Per-agent memory attribution for the multi-agent memory view.
+
+    Reports how many memories each writing agent contributed, when each was
+    last active, which ingestion sources they used, and the most recent
+    entries — grouped by ``ingestion_operations.trusted_actor_id`` (the agent
+    that wrote the memory). Profile-scoped. Uses a direct DB read because the
+    dashboard runs without the engine subprocess. Never raises to the client;
+    returns empty structures if the operations table is absent.
+    """
+    import sqlite3
+
+    from .helpers import get_active_profile
+
+    pid = get_active_profile()
+    agents: list[dict] = []
+    recent: list[dict] = []
+    total = 0
+
+    if DB_PATH.exists():
+        conn = get_read_connection(DB_PATH)
+        try:
+            try:
+                rows = conn.execute(
+                    "SELECT CASE WHEN trusted_actor_id='' THEN 'unknown' "
+                    "ELSE trusted_actor_id END AS agent_id, "
+                    "COUNT(*) AS cnt, MAX(created_at) AS last_active, "
+                    "GROUP_CONCAT(DISTINCT source_type) AS sources "
+                    "FROM ingestion_operations WHERE profile_id=? "
+                    "GROUP BY agent_id ORDER BY cnt DESC, agent_id ASC "
+                    "LIMIT 500",
+                    (pid,),
+                ).fetchall()
+                for r in rows:
+                    agents.append({
+                        "agent_id": r["agent_id"],
+                        "count": r["cnt"],
+                        "last_active": r["last_active"],
+                        "source_types": (
+                            [s for s in (r["sources"] or "").split(",") if s]
+                        ),
+                    })
+                    total += r["cnt"]
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                rows = conn.execute(
+                    "SELECT CASE WHEN trusted_actor_id='' THEN 'unknown' "
+                    "ELSE trusted_actor_id END AS agent_id, "
+                    "substr(raw_content, 1, 160) AS snippet, "
+                    "created_at, source_type, session_id "
+                    "FROM ingestion_operations WHERE profile_id=? "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                    (pid, int(limit)),
+                ).fetchall()
+                recent = [{
+                    "agent_id": r["agent_id"],
+                    "content": r["snippet"],
+                    "created_at": r["created_at"],
+                    "source_type": r["source_type"],
+                    "session_id": r["session_id"],
+                } for r in rows]
+            except sqlite3.OperationalError:
+                pass
+        finally:
+            conn.close()
+
+    return {
+        "ok": True,
+        "profile_id": pid,
+        "total_memories": total,
+        "agent_count": len(agents),
+        "agents": agents,
+        "recent": recent,
+    }
 
 
 @router.get("/api/trust/stats")
@@ -97,41 +187,41 @@ async def get_trust_stats(request: Request):
         by_signal_type = {}
 
         if DB_PATH.exists():
-            conn = sqlite3.connect(str(DB_PATH))
-            conn.row_factory = sqlite3.Row
+            conn = get_read_connection(DB_PATH)
             try:
-                # Count trust signals
-                row = conn.execute(
-                    "SELECT COUNT(*) AS cnt FROM trust_signals "
-                    "WHERE profile_id = ?", (pid,),
-                ).fetchone()
-                total_signals = row["cnt"] if row else 0
-            except sqlite3.OperationalError:
-                pass
+                try:
+                    # Count trust signals
+                    row = conn.execute(
+                        "SELECT COUNT(*) AS cnt FROM trust_signals "
+                        "WHERE profile_id = ?", (pid,),
+                    ).fetchone()
+                    total_signals = row["cnt"] if row else 0
+                except sqlite3.OperationalError:
+                    pass
 
-            try:
-                # Average trust score
-                row = conn.execute(
-                    "SELECT AVG(trust_score) AS avg_ts FROM trust_scores "
-                    "WHERE profile_id = ?", (pid,),
-                ).fetchone()
-                if row and row["avg_ts"] is not None:
-                    avg_trust_score = round(float(row["avg_ts"]), 3)
-            except sqlite3.OperationalError:
-                pass
+                try:
+                    # Average trust score
+                    row = conn.execute(
+                        "SELECT AVG(trust_score) AS avg_ts FROM trust_scores "
+                        "WHERE profile_id = ?", (pid,),
+                    ).fetchone()
+                    if row and row["avg_ts"] is not None:
+                        avg_trust_score = round(float(row["avg_ts"]), 3)
+                except sqlite3.OperationalError:
+                    pass
 
-            try:
-                # Signal breakdown by type
-                rows = conn.execute(
-                    "SELECT signal_type, COUNT(*) AS cnt "
-                    "FROM trust_signals WHERE profile_id = ? "
-                    "GROUP BY signal_type", (pid,),
-                ).fetchall()
-                by_signal_type = {r["signal_type"]: r["cnt"] for r in rows}
-            except sqlite3.OperationalError:
-                pass
-
-            conn.close()
+                try:
+                    # Signal breakdown by type
+                    rows = conn.execute(
+                        "SELECT signal_type, COUNT(*) AS cnt "
+                        "FROM trust_signals WHERE profile_id = ? "
+                        "GROUP BY signal_type", (pid,),
+                    ).fetchall()
+                    by_signal_type = {r["signal_type"]: r["cnt"] for r in rows}
+                except sqlite3.OperationalError:
+                    pass
+            finally:
+                conn.close()
 
         # Enforcement status: SLM uses "Silent Collection" by default
         enforcement = "Silent Collection"
@@ -142,8 +232,8 @@ async def get_trust_stats(request: Request):
             "enforcement": enforcement,
             "by_signal_type": by_signal_type,
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Trust stats error: {str(e)}")
+    except Exception:
+        raise _internal_error("Trust stats error")
 
 
 @router.get("/api/trust/signals/{agent_id}")
@@ -165,5 +255,5 @@ async def get_agent_trust_signals(
                 "signals": signals, "count": len(signals),
             }
         return {"agent_id": agent_id, "signals": [], "count": 0}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Trust signals error: {str(e)}")
+    except Exception:
+        raise _internal_error("Trust signals error")

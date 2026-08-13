@@ -13,12 +13,13 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
-
+from superlocalmemory.infra.data_root import DynamicStatePath, canonical_data_root
 from superlocalmemory.storage.models import Mode
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -35,12 +36,17 @@ CANONICAL_RECALL_LIMIT: int = 20
 # Default Paths
 # ---------------------------------------------------------------------------
 
-DEFAULT_BASE_DIR = Path.home() / ".superlocalmemory"
+DEFAULT_BASE_DIR = DynamicStatePath()
 DEFAULT_DB_NAME = "memory.db"
 DEFAULT_PROFILES_FILE = "profiles.json"
 CURRENT_MODE_FILE = "current_mode"
 # Populated lazily in _get_mode_config_path() to avoid circular imports
 _MODE_CONFIG_NAMES: dict | None = None
+
+
+def _runtime_base_dir() -> Path:
+    """Resolve the process namespace when a config root is not explicit."""
+    return canonical_data_root()
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +236,11 @@ class EncodingConfig:
     # Entropy gate
     entropy_threshold: float = 0.95
 
+    # Entity reflexion (Wave Q1) — Mode B/C self-review of extracted entities.
+    # Fail-open; one extra bounded LLM call per chunk. Mode A is unaffected.
+    enable_entity_reflexion: bool = True
+    reflexion_max_facts: int = 8
+
 
 # ---------------------------------------------------------------------------
 # Retrieval Config
@@ -252,15 +263,71 @@ class RetrievalConfig:
     # Reranking (V3.3.2: ONNX backend enabled for all modes)
     # V3.4.2: Tested gte-reranker-modernbert-base (8K context) — REGRESSED
     # LoCoMo from 68.4% to 64.1%. Reverted to MiniLM-L-12-v2. The 512-token
-    # limit is acceptable because SLM's 6-channel retrieval pre-filters
+    # limit is acceptable because SLM's multi-producer retrieval pre-filters
     # relevant facts before reranking. See bench-v342-locomo.md.
     use_cross_encoder: bool = True
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"
-    cross_encoder_backend: str = ""  # "" = PyTorch (~500MB stable), "onnx" = ONNX (leaks on ARM64 CoreML)
+    # "" = PyTorch (~500MB stable), "onnx" = ONNX (leaks on ARM64 CoreML),
+    # "openai"/"remote" = v3.8.12 (issue #105) OpenAI-compatible /v1/rerank
+    # endpoint (llama-server, TEI, Infinity, vLLM, Cohere-shaped services).
+    cross_encoder_backend: str = ""
+
+    # v3.8.12 (issue #105): remote reranker endpoint. The bundled default
+    # cross-encoder (ms-marco-MiniLM-L-12-v2) is ENGLISH-ONLY, so non-English
+    # deployments scored their own language with a model that cannot read it.
+    # Pointing this at a multilingual reranker (bge-reranker-v2-m3, a Qwen
+    # reranker, …) is the same escape hatch remote embeddings got in v3.4.24.
+    #
+    # This key was accepted-and-ignored before 3.8.12 (issue #103): it was not
+    # a dataclass field, so ``SLMConfig.load`` filtered it out without a word.
+    # It is now read, validated, and — when it disagrees with the backend —
+    # reported as a loud configuration error instead of nothing at all.
+    cross_encoder_endpoint: str = ""
+    # Optional bearer token. SLM_CROSS_ENCODER_API_KEY takes precedence.
+    # When persisted for backward compatibility, config.json is atomically
+    # forced to owner-only mode 0600 by save().
+    cross_encoder_api_key: str = ""
+    # Per-request read budget for the remote reranker. Recall is interactive,
+    # so this stays tight: a slow reranker degrades to fusion scores rather
+    # than holding the recall open.
+    cross_encoder_timeout_seconds: float = 15.0
+
+    @property
+    def is_remote_cross_encoder(self) -> bool:
+        """True when reranking is served by a remote HTTP endpoint."""
+        from superlocalmemory.retrieval.remote_reranker import (
+            is_remote_cross_encoder_backend,
+        )
+
+        return (
+            is_remote_cross_encoder_backend(self.cross_encoder_backend)
+            and bool(self.cross_encoder_endpoint)
+        )
 
     # Agentic (Mode C only)
     agentic_max_rounds: int = 3
     agentic_confidence_threshold: float = 0.3
+
+    # v3.8.2: Client-driven agentic (the recall spine's global flag).
+    # The agent hot path (CLI / MCP / plugins) is consumed by a frontier
+    # LLM (Claude Code, Copilot, Codex, …) that reformulates multi-hop /
+    # low-confidence queries far better than the local Ollama model. So the
+    # hot path DELEGATES the agentic reformulation loop to that calling LLM:
+    # it returns fast local retrieval (all six channels + reranker) plus the
+    # confidence signals (no_confident_match / answer_confidence / abstained),
+    # and never spends an internal LLM round unless a caller asks for it.
+    #   True  (default) → hot path skips the internal agentic round
+    #                     (equivalent to fast=True) and the client drives
+    #                     refinement. Consistent ~1.5-2s recall, no LLM tail.
+    #   False           → hot path always runs the internal agentic round
+    #                     when a query looks multi-hop / low-confidence
+    #                     (equivalent to fast=False) — for deployments with
+    #                     no smart client in front of SLM.
+    # This ONLY sets the default when a caller does not pass ``fast``
+    # explicitly. The dashboard human path (search-all → cluster summary)
+    # passes fast=False directly and always keeps internal synthesis.
+    # Env kill-switch: SLM_HOT_PATH_INTERNAL_AGENTIC=1 forces internal-on.
+    client_driven_agentic: bool = True
 
     # Spreading activation
     spreading_activation_decay: float = 0.7
@@ -291,6 +358,11 @@ class RetrievalConfig:
     recall_per_fact_max_chars: int = 2400  # ~600 tokens; head 70% + tail 30%
     recall_total_max_chars: int = 12000    # ~3K tokens; stubs beyond this
 
+    # Wave Q2b: attach a precomputed community summary as thematic context when
+    # the top results cluster in one community. Read-only lookup, gated, and
+    # fail-open — never a per-query LLM call. Kill-switch for tuning.
+    enable_community_context: bool = True
+
 
 # ---------------------------------------------------------------------------
 # Math Config
@@ -314,6 +386,12 @@ class MathConfig:
     langevin_weight_range: tuple[float, float] = (0.0, 1.0)
 
     # Hopfield
+
+    # Ebbinghaus-Langevin coupling in maintenance (Phase 5 — P1-ELC)
+    # When True, the maintenance cycle computes the combined Ebbinghaus-Langevin
+    # coupled state for each fact and writes back the lifecycle zone.
+    # Defaults to False to preserve existing maintenance behaviour.
+    ebbinghaus_langevin_coupling_enabled: bool = False
 
     # Sheaf (at encoding time, NOT retrieval)
     sheaf_at_encoding: bool = True
@@ -653,6 +731,14 @@ class TemporalValidatorConfig:
     # Sheaf contradiction threshold
     contradiction_threshold: float = 0.45        # Mode A threshold (768d)
 
+    # P5-INT-01: superseded facts are DEMOTED in recall, not hidden. A fact
+    # marked system_expired_at keeps its channel evidence but its per-channel
+    # score is multiplied by this factor, so current facts rank above it while
+    # nothing valid silently vanishes (Mem0-2026 non-destructive design;
+    # retrieval-time recency resolves conflicts). 0.0 restores the old hide
+    # behaviour; 1.0 disables demotion.
+    superseded_demotion_factor: float = 0.25
+
     # LLM pre-filter threshold (lower to catch more candidates)
     llm_prefilter_threshold: float = 0.30
 
@@ -665,24 +751,42 @@ class TemporalValidatorConfig:
     # Include expired facts in historical queries
     include_expired_in_history: bool = True
 
+    # Event-time (valid_until) demotion factor, applied like
+    # superseded_demotion_factor but for facts whose stated validity window has
+    # elapsed. Default matches the prior hardcoded constant (0.5).
+    event_time_demotion_factor: float = 0.5
+
 
 @dataclass(frozen=True)
 class EvolutionConfig:
     """Configuration for Skill Evolution Engine (v3.4.10).
 
     OFF by default — opt in via `slm setup` (interactive) or
-    `slm config set evolution.enabled true` (CLI).
+    `slm config set evolution.enabled true` (CLI). Enabling makes
+    background LLM calls; the enable flow surfaces a cost advisory.
 
     Backend auto-detection priority:
       1. `claude` CLI available → spawn `claude --model haiku` (ECC pattern, free)
       2. Ollama running → use Ollama (free, local)
       3. API key set → use Anthropic/OpenAI API (paid)
       4. Nothing → dashboard-only (show candidates, manual evolution)
+
+    Model selection (v3.7.9): each pipeline step is configurable and
+    defaults to the lowest-cost capable model for the active backend
+    (Claude→haiku, Ollama→local). Leave a field empty ("") for "auto".
+    The blind verifier is kept on a *different* model from the generator
+    so it can't grade its own homework; see
+    ``evolution.model_selection.resolve_evolution_models``.
     """
 
     enabled: bool = False                        # OFF by default, opt-in
     backend: str = "auto"                        # auto, claude, ollama, anthropic, openai
     max_evolutions_per_cycle: int = 3            # Budget cap per consolidation
+    # Empty string == "auto" (resolve cheapest capable model at runtime).
+    # Accepts short aliases ("haiku"/"sonnet") or allow-listed model ids.
+    mutation_model: str = ""                     # generator (quality-sensitive)
+    verify_model: str = ""                       # blind verifier (must differ from generator)
+    confirm_model: str = ""                      # cheap yes/no gate
 
 
 @dataclass(frozen=True)
@@ -738,6 +842,168 @@ class AutoInvokeConfig:
 
 
 # ---------------------------------------------------------------------------
+# Deployment Config (v3.8.0)
+# ---------------------------------------------------------------------------
+
+_VALID_DEPLOYMENT_MODES = ("personal", "enterprise")
+
+
+@dataclass(frozen=True)
+class DeploymentConfig:
+    """Deployment mode configuration.
+
+    Personal (default, safe defaults):
+        Single-user install. No login required, no PII redaction, no
+        retention scheduler. Behaviour is identical to pre-3.8.0 installs.
+
+    Enterprise:
+        Multi-user / team / company install. Login required, PII redacted,
+        retention scheduler active, audit enabled.
+
+    SAFE DEFAULTS = Personal — an existing config.toml with no [deployment]
+    section continues to behave exactly as before.  Adding a [deployment]
+    section is opt-in; removing it reverts to Personal automatically.
+    """
+
+    mode: str = "personal"          # "personal" | "enterprise"
+    require_login: bool = False
+    pii_redaction: bool = False
+    retention_enabled: bool = False
+    audit: bool = True
+
+    def __post_init__(self) -> None:
+        if self.mode not in _VALID_DEPLOYMENT_MODES:
+            raise ValueError(
+                f"DeploymentConfig.mode must be one of {_VALID_DEPLOYMENT_MODES!r}, "
+                f"got {self.mode!r}"
+            )
+
+    @property
+    def is_personal(self) -> bool:
+        """True when operating in personal (single-user) mode."""
+        return self.mode == "personal"
+
+    @property
+    def is_enterprise(self) -> bool:
+        """True when operating in enterprise (team/company) mode."""
+        return self.mode == "enterprise"
+
+    def as_dict(self) -> dict:
+        return {
+            "mode": self.mode,
+            "require_login": self.require_login,
+            "pii_redaction": self.pii_redaction,
+            "retention_enabled": self.retention_enabled,
+            "audit": self.audit,
+        }
+
+
+#: Canonical Personal preset — all permissive defaults.
+DEPLOYMENT_PERSONAL = DeploymentConfig(
+    mode="personal",
+    require_login=False,
+    pii_redaction=False,
+    retention_enabled=False,
+    audit=True,
+)
+
+#: Canonical Enterprise preset — all enforcement defaults.
+DEPLOYMENT_ENTERPRISE = DeploymentConfig(
+    mode="enterprise",
+    require_login=True,
+    pii_redaction=True,
+    retention_enabled=True,
+    audit=True,
+)
+
+
+def load_deployment_config(
+    config_toml_path: Path | None = None,
+) -> DeploymentConfig:
+    """Parse [deployment] from config.toml with fail-closed invalid-state handling.
+
+    config.toml is the installer-written performance config (separate from the
+    daemon's config.json managed by SLMConfig). This function reads ONLY the
+    [deployment] section. All other sections are ignored.
+
+    Args:
+        config_toml_path: Explicit path to config.toml. When None, resolved to
+            ``~/.superlocalmemory/config.toml`` via the canonical data root.
+
+    Returns:
+        DeploymentConfig — Personal only when the file or deployment section is
+        absent. A present but invalid deployment configuration resolves to the
+        enterprise preset so startup controls cannot silently downgrade.
+    """
+    if config_toml_path is None:
+        try:
+            config_toml_path = _runtime_base_dir() / "config.toml"
+        except Exception:
+            return DEPLOYMENT_PERSONAL
+
+    if not config_toml_path.exists():
+        return DEPLOYMENT_PERSONAL
+
+    try:
+        import tomllib as _tomllib
+        raw = config_toml_path.read_text(encoding="utf-8")
+        data = _tomllib.loads(raw)
+    except Exception as exc:
+        logger.warning(
+            "load_deployment_config: failed to parse %s: %s", config_toml_path, exc
+        )
+        return DEPLOYMENT_ENTERPRISE
+
+    if "deployment" not in data:
+        # No [deployment] section — personal defaults, no behaviour change.
+        return DEPLOYMENT_PERSONAL
+    dep = data["deployment"]
+    if not isinstance(dep, dict):
+        logger.warning(
+            "load_deployment_config: [deployment] in %s is not a table — "
+            "failing closed to enterprise",
+            config_toml_path,
+        )
+        return DEPLOYMENT_ENTERPRISE
+
+    raw_mode = str(dep.get("mode", "")).lower()
+    if raw_mode not in _VALID_DEPLOYMENT_MODES:
+        logger.warning(
+            "load_deployment_config: unknown mode %r in %s — failing closed to enterprise",
+            raw_mode, config_toml_path,
+        )
+        return DEPLOYMENT_ENTERPRISE
+
+    # Use the preset for the mode as the base so omitted keys inherit
+    # sensible values (enterprise → require_login=True etc.).
+    base = DEPLOYMENT_ENTERPRISE if raw_mode == "enterprise" else DEPLOYMENT_PERSONAL
+
+    def _strict_bool(name: str, default: bool) -> bool:
+        value = dep.get(name, default)
+        if not isinstance(value, bool):
+            raise TypeError(f"{name} must be a TOML boolean")
+        return value
+
+    try:
+        return DeploymentConfig(
+            mode=raw_mode,
+            require_login=_strict_bool("require_login", base.require_login),
+            pii_redaction=_strict_bool("pii_redaction", base.pii_redaction),
+            retention_enabled=_strict_bool(
+                "retention_enabled", base.retention_enabled
+            ),
+            audit=_strict_bool("audit", base.audit),
+        )
+    except (ValueError, TypeError) as exc:
+        logger.warning(
+            "load_deployment_config: invalid values in [deployment] in %s: %s — "
+            "failing closed to enterprise",
+            config_toml_path, exc,
+        )
+        return DEPLOYMENT_ENTERPRISE
+
+
+# ---------------------------------------------------------------------------
 # Health Config (v3.6.9 BUG-A)
 # ---------------------------------------------------------------------------
 
@@ -757,6 +1023,29 @@ class HealthConfig:
 
 
 # ---------------------------------------------------------------------------
+# Graph Pruning Config (Workstream G — #84)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GraphPruningConfig:
+    """Graph thinning parameters.  Exposed via dashboard + CLI.
+
+    Defaults reproduce the previous hard-coded behaviour so existing
+    deployments see zero behavioural change after upgrade.
+    """
+
+    #: Maximum in- or out-degree per node.  Maps to the legacy module-level
+    #: ``_MAX_DEGREE_PER_NODE = 100`` in graph_pruner.py.
+    max_degree_per_node: int = 100
+    #: Discard edges with weight strictly below this floor.
+    #: 0.0 = no floor (current behaviour, always-safe default).
+    min_edge_weight: float = 0.0
+    #: Master kill-switch for all graph pruning.  ``False`` skips the entire
+    #: prune step (useful for debugging graph bloat).
+    enabled: bool = True
+
+
+# ---------------------------------------------------------------------------
 # Master Config
 # ---------------------------------------------------------------------------
 
@@ -768,7 +1057,7 @@ class SLMConfig:
     """
 
     mode: Mode = Mode.A
-    base_dir: Path = DEFAULT_BASE_DIR
+    base_dir: Path = field(default_factory=_runtime_base_dir)
     db_path: Path | None = None    # Computed from base_dir if None
     active_profile: str = "default"
 
@@ -801,14 +1090,35 @@ class SLMConfig:
     # v3.5.0: scaling backends — "sqlite" / "cozo" / "auto" / "lancedb" / "sqlite-vec" / "auto".
     graph_backend: str = "auto"       # "auto" = cozo if pycozo installed, else sqlite
     vector_backend: str = "auto"      # "auto" = lancedb if installed, else sqlite-vec
+    # Scale Engine is installed separately from activation.  Existing roots
+    # stay on SQLite until a staged parity check promotes these projections.
+    scale_engine_state: str = "local_core"  # local_core | prepared | verified | promoted
+    # v3.8.5: auto-promote Cozo+LanceDB when a DB grows past the scale at which
+    # they actually help.  Below the threshold the well-indexed SQLite graph is
+    # faster (measured ~1.7ms/traversal at 208K edges), so normal installs stay
+    # on Local Core and never pay the projection/migration cost.  The threshold
+    # is deliberately high: the graph DB win appears at millions of edges, not
+    # hundreds of thousands.  Auto-promotion is background, uses the same staged
+    # parity gate as the manual path, and falls back to SQLite on any failure.
+    scale_auto_promote_enabled: bool = True
+    scale_auto_promote_min_edges: int = 1_000_000
     evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
     health: HealthConfig = field(default_factory=HealthConfig)
+    # v3.8.4-G: Graph thinning parameters (#84)
+    graph_pruning: GraphPruningConfig = field(default_factory=GraphPruningConfig)
 
     # v3.4.3: Daemon configuration
     daemon_idle_timeout: int = 0       # 0 = 24/7 (no auto-kill). >0 = seconds before auto-kill.
     daemon_port: int = 8765            # Primary daemon port
     daemon_legacy_port: int = 8767     # Backward-compat redirect port
     daemon_enable_legacy_port: bool = True  # Set False to disable 8767 redirect
+
+    # v4: auto-close orphaned application sessions during maintenance.
+    # A session is stale when it has had no new atomic_facts for this many
+    # hours. close_session is only invoked by the MCP tool otherwise, so
+    # without this pass temporal summaries never form for abandoned sessions.
+    session_idle_close_hours: float = 24.0
+    session_idle_close_max_per_pass: int = 50
 
     # v3.4.3: Entity compilation
     entity_compilation_enabled: bool = True
@@ -817,6 +1127,11 @@ class SLMConfig:
     # v3.4.3: Mesh
     mesh_enabled: bool = True
 
+    # Deployment policy overlay. Personal installs remain unchanged; the
+    # daemon upgrades this to True before engine initialization when the
+    # enterprise deployment preset requests PII redaction.
+    pii_redaction: bool = False
+
     def __post_init__(self) -> None:
         if self.db_path is None:
             self.db_path = self.base_dir / DEFAULT_DB_NAME
@@ -824,16 +1139,51 @@ class SLMConfig:
     @classmethod
     def load(cls, config_path: Path | None = None) -> SLMConfig:
         """Load config from JSON file. Returns default Mode A if file doesn't exist."""
-        # WP-07: resolve base dir through slm_home() at call time so all 3 env
-        # aliases (SLM_DATA_DIR → SL_MEMORY_PATH → SLM_HOME) are honoured.
+        # V3.7: process namespace selection is authoritative. A persisted
+        # base_dir may bootstrap a legacy custom root only when no environment
+        # alias selected the process namespace.
         try:
-            from superlocalmemory.cli._lazy_init import slm_home as _slm_home
-            _runtime_base = _slm_home()
+            from superlocalmemory.infra.data_root import (
+                canonical_data_root,
+                environment_data_root,
+            )
+            _environment_base = environment_data_root()
+            _runtime_base = canonical_data_root()
         except Exception:
+            _environment_base = None
             _runtime_base = DEFAULT_BASE_DIR
         path = config_path or (_runtime_base / "config.json")
         if not path.exists():
-            return cls.for_mode(Mode.A)
+            return cls.for_mode(Mode.A, base_dir=_runtime_base)
+
+        # DASH-V4 (3.7.9): the ``current_mode`` file is the single source of
+        # truth for the ACTIVE mode. If config.json drifted from it (a writer
+        # bypassed switch_mode and reset the active config), load the
+        # authoritative per-mode file so daemon/CLI/dashboard all run the user's
+        # chosen mode — with its settings — instead of a stale one. Scoped to
+        # config.json so explicit per-mode loads (switch_mode) are untouched.
+        # Fail-open: any error falls through to the normal load below.
+        if path.name == "config.json":
+            try:
+                import json as _json
+                _disk_mode = str(
+                    _json.loads(path.read_text()).get("mode", "")
+                ).lower()
+                _active_mode = cls.read_current_mode(path.parent)
+                if _disk_mode and _active_mode and _disk_mode != _active_mode:
+                    _mode_path = cls._mode_config_path(
+                        path.parent, Mode(_active_mode)
+                    )
+                    if _mode_path.exists():
+                        logger.warning(
+                            "config.json mode=%s disagrees with current_mode=%s;"
+                            " loading authoritative %s",
+                            _disk_mode, _active_mode, _mode_path.name,
+                        )
+                        return cls.load(_mode_path)
+            except Exception:
+                pass  # fail-open — fall through to the normal load below
+
         import json
         try:
             data = json.loads(path.read_text())
@@ -843,13 +1193,21 @@ class SLMConfig:
             logger.warning(
                 "config.json unreadable/corrupt (%s) — using Mode A default", exc
             )
-            return cls.for_mode(Mode.A)
+            return cls.for_mode(Mode.A, base_dir=_runtime_base)
         mode = Mode(data.get("mode", "a"))
         llm_data = data.get("llm", {})
         emb_data = data.get("embedding", {})
         # V3.5.9: read base_dir before constructing config so for_mode() builds
         # db_path from the user's directory, not DEFAULT_BASE_DIR.
-        raw_base_dir = Path(data.get("base_dir", str(_runtime_base)))
+        if _environment_base is not None:
+            raw_base_dir = _environment_base
+        else:
+            try:
+                raw_base_dir = canonical_data_root(
+                    configured_base_dir=data.get("base_dir", _runtime_base),
+                )
+            except Exception:
+                raw_base_dir = _runtime_base
         config = cls.for_mode(
             mode,
             llm_provider=llm_data.get("provider", ""),
@@ -879,6 +1237,22 @@ class SLMConfig:
                 ollama_base_url=emb_data.get("ollama_base_url", config.embedding.ollama_base_url),
             )
         config.active_profile = data.get("active_profile", "default")
+        config.graph_backend = data.get("graph_backend", "auto")
+        config.vector_backend = data.get("vector_backend", "auto")
+        state = data.get("scale_engine_state", "local_core")
+        config.scale_engine_state = (
+            state if state in {"local_core", "prepared", "verified", "promoted"}
+            else "local_core"
+        )
+        config.scale_auto_promote_enabled = bool(
+            data.get("scale_auto_promote_enabled", True)
+        )
+        try:
+            config.scale_auto_promote_min_edges = int(
+                data.get("scale_auto_promote_min_edges", 1_000_000)
+            )
+        except (TypeError, ValueError):
+            config.scale_auto_promote_min_edges = 1_000_000
 
         # V3.3 config fields (additive — defaults work if missing from JSON)
         fg = data.get("forgetting", {})
@@ -887,6 +1261,65 @@ class SLMConfig:
                 k: v for k, v in fg.items()
                 if k in ForgettingConfig.__dataclass_fields__
             })
+
+        # quantization: nested PolarQuantConfig + QJLConfig are reconstructed
+        # from their serialized dicts; scalar fields are passed through directly.
+        # Unknown subkeys are filtered out for forward-compat safety.
+        qt_raw = data.get("quantization", {})
+        if qt_raw:
+            try:
+                polar_raw = qt_raw.get("polar", {})
+                qjl_raw = qt_raw.get("qjl", {})
+                polar = PolarQuantConfig(**{
+                    k: v for k, v in polar_raw.items()
+                    if k in PolarQuantConfig.__dataclass_fields__
+                })
+                qjl = QJLConfig(**{
+                    k: v for k, v in qjl_raw.items()
+                    if k in QJLConfig.__dataclass_fields__
+                })
+                qt_scalars = {
+                    k: v for k, v in qt_raw.items()
+                    if k in QuantizationConfig.__dataclass_fields__
+                    and k not in ("polar", "qjl")
+                }
+                config.quantization = QuantizationConfig(polar=polar, qjl=qjl, **qt_scalars)
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Ignoring invalid quantization config (%s) — using defaults", exc
+                )
+
+        # sagq: valid_bit_widths is serialized as a list by dataclasses.asdict()
+        # and must be coerced back to a tuple to satisfy the field annotation and
+        # preserve identity through a round-trip.
+        sq_raw = data.get("sagq", {})
+        if sq_raw:
+            try:
+                sq_kwargs = {
+                    k: v for k, v in sq_raw.items()
+                    if k in SAGQConfig.__dataclass_fields__
+                }
+                if "valid_bit_widths" in sq_kwargs:
+                    sq_kwargs["valid_bit_widths"] = tuple(sq_kwargs["valid_bit_widths"])
+                config.sagq = SAGQConfig(**sq_kwargs)
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Ignoring invalid sagq config (%s) — using defaults", exc
+                )
+
+        # auto_invoke: dict fields (weights, act_r_weights, mode_a_weights) are
+        # preserved as-is by asdict(); no special reconstruction required.
+        ai_raw = data.get("auto_invoke", {})
+        if ai_raw:
+            try:
+                config.auto_invoke = AutoInvokeConfig(**{
+                    k: v for k, v in ai_raw.items()
+                    if k in AutoInvokeConfig.__dataclass_fields__
+                })
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Ignoring invalid auto_invoke config (%s) — using defaults", exc
+                )
 
         rt = data.get("retrieval", {})
         if rt:
@@ -907,6 +1340,12 @@ class SLMConfig:
         # V3.4.3 config fields (additive — missing keys get dataclass defaults)
         config.daemon_idle_timeout = data.get("daemon_idle_timeout", 0)
         config.daemon_port = data.get("daemon_port", 8765)
+        config.session_idle_close_hours = float(
+            data.get("session_idle_close_hours", 24.0) or 24.0
+        )
+        config.session_idle_close_max_per_pass = int(
+            data.get("session_idle_close_max_per_pass", 50) or 50
+        )
         config.daemon_legacy_port = data.get("daemon_legacy_port", 8767)
         config.daemon_enable_legacy_port = data.get("daemon_enable_legacy_port", True)
         config.entity_compilation_enabled = data.get("entity_compilation_enabled", True)
@@ -930,6 +1369,31 @@ class SLMConfig:
                 k: v for k, v in hlth.items()
                 if k in HealthConfig.__dataclass_fields__
             })
+
+        # v3.8.4-G: Graph pruning config (#84) — additive, no migration needed.
+        # Old configs without this section silently fall back to GraphPruningConfig()
+        # defaults, which reproduce the existing _MAX_DEGREE_PER_NODE=100 behaviour.
+        gp_raw = data.get("graph_pruning", {})
+        if gp_raw:
+            try:
+                gp_kwargs = {
+                    k: v for k, v in gp_raw.items()
+                    if k in GraphPruningConfig.__dataclass_fields__
+                }
+                gp = GraphPruningConfig(**gp_kwargs)
+                # Validate and clamp out-of-range values
+                max_deg = gp.max_degree_per_node if gp.max_degree_per_node >= 1 else 100
+                min_w = max(0.0, min(1.0, gp.min_edge_weight))
+                config.graph_pruning = GraphPruningConfig(
+                    max_degree_per_node=max_deg,
+                    min_edge_weight=min_w,
+                    enabled=gp.enabled,
+                )
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "graph_pruning config invalid (%s) — using defaults", exc
+                )
+                config.graph_pruning = GraphPruningConfig()
 
         # V3.4.65: Injection config (additive — defaults if missing from JSON)
         inj = data.get("injection", {}) or {}
@@ -979,6 +1443,14 @@ class SLMConfig:
                     "Ignoring invalid scope config (%s) — using shared-off defaults", exc
                 )
 
+        # Preserve the raw loaded dict so save() can return every key that was
+        # present in the file, including unknown forward-compat keys and nested
+        # sections whose subkeys this version does not model.  The attribute is
+        # intentionally private (leading underscore) and is not a declared field,
+        # so dataclasses.asdict() and dataclasses.replace() ignore it — callers
+        # that clone a config via replace() will lose unknown-key preservation,
+        # which is acceptable: the primary contract is load→save round-trip.
+        config._raw_preserved: dict = dict(data)  # type: ignore[attr-defined]
         return config
 
     def save(
@@ -1025,6 +1497,11 @@ class SLMConfig:
         data = {
             "mode": effective_mode,
             "active_profile": self.active_profile,
+            "graph_backend": self.graph_backend,
+            "vector_backend": self.vector_backend,
+            "scale_engine_state": self.scale_engine_state,
+            "scale_auto_promote_enabled": self.scale_auto_promote_enabled,
+            "scale_auto_promote_min_edges": self.scale_auto_promote_min_edges,
             "base_dir": str(self.base_dir),  # V3.5.9: persist so load() can restore custom paths
             "llm": {
                 "provider": self.llm.provider,
@@ -1040,11 +1517,10 @@ class SLMConfig:
                 "api_key": self.embedding.api_key,
                 "deployment_name": self.embedding.deployment_name,
             },
-            "retrieval": {
-                "use_cross_encoder": self.retrieval.use_cross_encoder,
-                "cross_encoder_model": self.retrieval.cross_encoder_model,
-                "cross_encoder_backend": self.retrieval.cross_encoder_backend,
-            },
+            # Persist the complete retrieval contract.  Saving only the
+            # cross-encoder subset silently reset channel limits, evidence
+            # floors, and agentic settings on the next mode/provider change.
+            "retrieval": asdict(self.retrieval),
         }
 
         # V3.4.11: Persist evolution config (C-CONFIGSAVE fix)
@@ -1052,6 +1528,9 @@ class SLMConfig:
             "enabled": self.evolution.enabled,
             "backend": self.evolution.backend,
             "max_evolutions_per_cycle": self.evolution.max_evolutions_per_cycle,
+            "mutation_model": self.evolution.mutation_model,
+            "verify_model": self.evolution.verify_model,
+            "confirm_model": self.evolution.confirm_model,
         }
 
         # V3.4.65: Persist injection config
@@ -1081,17 +1560,90 @@ class SLMConfig:
         # Multi-scope memory: behaviour defaults
         data["scope"] = self.scope.as_dict()
 
-        # Preserve existing V3.3 config sections that aren't in for_mode()
-        for key in ("forgetting", "quantization", "sagq", "embedding_signature", "auto_invoke"):
-            if key in existing:
-                data[key] = existing[key]
+        # v3.8.4-G: Persist graph pruning config (#84).
+        # Always written — additive key, never overwrites unrelated sections.
+        data["graph_pruning"] = {
+            "max_degree_per_node": self.graph_pruning.max_degree_per_node,
+            "min_edge_weight": self.graph_pruning.min_edge_weight,
+            "enabled": self.graph_pruning.enabled,
+        }
+
+        # Daemon, entity-compilation, and mesh scalar settings were loaded by
+        # load() but omitted from earlier versions of this method. Write them
+        # explicitly so a load-then-save is lossless for these fields.
+        data["daemon_idle_timeout"] = self.daemon_idle_timeout
+        data["daemon_port"] = self.daemon_port
+        data["session_idle_close_hours"] = self.session_idle_close_hours
+        data["session_idle_close_max_per_pass"] = self.session_idle_close_max_per_pass
+        data["daemon_legacy_port"] = self.daemon_legacy_port
+        data["daemon_enable_legacy_port"] = self.daemon_enable_legacy_port
+        data["entity_compilation_enabled"] = self.entity_compilation_enabled
+        data["entity_compilation_retrieval_boost"] = self.entity_compilation_retrieval_boost
+        data["mesh_enabled"] = self.mesh_enabled
+
+        # Typed in-memory config sections.  Preserve any on-disk subkeys this
+        # version does not model (forward-compat or externally-tuned fields such
+        # as forgetting.half_life_days), then overlay the current in-memory
+        # dataclass values so a programmatic mutation still survives a
+        # save/load cycle while unmodeled subkeys are never dropped.
+        # dataclasses.asdict() recurses into nested dataclasses
+        # (quantization.polar, quantization.qjl).
+        #
+        # embedding_signature: has no typed in-memory model — it is an opaque blob
+        # written by external tooling (see below).
+        for _section, _obj in (
+            ("forgetting", self.forgetting),
+            ("quantization", self.quantization),
+            ("sagq", self.sagq),
+            ("auto_invoke", self.auto_invoke),
+        ):
+            _base = existing.get(_section)
+            _merged = dict(_base) if isinstance(_base, dict) else {}
+            _merged.update(asdict(_obj))
+            data[_section] = _merged
+
+        # Merge any keys from the last load() that are not covered by the
+        # explicit serialization above.  This includes unknown forward-compat
+        # top-level keys and nested sections whose subkeys this version does
+        # not model (e.g. a "health" dict that carries vendor-extension fields).
+        # Explicitly serialized keys always take precedence; preserved keys are
+        # only written when the slot is vacant in the output dict.
+        _raw = getattr(self, "_raw_preserved", None)
+        if _raw:
+            for _k, _v in _raw.items():
+                if _k not in data:
+                    data[_k] = _v
+
+        # embedding_signature has no typed in-memory model — it is an opaque blob
+        # written by external tooling.  Preserve the on-disk value verbatim so a
+        # load→save cycle does not erase externally written metadata.
+        if "embedding_signature" in existing:
+            data["embedding_signature"] = existing["embedding_signature"]
 
         # Atomic write: a crash mid-write must NOT leave a truncated/corrupt
         # config.json (which would make every subsequent `slm` call fail to load).
         import os as _os
-        _tmp = path.with_suffix(path.suffix + ".tmp")
-        _tmp.write_text(json.dumps(data, indent=2))
-        _os.replace(_tmp, path)
+        import tempfile as _tempfile
+
+        _fd, _tmp_name = _tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent,
+        )
+        _tmp = Path(_tmp_name)
+        try:
+            with _os.fdopen(_fd, "w", encoding="utf-8") as _handle:
+                json.dump(data, _handle, indent=2)
+                _handle.write("\n")
+                _handle.flush()
+                _os.fsync(_handle.fileno())
+            _os.chmod(_tmp, 0o600)
+            _os.replace(_tmp, path)
+            _os.chmod(path, 0o600)
+        except BaseException:
+            try:
+                _tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     @staticmethod
     def provider_presets() -> dict[str, dict[str, str]]:
@@ -1179,6 +1731,7 @@ class SLMConfig:
                 base_dir=_base,
                 embedding=_a_emb,
                 llm=LLMConfig(),  # No LLM
+                temporal_validator=TemporalValidatorConfig(mode="a"),
                 retrieval=RetrievalConfig(
                     # V3.3.2: ONNX cross-encoder enabled for all modes (~200MB)
                     use_cross_encoder=True,
@@ -1220,6 +1773,7 @@ class SLMConfig:
                     api_base=llm_api_base or "http://localhost:11434",
                     api_key=llm_api_key or "",
                 ),
+                temporal_validator=TemporalValidatorConfig(mode="b"),
                 retrieval=RetrievalConfig(
                     # V3.3.2: ONNX cross-encoder enabled for all modes (~200MB)
                     use_cross_encoder=True,
@@ -1240,13 +1794,27 @@ class SLMConfig:
                 api_endpoint=embedding_endpoint,
                 api_key=embedding_key,
             )
-        else:
+        elif embedding_endpoint:
             _c_emb = EmbeddingConfig(
-                model_name="text-embedding-3-large",
-                dimension=3072,
+                model_name=embedding_model_name or "text-embedding-3-large",
+                dimension=embedding_dimension or 3072,
+                provider=_c_emb_provider,
                 api_endpoint=embedding_endpoint,
                 api_key=embedding_key,
                 deployment_name=embedding_deployment,
+            )
+        else:
+            # Mode C upgrades LLM capability; it must not silently require a
+            # second paid embedding provider.  A 3072-dim cloud embedding
+            # contract without an endpoint/key was auto-routed to the local
+            # 768-dim Ollama embedder, which made ingestion fail at vector
+            # materialization. Cloud embeddings remain an explicit opt-in.
+            _c_emb = EmbeddingConfig(
+                # Honour an on-disk embedding model when one was configured (the
+                # load() path passes it through); default to the local nomic
+                # model so Mode C never silently requires a paid cloud embedder.
+                model_name=embedding_model_name or "nomic-ai/nomic-embed-text-v1.5",
+                dimension=embedding_dimension or 768,
             )
         return cls(
             mode=mode,
@@ -1258,6 +1826,7 @@ class SLMConfig:
                 api_key=llm_api_key,
                 api_base=llm_api_base,
             ),
+            temporal_validator=TemporalValidatorConfig(mode="c"),
             channel_weights=ChannelWeights(
                 semantic=1.5,
                 bm25=1.2,

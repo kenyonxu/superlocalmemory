@@ -13,31 +13,123 @@
 // surfaces as a normal rejection and the UI can show a clear error.
 // ============================================================================
 
-window.SLM_FETCH_TIMEOUT_MS = 15000;
+// v3.8.3: 30s (> the server's 25s recall budget) so the browser waits for a
+// quality recall under heavy multi-agent load instead of aborting it early
+// ("signal is aborted without reason"). The server self-bounds recall and
+// falls back to keyword within its budget, so this only ever waits longer for
+// a genuinely stuck request. Per-call init.timeoutMs still overrides.
+window.SLM_FETCH_TIMEOUT_MS = 30000;
+window.SLM_INSTALL_TOKEN_KEY = 'slm_install_token';
 
-// Global fetch patch: apply the abort timeout to every relative-URL request
+// B2 (3.7.9): the install token is kept in a private closure, never in
+// sessionStorage — a stored token is trivially readable by any injected
+// script (sessionStorage.getItem), which was the theft leg of the XSS chain.
+window.slmInstallToken = (function () {
+    var _cache = null;  // in-memory only; not on window, not in storage
+    return async function (forceRefresh) {
+        if (!forceRefresh && _cache) return _cache;
+        var response = await window.__slmOriginalFetch(
+            '/internal/token',
+            {credentials: 'same-origin'}
+        );
+        if (!response.ok) return '';
+        var payload = await response.json();
+        var token = payload && payload.token ? payload.token : '';
+        if (token) _cache = token;
+        return token;
+    };
+})();
+
+// Global fetch patch: apply the abort timeout to every same-origin request
 // automatically. 17 UI modules call bare fetch() — patching here avoids
 // touching each one and guarantees no future callsite can regress to an
-// un-timed fetch that holds the spinner forever. Absolute URLs (external
-// resources) are passed through unchanged. Callers that already supply
+// un-timed fetch that holds the spinner forever. External URLs are passed
+// through unchanged. Callers that already supply
 // `signal` keep their own behavior. `init.timeoutMs` lets callers override
 // the default per-request.
 (function patchFetch() {
     if (window.__slmFetchPatched) return;
     window.__slmFetchPatched = true;
     var _origFetch = window.fetch.bind(window);
+    window.__slmOriginalFetch = _origFetch;
     window.fetch = function (input, init) {
-        init = init || {};
-        var urlStr = typeof input === 'string' ? input : (input && input.url) || '';
-        var isRelative = !(/^https?:\/\//i.test(urlStr));
-        if (!isRelative || init.signal) {
-            return _origFetch(input, init);
+        init = Object.assign({}, init || {});
+        var urlStr = typeof input === 'string'
+            ? input
+            : (input && (input.url || input.href)) || '';
+        // Resolve every URL before deciding whether it is local. In particular,
+        // protocol-relative URLs such as //host/path inherit the current scheme
+        // but are not same-origin and must never receive the install token.
+        var isSameOrigin = false;
+        var requestUrl = null;
+        try {
+            requestUrl = new URL(urlStr, window.location.href);
+            isSameOrigin = requestUrl.origin === window.location.origin;
+        } catch (e) {
+            // A malformed URL is handled by native fetch. Treat it as external
+            // here so it cannot obtain local credentials while failing.
         }
-        var controller = new AbortController();
-        var timeoutMs = init.timeoutMs || window.SLM_FETCH_TIMEOUT_MS;
-        var timer = setTimeout(function () { controller.abort(); }, timeoutMs);
-        init.signal = controller.signal;
-        return _origFetch(input, init).finally(function () { clearTimeout(timer); });
+        var method = String(
+            init.method || (input && input.method) || 'GET'
+        ).toUpperCase();
+        var mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].indexOf(method) !== -1;
+        var invalidatesCache = init.slmInvalidatesCache !== false;
+        var requiresWriteAuth = init.slmRequiresWriteAuth !== false;
+        delete init.slmInvalidatesCache;
+        delete init.slmRequiresWriteAuth;
+
+        function invalidateAfterMutation(request) {
+            if (!isSameOrigin || !mutating || !invalidatesCache) return request;
+            return request.then(function (response) {
+                if (
+                    response && response.ok &&
+                    typeof window.slmInvalidatePanes === 'function'
+                ) {
+                    window.slmInvalidatePanes();
+                }
+                if (
+                    response && response.ok &&
+                    typeof window.slmInvalidateDashboardCache === 'function'
+                ) {
+                    window.slmInvalidateDashboardCache();
+                }
+                return response;
+            });
+        }
+
+        function send() {
+            if (!isSameOrigin || init.signal) {
+                return invalidateAfterMutation(_origFetch(input, init));
+            }
+            var controller = new AbortController();
+            var timeoutMs = init.timeoutMs || window.SLM_FETCH_TIMEOUT_MS;
+            var timer = setTimeout(function () { controller.abort(); }, timeoutMs);
+            init.signal = controller.signal;
+            return invalidateAfterMutation(
+                _origFetch(input, init).finally(function () { clearTimeout(timer); })
+            );
+        }
+
+        if (
+            isSameOrigin &&
+            mutating &&
+            requiresWriteAuth &&
+            (!requestUrl || requestUrl.pathname !== '/internal/token')
+        ) {
+            return window.slmInstallToken(false).then(function (token) {
+                if (!token) throw new Error('local write credential unavailable');
+                var headers = new Headers(
+                    init.headers || (input && input.headers) || {}
+                );
+                if (!headers.has('X-Install-Token')) {
+                    headers.set('X-Install-Token', token);
+                }
+                init.headers = headers;
+                init.credentials = init.credentials || 'same-origin';
+                return send();
+            });
+        }
+        return send();
     };
 })();
 
@@ -419,22 +511,30 @@ function populateFilters(categories, projects) {
     // Clear existing options beyond the first placeholder to prevent duplicates on refresh
     if (categorySelect) while (categorySelect.options.length > 1) categorySelect.remove(1);
     if (projectSelect) while (projectSelect.options.length > 1) projectSelect.remove(1);
-    categories.forEach(function(cat) {
-        if (cat.category) {
-            var option = document.createElement('option');
-            option.value = cat.category;
-            option.textContent = cat.category + ' (' + cat.count + ')';
-            categorySelect.appendChild(option);
-        }
-    });
-    projects.forEach(function(proj) {
-        if (proj.project_name) {
-            var option = document.createElement('option');
-            option.value = proj.project_name;
-            option.textContent = proj.project_name + ' (' + proj.count + ')';
-            projectSelect.appendChild(option);
-        }
-    });
+    // Guard appendChild: in the OD dashboard #filter-category / #filter-project
+    // live in a folded pane and are frequently absent. Without these guards a
+    // null.appendChild threw, tripping the loadStats() catch and zeroing every
+    // dashboard counter after a profile create/switch.
+    if (categorySelect) {
+        categories.forEach(function(cat) {
+            if (cat.category) {
+                var option = document.createElement('option');
+                option.value = cat.category;
+                option.textContent = cat.category + ' (' + cat.count + ')';
+                categorySelect.appendChild(option);
+            }
+        });
+    }
+    if (projectSelect) {
+        projects.forEach(function(proj) {
+            if (proj.project_name) {
+                var option = document.createElement('option');
+                option.value = proj.project_name;
+                option.textContent = proj.project_name + ' (' + proj.count + ')';
+                projectSelect.appendChild(option);
+            }
+        });
+    }
 }
 
 // ============================================================================
@@ -450,6 +550,11 @@ window.addEventListener('DOMContentLoaded', function() {
     loadProfiles();
     loadStats();
     loadGraph();
+    // DASH-V1/V2/V3 fix: populate the landing-page cards (Operating Mode,
+    // LLM Provider, Memories facts, Version) on first paint. loadDashboard()
+    // was only bound to visibilitychange/focus/hashchange, none of which fire
+    // on a fresh load, so those cards were stuck on their static "Loading…".
+    if (typeof loadDashboard === 'function') loadDashboard();
 
     // v2.5 — Event Bus + Agent Registry (graceful if functions don't exist)
     if (typeof initEventStream === 'function') initEventStream();

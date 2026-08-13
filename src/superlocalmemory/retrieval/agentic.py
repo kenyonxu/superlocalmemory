@@ -15,7 +15,7 @@ Design decisions:
 - Mode C: LLM sufficiency judgment with 3-way classification
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
-License: Elastic-2.0
+License: AGPL-3.0-or-later
 """
 from __future__ import annotations
 
@@ -314,7 +314,7 @@ class AgenticRetriever:
                 entity = self._db.get_entity_by_name(name, profile_id)
                 if entity:
                     try:
-                        aliases = self._db.get_aliases_for_entity(entity.entity_id)
+                        aliases = self._db.get_aliases_for_entity(entity.entity_id, profile_id)
                         for a in aliases[:2]:
                             sub_queries.append(f"{a.alias} {' '.join(action_words)}")
                     except Exception:

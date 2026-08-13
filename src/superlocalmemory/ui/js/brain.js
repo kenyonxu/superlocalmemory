@@ -21,7 +21,8 @@
 (() => {
   'use strict';
 
-  const TOKEN_STORAGE_KEY = 'slm_install_token';
+  // B2 (3.7.9): token kept in a private closure var, never sessionStorage.
+  let _tokenCache = null;
 
   // --------------------------------------------------------------------
   // Safe DOM helper — the ONLY way this file creates nodes.
@@ -69,25 +70,9 @@
   // --------------------------------------------------------------------
   // Token handling — auto-fetch from local daemon, never prompt user.
   // --------------------------------------------------------------------
-  function readToken() {
-    try {
-      return window.sessionStorage
-        ? window.sessionStorage.getItem(TOKEN_STORAGE_KEY)
-        : null;
-    } catch (e) {
-      return null;
-    }
-  }
+  function readToken() { return _tokenCache; }
 
-  function writeToken(value) {
-    try {
-      if (window.sessionStorage) {
-        window.sessionStorage.setItem(TOKEN_STORAGE_KEY, value);
-      }
-    } catch (e) {
-      // storage disabled — keep in-memory.
-    }
-  }
+  function writeToken(value) { _tokenCache = value; }
 
   async function fetchTokenFromServer() {
     try {
@@ -426,7 +411,7 @@
   function cardBandit(b) {
     const data = b || {};
     const wrap = EL('section', {className: 'brain-section'});
-    wrap.appendChild(EL('h4', {text: 'Adaptive ranking (bandit)'}));
+    wrap.appendChild(EL('h4', {text: 'Adaptive ranking'}));
 
     const top = data.top_arm_global;
     const topText = top
@@ -1081,10 +1066,12 @@
       'aria-live': 'polite',
     });
     btn.addEventListener('click', async () => {
-      const ok = window.confirm(
-        'Reset all learning data? Memories will be preserved, '
-        + 'but learned patterns and ranking signals will be deleted.',
-      );
+      const ok = await window.confirmDestructive({
+        title: 'Reset learning data',
+        target: 'All learned patterns and ranking signals',
+        consequence: 'Memories will be preserved, but learned patterns and ranking signals will be deleted.',
+        confirmLabel: 'Reset',
+      });
       if (!ok) return;
       status.textContent = 'Resetting…';
       try {

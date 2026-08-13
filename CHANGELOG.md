@@ -1,9 +1,635 @@
 # Changelog
 
-All notable changes to SuperLocalMemory V3 will be documented in this file.
+All notable changes to SuperLocalMemory will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [4.0.1] - 2026-08-09 — Dashboard and operations-status correctness
+
+### Fixed
+- The packaged dashboard identifies itself as SuperLocalMemory V4 and uses an
+  absolute packaged favicon path. Both unified and standalone dashboard servers
+  now provide the conventional `/favicon.ico` route by redirecting to the
+  packaged SVG icon.
+- The daemon's operations-status counters now receive their FastAPI application
+  explicitly, so persisted dead-letter, degraded-manifest, and exhausted-
+  obligation counts cannot be silently reported as zero.
+
+## [4.0.0] - 2026-08-01 — Verifiable memory transactions
+
+Version 4.0 hardens the full lifecycle of a memory operation — admission,
+canonical commit, projection to every store, migration, backup, and erasure —
+so each step is authorized and verifiable. Existing memories and
+configuration are preserved; M038 (eager) and M039 (deferred) migrations are
+automatically applied at startup — no manual migration is normally required
+(see `src/superlocalmemory/storage/migration_runner.py`; `slm db migrate` is
+forward-only: `status`/`--dry-run`/apply, no rollback). Schema downgrade is
+unsupported — restore a verified pre-upgrade backup instead.
+
+### Changed
+- **MCP SDK 2.0.0 (fully-stateless Streamable HTTP).** Pinned `mcp==2.0.0`.
+  Replaced deleted `mcp.server.fastmcp.FastMCP` with
+  `mcp.server.mcpserver.MCPServer` (same `@tool` decorator and
+  `run(transport="stdio")`). Transport knobs
+  (`stateless_http`, `json_response`, `streamable_http_path`,
+  `transport_security`) are now kwargs to `streamable_http_app()` —
+  `_configure_mcp_transport_settings()` returns that kwargs dict.
+  **Stateless is the default** (opt out with `SLM_MCP_STATEFUL=1`). Session
+  idle-timeout and EventStore SSE resumability are unused under
+  `stateless_http=True`. Application-level `session_init` / `close_session`
+  are unchanged (orthogonal to transport sessions). SDK lowlevel already
+  registers `server/discover` — not hand-written. Product version is passed
+  as `MCPServer(version=...)` (no private `_mcp_server.version` poke).
+
+### Added
+- A unified admission gateway resolves one authenticated actor, active profile,
+  and policy decision for every write across the CLI, MCP, HTTP, WebSocket, and
+  hook surfaces.
+- Every completed operation carries a durable receipt and a hash-verifiable
+  completion manifest spanning all representations.
+- **BackupCoordinator** is available as a coherent, checksum-verified backup
+  set primitive (`src/superlocalmemory/infra/backup.py`: `BackupCoordinator.create_backup_set()` /
+  `restore_from_manifest()` — shared epoch, per-store SHA-256, manifest hash,
+  atomic publish, pre-restore snapshot + rollback). Production backup,
+  dashboard, cloud, and export routes currently use the **legacy
+  `BackupManager`** independent per-file SQLite `sqlite3.backup()` snapshots
+  (one file at a time); companion-store failures are logged as non-critical
+  and do not fail the primary `memory.db` snapshot (`_backup_all_dbs`). See
+  correction note below.
+- **SLM-Mesh** remains the peer-coordination plane (cross-session / cross-machine
+  messages, locks, shared state, inbox/outbox) with mesh MCP tools on the
+  `full` / `power` / `mesh` profiles.
+- Documented MCP profile counts for the V4 surface: `full` 42 (default everyday),
+  `power` 54, `whole` 87 registered tools; `core` 14, `code` 24, `mesh` 8.
+- Product documentation reframes the release as V4: multi-scope memory and
+  profiles, cache/compress context optimization, Entity Explorer and skill
+  evolution, Modes A/B/C locality choices, GDPR export/erasure/retention and
+  hash-chained audit controls, and the seven-layer retrieval/operations stack.
+
+### Security
+- Outbound provider requests are validated against server-side request forgery,
+  blocking internal metadata endpoints and unresolved hosts.
+- Secrets are scrubbed from content before it is persisted or indexed, on both
+  the canonical write path and import.
+- Profile erasure removes every representation — main store, projections,
+  full-text and semantic indexes, and the context cache — and reports each count.
+- Mesh peers receive server-assigned identities bound to tenant and project;
+  production remote transport rejects plaintext, and shared state rejects
+  secret-looking values.
+
+### Fixed
+- A corrected fact is re-indexed everywhere, so semantic and keyword recall
+  reflect the new content instead of a stale copy.
+- Archived facts are excluded from every read path, including keyword search
+  and direct fetch.
+- Schema migrations refuse to run against a database written by a newer build,
+  and a migration whose dependency did not complete is held back.
+- In-memory configuration changes are preserved across a save, and unknown or
+  externally tuned settings survive a load/save cycle.
+
+### Backup scope and offline guidance (correction)
+
+*Correction 2026-08-08 — the 2026-08-01 text “Backups are captured as a
+coherent, checksum-verified set and restored atomically …” described the
+`BackupCoordinator` primitive, not the wired production path. The production
+path ( `BackupManager.create_backup()` / `server/routes/backup.py` /
+`maintenance_scheduler` auto-backup / cloud sync / dashboard **Export**
+) remains independent per-file `sqlite3.backup()` snapshots; this entry is
+preserved with this pointer rather than silently rewritten.*
+
+- Included stores (legacy path): `memory.db`, `learning.db`, `audit_chain.db`,
+  `code_graph.db`, `pending.db`, `audit.db` — only those present on disk; no
+  other files are backed up. `memory-*.db` is the primary snapshot;
+  `_backup_all_dbs()` copies remaining managed DBs one-by-one.
+  Companion-copy exceptions are caught and logged at `warning` as non-critical.
+  `lance/` (LanceDB directory) is **not** included by the legacy path; the
+  coherent primitive handles it as an out-of-manifest companion.
+- Exclusions: nothing outside `MANAGED_DATABASES`; no coherent epoch or
+  cross-store manifest/rollback claim for the production path.
+- Dashboard **Export** (`POST /api/backup/export`) creates a single compressed
+  `.db.gz` from the latest `memory.db` snapshot only (`memory-*.db` → gzip).
+  It is not a coherent whole-root export.
+- No `BackupCoordinator` epoch/atomic-set / whole-root backup is wired to
+  production routes or `slm` subcommands in this release.
+- Legacy backup destination files follow the process **umask**, not source-file
+  permission inheritance; there is no unwired whole-root restore route. For
+  offline whole-root backup/restore, `slm serve stop` (stop the daemon) first
+  so WAL/SHM are checkpointed, then copy the complete data-root store set
+  (all present `*.db` plus `-wal`/`-shm` sidecars and `lance/` if present)
+  with the destination directory on an encrypted/private volume; verify
+  resulting files are owner-only (`0600`/`0700`) after copy.
+- Legacy backup destination follows process umask; do not claim source
+  permission inheritance.
+
+### Notes
+- Existing memories and configuration are preserved. V4.0.0 M038 (eager) and
+  M039 (deferred) are auto-applied at startup; no manual `slm db migrate` is
+  normally required. Downgrade requires a verified pre-upgrade complete backup
+  (stop daemon before offline copy, include WAL/SHM). No `slm db migrate
+  --rollback`; use restore of that backup instead.
+
+## [3.8.10] - 2026-07-29 — Reliable startup and MCP writes
+
+### Fixed
+- Concurrent remember calls now share one bounded SQLite writer deadline
+  across local and database contention. Idempotent retries avoid redundant
+  journal writes, and the advisory dispatch marker no longer adds a second
+  full disk sync before the canonical write.
+- A remember that has already committed now returns its durable receipt even
+  if auxiliary journal reconciliation reaches the caller deadline. Retrying
+  returns the same fact instead of reporting an ambiguous failure.
+- Streamable HTTP `remember` calls no longer risk freezing the daemon when a
+  transient daemon request fails. Fallback discovery and storage now run away
+  from the server event loop, and the running daemon remains the sole writer.
+- Startup failures now preserve and report their original cause instead of
+  being replaced by a secondary `profile_runtime` error.
+- Embedding repair now marks a fact complete only after its searchable vector
+  projection is durable. A failed projection remains pending and is retried
+  instead of silently reducing recall quality.
+- Embedding providers that return the wrong vector dimension are rejected
+  before caching or storage, preventing mixed-dimension indexes.
+- Windows shadow capture now preserves its owner-only file protection without
+  failing on newly created files on current Windows hosts.
+- Release builds now reject extra, missing, or byte-different Python modules
+  across the npm package, Python wheel, and source distribution.
+
+### Notes
+- Existing memories and configuration are preserved. No database migration is
+  required.
+
+## [3.8.9] - 2026-07-27 — Reliable MCP recall and background processing
+
+### Fixed
+- MCP recall is reliable through both supported connection methods: local
+  stdio and Streamable HTTP. HTTP tool calls no longer hang the daemon.
+- Changing dashboard memory or model settings no longer leaves background
+  processing stuck. Your saved memories stay available while processing resumes
+  safely with the updated settings.
+- Newly saved memories remain immediately searchable while their richer
+  background indexing completes.
+
+### Notes
+- Existing memories and configuration are preserved during upgrade. No manual
+  migration is required.
+
+## [3.8.8] - 2026-07-27 — Live-database recall and vector integrity
+
+### Fixed
+- Foreground recall now retains priority while startup repair and canonical
+  remember enrichment are active. Background embedding work yields between
+  items and cannot cold-start the shared local model ahead of a user query.
+- Daemon readiness now verifies that the local embedding subprocess is
+  actually alive and has served a request instead of trusting a stale startup
+  flag.
+- Scene clustering reuses durable fact embeddings and ignores legacy scene
+  rows whose facts were already consolidated away. Mature databases no longer
+  issue thousands of redundant model requests or repeatedly recycle the
+  embedding worker after restart.
+- sqlite-vec row allocation is serialized across processes, and every metadata
+  pointer is validated against the vector payload's profile. Cross-profile
+  row-id collisions are repaired without exposing another profile's memory.
+- Vector writes roll back abandoned transactions, missing vectors are repaired
+  exactly, and semantic search expands past legacy orphan payloads.
+- Entity-cache startup reads are bounded and load only the columns used by the
+  entity channel.
+- Exact lexical evidence remains protected after learned ranking so a freshly
+  remembered exact marker cannot be displaced by a weaker semantic match.
+
+### Notes
+- Recall remains physically query-only; remember owns durable writes and
+  continues full canonical enrichment asynchronously after immediate queryable
+  admission.
+- This candidate must pass the installed wheel, installed npm tarball,
+  dashboard, MCP, CLI, and mature live-database gates before publication.
+
+## [3.8.7] - 2026-07-27 — Existing graph-store compatibility
+
+### Fixed
+- Upgrades now retain the PyCozo 0.3.0 native binding used to create existing
+  Cozo graph stores. Version 3.8.6 selected PyCozo 0.7.6, whose incompatible
+  on-disk format could stop the daemon at startup with
+  `Unknown storage version 1`.
+- A native Cozo panic is now contained at the optional projection boundary.
+  The daemon remains available on canonical SQLite and preserves the graph
+  files unchanged instead of losing access to memory.
+
+### Notes
+- Existing PyCozo 0.3.0 graphs require no rebuild or database migration.
+- All serialized-write, read-only recall, admission-journal, and dead-letter
+  fixes from 3.8.6 are unchanged.
+
+## [3.8.6] - 2026-07-27 — Serialized writes and read-only recall
+
+### Fixed
+- Remember requests and dashboard fact mutations now enter one bounded,
+  priority-aware coordinator. Durable idempotency receipts make retries safe,
+  while accepted admissions survive daemon interruption and replay once.
+- Recall paths now use query-only SQLite connections and no longer update
+  diagnostics, bandit state, access counters, or other canonical tables.
+- Dashboard, CLI, and MCP mutations use the running daemon instead of opening
+  competing writable engines. When the daemon is unavailable, writes fail
+  explicitly instead of silently switching to another database path.
+- Mode and profile changes rebind the canonical writer before the new runtime
+  is exposed, and roll back cleanly when persistence fails.
+- Stuck background enrichment work is moved to a bounded failed/dead-letter
+  state instead of retrying forever (#77).
+- Daemon shutdown now closes deferred writers and terminates embedding and
+  reranker workers within bounded time, including Mode B container deployments
+  (#91).
+- CozoDB now installs on Linux ARM64 by using the current embedded wheel series.
+
+### Added
+- A separate authenticated admission journal protects accepted remember
+  requests before canonical SQLite work begins.
+- Runtime readiness now distinguishes full retrieval readiness from degraded
+  or warming operation without breaking existing status clients.
+- Concurrency regression coverage for duplicate remember requests, foreground
+  priority, read-only recall, legacy writer coexistence, mode/profile isolation,
+  and bounded child-process shutdown.
+
+### Notes
+- Upgrades apply automatically on daemon start; no manual migration is needed.
+- Existing memory databases are preserved. The new coordinator ledger and
+  admission journal are additive.
+
+## [3.8.5] - 2026-07-26 — Reliable, full-quality recall
+
+### Fixed
+- Recall now consistently uses full-quality relevance ranking. The ranking model
+  warms up in the background with automatic retries, so recall no longer quietly
+  falls back to basic scoring when the model is slow to load, is recycled, or is
+  restarted. Full ranking resumes on its own within seconds if it is ever interrupted.
+- The first recall after startup is now fast. The memory graph is fully warmed in
+  the background before queries arrive, instead of the first query paying a
+  multi-second load — and the graph no longer reloads on the query path during
+  normal use, so recall latency stays consistent.
+- Recall stays responsive under heavy concurrent load. A startup contention issue
+  that could make the first queries slow on busy multi-agent systems has been removed.
+- The internal recall cache is now cleaned up automatically. It could previously
+  grow without bound over months of use; on upgrade, stale entries are compacted away.
+
+### Added
+- Automatic scale-up for very large memory graphs. A database that grows past
+  millions of connections switches to a high-performance graph backend on its own;
+  smaller databases stay on the fast built-in engine, which is quicker for them. The
+  switch runs in the background, is verified for correctness before it takes effect,
+  and falls back safely to the built-in engine if it cannot complete.
+
+### Notes
+- Upgrades apply automatically on daemon start — no manual migration command needed.
+- Recommended upgrade for all 3.8.x users.
+
+## [3.8.4] - 2026-07-26
+
+### Fixed
+- Frequent "database is locked" errors under heavy or concurrent multi-agent use.
+- MCP connections dropping when idle; connections now stay stable and recover cleanly.
+- A just-saved memory is now instantly findable by meaning, not only by keyword (on a warm instance).
+- HTTP write endpoints (dashboard Save / API) were rejected on some networked/containerized setups (#90).
+- Background ingestion operations that failed no longer retry forever; failures move to a dead-letter queue (#77).
+- Stale agent locks are cleared on restart; daemon shutdown no longer logs spurious import errors; the dashboard UI serves reliably on restricted filesystems.
+### Added
+- A choice of connection transport (stdio or HTTP) when connecting IDEs.
+- Configurable graph-memory pruning (max edges per node, minimum edge weight) (#84).
+### Notes
+- Upgrades apply automatically on daemon start — no manual migration command needed.
+
+## [3.8.3] - 2026-07-24 — Recall stays responsive under heavy load
+
+### Fixed
+
+- **Recall no longer hangs when the system is busy.** Search and recall now
+  complete within a generous time budget even during background maintenance or
+  when many agents are querying at once. If a query can't finish in that window,
+  SLM returns keyword-matched results and marks them clearly instead of leaving
+  the request to time out. This applies everywhere recall runs — the dashboard
+  search, the CLI, and connected assistants — so results are consistent across
+  every surface.
+- **Dashboard search waits long enough for a real answer.** The dashboard now
+  allows recall the full server-side budget before giving up, so heavy-load
+  queries return results rather than an aborted-request error.
+
+## [3.8.2] - 2026-07-24 — Self-healing upgrades & faster, consistent recall
+
+### Added
+
+- **Self-healing on startup.** After an upgrade the daemon quietly repairs its
+  own index in the background — backfilling any missing embeddings and rebuilding
+  vector indexes — with no manual steps and no interruption to recall. Progress
+  is visible in the dashboard. Upgrading is now genuinely zero-touch.
+- **Confidence-aware recall.** Every recall result now carries clear confidence
+  signals (`no_confident_match`, `answer_confidence`, `abstained`). Connected
+  assistants are guided to sharpen and re-run a query when confidence is low
+  rather than guessing — better answers, with no extra server-side wait.
+- **New `client_driven_agentic` setting** controls whether query refinement is
+  delegated to the calling assistant (default) or performed inside the server.
+- **Self-repairing components.** On startup SLM checks that the models and
+  dependencies it needs are present and quietly re-downloads or reinstalls the
+  ones it can, in the background — no commands to run. Anything it can't fix on
+  its own (for example a missing Ollama install) is reported with the exact
+  command to fix it.
+- **Dashboard “System Health” report.** A new panel in the dashboard Help area
+  shows every component as ready / missing / degraded, with copy-paste fixes and
+  a “Retry now” button.
+- **Editable memory settings in the dashboard.** A new “Recall & Memory
+  Behaviour” group lets you tune recall depth, the quality reranker, and memory
+  injection from the UI. Changes apply immediately and persist — no config files
+  to edit by hand.
+- **`slm help` and `slm doctor --fix`.** `slm help` now prints a grouped guide to
+  every command plus focused topics (`slm help modes | config | self-heal`), and
+  `slm doctor --fix` auto-repairs the components it can.
+- **Friendlier first-time setup.** `slm setup` detects a local Ollama and offers
+  Smart-Local mode in one keypress, summarizes what will download and asks before
+  the large optional compression model, can connect all your detected IDEs in one
+  step, and finishes with a health check. Skill Evolution is now off by default.
+
+### Changed
+
+- **Recall is faster and consistent across every surface.** The CLI, MCP, and
+  editor integrations now return the same fast local results (all retrieval
+  channels plus reranking) in about 1–2 seconds and behave identically. The
+  occasional multi-second tail on some queries is gone.
+- **Dashboard search stays snappy.** The search box returns a quick result list;
+  richer synthesis remains available in the memory chat and knowledge-cluster
+  summaries.
+
+### Fixed
+
+- **Large databases no longer produce an occasional multi-second recall spike**
+  (graph bridge discovery is now time-bounded).
+- **Upgrades that only relabel an embedding model no longer trigger a full
+  re-embed** of every stored memory.
+- Dashboard search now reliably reflects the active profile.
+
+## [3.8.1] - 2026-07-23 — Existing-install stability
+
+### Fixed
+
+- **Large existing databases no longer delay daemon readiness for a full tier
+  rebalance.** Startup now initializes bounded backend state and leaves the
+  scheduled full-database tier evaluation to maintenance.
+- **Failed enrichment can no longer retry forever.** Automatic durable-ingestion
+  materialization stops after ten attempts; an operator can still request an
+  explicit retry after correcting the underlying issue.
+- **Background enrichment no longer monopolizes SQLite.** Durable
+  materialization now uses short saga checkpoints instead of holding one
+  database write transaction across model extraction and embedding work, so
+  remember, update, delete, and dashboard actions remain writable while
+  enrichment continues.
+- **Durable enrichment retries are idempotent after partial failure.** Fact,
+  evidence, provenance, graph, temporal, and entity-association effects are
+  checkpointed or keyed so retries and process recovery cannot inflate them.
+- **Entity counts stay O(1) on mature databases.** A normalized, indexed
+  fact/entity association ledger replaces per-entity scans of the full facts
+  table; existing associations are backfilled once during upgrade.
+- **Newly queryable memories are immediately visible to recall.** A strong
+  exact BM25/FTS hit now retains one bounded result slot even when semantic
+  candidates would otherwise fill a small `limit`, preserving the
+  queryable-before-enrichment contract.
+- **Mesh heartbeat writes no longer block the async HTTP event loop.** SQLite
+  work runs in FastAPI's worker thread pool, keeping health, token, dashboard,
+  recall, and remember endpoints responsive during peer activity.
+- **Dashboard navigation preserves mounted pane state.** Brain, Knowledge Graph,
+  Memories, and Entity Explorer do not remount and refetch on every return.
+  Successful writes and configuration changes invalidate pane state once so
+  the next visit refreshes deliberately.
+- **Brain telemetry is historical and provenance-backed.** Existing reward
+  outcomes are repaired into source-quality observations in resumable bounded
+  batches, and transient database errors can no longer be reported as a
+  completed repair.
+- **Company-mode learning controls enforce workspace permissions.** Learning
+  and behavioral reads and mutations now apply the same read, write, delete,
+  and manage gates as the rest of the control plane.
+- **Large graph views have a fixed browser-compute budget.** The dashboard can
+  render the requested graph result while force simulation is bounded, with a
+  short initial settle and finite animation window; selecting a large graph can
+  no longer monopolize the browser main thread.
+- **Interactive model workers stay warm instead of repeatedly cold-starting.**
+  Embedding and reranker workers now remain resident for a 30-minute working
+  session by default, and the embedding peak guard matches the daemon's
+  2.5 GB per-worker watchdog. Low-RAM installations can retain shorter idle
+  windows and stricter recycling through the existing environment overrides.
+- **CLI mutations use the resident daemon as the single database writer.**
+  Exact delete and update commands no longer initialize a competing engine
+  beside a running daemon, preventing lock failures on active existing
+  installations.
+- **Skill Evolution repairs incomplete historical schemas.** The migration
+  runner verifies a completed migration's promised end-state before skipping
+  it and reapplies additive DDL when an older upgrade left a required table
+  missing.
+- **Release packages are deterministic again.** Canonical data-root routing,
+  generated plugin parity checks, truthful integration instructions, and the
+  bounded npm package surface are restored.
+
+## [3.8.0] - 2026-07-23 — Teams, bounded loops, and nine framework adapters
+
+### Added
+
+- **Team & company memory with real access control.** A workspace (profile) can
+  now have multiple users, each with a role — **admin**, **member**, or
+  **viewer**. Admins manage people and settings, members read and write, viewers
+  read only. Everything is managed from the dashboard's new **Team & access**
+  panel: add a person, set their role, sign in, or remove them — no config files
+  or command line needed.
+- **Sign-in for shared workspaces.** Turn on *"require sign-in"* (company mode)
+  and everyone must log in before reading or writing memory, so every action is
+  attributable to a person. Single-user setups are unchanged and need no login.
+- **Private, shared, and global memories across a mesh.** Memories keep their
+  personal / shared / global visibility consistently when several SuperLocalMemory
+  instances are connected, and one team's coordination never bleeds into another's.
+- **Optional personal-data scrubbing on save.** Enable PII redaction and emails,
+  phone numbers, national IDs, payment cards, and IP addresses are stripped from
+  content before it is ever stored.
+- **Bounded loops — gate-verified iteration.** A loop terminates only when an
+  independent gate passes (a test exit code, a linter, a JSON-schema check, or
+  an SLM-recall condition) — never when the agent reports completion. Every lap
+  is persisted to SLM memory under the tag `loop:<name>`, making runs auditable
+  and resumable across sessions. Ships on three surfaces: the `slm loop` CLI
+  (`demo` / `history` / `show`), the `/slm-loop` skill with the
+  `slm-loop-runner` agent, and the MCP tools `slm_loop_run` /
+  `slm_loop_history` / `slm_loop_show` (available in the `code` and `full`
+  profiles).
+- **Nine framework adapters.** SLM now ships adapters under `ide/integrations/`
+  for LangGraph, Semantic Kernel, Microsoft Agent Framework, LangChain,
+  LlamaIndex, CrewAI, AutoGen, Google ADK, and OpenAI Agents. Each adapter
+  wires SLM as the memory and history provider without replacing the framework's
+  agent runtime. Pydantic AI is intentionally not included — it does not expose
+  a formal memory interface for external providers.
+- **Multi-Agent Memory dashboard page.** A new dashboard workspace shows
+  per-agent write activity and attribution for environments where multiple
+  agents share one SLM deployment. Memory entries are stamped via
+  `SLM_AGENT_ID`; the page surfaces per-agent write counts, recent activity,
+  and agent trust signals.
+
+### Changed / Fixed
+
+- **Strict tenant isolation across the whole product.** Coordination between
+  agents (peers, messages, shared state, file locks, activity log) is now scoped
+  per workspace, so different teams or companies sharing one deployment can never
+  see each other's activity.
+- **A person can only enter a workspace they belong to.** Switching into a
+  workspace now requires membership.
+- **Tighter file permissions.** Memory, audit, and learning databases are now
+  owner-only on disk.
+
+## [3.7.9] - 2026-07-20 — Dashboard, skill-evolution, and security hardening
+
+### Fixed
+
+- **Skill evolution now produces output.** A token-limit mismatch made every evolution attempt fail silently and produce nothing; the ceiling is corrected and the underlying misconfiguration is logged instead of masked.
+- **Manual evolution respects its cost caps.** Triggering `evolve_skill` directly now runs under the same per-cycle, wall-time, and per-day LLM caps as automatic evolution (previously it could run uncapped).
+- **Dashboard landing page loads on first open.** The Operating Mode, LLM Provider, Memories, and Version cards now populate immediately instead of staying on "Loading…".
+- **Operating mode is consistent everywhere.** The active mode is read from a single source of truth, so the CLI, daemon, and dashboard always agree and the chosen mode and provider are actually used.
+- **Code-graph updates are safe against hostile repositories.** `update_code_graph` rejects paths outside your home directory and runs `git` with hook and config execution disabled.
+- **LanceDB tier updates escape identifiers**, closing a filter-injection path.
+- **Optimize savings** no longer errors when no model is configured.
+
+### Added
+
+- **Configurable, lowest-cost skill-evolution models.** Each step (generate / verify / confirm) defaults to the cheapest capable model for your backend, keeps the blind verifier independent of the generator, and is settable from the CLI or dashboard. Enabling evolution shows a cost advisory.
+- **Dashboard write endpoint** (`POST /api/evolution/config`) for evolution settings, validated against the same allow-list as the CLI.
+- **Test coverage** for the Gmail and Calendar ingestion adapters.
+
+## [3.7.8] - 2026-07-20 — Profile-isolation leak fix, loopback auth opt-in, hardening
+
+### Fixed
+
+- **Cross-profile recall leak (critical).** After a profile switch, the dashboard Chat, memory-facts, and cluster-summary routes read from a long-lived `WorkerPool` subprocess that cached the previous profile for up to 120 seconds, so those views could return the prior profile's memories while the UI reported the new one. Those routes now read the daemon's resident, lease-protected engine — which `commit_daemon_profile_switch` rebinds synchronously on every switch, exactly as the `/recall` and `/remember` endpoints already do — so recall always reflects the current profile. Added full-daemon isolation regression tests that store under one profile, switch, and assert the other profile's data is never returned.
+- Removed a dead consolidation-trigger fast path (`WorkerPool.send_command`, a method that never existed and silently fell through on every call) and placed the remaining direct-consolidation path under the profile-runtime lease so a concurrent switch cannot commit mid-consolidation.
+- The MCP `switch_profile` tool now synchronizes local engine state only to the profile the daemon actually acknowledged, and re-validates that the profile exists locally before adopting it, instead of trusting the response body.
+
+### Added
+
+- `SLM_REQUIRE_API_KEY_LOOPBACK` opt-in. When set together with a configured `api_key` file, uncredentialed loopback writes must also present a matching `X-SLM-API-Key`, restoring the strict posture for shared-host operators. Default behavior is unchanged (local-first): the flag is a no-op unless explicitly enabled. This is a single, explicit control rather than overloading "an api_key file exists" with two meanings — the overload that caused the 3.7.6 write-auth regressions.
+
+### Changed
+
+- Removed the dead `V32_VEC0_DDL` schema constant and retired the now-inert unconditional `check_api_key` write gate (repurposed as the sole enforcement point for the loopback opt-in). The legacy `api.py`/`ui.py` app factories are documented as not served by the daemon.
+
+## [3.7.7] - 2026-07-20 — Profile isolation and runtime integrity
+
+### Fixed
+
+- Fixes daemon-aware profile switching and profile-isolated CLI reads/writes. Profile transitions now drain admitted operations, atomically rebind the resident engine, persist only after a successful transition, and return a generation-stamped acknowledgement to CLI, dashboard/API, and MCP callers without restarting the daemon.
+- Dashboard mode, provider, embedding, and memory-visibility changes now take effect through the same daemon-owned runtime transition boundary. Existing custom embedding settings survive setup-mode changes, and Optimize cache vectors follow the configured embedding dimension instead of assuming 768 dimensions.
+- Migration reconciliation now accepts only explicitly allowlisted historical hashes and verifies the complete required schema before updating migration metadata; unknown or structurally incomplete drift fails closed.
+- Restored cross-platform UI test discovery and added dependency and high-severity static security gates to CI.
+- Upgraded the audited web, MCP, cryptography, and Transformers dependency stack to patched releases. Three narrowly scoped NLTK, setuptools, and PyTorch advisories are tracked as exact, dated exceptions; PyTorch remains on the proven 2.11 runtime because the combined native/ML upgrade produced a full-suite process crash and could not be attributed safely to one package.
+
+### Added
+
+- Dashboard controls and API/CLI configuration support for the default write scope and explicit shared/global recall opt-ins. Personal-only recall remains the default.
+
+## [3.7.6] - 2026-07-19 — Auth, upgrade, and embedding-dimension fixes
+
+### Fixed
+
+- Writes authenticated by the daemon capability or the dashboard install token are no longer rejected once an `api_key` file is configured. The write path ran a redundant second gate that only understood `X-SLM-API-Key`, so capability-authenticated MCP `remember` write-throughs and install-token dashboard writes / config tests returned 401 "Invalid or missing API key" whenever opt-in API-key auth was enabled. The mutation-actor gate — which already accepts the daemon capability, the install token, a matching API key, or an uncredentialed loopback caller — is now the single authoritative write boundary. (#71, #73, #74)
+- Upgrading an install across a benign migration DDL change no longer leaves the daemon permanently `not_ready`. On a `ddl_sha256` mismatch for a migration already marked complete, the runner now consults the migration's `verify()`; when the schema end-state is present it reconciles the log to the current hash instead of failing readiness. Real drift with an absent schema is still surfaced as a failure. (#70)
+- The LanceDB vector backend now follows the configured embedding dimension instead of a hardcoded 768, so custom OpenAI-compatible endpoints (for example 1024-d Qwen3-Embedding) no longer hit a vector-dimension mismatch on initialization. An existing store's on-disk width is always honored, keeping already-materialized data readable after a configuration change. (#72)
+
+### Improved
+
+- `slm setup` skips the local 768-d embedding-model download when a remote/OpenAI-compatible embedding endpoint is configured, instead of forcing an unnecessary model fetch. (#72)
+- Aligned retrieval documentation and docstrings with the shipped architecture: five parallel candidate producers (semantic, BM25, temporal, spreading-activation, Hopfield) feed single-pass RRF fusion, followed by optional cross-encoder rerank and an entity-graph post-fusion score enhancement. The entity graph is not a sixth parallel candidate producer.
+
+## [3.7.5] - 2026-07-18 — Complete Scale Engine projection parity
+
+### Improved
+
+- Scale Engine vector preparation now reads the supported sqlite-vec virtual-table contract and joins vectors through canonical embedding metadata.
+- LanceDB projection imports are profile-scoped, lifecycle-aware, and processed in bounded batches to keep migration memory stable.
+- Scale verification and fingerprints now cover the same canonical vector rows that are written to LanceDB, so a partial vector projection cannot pass parity.
+
+## [3.7.4] - 2026-07-18 — Scale Engine projection-parity release
+
+### Fixed
+
+- Aligned CozoDB projection parity with SLM's logical graph-edge identity while retaining the strongest relationship weight.
+- Preserved canonical SQLite history when normalizing legacy repeated graph rows into derived scale projections.
+- Kept rejected projection manifests inspectable, retired replaceable stage payloads, and allowed a corrected, explicitly confirmed adoption retry.
+- Removed stale CozoDB graph edges when a fact is deleted and kept shadow-error telemetry side-effect free.
+
+## [3.7.3] - 2026-07-18 — Scale Engine integrity release
+
+### Fixed
+
+- Added explicit, structurally verified adoption for pre-v3.7 CozoDB/LanceDB projections.
+- Added durable promotion recovery, lifecycle serialization, and a final canonical-source consistency fence.
+- Made Scale Engine status distinguish installed projection paths, lifecycle state, and live daemon backend health.
+- Unified shipped runtime identity metadata at the release version.
+
+## [3.7.2] - 2026-07-16 — Reliability release
+
+### Fixed
+
+- Strengthened daemon-owned local write coordination across Mesh and MCP paths.
+- Kept durable facts queryable when optional enrichment needs a controlled retry.
+- Preserved graph-aware retrieval through the canonical fallback when sqlite-vec is unavailable.
+- Bounded local embedding-worker dependency failures to prevent repeated worker respawns.
+- Hardened Windows RAM reservations and cross-platform installer validation.
+
+## [3.7.1] - 2026-07-16 — Installer-parity hotfix
+
+### Fixed
+
+- Included the full `plugin-src/` build inputs in the npm artifact so the npm-owned Python runtime can build with the same Codex skill data files as the PyPI artifact.
+- Added a release gate that fails when any Python `data-files` build source is absent from `npm pack` output.
+- Corrected first-run configuration metadata to use the installed runtime version instead of a stale historical version.
+- Kept background reranker warmup informational on first run; fallback retrieval remains explicit and `slm doctor` remains the diagnostic path.
+
+## [3.7.0] - 2026-07-16 — Release package
+
+V3.7 packages the audit-hardening stream: fail-closed release promotion,
+exact artifact testing, evidence and checksums, canonical version/license
+guards, daemon identity and mutation authorization, and retrieval/ingestion
+integrity fixes. Publication remains gated on the final evidence bundle and
+registry verification.
+
+## [3.6.23] - 2026-07-12 — Cross-platform data-root and maintenance hardening
+
+### Fixed
+
+- Resolved the server data directory from the supported environment variables instead of a hard-coded path.
+- Made Langevin maintenance backfill tolerate timezone-naive `created_at` values.
+- Applied the coordinated cross-platform release patch and reconciled package metadata at 3.6.23.
+
+## [3.6.22] - 2026-06-30 — Provider response hardening
+
+### Fixed
+
+- Treated an empty HTTP 200 provider body as a controlled provider error instead of leaking a `JSONDecodeError`.
+- Completed the remaining dashboard audit fixes included in the 3.6.22 release tag.
+
+## [3.6.21] - 2026-06-30 — Dashboard audit and settings preservation
+
+### Fixed
+
+- Preserved unrelated user settings when dashboard and MCP configuration paths write updates.
+- Completed the dashboard UI audit and browser-side mesh authentication repair for issue #60.
+
+## [3.6.20] - 2026-06-26 — Remote mesh authentication repair
+
+### Fixed
+
+- Accepted the supported bearer-token authentication path in the mesh broker and removed the superseded validation path.
+
+## [3.6.19] - 2026-06-24 — Plugin hook source correction
+
+### Fixed
+
+- Moved the session mandate hook into `plugin-src`, the actual build source, so npm prepack no longer overwrites the shipped hook with stale content.
+
+## [3.6.18] - 2026-06-24 — Session mandate and atomic installer state
+
+### Added
+
+- Added the `session_init` mandate, plugin auto-install support, migration M017, and garbage-collection-safe tests.
+
+### Fixed
+
+- Made `settings.json` replacement atomic and hook installation idempotent across repeated installer runs.
 
 ## [3.6.17] - 2026-06-21 — Community PR round + dashboard-feedback fix + SQLite tuning
 
@@ -1764,7 +2390,7 @@ Hardening release — correctness, stability, and security fixes.
 **Varun Pratap Bhardwaj**
 *Solution Architect*
 
-SuperLocalMemory V3 - Intelligent local memory system for AI coding assistants.
+SuperLocalMemory V4 - Intelligent local memory system for AI coding assistants.
 
 ---
 
@@ -2202,7 +2828,7 @@ We use [Semantic Versioning](https://semver.org/):
 - **MINOR:** New features (backward compatible, e.g., 2.0.0 → 2.1.0)
 - **PATCH:** Bug fixes (backward compatible, e.g., 2.1.0 → 2.1.1)
 
-**Current Version:** v3.3.0
+**Current Version:** v4.0.0 (see top of this file for the active release entry)
 **Website:** [superlocalmemory.com](https://superlocalmemory.com)
 **npm:** `npm install -g superlocalmemory`
 
@@ -2210,7 +2836,7 @@ We use [Semantic Versioning](https://semver.org/):
 
 ## License
 
-SuperLocalMemory V3 is released under the [Elastic License 2.0](LICENSE).
+Early SuperLocalMemory V3 packaging used the [Elastic License 2.0](LICENSE); the current public project license is AGPL-3.0-or-later (see LICENSE at the repository root).
 
 ---
 

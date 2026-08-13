@@ -188,8 +188,18 @@ class IDEConnector:  # pragma: no cover — legacy shim, covered by test_ide_con
         path.write_text(content + "\n" + section)
         return True
 
-    def _merge_json(self, path: Path) -> bool:
-        """Merge SLM config into a JSON config file."""
+    def _merge_json(
+        self,
+        path: Path,
+        transport: str = "stdio",
+        daemon_port: int = 8765,
+    ) -> bool:
+        """Merge SLM config into a JSON config file.
+
+        Args:
+            transport: "stdio" (default), "http", or "http-mcp-remote".
+            daemon_port: Daemon port for http transports (default 8765).
+        """
         data: dict[str, Any] = {}
         if path.exists():
             try:
@@ -201,12 +211,20 @@ class IDEConnector:  # pragma: no cover — legacy shim, covered by test_ide_con
         if "mcpServers" not in data:
             data["mcpServers"] = {}
 
-        data["mcpServers"]["superlocalmemory"] = {
-            "type": "stdio",
-            "command": "slm",
-            "args": ["mcp"],
-            "enabled": True,
-        }
+        base_url = f"http://127.0.0.1:{daemon_port}/mcp/"
+        if transport == "http":
+            block: dict[str, Any] = {"type": "http", "url": base_url}
+        elif transport == "http-mcp-remote":
+            block = {"type": "stdio", "command": "mcp-remote", "args": [base_url]}
+        else:
+            block = {
+                "type": "stdio",
+                "command": "slm",
+                "args": ["mcp"],
+                "enabled": True,
+            }
+
+        data["mcpServers"]["superlocalmemory"] = block
 
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2))

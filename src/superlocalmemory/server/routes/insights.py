@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
-from superlocalmemory.server.routes.helpers import DB_PATH, get_active_profile
+from superlocalmemory.server.routes.helpers import DB_PATH, get_active_profile, get_read_connection
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +31,7 @@ def _get_conn(profile: str = "") -> tuple[sqlite3.Connection | None, str]:
     pid = profile or get_active_profile()
     if not DB_PATH.exists():
         return None, pid
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    return conn, pid
+    return get_read_connection(DB_PATH), pid
 
 
 # ── Action Handlers ───────────────────────────────────────────────
@@ -358,10 +356,10 @@ async def insight_action(
         result = handler(conn, pid, limit=limit, days=days)
         result["profile"] = pid
         return result
-    except Exception as exc:
-        logger.warning("Insight action %s failed: %s", action_name, exc)
+    except Exception:
+        logger.exception("Insight action %s failed", action_name)
         return JSONResponse(
-            {"error": f"Query failed: {exc}"},
+            {"error": "Query failed"},
             status_code=500,
         )
     finally:

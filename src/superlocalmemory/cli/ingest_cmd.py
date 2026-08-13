@@ -24,10 +24,14 @@ from argparse import Namespace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from superlocalmemory.infra.data_root import DynamicStatePath
+
 logger = logging.getLogger(__name__)
 
-MEMORY_DIR = Path.home() / ".superlocalmemory"
-MEMORY_DB = MEMORY_DIR / "memory.db"
+# Backward-compatible public paths that resolve at call time instead of
+# freezing Path.home() during module import.
+MEMORY_DIR = DynamicStatePath()
+MEMORY_DB = DynamicStatePath("memory.db")
 
 
 def cmd_ingest(args: Namespace) -> None:
@@ -277,15 +281,25 @@ def _write_tool_events(events: list[dict]) -> int:
 
     v3.4.10: Preserves input_summary, output_summary, and project_path
     from enriched sources (ECC observations, enriched hook).
+
+    Concurrency note
+    ----------------
+    ``slm ingest`` is a SEPARATE OS process — the daemon's threading.RLock
+    write-lock cannot help here.  PRAGMA busy_timeout is the only cross-process
+    lever: it makes SQLite WAIT for the single writer (daemon / hook) to finish
+    instead of immediately raising SQLITE_BUSY.  The ``timeout`` kwarg to
+    sqlite3.connect is the Python-level retry budget (same duration).
     """
-    db_path = MEMORY_DB
+    db_path = Path(MEMORY_DB)
     if not db_path.exists():
         return 0
 
-    conn = sqlite3.connect(str(db_path), timeout=10)
+    _busy_ms = 10_000
+    conn = sqlite3.connect(str(db_path), timeout=_busy_ms / 1000.0)
     count = 0
 
     try:
+        conn.execute(f"PRAGMA busy_timeout={_busy_ms}")
         for ev in events:
             try:
                 conn.execute(

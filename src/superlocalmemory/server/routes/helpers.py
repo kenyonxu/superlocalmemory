@@ -21,6 +21,9 @@ from typing import Optional
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
 
+from superlocalmemory.infra.data_root import DynamicStatePath, canonical_data_root
+from superlocalmemory.storage.memory_write import memory_read, memory_write
+
 
 _engine_logger = logging.getLogger("superlocalmemory.engine")
 
@@ -66,11 +69,34 @@ def _get_version() -> str:
 
 SLM_VERSION = _get_version()
 
-# V3 paths (migrated from ~/.claude-memory to ~/.superlocalmemory)
-MEMORY_DIR = Path.home() / ".superlocalmemory"
-DB_PATH = MEMORY_DIR / "memory.db"
+
+def _resolve_slm_home() -> Path:
+    """Resolve the SLM data dir the SAME way the CLI does.
+
+    The CLI honours ``SLM_DATA_DIR`` → ``SL_MEMORY_PATH`` → ``SLM_HOME``
+    → ``~/.superlocalmemory`` (see ``cli/_lazy_init.py:slm_home``). The
+    dashboard previously hardcoded ``Path.home() / ".superlocalmemory"``,
+    so when a user pointed the CLI at a custom data dir (or set a
+    different ``base_dir`` in ``config.json``), profiles created in the
+    dashboard landed in the default dir while ``slm profile list`` read a
+    different ``memory.db`` and reported the profile missing.
+
+    This function mirrors ``slm_home()`` so both surfaces agree. It is
+    evaluated lazily (at call time inside the properties below) rather
+    than at import, so a process that sets the env var after import —
+    e.g. tests, or a launcher that exports it late — still sees the
+    right path.
+    """
+    return canonical_data_root()
+
+
+# V3 paths (migrated from ~/.claude-memory to ~/.superlocalmemory).
+# Exposed as dynamic module-level path-like objects for backward compatibility
+# with route modules that import them. They never cache an earlier namespace.
+MEMORY_DIR = DynamicStatePath()
+DB_PATH = DynamicStatePath("memory.db")
 UI_DIR = Path(__file__).parent.parent / "ui"
-PROFILES_DIR = MEMORY_DIR / "profiles"
+PROFILES_DIR = DynamicStatePath("profiles")
 
 
 # ---------------------------------------------------------------------------
@@ -191,14 +217,48 @@ def log_mode_change(
     )
 
 
-def get_db_connection() -> sqlite3.Connection:
-    """Get database connection."""
-    if not DB_PATH.exists():
+class _RouteReadConnection:
+    """Compatibility wrapper for legacy route callers that close manually.
+
+    New routes should prefer ``with memory_read(path)``.  A few shared route
+    callers still expect ``get_db_connection()`` to return a connection they
+    can close themselves, so this wrapper preserves that contract without
+    reopening canonical ``memory.db`` in writable mode.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        object.__setattr__(self, "_snapshot", memory_read(db_path))
+        object.__setattr__(self, "_connection", self._snapshot.__enter__())
+        object.__setattr__(self, "_closed", False)
+
+    def __getattr__(self, name: str):
+        return getattr(self._connection, name)
+
+    def __setattr__(self, name: str, value) -> None:
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._connection, name, value)
+
+    def close(self) -> None:
+        if not self._closed:
+            self._snapshot.__exit__(None, None, None)
+            object.__setattr__(self, "_closed", True)
+
+
+def get_read_connection(db_path: Path = DB_PATH) -> _RouteReadConnection:
+    """Return a legacy-compatible, physically read-only canonical connection."""
+    if not db_path.exists():
         raise HTTPException(
             status_code=500,
-            detail="Memory database not found. Run 'slm init' to initialize."
+            detail="Memory database not found. Run 'slm init' to initialize.",
         )
-    return sqlite3.connect(str(DB_PATH))
+    return _RouteReadConnection(db_path)
+
+
+def get_db_connection() -> _RouteReadConnection:
+    """Return the shared dashboard read connection for canonical ``memory.db``."""
+    return get_read_connection(DB_PATH)
 
 
 def dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
@@ -208,7 +268,12 @@ def dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
 
 
 def get_active_profile() -> str:
-    """Read the active profile from profiles.json. Falls back to 'default'."""
+    """Read request runtime truth, falling back to the compatibility cache."""
+    from superlocalmemory.server.profile_runtime import current_request_profile
+
+    runtime_profile = current_request_profile()
+    if runtime_profile:
+        return runtime_profile
     config_file = MEMORY_DIR / "profiles.json"
     if config_file.exists():
         try:
@@ -231,20 +296,22 @@ def validate_profile_name(name: str) -> bool:
 
 
 def ensure_profile_in_db(name: str, description: str = "") -> None:
-    """Ensure a profile row exists in SQLite (idempotent)."""
+    """Ensure a profile row exists in SQLite (idempotent).
+
+    Hot path: called on every authenticated request.  Uses ``memory_write()``
+    so in-process writers serialise through the write lock and cross-process
+    writers (hooks / CLI) wait via PRAGMA busy_timeout instead of getting
+    SQLITE_BUSY.
+    """
     if not DB_PATH.exists():
         return
-    conn = sqlite3.connect(str(DB_PATH))
-    try:
+    with memory_write(DB_PATH) as conn:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute(
             "INSERT OR IGNORE INTO profiles (profile_id, name, description) "
             "VALUES (?, ?, ?)",
             (name, name, description or f"Memory profile: {name}"),
         )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def ensure_profile_in_json(name: str, description: str = "") -> None:
@@ -305,53 +372,47 @@ def sync_profiles() -> list[dict]:
 
 
 def set_active_profile_everywhere(name: str) -> None:
-    """Persist the active profile to BOTH profiles.json and config.json."""
-    # profiles.json
-    config = _load_profiles_json()
-    config['active_profile'] = name
-    _save_profiles_json(config)
+    """Persist active profile through the crash-safe compatibility writer."""
+    from superlocalmemory.server.profile_runtime import persist_active_profile
 
-    # config.json (read by Engine/MCP on startup)
-    config_path = MEMORY_DIR / "config.json"
-    cfg = {}
-    if config_path.exists():
-        try:
-            cfg = json.loads(config_path.read_text())
-        except (json.JSONDecodeError, IOError):
-            pass
-    cfg['active_profile'] = name
-    config_path.write_text(json.dumps(cfg, indent=2))
+    persist_active_profile(name)
 
 
 def delete_profile_from_db(name: str) -> None:
-    """Delete a profile row from SQLite. ON DELETE CASCADE handles child rows."""
+    """Delete a profile row from SQLite.
+
+    rbac_memberships has no FK to profiles, so CASCADE does not remove role
+    grants — they would otherwise survive deletion and silently re-activate if
+    a profile of the same name is later recreated. Remove them explicitly.
+    Uses ``memory_write()`` so the multi-statement DELETE is atomic and
+    serialised against other in-process writers.
+    """
     if not DB_PATH.exists():
         return
-    conn = sqlite3.connect(str(DB_PATH))
-    try:
+    with memory_write(DB_PATH) as conn:
         conn.execute("PRAGMA foreign_keys=ON")
+        # Purge role grants for this workspace (no FK CASCADE covers these).
+        for tbl in ("rbac_memberships",):
+            try:
+                conn.execute(f"DELETE FROM {tbl} WHERE profile_id = ?", (name,))
+            except sqlite3.OperationalError:
+                pass  # table may not exist on older installs
         conn.execute("DELETE FROM profiles WHERE profile_id = ?", (name,))
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def _get_db_profiles() -> list[dict]:
     """Read all profiles from SQLite."""
     if not DB_PATH.exists():
         return []
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute(
-            "SELECT profile_id, name, description, created_at, last_used "
-            "FROM profiles ORDER BY name"
-        ).fetchall()
-        return [dict(r) for r in rows]
+        with memory_read(DB_PATH) as conn:
+            rows = conn.execute(
+                "SELECT profile_id, name, description, created_at, last_used "
+                "FROM profiles ORDER BY name"
+            ).fetchall()
+            return [dict(r) for r in rows]
     except sqlite3.OperationalError:
         return []
-    finally:
-        conn.close()
 
 
 def _load_profiles_json() -> dict:
@@ -402,6 +463,10 @@ class SearchRequest(BaseModel):
     cluster_id: Optional[int] = None
     date_from: Optional[str] = None
     date_to: Optional[str] = None
+    # T-window: relative span ("7d", "30d", "1y") or explicit range
+    # ("2026-07-01..2026-07-31"). When empty, date_from/date_to (if both set)
+    # are used as the range. Empty + no dates = no time filter.
+    window: Optional[str] = None
 
 
 class ProfileSwitch(BaseModel):

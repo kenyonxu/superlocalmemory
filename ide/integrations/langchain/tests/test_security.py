@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 SuperLocalMemory (superlocalmemory.com)
-"""SuperLocalMemory V2 - LangChain Integration Security Tests
+"""SuperLocalMemory V3 - LangChain Integration Security Tests
 
 Security tests covering SQL injection, XSS payloads, oversized content,
 and edge-case session identifiers.  These mirror OWASP agentic-AI concerns
@@ -11,8 +11,9 @@ import os
 import tempfile
 
 import pytest
-from langchain_core.messages import HumanMessage
 
+pytest.importorskip("langchain_core")  # skip cleanly when LangChain isn't installed
+from langchain_core.messages import HumanMessage
 from langchain_superlocalmemory import SuperLocalMemoryChatMessageHistory
 
 
@@ -73,7 +74,7 @@ def test_xss_content(tmp_db):
 def test_large_content(tmp_db):
     """A large message (near the SLM 1 MB limit) is stored and retrieved intact.
 
-    MemoryStoreV2 enforces MAX_CONTENT_SIZE = 1_000_000 on the *stored*
+    The V3 adapter enforces MAX_CONTENT_SIZE = 1_000_000 on the *stored*
     string, which is the JSON-serialized message (not the raw text).  The
     JSON envelope adds ~150 bytes of overhead, so we use 999_000 chars to
     stay safely under the limit.

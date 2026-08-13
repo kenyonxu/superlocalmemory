@@ -14,9 +14,19 @@ All tools return {"success": bool, ...} envelope. Never raise.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable
+
+from mcp.types import ToolAnnotations
+
+from superlocalmemory.core.admission import admits
+from superlocalmemory.core.operation_request import OperationKind
+from superlocalmemory.core.security_primitives import (
+    PathTraversalError,
+    safe_resolve,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +112,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # ==================================================================
 
     @server.tool()
+    @admits(OperationKind.CORRECT)
     async def build_code_graph(
         repo_path: str,
         languages: str = "",
@@ -118,7 +129,14 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
             exclude_patterns: Comma-separated glob patterns to exclude.
         """
         try:
-            repo = Path(repo_path)
+            # SEC: contain the untrusted repo_path under $HOME (same guard as
+            # update_code_graph) so repo_path="/" cannot ingest the whole
+            # filesystem into the code-graph DB.
+            from superlocalmemory.core.security_primitives import PathTraversalError
+            try:
+                repo = safe_resolve(Path.home(), repo_path)
+            except (PathTraversalError, OSError, ValueError) as exc:
+                return _error_response(f"Invalid repo_path: {exc}")
             if not repo.exists():
                 return _error_response(
                     f"Repository path does not exist: {repo_path}"
@@ -229,6 +247,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # ==================================================================
 
     @server.tool()
+    @admits(OperationKind.CORRECT)
     async def update_code_graph(
         repo_path: str = "",
         changed_files: str = "",
@@ -250,6 +269,22 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
             svc = _get_service()
             db = svc.db
 
+            # SEC 3.7.9 (B1): contain untrusted repo_path under $HOME and confirm
+            # it is a real git repo BEFORE any git subprocess runs with it as cwd.
+            # Blocks RCE via attacker-controlled .git config/hooks (core.fsmonitor,
+            # core.hooksPath) that git would otherwise execute in a hostile repo.
+            if repo_path:
+                try:
+                    repo = safe_resolve(Path.home(), repo_path)
+                except PathTraversalError as exc:
+                    return _error_response(f"Invalid repo_path: {exc}")
+                if not (repo / ".git").exists():
+                    return _error_response(
+                        f"Not a git repository (no .git dir): {repo_path}"
+                    )
+            else:
+                repo = svc.config.repo_root
+
             files_list = [
                 f.strip() for f in changed_files.split(",") if f.strip()
             ] if changed_files else []
@@ -258,11 +293,22 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                 # Auto-detect via git
                 try:
                     import subprocess
-                    repo = Path(repo_path) if repo_path else svc.config.repo_root
+                    # repo is the safe_resolve-contained path computed above.
+                    # Harden git: disable hooks + fsmonitor + system config so a
+                    # hostile repo cannot execute code via the git invocation (B1).
                     result = subprocess.run(
-                        ["git", "diff", "--name-only", "HEAD~1", "HEAD"],
+                        [
+                            "git", "-c", "core.hooksPath=/dev/null",
+                            "-c", "core.fsmonitor=",
+                            "diff", "--name-only", "HEAD~1", "HEAD",
+                        ],
                         capture_output=True, text=True, timeout=30,
                         cwd=str(repo),
+                        env={
+                            **os.environ,
+                            "GIT_CONFIG_NOSYSTEM": "1",
+                            "GIT_TERMINAL_PROMPT": "0",
+                        },
                     )
                     files_list = [
                         f.strip() for f in result.stdout.strip().split("\n")
@@ -289,13 +335,19 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
             config = svc.config
             parser = CodeParser(config)
             store = GraphStore(db)
-            repo = Path(repo_path) if repo_path else config.repo_root
+            # repo already contained via safe_resolve above (B1).
 
             nodes_before = db.get_node_count()
             edges_before = db.get_edge_count()
 
             for fp in files_list:
-                full = repo / fp
+                # fp comes from caller-supplied changed_files; contain it under
+                # the (already safe-resolved) repo so "../../.ssh/id_rsa" cannot
+                # be read into the graph.
+                try:
+                    full = safe_resolve(repo, fp)
+                except Exception:
+                    continue
                 if not full.exists():
                     store.remove_file(fp)
                     continue
@@ -344,7 +396,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 3: get_blast_radius
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_blast_radius(
         changed_files: str,
         max_depth: int = 2,
@@ -406,7 +458,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 4: get_review_context
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_review_context(
         changed_files: str,
         include_source: bool = True,
@@ -463,7 +515,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
         "tests_for", "inherits_from", "inherited_by", "contains",
     })
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def query_graph(
         pattern: str,
         target: str = "",
@@ -562,7 +614,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 6: semantic_search_code
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def semantic_search_code(
         query: str,
         kind: str = "",
@@ -612,7 +664,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 7: list_graph_stats
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def list_graph_stats() -> dict:
         """Get code graph size and health metrics."""
         try:
@@ -659,7 +711,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 8: find_large_functions
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def find_large_functions(
         threshold: int = 50,
         limit: int = 20,
@@ -706,7 +758,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 9: list_flows
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def list_flows(
         sort_by: str = "criticality",
         limit: int = 20,
@@ -763,7 +815,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 10: get_flow
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_flow(
         flow_name: str,
     ) -> dict:
@@ -814,7 +866,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 11: get_affected_flows
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_affected_flows(
         changed_files: str,
     ) -> dict:
@@ -874,7 +926,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 12: list_communities
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def list_communities(
         sort_by: str = "cohesion",
         limit: int = 20,
@@ -921,7 +973,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 13: get_community
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_community(
         community_id: int,
     ) -> dict:
@@ -968,7 +1020,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 14: get_architecture_overview
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_architecture_overview() -> dict:
         """Get high-level architecture map showing communities and their relationships."""
         try:
@@ -1017,7 +1069,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 15: detect_changes
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def detect_changes(
         base: str = "HEAD~1",
     ) -> dict:
@@ -1076,7 +1128,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 16: refactor_preview
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def refactor_preview(
         action: str,
         target: str,
@@ -1170,6 +1222,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # ==================================================================
 
     @server.tool()
+    @admits(OperationKind.CORRECT)
     async def apply_refactor(
         action: str,
         target: str,
@@ -1204,7 +1257,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 18 (BRIDGE): code_memory_search
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def code_memory_search(
         code_entity: str,
         link_type: str = "",
@@ -1274,7 +1327,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 19 (BRIDGE): code_entity_history
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def code_entity_history(
         code_entity: str,
     ) -> dict:
@@ -1344,7 +1397,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 20 (BRIDGE): enrich_blast_radius
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def enrich_blast_radius(
         changed_files: str,
         max_depth: int = 2,
@@ -1418,7 +1471,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 21 (BRIDGE): code_stale_check
     # ==================================================================
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def code_stale_check(
         scope: str = "all",
     ) -> dict:
@@ -1492,6 +1545,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     })
 
     @server.tool()
+    @admits(OperationKind.CORRECT)
     async def link_memory_to_code(
         fact_id: str,
         code_entity: str,
