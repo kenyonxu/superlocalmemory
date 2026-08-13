@@ -81,8 +81,8 @@ This multi-channel approach means V3 finds memories that any single search metho
 
 | Mode | Retrieval | LLM Usage | Data Location |
 |------|-----------|-----------|---------------|
-| **A: Zero-Cloud** | 4-channel + math scoring | None | 100% local |
-| **B: Local LLM** | 4-channel + local LLM reranking | Ollama (local) | 100% local |
+| **A: Zero-Cloud** | multi-producer + math scoring | None | Local (memory content) |
+| **B: Local LLM** | multi-producer + local LLM reranking | Ollama (local) | Local (memory content) |
 | **C: Cloud LLM** | 4-channel + cross-encoder + agentic retrieval | Cloud provider | Queries sent to cloud |
 
 Mode A is the default. It delivers strong recall quality using mathematical scoring without any network calls.
@@ -115,11 +115,11 @@ V3 uses three mathematical layers. These are not academic additions — they sol
 
 **Effect:** Active memories stay prominent. Stale memories fade gracefully. Storage stays efficient.
 
-## EU AI Act Compliance
+## EU AI Act Alignment
 
-Mode A satisfies data sovereignty requirements under the EU AI Act by design:
+Mode A supports data sovereignty requirements under the EU AI Act by design (legal compliance remains a deployment-context assessment):
 
-- **No cloud dependency.** All memory operations run locally. No data leaves your machine.
+- **Local memory operations.** Memory-content operations run locally in Mode A; optional enrichment, backup, and connector features are networked and opt-in.
 - **Right to erasure.** `slm forget` deletes data locally. No cloud logs to purge.
 - **Transparency.** The retrieval pipeline is auditable. No black-box LLM decisions in Mode A.
 - **Risk classification.** A local retrieval system with no AI decision-making qualifies as minimal risk.
@@ -128,7 +128,7 @@ Mode C sends queries to a cloud LLM provider. In that mode, the cloud provider's
 
 ## Database
 
-All data is stored in a single SQLite database:
+The primary store is SQLite (one main database file; companion stores hold learning, cache, and audit data):
 
 ```
 ~/.superlocalmemory/memory.db

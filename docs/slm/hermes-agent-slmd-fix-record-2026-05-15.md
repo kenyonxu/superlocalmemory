@@ -124,7 +124,7 @@ commit 6b7aa65
 
 ### 8. 数据目录统一
 
-**问题**: 诊断报告建议 #6 指出 daemon 使用默认 `~/.superlocalmemory/` 而 Hermes MCP 使用 `~/.hermes/profiles/zhihui/home/.superlocalmemory/`，两者指向不同数据库。`SLMConfig.load()` 硬编码使用 `~/.superlocalmemory/config.json`，不支持 `SLM_DATA_DIR` 环境变量覆盖 `base_dir`。
+**问题**: 诊断报告建议 #6 指出 daemon 使用默认 `~/.superlocalmemory/` 而 Hermes MCP 使用 `~/.hermes/profiles/zhihui/slm-data/`，两者指向不同数据库。`SLMConfig.load()` 硬编码使用 `~/.superlocalmemory/config.json`，不支持 `SLM_DATA_DIR` 环境变量覆盖 `base_dir`。
 
 **修复**: 将 Hermes 数据目录内容迁移至 `~/.superlocalmemory/`，删除 `SLM_DATA_DIR` 环境变量依赖。
 

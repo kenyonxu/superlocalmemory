@@ -236,7 +236,7 @@ mslm serve start
 | 检索质量差 | 嵌入列为 NULL | 等待 maintenance 回填（30 分钟间隔），或重启 daemon 加快 |
 | MCP 记忆"丢失" | 数据目录不一致 | 统一使用 `~/.superlocalmemory/`，不设 `SLM_DATA_DIR` |
 | 知识图谱为空 | 旧记忆无实体 | daemon 重启时自动回溯填充（幂等，跨 profile） |
-| Recall 不报错但无结果 | 嵌入未就绪，语义 channel 跳过 | 6/7 channel 正常工作，等 embed worker 就绪 |
+| Recall 不报错但无结果 | 嵌入未就绪，语义 producer 跳过 | 其余检索 producer 正常工作，等 embed worker 就绪 |
 | `mslm doctor` 报错 | 依赖缺失 | `pip install mslm-memory[dev]` |
 | 端口 8765 被占用 | 旧 daemon 僵尸 uvicorn | `mslm restart` 自动清理 |
 

@@ -23,8 +23,15 @@ def _make_prometheus_mock() -> MagicMock:
 
 # ---- get_prometheus_exporter ------------------------------------------------
 
-def test_get_prometheus_exporter_import_error_returns_none() -> None:
-    """prometheus_client not installed → returns None (default test env)."""
+def test_get_prometheus_exporter_import_error_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """prometheus_client unavailable (ImportError) → returns None.
+
+    Env-independent: prometheus_client may legitimately be installed in the
+    test env (it is a transitive dep of fastapi[all]), so simulate the
+    ImportError path explicitly instead of assuming its absence.
+    """
+    monkeypatch.setitem(sys.modules, "prometheus_client", None)
+
     from superlocalmemory.optimize.metrics.exporters import get_prometheus_exporter
 
     result = get_prometheus_exporter()

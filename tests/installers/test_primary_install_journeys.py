@@ -90,6 +90,7 @@ def test_npm_artifact_owns_cli_runtime_but_not_repo_clone_installers() -> None:
         pytest.skip("npm artifact is executed by the dedicated installer matrix")
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
     assert package["bin"] == {
+        "mslm": "./bin/slm-npm",
         "slm": "./bin/slm-npm",
         "superlocalmemory": "./bin/slm-npm",
     }

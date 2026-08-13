@@ -260,11 +260,11 @@ def test_rejects_python_less_than_3_11(tmp_path: pytest.TempPathFactory) -> None
     """
     root, data = _make_roots(tmp_path)
 
-    # Create a fake python3 wrapper that reports version 3.10.x
+    # Create fake python wrappers (all candidate names the script's resolver
+    # probes) that report version 3.10.x
     fake_py_dir = tmp_path / "fake-python"
     fake_py_dir.mkdir()
-    fake_py = fake_py_dir / "python3"
-    fake_py.write_text(
+    _shim = (
         "#!/bin/bash\n"
         'if [[ "$@" == "--version" || "$*" == *"--version"* || "$*" == *"-V"* ]]; then\n'
         '  echo "Python 3.10.14"\n'
@@ -278,7 +278,10 @@ def test_rejects_python_less_than_3_11(tmp_path: pytest.TempPathFactory) -> None
         'fi\n'
         'exec /usr/bin/env python3 "$@"\n'
     )
-    fake_py.chmod(fake_py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    for _name in ("python3", "python3.11", "python3.12", "python3.13", "python3.14"):
+        fake_py = fake_py_dir / _name
+        fake_py.write_text(_shim)
+        fake_py.chmod(fake_py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     # Run with fake python3 first in PATH
     env = {

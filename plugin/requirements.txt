@@ -1,1 +1,1 @@
-superlocalmemory==4.0.1
+mslm-memory==4.2.0

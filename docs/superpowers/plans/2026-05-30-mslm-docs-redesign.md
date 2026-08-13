@@ -20,7 +20,7 @@
 - [ ] **Step 1: 创建 docs/slm/ 目录**
 
 ```bash
-mkdir -p /home/kai-remote/github/superlocalmemory/docs/slm
+mkdir -p /home/yourusername/github/superlocalmemory/docs/slm
 ```
 
 - [ ] **Step 2: 移动所有技术文档到 docs/slm/**
@@ -57,7 +57,7 @@ mkdir -p /home/kai-remote/github/superlocalmemory/docs/slm
 - `docs/v2-archive/` → `docs/slm/v2-archive/`
 
 ```bash
-cd /home/kai-remote/github/superlocalmemory/docs
+cd /home/yourusername/github/superlocalmemory/docs
 
 # 核心技术文档
 mv ARCHITECTURE.md slm/
@@ -92,8 +92,8 @@ mv v2-archive/ slm/
 - [ ] **Step 3: 验证移动后的文件结构**
 
 ```bash
-ls -la /home/kai-remote/github/superlocalmemory/docs/slm/
-ls /home/kai-remote/github/superlocalmemory/docs/
+ls -la /home/yourusername/github/superlocalmemory/docs/slm/
+ls /home/yourusername/github/superlocalmemory/docs/
 ```
 
 预期结果：`docs/slm/` 下有 ~25 个文件/目录，`docs/` 下只剩下：
@@ -139,7 +139,7 @@ MSLM 基于 SLM 构建，使用相同的底层引擎和协议。
 - [ ] **Step 5: 提交**
 
 ```bash
-cd /home/kai-remote/github/superlocalmemory
+cd /home/yourusername/github/superlocalmemory
 git add docs/slm/
 git add docs/
 git commit -m "docs: archive upstream technical docs to docs/slm/"

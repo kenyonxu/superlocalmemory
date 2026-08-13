@@ -249,7 +249,7 @@ mslm serve start
 | Poor retrieval quality | NULL embedding columns | Wait for maintenance backfill (30 min interval), or restart daemon to accelerate |
 | MCP memories "disappear" | Inconsistent data directory | Always use `~/.superlocalmemory/`, don't set `SLM_DATA_DIR` |
 | Empty knowledge graph | Old memories lack entities | Auto-backfilled on daemon restart (idempotent, cross-profile) |
-| Recall returns no results without errors | Embeddings not ready, semantic channel skipped | 6/7 channels work normally; wait for embed worker |
+| Recall returns no results without errors | Embeddings not ready, semantic producer skipped | Other retrieval producers work normally; wait for embed worker |
 | `mslm doctor` reports errors | Missing dependencies | `pip install mslm-memory[dev]` |
 | Port 8765 already in use | Zombie uvicorn from old daemon | `mslm restart` auto-cleans |
 

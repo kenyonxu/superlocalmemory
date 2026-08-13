@@ -12,14 +12,7 @@
 <p align="center"><strong>MSLM 专属能力</strong>:三层作用域记忆(personal / shared / global)、Hermes Agent MemoryProvider 集成、全局实体共享、数学驱动检索(无需云端 LLM)。</p>
 
 <p align="center">
-  <a href="README-zh.md">中文文档</a> | <a href="README-en.md">English Docs</a> | <a href="docs/INDEX-zh.md">文档索引</a> | <a href="docs/hermes-agent-guide-zh.md">Hermes 集成指南</a>
-</p>
-
-<p align="center">
-  <code>pip install mslm-memory</code>
-</p>
-
-<p align="center">
+  <a href="README-zh.md">中文文档</a> | <a href="README-en.md">English Docs</a> | <a href="docs/INDEX-zh.md">文档索引</a> | <a href="docs/hermes-agent-guide-zh.md">Hermes 集成指南</a> · <code>pip install mslm-memory</code><br/>
   <a href="https://pypi.org/project/mslm-memory/"><img src="https://img.shields.io/badge/PyPI-mslm--memory-blue?style=for-the-badge&logo=pypi&logoColor=white" alt="PyPI"/></a>
   <a href="https://www.npmjs.com/package/mslm-memory"><img src="https://img.shields.io/badge/npm-mslm--memory-red?style=for-the-badge&logo=npm&logoColor=white" alt="npm"/></a>
   <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg?style=for-the-badge" alt="AGPL v3"/></a>
@@ -47,26 +40,13 @@ negative control, and shipped with the harness that regenerates the evidence:
 does <em>not</em> exercise is stated too.</p>
 <p align="center"><code>v4.0.1 内核</code> — one control plane: <strong>SLM-Mesh</strong> peer coordination · multi-scope memory (personal / shared / global) · profiles · Cache · Compress · 7-layer retrieval · code graph · Entity Explorer · skill evolution · Modes A/B/C · GDPR retention &amp; audit chain · bounded loops — across CLI, MCP, dashboard, the <strong>Claude plugin</strong>, the <strong>Codex add-on</strong>, and documented IDE integrations.<br/>
 Proxy: <code>slm wrap claude</code> &nbsp;·&nbsp; MCP: add <code>slm_compress</code> to your config &nbsp;·&nbsp; Skill: zero-config</p>
-<p align="center"><strong>Four public arXiv preprints</strong> · V4: <a href="https://arxiv.org/abs/2608.08253">arXiv:2608.08253</a> · companion archive: <a href="https://zenodo.org/records/21853302">Zenodo 21853302</a> (<a href="https://doi.org/10.5281/zenodo.21853302">DOI 10.5281/zenodo.21853302</a>) · prior preprints: <a href="https://arxiv.org/abs/2603.02240">2603.02240</a> · <a href="https://arxiv.org/abs/2603.14588">2603.14588</a> · <a href="https://arxiv.org/abs/2604.04514">2604.04514</a>.</p>
-
-<p align="center">
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/v4.0.1-Upstream_Kernel-2ea44f?style=for-the-badge&logo=checkmarx&logoColor=white" alt="v4.0.1 — Upstream Kernel"/></a>
-  <a href="https://arxiv.org/abs/2608.08253"><img src="https://img.shields.io/badge/arXiv-2608.08253-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="SuperLocalMemory 4.0 paper on arXiv:2608.08253"/></a>
-  <a href="https://zenodo.org/records/21853302"><img src="https://img.shields.io/badge/Zenodo-10.5281%2Fzenodo.21853302-1682D4?style=for-the-badge&logo=zenodo&logoColor=white" alt="V4 paper on Zenodo: 10.5281/zenodo.21853302"/></a>
-  <a href="https://arxiv.org/abs/2603.14588"><img src="https://img.shields.io/badge/arXiv-2603.14588-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="arXiv Paper"/></a>
-  <a href="https://pypi.org/project/superlocalmemory/"><img src="https://img.shields.io/pypi/v/superlocalmemory?style=for-the-badge&logo=pypi&logoColor=white&label=upstream" alt="Upstream PyPI"/></a>
-  <a href="https://superlocalmemory.com"><img src="https://img.shields.io/badge/Web-superlocalmemory.com-ff6b35?style=for-the-badge" alt="Website"/></a>
-</p>
+<p align="center"><strong>Four public arXiv preprints</strong> · V4: <a href="https://arxiv.org/abs/2608.08253">arXiv:2608.08253</a> · companion archive: <a href="https://zenodo.org/records/21853302">Zenodo 21853302</a> (<a href="https://doi.org/10.5281/zenodo.21853302">DOI 10.5281/zenodo.21853302</a>) · prior preprints: <a href="https://arxiv.org/abs/2603.02240">2603.02240</a> · <a href="https://arxiv.org/abs/2603.14588">2603.14588</a> · <a href="https://arxiv.org/abs/2604.04514">2604.04514</a> · <a href="CHANGELOG.md">CHANGELOG</a></p>
 
 ---
 
-MSLM (Multi-Scope Local Memory) 是一个本地优先的 AI Agent 多层次记忆系统。基于 SuperLocalMemory 引擎构建，为 Claude Code、Cursor、Hermes Agent 等 MCP 兼容客户端提供持久化记忆。
+MSLM (Multi-Scope Local Memory) 是一个本地优先的 AI Agent 多层次记忆系统。基于 SuperLocalMemory 引擎构建，为 Claude Code、Cursor、Hermes Agent 等 MCP 兼容客户端提供持久化记忆。**核心特性**：三层作用域记忆（personal / shared / global）、7 通道混合检索、全局实体共享、数学驱动（无需云端 LLM）。→ [中文完整文档](README-zh.md) · [English Full Docs](README-en.md) · [全部文档索引](docs/INDEX-zh.md) · *MSLM — powered by [SuperLocalMemory](https://github.com/qualixar/superlocalmemory)*
 
-**核心特性**：三层作用域记忆（personal / shared / global）、7 通道混合检索、全局实体共享、数学驱动（无需云端 LLM）。→ [中文完整文档](README-zh.md) · [English Full Docs](README-en.md) · [全部文档索引](docs/INDEX-zh.md)
-
-*MSLM — powered by [SuperLocalMemory](https://github.com/qualixar/superlocalmemory)*
-
----
+## Why SuperLocalMemory?
 
 SuperLocalMemory is an enterprise-grade, local-first memory control plane for AI agents. Your team's agent memory lives on infrastructure you control, with per-workspace isolation, role-based access, and GDPR / EU AI Act governance controls — built for organizations, and for EU data-residency obligations where agent context must not leave your environment by default.
 
@@ -730,9 +710,3 @@ Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar.
 Part of [Qualixar](https://qualixar.com) · Author: [Varun Pratap Bhardwaj](https://varunpratap.com)
 Acknowledgments: [Everything Claude Code](https://github.com/affaan-m/everything-claude-code) informed skill observation; [HKUDS/OpenSpace](https://github.com/HKUDS/OpenSpace) informed skill-evolution verification.
 Qualixar builds open-source infrastructure for AI reliability engineering. Start at [qualixar.com](https://qualixar.com) or browse the [research archive](https://huggingface.co/Qualixar).
-
-## Star This Project
-
-If this project solves a real problem for you, **please star the repo** — it helps other developers discover Qualixar and signals that the AI agent reliability community is growing.
-
-[![Star SuperLocalMemory on GitHub](https://img.shields.io/github/stars/qualixar/superlocalmemory?style=for-the-badge&logo=github&label=Star%20on%20GitHub)](https://github.com/qualixar/superlocalmemory)

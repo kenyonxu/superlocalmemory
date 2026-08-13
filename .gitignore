@@ -234,3 +234,4 @@ scratchpad/
 # stale on the next commit, and a plan published with any item open reads as
 # self-documented non-compliance (F-11). Public record of shipped work = CHANGELOG.md.
 docs/audits/
+.slm-venv/

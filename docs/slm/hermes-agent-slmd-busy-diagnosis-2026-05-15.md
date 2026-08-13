@@ -81,7 +81,7 @@ Hermes Agent 调用 `mcp_superlocalmemory_get_status` 时的执行路径：
 kill 3063266
 
 # 2. 使用正确的数据目录重新启动
-SLM_DATA_DIR=/path/to/zhihui/home/.superlocalmemory \
+SLM_DATA_DIR=/path/to/zhihui/slm-data \
 SLM_MODE=a \
 SLM_PROFILE=zhihui \
 python3 -m superlocalmemory.server.unified_daemon --start &
@@ -131,4 +131,4 @@ SLM unified daemon engine 崩溃
 5. **Daemon engine 崩溃调查**: 排查 `create_app` 中 engine 变为 None 的具体触发条件（目前仅有 `except Exception` 捕获，缺少详细错误日志）
 
 ### 长期
-6. **数据目录一致性**: 当前 daemon 使用默认 `~/.superlocalmemory/`，而 MCP server 使用 `~/.hermes/profiles/zhihui/home/.superlocalmemory/`，两者指向不同数据库。建议统一或明确文档化这种分离设计。
+6. **数据目录一致性**: 当前 daemon 使用默认 `~/.superlocalmemory/`，而 MCP server 使用 `~/.hermes/profiles/zhihui/slm-data/`，两者指向不同数据库。建议统一或明确文档化这种分离设计。

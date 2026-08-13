@@ -45,12 +45,12 @@ def _read_manifest_version() -> str:
 def _read_requirements_pin() -> str:
     """Read the version pinned in plugin-src/requirements.txt.
 
-    Expected format: superlocalmemory==3.6.14
+    Expected format: mslm-memory==3.6.14 (fork: package renamed from superlocalmemory)
     """
     path = _REPO_ROOT / "plugin-src" / "requirements.txt"
     content = path.read_text(encoding="utf-8").strip()
-    match = re.search(r"superlocalmemory==([^\s]+)", content)
-    assert match, "Could not find superlocalmemory== pin in requirements.txt"
+    match = re.search(r"mslm-memory==([^\s]+)", content)
+    assert match, "Could not find mslm-memory== pin in requirements.txt"
     return match.group(1)
 
 
@@ -61,8 +61,8 @@ def _read_json_version(relative: str, *, package_root: bool = False) -> str:
 
 def _read_requirement_pin(relative: str) -> str:
     content = (_REPO_ROOT / relative).read_text(encoding="utf-8")
-    match = re.search(r"superlocalmemory==([^\s]+)", content)
-    assert match, f"Could not find superlocalmemory== pin in {relative}"
+    match = re.search(r"mslm-memory==([^\s]+)", content)
+    assert match, f"Could not find mslm-memory== pin in {relative}"
     return match.group(1)
 
 
@@ -79,9 +79,9 @@ def _read_uv_lock_version() -> str:
     matches = [
         package["version"]
         for package in lock["package"]
-        if package.get("name") == "superlocalmemory"
+        if package.get("name") == "mslm-memory"
     ]
-    assert len(matches) == 1, f"Expected one superlocalmemory uv.lock entry: {matches}"
+    assert len(matches) == 1, f"Expected one mslm-memory uv.lock entry: {matches}"
     return matches[0]
 
 

@@ -5,6 +5,27 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.0] - 2026-08-13 — MSLM fork: upstream V4.0.1 kernel + Hermes MemoryProvider
+
+MSLM (Multi-Scope Local Memory) 4.2.0 merges upstream SuperLocalMemory v4.0.1
+(372 commits: verifiable memory transactions, admission gateway, BackupCoordinator,
+MCP SDK 2.0 stateless Streamable HTTP, security hardening) into the mslm fork.
+
+### Added (fork)
+- Hermes Agent `MemoryProvider` integration (`src/superlocalmemory/integrations/hermes/`):
+  prefetch (hybrid mode), `sync_turn`, lifecycle hooks, and `slm_recall` /
+  `slm_remember` / `slm_status` tools, with `plugin.yaml` + `register()` entry point.
+
+### Changed (fork)
+- Package identity: `mslm-memory` 4.2.0 (PyPI/npm), CLI bins `mslm` + `slm`.
+- `torch>=2.11.0` relaxed pin (upstream pins `==2.11.0`) for environments
+  where the exact wheel is unavailable.
+
+### Fixed (fork, re-applied on V4)
+- Preserve `ollama_model` / `ollama_base_url` through `SLMConfig.for_mode()`.
+- Embedding worker: proxy forwarding (http/https/all/no_proxy) + `HF_ENDPOINT`
+  removal + response timeout 180s → 300s.
+
 ## [4.0.1] - 2026-08-09 — Dashboard and operations-status correctness
 
 ### Fixed

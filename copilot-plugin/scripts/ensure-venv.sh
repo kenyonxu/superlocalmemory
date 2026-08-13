@@ -25,12 +25,23 @@ set -euo pipefail
 exec 1>&2
 
 # ---------------------------------------------------------------------------
-# Python >= 3.11 guard
+# Python >= 3.11 + ensurepip resolver
+# Debian/Ubuntu splits ensurepip into python3.x-venv, so a bare `python3`
+# may exist but be unable to create venvs. SLM_VENV_PYTHON overrides discovery.
 # ---------------------------------------------------------------------------
-if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" 2>/dev/null; then
+PY_BIN=""
+for _cand in ${SLM_VENV_PYTHON:-} python3.14 python3.13 python3.12 python3.11 python3; do
+    [ -n "${_cand}" ] || continue
+    command -v "${_cand}" >/dev/null 2>&1 || continue
+    if "${_cand}" -c "import sys, ensurepip; sys.exit(0 if sys.version_info >= (3, 11) else 1)" 2>/dev/null; then
+        PY_BIN="${_cand}"
+        break
+    fi
+done
+if [ -z "${PY_BIN}" ]; then
     PY_VER=$(python3 --version 2>&1 || echo "unknown")
-    echo "ERROR: SuperLocalMemory plugin requires Python >= 3.11, found: ${PY_VER}" >&2
-    echo "Install Python 3.11+ and ensure it is first on PATH." >&2
+    echo "ERROR: SuperLocalMemory plugin requires Python >= 3.11 with ensurepip (venv support); python3 is: ${PY_VER}" >&2
+    echo "Install python3-venv (Debian/Ubuntu) or set SLM_VENV_PYTHON to a suitable interpreter." >&2
     exit 1
 fi
 
@@ -75,13 +86,13 @@ fi
 # ---------------------------------------------------------------------------
 echo "SLM plugin: bootstrapping Python venv at ${VENV} …" >&2
 echo "  requirements: ${REQ}" >&2
-echo "  python3: $(python3 --version 2>&1)" >&2
+echo "  python: ${PY_BIN} ($(${PY_BIN} --version 2>&1))" >&2
 
 # Clean up any partial previous attempt
 rm -rf "${VENV_TMP}"
 
 # Create fresh venv
-python3 -m venv "${VENV_TMP}"
+"${PY_BIN}" -m venv "${VENV_TMP}"
 
 # Upgrade pip first (prefer binary to avoid source builds)
 "${VENV_TMP}/bin/pip" install --upgrade pip --prefer-binary --quiet

@@ -1,7 +1,7 @@
 ---
 name: slm-mesh
 description: Cross-session peer coordination via the SLM mesh network. Lets multiple AI agent sessions on the same machine discover each other, send messages, share lightweight state, and lock files to avoid conflicts. Requires full, power, or mesh MCP profile. All 8 tools are MCP-only — there is no CLI fallback.
-version: "4.0.1"
+version: "4.2.0"
 agent: agent
 tools:
   - mesh_summary

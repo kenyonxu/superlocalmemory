@@ -12,7 +12,7 @@ The EU AI Act (Regulation 2024/1689) establishes requirements for AI systems ope
 
 ### Mode A: Full Compliance by Architecture
 
-In Mode A, SuperLocalMemory operates as a local data retrieval system with zero cloud dependency:
+In Mode A, SuperLocalMemory operates as a local data retrieval system that does not depend on cloud services for memory-content operations:
 
 | Requirement | How Mode A satisfies it |
 |-------------|------------------------|
@@ -23,7 +23,7 @@ In Mode A, SuperLocalMemory operates as a local data retrieval system with zero 
 
 ### Mode B: Full Compliance
 
-Mode B uses a local LLM (Ollama). Data never leaves the device. Same compliance posture as Mode A.
+Mode B uses a local LLM (Ollama). Memory content stays on the device in default configuration. Same compliance posture as Mode A.
 
 ### Mode C: Shared Responsibility
 
@@ -154,7 +154,7 @@ This checks the hash chain for tampering. Each entry contains a hash of the prev
 
 For healthcare applications:
 
-1. Use Mode A (zero cloud) to ensure PHI never leaves the device
+1. Use Mode A (local-first) to keep PHI on the device in default configuration
 2. Apply the `hipaa-7y` retention policy
 3. Use per-patient or per-case profiles for isolation
 4. Enable audit trail verification for compliance audits
@@ -179,7 +179,7 @@ SuperLocalMemory supports SOC 2 requirements through:
 | Requirement | Mode A | Mode B | Mode C |
 |-------------|:------:|:------:|:------:|
 | Data stays on device | Yes | Yes | Partial (queries sent to cloud) |
-| No cloud dependency | Yes | Yes | No |
+| Cloud-free memory operations | Yes | Yes | No |
 | Right to erasure | Yes | Yes | Yes (local); cloud logs depend on provider |
 | Audit trail | Yes | Yes | Yes |
 | Retention policies | Yes | Yes | Yes |

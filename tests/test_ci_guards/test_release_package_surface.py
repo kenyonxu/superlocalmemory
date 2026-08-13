@@ -111,7 +111,10 @@ def test_one_workflow_coordinates_both_registries_and_supports_recovery() -> Non
     assert "pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b" in source
     assert "check-release-registries" in source
     assert "verify-release-registries" in source
-    assert "python -m pytest tests/ -q" in source
+    # Upstream workflow runs pytest via RELEASE_TEST_ARGS array
+    # ("tests/ -q ..." expanded through "${RELEASE_TEST_ARGS[@]}"), so the
+    # literal "python -m pytest tests/ -q" never appears in source.
+    assert "python -m pytest" in source and "tests/ -q" in source
     assert "SLM_RELEASE_PYTHON_DIST" in source
     assert "scripts/release_evidence.py" in source
     assert "steps.registry.outputs.pypi_exists != 'true'" in source

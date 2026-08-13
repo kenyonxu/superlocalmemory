@@ -67,7 +67,7 @@ CREATE INDEX idx_<table>_profile_scope ON <table> (profile_id, scope);
 - [ ] **Step 1: 确保 upstream/main 是最新的**
 
 ```bash
-cd /home/kai-remote/github/superlocalmemory
+cd /home/yourusername/github/superlocalmemory
 git fetch upstream
 git log upstream/main --oneline -3
 ```

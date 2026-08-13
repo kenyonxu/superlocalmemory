@@ -90,7 +90,7 @@ MSLM 的核心价值层（独立于引擎变更）：
 | PR | 内容 | 预计 LOC | 依赖 |
 |----|------|---------|------|
 | PR-A | Schema + Migration M014 | ~300 | #24, #25 合并后 |
-| PR-B | Retrieval Layer (7 channels + RRF) | ~400 | PR-A 合并后 |
+| PR-B | Retrieval Layer (multi-producer + RRF) | ~400 | PR-A 合并后 |
 | PR-C | External Interface (CLI + MCP + IPC) | ~300 | PR-B 合并后 |
 
 ### 第三步：Phase 2/3 设计对齐

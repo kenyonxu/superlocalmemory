@@ -34,9 +34,9 @@ Switching modes takes effect immediately. No data is lost.
 
 ### Mode A: Zero-Cloud (Default)
 
-All operations run locally. Retrieval uses four channels (semantic similarity, keyword search, entity graph, and temporal context) combined with mathematical scoring. No network calls.
+Memory-content operations run locally. Retrieval combines semantic similarity, keyword search, entity graph, temporal context, and associative producers with mathematical scoring. Optional enrichment, cloud backup, and connector features are networked, off by default, and explicitly opt-in.
 
-Best for: privacy-sensitive work, air-gapped environments, EU AI Act compliance.
+Best for: privacy-sensitive work, air-gapped environments, and EU AI Act–aligned local deployments (legal compliance remains a deployment-context assessment).
 
 ### Mode B: Local LLM
 
