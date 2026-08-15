@@ -321,25 +321,22 @@ def cmd_session(args: Namespace) -> None:
         print("Session close failed (daemon unreachable?)")
 
 
+def _cmd_upgrade_hosts(args: Namespace) -> None:
+    """Run the consented host-integration refresh command."""
+    from superlocalmemory.cli.host_upgrades import cmd_upgrade_hosts
+
+    cmd_upgrade_hosts(args)
+
+
 def dispatch(args: Namespace) -> None:
     """Route CLI command to the appropriate handler."""
-    # Auto-install/upgrade hooks on version change (single file read, ~0.1ms)
-    if (
-        args.command not in ("hooks", "codex", "init", "mcp")
-        and not getattr(args, "dry_run", False)
-    ):
-        try:
-            from superlocalmemory.hooks.claude_code_hooks import auto_install_if_needed
-            auto_install_if_needed()
-        except Exception:
-            pass
-
     handlers = {
         "init": cmd_init,
         "setup": cmd_setup,
         "mode": cmd_mode,
         "provider": cmd_provider,
         "connect": cmd_connect,
+        "upgrade-hosts": _cmd_upgrade_hosts,
         "migrate": cmd_migrate,
         "list": cmd_list,
         "remember": cmd_remember,
@@ -2966,14 +2963,6 @@ def cmd_mcp(_args: Namespace) -> None:
             logger.info("MCP server version note: %s", _vi.detail)
     except Exception:
         pass  # A diagnostic must never prevent the server from starting.
-
-    # Auto-install hooks on MCP startup (fast path: ~0.1ms if already current)
-    # CRITICAL: No stdout — MCP uses stdio transport, any print corrupts protocol
-    try:
-        from superlocalmemory.hooks.claude_code_hooks import auto_install_if_needed
-        auto_install_if_needed()
-    except Exception:
-        pass
 
     from superlocalmemory.mcp.server import server
 

@@ -387,6 +387,22 @@ Full docs: [docs/multi-machine.md](docs/multi-machine.md) · [docs/distributed-d
 
 After any install path: `slm setup` → `slm doctor` → `slm warmup` (optional, pre-downloads ~500MB embedding model).
 
+### Upgrading an existing installation
+
+An npm, pip, or repository update upgrades the SLM runtime; it does not silently
+rewrite your IDE configuration, hooks, or plugin state. Review the existing
+integrations first:
+
+```bash
+slm upgrade-hosts
+```
+
+Then explicitly apply the hosts you approve, for example
+`slm upgrade-hosts --host codex --apply`, or use
+`slm upgrade-hosts --all-detected --apply` after reviewing the preview. See
+[Host Integration Upgrades](docs/host-upgrades.md) for the full safety contract
+and the Claude Code plugin update path.
+
 | Component | Size | When |
 |:----------|:-----|:-----|
 | Core libraries (numpy, scipy, networkx) | ~50MB | During install |

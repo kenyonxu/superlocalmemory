@@ -206,6 +206,10 @@ function main(argv = process.argv.slice(2)) {
   console.log('');
   console.log('      slm setup');
   console.log('');
+  console.log('  If this updated an existing SLM installation, preview host integrations first:');
+  console.log('');
+  console.log('      slm upgrade-hosts');
+  console.log('');
   console.log('  Prefer to tune performance profiles? Use:  slm reconfigure');
   console.log('');
   return 0;

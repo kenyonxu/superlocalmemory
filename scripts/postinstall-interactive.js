@@ -554,6 +554,7 @@ function printFirstRunChecklist(config) {
   console.log('Next steps:');
   console.log('  slm status --verbose       — daemon, mode, dashboard, health');
   console.log('  slm doctor                 — run health checks (DB, models, ports)');
+  console.log('  slm upgrade-hosts          — preview existing host integrations after an update');
   console.log('  slm health --watch         — live health ladder readout');
   console.log('  slm dashboard              — open the dashboard in your browser');
   console.log('');

@@ -8,6 +8,7 @@
 * [Getting Started](Getting-Started)
 * [Modes Explained](Modes-Explained)
 * [IDE Setup](IDE-Setup)
+* [Host Integration Upgrades](Host-Upgrades)
 * [Migration from V2](Migration-from-V2)
 
 **Reference**

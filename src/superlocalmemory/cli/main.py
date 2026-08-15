@@ -69,7 +69,7 @@ documentation:
 
 
 _NO_DAEMON_COMMANDS = {
-    "setup", "mode", "provider", "connect", "migrate", "mcp", "warmup", "hooks", "codex",
+    "setup", "mode", "provider", "connect", "upgrade-hosts", "migrate", "mcp", "warmup", "hooks", "codex",
     "config", "evolve", "db",
     # v3.4.22 escape hatches — never auto-start the daemon on these.
     "disable", "enable", "clear-cache", "reconfigure", "benchmark",
@@ -123,12 +123,17 @@ def main() -> None:
         and sys.argv[1] == "connect"
         and "--dry-run" in sys.argv[2:]
     )
+    _is_host_upgrade_preview = (
+        len(sys.argv) >= 2
+        and sys.argv[1] == "upgrade-hosts"
+        and "--apply" not in sys.argv[2:]
+    )
 
     # WP-07: lazy first-run init — runs after hook/mcp fast-paths so stdout
     # is never polluted on those paths (CRIT-3, MCP JSON-RPC purity).
     # Guarded: any failure must not crash the CLI (AC4).
     _is_mcp_cmd = len(sys.argv) >= 2 and sys.argv[1] == "mcp"
-    if not _is_mcp_cmd and not _is_metadata_cmd and not _is_connect_dry_run:
+    if not _is_mcp_cmd and not _is_metadata_cmd and not _is_connect_dry_run and not _is_host_upgrade_preview:
         try:
             from superlocalmemory.cli._lazy_init import _ensure_initialized
             _ensure_initialized()
@@ -148,7 +153,7 @@ def main() -> None:
 
     # One-time post-upgrade banner — silent for fresh installs and
     # same-version runs. Guarded against I/O errors internally.
-    if not _is_mcp_stdio and not _is_metadata_cmd and not _is_connect_dry_run:
+    if not _is_mcp_stdio and not _is_metadata_cmd and not _is_connect_dry_run and not _is_host_upgrade_preview:
         from superlocalmemory.cli.version_banner import check_and_emit_upgrade_banner
         if check_and_emit_upgrade_banner(_ver):
             # First post-upgrade invocation: apply the data-dir migration if
@@ -283,6 +288,23 @@ def main() -> None:
             "After writing the config, probe the daemon health endpoint to confirm "
             "the transport is reachable (only meaningful for --transport http)"
         ),
+    )
+
+    upgrade_p = sub.add_parser(
+        "upgrade-hosts",
+        help="Preview or explicitly refresh installed SLM host integrations",
+    )
+    upgrade_p.add_argument(
+        "--host", action="append", dest="hosts", default=[],
+        help="Explicit host to refresh (repeatable; for example: codex, cursor)",
+    )
+    upgrade_p.add_argument(
+        "--all-detected", action="store_true", default=False,
+        help="Target only hosts that already contain an SLM integration",
+    )
+    upgrade_p.add_argument(
+        "--apply", action="store_true", default=False,
+        help="Apply the previewed changes; default is read-only preview",
     )
 
     migrate_p = sub.add_parser("migrate", help="Migrate data from V2 to V3 schema")
@@ -966,7 +988,10 @@ def main() -> None:
         sys.exit(0)
 
     # V3.3.19: Auto-trigger setup wizard on first use
-    if not (args.command == "connect" and getattr(args, "dry_run", False)):
+    if not (
+        (args.command == "connect" and getattr(args, "dry_run", False))
+        or (args.command == "upgrade-hosts" and not getattr(args, "apply", False))
+    ):
         from superlocalmemory.cli.setup_wizard import check_first_use
         check_first_use(args.command)
 
