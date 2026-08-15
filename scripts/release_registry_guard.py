@@ -74,14 +74,25 @@ def _assert_pypi_identity(payload: dict, version: str, dist_dir: Path) -> None:
         raise RuntimeError(
             f"PyPI version mismatch: expected {version!r}, got {published!r}"
         )
+    # The PyPI publishing action writes attestations beside the candidate wheel
+    # and sdist after upload.  Those sidecars (and build-tool bookkeeping such
+    # as .gitignore) are not PyPI distributions, so comparing every local file
+    # makes a successful publication look corrupt.  Compare only the two
+    # release distributions this workflow builds and uploads.
     local = {
         path.name: _sha256(path)
         for path in sorted(dist_dir.iterdir())
         if path.is_file()
+        and path.name.startswith(f"{PACKAGE_NAME}-{version}")
+        and path.name.endswith((".whl", ".tar.gz"))
     }
     remote = {
         item.get("filename"): item.get("digests", {}).get("sha256")
         for item in payload.get("urls", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("filename"), str)
+        and item["filename"].startswith(f"{PACKAGE_NAME}-{version}")
+        and item["filename"].endswith((".whl", ".tar.gz"))
     }
     if not local or local != remote:
         raise RuntimeError(
