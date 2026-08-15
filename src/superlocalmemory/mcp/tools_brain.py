@@ -9,6 +9,8 @@ or changes a memory answer.
 
 from __future__ import annotations
 
+import asyncio
+import sqlite3
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,6 +19,7 @@ from mcp.types import ToolAnnotations
 from superlocalmemory.core.admission import admits
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.infra.data_root import state_path
+from superlocalmemory.integrations.bounded_loops_mcp import BridgeUnavailable, observe_installed
 from superlocalmemory.storage.agent_experience import (
     AgentExperienceConflictError,
     AgentExperienceStore,
@@ -25,11 +28,25 @@ from superlocalmemory.storage.agent_experience import (
     ProfileAdmissionError,
     get_profile_receipt_summary,
 )
+from superlocalmemory.storage.external_evidence import (
+    ExternalEvidenceConflictError,
+    ExternalEvidenceStore,
+    ExternalEvidenceValidationError,
+    get_profile_external_evidence_summary,
+)
 
 
 def _store_for(engine: Any) -> AgentExperienceStore:
     active_profile = engine.profile_id
     return AgentExperienceStore(
+        Path(state_path("learning.db")),
+        is_profile_active=lambda profile_id: profile_id == active_profile,
+    )
+
+
+def _external_store_for(engine: Any) -> ExternalEvidenceStore:
+    active_profile = engine.profile_id
+    return ExternalEvidenceStore(
         Path(state_path("learning.db")),
         is_profile_active=lambda profile_id: profile_id == active_profile,
     )
@@ -42,6 +59,27 @@ def _require_active_profile(engine: Any, payload: dict[str, Any]) -> str | None:
     return None
 
 
+class _ExternalEvidenceWriteError(Exception):
+    """Preserve committed receipt count when a later snapshot item fails."""
+
+    def __init__(self, created: int, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.created = created
+        self.cause = cause
+
+
+def _record_external_evidence(store: ExternalEvidenceStore, observed: list[dict[str, Any]]) -> int:
+    """Write bounded evidence off the async MCP loop; return durable inserts."""
+    created = 0
+    for payload in observed:
+        try:
+            if store.record(payload):
+                created += 1
+        except Exception as exc:
+            raise _ExternalEvidenceWriteError(created, exc) from exc
+    return created
+
+
 def register_brain_tools(server: Any, get_engine: Callable[[], Any]) -> None:
     """Register transport-neutral receipt reads and writes.
 
@@ -52,12 +90,15 @@ def register_brain_tools(server: Any, get_engine: Callable[[], Any]) -> None:
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_brain_evidence_status() -> dict[str, Any]:
-        """Get profile-scoped Agent Experience and Cognitive Turn totals."""
+        """Get profile-scoped, observation-only Brain evidence totals."""
         engine = get_engine()
         return {
             "success": True,
             "profile_id": engine.profile_id,
             "agent_experience": get_profile_receipt_summary(
+                state_path("learning.db"), engine.profile_id
+            ),
+            "external_graph_evidence": get_profile_external_evidence_summary(
                 state_path("learning.db"), engine.profile_id
             ),
             "control_plane": "observation_only",
@@ -110,9 +151,7 @@ def register_brain_tools(server: Any, get_engine: Callable[[], Any]) -> None:
 
     @server.tool()
     @admits(OperationKind.REMEMBER)
-    async def finalize_cognitive_turn(
-        receipt_id: str, outcome: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def finalize_cognitive_turn(receipt_id: str, outcome: dict[str, Any]) -> dict[str, Any]:
         """Finalize an active-profile cognitive turn with outcome evidence."""
         engine = get_engine()
         try:
@@ -130,3 +169,49 @@ def register_brain_tools(server: Any, get_engine: Callable[[], Any]) -> None:
         except (TypeError, ValueError) as exc:
             return {"success": False, "durable": False, "error": str(exc)}
         return {"success": True, "durable": True, "finalized": finalized}
+
+    @server.tool()
+    @admits(OperationKind.REMEMBER)
+    async def observe_bounded_loop_evidence(workspace: str) -> dict[str, Any]:
+        """Import one explicit, read-only snapshot from installed Bounded Loops.
+
+        Bounded Loops remains optional.  This tool negotiates its public MCP
+        contract at runtime, records only compatible terminal evidence, and
+        never changes recall, ranking, routing, or learned behaviour.
+        """
+        engine = get_engine()
+        created = 0
+        try:
+            observed = await observe_installed(workspace=workspace, profile_id=engine.profile_id)
+            store = _external_store_for(engine)
+            created = await asyncio.to_thread(_record_external_evidence, store, observed)
+        except _ExternalEvidenceWriteError as exc:
+            return {
+                "success": False,
+                "durable": exc.created > 0,
+                "created": exc.created,
+                "retryable": isinstance(exc.cause, LearningWriteBusyError),
+                "error": str(exc.cause),
+            }
+        except (
+            BridgeUnavailable,
+            ExternalEvidenceConflictError,
+            ExternalEvidenceValidationError,
+            ProfileAdmissionError,
+            sqlite3.Error,
+        ) as exc:
+            return {
+                "success": False,
+                "durable": created > 0,
+                "created": created,
+                "error": str(exc),
+            }
+        except LearningWriteBusyError as exc:
+            return {"success": False, "durable": False, "retryable": True, "error": str(exc)}
+        return {
+            "success": True,
+            "durable": True,
+            "observed": len(observed),
+            "created": created,
+            "control_plane": "observation_only",
+        }
