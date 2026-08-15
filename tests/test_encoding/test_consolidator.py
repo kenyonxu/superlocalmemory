@@ -20,7 +20,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from superlocalmemory.core.config import EncodingConfig
 from superlocalmemory.encoding.consolidator import (
     MemoryConsolidator,
     _compute_similarity,
@@ -34,7 +33,6 @@ from superlocalmemory.storage.models import (
     FactType,
     MemoryRecord,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -148,7 +146,7 @@ class TestConsolidateAdd:
 
 class TestConsolidateNoop:
     def test_noop_for_near_duplicate(self, db: DatabaseManager) -> None:
-        existing = _store_fact(
+        _store_fact(
             db, "f_existing", "Alice works at Google",
             canonical_entities=["ent_alice"],
             embedding=[1.0, 0.0, 0.0],
@@ -198,7 +196,7 @@ class TestConsolidateNoop:
 
 class TestConsolidateUpdate:
     def test_update_refines_existing(self, db: DatabaseManager) -> None:
-        existing = _store_fact(
+        _store_fact(
             db, "f_old", "Alice works at Google",
             canonical_entities=["ent_alice"],
             embedding=[1.0, 0.0, 0.0],
@@ -219,6 +217,29 @@ class TestConsolidateUpdate:
             ConsolidationActionType.NOOP,
         )
 
+    def test_update_classification_preserves_predecessor_and_stores_successor(
+        self, db: DatabaseManager,
+    ) -> None:
+        existing = _store_fact(
+            db, "f_old", "Alice works at Google",
+            canonical_entities=["ent_alice"], embedding=[1.0, 0.0, 0.0],
+        )
+        db.store_memory(MemoryRecord(memory_id="m_upd_proposal", content="parent"))
+        successor = AtomicFact(
+            fact_id="f_upd_proposal", memory_id="m_upd_proposal",
+            content="Alice works at Google as a senior engineer",
+            canonical_entities=["ent_alice"], embedding=[0.95, 0.05, 0.0],
+        )
+
+        action = MemoryConsolidator(db=db)._execute_update(
+            successor, existing, "default", reason="test refinement",
+        )
+
+        assert action.action_type is ConsolidationActionType.UPDATE
+        assert db.get_fact(existing.fact_id).content == "Alice works at Google"
+        assert db.get_fact(existing.fact_id).evidence_count == existing.evidence_count
+        assert db.get_fact(successor.fact_id).content == successor.content
+
 
 # ---------------------------------------------------------------------------
 # Consolidation: SUPERSEDE (contradiction)
@@ -226,7 +247,7 @@ class TestConsolidateUpdate:
 
 class TestConsolidateSupersede:
     def test_keyword_contradiction_detected(self, db: DatabaseManager) -> None:
-        existing = _store_fact(
+        _store_fact(
             db, "f_old", "Alice works at Google",
             canonical_entities=["ent_alice"],
             embedding=[1.0, 0.0, 0.0],
@@ -245,6 +266,30 @@ class TestConsolidateSupersede:
             ConsolidationActionType.SUPERSEDE,
             ConsolidationActionType.ADD,
         )
+
+    def test_supersede_classification_preserves_predecessor_without_edges(
+        self, db: DatabaseManager,
+    ) -> None:
+        existing = _store_fact(
+            db, "f_old", "Alice works at Google",
+            canonical_entities=["ent_alice"], embedding=[1.0, 0.0, 0.0],
+        )
+        db.store_memory(MemoryRecord(memory_id="m_super_proposal", content="parent"))
+        successor = AtomicFact(
+            fact_id="f_super_proposal", memory_id="m_super_proposal",
+            content="Alice no longer works at Google",
+            canonical_entities=["ent_alice"], embedding=[0.9, 0.1, 0.0],
+        )
+
+        action = MemoryConsolidator(db=db)._execute_supersede(
+            successor, existing, "default", reason="test contradiction",
+        )
+
+        assert action.action_type is ConsolidationActionType.SUPERSEDE
+        assert db.get_fact(existing.fact_id).lifecycle.value == "active"
+        assert db.get_fact(successor.fact_id).content == successor.content
+        edges = db.get_edges_for_node(existing.fact_id, "default")
+        assert all(edge.edge_type.value not in {"contradiction", "supersedes"} for edge in edges)
 
 
 # ---------------------------------------------------------------------------

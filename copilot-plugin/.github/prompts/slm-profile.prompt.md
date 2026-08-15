@@ -1,7 +1,7 @@
 ---
 name: slm-profile
 description: Workspace isolation and runtime profile switching for SuperLocalMemory. Each profile is a fully independent memory namespace — separate facts, code graphs, and tool sets. Use switch_profile (MCP, requires code/full/power profile) to change the active workspace without restarting. Check the active profile with slm status. Required when working across multiple projects, clients, or tenants.
-version: "4.0.4"
+version: "4.0.5"
 agent: agent
 tools:
   - switch_profile
@@ -99,6 +99,7 @@ In your `.mcp.json` (Claude Code) or `.codex/config.toml` (Codex):
 ```json
 "env": {
   "SLM_MCP_PROFILE": "code",
+  "SLM_AGENT_ID": "claude_code",
   "SLM_DATA_DIR": "~/.superlocalmemory"
 }
 ```

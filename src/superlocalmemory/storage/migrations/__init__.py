@@ -32,6 +32,7 @@ from . import (
     M039_scene_fact_members,
     M040_agent_experience_receipts,
     M041_external_evidence_receipts,
+    M042_correction_case_ledger,
 )
 
 # ---------------------------------------------------------------------------
@@ -89,6 +90,7 @@ __all__ = (
     "M039_scene_fact_members",
     "M040_agent_experience_receipts",
     "M041_external_evidence_receipts",
+    "M042_correction_case_ledger",
     # Legacy re-exports (backward compat):
     "CURRENT_SCHEMA_VERSION",
     "get_schema_version",

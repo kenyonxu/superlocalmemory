@@ -1,4 +1,4 @@
-**SuperLocalMemory V4.0.4**
+**SuperLocalMemory V4.0.5**
 
 * [Home](Home)
 
@@ -13,7 +13,7 @@
 
 **Reference**
 * [CLI Commands](CLI-Reference)
-* [MCP Tools](MCP-Tools) — 91 whole / 58 power / 46 full / 28 code / 14 core
+* [MCP Tools](MCP-Tools) — 94 whole / 61 power / 49 full / 31 code / 16 core
 * [Retrieval Score Contract](Retrieval-Score-Contract)
 * [Auto-Memory](Auto-Memory)
 * [Active Memory (V3.1)](Active-Memory)

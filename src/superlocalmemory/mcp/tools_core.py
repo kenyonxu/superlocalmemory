@@ -928,8 +928,11 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 )
                 if isinstance(result, dict) and result.get("success"):
                     return {
-                        "success": True, "fact_id": fact_id,
-                        "content": content.strip(),
+                        "success": True,
+                        "predecessor_fact_id": result.get("predecessor_fact_id", fact_id),
+                        "successor_fact_id": result.get("successor_fact_id"),
+                        "correction_case": result.get("correction_case"),
+                        "review_required": bool(result.get("review_required", False)),
                     }
                 return {
                     "success": False,
@@ -947,11 +950,93 @@ def register_core_tools(server, get_engine: Callable) -> None:
             })
             if result.get("ok"):
                 logger.info("Memory updated: %s by agent: %s", fact_id[:16], agent_id)
-                return {"success": True, "fact_id": fact_id, "content": content.strip()}
+                return {
+                    "success": True,
+                    "predecessor_fact_id": result.get("predecessor_fact_id", fact_id),
+                    "successor_fact_id": result.get("successor_fact_id"),
+                    "correction_case": result.get("correction_case"),
+                    "review_required": bool(result.get("review_required", False)),
+                }
             return {"success": False, "error": result.get("error", "Update failed")}
         except Exception as exc:
             logger.exception("update_memory failed")
             return {"success": False, "error": str(exc)}
+
+    @server.tool(annotations=ToolAnnotations(idempotentHint=True))
+    @admits(OperationKind.CORRECT)
+    async def review_correction(
+        case_id: str,
+        action: str,
+        expected_version: int,
+        event_valid_until: str | None = None,
+    ) -> dict:
+        """Apply, reject, or roll back a review-gated correction case.
+
+        The active daemon derives reviewer identity and profile from its local
+        authenticated MCP boundary.  Clients provide only a case address, a
+        CAS version, and an optional reviewer-approved event-time boundary.
+        """
+        if action not in {"apply", "reject", "rollback"}:
+            return {"success": False, "error": "action must be apply, reject, or rollback"}
+        if not isinstance(expected_version, int) or isinstance(expected_version, bool):
+            return {"success": False, "error": "expected_version must be an integer"}
+        if expected_version < 0:
+            return {"success": False, "error": "expected_version must be non-negative"}
+        try:
+            import asyncio
+            import urllib.parse
+
+            from superlocalmemory.cli.daemon import daemon_request, is_daemon_running
+
+            if not await asyncio.to_thread(is_daemon_running):
+                return {
+                    "success": False,
+                    "retryable": True,
+                    "error": "correction review requires the resident canonical daemon",
+                }
+            payload: dict[str, object] = {"expected_version": expected_version}
+            if event_valid_until is not None:
+                payload["event_valid_until"] = event_valid_until
+            path = "/api/corrections/" + urllib.parse.quote(case_id, safe="") + "/" + action
+            result = await asyncio.to_thread(daemon_request, "POST", path, payload)
+            if isinstance(result, dict) and result.get("success"):
+                return result
+            return {
+                "success": False,
+                "retryable": True,
+                "error": "resident daemon rejected the correction review",
+            }
+        except Exception:
+            logger.exception("review_correction failed")
+            return {"success": False, "retryable": True, "error": "correction review unavailable"}
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def list_corrections(limit: int = 100) -> dict:
+        """List active-profile correction cases for a human or host reviewer."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+            return {"success": False, "error": "limit must be an integer from 1 to 500"}
+        try:
+            import asyncio
+
+            from superlocalmemory.cli.daemon import daemon_request, is_daemon_running
+
+            if not await asyncio.to_thread(is_daemon_running):
+                return {
+                    "success": False,
+                    "retryable": True,
+                    "error": "correction review requires the resident canonical daemon",
+                }
+            result = await asyncio.to_thread(daemon_request, "GET", f"/api/corrections?limit={limit}")
+            if isinstance(result, dict) and result.get("success"):
+                return result
+            return {
+                "success": False,
+                "retryable": True,
+                "error": "resident daemon rejected correction listing",
+            }
+        except Exception:
+            logger.exception("list_corrections failed")
+            return {"success": False, "retryable": True, "error": "correction listing unavailable"}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_attribution() -> dict:

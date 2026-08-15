@@ -77,13 +77,13 @@ def reset_engine():
 
 # Register tools and resources -------------------------------------------------
 #
-# Essential-only default: 39 base tools + 8 mesh tools = 47 registered.
+# Essential-only default: 41 base tools + 8 mesh tools = 49 registered.
 # when mesh is enabled. Set ``SLM_MCP_ALL_TOOLS=1`` to expose the full
 # toolset. Rationale: IDEs cap at 50-100 tools total (Cursor,
 # Antigravity, Windsurf) and a maximal SLM registration crowds out
 # other MCP servers the user may have installed.
 # Admin/diagnostics tools remain available via CLI (`slm <command>`).
-# Set SLM_MCP_ALL_TOOLS=1 to enable all 92 tools (power users).
+# Set SLM_MCP_ALL_TOOLS=1 to enable all 94 tools (power users).
 
 import os as _os_reg
 
@@ -103,6 +103,8 @@ _ESSENTIAL_TOOLS: set[str] = {
     # v4.0.4: explicit, optional observation from the separately installed
     # Bounded Loops MCP producer. It never participates in recall/ranking.
     "observe_bounded_loop_evidence",
+    # Update, review, and list form one core correction lifecycle.
+    "review_correction", "list_corrections",
     # Memory management (2)
     "forget", "run_maintenance",
     # NOTE: prestage_context IS registered (see register_prestage_tool below)

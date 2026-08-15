@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -103,6 +104,20 @@ def test_user_prompt_returns_envelope_on_hit(
         ))
     finally:
         cache.close()
+    memory = sqlite3.connect(home / "memory.db")
+    try:
+        memory.executescript(
+            """
+            CREATE TABLE atomic_facts (fact_id TEXT PRIMARY KEY, profile_id TEXT);
+            CREATE TABLE fact_temporal_validity (
+                fact_id TEXT, profile_id TEXT, system_expired_at TEXT
+            );
+            INSERT INTO atomic_facts VALUES ('f42', 'default');
+            """
+        )
+        memory.commit()
+    finally:
+        memory.close()
 
     payload = json.dumps({"session_id": "sess-envelope", "prompt": prompt})
     rc, out = _run_hook(user_prompt_hook.main, payload, monkeypatch)

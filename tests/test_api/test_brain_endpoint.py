@@ -189,6 +189,43 @@ def test_living_brain_is_an_honest_observation_read_model(
     assert living["agent_experience"]["external_graph_evidence"]["total"] == 0
 
 
+def test_living_brain_embeds_the_additive_brain_truth_snapshot(
+    client: TestClient, install_token: str, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """BrainTruth is additive; the established Living Brain keys remain usable."""
+    from superlocalmemory.brain import BRAIN_TRUTH_V1
+
+    memory_db = tmp_path / "memory.db"
+    with sqlite3.connect(memory_db) as conn:
+        conn.execute(
+            "CREATE TABLE atomic_facts ("
+            "fact_id TEXT, profile_id TEXT, lifecycle TEXT, created_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO atomic_facts VALUES ('fact-1', 'default', 'active', datetime('now'))"
+        )
+    monkeypatch.setattr(brain_mod, "_memory_dir", lambda: tmp_path)
+
+    body = client.get(
+        "/api/v3/brain", headers={"X-Install-Token": install_token},
+    ).json()
+    living = body["living_brain"]
+
+    # Existing clients can still read legacy fields without knowing BrainTruth.
+    assert "feedback" in living
+    assert "connected_clients" in living
+    truth = living["brain_truth"]
+    assert truth["contract"] == BRAIN_TRUTH_V1
+    assert truth["profile_id"] == "default"
+    assert truth["control_plane"] == "observation_only"
+    assert truth["memory_activity"]["facts_total"] == 1
+    assert truth["feedback"]["availability"] == "available"
+    assert truth["agent_experience"]["availability"] in {"available", "unavailable"}
+    assert truth["external_evidence"]["control_plane"] == "observation_only"
+    assert truth["correction_quality"]["availability"] == "unavailable"
+
+
 def test_feedback_loop_uses_canonical_signal_rows(
     client: TestClient, install_token: str, tmp_learning_db: Path,
 ) -> None:

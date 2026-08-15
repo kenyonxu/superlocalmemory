@@ -98,7 +98,7 @@ def main() -> int:
 
     try:
         topic_sig = compute_topic_signature(prompt, entity_hits=entity_hits)
-        entry = read_entry_fast(session_id, topic_sig)
+        entry = read_entry_fast(session_id, topic_sig, require_current_admission=True)
     except Exception:
         sys.stdout.write("{}")
         return 0

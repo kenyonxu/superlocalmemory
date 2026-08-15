@@ -61,6 +61,10 @@ def _mock_db(facts: list[AtomicFact] | None = None) -> MagicMock:
     db.get_facts_by_ids.side_effect = (
         lambda ids, pid, **kwargs: [f for f in _facts if f.fact_id in ids]
     )
+    # The correction admission contract is fail-closed. Ordinary synthetic
+    # fixtures explicitly model a healthy ledger with no pending successors.
+    db.get_invalidated_fact_ids.return_value = set()
+    db.get_nonapplied_correction_successor_ids.return_value = set()
     db.get_scenes_for_fact.return_value = []
     return db
 
@@ -538,6 +542,32 @@ class TestTemporalValidityWiring:
         bridge.discover.assert_called_once()
         assert "f_superseded" not in bridge.discover.call_args.args[0]
         assert {result.fact.fact_id for result in response.results} == {"f_valid"}
+
+    def test_lifecycle_failure_abstains_before_profile_shortcut_can_surface(self) -> None:
+        """A failed lifecycle read closes every pre-fusion admission path.
+
+        The profile shortcut is deliberately injected after ordinary channels,
+        so this exercises both hard-admission sites.  It must not turn a DB
+        outage into a special path that materializes a possibly stale fact.
+        """
+        facts = self._facts()
+        db = _mock_db(facts)
+        db.get_invalidated_fact_ids.side_effect = RuntimeError("database busy")
+        profile_channel = MagicMock()
+        profile_channel.search.return_value = [("f_superseded", 0.99)]
+        engine = RetrievalEngine(
+            db=db,
+            config=RetrievalConfig(),
+            channels={"bm25": _mock_channel([("f_valid", 0.8)])},
+            profile_channel=profile_channel,
+        )
+        try:
+            response = engine.recall("Where does Alice live?", "default")
+        finally:
+            engine.close()
+
+        assert response.results == []
+        db.get_facts_by_ids.assert_not_called()
 
     def test_post_expansion_admission_blocks_bridge_and_scene_bypasses(self) -> None:
         """Facts added after channel admission still cannot reach materialization."""

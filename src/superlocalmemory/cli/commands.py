@@ -345,6 +345,7 @@ def dispatch(args: Namespace) -> None:
         "forget": cmd_forget,
         "delete": cmd_delete,
         "update": cmd_update,
+        "review-correction": cmd_review_correction,
         "status": cmd_status,
         "brain": cmd_brain,
         "health": cmd_health,
@@ -1799,19 +1800,62 @@ def cmd_update(args: Namespace) -> None:
         if use_json:
             from superlocalmemory.cli.json_output import json_print
             json_print("update", data={
-                "fact_id": fact_id,
-                "new_content": new_content[:120],
+                "predecessor_fact_id": result.get("predecessor_fact_id", fact_id),
+                "successor_fact_id": result.get("successor_fact_id"),
+                "correction_case": result.get("correction_case"),
+                "review_required": bool(result.get("review_required", False)),
             }, next_actions=[
                 {
-                    "command": "slm list --json",
-                    "description": "List recent memories",
+                    "command": "slm brain --json",
+                    "description": "Inspect the observation-only brain status",
                 },
             ])
         else:
-            print(f"New: {new_content[:100]}")
-            print(f"Updated: {fact_id}")
+            if result.get("review_required"):
+                case = result.get("correction_case", {})
+                print(f"Correction proposed: {case.get('case_id', 'unknown')}")
+                print(f"Predecessor remains current until review: {fact_id}")
+            else:
+                print(f"Unchanged: {fact_id}")
         return
     _daemon_unavailable("update", use_json)
+
+
+def cmd_review_correction(args: Namespace) -> None:
+    """Apply, reject, or roll back an explicitly reviewed correction case."""
+    from superlocalmemory.core.admission import gate_cli_mutation
+    from superlocalmemory.core.operation_request import OperationKind
+
+    gate_cli_mutation(OperationKind.CORRECT)
+    import urllib.parse
+
+    from superlocalmemory.cli.daemon import daemon_request, ensure_daemon, is_daemon_running
+
+    use_json = getattr(args, "json", False)
+    action = str(args.action).strip().lower()
+    if action not in {"apply", "reject", "rollback"}:
+        raise ValueError("action must be apply, reject, or rollback")
+    if not isinstance(args.expected_version, int) or args.expected_version < 0:
+        raise ValueError("expected_version must be a non-negative integer")
+    if not (is_daemon_running() or ensure_daemon()):
+        _daemon_unavailable("correction review", use_json)
+        return
+    payload: dict[str, object] = {"expected_version": args.expected_version}
+    if getattr(args, "event_valid_until", None):
+        payload["event_valid_until"] = args.event_valid_until
+    path = "/api/corrections/" + urllib.parse.quote(args.case_id, safe="") + "/" + action
+    result = daemon_request("POST", path, payload)
+    if not isinstance(result, dict) or not result.get("success"):
+        _daemon_unavailable("correction review", use_json)
+        return
+    if use_json:
+        from superlocalmemory.cli.json_output import json_print
+
+        json_print("review-correction", data=result)
+    else:
+        case = result.get("correction_case", {})
+        print(f"Correction {action}: {case.get('case_id', args.case_id)}")
+        print(f"State: {case.get('status', 'unknown')}")
 
 
 # -- Diagnostics (all support --json) -------------------------------------
@@ -2157,7 +2201,8 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("recall", "Semantic + keyword search across memories"),
         ("search", "Exact keyword / full-text search"),
         ("list", "Show recent memories (-n N)"),
-        ("update", "Correct an existing memory by id"),
+        ("update", "Propose an immutable correction by id"),
+        ("review-correction", "Apply, reject, or roll back a correction case"),
         ("delete", "Delete a memory by id"),
         ("forget", "Run the decay cycle (preview first)"),
         ("trace", "Recall with a per-channel score breakdown"),
@@ -3690,25 +3735,22 @@ def cmd_session_context(args: Namespace) -> None:
 
 
 def cmd_brain(args: Namespace) -> None:
-    """Read the portable, profile-scoped Agent Experience evidence summary.
+    """Read the portable, profile-scoped Living Brain truth snapshot.
 
-    This command deliberately opens no memory engine and starts no daemon. It
-    is an indexed ``learning.db`` read, so support scripts and non-technical
-    users can inspect the Living Brain without affecting recall latency.
+    This command deliberately opens no memory engine and starts no daemon.
+    BrainTruth uses short read-only connections to keep the status view out of
+    recall and writer domains.
     """
+    from superlocalmemory.brain.truth import BrainTruthService
     from superlocalmemory.core.config import SLMConfig
     from superlocalmemory.infra.data_root import state_path
-    from superlocalmemory.storage.agent_experience import get_profile_receipt_summary
 
     config = SLMConfig.load()
     profile_id = config.active_profile
-    data = {
-        "profile_id": profile_id,
-        "agent_experience": get_profile_receipt_summary(
-            state_path("learning.db"), profile_id
-        ),
-        "control_plane": "observation_only",
-    }
+    data = BrainTruthService(
+        memory_db_path=state_path("memory.db"),
+        learning_db_path=state_path("learning.db"),
+    ).snapshot(profile_id)
     if getattr(args, "json", False):
         from superlocalmemory.cli.json_output import json_print
 
@@ -3716,18 +3758,33 @@ def cmd_brain(args: Namespace) -> None:
             {"command": "slm dashboard", "description": "Open the Living Brain dashboard"},
         ])
         return
+    memory = data["memory_activity"]
+    feedback = data["feedback"]
     evidence = data["agent_experience"]
+    external = data["external_evidence"]
+    corrections = data["correction_quality"]
     print("SuperLocalMemory Living Brain")
     print(f"  Profile: {profile_id}")
-    print(f"  Agent experiences: {evidence['experiences_total']}")
-    print(f"  Claimed evidence authority: {evidence['claimed_evidence_experiences']}")
-    print(f"  Cognitive turns: {evidence['turns_total']}")
-    if evidence["turns_by_state"]:
+    print(f"  Stored facts: {memory['facts_total']}")
+    print(f"  Feedback signals: {feedback['signals_total']}")
+    print(f"  Claimed agent experiences: {evidence['claimed_experiences_total']}")
+    print(
+        "  Independently verified experiences: "
+        f"{evidence['independently_verified_experiences_total']}"
+    )
+    print(f"  Cognitive turns: {evidence['cognitive_turns_total']}")
+    if evidence["cognitive_turns_by_state"]:
         states = ", ".join(
-            f"{state}: {count}" for state, count in sorted(evidence["turns_by_state"].items())
+            f"{state}: {count}"
+            for state, count in sorted(evidence["cognitive_turns_by_state"].items())
         )
         print(f"  Turn states: {states}")
-    print("  Retrieval control: observation only")
+    print(f"  Bounded Loop observations: {external['receipts_total']}")
+    print(f"  Correction cases: {corrections['cases_total']}")
+    print(
+        "  Retrieval control: observation only; does not change recall, "
+        "ranking, or model routing"
+    )
 
 
 def cmd_observe(args: Namespace) -> None:

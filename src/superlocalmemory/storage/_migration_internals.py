@@ -150,6 +150,9 @@ from superlocalmemory.storage.migrations import (
 from superlocalmemory.storage.migrations import (
     M041_external_evidence_receipts as _M041,
 )
+from superlocalmemory.storage.migrations import (
+    M042_correction_case_ledger as _M042,
+)
 
 # Emit under the runner's logger name so operational log filters that key on
 # "superlocalmemory.storage.migration_runner" keep matching after this split.
@@ -199,6 +202,7 @@ _MODULES = {
     _M039.NAME: _M039,
     _M040.NAME: _M040,
     _M041.NAME: _M041,
+    _M042.NAME: _M042,
 }
 
 # Exact historical DDL fingerprints whose resulting schema is intentionally

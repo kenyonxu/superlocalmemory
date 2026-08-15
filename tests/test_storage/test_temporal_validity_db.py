@@ -65,6 +65,34 @@ class TestGetInvalidatedFactIds:
         invalid = db.get_invalidated_fact_ids(["f1", "f2", "f3"], "default")
         assert invalid == {"f1"}
 
+    def test_combined_correction_admission_matches_both_lifecycle_states(
+        self, db: DatabaseManager,
+    ) -> None:
+        """The hot-path helper preserves correction truth in one DB read."""
+        from superlocalmemory.storage.migrations import M042_correction_case_ledger as m042
+
+        _seed_three_facts(db)
+        db.store_temporal_validity("f1", "default")
+        db.invalidate_fact_temporal("f1", invalidated_by="f2", invalidation_reason="reviewed")
+        with db.raw_connection() as conn:
+            m042.apply(conn)
+            conn.execute(
+                "INSERT INTO correction_cases "
+                "(case_id, profile_id, scope, predecessor_fact_id, successor_fact_id, "
+                "reason_code, status, proposed_by_actor_id, proposed_by_actor_kind, "
+                "proposed_by_trust_tier, idempotency_key, version, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "case-1", "default", "personal", "f2", "f3", "reviewed", "proposed",
+                    "reviewer", "human", "operator_verified", "case-1", 0,
+                    "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00",
+                ),
+            )
+
+        assert db.get_correction_inadmissible_fact_ids(["f1", "f2", "f3"], "default") == {
+            "f1", "f3"
+        }
+
     def test_closed_loop_excluded_from_valid_facts(self, db: DatabaseManager) -> None:
         _seed_three_facts(db)
         db.store_temporal_validity("f1", "default")
@@ -168,6 +196,27 @@ class TestPinnedTemporalAdmission:
         pinned = {fact.fact_id for fact in db.get_pinned("default")}
 
         assert pinned == {"f2"}
+
+    def test_current_pinned_recall_excludes_a_nonapplied_correction_successor(
+        self, db: DatabaseManager,
+    ) -> None:
+        """Pins cannot bypass a correction proposal waiting for human review."""
+        from superlocalmemory.storage.migrations import M042_correction_case_ledger as m042
+
+        _seed_three_facts(db)
+        db.set_pinned("f1", True)
+        with sqlite3.connect(db.db_path) as conn:
+            m042.apply(conn)
+            conn.execute(
+                "INSERT INTO correction_cases (case_id, profile_id, scope, "
+                "predecessor_fact_id, successor_fact_id, reason_code, status, version, "
+                "idempotency_key, proposed_by_actor_id, proposed_by_actor_kind, "
+                "proposed_by_trust_tier, created_at, updated_at) "
+                "VALUES ('pending-f1', 'default', 'personal', 'f2', 'f1', 'test', "
+                "'proposed', 0, 'pending-f1', 'test', 'test', 'trusted', 'now', 'now')"
+            )
+
+        assert db.get_pinned("default") == []
 
 
 class TestStrictTwoClockAdmission:

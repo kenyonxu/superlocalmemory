@@ -1,4 +1,4 @@
-# MCP Tools — V4.0.4 (92 whole)
+# MCP Tools — V4.0.5 (94 whole)
 
 SuperLocalMemory exposes profile-selected tools and resources through the Model
 Context Protocol (MCP). The installed profile registry (`src/superlocalmemory/mcp/profiles.py` and `src/superlocalmemory/mcp/server.py`) is the source of truth
@@ -6,7 +6,7 @@ for names and counts. An MCP-compatible client still decides when to call a
 tool.
 
 > **Current V4 profile counts (from `CHANGELOG.md` and the MCP exposure contract `tests/test_mcp/test_mcp_exposure_contract.py` / `tests/mcp/test_profile_selector.py`):**
-> `core` **14**, `code` **29** (installed coding agents), `full` **47**, `power` **59**, `whole` **92** (all registered), plus `mesh` **8**. The unrestricted default surface is **47** with mesh enabled. See also `src/superlocalmemory/mcp/profiles.py`.
+> `core` **16**, `code` **31** (installed coding agents), `full` **49**, `power` **61**, `whole` **94** (all registered), plus `mesh` **8**. The unrestricted default surface is **49** with mesh enabled. See also `src/superlocalmemory/mcp/profiles.py`.
 
 > **Optimize tools:** `slm_compress`, `slm_retrieve`, `slm_cache_set`,
 > `slm_cache_get`, and `slm_optimize_stats` provide explicit compression and
@@ -130,23 +130,23 @@ boundary.
 
 > **Hard constraint:** Surfaces B and C cache results you explicitly route through SLM — not the Claude conversation turn. Full-turn caching requires Surface A (proxy).
 
-## MCP Profiles (V4.0.4 — whole is 92)
+## MCP Profiles (V4.0.5 — whole is 94)
 
 A profile is a named, fixed subset of tools exposed to the connecting client.
 Set the active profile via the `SLM_MCP_PROFILE` environment variable (or `SLM_MCP_ALL_TOOLS`/`SLM_MCP_TOOLS` overrides — see `src/superlocalmemory/mcp/server.py` precedence: `ALL > TOOLS > PROFILE > default`). `whole` exposes the raw server with all registered tools; `switch_profile` tool switches the active workspace profile (separate concept).
 
 | Profile | Tool count | Included surfaces |
 |---|---|---|
-| `core` | **14** | Store, recall, search, sessions, optimize (5 tools) |
-| `code` | **29** | Core + portable Brain evidence + code graph + `switch_profile` + 3 bounded-loop tools |
-| `full` | **47** | All everyday memory, portable Brain evidence, optimize, and mesh tools |
-| `power` | **59** | Full + governance and behavioral analysis tools |
+| `core` | **16** | Store, recall, search, sessions, optimize, and correction review |
+| `code` | **31** | Core + portable Brain evidence + code graph + `switch_profile` + 3 bounded-loop tools |
+| `full` | **49** | All everyday memory, portable Brain evidence, optimize, and mesh tools |
+| `power` | **61** | Full + governance and behavioral analysis tools |
 | `mesh` | **8** | SLM-Mesh coordination only |
-| `whole` | **92** | All registered tools (raw server) — verified by `tests/test_mcp/test_mcp_exposure_contract.py` `whole == 92` |
+| `whole` | **94** | All registered tools (raw server) — verified by `tests/test_mcp/test_mcp_exposure_contract.py` `whole == 94` |
 
-> **Why 92 not 91:** V4.0.4 adds one explicit Bounded Loops observation tool to the portable Brain surface. Earlier `whole81`/`whole84`/`whole91` aliases still resolve to `whole`; `whole92` names the current registered surface.
+> **Why 94:** V4.0.5 adds the correction review and listing tools so every portable MCP surface that can propose a correction can complete its review lifecycle. Earlier `whole81`/`whole84`/`whole91`/`whole92` aliases still resolve to `whole`; `whole94` names the current registered surface.
 
-Legacy count-suffixed aliases (`core14`, `code20`/`code21`/`code24`/`code28`/`code29`, `full38`/`full39`/`full42`/`full46`/`full47`, `power50`/`power51`/`power54`/`power58`/`power59`, `mesh8`, and `whole81`/`whole84`/`whole91`/`whole92`) resolve to their canonical name for backward compatibility and emit a migration warning.
+Legacy count-suffixed aliases (`core14`/`core16`, `code20`/`code21`/`code24`/`code28`/`code29`/`code31`, `full38`/`full39`/`full42`/`full46`/`full47`/`full49`, `power50`/`power51`/`power54`/`power58`/`power59`/`power61`, `mesh8`, and `whole81`/`whole84`/`whole91`/`whole92`/`whole94`) resolve to their canonical name for backward compatibility and emit a migration warning.
 
 ### Optional Bounded Loops evidence bridge
 

@@ -290,7 +290,8 @@ This skill uses graph tools that are only active under the `code` MCP profile
 
 ```json
 "env": {
-  "SLM_MCP_PROFILE": "code"
+  "SLM_MCP_PROFILE": "code",
+  "SLM_AGENT_ID": "claude_code"
 }
 ```
 
@@ -311,4 +312,4 @@ profile. See `slm-profile` for the full profile switching workflow.
 
 ---
 
-SuperLocalMemory v4.0.4 · Qualixar · AGPL-3.0-or-later
+SuperLocalMemory v4.0.5 · Qualixar · AGPL-3.0-or-later

@@ -48,13 +48,14 @@ def test_profile_definitions_keys_exact():
 
 
 # ---------------------------------------------------------------------------
-# RED-2: core == exactly the 14 names in LLD §5
+# RED-2: core == exactly the 16 names in the lifecycle contract
 # ---------------------------------------------------------------------------
 
 _EXPECTED_CORE = frozenset({
     "remember", "recall", "search", "fetch", "list_recent", "update_memory", "forget",
     "session_init", "close_session",
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
+    "review_correction", "list_corrections",
 })
 
 
@@ -64,11 +65,11 @@ def test_profile_core_exact():
     assert core == _EXPECTED_CORE, (
         f"core diff — extra: {core - _EXPECTED_CORE}, missing: {_EXPECTED_CORE - core}"
     )
-    assert len(core) == 14, f"core must be 14 names, got {len(core)}"
+    assert len(core) == 16, f"core must be 16 names, got {len(core)}"
 
 
 # ---------------------------------------------------------------------------
-# RED-3: code == core | Brain + code-graph + switch_profile + loops (==29)
+# RED-3: code == core | Brain + code-graph + switch_profile + loops (==31)
 # ---------------------------------------------------------------------------
 
 _CODE_EXTRA = frozenset({
@@ -91,11 +92,11 @@ def test_profile_code_exact():
     assert code == expected, (
         f"code diff — extra: {code - expected}, missing: {expected - code}"
     )
-    assert len(code) == 29, f"code must be 29 names, got {len(code)}"
+    assert len(code) == 31, f"code must be 31 names, got {len(code)}"
 
 
 # ---------------------------------------------------------------------------
-# RED-4: full == 47 and ⊇ core memory names; built from explicit 39+8 literal
+# RED-4: full == 49 and ⊇ core memory names; built from explicit 41+8 literal
 # ---------------------------------------------------------------------------
 
 _EXPECTED_FULL_MESH = frozenset({
@@ -112,6 +113,7 @@ _EXPECTED_FULL_BASE = frozenset({
     "get_brain_evidence_status", "record_agent_experience",
     "record_cognitive_turn", "finalize_cognitive_turn",
     "observe_bounded_loop_evidence",
+    "review_correction", "list_corrections",
     "evolve_skill", "skill_health", "skill_lineage", "switch_profile",
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
     # 3.8.0: bounded-loop tools (CLI + command + MCP).
@@ -128,14 +130,14 @@ def test_profile_full_exact():
     assert full == _EXPECTED_FULL, (
         f"full diff — extra: {full - _EXPECTED_FULL}, missing: {_EXPECTED_FULL - full}"
     )
-    assert len(full) == 47, f"full must be 47 names, got {len(full)}"
+    assert len(full) == 49, f"full must be 49 names, got {len(full)}"
     # Must ⊇ core memory names
     core = mod._PROFILE_DEFINITIONS["core"]
     assert core <= full, f"full must be a superset of core; missing from full: {core - full}"
 
 
 # ---------------------------------------------------------------------------
-# RED-5: power == 59 and ⊇ full
+# RED-5: power == 61 and ⊇ full
 # ---------------------------------------------------------------------------
 
 _POWER_EXTRA = frozenset({
@@ -153,7 +155,7 @@ def test_profile_power_exact():
     assert power == _EXPECTED_POWER, (
         f"power diff — extra: {power - _EXPECTED_POWER}, missing: {_EXPECTED_POWER - power}"
     )
-    assert len(power) == 59, f"power must be 59 names, got {len(power)}"
+    assert len(power) == 61, f"power must be 61 names, got {len(power)}"
     full = mod._PROFILE_DEFINITIONS["full"]
     assert full <= power, f"power must be a superset of full; missing: {full - power}"
 
@@ -294,11 +296,13 @@ def test_resolve_profile_all_published_legacy_aliases():
     mod = _get_module()
     expected = {
         "core14": mod._PROFILE_DEFINITIONS["core"],
+        "core16": mod._PROFILE_DEFINITIONS["core"],
         "code20": mod._PROFILE_DEFINITIONS["code"],
         "mesh8": mod._PROFILE_DEFINITIONS["mesh"],
         "full38": mod._PROFILE_DEFINITIONS["full"],
         "power50": mod._PROFILE_DEFINITIONS["power"],
         "whole81": None,
+        "whole94": None,
     }
     for alias, allowed in expected.items():
         assert mod._resolve_profile_allowed(

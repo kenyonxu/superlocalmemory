@@ -69,7 +69,7 @@ Add ONLY this section to your existing `.codex/config.toml` (project) or
 [mcp_servers.superlocalmemory]
 command = "slm"
 args = ["mcp"]
-env = { SLM_MCP_PROFILE = "code", SLM_DATA_DIR = "~/.superlocalmemory" }
+env = { SLM_MCP_PROFILE = "code", SLM_AGENT_ID = "codex", SLM_DATA_DIR = "~/.superlocalmemory" }
 ```
 
 This registers the `superlocalmemory` MCP server with `SLM_MCP_PROFILE=code` (the 28-tool
@@ -130,7 +130,7 @@ tools), use the provided launcher script instead of the bare `slm` binary.
    [mcp_servers.superlocalmemory]
    command = "/absolute/path/to/codex-plugin/scripts/slm-launch"
    args = []
-   env = { SLM_MCP_PROFILE = "code", SLM_DATA_DIR = "~/.superlocalmemory" }
+env = { SLM_MCP_PROFILE = "code", SLM_AGENT_ID = "codex", SLM_DATA_DIR = "~/.superlocalmemory" }
    ```
 
    Replace `/absolute/path/to/codex-plugin/scripts/slm-launch` with the actual path.

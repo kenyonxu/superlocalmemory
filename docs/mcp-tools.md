@@ -181,13 +181,39 @@ Delete a specific memory by exact fact ID. All deletions are logged with `agent_
 
 ### `update_memory`
 
-Update the content of a specific memory by exact fact ID. The fact must belong to the active profile.
+Propose a review-required correction for a specific memory by exact fact ID.
+It returns the immutable successor and correction case, but neither becomes
+current truth until `review_correction(..., action="apply")` succeeds through
+the resident authenticated daemon.
 
 | Parameter | Type | Required | Description |
 |-----------|------|:--------:|-------------|
 | `fact_id` | string | Yes | Exact fact ID to update |
 | `content` | string | Yes | New content (cannot be empty) |
 | `agent_id` | string | No | Calling-agent identifier for audit log |
+
+### `review_correction`
+
+Apply, reject, or roll back a correction case through the resident canonical
+daemon. The client supplies the case address and expected version only; the
+daemon derives the active profile and reviewer identity. This tool never
+performs a local fallback write.
+
+| Parameter | Type | Required | Description |
+|-----------|------|:--------:|-------------|
+| `case_id` | string | Yes | Correction case returned by `update_memory` |
+| `action` | string | Yes | `apply`, `reject`, or `rollback` |
+| `expected_version` | integer | Yes | Current case version for compare-and-swap |
+| `event_valid_until` | string | No | Reviewer-validated event-time boundary; `apply` only |
+
+### `list_corrections`
+
+List bounded, active-profile correction metadata for human or host review. It
+contains identifiers, status, and timing metadata only—never fact text.
+
+| Parameter | Type | Required | Description |
+|-----------|------|:--------:|-------------|
+| `limit` | integer | No | 1–500; default 100 |
 
 ## Active Memory Tools (V3.1)
 
@@ -380,7 +406,7 @@ Find and optionally terminate orphaned SLM daemon or MCP processes. Safe to call
 
 ## Code-Graph Tools
 
-Available in profiles `code` (29 tools), `full` (47 tools), and `power` (59 tools). Not available in `core` or `mesh` profiles.
+Available in profiles `code` (31 tools), `full` (49 tools), and `power` (61 tools). Not available in `core` or `mesh` profiles.
 
 These tools build and query a structural code graph over a local repository. The graph maps functions, classes, modules, call sites, imports, and dependencies. It is built on demand from the repository path and persisted in SLM's database.
 

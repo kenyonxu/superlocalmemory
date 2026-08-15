@@ -104,6 +104,7 @@ In your `.mcp.json` (Claude Code) or `.codex/config.toml` (Codex):
 ```json
 "env": {
   "SLM_MCP_PROFILE": "code",
+  "SLM_AGENT_ID": "claude_code",
   "SLM_DATA_DIR": "~/.superlocalmemory"
 }
 ```

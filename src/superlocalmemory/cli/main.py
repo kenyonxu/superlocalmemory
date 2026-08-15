@@ -484,6 +484,18 @@ def main() -> None:
     update_p.add_argument("content", help="New content for the memory")
     update_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
+    correction_p = sub.add_parser(
+        "review-correction", help="Apply, reject, or roll back a reviewed correction case"
+    )
+    correction_p.add_argument("case_id", help="Correction case ID returned by slm update")
+    correction_p.add_argument("action", choices=("apply", "reject", "rollback"))
+    correction_p.add_argument("expected_version", type=int, help="Current case version (CAS guard)")
+    correction_p.add_argument(
+        "--event-valid-until",
+        help="Optional reviewer-approved RFC3339 event-time boundary (apply only)",
+    )
+    correction_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
+
     list_p = sub.add_parser("list", help="List recent memories chronologically (shows IDs for delete/update)")
     list_p.add_argument(
         "--limit", "-n", type=int, default=20, help="Number of entries (default 20)",

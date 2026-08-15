@@ -29,6 +29,7 @@ from superlocalmemory.core.config import ChannelWeights, RetrievalConfig
 from superlocalmemory.retrieval.fusion import FusionResult, weighted_rrf
 from superlocalmemory.retrieval.strategy import QueryStrategy, QueryStrategyClassifier
 from superlocalmemory.retrieval.temporal_validity_filter import (
+    CorrectionAdmissionCache,
     admit_correction_candidates,
     admit_correction_fusion_results,
 )
@@ -232,6 +233,10 @@ class RetrievalEngine:
             include_unknown=include_unknown,
         )
         _em("run_channels")
+        # One request may need admission before fusion and again after optional
+        # bridge/scene expansion.  Cache only the IDs checked during this one
+        # request; every newly expanded candidate remains a hard DB lookup.
+        correction_admission = CorrectionAdmissionCache()
         if profile_hits:
             ch_results["profile"] = profile_hits
         # The profile shortcut bypasses _run_channels(), so it needs the same
@@ -241,6 +246,7 @@ class RetrievalEngine:
             known_as_of=known_as_of, valid_at=valid_at,
             include_unknown=include_unknown,
             include_global=include_global, include_shared=include_shared,
+            lifecycle_cache=correction_admission,
         )
         total = sum(len(v) for v in ch_results.values())
 
@@ -357,6 +363,7 @@ class RetrievalEngine:
             known_as_of=known_as_of, valid_at=valid_at,
             include_unknown=include_unknown,
             include_global=include_global, include_shared=include_shared,
+            lifecycle_cache=correction_admission,
         )
 
         _em("expand+entity_enh")
@@ -948,16 +955,6 @@ class RetrievalEngine:
                     out = fn(out, profile_id, _filter_context)
                 except Exception as exc:
                     logger.warning("Post-retrieval filter failed: %s", exc)
-
-        # The legacy temporal filter preserves its score-demotion semantics for
-        # compatibility. Admission is separate and hard: no current
-        # system-superseded fact may seed fusion, bridge discovery, or rerank.
-        out = admit_correction_candidates(
-            out, profile_id, self._db, as_of=as_of,
-            known_as_of=known_as_of, valid_at=valid_at,
-            include_unknown=include_unknown,
-            include_global=include_global, include_shared=include_shared,
-        )
 
         return out
 

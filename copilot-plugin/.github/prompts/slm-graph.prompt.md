@@ -1,7 +1,7 @@
 ---
 name: slm-graph
 description: >
-version: "4.0.4"
+version: "4.0.5"
 agent: agent
 tools:
   - build_code_graph
@@ -285,7 +285,8 @@ This skill uses graph tools that are only active under the `code` MCP profile
 
 ```json
 "env": {
-  "SLM_MCP_PROFILE": "code"
+  "SLM_MCP_PROFILE": "code",
+  "SLM_AGENT_ID": "claude_code"
 }
 ```
 

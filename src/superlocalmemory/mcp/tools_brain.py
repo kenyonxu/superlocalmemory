@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 from mcp.types import ToolAnnotations
 
+from superlocalmemory.brain.truth import BrainTruthService
 from superlocalmemory.core.admission import admits
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.infra.data_root import state_path
@@ -26,13 +27,11 @@ from superlocalmemory.storage.agent_experience import (
     CognitiveTurnTransitionError,
     LearningWriteBusyError,
     ProfileAdmissionError,
-    get_profile_receipt_summary,
 )
 from superlocalmemory.storage.external_evidence import (
     ExternalEvidenceConflictError,
     ExternalEvidenceStore,
     ExternalEvidenceValidationError,
-    get_profile_external_evidence_summary,
 )
 
 
@@ -50,6 +49,48 @@ def _external_store_for(engine: Any) -> ExternalEvidenceStore:
         Path(state_path("learning.db")),
         is_profile_active=lambda profile_id: profile_id == active_profile,
     )
+
+
+def _brain_truth_for(engine: Any) -> dict[str, Any]:
+    """Read the portable truth snapshot without opening an engine or a writer."""
+    return BrainTruthService(
+        memory_db_path=state_path("memory.db"),
+        learning_db_path=state_path("learning.db"),
+    ).snapshot(engine.profile_id)
+
+
+def _legacy_agent_experience(truth: dict[str, Any]) -> dict[str, Any]:
+    """Keep the v4.0.4 MCP alias during the one-release transition window."""
+    evidence = truth["agent_experience"]
+    available = evidence["availability"] == "available"
+    claimed = evidence["claimed_experiences_total"]
+    turns = evidence["cognitive_turns_total"]
+    states = evidence["cognitive_turns_by_state"]
+    return {
+        "is_real": available,
+        "availability": evidence["availability"],
+        "experiences_total": claimed if available else 0,
+        "turns_total": turns if available else 0,
+        "turns_by_state": states if available else {},
+        # The old name remains an alias only.  BrainTruth deliberately calls
+        # these declared claims, never independently verified learning.
+        "claimed_evidence_experiences": claimed if available else 0,
+        "source": evidence["source"],
+    }
+
+
+def _legacy_external_evidence(truth: dict[str, Any]) -> dict[str, Any]:
+    """Keep the v4.0.4 external-graph alias without a second database read."""
+    evidence = truth["external_evidence"]
+    available = evidence["availability"] == "available"
+    return {
+        "is_real": available,
+        "availability": evidence["availability"],
+        "total": evidence["receipts_total"] if available else 0,
+        "by_run_state": evidence["receipts_by_run_state"] if available else {},
+        "demonstrations": evidence["demonstrations_total"] if available else 0,
+        "control_plane": "observation_only",
+    }
 
 
 def _require_active_profile(engine: Any, payload: dict[str, Any]) -> str | None:
@@ -90,18 +131,21 @@ def register_brain_tools(server: Any, get_engine: Callable[[], Any]) -> None:
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_brain_evidence_status() -> dict[str, Any]:
-        """Get profile-scoped, observation-only Brain evidence totals."""
+        """Get profile-scoped, observation-only Living Brain evidence totals.
+
+        ``brain_truth`` is the canonical v1 payload.  The legacy aliases are
+        retained for one release so existing hosts can move independently.
+        """
         engine = get_engine()
+        truth = _brain_truth_for(engine)
         return {
             "success": True,
             "profile_id": engine.profile_id,
-            "agent_experience": get_profile_receipt_summary(
-                state_path("learning.db"), engine.profile_id
-            ),
-            "external_graph_evidence": get_profile_external_evidence_summary(
-                state_path("learning.db"), engine.profile_id
-            ),
-            "control_plane": "observation_only",
+            "brain_truth": truth,
+            "agent_experience": _legacy_agent_experience(truth),
+            "external_evidence": truth["external_evidence"],
+            "external_graph_evidence": _legacy_external_evidence(truth),
+            "control_plane": truth["control_plane"],
         }
 
     @server.tool()

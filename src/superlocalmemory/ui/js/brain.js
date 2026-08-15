@@ -1135,7 +1135,15 @@
   // --------------------------------------------------------------------
   function cardLivingBrain(snapshot) {
     const data = snapshot || {};
-    const feedback = data.feedback || {};
+    // v4.0.5: BrainTruth is the canonical, unavailable-aware read model.
+    // Keep legacy fields below as fallbacks while old daemon versions remain
+    // in use during a rolling local upgrade.
+    const truth = data.brain_truth || {};
+    const memoryActivity = truth.memory_activity || {};
+    const feedback = truth.feedback || data.feedback || {};
+    const experience = truth.agent_experience || {};
+    const externalEvidence = truth.external_evidence || {};
+    const correctionQuality = truth.correction_quality || {};
     const clients = (data.connected_clients || {}).clients || [];
     const quality = data.source_quality || {};
     const graph = data.graph || {};
@@ -1143,8 +1151,17 @@
     wrap.appendChild(EL('h4', {text: 'Living Brain'}));
     wrap.appendChild(EL('p', {
       className: 'brain-help',
-      text: 'A local evidence view of what SLM has observed. It does not automatically change your model, tools, or memories.',
+      text: 'A local evidence view of memory activity, feedback, and reviewed quality. Evidence and observations do not change recall, ranking, or model routing.',
     }));
+
+    function countOrUnavailable(section, key, label) {
+      if (!section || section.availability === 'unavailable') {
+        const reason = section && section.reason ? ': ' + section.reason : '';
+        return 'Unavailable' + reason;
+      }
+      const value = section[key];
+      return value == null ? 'No data yet' : String(value) + (label ? ' ' + label : '');
+    }
 
     const clientText = clients.length
       ? clients.map((client) => {
@@ -1153,10 +1170,29 @@
       }).join(' · ')
       : 'No client activity in the last 5 minutes';
     const grid = EL('div', {className: 'brain-stat-grid'});
+    grid.appendChild(statRow(
+      'Control plane',
+      truth.control_plane === 'observation_only' ? 'Observation only' : 'Legacy view',
+    ));
     grid.appendChild(statRow('Recent clients', clientText));
-    grid.appendChild(statRow('Explicit feedback', feedback.explicit_signals || 0));
-    grid.appendChild(statRow('Implicit signals', feedback.implicit_signals || 0));
-    grid.appendChild(statRow('Settled outcomes', feedback.settled_outcomes || 0));
+    grid.appendChild(statRow('Memory activity', countOrUnavailable(
+      memoryActivity, 'facts_total', 'facts',
+    )));
+    grid.appendChild(statRow('Feedback signals', countOrUnavailable(
+      feedback, 'signals_total', 'signals',
+    )));
+    grid.appendChild(statRow('Claimed evidence', countOrUnavailable(
+      experience, 'claimed_experiences_total', 'receipts',
+    )));
+    grid.appendChild(statRow('Independently verified evidence', countOrUnavailable(
+      experience, 'independently_verified_experiences_total', 'receipts',
+    )));
+    grid.appendChild(statRow('External observations', countOrUnavailable(
+      externalEvidence, 'receipts_total', 'receipts',
+    )));
+    grid.appendChild(statRow('Correction quality', countOrUnavailable(
+      correctionQuality, 'cases_total', 'review cases',
+    )));
     grid.appendChild(statRow(
       'Observed source quality',
       quality.mean_quality == null ? 'No evidence yet' : Number(quality.mean_quality).toFixed(3),
@@ -1175,8 +1211,8 @@
         : 'No feedback signals recorded yet. Report outcomes or use memory feedback to start the loop.',
     }));
     wrap.appendChild(badge(
-      data.is_real ? 'real' : 'stub',
-      data.source || 'local evidence',
+      truth.contract ? 'real' : (data.is_real ? 'real' : 'stub'),
+      truth.contract || data.source || 'local evidence',
     ));
     return wrap;
   }

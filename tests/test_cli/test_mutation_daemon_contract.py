@@ -40,8 +40,10 @@ def test_update_routes_to_resident_daemon(capsys) -> None:
             "superlocalmemory.cli.daemon.daemon_request",
             return_value={
                 "success": True,
-                "fact_id": "fact 1",
-                "content": "Updated content.",
+                "predecessor_fact_id": "fact 1",
+                "successor_fact_id": "successor-1",
+                "correction_case": {"case_id": "case-1", "status": "proposed", "version": 0},
+                "review_required": True,
             },
         ) as request,
         patch(
@@ -58,4 +60,33 @@ def test_update_routes_to_resident_daemon(capsys) -> None:
     )
     payload = json.loads(capsys.readouterr().out)
     assert payload["success"] is True
-    assert payload["data"]["fact_id"] == "fact 1"
+    assert payload["data"]["predecessor_fact_id"] == "fact 1"
+    assert payload["data"]["correction_case"]["status"] == "proposed"
+    assert payload["data"]["review_required"] is True
+
+
+def test_review_correction_routes_to_resident_daemon(capsys) -> None:
+    from superlocalmemory.cli.commands import cmd_review_correction
+
+    args = Namespace(
+        case_id="case 1",
+        action="apply",
+        expected_version=0,
+        event_valid_until="2026-08-16T00:00:00Z",
+        json=True,
+    )
+    with (
+        patch("superlocalmemory.cli.daemon.is_daemon_running", return_value=True),
+        patch(
+            "superlocalmemory.cli.daemon.daemon_request",
+            return_value={"success": True, "correction_case": {"status": "applied"}},
+        ) as request,
+    ):
+        cmd_review_correction(args)
+
+    request.assert_called_once_with(
+        "POST",
+        "/api/corrections/case%201/apply",
+        {"expected_version": 0, "event_valid_until": "2026-08-16T00:00:00Z"},
+    )
+    assert json.loads(capsys.readouterr().out)["data"]["correction_case"]["status"] == "applied"

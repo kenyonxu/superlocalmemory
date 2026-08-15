@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<h1 align="center">SuperLocalMemory V4.0.4</h1>
+<h1 align="center">SuperLocalMemory V4.0.5</h1>
 
 <h2 align="center">Rent the LLM. Own the memory.</h2>
 
@@ -27,12 +27,12 @@ guarantee here is stated as a falsifiable invariant, tested under an adversarial
 negative control, and shipped with the harness that regenerates the evidence:
 <code>python benchmark/run_all.py --trials 200 --output-dir results/</code>. What each experiment
 does <em>not</em> exercise is stated too.</p>
-<p align="center"><code>v4.0.4</code> — one control plane: <strong>SLM-Mesh</strong> peer coordination · multi-scope memory (personal / shared / global) · profiles · Cache · Compress · 7-layer retrieval · code graph · Entity Explorer · skill evolution · Modes A/B/C · GDPR retention &amp; audit chain · bounded loops — across CLI, MCP, dashboard, the <strong>Claude plugin</strong>, the <strong>Codex add-on</strong>, and documented IDE integrations.<br/>
+<p align="center"><code>v4.0.5</code> — one control plane: <strong>SLM-Mesh</strong> peer coordination · multi-scope memory (personal / shared / global) · profiles · Cache · Compress · 7-layer retrieval · code graph · Entity Explorer · skill evolution · Modes A/B/C · GDPR retention &amp; audit chain · bounded loops — across CLI, MCP, dashboard, the <strong>Claude plugin</strong>, the <strong>Codex add-on</strong>, and documented IDE integrations.<br/>
 Proxy: <code>slm wrap claude</code> &nbsp;·&nbsp; MCP: add <code>slm_compress</code> to your config &nbsp;·&nbsp; Skill: zero-config</p>
 <p align="center"><strong>Four public arXiv preprints</strong> · V4: <a href="https://arxiv.org/abs/2608.08253">arXiv:2608.08253</a> · companion archive: <a href="https://zenodo.org/records/21853302">Zenodo 21853302</a> (<a href="https://doi.org/10.5281/zenodo.21853302">DOI 10.5281/zenodo.21853302</a>) · prior preprints: <a href="https://arxiv.org/abs/2603.02240">2603.02240</a> · <a href="https://arxiv.org/abs/2603.14588">2603.14588</a> · <a href="https://arxiv.org/abs/2604.04514">2604.04514</a>.</p>
 
 <p align="center">
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/v4.0.4-Current_Release-2ea44f?style=for-the-badge&logo=checkmarx&logoColor=white" alt="v4.0.4 — Current Release"/></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/v4.0.5-Current_Release-2ea44f?style=for-the-badge&logo=checkmarx&logoColor=white" alt="v4.0.5 — Current Release"/></a>
   <a href="https://arxiv.org/abs/2608.08253"><img src="https://img.shields.io/badge/arXiv-2608.08253-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="SuperLocalMemory 4.0 paper on arXiv:2608.08253"/></a>
   <a href="https://zenodo.org/records/21853302"><img src="https://img.shields.io/badge/Zenodo-10.5281%2Fzenodo.21853302-1682D4?style=for-the-badge&logo=zenodo&logoColor=white" alt="V4 paper on Zenodo: 10.5281/zenodo.21853302"/></a>
   <a href="https://arxiv.org/abs/2603.14588"><img src="https://img.shields.io/badge/arXiv-2603.14588-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="arXiv Paper"/></a>
@@ -62,7 +62,12 @@ SuperLocalMemory V4 combines conventional dense and lexical retrieval with graph
 
 **Memory with a sense of time.** SLM does not only store *what* an agent learned — it records *when*. Every fact carries ingestion timing and provenance; recall runs a dedicated temporal candidate channel alongside semantic, lexical, and associative retrieval; scenes and entity timelines reconstruct sequence; and the lifecycle lets neglected memory decay and self-archive instead of growing without bound. Time is a first-class ranking and lifecycle signal rather than a timestamp column an agent never reads — which is what lets a long-lived agent reason about how its context changed, not only what it currently holds.
 
-**What V4.0.4 ships.** Existing users can now preview and explicitly refresh SLM-owned host integrations with `slm upgrade-hosts`, while package installation and MCP startup no longer silently modify host hook configuration. V4.0.4 also adds an optional, capability-negotiated Bounded Loops observation bridge: compatible terminal graph receipts enter a separate, profile-scoped `learning.db` table and appear in Living Brain, without affecting recall, ranking, routing, or automatic learning. V4 remains a *governed* local-first control plane — every canonical write is admitted, policy-authorized, tracked as durable per-store obligations (lexical, temporal, vector), and sealed by a completion manifest, so it is either fully applied or explicitly marked degraded, never silently half-done. Flagship surfaces in this release:
+**What V4.0.5 ships.** A correction is now a review-gated lifecycle, not an in-place edit: SLM creates an immutable successor, keeps it out of current recall until an authenticated reviewer applies it, and preserves the predecessor for time-aware history. Every candidate path, including cached context, pins, bridge expansion, and scene expansion, uses hard current-truth admission and abstains if that truth cannot be read. `slm brain`, MCP, HTTP, and the Living Brain share one observation-only BrainTruth snapshot; feedback, external Bounded Loops evidence, and receipt claims are shown honestly but do not silently alter recall, ranking, or model routing. The optional Bounded Loops bridge remains capability-negotiated and independent. See [reviewed corrections](docs/reviewed-corrections.md) for the lifecycle and [MCP tools](docs/mcp-tools.md) for host-facing commands.
+
+**Adaptive-ranking migration.** V4.0.5 leaves the optional adaptive ranker off
+unless an operator sets `SLM_RANKING` (`v1`, `v2`, or `v2-ensemble`). This does
+not disable the normal retrieval channels; it prevents feedback and
+observation data from changing ranking without an explicit operator decision.
 
 - **[SLM-Mesh](#slm-mesh-cross-session--cross-machine-coordination)** — authenticated cross-session and cross-machine peer coordination (messages, locks, shared state, inbox/outbox, optional discovery). Coordination only — not automatic replicated memory.
 - **Multi-scope memory & profiles** — workspaces (profiles) plus `personal` / `shared` / `global` scopes; cross-profile recall is default-deny.
@@ -71,7 +76,7 @@ SuperLocalMemory V4 combines conventional dense and lexical retrieval with graph
 - **Modes A / B / C** — local-only (A), on-device LLM enrichment (B), provider-assisted (C). An operating mode records technical locality facts; it does **not** determine EU AI Act legal compliance (that is deployment-context assessment — see [Privacy controls](#privacy-controls-and-operating-modes)).
 - **GDPR posture, retention & audit chain** — export, fail-closed cross-store erasure, retention policies, and a hash-chained audit trail. Engineering controls for compliance programs, not a legal certification.
 - **7-layer retrieval/recall stack & code graph** — multi-channel candidates (semantic, BM25, temporal, Hopfield, spreading activation) plus optional code-graph tools for blast radius and review context.
-- **MCP profiles** — `code` exposes **29** tools for installed coding agents; `full` **47**; `power` **59**; `whole` **92** (all registered). Also `core` (14), `mesh` (8), and the unrestricted default surface (47 with mesh enabled).
+- **MCP profiles** — `code` exposes **31** tools for installed coding agents; `full` **49**; `power` **61**; `whole` **94** (all registered). Also `core` (16), `mesh` (8), and the unrestricted default surface (49 with mesh enabled).
 - **Governed write path & verifiable transactions** — admission + policy control, a per-owner obligation ledger, and a hash-sealed completion manifest with a reconciler that redrives unmet obligations.
 - **Self-healing lifecycle & admin remediation** — stale locks cleared on restart; list/resolve stuck operations from CLI, MCP, or the dashboard.
 
@@ -382,7 +387,7 @@ Full docs: [docs/multi-machine.md](docs/multi-machine.md) · [docs/distributed-d
 | **Python CLI + SDK** (primary) | Activate a Python virtual environment, then `python -m pip install superlocalmemory` | Python 3.11+; the `slm` CLI and importable SDK stay inside that environment |
 | **Repository clone — macOS/Linux** | `./scripts/install.sh install` | Research/contributor path; delegates to an existing uv or pipx installation |
 | **Repository clone — Windows** | `.\scripts\install.ps1 -Action Install` | Research/contributor path; delegates to an existing uv or pipx installation |
-| **Claude Code Plugin** (WP-06) | `/plugin marketplace add qualixar/superlocalmemory` then `/plugin install superlocalmemory@qualixar` | Self-bootstraps venv, isolated SLM_DATA_DIR, additive — 14-tool core. Ships the skills/agents/hooks/commands |
+| **Claude Code Plugin** (WP-06) | `/plugin marketplace add qualixar/superlocalmemory` then `/plugin install superlocalmemory@qualixar` | Self-bootstraps venv, isolated SLM_DATA_DIR, additive — 16-tool core. Ships the skills/agents/hooks/commands |
 | **Portable / IDE connect** (WP-08) | `slm connect <ide> [--here]` | Wire any IDE without reinstalling; `slm connect claude-code` → plugin pointer |
 
 After any install path: `slm setup` → `slm doctor` → `slm warmup` (optional, pre-downloads ~500MB embedding model).
@@ -435,12 +440,12 @@ Control tool surface via `SLM_MCP_PROFILE`:
 
 | Profile | Tools | Use case |
 |:--------|:-----:|:---------|
-| `core` | 14 | Memory, session, and optimize core |
-| `code` | 29 | Core + portable Brain evidence + code-graph tools + profile switching + bounded loops |
+| `core` | 16 | Memory, session, optimize, and correction review |
+| `code` | 31 | Core + portable Brain evidence + code-graph tools + profile switching + bounded loops |
 | `mesh` | 8 | SLM-Mesh only — multi-session / multi-machine coordination |
-| `full` | 47 | Memory + portable Brain evidence + optimize + evolution + mesh + bounded loops |
-| `power` | 59 | Full + administration, lifecycle, and diagnostics |
-| `whole` | 92 | Every registered MCP tool |
+| `full` | 49 | Memory + portable Brain evidence + optimize + evolution + mesh + bounded loops |
+| `power` | 61 | Full + administration, lifecycle, and diagnostics |
+| `whole` | 94 | Every registered MCP tool |
 
 **Precedence:** `ALL` > `TOOLS` > `PROFILE` > `default`
 
@@ -451,7 +456,7 @@ slm mcp
 
 For a predictable small surface, set `core` explicitly. Leaving the variable
 unset retains the compatibility default, whose mesh tools follow the local
-mesh setting. Count-suffixed aliases remain for backward compatibility and emit a migration warning: `core14`, `code20`, `code21`, `code24`, `code28`, `code29`, `mesh8`, `full38`, `full39`, `full42`, `full46`, `full47`, `power50`, `power51`, `power54`, `power58`, `power59`, `whole81`, `whole84`, `whole91`, `whole92`. Unknown names stop startup instead of silently selecting another tool set.
+mesh setting. Count-suffixed aliases remain for backward compatibility and emit a migration warning: `core14`, `core16`, `code20`, `code21`, `code24`, `code28`, `code29`, `code31`, `mesh8`, `full38`, `full39`, `full42`, `full46`, `full47`, `full49`, `power50`, `power51`, `power54`, `power58`, `power59`, `power61`, `whole81`, `whole84`, `whole91`, `whole92`, `whole94`. Unknown names stop startup instead of silently selecting another tool set.
 
 Per-IDE configs available for Claude Code, Cursor, Windsurf, VS Code Copilot, Continue, Gemini CLI, JetBrains, Zed, and more (15 configs in `ide/configs/`). See [docs/ide-setup.md](docs/ide-setup.md).
 
@@ -473,7 +478,7 @@ then install:
 ```
 
 - Self-bootstraps a Python venv, installs all deps in an isolated `SLM_DATA_DIR`
-- Registers the 14-tool core MCP surface (`core14` profile by default)
+- Registers the 16-tool core MCP surface (`core16` profile by default; `core14` remains a compatibility alias)
 - Ships the SLM skills / agents / hooks / commands / rules
 - Additive — does not replace an existing SLM install
 - `slm connect claude-code` detects an existing plugin install and links them

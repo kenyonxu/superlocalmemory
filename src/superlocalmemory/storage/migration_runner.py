@@ -157,6 +157,9 @@ from superlocalmemory.storage.migrations import (
 from superlocalmemory.storage.migrations import (
     M041_external_evidence_receipts as _M041,
 )
+from superlocalmemory.storage.migrations import (
+    M042_correction_case_ledger as _M042,
+)
 from superlocalmemory.storage._schema_version import (
     SUPPORTED_SCHEMA_VERSION,
     SchemaVersionError,
@@ -239,6 +242,10 @@ MIGRATIONS: list[Migration] = [
               dependencies=(_M003.NAME,)),
     Migration(name=_M041.NAME, db_target="learning", ddl=_M041.DDL,
               dependencies=(_M040.NAME,)),
+    # Review-gated correction metadata is self-contained in memory.db. It
+    # contains identifiers only and does not alter temporal fact state.
+    Migration(name=_M042.NAME, db_target="memory", ddl=_M042.DDL,
+              dependencies=(_M032.NAME,)),
     # M006 + M011 are deliberately NOT here — see DEFERRED_MIGRATIONS below.
 ]
 

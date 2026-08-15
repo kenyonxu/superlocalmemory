@@ -9,7 +9,7 @@ description: >
 tools: slm_compress, slm_retrieve, slm_cache_set, slm_cache_get, slm_optimize_stats, Read, Bash
 model: inherit
 target: vscode
-version: "4.0.4"
+version: "4.0.5"
 ---
 
 # Role

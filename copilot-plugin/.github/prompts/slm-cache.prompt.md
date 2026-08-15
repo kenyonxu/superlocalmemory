@@ -1,7 +1,7 @@
 ---
 name: slm-cache
 description: KV cache for repeated reads — call slm_cache_get(key) first; on a miss do the expensive operation then slm_cache_set(key, value, ttl_seconds) to store it; on a hit use the returned value directly; always fail-open (hit:false on any error, never raises); saves tokens when the same file, query result, or tool output is read more than once in a session.
-version: "4.0.4"
+version: "4.0.5"
 agent: agent
 tools:
   - slm_cache_set

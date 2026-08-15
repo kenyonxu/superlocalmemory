@@ -227,10 +227,23 @@
     var healthColor = healthStatus === 'HEALTHY' ? 'var(--ok)'
       : healthStatus === 'ACTIVE' ? 'var(--cyan)' : undefined;
     var pCount = ((beh.patterns) || []).length;
-    var feedback = (living && living.feedback) || {};
+    // BrainTruth is the portable V4.0.5 source of truth.  Legacy sections
+    // remain a rolling-upgrade fallback only.
+    var truth = (living && living.brain_truth) || {};
+    var memoryActivity = truth.memory_activity || {};
+    var feedback = truth.feedback || (living && living.feedback) || {};
+    var experience = truth.agent_experience || (living && living.agent_experience) || {};
+    var externalEvidence = truth.external_evidence || experience.external_graph_evidence || {};
+    var correctionQuality = truth.correction_quality || {};
     var graph = (living && living.graph) || {};
-    var experience = (living && living.agent_experience) || {};
-    var externalEvidence = experience.external_graph_evidence || {};
+
+    function truthCount(section, key, unit) {
+      if (!section || section.availability === 'unavailable') {
+        return 'Unavailable' + (section && section.reason ? ': ' + section.reason : '');
+      }
+      var value = section[key];
+      return value == null ? 'No data yet' : String(value) + (unit ? ' ' + unit : '');
+    }
 
     // KPI strip
     var strip = EL('div', { className: 'kpi-strip', style: 'margin-bottom:16px' });
@@ -314,13 +327,14 @@
       ['Models trained',    String(stats.models_trained || 0)],
       ['Verified active models', String(stats.models_active_verified || 0)],
       ['Sources tracked',   String(stats.tracked_sources || 0)],
-      ['Explicit feedback', String(feedback.explicit_signals || 0)],
-      ['Settled outcomes',  String(feedback.settled_outcomes || 0)],
-      ['Claimed evidence authority', String(experience.claimed_evidence_experiences || 0)],
-      ['Cognitive turns', String(experience.turns_total || 0) +
-        ' · ' + String((experience.turns_by_state || {}).finalized || 0) + ' finalized'],
-      ['Bounded Loop observations', String(externalEvidence.total || 0) +
-        (externalEvidence.is_real ? ' terminal receipts' : ' unavailable')],
+      ['Memory activity', truthCount(memoryActivity, 'facts_total', 'facts')],
+      ['Feedback signals', truthCount(feedback, 'signals_total', 'signals')],
+      ['Claimed evidence', truthCount(experience, 'claimed_experiences_total', 'receipts')],
+      ['Independently verified evidence', truthCount(
+        experience, 'independently_verified_experiences_total', 'receipts',
+      )],
+      ['External observations', truthCount(externalEvidence, 'receipts_total', 'receipts')],
+      ['Correction quality', truthCount(correctionQuality, 'cases_total', 'review cases')],
       ['Graph evidence', String(graph.fact_nodes || 0) + ' nodes · ' +
         String(graph.association_edges || 0) + ' edges'],
     ].forEach(function (row) {
@@ -354,23 +368,25 @@
       text: 'SLM records completed work when an integration supplies evidence. These records do not change recall, ranking, or model routing by themselves.',
     }));
     var evGrid = EL('div', { className: 'kpi-strip', style: 'margin:0' });
-    evGrid.appendChild(kpiCard('fact_check', 'Recorded experiences',
-      fmtNum(experience.experiences_total || 0), 'profile-scoped durable receipts',
-      Number(experience.experiences_total || 0) > 0, undefined, true));
-    evGrid.appendChild(kpiCard('verified', 'Claimed evidence authority',
-      fmtNum(experience.claimed_evidence_experiences || 0), 'declared by the producing host',
-      Number(experience.claimed_evidence_experiences || 0) > 0, undefined, true));
+    evGrid.appendChild(kpiCard('fact_check', 'Claimed evidence',
+      truthCount(experience, 'claimed_experiences_total', ''), 'profile-scoped durable receipts',
+      Number(experience.claimed_experiences_total || 0) > 0, undefined, true));
+    evGrid.appendChild(kpiCard('verified', 'Independently verified evidence',
+      truthCount(experience, 'independently_verified_experiences_total', ''),
+      experience.verification_availability === 'not_supported_by_read_model'
+        ? 'not supported by this read model' : 'independent verifier result',
+      Number(experience.independently_verified_experiences_total || 0) > 0, undefined, true));
     evGrid.appendChild(kpiCard('account_tree', 'Cognitive turns',
-      fmtNum(experience.turns_total || 0),
-      fmtNum((experience.turns_by_state || {}).open || 0) + ' open · ' +
-        fmtNum((experience.turns_by_state || {}).finalized || 0) + ' finalized',
-      Number(experience.turns_total || 0) > 0, undefined, true));
-    evGrid.appendChild(kpiCard('account_tree', 'Bounded Loop observations',
-      fmtNum(externalEvidence.total || 0),
-      externalEvidence.is_real
-        ? fmtNum(externalEvidence.demonstrations || 0) + ' demonstrations · no automatic learning'
-        : 'connect Bounded Loops to observe terminal runs',
-      Number(externalEvidence.total || 0) > 0, undefined, true));
+      truthCount(experience, 'cognitive_turns_total', ''),
+      String((experience.cognitive_turns_by_state || {}).open || 0) + ' open · ' +
+        String((experience.cognitive_turns_by_state || {}).finalized || 0) + ' finalized',
+      Number(experience.cognitive_turns_total || 0) > 0, undefined, true));
+    evGrid.appendChild(kpiCard('account_tree', 'External observations',
+      truthCount(externalEvidence, 'receipts_total', ''),
+      externalEvidence.availability === 'available'
+        ? String(externalEvidence.demonstrations_total || 0) + ' demonstrations · no automatic learning'
+        : 'external evidence unavailable',
+      Number(externalEvidence.receipts_total || 0) > 0, undefined, true));
     evb.appendChild(evGrid);
     evc.appendChild(evb);
     sec.appendChild(evc);
@@ -854,8 +870,8 @@
       var head = EL('div', { className: 'page-head' });
       head.appendChild(EL('h2', { text: 'The living brain' }));
       head.appendChild(EL('p', {
-        text: 'How your memory is getting smarter — ranking phase, the reward signal it learns from, ' +
-              'and the behavioural patterns it has extracted. Everything trained on-device from your own usage.',
+        text: 'A local view of memory activity, feedback, and evidence. Observations are shown separately ' +
+              'from ranking and do not change recall, ranking, or model routing by themselves.',
       }));
 
       container.replaceChildren(

@@ -385,6 +385,7 @@ def read_entry_fast(
     db_path: Path | None = None,
     home_dir: Path | None = None,
     profile_id: str | None = None,
+    require_current_admission: bool = False,
 ) -> CacheEntry | None:
     """Hot-path reader used by the UserPromptSubmit hook.
 
@@ -465,7 +466,7 @@ def read_entry_fast(
         except (ValueError, TypeError):
             fact_ids = []
 
-        return CacheEntry(
+        entry = CacheEntry(
             session_id=session_id,
             topic_sig=topic_sig,
             content=row[0],
@@ -474,8 +475,64 @@ def read_entry_fast(
             computed_at=int(row[3]),
             byte_size=int(row[4]),
         )
+        if require_current_admission and not _cache_fact_ids_are_current(home, entry.fact_ids):
+            return None
+        return entry
     except Exception:  # pragma: no cover — last-resort fail-open
         return None
+
+
+def _cache_fact_ids_are_current(home: Path, fact_ids: list[str]) -> bool:
+    """Prove cached source IDs remain current without loading the engine.
+
+    This is a cache-hit-only backstop for review-gated corrections.  It uses a
+    small read-only SQLite query and treats any unavailable or malformed memory
+    state as a cache miss.  Normal recall remains the authority after a miss.
+    """
+    if not fact_ids or not all(isinstance(fact_id, str) and fact_id for fact_id in fact_ids):
+        return False
+    memory_path = home / "memory.db"
+    if not memory_path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{memory_path}?mode=ro", uri=True, timeout=0.25)
+        try:
+            placeholders = ",".join("?" for _ in fact_ids)
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name IN ('atomic_facts', 'fact_temporal_validity', 'correction_cases')"
+                )
+            }
+            if {"atomic_facts", "fact_temporal_validity"} - tables:
+                return False
+            correction_join = ""
+            correction_bad = "0"
+            if "correction_cases" in tables:
+                correction_join = (
+                    " LEFT JOIN correction_cases cc ON cc.successor_fact_id=f.fact_id "
+                    "AND cc.status IN ('proposed', 'rejected', 'rolled_back')"
+                )
+                correction_bad = "cc.successor_fact_id IS NOT NULL"
+            rows = conn.execute(
+                "SELECT f.fact_id, tv.system_expired_at, " + correction_bad + " AS correction_blocked "
+                "FROM atomic_facts f "
+                "LEFT JOIN fact_temporal_validity tv ON tv.fact_id=f.fact_id "
+                "AND tv.profile_id=f.profile_id "
+                + correction_join
+                + f" WHERE f.fact_id IN ({placeholders})",
+                tuple(fact_ids),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+    found = {str(row[0]) for row in rows}
+    return (
+        found == set(fact_ids)
+        and all(row[1] is None and not bool(row[2]) for row in rows)
+    )
 
 
 def purge_profile_from_cache_db(db_path: Path, profile_id: str) -> int:

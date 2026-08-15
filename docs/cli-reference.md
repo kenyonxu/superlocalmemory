@@ -135,11 +135,27 @@ slm delete abc123 --json
 
 ### `slm update <fact_id> <content>`
 
-Edit the content of a specific memory by its exact fact ID. The fact must belong to the active profile.
+Propose a review-required correction for a specific memory by exact fact ID. It
+creates an immutable successor but does not change current recall until a
+trusted reviewer applies the case. The predecessor remains available to
+time-aware historical recall.
 
 ```bash
 slm update abc123 "API rate limit is now 200 req/min on staging"
 slm update abc123 "Updated content" --json
+```
+
+### `slm review-correction <case_id> <apply|reject|rollback> <expected_version>`
+
+Review a proposed correction using its version for compare-and-swap safety.
+`apply` makes the successor current and system-expires the predecessor;
+`rollback` restores the predecessor's prior temporal state. An optional
+`--event-valid-until` is accepted only for an `apply` when the reviewer has a
+separately validated real-world boundary.
+
+```bash
+slm review-correction case123 apply 0 --json
+slm review-correction case123 apply 0 --event-valid-until 2026-08-16T00:00:00Z
 ```
 
 ### `slm list [options]`

@@ -51,17 +51,19 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from superlocalmemory import __version__
 
+from superlocalmemory import __version__
+from superlocalmemory.brain import BrainTruthService
 from superlocalmemory.core.security_primitives import (
     redact_secrets,
     verify_install_token,
 )
+from superlocalmemory.infra.data_root import canonical_data_root
 from superlocalmemory.learning.database import LearningDatabase
 from superlocalmemory.learning.features import FEATURE_DIM
-from superlocalmemory.infra.data_root import canonical_data_root
-from superlocalmemory.storage.read_connection import ReadConnectionFactory
 from superlocalmemory.storage.agent_experience import get_profile_receipt_summary
+from superlocalmemory.storage.read_connection import ReadConnectionFactory
+
 from .helpers import get_active_profile
 
 logger = logging.getLogger("superlocalmemory.routes.brain")
@@ -595,7 +597,8 @@ def _adapter_last_sync_ago(adapter_name: str) -> int | None:
     honest empty rather than a fabricated number.
     """
     try:
-        from datetime import datetime as _dt, timezone as _tz
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
         memory_db = _memory_dir() / "memory.db"
         if not memory_db.exists():
             return None
@@ -1130,11 +1133,16 @@ async def get_brain(request: Request, profile_id: str | None = None) -> dict:
     # "default" — the Brain must reflect whichever profile is active.
     profile_id = _authorized_profile(request, profile_id)
     lrn_db = LearningDatabase(_learning_db_path())
+    truth_service = BrainTruthService(
+        memory_db_path=_memory_dir() / "memory.db",
+        learning_db_path=_learning_db_path(),
+    )
 
     (
         preferences, learning, usage, bandit_snap, cache,
         cross_platform, outcomes_preview, evolution, active_clients,
         feedback_loop, source_quality, graph_summary, agent_experience,
+        brain_truth,
     ) = await asyncio.gather(
         asyncio.to_thread(_compute_preferences, profile_id),
         asyncio.to_thread(_compute_learning_status, profile_id, lrn_db),
@@ -1152,6 +1160,7 @@ async def get_brain(request: Request, profile_id: str | None = None) -> dict:
         asyncio.to_thread(_compute_source_quality, profile_id),
         asyncio.to_thread(_compute_graph_summary, profile_id),
         asyncio.to_thread(_compute_agent_experience, profile_id),
+        asyncio.to_thread(truth_service.snapshot, profile_id),
         return_exceptions=True,
     )
 
@@ -1213,6 +1222,14 @@ async def get_brain(request: Request, profile_id: str | None = None) -> dict:
             "source_quality": source_quality,
             "graph": graph_summary,
             "agent_experience": agent_experience,
+            # Additive v4.0.5 contract.  Keep the preceding legacy keys for
+            # existing dashboard/API clients; new clients should render this
+            # one shared, unavailable-aware snapshot.
+            "brain_truth": _ok(brain_truth, {
+                "availability": "unavailable",
+                "source": "BrainTruth service unavailable",
+                "control_plane": "observation_only",
+            }),
             "source": "local durable stores + ephemeral session registry",
         },
         "evolution_preview": _ok(evolution, {
@@ -1246,7 +1263,8 @@ def _compute_outcome_queue_stats(profile_id: str) -> dict:
     """
     try:
         from superlocalmemory.learning.outcome_queue import (
-            get_counters, queue_size,
+            get_counters,
+            queue_size,
         )
         counters = get_counters()
         qsz = queue_size()

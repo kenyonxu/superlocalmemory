@@ -9,7 +9,6 @@ import shutil
 import stat
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -134,14 +133,16 @@ async def observe_from_stdio(*, command: str, cwd: str, profile_id: str) -> list
             async with ClientSession(
                 read,
                 write,
-                read_timeout_seconds=timedelta(seconds=_OBSERVATION_TIMEOUT_SECONDS),
+                # MCP 2.x passes this directly to AnyIO's timeout machinery,
+                # which accepts a numeric duration rather than timedelta.
+                read_timeout_seconds=_OBSERVATION_TIMEOUT_SECONDS,
             ) as session:
                 async def observe() -> list[dict[str, Any]]:
                     await session.initialize()
 
                     async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
                         result = await session.call_tool(name, arguments)
-                        if result.isError:
+                        if result.is_error:
                             raise BridgeUnavailable(
                                 "bounded-loops rejected the observation request"
                             )

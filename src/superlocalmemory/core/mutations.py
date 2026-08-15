@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,30 @@ def _invalidate_context_cache_for_fact(
                 conn.close()
         except Exception:
             pass
+
+
+def purge_profile_context_cache(engine: Any, profile_id: str) -> None:
+    """Best-effort full-profile cache purge after a truth lifecycle change.
+
+    Apply and rollback can flip which of two immutable facts is current.  A
+    fact-ID substring delete is therefore insufficient: any cached prose for
+    the profile could contain the old current truth.  Read-side admission
+    remains the authoritative backstop if this post-commit cleanup is busy.
+    """
+    try:
+        db_parent = Path(engine._db.db_path).parent
+    except AttributeError:
+        return
+    try:
+        from superlocalmemory.core.context_cache import purge_profile_from_cache_db
+
+        for cache_path in (
+            db_parent / "context-cache" / "active_brain_cache.db",
+            db_parent / "active_brain_cache.db",
+        ):
+            purge_profile_from_cache_db(cache_path, profile_id)
+    except Exception:
+        logger.warning("Profile context cache purge failed after correction transition")
 
 
 def _sync_vector_ann(
@@ -171,6 +196,83 @@ def _converge_update_projections(
             orchestrator.sync_changed_fact(fact_id)
     except Exception:
         logger.warning("Derived projection update sync failed for %s", fact_id[:16])
+
+
+def _project_correction_successor(
+    engine: Any,
+    fact_id: str,
+    content: str,
+    profile_id: str,
+    embedding: list[float] | None,
+) -> None:
+    """Project a new successor without touching predecessor projections."""
+    retrieval = getattr(engine, "_retrieval_engine", None)
+    bm25 = getattr(retrieval, "_bm25", None) if retrieval else None
+    if bm25 is not None:
+        try:
+            bm25.add(fact_id, content, profile_id)
+        except Exception as exc:
+            logger.warning("BM25 successor projection failed for %s: %s", fact_id[:16], exc)
+    if retrieval is not None:
+        _sync_vector_ann(retrieval, fact_id, profile_id, embedding, operation="update")
+
+
+def _correction_ledger_available(engine: Any) -> bool:
+    try:
+        rows = engine._db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='correction_cases'"
+        )
+        return bool(rows)
+    except Exception:
+        return False
+
+
+def _propose_correction_case(
+    engine: Any,
+    *,
+    profile_id: str,
+    scope: str,
+    predecessor_fact_id: str,
+    successor_fact_id: str,
+    trusted_actor_id: str,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """Record a review-required M042 proposal after successor persistence.
+
+    The ledger deliberately lives on a separate short transaction from the
+    canonical writer.  A retry with the same deterministic identifiers is
+    idempotent; the predecessor remains untouched if the ledger is unavailable.
+    """
+    from superlocalmemory.storage.correction_cases import (
+        CorrectionActor,
+        CorrectionCaseStore,
+    )
+
+    actor = CorrectionActor(
+        actor_id=trusted_actor_id,
+        actor_kind="host_authenticated",
+        trust_tier="trusted",
+    )
+    case_id = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"slm-correction:{profile_id}:{predecessor_fact_id}:{successor_fact_id}",
+    ).hex
+    store = CorrectionCaseStore(
+        engine._db.db_path,
+        is_profile_active=lambda candidate: candidate == profile_id,
+        is_actor_trusted=lambda candidate: candidate == actor,
+    )
+    case = store.propose(
+        case_id=case_id,
+        profile_id=profile_id,
+        scope=scope,
+        predecessor_fact_id=predecessor_fact_id,
+        successor_fact_id=successor_fact_id,
+        reason_code="direct_content_correction",
+        actor=actor,
+        idempotency_key=idempotency_key,
+    )
+    return {"case_id": case.case_id, "status": case.status, "version": case.version}
 
 
 def _purge_delete_projections(
@@ -498,7 +600,7 @@ def update_fact_authorized(
     canonical_runtime: Any | None = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    """Authorize a fact correction and converge every derived projection."""
+    """Create a review-required correction successor without rewriting history."""
     if not content or not content.strip():
         return {"ok": False, "error": "content cannot be empty"}
     content = content.strip()
@@ -517,42 +619,70 @@ def update_fact_authorized(
     )
     if not rows:
         return {"ok": False, "error": f"Memory {fact_id} not found"}
-    old_content = dict(rows[0]).get("content", "")[:80]
-    updates: dict[str, Any] = {"content": content}
+    source = engine._db.get_fact(fact_id)
+    if source is None:
+        return {"ok": False, "error": f"Memory {fact_id} not found"}
+    if source.content == content:
+        return {"ok": True, "fact_id": fact_id, "content": content, "unchanged": True}
+    if not _correction_ledger_available(engine):
+        return {"ok": False, "error": "review-gated correction ledger is unavailable"}
+
+    request_key = idempotency_key or uuid.uuid4().hex
+    successor_fact_id = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"slm-correction-successor:{profile_id}:{fact_id}:{request_key}",
+    ).hex[:16]
     embedding: list[float] | None = None
+    fisher_mean: list[float] | None = None
+    fisher_variance: list[float] | None = None
     if engine._embedder:
         try:
             embedding = engine._embedder.embed(content)
             if embedding:
-                updates["embedding"] = embedding
                 fisher_mean, fisher_variance = (
                     engine._embedder.compute_fisher_params(embedding)
                 )
-                updates["fisher_mean"] = fisher_mean
-                updates["fisher_variance"] = fisher_variance
         except Exception as exc:
-            logger.warning("UPDATE embedding refresh failed: %s", exc)
-    if canonical_runtime is not None:
-        result = dict(canonical_runtime.update_fact(
-            profile_id,
-            fact_id,
-            updates,
-            idempotency_key=idempotency_key,
-        ))
-        if not result.get("ok"):
-            return {"ok": False, "error": f"Memory {fact_id} not found"}
-    else:
-        engine._db.update_fact(fact_id, updates, profile_id=profile_id)
-
-    # Converge every derived projection to the corrected content
-    _converge_update_projections(engine, fact_id, content, profile_id, embedding)
+            logger.warning("Correction successor embedding refresh failed: %s", exc)
+    if canonical_runtime is None:
+        return {
+            "ok": False,
+            "retryable": True,
+            "error": "canonical correction writer is temporarily unavailable",
+        }
+    result = dict(canonical_runtime.create_correction_successor(
+        profile_id,
+        fact_id,
+        successor_fact_id,
+        content,
+        embedding=embedding,
+        fisher_mean=fisher_mean,
+        fisher_variance=fisher_variance,
+        trusted_actor_id=trusted_actor_id,
+        idempotency_key=request_key,
+    ))
+    if not result.get("ok"):
+        return {"ok": False, "error": f"Memory {fact_id} not found"}
+    successor_fact_id = str(result["successor_fact_id"])
 
     engine._hooks.run_post("update", context)
     logger.info(
-        "UPDATE fact_id=%s actor=%s source_agent=%s old=%s new=%s",
-        fact_id[:16], trusted_actor_id, source_agent_id, old_content, content[:80],
+        "CORRECTION_PROPOSED predecessor=%s successor=%s actor=%s source_agent=%s",
+        fact_id[:16], successor_fact_id[:16], trusted_actor_id, source_agent_id,
     )
-    return {"ok": True, "fact_id": fact_id, "content": content}
+    return {
+        "ok": True,
+        "fact_id": successor_fact_id,
+        "content": content,
+        "predecessor_fact_id": fact_id,
+        "successor_fact_id": successor_fact_id,
+        "correction_case": {
+            "case_id": result["case_id"],
+            "status": result["status"],
+            "version": result["version"],
+        },
+        "review_required": True,
+    }
 
 
-__all__ = ["delete_fact_authorized", "update_fact_authorized"]
+__all__ = ["delete_fact_authorized", "purge_profile_context_cache", "update_fact_authorized"]

@@ -5,6 +5,7 @@
       "args": [],
       "env": {
         "SLM_MCP_PROFILE": "code",
+        "SLM_AGENT_ID": "claude_code",
         "SLM_DATA_DIR": "${CLAUDE_PLUGIN_DATA}"
       }
     }

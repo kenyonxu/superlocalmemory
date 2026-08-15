@@ -1182,9 +1182,9 @@ async def merge_memory(request: Request, fact_id: str):
         raise _canonical_mutation_error(exc, "Merge error")
 
 
-@router.patch("/api/memories/{fact_id}")
+@router.patch("/api/memories/{fact_id}", status_code=202)
 async def edit_memory(request: Request, fact_id: str):
-    """Edit the content of a specific memory (atomic fact)."""
+    """Propose an immutable, review-required correction for one memory."""
     try:
         body = await request.json()
         new_content = (body.get("content") or "").strip()
@@ -1210,11 +1210,137 @@ async def edit_memory(request: Request, fact_id: str):
         )
         if not result.get("ok"):
             raise HTTPException(status_code=404, detail="Memory not found")
-        return {"success": True, "fact_id": fact_id, "content": new_content}
+        if result.get("unchanged"):
+            return {"success": True, "fact_id": fact_id, "content": new_content, "unchanged": True}
+        correction = result["correction_case"]
+        return {
+            "success": True,
+            "fact_id": fact_id,
+            "predecessor_fact_id": result["predecessor_fact_id"],
+            "successor_fact_id": result["successor_fact_id"],
+            "correction_case": correction,
+            "review_required": True,
+            "status": "proposed",
+        }
     except HTTPException:
         raise
     except Exception as exc:
         raise _canonical_mutation_error(exc, "Edit error")
+
+
+@router.post("/api/corrections/{case_id}/{action}")
+async def review_correction(request: Request, case_id: str, action: str):
+    """Apply, reject, or roll back an active-profile correction case.
+
+    The caller authenticates through the daemon boundary.  It cannot select a
+    profile, fact scope, or trust tier; the canonical writer rechecks all of
+    those fields in its one SQLite transaction.
+    """
+    try:
+        body = await request.json()
+        if action not in {"apply", "reject", "rollback"}:
+            raise HTTPException(422, detail="action must be apply, reject, or rollback")
+        expected_version = body.get("expected_version") if isinstance(body, dict) else None
+        if not isinstance(expected_version, int) or isinstance(expected_version, bool):
+            raise HTTPException(422, detail="expected_version must be a non-negative integer")
+        if expected_version < 0:
+            raise HTTPException(422, detail="expected_version must be a non-negative integer")
+        event_valid_until = body.get("event_valid_until") if isinstance(body, dict) else None
+        if event_valid_until is not None and not isinstance(event_valid_until, str):
+            raise HTTPException(422, detail="event_valid_until must be an RFC3339 timestamp")
+        if event_valid_until is not None and action != "apply":
+            raise HTTPException(422, detail="event_valid_until is permitted only for apply")
+        engine, active_profile, hook_context = _authorize_memory_mutation(
+            request, "update", case_id, run_pre_hook=False
+        )
+        result = _canonical_mutation_runtime(request).transition_correction(
+            active_profile,
+            case_id,
+            action=action,
+            expected_version=expected_version,
+            actor_id=hook_context["agent_id"],
+            event_valid_until=event_valid_until,
+            idempotency_key=_mutation_idempotency_key(request),
+        )
+        if not result.get("ok"):
+            raise HTTPException(404, detail="Correction case not found")
+        if action in {"apply", "rollback"}:
+            from superlocalmemory.core.mutations import purge_profile_context_cache
+
+            purge_profile_context_cache(engine, active_profile)
+        engine._hooks.run_post("update", hook_context)
+        return {"success": True, "correction_case": result}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _canonical_mutation_error(exc, "Correction review error")
+
+
+def _correction_case_response(case) -> dict[str, object]:
+    """Return review metadata only; correction ledgers never contain fact text."""
+    return {
+        "case_id": case.case_id,
+        "profile_id": case.profile_id,
+        "scope": case.scope,
+        "predecessor_fact_id": case.predecessor_fact_id,
+        "successor_fact_id": case.successor_fact_id,
+        "reason_code": case.reason_code,
+        "status": case.status,
+        "version": case.version,
+        "created_at": case.created_at,
+        "updated_at": case.updated_at,
+        "reviewed_at": case.reviewed_at,
+        "applied_at": case.applied_at,
+        "system_effective_at": case.system_effective_at,
+        "event_valid_from": case.event_valid_from,
+        "event_valid_until": case.event_valid_until,
+    }
+
+
+def _correction_store_for(engine, active_profile: str):
+    from superlocalmemory.storage.correction_cases import CorrectionCaseStore
+
+    return CorrectionCaseStore(
+        engine._db.db_path,
+        is_profile_active=lambda candidate: candidate == active_profile,
+        # Read operations never invoke this callback; writes use the daemon's
+        # canonical runtime, which derives the authenticated actor separately.
+        is_actor_trusted=lambda _actor: False,
+    )
+
+
+@router.get("/api/corrections")
+async def list_corrections(request: Request, limit: int = 100):
+    """List bounded review metadata for the active owning profile."""
+    try:
+        engine, active_profile, _context = _authorize_memory_mutation(
+            request, "update", "correction-list", run_pre_hook=False
+        )
+        cases = _correction_store_for(engine, active_profile).list_cases(active_profile, limit=limit)
+        return {"success": True, "corrections": [_correction_case_response(case) for case in cases]}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _canonical_mutation_error(exc, "Correction list error")
+
+
+@router.get("/api/corrections/{case_id}")
+async def get_correction(request: Request, case_id: str):
+    """Get one active-profile correction case without exposing raw memory text."""
+    try:
+        engine, active_profile, _context = _authorize_memory_mutation(
+            request, "update", case_id, run_pre_hook=False
+        )
+        case = _correction_store_for(engine, active_profile).get_case(case_id)
+        return {"success": True, "correction": _correction_case_response(case)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        from superlocalmemory.storage.correction_cases import CorrectionNotFoundError
+
+        if isinstance(exc, CorrectionNotFoundError):
+            raise HTTPException(404, detail="Correction case not found") from exc
+        raise _canonical_mutation_error(exc, "Correction lookup error")
 
 
 _VALID_SCOPES = ("personal", "shared", "global")

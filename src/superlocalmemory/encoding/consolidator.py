@@ -4,10 +4,13 @@
 
 """SuperLocalMemory V3 — Memory Consolidator.
 
-Mem0-style ADD/UPDATE/SUPERSEDE/NOOP logic for incoming facts.
-V1 was append-only (never updated, never deleted, never merged).
-This module gives a ~26% uplift by deduplicating, updating, and
-resolving contradictions at encoding time.
+Mem0-style ADD/UPDATE/SUPERSEDE/NOOP classification for incoming facts.
+
+UPDATE and SUPERSEDE are now *proposal classifications*: they persist the
+incoming fact but never rewrite, archive, lower trust for, or otherwise mutate
+the matched fact.  A reviewed correction owner may later apply a case through
+the correction ledger.  This keeps ingestion useful while preventing an
+automatic model judgement from changing the historical record.
 
 Mode A: keyword-based contradiction detection (zero LLM).
 Mode B/C: LLM-assisted contradiction detection when available.
@@ -20,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Protocol
+from typing import Protocol
 
 from superlocalmemory.core.config import EncodingConfig
 from superlocalmemory.storage.database import DatabaseManager
@@ -30,7 +33,6 @@ from superlocalmemory.storage.models import (
     ConsolidationActionType,
     EdgeType,
     GraphEdge,
-    MemoryLifecycle,
 )
 
 logger = logging.getLogger(__name__)
@@ -310,29 +312,17 @@ class MemoryConsolidator:
         *,
         reason: str,
     ) -> ConsolidationAction:
-        """Update existing fact: bump evidence, optionally merge content."""
-        new_evidence = existing.evidence_count + 1
-        new_confidence = min(1.0, existing.confidence + 0.05)
-        updates: dict[str, Any] = {
-            "evidence_count": new_evidence,
-            "confidence": new_confidence,
-        }
-
-        # If LLM available, merge content for a richer fact
-        if self._llm is not None and self._llm.is_available():
-            merged = self._merge_facts(existing.content, new_fact.content)
-            if merged:
-                updates["content"] = merged
-
-        self._db.update_fact(existing.fact_id, updates)
+        """Persist a proposed refinement without rewriting the predecessor."""
+        self._db.store_fact(new_fact)
+        self._create_semantic_edges(new_fact, profile_id)
         action = self._log_action(
             ConsolidationActionType.UPDATE,
             new_fact.fact_id, existing.fact_id,
             profile_id, reason,
         )
         logger.debug(
-            "UPDATE fact %s (evidence=%d): %s",
-            existing.fact_id, new_evidence, reason,
+            "UPDATE proposal %s -> %s: %s",
+            existing.fact_id, new_fact.fact_id, reason,
         )
         return action
 
@@ -344,37 +334,17 @@ class MemoryConsolidator:
         *,
         reason: str,
     ) -> ConsolidationAction:
-        """Archive old fact, store new, create contradiction edge."""
-        # Archive old fact (keep for history but deprioritize in retrieval)
-        self._db.update_fact(
-            existing.fact_id,
-            {"lifecycle": MemoryLifecycle.ARCHIVED},
-        )
-        # Store new fact
+        """Persist a proposed successor without changing the predecessor."""
         self._db.store_fact(new_fact)
-        # Create contradiction + supersedes edges
-        self._db.store_edge(GraphEdge(
-            profile_id=profile_id,
-            source_id=new_fact.fact_id,
-            target_id=existing.fact_id,
-            edge_type=EdgeType.CONTRADICTION,
-            weight=1.0,
-        ))
-        self._db.store_edge(GraphEdge(
-            profile_id=profile_id,
-            source_id=new_fact.fact_id,
-            target_id=existing.fact_id,
-            edge_type=EdgeType.SUPERSEDES,
-            weight=1.0,
-        ))
+        self._create_semantic_edges(new_fact, profile_id)
         action = self._log_action(
             ConsolidationActionType.SUPERSEDE,
             new_fact.fact_id, existing.fact_id,
             profile_id, reason,
         )
         logger.debug(
-            "SUPERSEDE %s → %s: %s",
-            new_fact.fact_id, existing.fact_id, reason,
+            "SUPERSEDE proposal %s -> %s: %s",
+            existing.fact_id, new_fact.fact_id, reason,
         )
         return action
 

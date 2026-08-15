@@ -5,6 +5,39 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.5] - 2026-08-16 — Reviewed time-aware corrections
+
+### Added
+- M042 adds a profile-scoped, append-only correction ledger in `memory.db`.
+  CLI, MCP, and authenticated HTTP expose a propose/list/review lifecycle with
+  compare-and-swap versions; no correction stores raw fact text in its ledger.
+- `BrainTruth v1` is now shared by `slm brain`, MCP, HTTP, and the Living Brain
+  dashboard. It reports memory activity, feedback, receipt claims, external
+  evidence, and correction quality independently and marks unavailable sources
+  instead of fabricating zeroes.
+- A generated isolated performance/liveness gate records 50 warm recalls, 50
+  canonical remember acknowledgements, current-truth admission overhead, and
+  a 60-second 10-reader/2-writer run without opening user memory data.
+
+### Changed
+- Direct memory edits create immutable review-required successors. `apply`
+  makes the successor current and transaction-expires the predecessor;
+  `reject` preserves current truth; `rollback` restores the predecessor's
+  temporal state.
+- Current truth admission covers channel results, profile shortcuts, bridge and
+  scene expansion, pins, and cache hits. Admission failures abstain rather
+  than returning potentially stale facts. The hot path uses one bounded
+  lifecycle read per recall and rechecks only newly expanded candidates.
+- Default ranking remains `off` unless an operator explicitly configures a
+  ranking mode. M040/M041 observations and correction cases do not become
+  ranking or model-routing inputs.
+
+### Safety
+- Correction history prevents an ordinary forget from producing an opaque
+  writer failure; it returns an explicit conflict for any correction-linked
+  fact. A dedicated erasure workflow remains responsible for privacy deletion
+  across both fact and ledger.
+
 ## [4.0.4] - 2026-08-15 — Optional Bounded Loops evidence bridge
 
 ### Added
