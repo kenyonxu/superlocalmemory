@@ -380,7 +380,7 @@ Find and optionally terminate orphaned SLM daemon or MCP processes. Safe to call
 
 ## Code-Graph Tools
 
-Available in profiles `code` (24 tools), `full` (42 tools), and `power` (54 tools). Not available in `core` or `mesh` profiles.
+Available in profiles `code` (28 tools), `full` (46 tools), and `power` (58 tools). Not available in `core` or `mesh` profiles.
 
 These tools build and query a structural code graph over a local repository. The graph maps functions, classes, modules, call sites, imports, and dependencies. It is built on demand from the repository path and persisted in SLM's database.
 

@@ -5,6 +5,32 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.3] - 2026-08-15 — Consented host integration upgrades
+
+### Added
+- `slm upgrade-hosts` provides a read-only preview of existing SLM host
+  integrations. `--apply` requires either explicit `--host` targets or
+  `--all-detected`; unbounded host mutation is rejected.
+- The npm runtime installer and interactive setup checklist direct existing
+  users to the upgrade preview. README, source docs, and Wiki source document
+  the host-specific upgrade and restart path.
+- Portable Brain evidence is now reachable from the `code`, `full`, and
+  `power` MCP profiles used by installed agents. Profile counts are now code
+  28, full 46, power 58, and whole 91; legacy count-suffixed aliases remain
+  supported.
+- The separately packaged Codex rules and skills are synchronized from the
+  shared plugin source for this release.
+
+### Changed
+- Existing portable MCP blocks are verified and preserved, retaining their
+  host-specific command paths, environment variables, and unrelated servers.
+  Codex refreshes only SLM-owned skills, agents, and lifecycle hooks.
+- Claude Code plugin updates remain owned by its native plugin manager.
+
+### Safety
+- Normal CLI commands and MCP startup no longer auto-install or update Claude
+  Code hooks. Host configuration changes require explicit operator action.
+
 ## [4.0.2] - 2026-08-15 — Portable Living Brain evidence
 
 ### Added

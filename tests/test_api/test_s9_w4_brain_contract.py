@@ -40,6 +40,8 @@ _EXPECTED_TOP_LEVEL_KEYS = frozenset({
     "evolution_cost_preview",
     # S9-DASH-02: producer-side telemetry for closed-loop visibility.
     "outcome_queue",
+    # V4.0.2: truthful, observation-only Living Brain evidence.
+    "living_brain",
 })
 
 

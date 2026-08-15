@@ -1,6 +1,6 @@
-# SuperLocalMemory V4.0.0
+# SuperLocalMemory V4.0.3
 
-> **V4.0.0 — governed local-first agent memory control plane built on the V3.8 foundation:
+> **V4.0.3 — governed local-first agent memory control plane built on the V3.8 foundation:
 > local-first agent memory, 5-channel retrieval, cache, compression, trusted-peer
 > coordination, team workspaces, roles, and governance controls.**
 
@@ -11,9 +11,15 @@ canonical local store. The product also includes an explicit Scale Engine for
 CozoDB graph and LanceDB vector projections, a cache/compression module, and
 **SLM-Mesh** coordination controls.
 
-> **V4.0.0 is the current release** (see [CHANGELOG](https://github.com/qualixar/superlocalmemory/blob/main/CHANGELOG.md) and `src/superlocalmemory/__version__.py`). Every Current page in this Wiki describes V4. Historical V3 research pages are labeled as historical and carried forward where still accurate.
+> **V4.0.3 is the current release** (see [CHANGELOG](https://github.com/qualixar/superlocalmemory/blob/main/CHANGELOG.md) and `src/superlocalmemory/__init__.py`). Every Current page in this Wiki describes V4. Historical V3 research pages are labeled as historical and carried forward where still accurate.
 
-## What changed in V4.0.0
+## What changed in V4.0.3
+
+V4.0.3 adds consented host-integration upgrades. `slm upgrade-hosts` is always a
+read-only preview until an operator selects named hosts (or explicitly approves
+all detected hosts) with `--apply`. It preserves existing MCP blocks and only
+refreshes SLM-owned Codex assets. Normal CLI and MCP startup never silently
+installs or updates Claude Code hooks. See [Host Upgrades](Host-Upgrades).
 
 V4 keeps the multi-channel retrieval and local-first store from the V3 research line, and productizes governed writes, **SLM-Mesh** peer coordination, multi-scope profiles, cache/compress, Entity Explorer and skill evolution, Modes A/B/C, and GDPR-oriented retention/audit controls. Operating mode is not legal certification under the EU AI Act — deployment context decides legal duties.
 
@@ -126,7 +132,7 @@ through the SLM V4 ingestion contract. See [[Framework Adapters]].
 **Multi-Agent Memory** — per-agent attribution via `SLM_AGENT_ID`, per-agent pane in the dashboard, and Mesh/lock coordination. See [[Multi-Agent Memory]].
 
 **MCP profile update** — profiles now include bounded-loop tools. V4 counts:
-`core` 14 / `code` 24 / `full` 42 / `power` 54 / `mesh` 8 / **`whole` 87** (all registered). See [[MCP Tools]].
+`core` 14 / `code` 28 / `full` 46 / `power` 58 / `mesh` 8 / **`whole` 91** (all registered). See [[MCP Tools]].
 
 ## Dashboard workspaces
 

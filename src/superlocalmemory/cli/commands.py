@@ -2148,6 +2148,7 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("mode", "Switch memory mode: a (local) / b (Ollama) / c (cloud)"),
         ("provider", "Configure the cloud LLM provider + API key (Mode C)"),
         ("connect", "Auto-configure detected IDEs (Cursor, VS Code, …)"),
+        ("upgrade-hosts", "Preview or explicitly refresh existing SLM host integrations"),
         ("hooks", "Install/inspect Claude Code hooks"),
         ("codex", "Configure the Codex / OpenAI integration"),
     ]),
@@ -2203,6 +2204,7 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ("Learning & maintenance", [
         ("evolve", "Skill-evolution controls"),
         ("observe", "External observation / telemetry ingestion"),
+        ("brain", "Show profile-scoped Living Brain evidence"),
         ("decay", "Run a forgetting/decay pass"),
         ("consolidate", "Merge/consolidate related memories"),
         ("quantize", "Quantize embeddings to save space"),

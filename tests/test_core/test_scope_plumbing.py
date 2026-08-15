@@ -191,6 +191,9 @@ class TestConcurrentRecallScopeIsolation:
             include_global=False,
             include_shared=False,
             as_of=None,
+            known_as_of=None,
+            valid_at=None,
+            include_unknown=False,
         ):
             # v3.7.9: flags now travel as explicit kwargs rather than being set
             # as attributes on shared channel instances. Capture the kwargs
@@ -205,7 +208,8 @@ class TestConcurrentRecallScopeIsolation:
                 query, profile_id, strat,
                 extra_disabled_channels=extra_disabled_channels,
                 include_global=include_global, include_shared=include_shared,
-                as_of=as_of,
+                as_of=as_of, known_as_of=known_as_of, valid_at=valid_at,
+                include_unknown=include_unknown,
             )
 
         re._run_channels = _spy

@@ -2,7 +2,7 @@
 
 Local-first agent memory + reversible context compression for OpenAI Codex CLI.
 
-SuperLocalMemory v4.0.0 · Qualixar · AGPL-3.0-or-later
+SuperLocalMemory v4.0.3 · Qualixar · AGPL-3.0-or-later
 
 ---
 
@@ -11,7 +11,7 @@ SuperLocalMemory v4.0.0 · Qualixar · AGPL-3.0-or-later
 | Capability         | How                                            |
 |--------------------|------------------------------------------------|
 | Agent rules        | `AGENTS.md` — loaded automatically per project |
-| MCP memory tools   | `.codex/config.toml` — 24-tool code profile   |
+| MCP memory tools   | `.codex/config.toml` — 28-tool code profile with portable Brain evidence |
 | Lifecycle hooks    | `hooks/hooks.json` — session start/stop/prompt |
 | Slash skills       | `skills/*/SKILL.md` — 11 skills via `/skills`  |
 | Venv launcher      | `scripts/slm-launch` — optional isolated mode  |
@@ -72,8 +72,8 @@ args = ["mcp"]
 env = { SLM_MCP_PROFILE = "code", SLM_DATA_DIR = "~/.superlocalmemory" }
 ```
 
-This registers the `superlocalmemory` MCP server with `SLM_MCP_PROFILE=code` (the 24-tool
-code profile: memory + code-graph + profile switching + bounded loops).
+This registers the `superlocalmemory` MCP server with `SLM_MCP_PROFILE=code` (the 28-tool
+code profile: memory, portable Brain evidence, code graph, profile switching, and bounded loops).
 
 ### 3 — Append lifecycle hooks (optional)
 
@@ -190,4 +190,4 @@ root (not inside a subdirectory), then restart Codex.
 
 ---
 
-SuperLocalMemory v4.0.0 · Qualixar · https://github.com/qualixar/superlocalmemory
+SuperLocalMemory v4.0.3 · Qualixar · https://github.com/qualixar/superlocalmemory

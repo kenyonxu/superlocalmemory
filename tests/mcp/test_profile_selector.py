@@ -68,10 +68,12 @@ def test_profile_core_exact():
 
 
 # ---------------------------------------------------------------------------
-# RED-3: code == core | code-graph + switch_profile + 3 loop tools (==24)
+# RED-3: code == core | Brain + code-graph + switch_profile + loops (==28)
 # ---------------------------------------------------------------------------
 
 _CODE_EXTRA = frozenset({
+    "get_brain_evidence_status", "record_agent_experience",
+    "record_cognitive_turn", "finalize_cognitive_turn",
     "build_code_graph", "get_blast_radius", "query_graph",
     "semantic_search_code", "get_review_context", "detect_changes",
     # 3.8.0: plugin (code profile) can switch the active workspace over MCP.
@@ -88,11 +90,11 @@ def test_profile_code_exact():
     assert code == expected, (
         f"code diff — extra: {code - expected}, missing: {expected - code}"
     )
-    assert len(code) == 24, f"code must be 24 names, got {len(code)}"
+    assert len(code) == 28, f"code must be 28 names, got {len(code)}"
 
 
 # ---------------------------------------------------------------------------
-# RED-4: full == 42 and ⊇ core memory names; built from explicit 34+8 literal
+# RED-4: full == 46 and ⊇ core memory names; built from explicit 38+8 literal
 # ---------------------------------------------------------------------------
 
 _EXPECTED_FULL_MESH = frozenset({
@@ -106,13 +108,13 @@ _EXPECTED_FULL_BASE = frozenset({
     "report_feedback", "forget", "run_maintenance", "consolidate_cognitive",
     "get_soft_prompts", "set_mode", "report_outcome", "log_tool_event",
     "get_assertions", "reinforce_assertion", "contradict_assertion",
+    "get_brain_evidence_status", "record_agent_experience",
+    "record_cognitive_turn", "finalize_cognitive_turn",
     "evolve_skill", "skill_health", "skill_lineage", "switch_profile",
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
     # 3.8.0: bounded-loop tools (CLI + command + MCP).
     "slm_loop_run", "slm_loop_history", "slm_loop_show",
-    # v4: prestage_context is registered but intentionally NOT in full/power —
-    # the profile names encode the counts (full42/power54) and the published
-    # tool-count table depends on them. It reaches users via `whole`.
+    # prestage_context is registered but intentionally not in named profiles.
 })
 
 _EXPECTED_FULL = _EXPECTED_FULL_BASE | _EXPECTED_FULL_MESH
@@ -124,14 +126,14 @@ def test_profile_full_exact():
     assert full == _EXPECTED_FULL, (
         f"full diff — extra: {full - _EXPECTED_FULL}, missing: {_EXPECTED_FULL - full}"
     )
-    assert len(full) == 42, f"full must be 42 names, got {len(full)}"
+    assert len(full) == 46, f"full must be 46 names, got {len(full)}"
     # Must ⊇ core memory names
     core = mod._PROFILE_DEFINITIONS["core"]
     assert core <= full, f"full must be a superset of core; missing from full: {core - full}"
 
 
 # ---------------------------------------------------------------------------
-# RED-5: power == 55 and ⊇ full
+# RED-5: power == 58 and ⊇ full
 # ---------------------------------------------------------------------------
 
 _POWER_EXTRA = frozenset({
@@ -149,7 +151,7 @@ def test_profile_power_exact():
     assert power == _EXPECTED_POWER, (
         f"power diff — extra: {power - _EXPECTED_POWER}, missing: {_EXPECTED_POWER - power}"
     )
-    assert len(power) == 54, f"power must be 54 names, got {len(power)}"
+    assert len(power) == 58, f"power must be 58 names, got {len(power)}"
     full = mod._PROFILE_DEFINITIONS["full"]
     assert full <= power, f"power must be a superset of full; missing: {full - power}"
 
@@ -214,6 +216,7 @@ def test_every_profile_name_is_a_real_registered_tool():
     from superlocalmemory.mcp.tools_evolution import register_evolution_tools
     from superlocalmemory.mcp.tools_optimize import register_optimize_tools
     from superlocalmemory.mcp.tools_loops import register_loop_tools
+    from superlocalmemory.mcp.tools_brain import register_brain_tools
     from superlocalmemory.mcp.tools_context import register_prestage_tool
 
     collector = _NameCollector()
@@ -230,6 +233,7 @@ def test_every_profile_name_is_a_real_registered_tool():
     register_evolution_tools(collector, get_engine_stub)
     register_optimize_tools(collector)
     register_loop_tools(collector, get_engine_stub)
+    register_brain_tools(collector, get_engine_stub)
     register_prestage_tool(collector, lambda *a, **k: [])
 
     mod = _get_module()

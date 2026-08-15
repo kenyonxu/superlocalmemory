@@ -95,6 +95,7 @@ def _register_every_tool(target) -> None:
     from superlocalmemory.mcp.tools_optimize import register_optimize_tools
     from superlocalmemory.mcp.tools_loops import register_loop_tools
     from superlocalmemory.mcp.tools_ops import register_ops_tools
+    from superlocalmemory.mcp.tools_brain import register_brain_tools
     from superlocalmemory.mcp.tools_v28 import register_v28_tools
     from superlocalmemory.mcp.tools_v3 import register_v3_tools
     from superlocalmemory.mcp.tools_v33 import register_v33_tools
@@ -112,6 +113,7 @@ def _register_every_tool(target) -> None:
     register_optimize_tools(target)
     register_loop_tools(target, get_engine)
     register_ops_tools(target, get_engine)
+    register_brain_tools(target, get_engine)
     from superlocalmemory.mcp.tools_context import register_prestage_tool
     register_prestage_tool(target, lambda *a, **k: [])
 
@@ -119,12 +121,11 @@ def _register_every_tool(target) -> None:
 @pytest.mark.parametrize(
     ("exposure", "profile", "expected_count"),
     (
-        # essential stays 42 to match the full42 profile name (user-facing
-        # config contract + published tool-count table). prestage_context is
-        # registered but reaches users through `whole`, which is why whole is 87.
-        ("essential", "", 42),
+        # Portable Brain evidence is deliberately reachable from default MCP
+        # clients; prestage_context remains a raw-server-only tool.
+        ("essential", "", 46),
         ("named-core", "core", 14),
-        ("whole", "whole", 87),
+        ("whole", "whole", 91),
     ),
 )
 def test_registration_exposure_is_exact_and_duplicate_free(
@@ -235,14 +236,14 @@ async def test_attribution_reports_current_product_identity(
 def test_imported_server_exposes_product_name_and_whole_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Imported MCP server keeps product identity and whole surface at 87."""
+    """Imported MCP server keeps product identity and whole surface at 91."""
     mod = _fresh_server(monkeypatch, "whole")
     # Public SLMFastMCP/MCPServer attribute — do not assert private internals.
     assert mod.server.name == "SuperLocalMemory V4"
     strict = _StrictToolServer()
     _register_every_tool(strict)
-    assert len(strict.tools) == 87
+    assert len(strict.tools) == 91
     actual_names = [tool.name for tool in mod.server._tool_manager.list_tools()]
-    assert len(actual_names) == 87
+    assert len(actual_names) == 91
     assert len(actual_names) == len(set(actual_names))
     assert set(actual_names) == set(strict.tools)

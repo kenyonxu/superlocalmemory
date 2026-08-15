@@ -1,6 +1,6 @@
-# FAQ — V4.0.0
+# FAQ — V4.0.3
 
-Frequently asked questions about SuperLocalMemory V4.0.0.
+Frequently asked questions about SuperLocalMemory V4.0.3.
 
 ## General
 

@@ -57,6 +57,9 @@ def test_mesh_mcp_tools_use_one_broker_identity_and_unread_delivery(monkeypatch)
     monkeypatch.setattr(mesh_tools, "_PEER_ID", "local-provisional")
     monkeypatch.setattr(mesh_tools, "_HEARTBEAT_THREAD", None)
     monkeypatch.setattr(mesh_tools, "_PROJECT_PATH", "/sandbox/project")
+    # `_detect_project_path()` deliberately prefers CLAUDE_PROJECT_DIR. Clear
+    # it so this fixture owns the selected lower-priority PROJECT_PATH too.
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.setenv("PROJECT_PATH", "/sandbox/project")
 
     async def exercise() -> None:

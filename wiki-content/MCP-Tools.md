@@ -1,12 +1,12 @@
-# MCP Tools — V4.0.0 (87 whole)
+# MCP Tools — V4.0.3 (91 whole)
 
 SuperLocalMemory exposes profile-selected tools and resources through the Model
 Context Protocol (MCP). The installed profile registry (`src/superlocalmemory/mcp/profiles.py` and `src/superlocalmemory/mcp/server.py`) is the source of truth
 for names and counts. An MCP-compatible client still decides when to call a
 tool.
 
-> **Current V4 profile counts (from `CHANGELOG.md 4.0.0` and the MCP exposure contract `tests/test_mcp/test_mcp_exposure_contract.py` / `tests/mcp/test_profile_selector.py`):**
-> `core` **14**, `code` **24**, `full` **42** (default everyday surface), `power` **54**, `whole` **87** (all registered), plus `mesh` **8**. See also `src/superlocalmemory/mcp/profiles.py`.
+> **Current V4 profile counts (from `CHANGELOG.md` and the MCP exposure contract `tests/test_mcp/test_mcp_exposure_contract.py` / `tests/mcp/test_profile_selector.py`):**
+> `core` **14**, `code` **28** (installed coding agents), `full` **46**, `power` **58**, `whole` **91** (all registered), plus `mesh` **8**. The unrestricted default surface is **46** with mesh enabled. See also `src/superlocalmemory/mcp/profiles.py`.
 
 > **Optimize tools:** `slm_compress`, `slm_retrieve`, `slm_cache_set`,
 > `slm_cache_get`, and `slm_optimize_stats` provide explicit compression and
@@ -130,7 +130,7 @@ boundary.
 
 > **Hard constraint:** Surfaces B and C cache results you explicitly route through SLM — not the Claude conversation turn. Full-turn caching requires Surface A (proxy).
 
-## MCP Profiles (V4.0.0 — whole is 87)
+## MCP Profiles (V4.0.3 — whole is 91)
 
 A profile is a named, fixed subset of tools exposed to the connecting client.
 Set the active profile via the `SLM_MCP_PROFILE` environment variable (or `SLM_MCP_ALL_TOOLS`/`SLM_MCP_TOOLS` overrides — see `src/superlocalmemory/mcp/server.py` precedence: `ALL > TOOLS > PROFILE > default`). `whole` exposes the raw server with all registered tools; `switch_profile` tool switches the active workspace profile (separate concept).
@@ -138,15 +138,15 @@ Set the active profile via the `SLM_MCP_PROFILE` environment variable (or `SLM_M
 | Profile | Tool count | Included surfaces |
 |---|---|---|
 | `core` | **14** | Store, recall, search, sessions, optimize (5 tools) |
-| `code` | **24** | Core + code-graph (4) + `switch_profile` + 3 bounded-loop tools |
-| `full` | **42** | All everyday memory, optimize, brain, and mesh tools (default everyday surface) |
-| `power` | **54** | Full + governance and behavioral analysis tools |
+| `code` | **28** | Core + portable Brain evidence + code graph + `switch_profile` + 3 bounded-loop tools |
+| `full` | **46** | All everyday memory, portable Brain evidence, optimize, and mesh tools |
+| `power` | **58** | Full + governance and behavioral analysis tools |
 | `mesh` | **8** | SLM-Mesh coordination only |
-| `whole` | **87** | All registered tools (raw server) — verified by `tests/test_mcp/test_mcp_exposure_contract.py` `whole == 87` |
+| `whole` | **91** | All registered tools (raw server) — verified by `tests/test_mcp/test_mcp_exposure_contract.py` `whole == 91` |
 
-> **Why 87 not 84:** Earlier docs (and the `whole84` compatibility alias in `src/superlocalmemory/mcp/profiles.py`) reflected a pre-V4 registration count. V4 adds `list_failed_operations` + `resolve_operation` (`src/superlocalmemory/mcp/tools_ops.py`, Wave-3 remediation) and `prestage_context` (`src/superlocalmemory/mcp/tools_context.py`) to the raw registration — verified by counting `@server.tool` decorators (87 unique names). The aliases `whole81`/`whole84` still resolve to `whole` for backward compatibility but the installed `whole` surface is **87**.
+> **Why 91 not 87:** V4.0.3 exposes four portable Brain evidence tools to installed coding agents and every named everyday profile. Earlier `whole81`/`whole84` aliases still resolve to `whole`; `whole91` names the current registered surface.
 
-Legacy count-suffixed aliases (`core14`, `code20`/`code21`/`code24`, `full38`/`full39`/`full42`, `power50`/`power51`/`power54`, `mesh8`, `whole81`/`whole84`, and `whole87` where emitted) resolve to their canonical name for backward compatibility and emit a migration warning.
+Legacy count-suffixed aliases (`core14`, `code20`/`code21`/`code24`/`code28`, `full38`/`full39`/`full42`/`full46`, `power50`/`power51`/`power54`/`power58`, `mesh8`, and `whole81`/`whole84`/`whole91`) resolve to their canonical name for backward compatibility and emit a migration warning.
 
 The three bounded-loop tools (`slm_loop_run`, `slm_loop_history`,
 `slm_loop_show`) are included in `code`, `full`, `power`, and `whole`.

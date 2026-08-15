@@ -77,13 +77,13 @@ def reset_engine():
 
 # Register tools and resources -------------------------------------------------
 #
-# Essential-only default: 34 base tools + 8 mesh tools = 42 registered
+# Essential-only default: 38 base tools + 8 mesh tools = 46 registered
 # when mesh is enabled. Set ``SLM_MCP_ALL_TOOLS=1`` to expose the full
 # toolset. Rationale: IDEs cap at 50-100 tools total (Cursor,
 # Antigravity, Windsurf) and a maximal SLM registration crowds out
 # other MCP servers the user may have installed.
 # Admin/diagnostics tools remain available via CLI (`slm <command>`).
-# Set SLM_MCP_ALL_TOOLS=1 to enable all 87 tools (power users).
+# Set SLM_MCP_ALL_TOOLS=1 to enable all 91 tools (power users).
 
 import os as _os_reg
 
@@ -103,10 +103,8 @@ _ESSENTIAL_TOOLS: set[str] = {
     # Memory management (2)
     "forget", "run_maintenance",
     # NOTE: prestage_context IS registered (see register_prestage_tool below)
-    # but is deliberately absent from the default surface. _ESSENTIAL_TOOLS must
-    # stay at 42 to match the full42 profile: the profile names are a
-    # user-facing config contract and the published tool-count table depends on
-    # them. New tools reach users via the `whole` profile until a rename ships.
+    # but is deliberately absent from the default surface. Brain evidence is
+    # intentionally present: it is the portable contract for installed agents.
     # Infinite memory + learning (4)
     "consolidate_cognitive", "get_soft_prompts",
     "set_mode", "report_outcome",
