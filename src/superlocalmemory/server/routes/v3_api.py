@@ -271,24 +271,102 @@ async def set_full_config(request: Request):
     require_manage(request)
     try:
         body = await request.json()
-        new_mode = body.get("mode", "a").lower()
-        provider = body.get("provider", "none")
-        model = body.get("model", "")
-        api_key = body.get("api_key", "")
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "Request body must be a JSON object"}, status_code=400)
+        from superlocalmemory.core.config import SLMConfig, EmbeddingConfig, LLMConfig
+        from superlocalmemory.storage.models import Mode
+        from superlocalmemory.server.routes.helpers import log_mode_change
+
+        config = SLMConfig.load()
+        old_mode = config.mode.value
+
+        def _nonblank(name: str) -> str | None:
+            value = body.get(name)
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                raise ValueError(f"{name} must be a string")
+            return value.strip() or None
+
+        new_mode = (_nonblank("mode") or config.mode.value).lower()
+        provider_input = _nonblank("provider")
+        model_input = _nonblank("model")
+        api_key_input = _nonblank("api_key")
+        base_url_input = _nonblank("base_url")
+        endpoint_input = _nonblank("endpoint")
+        clear_api_key = body.get("clear_api_key") is True
+        clear_base_url = body.get("clear_base_url") is True
+
+        if clear_api_key and api_key_input:
+            return JSONResponse(
+                {"error": "api_key cannot be replaced and cleared together"},
+                status_code=400,
+            )
+        if clear_base_url and (base_url_input or endpoint_input):
+            return JSONResponse(
+                {"error": "base_url cannot be replaced and cleared together"},
+                status_code=400,
+            )
+        if base_url_input and endpoint_input and base_url_input != endpoint_input:
+            return JSONResponse(
+                {"error": "base_url and endpoint must match when both are supplied"},
+                status_code=400,
+            )
 
         if new_mode not in ("a", "b", "c"):
             return JSONResponse({"error": "Invalid mode"}, status_code=400)
 
-        from superlocalmemory.core.config import SLMConfig, EmbeddingConfig, LLMConfig
-        from superlocalmemory.storage.models import Mode
-        from superlocalmemory.server.routes.helpers import log_mode_change
-        config = SLMConfig.load()
-        old_mode = config.mode.value
-
-        # v3.6.12 (settings-2): honor a custom endpoint for ANY provider.
-        _endpoint = (body.get("base_url", "") or body.get("endpoint", "")).strip()
-        if not _endpoint and provider == "ollama":
+        # Field presence, not form defaults, is the persistence contract. A
+        # dashboard panel may update embeddings without sending mode/provider,
+        # and password fields deliberately reload blank. In both cases saved
+        # LLM state must remain intact unless the user supplies a replacement
+        # or explicit clear flag.
+        provider = provider_input or config.llm.provider or "none"
+        model = model_input or config.llm.model
+        _endpoint = "" if clear_base_url else (base_url_input or endpoint_input or "")
+        if (
+            not _endpoint and provider_input == "ollama"
+            and config.llm.provider != "ollama"
+            and not clear_base_url
+        ):
             _endpoint = "http://localhost:11434"
+        elif not _endpoint and not clear_base_url:
+            _endpoint = config.llm.api_base or ""
+
+        # Custom endpoints become runtime egress destinations.  Apply the
+        # same boundary policy as the connection-test route before persisting.
+        if base_url_input is not None or endpoint_input is not None:
+            client = getattr(request, "client", None)
+            endpoint_error = _validate_provider_url(
+                _endpoint, getattr(client, "host", "") if client else ""
+            )
+            if endpoint_error:
+                return JSONResponse({"error": endpoint_error}, status_code=400)
+
+        # A retained cloud credential must never be redirected to a caller's
+        # newly supplied provider or endpoint.  Compare canonical URL identity
+        # after validation so a harmless host-case or trailing-slash rewrite
+        # does not unexpectedly clear the key.
+        from urllib.parse import urlsplit, urlunsplit
+
+        def _endpoint_identity(url: str) -> str:
+            parsed = urlsplit(url)
+            return urlunsplit((
+                parsed.scheme.lower(), parsed.netloc.lower(),
+                parsed.path.rstrip("/"), parsed.query, "",
+            ))
+
+        destination_changed = (
+            (provider_input is not None and provider_input != config.llm.provider)
+            or (
+                (base_url_input is not None or endpoint_input is not None)
+                and _endpoint_identity(_endpoint)
+                != _endpoint_identity(config.llm.api_base or "")
+            )
+        )
+        api_key = "" if (clear_api_key or (destination_changed and not api_key_input)) else (
+            api_key_input or config.llm.api_key
+        )
 
         # Mutate only the fields the dashboard sent — all other config blocks
         # (forgetting, injection, retrieval, math, consolidation, scope, …) are
@@ -351,6 +429,8 @@ async def set_full_config(request: Request):
             "embedding_model": config.embedding.model_name,
             "embedding_dimension": config.embedding.dimension,
         }
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception as e:
         return _internal_error()
 
@@ -830,6 +910,17 @@ async def recall_trace(request: Request):
         limit = body.get("limit", 10)
         window = body.get("window", "") or ""
         as_of_raw = (body.get("as_of", "") or "").strip()
+        raw_known_as_of = body.get("known_as_of", "")
+        raw_valid_at = body.get("valid_at", "")
+        if raw_known_as_of is not None and not isinstance(raw_known_as_of, str):
+            return JSONResponse({"error": "invalid_known_as_of"}, status_code=400)
+        if raw_valid_at is not None and not isinstance(raw_valid_at, str):
+            return JSONResponse({"error": "invalid_valid_at"}, status_code=400)
+        known_as_of_raw = (raw_known_as_of or "").strip()
+        valid_at_raw = (raw_valid_at or "").strip()
+        include_unknown = body.get("include_unknown", False)
+        if not isinstance(include_unknown, bool):
+            return JSONResponse({"error": "invalid_include_unknown"}, status_code=400)
 
         # Normalize as_of at HTTP boundary. Invalid → 400.
         _as_of: str | None = None
@@ -840,6 +931,20 @@ async def recall_trace(request: Request):
                 return JSONResponse(
                     {"error": "invalid_as_of", "raw": as_of_raw}, status_code=400
                 )
+        def _normalize_named_time(raw: str, error: str) -> str | None | JSONResponse:
+            if not raw:
+                return None
+            from superlocalmemory.retrieval.temporal_utils import normalize_as_of
+            normalized = normalize_as_of(raw)
+            if normalized is None:
+                return JSONResponse({"error": error, "raw": raw}, status_code=400)
+            return normalized
+        _known_as_of = _normalize_named_time(known_as_of_raw, "invalid_known_as_of")
+        if isinstance(_known_as_of, JSONResponse):
+            return _known_as_of
+        _valid_at = _normalize_named_time(valid_at_raw, "invalid_valid_at")
+        if isinstance(_valid_at, JSONResponse):
+            return _valid_at
 
         # Use daemon engine — already loaded, shares warm page cache.
         # run_in_executor keeps event loop alive so browser doesn't abort.
@@ -855,6 +960,8 @@ async def recall_trace(request: Request):
             lambda: engine.recall(
                 query, limit=limit, fast=False,
                 window=window or None, as_of=_as_of,
+                known_as_of=_known_as_of, valid_at=_valid_at,
+                include_unknown=include_unknown,
             ),
         )
         elapsed_ms = round((_time.monotonic() - t0) * 1000, 1)

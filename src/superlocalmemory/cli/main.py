@@ -75,6 +75,8 @@ _NO_DAEMON_COMMANDS = {
     "disable", "enable", "clear-cache", "reconfigure", "benchmark",
     "rotate-token",
     "evidence",
+    # v4.0.2 receipt summary is a direct read-only learning.db query.
+    "brain",
     "diagnostics",
     # LLD-06 — agents launched through wrap start the daemon on demand.
     "wrap",
@@ -395,6 +397,18 @@ def main() -> None:
              "snapshot. Default: current-state recall.",
     )
     recall_p.add_argument(
+        "--known-as-of", dest="known_as_of", default="",
+        help="Strict transaction-time boundary: return only facts SLM knew by this ISO-8601 time.",
+    )
+    recall_p.add_argument(
+        "--valid-at", dest="valid_at", default="",
+        help="Strict event-time boundary: return only facts valid at this ISO-8601 time.",
+    )
+    recall_p.add_argument(
+        "--include-unknown", action="store_true",
+        help="Include pre-4.0.2 facts with unknown temporal provenance in strict time-travel.",
+    )
+    recall_p.add_argument(
         "--fast", action="store_true",
         help="Force-skip the internal agentic verification round (all six retrieval "
              "channels + reranker still run). This is already the default (client-driven "
@@ -605,6 +619,15 @@ def main() -> None:
 
     obs_p = sub.add_parser("observe", help="Auto-capture content (pipe or argument)")
     obs_p.add_argument("content", nargs="?", default="", help="Content to evaluate")
+
+    brain_p = sub.add_parser(
+        "brain", help="Show the local, profile-scoped Living Brain evidence summary"
+    )
+    brain_p.add_argument(
+        "action", nargs="?", default="status", choices=["status"],
+        help="Read-only Brain action (default: status)",
+    )
+    brain_p.add_argument("--json", action="store_true", help="Output structured JSON")
 
     # -- V3.3 Commands -------------------------------------------------
     decay_p = sub.add_parser("decay", help="Run Ebbinghaus forgetting decay cycle")

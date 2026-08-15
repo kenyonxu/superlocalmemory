@@ -349,6 +349,7 @@ def dispatch(args: Namespace) -> None:
         "delete": cmd_delete,
         "update": cmd_update,
         "status": cmd_status,
+        "brain": cmd_brain,
         "health": cmd_health,
         "doctor": cmd_doctor,
         "trace": cmd_trace,
@@ -1486,10 +1487,27 @@ def cmd_recall(args: Namespace) -> None:
                     _sys.exit(1)
                 _as_of = _as_of_norm
             as_of_qs = f"&as_of={quote(_as_of)}" if _as_of else ""
+            def _strict_time_qs(attr: str, parameter: str) -> str:
+                raw = getattr(args, attr, "") or ""
+                if not raw:
+                    return ""
+                from superlocalmemory.retrieval.temporal_utils import normalize_as_of
+                normalized = normalize_as_of(raw)
+                if normalized is None:
+                    import sys as _sys
+                    _sys.stderr.write(
+                        f"Error: invalid --{attr.replace('_', '-')} value: {raw!r}\n"
+                    )
+                    _sys.exit(1)
+                return f"&{parameter}={quote(normalized)}"
+            known_as_of_qs = _strict_time_qs("known_as_of", "known_as_of")
+            valid_at_qs = _strict_time_qs("valid_at", "valid_at")
+            unknown_qs = "&include_unknown=true" if getattr(args, "include_unknown", False) else ""
             result = daemon_request(
                 "GET",
                 f"/recall?q={quote(args.query)}&limit={args.limit}"
-                f"&session_id={quote(session_id)}{fast_qs}{scope_qs}{window_qs}{as_of_qs}",
+                f"&session_id={quote(session_id)}{fast_qs}{scope_qs}{window_qs}{as_of_qs}"
+                f"{known_as_of_qs}{valid_at_qs}{unknown_qs}",
             )
             if result and "results" in result:
                 # Format daemon response same as engine response
@@ -3678,6 +3696,47 @@ def cmd_session_context(args: Namespace) -> None:
 
     except Exception as exc:
         logger.debug("session-context (fast) failed: %s", exc)
+
+
+def cmd_brain(args: Namespace) -> None:
+    """Read the portable, profile-scoped Agent Experience evidence summary.
+
+    This command deliberately opens no memory engine and starts no daemon. It
+    is an indexed ``learning.db`` read, so support scripts and non-technical
+    users can inspect the Living Brain without affecting recall latency.
+    """
+    from superlocalmemory.core.config import SLMConfig
+    from superlocalmemory.infra.data_root import state_path
+    from superlocalmemory.storage.agent_experience import get_profile_receipt_summary
+
+    config = SLMConfig.load()
+    profile_id = config.active_profile
+    data = {
+        "profile_id": profile_id,
+        "agent_experience": get_profile_receipt_summary(
+            state_path("learning.db"), profile_id
+        ),
+        "control_plane": "observation_only",
+    }
+    if getattr(args, "json", False):
+        from superlocalmemory.cli.json_output import json_print
+
+        json_print("brain", data=data, next_actions=[
+            {"command": "slm dashboard", "description": "Open the Living Brain dashboard"},
+        ])
+        return
+    evidence = data["agent_experience"]
+    print("SuperLocalMemory Living Brain")
+    print(f"  Profile: {profile_id}")
+    print(f"  Agent experiences: {evidence['experiences_total']}")
+    print(f"  Claimed evidence authority: {evidence['claimed_evidence_experiences']}")
+    print(f"  Cognitive turns: {evidence['turns_total']}")
+    if evidence["turns_by_state"]:
+        states = ", ".join(
+            f"{state}: {count}" for state, count in sorted(evidence["turns_by_state"].items())
+        )
+        print(f"  Turn states: {states}")
+    print("  Retrieval control: observation only")
 
 
 def cmd_observe(args: Namespace) -> None:
