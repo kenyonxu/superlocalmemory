@@ -675,7 +675,8 @@ def _bounded_loops_probe_fresh() -> dict:
     """Probe bounded-loops installation — may spawn one short subprocess.
 
     Detection approach: ``shutil.which("bounded-loops-mcp")`` (PATH scan,
-    no subprocess), then ``bl --version`` with a 300 ms timeout.
+    no subprocess), then ``bl --version`` with a 1.5 s timeout (see the note at the call
+    site: 300 ms sat too close to the measured ~226 ms and flickered).
 
     Evidence tier: INSTALLED — the ``bounded-loops-mcp`` binary is on the
     resolved PATH, meaning the pipx package is present.
@@ -753,23 +754,48 @@ def _compute_bounded_loops() -> dict:
 
     Wraps ``_bounded_loops_probe_fresh`` in a 60-second TTL cache so the
     subprocess call is never inline on every Brain request.  First call may
-    take up to 300 ms (subprocess timeout); subsequent calls within the TTL
-    window return immediately from the cache.
+    take up to 1.5 s (subprocess timeout); subsequent calls within the TTL
+    window return immediately from the cache. The probe is single-flight, so
+    concurrent callers share one subprocess rather than spawning one each.
     """
-    now = time.monotonic()
     with _BL_PROBE_LOCK:
         cached = _BL_PROBE.get("result")
         cached_at = float(_BL_PROBE.get("cached_at", 0.0))
-        if cached is not None and (now - cached_at) < _BL_PROBE_TTL:
+        if cached is not None and (time.monotonic() - cached_at) < _BL_PROBE_TTL:
             return cached  # type: ignore[return-value]
 
-    fresh = _bounded_loops_probe_fresh()
-    fresh["section_enabled"] = fresh.get("installed", False)
+        # SINGLE-FLIGHT: run the probe while STILL HOLDING the lock.
+        # The previous shape released the lock between the check and the probe,
+        # so every concurrent caller that arrived after a TTL expiry spawned its
+        # own `bl --version` subprocess — N dashboard requests meant N processes,
+        # each up to 1.5s. Holding the lock makes the 2nd..Nth caller wait for
+        # the first result instead. Blocking here is safe: this whole function
+        # runs in a worker thread via asyncio.to_thread, so the event loop is
+        # never held, and it is off the recall/remember path entirely.
+        try:
+            fresh = _bounded_loops_probe_fresh()
+            fresh["section_enabled"] = bool(fresh.get("installed", False))
+        except Exception as exc:  # probe itself blew up
+            # Cache the FAILURE too, and label it as a failure rather than as a
+            # clean "not installed". Without caching it, every request would
+            # retry a broken probe forever; without labelling it, a broken probe
+            # is indistinguishable from Bounded Loops genuinely being absent —
+            # the silent-failure class this release exists to remove.
+            logger.warning("bounded-loops probe failed: %s", exc)
+            fresh = {
+                "installed": None,
+                "is_real": False,
+                "probe_failed": True,
+                "reason": f"probe_error:{type(exc).__name__}",
+                "section_enabled": False,
+                "source": "probe raised",
+            }
 
-    with _BL_PROBE_LOCK:
+        # Timestamp AFTER the probe so the TTL measures time since completion,
+        # not time since the request arrived.
         _BL_PROBE["result"] = fresh
-        _BL_PROBE["cached_at"] = now
-    return fresh
+        _BL_PROBE["cached_at"] = time.monotonic()
+        return fresh
 
 
 def _compute_cross_platform() -> dict:
@@ -1477,9 +1503,15 @@ async def get_brain(request: Request, profile_id: str | None = None) -> dict:
         # ``bounded_loops`` — lazy-probed, TTL-cached installation status.
         # ``section_enabled`` drives the UI panel on/off decision.
         # Evidence tier: path-based (shutil.which); bridge capability not probed.
+        # is_real=False and installed=None, NOT installed=False. If the probe
+        # task raised, we do not know whether Bounded Loops is installed — and
+        # saying "installed: False, is_real: True" asserts absence we never
+        # established. That reads to the UI, and to any API consumer, exactly
+        # like a machine with Bounded Loops genuinely not present.
         "bounded_loops": _ok(bounded_loops, {
-            "is_real": True,
-            "installed": False,
+            "is_real": False,
+            "installed": None,
+            "probe_failed": True,
             "section_enabled": False,
             "source": "bounded_loops_probe unavailable",
         }),

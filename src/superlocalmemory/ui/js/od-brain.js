@@ -773,12 +773,22 @@
     evc.appendChild(evh);
     var evb = EL('div', { className: 'card-pad' });
 
-    if (registryStatus === 'error') {
+    if (registryStatus === 'error' || registryStatus === 'unknown') {
       // Wave 4 honesty rule: failure and emptiness must not return the same value.
+      // 'unknown' belongs HERE, not in the healthy-empty branch below. The
+      // registry reader is fail-soft — a corrupt or unreadable file makes
+      // _load() return {} and active_client_summary() return [], so the read
+      // model reports status 'unknown' with an empty client list and is_real
+      // true. Falling through to "No host activity in the last 5 minutes" would
+      // render a BROKEN registry exactly like a healthy quiet machine, which is
+      // precisely the silent failure this section was rewritten to eliminate.
       evb.appendChild(EL('p', {
         className: 'muted',
         style: 'padding:16px;text-align:center;font-size:13px',
-        text: 'Presence registry unavailable. Check daemon logs for details.',
+        text: registryStatus === 'unknown'
+          ? 'Presence records could not be read, so recent activity cannot be '
+            + 'confirmed. This is not the same as no agents being active.'
+          : 'Presence registry unavailable. Check daemon logs for details.',
       }));
     } else if (registryStatus === 'stale') {
       // TELEMETRY GAP — entries exist but all are > 10 min old.

@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<h1 align="center">SuperLocalMemory V4.0.5</h1>
+<h1 align="center">SuperLocalMemory V4.0.6</h1>
 
 <h2 align="center">Rent the LLM. Own the memory.</h2>
 
@@ -27,12 +27,12 @@ guarantee here is stated as a falsifiable invariant, tested under an adversarial
 negative control, and shipped with the harness that regenerates the evidence:
 <code>python benchmark/run_all.py --trials 200 --output-dir results/</code>. What each experiment
 does <em>not</em> exercise is stated too.</p>
-<p align="center"><code>v4.0.5</code> — one control plane: <strong>SLM-Mesh</strong> peer coordination · multi-scope memory (personal / shared / global) · profiles · Cache · Compress · 7-layer retrieval · code graph · Entity Explorer · skill evolution · Modes A/B/C · GDPR retention &amp; audit chain · bounded loops — across CLI, MCP, dashboard, the <strong>Claude plugin</strong>, the <strong>Codex add-on</strong>, and documented IDE integrations.<br/>
+<p align="center"><code>v4.0.6</code> — one control plane: <strong>SLM-Mesh</strong> peer coordination · multi-scope memory (personal / shared / global) · profiles · Cache · Compress · 7-layer retrieval · code graph · Entity Explorer · skill evolution · Modes A/B/C · GDPR retention &amp; audit chain · bounded loops — across CLI, MCP, dashboard, the <strong>Claude plugin</strong>, the <strong>Codex add-on</strong>, and documented IDE integrations.<br/>
 Proxy: <code>slm wrap claude</code> &nbsp;·&nbsp; MCP: add <code>slm_compress</code> to your config &nbsp;·&nbsp; Skill: zero-config</p>
 <p align="center"><strong>Four public arXiv preprints</strong> · V4: <a href="https://arxiv.org/abs/2608.08253">arXiv:2608.08253</a> · companion archive: <a href="https://zenodo.org/records/21853302">Zenodo 21853302</a> (<a href="https://doi.org/10.5281/zenodo.21853302">DOI 10.5281/zenodo.21853302</a>) · prior preprints: <a href="https://arxiv.org/abs/2603.02240">2603.02240</a> · <a href="https://arxiv.org/abs/2603.14588">2603.14588</a> · <a href="https://arxiv.org/abs/2604.04514">2604.04514</a>.</p>
 
 <p align="center">
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/v4.0.5-Current_Release-2ea44f?style=for-the-badge&logo=checkmarx&logoColor=white" alt="v4.0.5 — Current Release"/></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/v4.0.6-Current_Release-2ea44f?style=for-the-badge&logo=checkmarx&logoColor=white" alt="v4.0.6 — Current Release"/></a>
   <a href="https://arxiv.org/abs/2608.08253"><img src="https://img.shields.io/badge/arXiv-2608.08253-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="SuperLocalMemory 4.0 paper on arXiv:2608.08253"/></a>
   <a href="https://zenodo.org/records/21853302"><img src="https://img.shields.io/badge/Zenodo-10.5281%2Fzenodo.21853302-1682D4?style=for-the-badge&logo=zenodo&logoColor=white" alt="V4 paper on Zenodo: 10.5281/zenodo.21853302"/></a>
   <a href="https://arxiv.org/abs/2603.14588"><img src="https://img.shields.io/badge/arXiv-2603.14588-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="arXiv Paper"/></a>
@@ -41,7 +41,7 @@ Proxy: <code>slm wrap claude</code> &nbsp;·&nbsp; MCP: add <code>slm_compress</
   <a href="https://www.npmjs.com/package/superlocalmemory"><img src="https://img.shields.io/npm/v/superlocalmemory?style=for-the-badge&logo=npm&logoColor=white" alt="npm"/></a>
   <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg?style=for-the-badge" alt="AGPL v3"/></a>
   <a href="#privacy-controls-and-operating-modes"><img src="https://img.shields.io/badge/Privacy-Deployment_Assessed-brightgreen?style=for-the-badge" alt="Privacy controls require deployment assessment"/></a>
-  <a href="#teams-and-enterprise-memory-v4"><img src="https://img.shields.io/badge/Enterprise-GDPR_%7C_EU_AI_Act-0b5394?style=for-the-badge" alt="Enterprise governance: GDPR and EU AI Act controls"/></a>
+  <a href="#teams-and-enterprise-memory-v4"><img src="https://img.shields.io/badge/Enterprise-GDPR_%7C_EU_AI_Act_controls-0b5394?style=for-the-badge" alt="Enterprise governance: GDPR and EU AI Act controls"/></a>
   <a href="https://superlocalmemory.com"><img src="https://img.shields.io/badge/Web-superlocalmemory.com-ff6b35?style=for-the-badge" alt="Website"/></a>
   <a href="#dual-interface-mcp--cli"><img src="https://img.shields.io/badge/MCP-Native-blue?style=for-the-badge" alt="MCP Native"/></a>
   <a href="#dual-interface-mcp--cli"><img src="https://img.shields.io/badge/CLI-Agent--Native-green?style=for-the-badge" alt="CLI Agent-Native"/></a>

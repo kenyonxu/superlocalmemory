@@ -1073,10 +1073,17 @@ class RetrievalEngine:
         # error escaped into the recall path rather than degrading to the fused
         # ordering.  Fail soft: reranking is a quality improvement on top of a
         # correct result set, never a correctness requirement.
-        if scored is None:
+        # `not scored` covers None AND an empty sequence. An empty list is the
+        # same defect wearing different clothes: the worker says applied=True but
+        # supplied nothing to rank with. Guarding only None would let [] through
+        # to build an empty score_map, and every candidate would then be scored
+        # against a degenerate min/max — silently shrinking the fused component
+        # by (1 - alpha) while still reporting the rerank as applied.
+        if not scored:
             logger.warning(
-                "Cross-encoder worker reported applied=True with null scores; "
-                "falling back to fused ranking for this query."
+                "Cross-encoder worker reported applied=True with %s scores; "
+                "falling back to fused ranking for this query.",
+                "null" if scored is None else "empty",
             )
             return fused, False, "worker_null_scores"
 

@@ -5,9 +5,39 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 4.0.6 — The Connected Brain
+## [4.0.6] — The Connected Brain
+
+### Added
+- **The Living Brain, rewritten for people who do not read telemetry.** The Brain
+  section now leads with the number of questions your memory has answered rather
+  than a raw event count, names its ranking phase in words, and stops presenting
+  a starting value as a measured result. Source quality no longer lists internal
+  identifiers; when nothing has been measured yet it says so and explains what
+  would change that.
+- **Session, daily and project summaries.** A readable layer over your memories:
+  what a session covered, what a day's main topics were, and what was worked on
+  per project. Each one links back to the memories it came from, and each states
+  how much of the underlying data it could actually cover. Requested in #113.
+- **Entity-level memory consolidation now runs.** Repeated facts about the same
+  entity are merged during maintenance, and the originals are archived rather
+  than deleted.
+- **Codex and Bounded Loops appear in Connected clients.** Codex is listed with
+  the configuration that proves it, and Bounded Loops is detected when installed,
+  with its version and the bridge it speaks.
 
 ### Fixed
+- **The knowledge graph no longer opens blank.** Previously the graph could
+  render nothing on first open — and again when you returned to it — until you
+  moved the node slider. Two separate causes: the view framed itself against a
+  canvas that had no size yet, and re-entering the pane cleared the canvas
+  without redrawing it. Default node count is now 50.
+- **The graph's details and chat panel is reachable on smaller screens.** Below
+  1100px it stacks under the graph, a full screen-height out of view; there is
+  now a control to reach it and a way back.
+- **Presence tells you when it has stopped being recorded.** A gap in recording
+  previously looked identical to "no agents are active".
+- **Recall no longer fails when the reranker returns no scores.** It falls back
+  to its existing ranking instead of raising.
 - Storage: per-call connections now disable checkpoint-on-close
   (`SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`), removing a version-dependent blocking
   close path. On SQLite builds whose close-path checkpoint can block, closing a

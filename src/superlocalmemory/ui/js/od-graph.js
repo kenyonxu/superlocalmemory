@@ -45,6 +45,11 @@
   /* settle-freeze: stop the rAF loop once kinetic energy drops below SETTLE_KE */
   var frames = 0, _ke = 0;
   var SETTLE_MIN = 30, SETTLE_KE = 0.2, SETTLE_MAX_FRAMES = 180;
+  /* Bounded wait for layout when the stage reports 0x0. ~3s at 60fps:
+     long enough for a cold load whose pane is laid out a beat after
+     mount, short enough that a hidden pane cannot hold the rAF loop
+     open indefinitely. */
+  var blindFrames = 0, BLIND_MAX_FRAMES = 180;
   var NODES = [], LINKS = [], idx = {};
   var tierVisible = { 1: true, 2: true, 3: true };  /* independent tier toggles */
   var scale = 1, ox = 0, oy = 0, dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -270,13 +275,17 @@
 
   function resize() {
     if (!stage || !cv) return;
-    W = stage.clientWidth; H = stage.clientHeight;
-    /* A stage that reports 0×0 is not yet laid out (hidden tab, off-screen pane).
-       Drawing into a zero-sized canvas produces exactly the blank-on-cold-load
-       failure the owner reported.  The ResizeObserver wired in wireControls()
-       fires the moment the stage acquires real pixel dimensions and re-calls
-       resize() + wake(), so nothing is ever permanently missed. */
-    if (!W || !H) return;
+    /* Read into locals and only COMMIT to W/H once they are real.
+       A stage that reports 0x0 is not yet laid out (hidden tab, off-screen
+       pane). Drawing into a zero-sized canvas produces the blank-on-cold-load
+       failure the owner reported. Equally important: writing 0 into W/H before
+       bailing would POISON the last-known-good size — a window resize while the
+       graph pane is hidden would zero them, and loop() would then have no valid
+       dimensions to work with. Keep the previous good values instead; the
+       ResizeObserver re-calls resize() the moment the stage has real pixels. */
+    var w = stage.clientWidth, h = stage.clientHeight;
+    if (!w || !h) return;
+    W = w; H = h;
     cv.width = W * dpr; cv.height = H * dpr; cv.style.width = W + 'px'; cv.style.height = H + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
@@ -350,16 +359,27 @@
 
   function loop() {
     if (!running) return;
-    /* Do not spend the settle budget while the canvas has no size.
-       fit() derives scale/ox/oy from W and H, so a frame rendered at 0x0 parks
-       the camera off-screen — measured on a cold load: 16,362 arc() calls, all
-       with finite coordinates, every one at x ~= -2,300.  The budget below
-       (fitFrames < 90, SETTLE_MAX_FRAMES) would then be exhausted while blind,
-       the loop would stop, and the graph stayed invisible until something
-       called load() again.  That is exactly the "blank until I move the node
-       slider" report.  Idle here instead and let the ResizeObserver's re-fit
-       drive the first real frame. */
-    if (!W || !H) { raf = requestAnimationFrame(loop); return; }
+    /* Blind frame: the stage has no size yet. Two failure modes to avoid, and
+       they pull in opposite directions —
+         (a) Spending the settle budget while blind. fit() derives scale/ox/oy
+             from W/H, so frames rendered at 0x0 park the camera off-screen:
+             measured 16,362 arc() calls, every one at x ~= -2,300, canvas
+             visually empty. That was the original "blank until I move the node
+             slider" bug.
+         (b) Idling forever. Re-scheduling rAF unconditionally kept a 60fps
+             callback alive on a hidden pane — the graph stays mounted after you
+             navigate away, so one window resize while hidden burned CPU
+             indefinitely.
+       So: retry for a BOUNDED window, then park. The retry covers a cold load
+       where layout lands a beat after mount (parking immediately there left the
+       first visit blank while re-visits worked). The bound means a hidden pane
+       can never hold the loop open — after ~3s it stops, and the ResizeObserver
+       calls wake() if the stage ever gains size. */
+    if (!W || !H) {
+      if (blindFrames++ < BLIND_MAX_FRAMES) { raf = requestAnimationFrame(loop); return; }
+      running = false; raf = null; blindFrames = 0; return;
+    }
+    blindFrames = 0;
     tick();
     if (fitFrames < 90) { fit(); fitFrames++; }   /* keep settling cloud in view */
     draw();

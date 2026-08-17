@@ -667,7 +667,16 @@ def run_maintenance(
                 fc_stats.get("facts_archived", 0),
             )
     except Exception as exc:
-        logger.debug("Fact consolidation skipped during maintenance: %s", exc)
+        # WARNING, not debug, and a distinguishable count. Leaving this at debug
+        # with facts_consolidated=0 made a failing consolidation report exactly
+        # the same numbers as a healthy run with nothing to merge, so a step that
+        # never worked would look like a step with no work to do — and nobody
+        # would ever see it in normal logs.
+        counts["facts_consolidated"] = -1
+        logger.warning(
+            "Fact consolidation FAILED during maintenance (reported as -1, "
+            "which is distinct from 0 = nothing to merge): %s", exc,
+        )
 
     logger.info(
         "Maintenance complete: %d backfilled, %d Langevin, %d Fisher-coupled, "
