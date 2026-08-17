@@ -103,15 +103,34 @@ def listeners(
 class TestRegistration:
     """Test listener registration and unregistration."""
 
-    def test_start_registers_listeners(
+    def test_start_registers_the_code_graph_listeners(
         self, listeners: BridgeEventListeners, fake_bus: FakeEventBus,
     ) -> None:
         listeners.start(fake_bus)
 
-        assert fake_bus.listener_count("memory.stored") == 1
         assert fake_bus.listener_count("code_graph.node_deleted") == 1
         assert fake_bus.listener_count("code_graph.node_changed") == 1
         assert listeners.is_started is True
+
+    def test_start_does_not_register_memory_stored(
+        self, listeners: BridgeEventListeners, fake_bus: FakeEventBus,
+    ) -> None:
+        """4.0.7: the memory-write subscription is gone, on purpose.
+
+        This test previously asserted ``listener_count("memory.stored") == 1``.
+        EventBus._notify_listeners dispatches synchronously on the emitting
+        thread, so that subscription ran entity resolution, enrichment and
+        Hebbian linking inside every remember. The work moved to background
+        maintenance (code_graph.bridge.maintenance) and the assertion is
+        inverted to lock the new contract in place.
+        """
+        listeners.start(fake_bus)
+
+        assert fake_bus.listener_count("memory.stored") == 0, (
+            "the bridge re-subscribed to memory.stored — that puts code "
+            "resolution back on the remember path. See "
+            "tests/test_code_graph/test_bridge_off_write_path.py."
+        )
 
     def test_start_idempotent(
         self, listeners: BridgeEventListeners, fake_bus: FakeEventBus,
@@ -119,7 +138,7 @@ class TestRegistration:
         listeners.start(fake_bus)
         listeners.start(fake_bus)  # Should not double-register
 
-        assert fake_bus.listener_count("memory.stored") == 1
+        assert fake_bus.listener_count("code_graph.node_changed") == 1
 
     def test_stop_unregisters_listeners(
         self, listeners: BridgeEventListeners, fake_bus: FakeEventBus,
@@ -147,7 +166,15 @@ class TestMemoryStoredListener:
         listeners: BridgeEventListeners,
         fake_bus: FakeEventBus,
     ) -> None:
-        """memory.stored with content should trigger entity resolution."""
+        """on_memory_stored resolves code mentions when invoked directly.
+
+        4.0.7: this used to drive the handler by emitting "memory.stored" on the
+        bus. The bridge no longer subscribes to that event — dispatch is
+        synchronous, so the subscription put resolution inside every remember —
+        so the payload is handed to the handler directly instead. The handler is
+        still a supported entry point for a caller that wants one fact linked
+        synchronously; what changed is that nothing wires it to memory writes.
+        """
         from superlocalmemory.code_graph.models import GraphNode, NodeKind
         db.upsert_node(GraphNode(
             node_id="n1", kind=NodeKind.FUNCTION,
@@ -157,9 +184,14 @@ class TestMemoryStoredListener:
         ))
 
         listeners.start(fake_bus)
-        fake_bus.emit("memory.stored", {
-            "fact_id": "fact-100",
-            "content_preview": "Fixed authenticate_user function",
+        # Same envelope the bus would have delivered: on_memory_stored reads
+        # event["payload"], so the payload must stay nested.
+        listeners.on_memory_stored({
+            "event_type": "memory.stored",
+            "payload": {
+                "fact_id": "fact-100",
+                "content_preview": "Fixed authenticate_user function",
+            },
         })
 
         # Verify link was created

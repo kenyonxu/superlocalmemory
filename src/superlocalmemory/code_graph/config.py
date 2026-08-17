@@ -9,7 +9,7 @@ Frozen dataclass with all tunables. Sensible defaults for typical repos.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from superlocalmemory.infra.data_root import state_path
@@ -88,3 +88,67 @@ class CodeGraphConfig:
         if slm_base_dir is not None:
             return slm_base_dir / "code_graph.db"
         return state_path("code_graph.db")
+
+    @classmethod
+    def load(cls, **overrides: object) -> CodeGraphConfig:
+        """Build a config from ``code_graph_config.json``, then apply overrides.
+
+        WHY THIS EXISTS (4.0.7). ``cli/setup_wizard.py`` has always written
+        ``code_graph_config.json`` with ``enabled`` and ``bridge_enabled``, and
+        until now **nothing read it**. There was no loader on this class at all,
+        and every call site constructed ``CodeGraphConfig(enabled=True)`` with
+        hardcoded defaults. So a user could answer "yes, enable the code graph"
+        in setup, get ``bridge_enabled: true`` written to disk, and have it
+        affect nothing — silently, with no way to tell from the outside.
+
+        Unknown keys in the file are ignored rather than raising: the file is
+        user-editable, and a stray key should not stop the code graph from
+        loading. Malformed JSON falls back to defaults with a warning, because
+        failing closed here would disable a working code graph over a typo.
+        """
+        import json
+        import logging
+
+        data: dict[str, object] = {}
+        path = state_path("code_graph_config.json")
+        try:
+            if path.exists():
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    data = loaded
+                else:
+                    logging.getLogger(__name__).warning(
+                        "%s does not contain a JSON object; using defaults", path,
+                    )
+        except (OSError, json.JSONDecodeError) as exc:
+            logging.getLogger(__name__).warning(
+                "could not read %s (%s); using defaults", path, exc,
+            )
+
+        data.update(overrides)
+
+        valid = {f.name for f in fields(cls)}
+        unknown = sorted(set(data) - valid)
+        if unknown:
+            logging.getLogger(__name__).debug(
+                "ignoring unknown code_graph config keys: %s", ", ".join(unknown),
+            )
+
+        kwargs = {k: v for k, v in data.items() if k in valid}
+
+        # JSON has no frozenset/Path; coerce the fields that need it.
+        if isinstance(kwargs.get("languages"), list):
+            kwargs["languages"] = frozenset(kwargs["languages"])
+        if isinstance(kwargs.get("exclude_dirs"), list):
+            kwargs["exclude_dirs"] = frozenset(kwargs["exclude_dirs"])
+        for key in ("repo_root", "db_path"):
+            if isinstance(kwargs.get(key), str):
+                kwargs[key] = Path(kwargs[key])
+
+        try:
+            return cls(**kwargs)  # type: ignore[arg-type]
+        except TypeError as exc:
+            logging.getLogger(__name__).warning(
+                "code_graph config rejected (%s); using defaults", exc,
+            )
+            return cls()

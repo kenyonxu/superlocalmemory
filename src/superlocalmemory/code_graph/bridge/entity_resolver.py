@@ -152,8 +152,24 @@ class EntityResolver:
         self,
         fact_text: str,
         fact_id: str,
+        max_links: int | None = None,
     ) -> list[CodeMemoryLink]:
         """Resolve code entity mentions in fact text and create links.
+
+        Args:
+            fact_text: Text to scan for code mentions.
+            fact_id:   The fact these links belong to.
+            max_links: Keep at most this many links, highest confidence first.
+                ``None`` (the default) is unbounded, preserving the behaviour the
+                manual ``link_memory_to_code`` path relies on.
+
+                A bound matters for automatic resolution. One file-path mention
+                matches EVERY node in that file: the fact "the parser in
+                code_graph/parser.py was dropping edges" produced 17 links at
+                confidence 0.6-0.8, while a backticked function name produces one
+                at 0.95. Unbounded, a fact naming a few files buries its own
+                high-signal links and hands a large node set to HebbianLinker,
+                whose neighbourhood expansion then grows accordingly.
 
         Returns list of CodeMemoryLink objects created.
         """
@@ -176,6 +192,16 @@ class EntityResolver:
 
         if not matches:
             return []
+
+        selected = list(matches.values())
+        if max_links is not None and len(selected) > max_links:
+            # Confidence ranks the match kinds correctly already — backticked and
+            # call-syntax mentions score 0.95, a bare identifier 0.9, file-path
+            # fan-out 0.6-0.8 — so ordering by it keeps the precise mentions and
+            # drops the broad ones.
+            selected.sort(key=lambda m: m.confidence, reverse=True)
+            selected = selected[:max_links]
+            matches = {m.node_id: m for m in selected}
 
         # Classify link type
         link_type = self._classify_link_type(fact_text)

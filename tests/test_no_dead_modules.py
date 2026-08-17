@@ -112,8 +112,10 @@ _KNOWN_DEAD: dict[str, str] = {
 #: TODO(4.0.7): wire or delete all four.
 _KNOWN_DEAD_PACKAGES: dict[str, str] = {
     "attribution": "seeded 4.0.6 — triage: provenance signer/watermark, no caller",
-    "code_graph/bridge": "seeded 4.0.6 — triage: 5 code-graph↔memory mechanisms, "
-                         "no caller. Same shape as resolver.py; likely a real defect",
+    # code_graph/bridge: REMOVED in 4.0.7 — wired into core/maintenance.py as a
+    # background pass. This guard is what forced the entry out: the ratchet test
+    # failed the moment the package gained a production importer, which is
+    # exactly the behaviour it was added for.
     "evaluation": "INTENTIONAL — calibration artifacts, documented as isolated "
                   "from production retrieval paths. Not a defect.",
     "summaries": "seeded 4.0.6 — issue #113 generators shipped with no command, "
