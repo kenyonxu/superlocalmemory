@@ -158,10 +158,22 @@
             '<h3>Recent memories</h3>' +
             '<span class="sub">newest first</span>' +
             '<div class="spacer"></div>' +
+            /* max-width + min-width:0 are load-bearing, not cosmetic.
+               A <select> sizes itself to its LONGEST OPTION, and the options
+               here are agent ids — which for daemon capabilities look like
+               "daemon-capability:811f335e55fac7f456aadd68938b862a...", 75+
+               characters. Measured on a real store: the control rendered
+               1,178px wide inside a 714px pane, dragging the pane's
+               scrollWidth to 1,336px. That is what broke this section's
+               layout and pushed the table off the right edge.
+               min-width:0 is required because this sits in a flex row, where
+               the default min-width:auto refuses to shrink below the
+               content's intrinsic size and defeats max-width. */
             '<select id="od-agents-filter"' +
               ' style="font-size:12.5px;padding:3px 8px;border-radius:var(--r-sm);' +
                       'background:var(--card-2);border:1px solid var(--border);' +
-                      'color:var(--fg-1)">' +
+                      'color:var(--fg-1);max-width:220px;min-width:0;' +
+                      'text-overflow:ellipsis">' +
               '<option value="">All agents</option>' +
             '</select>' +
           '</div>' +
@@ -259,6 +271,30 @@
   }
 
   // ── Populate agent filter dropdown ────────────────────────────────────────
+  /* Turn an agent id into something a person can read in a dropdown.
+     Ids arrive in three shapes on a real store:
+        "claude", "codex"                       -> already readable
+        "daemon-capability:<64 hex>"            -> kind + short fingerprint
+        "cli-offline-canonical:local-capability:cli:uid:501:<64 hex>:d63110"
+     Showing the raw string is what made the control 1,178px wide, and a
+     64-character hash tells the reader nothing anyway. Keep the leading,
+     meaningful segments and a short fingerprint so two capabilities of the
+     same kind remain distinguishable. The full id stays on opt.value (used
+     for filtering) and on opt.title (hover). */
+  function shortAgentLabel(id) {
+    if (!id) return 'unknown';
+    if (id.length <= 28) return id;
+    var parts = id.split(':');
+    var head = parts[0] || id;
+    /* find the first long hex-looking segment and reduce it to 6 chars */
+    for (var i = 1; i < parts.length; i++) {
+      if (/^[0-9a-f]{16,}$/i.test(parts[i])) {
+        return head + ':' + parts[i].slice(0, 6) + '…';
+      }
+    }
+    return head.length <= 28 ? head + ':…' : head.slice(0, 27) + '…';
+  }
+
   function populateFilter(agents) {
     var sel = document.getElementById('od-agents-filter');
     if (!sel) return;
@@ -267,8 +303,10 @@
     if (!agents) return;
     agents.forEach(function (a) {
       var opt = document.createElement('option');
-      opt.value       = String(a.agent_id || '');
-      opt.textContent = String(a.agent_id || 'unknown');
+      var id  = String(a.agent_id || '');
+      opt.value       = id;                       /* filtering needs the FULL id */
+      opt.textContent = shortAgentLabel(id);      /* the human reads a short one */
+      opt.title       = id || 'unknown';          /* full id still available on hover */
       sel.appendChild(opt);
     });
   }
@@ -293,7 +331,13 @@
       var rawSrc     = String(r.source_type || '—');
       var rawSess    = String(r.session_id  || '—');
 
-      var agId    = escapeHtml(rawId);
+      // Same treatment the content and session columns already get. The agent
+      // id is the one field that was rendered in full, and with nowrap that
+      // made the Agent column 632px wide for a 75-character
+      // "daemon-capability:<64 hex>" — squeezing every other column off the
+      // right edge. Full id stays in the title attribute.
+      var agId    = escapeHtml(shortAgentLabel(rawId));
+      var agIdFull = escapeHtml(rawId);
       var srcType = escapeHtml(rawSrc);
       var dt      = escapeHtml(fmtDate(r.created_at));
 
@@ -317,7 +361,7 @@
                 ' style="width:22px;height:22px;font-size:10px;background:' + avatarBg + '">' +
                 letter +
               '</span>' +
-              '<span class="mono" style="font-size:12px">' + agId + '</span>' +
+              '<span class="mono" style="font-size:12px" title="' + agIdFull + '">' + agId + '</span>' +
             '</span>' +
           '</td>' +
           '<td style="max-width:340px;font-size:13px;padding:7px 12px 7px 0"' +
