@@ -90,6 +90,27 @@ def _make_mock_db(
 
     db.get_invalidated_fact_ids = MagicMock(side_effect=_get_invalid)
     db.get_event_time_expired_fact_ids = MagicMock(side_effect=_get_event_expired)
+
+    # Correction-admission contract (4.0.2 Brain Core / M042).
+    #
+    # temporal_validity_filter fails CLOSED: when the correction-lifecycle read
+    # is unprovable it returns None and recall abstains, so every channel comes
+    # back empty. That is correct product behaviour — treating an unavailable
+    # lifecycle read as "nothing invalidated" would let an approved-stale fact
+    # back in — and the code probes type(db) rather than the instance, so a
+    # permissive MagicMock does not satisfy it.
+    #
+    # These fixtures predate that feature. Every recall in this file abstained,
+    # so the event-time assertions were comparing empty dicts and the axis under
+    # test was never reached at all: one test failed with
+    # "Expected 'get_event_time_expired_fact_ids' to have been called once.
+    # Called 0 times." A real empty set makes admission PROVABLE and empty,
+    # which is what these tests mean — no corrections in play.
+    #
+    # 4.0.6 applied this same repair to test_evidence_floor.py and
+    # test_engine.py; this suite was missed, so event-time filtering shipped
+    # with no effective coverage. Do not replace with MagicMock defaults.
+    db.get_nonapplied_correction_successor_ids.return_value = set()
     return db
 
 

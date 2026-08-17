@@ -5,6 +5,54 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.7] — Reachable
+
+Everything here was already built. None of it could be used.
+
+### Added
+- **`slm summary` — the readable layer over your memories.** Requested in #113
+  and shipped without a way to call it in 4.0.6.
+  - `slm summary day` — what you recorded today (also `yesterday`, or a date)
+  - `slm summary project` — what was worked on, for a directory
+  - `slm summary session <id>` — what one session covered
+
+  Every summary says how much of the underlying data it could actually see, and
+  `--json` lists the exact memories it was built from. Session data is sparse —
+  roughly 4% of facts carry a session id — so a session summary reports that
+  rather than presenting a fraction as the whole. No language model needed, so
+  these work in the fully offline mode.
+- **Memories now link to the code they mention.** A memory that names a
+  function, method or file is connected to it in the code graph, with a short
+  description of what it points at and a marker when the code has since changed.
+  Expanding a memory in the dashboard shows this; nothing appears if you have no
+  code graph. Runs during background maintenance, never when a memory is saved,
+  and requires no language model.
+- **`scripts/bump_version.py`** sets the release version in all fifteen places
+  that declare one, with `--check` for CI.
+
+### Fixed
+- **The code↔memory bridge never ran.** Four things were missing at once: setup
+  wrote a `bridge_enabled` flag no code read, the code-graph build discarded it,
+  the code-graph settings had no loader at all, and the method the bridge was
+  written against was an unimplemented placeholder. Enabling the code graph
+  during setup left the flag on disk and the feature inert, with nothing to
+  indicate it.
+- **Version numbers disagreed across the project.** 4.0.6 shipped with the pip
+  requirements pins, the npm lockfile, the editor plugin manifest, the citation
+  metadata and the lockfile all still reading 4.0.5, and the agent rule footers
+  reading 4.0.4. Installing from `requirements.txt` fetched the wrong release.
+- **Stale-memory checks reported "nothing is stale" when the feature was off.**
+  They answer entirely from code links, so with linking disabled they returned an
+  empty list — the most reassuring possible answer, from something that never
+  ran. They now say the feature is off, and the remediation message names a
+  setting that exists (it previously named one that did not).
+- **`slm help` did not mention `gdpr`**, which shipped in 4.0.6. The drift guard
+  that should have caught it only read one file, so a command registered
+  elsewhere was exempt from the check.
+- **Consolidation could create a database file named after a bad argument.**
+  Given something that was neither a database handle nor a path, it stringified
+  the object and let SQLite create that filename. It now refuses the argument.
+
 ## [4.0.6] — The Connected Brain
 
 ### Added
