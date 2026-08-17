@@ -90,6 +90,11 @@ _KNOWN_DEAD: dict[str, str] = {
 #: Dynamically loaded, invisible to a static scan.
 _DYNAMIC_PREFIXES = ("storage/migrations/",)
 
+#: Interpreter entry points. `__main__.py` is executed by `python -m pkg` and is
+#: never imported by anything — that is the idiom, not dead code. Wave 3's
+#: compliance CLI gate invokes `python -m superlocalmemory.cli` directly.
+_ENTRYPOINT_NAMES = ("__main__.py",)
+
 
 def _module_names_imported_by(paths: list[pathlib.Path]) -> set[str]:
     """Collect every module name referenced by an import statement in *paths*."""
@@ -114,7 +119,7 @@ def _module_names_imported_by(paths: list[pathlib.Path]) -> set[str]:
 def _src_modules() -> list[pathlib.Path]:
     out = []
     for path in _SRC.rglob("*.py"):
-        if path.name == "__init__.py" or "__pycache__" in path.parts:
+        if path.name in ("__init__.py", *_ENTRYPOINT_NAMES) or "__pycache__" in path.parts:
             continue
         rel = path.relative_to(_SRC).as_posix()
         if rel.startswith(_DYNAMIC_PREFIXES):

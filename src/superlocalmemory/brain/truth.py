@@ -211,7 +211,20 @@ def _agent_experience(conn: sqlite3.Connection, profile_id: str) -> dict[str, An
         # no independent verifier.  Calling those claims verified would be a
         # product-quality lie, so this number is deliberately known to be zero.
         "independently_verified_experiences_total": 0,
+        # Plain language: 75% of SLM users are non-technical, and this string is
+        # rendered in the Living Brain UI. The previous value described this
+        # service's internal architecture, which tells a user nothing about
+        # their own data. The meaning a reader actually needs is: work was
+        # reported, and nothing here independently checked it.
+        # Machine-readable enum on the versioned brain-truth/v1 contract — kept
+        # STABLE so existing consumers do not break. The human-facing wording
+        # lives in verification_explanation below; the UI renders that, not this.
         "verification_availability": "not_supported_by_read_model",
+        "verification_explanation": (
+            "These records were reported by an integration. SuperLocalMemory "
+            "stores them but does not independently check them, so they are "
+            "shown as claims rather than verified results."
+        ),
         "cognitive_turns_total": sum(turns_by_state.values()),
         "cognitive_turns_by_state": turns_by_state,
     }

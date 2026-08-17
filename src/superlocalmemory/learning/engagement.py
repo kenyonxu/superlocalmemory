@@ -320,3 +320,168 @@ class EngagementTracker:
         if raw <= 0:
             return 0.0
         return raw / (raw + 20.0)
+
+
+# ---------------------------------------------------------------------------
+# Derive-on-read engagement — zero hot-path cost (Invariants I1, I3)
+# ---------------------------------------------------------------------------
+
+def derive_engagement_from_dbs(
+    memory_db_path: "Path | str",
+    learning_db_path: "Path | str",
+    profile_id: str,
+) -> "Dict[str, Any]":
+    """Derive engagement metrics from tables that already exist — no writes.
+
+    Source tables
+    -------------
+    memory.db : atomic_facts
+        store_count   — live facts (lifecycle in active/warm/cold)
+        days_active   — distinct calendar days with at least one live fact
+        recent_7d     — facts created in the last 7 days (drives health)
+    learning.db : learning_signals
+        recall_count  — COUNT(DISTINCT query) for the profile.
+                        This is a proxy: one distinct query = one recall
+                        session.  If the same query was run N times, it
+                        counts as 1.  The table is populated by the
+                        post_tool_outcome_hook when Claude Code surfaces
+                        recall results; it may be empty in environments
+                        without that hook, in which case recall_count = 0
+                        while store_count still reflects real activity.
+
+    Invariant compliance
+    --------------------
+    I1 — zero writes, no lock acquisition on the recall/remember hot path.
+    I3 — no new table or row is ever created; bounded by the existing
+         lifecycle-management and retention systems (atomic_facts rows age
+         through active → warm → cold → archived via Langevin dynamics;
+         learning_signals rows are pruned by the retention sweep).
+    I6 — every field carries a named source.
+
+    health_status (plain language, non-technical)
+    ----------------------------------------------
+    "ACTIVE"   — 10 or more memories added in the last 7 days
+    "WARM"     —  3–9 memories added in the last 7 days
+    "COLD"     —  1–2 memories added in the last 7 days
+    "INACTIVE" —  no new memories in the last 7 days
+    """
+    memory_db_path = Path(str(memory_db_path))
+    learning_db_path = Path(str(learning_db_path))
+
+    store_count: int = 0
+    days_active: int = 0
+    recent_7d: int = 0
+    recall_count: int = 0
+
+    # ── memory.db : atomic_facts ──────────────────────────────────────────
+    if memory_db_path.exists():
+        try:
+            # read-only URI; never creates the file, never acquires write lock
+            _uri = f"{memory_db_path.resolve().as_uri()}?mode=ro"
+            _conn = sqlite3.connect(_uri, uri=True, timeout=1.0)
+            _conn.execute("PRAGMA query_only=ON")
+            try:
+                _tables = {
+                    r[0]
+                    for r in _conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                if "atomic_facts" in _tables:
+                    # Only live facts (archived = soft-deleted / forgotten).
+                    # CRIT-fix-3: lifecycle filter avoids counting deleted facts
+                    # as "stored"; a profile with 1 000 facts all archived
+                    # should not report store_count=1000 to a non-technical user.
+                    _r = _conn.execute(
+                        "SELECT COUNT(*) FROM atomic_facts "
+                        "WHERE profile_id=? AND lifecycle IN ('active','warm','cold')",
+                        (profile_id,),
+                    ).fetchone()
+                    store_count = _r[0] if _r else 0
+
+                    _r = _conn.execute(
+                        "SELECT COUNT(DISTINCT SUBSTR(created_at, 1, 10)) "
+                        "FROM atomic_facts "
+                        "WHERE profile_id=? AND lifecycle IN ('active','warm','cold')",
+                        (profile_id,),
+                    ).fetchone()
+                    days_active = _r[0] if _r else 0
+
+                    _r = _conn.execute(
+                        "SELECT COUNT(*) FROM atomic_facts "
+                        "WHERE profile_id=? "
+                        "AND lifecycle IN ('active','warm','cold') "
+                        "AND created_at >= datetime('now', '-7 days')",
+                        (profile_id,),
+                    ).fetchone()
+                    recent_7d = _r[0] if _r else 0
+            finally:
+                _conn.close()
+        except Exception:
+            # Any failure (locked, missing, corrupt) → keep zeros;
+            # health stays INACTIVE which is the honest fallback.
+            pass
+
+    # ── learning.db : learning_signals (recall proxy) ─────────────────────
+    if learning_db_path.exists():
+        try:
+            _uri = f"{learning_db_path.resolve().as_uri()}?mode=ro"
+            _conn = sqlite3.connect(_uri, uri=True, timeout=1.0)
+            _conn.execute("PRAGMA query_only=ON")
+            try:
+                _tables = {
+                    r[0]
+                    for r in _conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                if "learning_signals" in _tables:
+                    # CRIT-fix-1: label is "distinct queries" not raw row count.
+                    # One query that surfaces 10 facts writes 10 rows; COUNT(*)
+                    # would inflate the number by 10×. COUNT(DISTINCT query)
+                    # approximates "sessions where you asked for something"
+                    # which is the intent of recall_count for non-technical users.
+                    _r = _conn.execute(
+                        "SELECT COUNT(DISTINCT query) FROM learning_signals "
+                        "WHERE profile_id=?",
+                        (profile_id,),
+                    ).fetchone()
+                    recall_count = _r[0] if _r else 0
+            finally:
+                _conn.close()
+        except Exception:
+            pass
+
+    # ── health derivation (plain language) ───────────────────────────────
+    if recent_7d >= _ACTIVE_THRESHOLD:
+        health_status = "ACTIVE"
+    elif recent_7d >= _WARM_THRESHOLD:
+        health_status = "WARM"
+    elif recent_7d >= 1:
+        health_status = "COLD"
+    else:
+        health_status = "INACTIVE"
+
+    total_events = store_count  # recalls add to proxy separately via recall_count
+    memories_per_day = (
+        round(store_count / days_active, 1) if days_active > 0 else 0
+    )
+    raw = (
+        0.4 * recall_count
+        + 0.3 * store_count
+        + 0.1 * days_active
+    )
+    score = (raw / (raw + 20.0)) if raw > 0 else 0.0
+
+    return {
+        "health_status": health_status,
+        "days_active": days_active,
+        "memories_per_day": memories_per_day,
+        "total_events": total_events,
+        "recall_count": recall_count,
+        "store_count": store_count,
+        "session_count": 0,          # not derivable without dedicated writes
+        "engagement_score": round(score, 4),
+        # I6 provenance — every figure is traceable to a named source table
+        "source": "memory.db:atomic_facts,learning.db:learning_signals",
+    }
