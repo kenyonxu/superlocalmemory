@@ -367,18 +367,23 @@ def _mine_channel_and_coretrieval(
                 gen += 1
 
         try:
+            # Column names must match learning.db: the table is
+            # (fact_id_a, fact_id_b, co_count). This query asked for
+            # (fact_a, fact_b, co_access_count) and therefore raised
+            # sqlite3.OperationalError on every run since it was written —
+            # caught below, logged at WARNING, and otherwise invisible. Net
+            # effect: 912 co-retrieval edges on a real store never produced a
+            # single pattern, and the Brain pane had one fewer signal with no
+            # indication anything was missing.
             coret_rows = learn_conn.execute(
-                "SELECT fact_a, fact_b, co_access_count "
+                "SELECT fact_id_a, fact_id_b, co_count "
                 "FROM co_retrieval_edges "
-                "WHERE profile_id = ? AND co_access_count >= 3 "
-                "ORDER BY co_access_count DESC LIMIT 20",
+                "WHERE profile_id = ? AND co_count >= 3 "
+                "ORDER BY co_count DESC LIMIT 20",
                 (profile_id,),
             ).fetchall()
             if coret_rows and not dry_run:
-                top_pair = (
-                    dict(coret_rows[0]).get("co_access_count", 0)
-                    if coret_rows else 0
-                )
+                top_pair = dict(coret_rows[0]).get("co_count", 0)
                 store.record_pattern(
                     profile_id=profile_id,
                     pattern_type="co_retrieval_clusters",
