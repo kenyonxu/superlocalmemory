@@ -23,6 +23,22 @@ Audit at the time this guard was added found ~1,650 such lines:
 Migrations are excluded: storage/migrations/M0*.py are loaded dynamically via
 importlib.util.spec_from_file_location in storage/migrations/__init__.py, so a
 static import scan cannot see them and would report every one as dead.
+
+THE HOLE THIS GUARD SHIPPED WITH (closed after 4.0.6)
+-----------------------------------------------------
+The module-level scan below skips every `__init__.py` when choosing what to
+CHECK, but counts `__init__.py` files when deciding what has an IMPORTER. So a
+package whose `__init__.py` re-exports its own submodules made every one of
+those submodules look wired — by itself — while the package as a whole was
+imported by nothing. The package was then invisible from both directions.
+
+That is not hypothetical. `summaries/` shipped in 4.0.6 in exactly that shape:
+three generators written for issue #113, seventeen passing tests, an
+`__init__.py` re-exporting all three, and no command, tool or endpoint anywhere
+that calls the package. It passed this guard for the whole release.
+
+`test_no_new_dead_packages` closes it: a package must be imported by production
+code OUTSIDE itself. Same rule as a module, one level up.
 """
 
 from __future__ import annotations
@@ -88,6 +104,20 @@ _KNOWN_DEAD: dict[str, str] = {
     "server/routes/timeline.py": "seeded 4.0.6 — triage (route registry?)",
     "server/ui.py": "seeded 4.0.6 — triage",
     "storage/migration_v33.py": "seeded 4.0.6 — triage",
+}
+
+#: Packages imported by nothing outside themselves. Same ratchet as
+#: _KNOWN_DEAD: seeded with what the scan finds today so the guard passes, and
+#: its real job is blocking the NEXT one. Every entry states why it is here.
+#: TODO(4.0.7): wire or delete all four.
+_KNOWN_DEAD_PACKAGES: dict[str, str] = {
+    "attribution": "seeded 4.0.6 — triage: provenance signer/watermark, no caller",
+    "code_graph/bridge": "seeded 4.0.6 — triage: 5 code-graph↔memory mechanisms, "
+                         "no caller. Same shape as resolver.py; likely a real defect",
+    "evaluation": "INTENTIONAL — calibration artifacts, documented as isolated "
+                  "from production retrieval paths. Not a defect.",
+    "summaries": "seeded 4.0.6 — issue #113 generators shipped with no command, "
+                 "tool or endpoint. Surface lands in 4.0.7.",
 }
 
 #: Dynamically loaded, invisible to a static scan.
@@ -165,6 +195,81 @@ def test_no_new_dead_modules(_importers_by_stem) -> None:
         "and the code graph empty for six weeks with CI green. Wire the module "
         "into the code path that needs it, delete it, or (last resort, with a "
         "reason) add it to _KNOWN_DEAD in this file."
+    )
+
+
+def _packages() -> list[pathlib.Path]:
+    """Every package directory under src, excluding the root package itself."""
+    return sorted(
+        p.parent
+        for p in _SRC.rglob("__init__.py")
+        if p.parent != _SRC and "__pycache__" not in p.parts
+    )
+
+
+@pytest.fixture(scope="module")
+def _imports_by_file() -> dict[pathlib.Path, set[str]]:
+    """Parse every src file ONCE: path -> names it imports.
+
+    Deliberately a fixture and not a per-package rescan. The module-level scan
+    above already paid for that lesson — an O(n^2) rglob-and-parse per target
+    took six minutes and nobody ran it. One pass, then set lookups.
+    """
+    return {
+        f: _module_names_imported_by([f])
+        for f in _SRC.rglob("*.py")
+        if "__pycache__" not in f.parts
+    }
+
+
+def _package_importers(
+    pkg: pathlib.Path, imports_by_file: dict[pathlib.Path, set[str]]
+) -> set[pathlib.Path]:
+    """Production files OUTSIDE *pkg* that name it in an import statement.
+
+    "Outside" is what makes this different from the module scan: a package's
+    own ``__init__.py`` re-exporting its submodules is not evidence that
+    anything uses the package. That self-reference is the hole this closes.
+    """
+    return {
+        f for f, names in imports_by_file.items()
+        if pkg.name in names and pkg not in f.parents and f.parent != pkg
+    }
+
+
+def test_no_new_dead_packages(_imports_by_file) -> None:
+    """A package must be imported by production code outside itself."""
+    dead = [
+        pkg.relative_to(_SRC).as_posix()
+        for pkg in _packages()
+        if not _package_importers(pkg, _imports_by_file)
+    ]
+
+    unexpected = sorted(set(dead) - set(_KNOWN_DEAD_PACKAGES))
+    assert not unexpected, (
+        "These packages are imported by NO production code outside themselves. "
+        "Their submodules look wired only because the package's own "
+        "__init__.py re-exports them:\n  "
+        + "\n  ".join(unexpected)
+        + "\n\nThis is how summaries/ shipped in 4.0.6 unreachable — three "
+        "generators, seventeen passing tests, and no way for a user to call "
+        "any of them. Give the package a caller (command, tool, route, or "
+        "scheduled job), delete it, or add it to _KNOWN_DEAD_PACKAGES with a "
+        "reason."
+    )
+
+
+def test_known_dead_packages_has_no_stale_entries(_imports_by_file) -> None:
+    """Once a known-dead package gains an outside caller, force the entry out."""
+    now_wired = [
+        rel for rel in sorted(_KNOWN_DEAD_PACKAGES)
+        if (_SRC / rel).exists()
+        and _package_importers(_SRC / rel, _imports_by_file)
+    ]
+    assert not now_wired, (
+        "These packages are now imported by production code — remove them from "
+        "_KNOWN_DEAD_PACKAGES so the guard stays meaningful:\n  "
+        + "\n  ".join(now_wired)
     )
 
 
