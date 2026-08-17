@@ -116,6 +116,7 @@ import inspect
 import re
 import sqlite3
 import time
+import os
 from pathlib import Path
 
 import pytest
@@ -131,10 +132,37 @@ _EXPECTED_SCHEMA_VERSION: int = 42
 #: M001–M042 with M008 absent = 41 total.
 _EXPECTED_MIGRATION_COUNT: int = 41
 
-#: Path to the installed 4.0.5 reference package's migrations directory.
-_INSTALLED_405_MIGRATIONS_DIR: Path = Path(
-    "/Users/v.pratap.bhardwaj/.local/pipx/venvs/superlocalmemory"
-    "/lib/python3.14/site-packages/superlocalmemory/storage/migrations"
+#: Path to an installed reference package's migrations directory, if one exists.
+#:
+#: Resolved from the environment rather than hardcoded. The original literal
+#: pointed at one developer's pipx venv, which (a) embedded a username in a
+#: published file and (b) could never resolve on anyone else's machine, so the
+#: comparison it guards silently did nothing everywhere except that laptop.
+#:
+#: Set SLM_REFERENCE_INSTALL to the site-packages/superlocalmemory directory of
+#: a previous release to run the cross-version comparison; otherwise the tests
+#: that need it skip, which is the honest outcome when the reference is absent.
+def _reference_install_dir() -> Path | None:
+    override = os.environ.get("SLM_REFERENCE_INSTALL", "").strip()
+    if override:
+        p = Path(override).expanduser()
+        return p if p.is_dir() else None
+    # Common pipx layout, discovered without assuming a user or Python version.
+    for base in (Path.home() / ".local/pipx/venvs/superlocalmemory/lib",):
+        if not base.is_dir():
+            continue
+        for pyver in sorted(base.glob("python3.*")):
+            cand = pyver / "site-packages" / "superlocalmemory"
+            if cand.is_dir():
+                return cand
+    return None
+
+
+_REFERENCE_INSTALL: Path | None = _reference_install_dir()
+_INSTALLED_405_MIGRATIONS_DIR: Path = (
+    (_REFERENCE_INSTALL / "storage" / "migrations")
+    if _REFERENCE_INSTALL is not None
+    else Path("/nonexistent/reference-install/storage/migrations")
 )
 
 #: Path to the installed 4.0.5 _schema_version.py module.
