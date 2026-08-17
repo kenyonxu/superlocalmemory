@@ -637,11 +637,44 @@ def run_maintenance(
     except Exception as exc:
         logger.warning("Entity summary consolidation failed: %s", exc)
 
+    # 4. Fact consolidation (v3.8.4 concurrency-safe path via DatabaseManager).
+    # Merges clusters of warm/cold atomic facts about the same entity into a
+    # single consolidated fact, archives the originals (NEVER deletes them),
+    # and records provenance in fact_consolidations.
+    #
+    # Uses the DatabaseManager path so LLM calls happen OUTSIDE the write lock:
+    #   - Discover clusters in a short memory_read() (no write lock held).
+    #   - Generate summary OUTSIDE any lock (Ollama/Cloud may take 30s).
+    #   - Write per-cluster inside a short memory_write() (lock held for SQL only).
+    #
+    # NOT on the recall/store hot path.  Runs as part of background maintenance.
+    counts["facts_consolidated"] = 0
+    try:
+        from superlocalmemory.core.fact_consolidator import consolidate_facts
+
+        fc_stats = consolidate_facts(
+            db,
+            profile_id=profile_id,
+            max_clusters=getattr(config, "max_consolidation_clusters", 20),
+            dry_run=False,
+            config=config,
+        )
+        counts["facts_consolidated"] = fc_stats.get("consolidated", 0)
+        if fc_stats.get("consolidated", 0) > 0:
+            logger.info(
+                "Fact consolidation: %d clusters merged, %d facts archived",
+                fc_stats.get("consolidated", 0),
+                fc_stats.get("facts_archived", 0),
+            )
+    except Exception as exc:
+        logger.debug("Fact consolidation skipped during maintenance: %s", exc)
+
     logger.info(
         "Maintenance complete: %d backfilled, %d Langevin, %d Fisher-coupled, "
-        "%d Sheaf, %d entity-summaries",
+        "%d Sheaf, %d entity-summaries, %d facts-consolidated",
         counts["langevin_backfilled"], counts["langevin_updated"],
         counts["fisher_coupled"], counts["sheaf_checked"],
         counts["entity_summaries_consolidated"],
+        counts["facts_consolidated"],
     )
     return counts

@@ -16,7 +16,16 @@ describe('Brain reward truth', function () {
   it('renders reward telemetry and never labels tool events as reward', function () {
     assert.match(source, /beh\.reward_telemetry/);
     assert.match(source, /reward\.timeline/);
-    assert.match(source, /Average settled reward/);
+    // 4.0.6: the literal display string "Average settled reward" was pinned here.
+    // That pin was load-bearing for nothing — this test's stated contract is data
+    // PROVENANCE ("must use action_outcomes reward telemetry only ... never labels
+    // tool events as reward"), which is fully enforced by beh.reward_telemetry and
+    // reward.timeline above plus the three doesNotMatch guards below that ban the
+    // old mislabelled sources. Pinning the user-facing wording as well meant the
+    // test blocked removing "settled reward" — ML jargon — from a pane whose whole
+    // remit this release is to be readable by non-technical owners. Provenance is
+    // still guarded; the wording is now free.
+    assert.match(source, /reward_telemetry|reward\.average|avg_reward/);
     assert.doesNotMatch(source, /buildReward\\(behavioral, dateMap\\)/);
     assert.doesNotMatch(source, /reward signal · last 26 weeks/);
     assert.doesNotMatch(source, /heuristic reward attribution/);

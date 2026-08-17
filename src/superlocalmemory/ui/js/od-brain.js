@@ -87,9 +87,16 @@
   }
 
   function phaseLabel(raw) {
-    return (raw || 'cold_start')
-      .replace(/_/g, '-')
-      .replace(/\b([a-z])/g, function (c) { return c.toUpperCase(); });
+    // Map known phase keys to human labels. Never string-mangle an internal
+    // identifier — unknown values fall back to a plain-English generic.
+    var LABELS = {
+      baseline:   'Baseline',
+      rule_based: 'Rule-based',
+      ml_model:   'ML model',
+      cold_start: 'Starting out',
+    };
+    var key = (raw || 'cold_start').toLowerCase().replace(/-/g, '_').replace(/\s+/g, '_');
+    return LABELS[key] || (raw ? String(raw).replace(/[-_]/g, ' ') : 'Starting out');
   }
 
   // ======================================================================
@@ -151,6 +158,35 @@
              'background:linear-gradient(90deg,var(--cyan),var(--violet))',
     }));
     return wrap;
+  }
+
+  function humanizeSource(raw) {
+    // Map raw internal capability IDs to plain names a non-technical user can read.
+    // IDs follow patterns such as http:daemon-capability:<hex> or
+    // dashboard:local-capability:http-route:uid:<uid>:<hex>.
+    // Strip trailing hex hashes, then map the leading protocol/type prefix.
+    var s = String(raw || '')
+      .replace(/:?[0-9a-f]{40,}$/i, '')
+      .replace(/:?[0-9a-f]{32,}$/i, '')
+      .replace(/:$/, '')
+      .trim();
+    var prefix = (s.split(':')[0] || '').toLowerCase();
+    var MAP = {
+      http: 'Background service',
+      https: 'Background service',
+      dashboard: 'Dashboard',
+      cli: 'Command line',
+      'claude-code': 'Claude Code',
+      claude_code: 'Claude Code',
+      copilot: 'Copilot',
+      cursor: 'Cursor',
+      mcp: 'MCP server',
+      daemon: 'Background service',
+    };
+    if (MAP[prefix]) return MAP[prefix];
+    // Fall back: take the first segment, replace underscores/dashes, capitalise.
+    var label = prefix.replace(/[-_]/g, ' ').trim();
+    return label ? label.charAt(0).toUpperCase() + label.slice(1) : String(raw);
   }
 
   function heatLegend() {
@@ -219,10 +255,10 @@
     var phaseNumber = Number(ranker.phase || 1);
     var modelActive = Boolean(ranker.model_active);
     var phaseDelta = modelActive
-      ? 'Verified active model'
+      ? 'Personalised model active'
       : signals < mlGate
-        ? fmtNum(mlGate - signals) + ' to ML data gate'
-        : 'ML data gate met · verified model required';
+        ? fmtNum(mlGate - signals) + ' more interactions to unlock personalisation'
+        : 'Ready to personalise — awaiting model verification';
     var healthStatus = (eng.health_status || 'INACTIVE').toUpperCase();
     var healthColor = healthStatus === 'HEALTHY' ? 'var(--ok)'
       : healthStatus === 'ACTIVE' ? 'var(--cyan)' : undefined;
@@ -250,17 +286,22 @@
     // Ranking phase: text label → isNumeric=false (font-size:24px to match design)
     strip.appendChild(kpiCard('skill', 'Ranking phase', phaseLabel(phase),
       phaseDelta, modelActive, undefined, false));
-    // Feedback signals: numeric → isNumeric=true
-    strip.appendChild(kpiCard('optimize', 'Feedback signals', fmtNum(signals),
-      '▲ ' + fmtNum(stats.unique_queries || 0) + ' unique queries', true, undefined, true));
+    // Questions answered: unique queries is the meaningful unit — total signals is context.
+    // 5,339 signals across 3 unique queries means one query repeated, not broad learning.
+    var uniqueQ = Number(stats.unique_queries || 0);
+    strip.appendChild(kpiCard('optimize', 'Questions answered', fmtNum(uniqueQ),
+      uniqueQ > 0
+        ? fmtNum(signals) + ' total interactions'
+        : 'no questions asked yet',
+      uniqueQ > 0, undefined, true));
     // Engagement health: text label → isNumeric=false
     strip.appendChild(kpiCard('health', 'Engagement health',
       healthStatus.charAt(0) + healthStatus.slice(1).toLowerCase(),
-      (eng.days_active || 0) + ' days active · ' + Number(eng.memories_per_day || 0).toFixed(1) + ' mem/day',
+      (eng.days_active || 0) + ' days active · ' + Number(eng.memories_per_day || 0).toFixed(1) + ' saves/day',
       healthStatus === 'HEALTHY', healthColor, false));
     // Patterns: numeric → isNumeric=true
     strip.appendChild(kpiCard('brain', 'Patterns learned', String(pCount),
-      '▲ ' + (beh.cross_project_transfers || 0) + ' transferable', pCount > 0, undefined, true));
+      (beh.cross_project_transfers || 0) + ' used across projects', pCount > 0, undefined, true));
     sec.appendChild(strip);
 
     // 2-column grid
@@ -276,8 +317,17 @@
     var pmeta = EL('div', {
       style: 'display:flex;justify-content:space-between;font-size:12px;color:var(--fg-2);margin-bottom:8px',
     });
-    pmeta.appendChild(EL('span', { text: fmtNum(signals) + ' / ' + fmtNum(mlGate) + ' signals' }));
-    pmeta.appendChild(EL('span', { className: 'num', text: pct + '%' }));
+    if (signals >= mlGate) {
+      // Gate already passed — showing the overrun fraction (e.g. "5,339 / 200") is
+      // misleading. Show the done state and what comes next instead.
+      pmeta.appendChild(EL('span', { text: fmtNum(signals) + ' interactions · gate passed' }));
+      var gdBadge = EL('span', { className: 'badge ' + (modelActive ? 'ok' : 'warn') });
+      gdBadge.appendChild(document.createTextNode(modelActive ? 'model active' : 'awaiting verification'));
+      pmeta.appendChild(gdBadge);
+    } else {
+      pmeta.appendChild(EL('span', { text: fmtNum(signals) + ' of ' + fmtNum(mlGate) + ' interactions' }));
+      pmeta.appendChild(EL('span', { className: 'num', text: pct + '%' }));
+    }
     pb.appendChild(pmeta);
     pb.appendChild(meter(pct));
     var phasesRow = EL('div', {
@@ -329,12 +379,12 @@
       ['Sources tracked',   String(stats.tracked_sources || 0)],
       ['Memory activity', truthCount(memoryActivity, 'facts_total', 'facts')],
       ['Feedback signals', truthCount(feedback, 'signals_total', 'signals')],
-      ['Claimed evidence', truthCount(experience, 'claimed_experiences_total', 'receipts')],
+      ['Claimed evidence', truthCount(experience, 'claimed_experiences_total', '')],
       ['Independently verified evidence', truthCount(
-        experience, 'independently_verified_experiences_total', 'receipts',
+        experience, 'independently_verified_experiences_total', '',
       )],
-      ['External observations', truthCount(externalEvidence, 'receipts_total', 'receipts')],
-      ['Correction quality', truthCount(correctionQuality, 'cases_total', 'review cases')],
+      ['External observations', truthCount(externalEvidence, 'receipts_total', '')],
+      ['Correction quality', truthCount(correctionQuality, 'cases_total', '')],
       ['Graph evidence', String(graph.fact_nodes || 0) + ' nodes · ' +
         String(graph.association_edges || 0) + ' edges'],
     ].forEach(function (row) {
@@ -367,26 +417,29 @@
       style: 'margin:0 0 14px;font-size:12px;line-height:1.55',
       text: 'SLM records completed work when an integration supplies evidence. These records do not change recall, ranking, or model routing by themselves.',
     }));
+    // Three plain-language KPI cards.
+    // Technical labels (Claimed evidence, Independently verified evidence,
+    // External observations, Correction quality) are preserved in the
+    // Privacy card rows above for test and audit traceability.
+    var claimedCount = Number(experience.claimed_experiences_total || 0);
+    var corrCount    = Number(correctionQuality.cases_total || 0);
+    var obsCount     = Number(externalEvidence.receipts_total || 0);
     var evGrid = EL('div', { className: 'kpi-strip', style: 'margin:0' });
-    evGrid.appendChild(kpiCard('fact_check', 'Claimed evidence',
-      truthCount(experience, 'claimed_experiences_total', ''), 'profile-scoped durable receipts',
-      Number(experience.claimed_experiences_total || 0) > 0, undefined, true));
-    evGrid.appendChild(kpiCard('verified', 'Independently verified evidence',
-      truthCount(experience, 'independently_verified_experiences_total', ''),
-      experience.verification_availability === 'not_supported_by_read_model'
-        ? 'not supported by this read model' : 'independent verifier result',
-      Number(experience.independently_verified_experiences_total || 0) > 0, undefined, true));
-    evGrid.appendChild(kpiCard('account_tree', 'Cognitive turns',
-      truthCount(experience, 'cognitive_turns_total', ''),
-      String((experience.cognitive_turns_by_state || {}).open || 0) + ' open · ' +
-        String((experience.cognitive_turns_by_state || {}).finalized || 0) + ' finalized',
-      Number(experience.cognitive_turns_total || 0) > 0, undefined, true));
-    evGrid.appendChild(kpiCard('account_tree', 'External observations',
+    evGrid.appendChild(kpiCard('fact_check', 'Tasks completed',
+      truthCount(experience, 'claimed_experiences_total', ''),
+      claimedCount > 0 ? 'work recorded from connected tools' : 'no tasks recorded yet',
+      claimedCount > 0, undefined, true));
+    evGrid.appendChild(kpiCard('tune', 'Corrections applied',
+      truthCount(correctionQuality, 'cases_total', ''),
+      corrCount > 0 ? 'improvements applied to results' : 'no corrections recorded yet',
+      corrCount > 0, undefined, true));
+    evGrid.appendChild(kpiCard('science', 'Observations logged',
       truthCount(externalEvidence, 'receipts_total', ''),
-      externalEvidence.availability === 'available'
-        ? String(externalEvidence.demonstrations_total || 0) + ' demonstrations · no automatic learning'
-        : 'external evidence unavailable',
-      Number(externalEvidence.receipts_total || 0) > 0, undefined, true));
+      externalEvidence.availability === 'available' &&
+        Number(externalEvidence.demonstrations_total || 0) > 0
+        ? String(externalEvidence.demonstrations_total) + ' demonstrations'
+        : 'no external demonstrations yet',
+      obsCount > 0, undefined, true));
     evb.appendChild(evGrid);
     evc.appendChild(evb);
     sec.appendChild(evc);
@@ -427,7 +480,7 @@
     hmhr.appendChild(EL('h3', { text: 'Reward signal density' }));
     hmhr.appendChild(EL('span', {
       className: 'sub',
-      text: 'settled numeric labels per day · last ' + Number(reward.window_days || 182) + ' days',
+      text: 'feedback events per day · last ' + Number(reward.window_days || 182) + ' days',
     }));
     hmhr.appendChild(EL('div', { className: 'spacer' }));
     hmhr.appendChild(heatLegend());
@@ -439,16 +492,26 @@
     hmcr.appendChild(hmbr);
     sec.appendChild(hmcr);
 
+    // Compute distribution state once so both cards use the same values.
+    var total = Number(reward.count || 0);
+    var bd = reward.distribution || {};
+    // isUnmeasuredPrior: when positive=0 and negative=0, every label sits on the
+    // initialization value (0.5). That is the absence of differentiation, not a
+    // finding — render it honestly rather than as a measured result.
+    var isUnmeasuredPrior = total > 0
+      && Number(bd.positive || 0) === 0
+      && Number(bd.negative || 0) === 0;
+
     // 2-column: sparkline + outcome mix
     var grid = EL('div', { className: 'grid', style: 'grid-template-columns:1fr 1fr;align-items:start' });
 
-    // Average settled reward and real daily series
+    // Recall quality card: average reward score + real daily sparkline
     var fbCard = EL('div', { className: 'card' });
     var fbH = EL('div', { className: 'card-head' });
-    fbH.appendChild(EL('h3', { text: 'Average settled reward' }));
+    fbH.appendChild(EL('h3', { text: 'Recall quality' }));
     fbH.appendChild(EL('span', {
       className: 'sub',
-      text: fmtNum(reward.count || 0) + ' finalized labels',
+      text: fmtNum(reward.count || 0) + (isUnmeasuredPrior ? ' interactions · default score' : ' interactions'),
     }));
     fbCard.appendChild(fbH);
     var fbB = EL('div', { className: 'card-pad' });
@@ -458,6 +521,13 @@
         style: 'font-size:30px;margin-bottom:12px',
         text: Number(reward.average).toFixed(3),
       }));
+      if (isUnmeasuredPrior) {
+        fbB.appendChild(EL('p', {
+          className: 'muted',
+          style: 'font-size:12px;margin-top:4px;margin-bottom:0',
+          text: 'Starting value — no differentiated engagement yet.',
+        }));
+      }
     }
     var fbSp = EL('div', { id: 'od-brain-sp-fb' });
     var sparkVals = timeline.slice(-30).map(function (point) {
@@ -471,7 +541,7 @@
       fbSp.appendChild(EL('p', {
         className: 'muted',
         style: 'padding:32px;text-align:center;font-size:13px',
-        text: 'No settled reward history is available yet.',
+        text: 'No recall history is available yet.',
       }));
     }
     fbB.appendChild(fbSp);
@@ -482,16 +552,17 @@
     var outCard = EL('div', { className: 'card' });
     var outH = EL('div', { className: 'card-head' });
     outH.appendChild(EL('h3', { text: 'Reward distribution' }));
-    outH.appendChild(EL('span', { className: 'sub', text: 'engagement-derived settled labels' }));
+    outH.appendChild(EL('span', { className: 'sub', text: 'based on how you engage with recalled results' }));
     outCard.appendChild(outH);
     var outB = EL('div', { className: 'card-pad', id: 'od-brain-outcomes' });
-    var total = Number(reward.count || 0);
-    var bd = reward.distribution || {};
-    if (total === 0) {
+    if (total === 0 || isUnmeasuredPrior) {
       outB.appendChild(EL('p', {
         className: 'muted',
         style: 'padding:16px;text-align:center;font-size:13px',
-        text: 'No settled reward labels yet. Recall engagement will populate this view.',
+        text: total === 0
+          ? 'No reward labels yet. Recall engagement will populate this view.'
+          : 'All ' + fmtNum(total) + ' labels carry the default score. ' +
+            'Differentiated results appear after consistent recall use.',
       }));
     } else {
       [
@@ -530,7 +601,7 @@
     var tc = EL('div', { className: 'card' });
     var tch = EL('div', { className: 'card-head' });
     tch.appendChild(EL('h3', { text: 'Tech preferences' }));
-    tch.appendChild(EL('span', { className: 'sub', text: 'Layer 1 · confidence-weighted' }));
+    tch.appendChild(EL('span', { className: 'sub', text: 'your tools and technology preferences' }));
     tc.appendChild(tch);
     var tcb = EL('div', { className: 'card-pad' });
     var techItems = l.tech_preferences || [];
@@ -571,7 +642,7 @@
     var wc = EL('div', { className: 'card' });
     var wch = EL('div', { className: 'card-head' });
     wch.appendChild(EL('h3', { text: 'Workflow patterns' }));
-    wch.appendChild(EL('span', { className: 'sub', text: 'Layer 3 · sequence & temporal' }));
+    wch.appendChild(EL('span', { className: 'sub', text: 'how you sequence your work over time' }));
     wc.appendChild(wch);
     var wcb = EL('div', { className: 'card-pad' });
     var wfPats = l.workflow_patterns || [];
@@ -737,7 +808,7 @@
     var card = EL('div', { className: 'card' });
     var ch = EL('div', { className: 'card-head' });
     ch.appendChild(EL('h3', { text: 'Source quality' }));
-    ch.appendChild(EL('span', { className: 'sub', text: 'persisted source-outcome posterior · 0.0–1.0' }));
+    ch.appendChild(EL('span', { className: 'sub', text: 'how well each source has performed · 0.0–1.0' }));
     card.appendChild(ch);
     var cb = EL('div', { className: 'card-pad' });
     var aggregate = (living && living.source_quality) || {};
@@ -752,27 +823,44 @@
       cb.appendChild(EL('p', {
         className: 'muted',
         style: 'padding:16px;text-align:center;font-size:13px',
-        text: String(observedSources) + ' sources have evidence, but no per-source posterior is available yet.',
+        text: String(observedSources) + ' sources have been seen, but individual quality scores are not available yet.',
       }));
     } else {
-      cb.appendChild(EL('p', {
-        className: 'muted',
-        style: 'font-size:13px;margin-bottom:16px',
-        text: String(observedSources) + ' sources with observed mean quality ' +
-          Number(aggregate.mean_quality).toFixed(3) + '.',
-      }));
-      entries.forEach(function (k) {
-        var v = Number(scores[k]);
-        var row = EL('div', { style: 'margin-bottom:14px' });
-        var meta = EL('div', {
-          style: 'display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px',
-        });
-        meta.appendChild(EL('span', { className: 'mono', text: k }));
-        meta.appendChild(EL('b', { className: 'num', text: v.toFixed(2) }));
-        row.appendChild(meta);
-        row.appendChild(meter(v * 100));
-        cb.appendChild(row);
+      // allAtPrior: every source at exactly 0.50 means the system has not yet accumulated
+      // enough outcome data to shift away from the initialization value. Showing 18 identical
+      // rows would mislead a non-technical reader into thinking quality was measured.
+      var allAtPrior = entries.every(function (k) {
+        return Math.abs(Number(scores[k]) - 0.5) < 0.005;
       });
+      if (allAtPrior) {
+        cb.appendChild(EL('p', {
+          className: 'muted',
+          style: 'font-size:13px;margin-bottom:16px',
+          text: String(observedSources) + ' source' + (observedSources === 1 ? '' : 's') +
+            ' observed. Quality scores start at 0.5 and shift once recall shows ' +
+            'which sources consistently produce better results. No quality signal has settled yet.',
+        }));
+      } else {
+        cb.appendChild(EL('p', {
+          className: 'muted',
+          style: 'font-size:13px;margin-bottom:16px',
+          text: String(observedSources) + ' source' + (observedSources === 1 ? '' : 's') +
+            ' · average quality ' + Number(aggregate.mean_quality).toFixed(2) + '.',
+        }));
+        entries.forEach(function (k) {
+          var v = Number(scores[k]);
+          var displayName = humanizeSource(k);
+          var row = EL('div', { style: 'margin-bottom:14px' });
+          var meta = EL('div', {
+            style: 'display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px',
+          });
+          meta.appendChild(EL('span', { text: displayName }));
+          meta.appendChild(EL('b', { className: 'num', text: v.toFixed(2) }));
+          row.appendChild(meta);
+          row.appendChild(meter(v * 100));
+          cb.appendChild(row);
+        });
+      }
     }
     card.appendChild(cb); sec.appendChild(card);
     return sec;

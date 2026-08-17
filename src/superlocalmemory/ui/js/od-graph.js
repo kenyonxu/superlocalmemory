@@ -15,7 +15,7 @@
 
   var GRAPH_URL = '/api/graph';
   var RECALL_URL = '/api/search';   /* POST {query, limit} -> {results:[...]} */
-  var MAX_NODES = 120;              /* default budget; slider range 20-2000 */
+  var MAX_NODES = 50;               /* default budget; owner-set to 50; slider range 20-2000 */
   /* Keep force-layout work bounded even when a user asks to render "All". */
   var PHYSICS_MAX_NODES = 160;
   var PRE_SETTLE_TICKS = 24;
@@ -50,7 +50,7 @@
   var scale = 1, ox = 0, oy = 0, dpr = Math.max(1, window.devicePixelRatio || 1);
   var W = 0, H = 0, selected = null, hover = null;
   var dragNode = null, panning = false, last = null;
-  var PAL = {}, themeObs = null;
+  var PAL = {}, themeObs = null, sizeObs = null;
 
   /* bound handlers kept so re-render can detach them */
   var onMove = null, onUp = null;
@@ -74,7 +74,12 @@
             '</div>' +
             '<label class="chip" style="gap:8px" title="How many nodes to show">' +
               '<span data-ic="filter"></span> Nodes ' +
-              '<input id="odg-budget" type="range" min="20" max="2000" step="20" value="' + MAX_NODES + '" style="width:96px;accent-color:var(--violet)">' +
+              /* step=10, not 20: the default budget is 50, and a step-20 grid
+                 starting at min=20 only permits 20/40/60/... so the browser
+                 silently snapped the control to 60 while the label beside it
+                 printed MAX_NODES as 50 — the control and its own label
+                 disagreed on first paint. */
+              '<input id="odg-budget" type="range" min="20" max="2000" step="10" value="' + MAX_NODES + '" style="width:96px;accent-color:var(--violet)">' +
               '<span class="cnt" id="odg-budgetv">' + MAX_NODES + '</span>' +
             '</label>' +
             '<button id="odg-showall" class="chip" style="padding:2px 10px;font-size:12px;cursor:pointer" title="Show all nodes (up to 2000)">All</button>' +
@@ -243,6 +248,12 @@
   function resize() {
     if (!stage || !cv) return;
     W = stage.clientWidth; H = stage.clientHeight;
+    /* A stage that reports 0×0 is not yet laid out (hidden tab, off-screen pane).
+       Drawing into a zero-sized canvas produces exactly the blank-on-cold-load
+       failure the owner reported.  The ResizeObserver wired in wireControls()
+       fires the moment the stage acquires real pixel dimensions and re-calls
+       resize() + wake(), so nothing is ever permanently missed. */
+    if (!W || !H) return;
     cv.width = W * dpr; cv.height = H * dpr; cv.style.width = W + 'px'; cv.style.height = H + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
@@ -316,6 +327,16 @@
 
   function loop() {
     if (!running) return;
+    /* Do not spend the settle budget while the canvas has no size.
+       fit() derives scale/ox/oy from W and H, so a frame rendered at 0x0 parks
+       the camera off-screen — measured on a cold load: 16,362 arc() calls, all
+       with finite coordinates, every one at x ~= -2,300.  The budget below
+       (fitFrames < 90, SETTLE_MAX_FRAMES) would then be exhausted while blind,
+       the loop would stop, and the graph stayed invisible until something
+       called load() again.  That is exactly the "blank until I move the node
+       slider" report.  Idle here instead and let the ResizeObserver's re-fit
+       drive the first real frame. */
+    if (!W || !H) { raf = requestAnimationFrame(loop); return; }
     tick();
     if (fitFrames < 90) { fit(); fitFrames++; }   /* keep settling cloud in view */
     draw();
@@ -328,6 +349,11 @@
 
   /* wake: restart physics after a perturbation (drag, toggle, budget change) */
   function wake() { frames = 0; if (!running) { running = true; loop(); } }
+  /* Window resize: resize() wipes the canvas, so re-fit and repaint after it.
+     Named (not an inline closure) so teardown() can actually remove it — the
+     previous inline `resize` binding was re-added on every mount and never
+     removed, so listeners accumulated one per pane visit. */
+  function onWinResize() { resize(); fitFrames = 0; wake(); }
   /* redraw: single repaint when sim is frozen (pan/zoom/hover) */
   function redraw() { if (!running) draw(); }
 
@@ -486,6 +512,37 @@
   function wireControls() {
     stage = q('#odg-stage'); cv = q('#odg-cv'); ctx = cv.getContext('2d');
 
+    /* On a cold tab load the graph pane is inside a CSS-hidden tab; the browser
+       reports clientWidth/clientHeight = 0 until the tab is actually shown.
+       resize() now refuses to commit to a 0×0 canvas (the root cause of the
+       "blank on first load, paints after slider drag" bug).  ResizeObserver is
+       the platform-correct remedy: it fires exactly once when the stage first
+       acquires real pixel dimensions, without polling and without a fixed
+       setTimeout that cannot be proved race-free. */
+    sizeObs = new ResizeObserver(function (entries) {
+      var entry = entries[0];
+      if (!entry) return;
+      var rect = entry.contentRect;
+      if (rect.width > 0 && rect.height > 0) {
+        /* ALWAYS re-fit and repaint after a size change — never conditionally.
+           resize() assigns cv.width, and assigning a canvas's width WIPES it,
+           even when the value is unchanged.  So any call to resize() that is
+           not followed by a repaint leaves a blank canvas on screen.
+           An earlier version of this handler only repainted when the canvas
+           had previously been blind.  Returning to the pane then hit the other
+           branch: W/H were stale-but-non-zero, resize() wiped the canvas, and
+           nothing redrew it — measured as 53,083 painted pixels on the first
+           visit and exactly 0 on the second, with no draw calls issued at all.
+           Re-fitting also matters because the pane can come back at a
+           different size, and a camera fitted to the old bounds frames the
+           wrong region. The settle budget is bounded, so waking here is cheap. */
+        resize();
+        fitFrames = 0; frames = 0;
+        wake();
+      }
+    });
+    sizeObs.observe(stage);
+
     /* tier buttons -- independent toggles: each click flips visibility + re-renders */
     mount.querySelectorAll('#odg-tier button').forEach(function (b) {
       b.onclick = function () {
@@ -614,7 +671,21 @@
     if (onMove) { window.removeEventListener('mousemove', onMove); onMove = null; }
     if (onUp) { window.removeEventListener('mouseup', onUp); onUp = null; }
     if (themeObs) { themeObs.disconnect(); themeObs = null; }
+    if (sizeObs) { sizeObs.disconnect(); sizeObs = null; }
+    window.removeEventListener('resize', onWinResize);
   }
+
+  /* Legacy compatibility — js/knowledge-graph.js was retired in 4.0.6 and it
+     owned window.loadGraph (it assigned loadGraphSigma). Several live callers
+     still invoke it, and two of them do so WITHOUT a typeof guard:
+         core.js:552                 loadGraph()            on every page init
+         event-delegation.js:42      'load-graph' action
+     (core.js:498, od-shell.js:481 and ng-shell.js:345 are guarded and would
+     have degraded quietly.) Without this shim those two would throw
+     ReferenceError on first paint. Re-fetching when the pane is mounted is the
+     honest equivalent of what the old function did; when nothing is mounted the
+     pane renders on activation via odRenderGraph, so there is nothing to do. */
+  window.loadGraph = function () { if (mount) load(); };
 
   /* ---------------- public entry ---------------- */
   window.odRenderGraph = function (container) {
@@ -627,7 +698,10 @@
     readPalette();
     wireControls();
     resize();
-    window.addEventListener('resize', resize);
+    /* Same hazard as the ResizeObserver above: resize() wipes the canvas, so a
+       bare `resize` listener leaves the graph blank after a window resize until
+       something else happens to repaint. Re-fit and wake instead. */
+    window.addEventListener('resize', onWinResize);
     themeObs = new MutationObserver(readPalette);
     themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     load();

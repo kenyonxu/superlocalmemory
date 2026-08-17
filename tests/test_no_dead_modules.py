@@ -50,9 +50,13 @@ _TESTS = _REPO / "tests"
 #:          infra/self_heal.py via the strings "embedding_worker.py" /
 #:          "recall_worker.py"
 #:   DEAD   mcp/cli_fallback.py (602 loc, no importer at all, not even a test)
-#:          core/fact_consolidator.py (598 loc, only its own test)
 #:          integrations/bounded_loops_v051.py (superseded by
 #:          integrations/bounded_loops_mcp.py, the live slm-bridge/v1 path)
+#:   FIXED  core/fact_consolidator.py — was listed here as DEAD (598 loc, only
+#:          its own test). Wired into core/maintenance.py in 4.0.6 for issue
+#:          #113, so its entry is gone from the dict above. This guard did its
+#:          job: it named the module, and the module got wired rather than
+#:          quietly shipping unreferenced for another release.
 #:
 #: This list may only SHRINK. test_known_dead_list_has_no_stale_entries forces
 #: an entry out as soon as the module gains a production importer.
@@ -64,7 +68,6 @@ _KNOWN_DEAD: dict[str, str] = {
     "code_graph/watcher.py": "seeded 4.0.6 — triage",
     "core/embedding_worker.py": "ALIVE — subprocess-spawned by infra/self_heal.py",
     "core/engine_lock.py": "seeded 4.0.6 — triage",
-    "core/fact_consolidator.py": "DEAD — candidate for issue #113 consolidation layer",
     "core/rate_limit.py": "seeded 4.0.6 — triage",
     "core/recall_worker.py": "ALIVE — subprocess-spawned by infra/self_heal.py",
     "core/reranker_worker.py": "ALIVE — subprocess reranker backend",

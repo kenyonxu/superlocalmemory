@@ -1066,6 +1066,20 @@ class RetrievalEngine:
         if not applied:
             return fused, False, status
 
+        # The worker can report applied=True while returning scores=null — the
+        # subprocess answers, so the call "succeeded", but there is nothing to
+        # score with.  Iterating None here raised TypeError from OUTSIDE the
+        # try/except above (which only wraps the rerank call itself), so the
+        # error escaped into the recall path rather than degrading to the fused
+        # ordering.  Fail soft: reranking is a quality improvement on top of a
+        # correct result set, never a correctness requirement.
+        if scored is None:
+            logger.warning(
+                "Cross-encoder worker reported applied=True with null scores; "
+                "falling back to fused ranking for this query."
+            )
+            return fused, False, "worker_null_scores"
+
         score_map = {fact.fact_id: score for fact, score in scored}
 
         # Min-max normalize CE scores to [0, 1] within the batch instead of
