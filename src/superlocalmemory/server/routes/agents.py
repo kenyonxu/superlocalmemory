@@ -121,20 +121,36 @@ async def get_agent_memory_activity(
                 # and mcp_client. Capability digests remain available per row for
                 # audit — they answer "what was allowed to write this", which is a
                 # different and also useful question, just not this pane's.
-                rows = conn.execute(
-                    "SELECT COALESCE("
-                    "  NULLIF(json_extract(raw_metadata_json, '$.agent_id'), ''),"
-                    "  NULLIF(trusted_actor_id, ''),"
-                    "  'unknown'"
-                    ") AS agent_id, "
+                # raw_metadata_json is absent on stores predating it. Try the
+                # identity query and fall back to capability grouping if the
+                # column is missing — without this, the OperationalError is
+                # caught below and an older install shows ZERO agents while
+                # having plenty. Deliberately not PRAGMA table_info: this
+                # handler is on the dashboard read path, which is gated against
+                # anything that parses as DDL.
+                _tail = (
                     "COUNT(*) AS cnt, MAX(created_at) AS last_active, "
                     "GROUP_CONCAT(DISTINCT source_type) AS sources, "
                     "COUNT(DISTINCT NULLIF(trusted_actor_id, '')) AS capabilities "
                     "FROM ingestion_operations WHERE profile_id=? "
                     "GROUP BY agent_id ORDER BY cnt DESC, agent_id ASC "
-                    "LIMIT 500",
-                    (pid,),
-                ).fetchall()
+                    "LIMIT 500"
+                )
+                try:
+                    rows = conn.execute(
+                        "SELECT COALESCE("
+                        "  NULLIF(json_extract(raw_metadata_json, '$.agent_id'), ''),"
+                        "  NULLIF(trusted_actor_id, ''),"
+                        "  'unknown'"
+                        ") AS agent_id, " + _tail,
+                        (pid,),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = conn.execute(
+                        "SELECT COALESCE(NULLIF(trusted_actor_id, ''), 'unknown')"
+                        " AS agent_id, " + _tail,
+                        (pid,),
+                    ).fetchall()
                 for r in rows:
                     name = r["agent_id"]
                     agents.append({

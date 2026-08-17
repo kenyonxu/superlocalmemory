@@ -125,7 +125,9 @@ def _register_every_tool(target) -> None:
     (
         # Portable Brain evidence is deliberately reachable from default MCP
         # clients; prestage_context remains a raw-server-only tool.
-        ("essential", "", 49),
+        # v4.0.8: +get_memory_summary. The essential/fallback surface must
+        # mirror the full profile, so it moves with it.
+        ("essential", "", 50),
         # v4.0.8: get_memory_summary added to CORE — the summary layer's MCP
         # surface (issue #113). Counts bumped deliberately, which is what
         # this contract exists to force.

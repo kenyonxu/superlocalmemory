@@ -105,6 +105,11 @@ _ESSENTIAL_TOOLS: set[str] = {
     "observe_bounded_loop_evidence",
     # Update, review, and list form one core correction lifecycle.
     "review_correction", "list_corrections",
+    # v4.0.8 (#113): readable summaries. Present here as well as in the named
+    # profiles because this set is the FALLBACK surface — it must mirror
+    # ``full``, and a tool that ships in the smallest profile ("core") cannot be
+    # missing from the fallback without a client silently losing it.
+    "get_memory_summary",
     # Memory management (2)
     "forget", "run_maintenance",
     # NOTE: prestage_context IS registered (see register_prestage_tool below)

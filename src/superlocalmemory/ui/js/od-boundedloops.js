@@ -295,8 +295,14 @@
       // (gate rejected the work) are different events and both map to FAILED.
       var state = r.run_state && r.run_state !== r.outcome
         ? ' <span style="color:var(--fg-3)">(' + esc(r.run_state) + ')</span>' : '';
-      return '<div class="list-row" style="align-items:baseline">' +
-        '<span class="mono" style="flex:1;font-size:12.5px">' + esc(r.run_ref || r.run_id) + '</span>' +
+      // min-width:0 + ellipsis: a run ref is a single unbroken token, and in a
+      // narrow pane `flex:1` alone shreds it one character per line
+      // ("demo / — / proo / f"). Truncate with the full value in the tooltip.
+      return '<div class="list-row" style="align-items:baseline;gap:8px">' +
+        '<span class="mono" title="' + esc(r.run_ref || r.run_id) + '" ' +
+          'style="flex:1;min-width:0;font-size:12.5px;overflow:hidden;' +
+          'text-overflow:ellipsis;white-space:nowrap">' +
+          esc(r.run_ref || r.run_id) + '</span>' +
         (r.demonstration
           ? '<span class="badge neutral" style="margin-right:8px">demo</span>' : '') +
         '<span class="badge ' + cls + '" style="margin-right:8px">' + esc(r.outcome) + '</span>' +

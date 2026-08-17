@@ -123,6 +123,44 @@ class TestIdentityGrouping:
         _seed(db, [("", None, "http")])
         assert _query(db)[0]["agent_id"] == "unknown"
 
+    def test_store_without_the_metadata_column_still_lists_agents(self, tmp_path):
+        """Stores predating raw_metadata_json must degrade to capability
+        grouping, NOT to an empty pane. Querying a missing column raises
+        OperationalError, which the handler catches — so without the column
+        probe, an older install silently reported zero agents while having
+        plenty."""
+        db = tmp_path / "legacy.db"
+        conn = sqlite3.connect(db)
+        conn.executescript(
+            """
+            CREATE TABLE ingestion_operations (
+                operation_id TEXT PRIMARY KEY, profile_id TEXT, source_type TEXT,
+                trusted_actor_id TEXT, created_at TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO ingestion_operations VALUES (?,?,?,?,?)",
+            ("op0", "default", "http", "claude", "2026-08-17T10:00:00Z"),
+        )
+        conn.commit(); conn.close()
+
+        has_meta = any(
+            r[1] == "raw_metadata_json"
+            for r in sqlite3.connect(db).execute(
+                "PRAGMA table_info(ingestion_operations)")
+        )
+        assert not has_meta, "fixture should model the legacy schema"
+
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT COALESCE(NULLIF(trusted_actor_id,''),'unknown') AS agent_id,"
+            " COUNT(*) AS cnt FROM ingestion_operations WHERE profile_id=?"
+            " GROUP BY agent_id", ("default",),
+        ).fetchall()
+        assert [r["agent_id"] for r in rows] == ["claude"]
+
 
 class TestEndpointContract:
     def test_endpoint_groups_by_metadata_agent_id(self):

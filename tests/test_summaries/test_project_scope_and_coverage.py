@@ -137,8 +137,8 @@ class TestProjectPickerEndpoint:
     def test_label_shortens_long_paths_but_keeps_siblings_distinct(self):
         from superlocalmemory.server.routes.memories import _project_label
 
-        a = "/Users/v/Documents/official/Call-off-tool/goep-serviceTool"
-        b = "/Users/v/Documents/official/testing - automation"
+        a = "/Users/alice/Documents/official/Call-off-tool/goep-serviceTool"
+        b = "/Users/alice/Documents/official/testing - automation"
         assert _project_label(a) == "Call-off-tool/goep-serviceTool"
         assert _project_label(b) == "official/testing - automation"
         assert _project_label(a) != _project_label(b)
