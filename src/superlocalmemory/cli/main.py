@@ -90,6 +90,9 @@ _NO_DAEMON_COMMANDS = {
     "serve", "restart",
     # V4.0.6: GDPR CLI accesses the DB directly; no daemon required.
     "gdpr",
+    # V4.0.7: summaries read memory.db directly and are extractive by default,
+    # so they need neither the daemon nor a language model.
+    "summary",
 }
 
 
@@ -967,6 +970,12 @@ def main() -> None:
     for _sp in loop_sub.choices.values():
         _sp.add_argument("--json", action="store_true",
                          help="Output structured JSON (agent-native)")
+
+    # V4.0.7: the readable summary layer from issue #113. The generators shipped
+    # in 4.0.6 with no caller; this is the surface that makes them reachable.
+    from superlocalmemory.cli.summary_cmd import register_summary_parser
+
+    register_summary_parser(sub)
 
     # Wave-3 / V4.0.6: GDPR subject-rights CLI (Art.15/17/20)
     gdpr_p = sub.add_parser(

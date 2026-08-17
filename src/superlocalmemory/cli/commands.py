@@ -282,6 +282,12 @@ def _cmd_gdpr_dispatch(args: Namespace) -> None:
     cmd_gdpr(args)
 
 
+def _cmd_summary_dispatch(args: Namespace) -> None:
+    """V4.0.7: readable session/day/project summaries (issue #113)."""
+    from superlocalmemory.cli.summary_cmd import cmd_summary
+    cmd_summary(args)
+
+
 # ---- end SLM v3.6 Optimize dispatch functions ----
 
 
@@ -414,6 +420,7 @@ def dispatch(args: Namespace) -> None:
         "ops": _cmd_ops,
         # V4.0.6: GDPR subject-rights CLI (Art.15/17/20)
         "gdpr": _cmd_gdpr_dispatch,
+        "summary": _cmd_summary_dispatch,
     }
     handler = handlers.get(args.command)
     if handler:
@@ -2215,6 +2222,13 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("forget", "Run the decay cycle (preview first)"),
         ("trace", "Recall with a per-channel score breakdown"),
         ("ingest", "Ingest external observations / documents"),
+        ("summary", "Readable summaries: session, day, or project"),
+    ]),
+    ("Privacy & compliance", [
+        # gdpr shipped in 4.0.6 but was never listed here, so `slm help` did not
+        # mention it at all. The drift test caught it; the omission is the thing
+        # that test exists to prevent.
+        ("gdpr", "Subject rights: status, export, erase, verify"),
     ]),
     ("Run SLM (daemon & dashboard)", [
         ("serve", "Start/stop the background daemon"),

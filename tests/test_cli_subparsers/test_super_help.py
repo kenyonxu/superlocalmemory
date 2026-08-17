@@ -21,10 +21,23 @@ def _top_level_commands() -> set[str]:
 
     Nested subparsers use other variables (db_sub, session_sub, …), so the
     ``\\bsub\\.add_parser`` anchor selects only top-level commands.
+
+    WIDENED in 4.0.7. Scanning only main.py made this guard blind to a command
+    registered from its own module: ``summary`` is attached by
+    ``summary_cmd.register_summary_parser(sub)``, so ``sub.add_parser("summary")``
+    lives in summary_cmd.py and main.py never mentions the name. The command was
+    therefore exempt from the very drift check that exists to catch it — a
+    contributor could add a whole command group, document nothing, and stay
+    green. Any cli/*.py that calls ``sub.add_parser`` is now scanned.
     """
-    main_src = Path(cmds.__file__).with_name("main.py").read_text()
-    return set(re.findall(r"\bsub\.add_parser\(\s*[\"']([a-z0-9\-]+)[\"']",
-                          main_src))
+    cli_dir = Path(cmds.__file__).parent
+    names: set[str] = set()
+    for path in sorted(cli_dir.glob("*.py")):
+        names |= set(re.findall(
+            r"\bsub\.add_parser\(\s*[\"']([a-z0-9\-]+)[\"']",
+            path.read_text(encoding="utf-8"),
+        ))
+    return names
 
 
 def test_super_help_covers_every_command():
