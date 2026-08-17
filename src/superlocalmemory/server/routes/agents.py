@@ -106,24 +106,52 @@ async def get_agent_memory_activity(
         conn = get_read_connection(DB_PATH)
         try:
             try:
+                # Group by the agent's OWN identity, not by the capability that
+                # authorised the write.
+                #
+                # This grouped by ``trusted_actor_id``, which on a real store is
+                # a capability digest — 43 distinct agents rendered as 43 rows of
+                # ``daemon-capability:923b7d6e616f46d3...`` and not one readable
+                # name. For a pane whose entire purpose is telling agents apart,
+                # that is the same as showing nothing.
+                #
+                # The real name was already being stored the whole time: writers
+                # pass ``agent_id`` and it lands in ``raw_metadata_json``. On this
+                # store that yields claude-desktop, claude, gemini, codex, grok
+                # and mcp_client. Capability digests remain available per row for
+                # audit — they answer "what was allowed to write this", which is a
+                # different and also useful question, just not this pane's.
                 rows = conn.execute(
-                    "SELECT CASE WHEN trusted_actor_id='' THEN 'unknown' "
-                    "ELSE trusted_actor_id END AS agent_id, "
+                    "SELECT COALESCE("
+                    "  NULLIF(json_extract(raw_metadata_json, '$.agent_id'), ''),"
+                    "  NULLIF(trusted_actor_id, ''),"
+                    "  'unknown'"
+                    ") AS agent_id, "
                     "COUNT(*) AS cnt, MAX(created_at) AS last_active, "
-                    "GROUP_CONCAT(DISTINCT source_type) AS sources "
+                    "GROUP_CONCAT(DISTINCT source_type) AS sources, "
+                    "COUNT(DISTINCT NULLIF(trusted_actor_id, '')) AS capabilities "
                     "FROM ingestion_operations WHERE profile_id=? "
                     "GROUP BY agent_id ORDER BY cnt DESC, agent_id ASC "
                     "LIMIT 500",
                     (pid,),
                 ).fetchall()
                 for r in rows:
+                    name = r["agent_id"]
                     agents.append({
-                        "agent_id": r["agent_id"],
+                        "agent_id": name,
                         "count": r["cnt"],
                         "last_active": r["last_active"],
                         "source_types": (
                             [s for s in (r["sources"] or "").split(",") if s]
                         ),
+                        # How many distinct capabilities this agent wrote under.
+                        "capability_count": r["capabilities"],
+                        # True when we fell back to a digest — the UI can then say
+                        # "this writer did not identify itself" instead of
+                        # presenting a hash as though it were a name.
+                        "identified": not str(name).startswith(
+                            ("daemon-capability:", "local-capability:")
+                        ) and name != "unknown",
                     })
                     total += r["cnt"]
             except sqlite3.OperationalError:
