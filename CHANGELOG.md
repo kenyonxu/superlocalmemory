@@ -11,10 +11,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Summaries reach agents and the dashboard.** 4.0.7 gave the summary layer a
   command; an agent still had no way to ask for one, and neither did anyone
   reading the dashboard. Adds the `get_memory_summary` tool and a **Summaries**
-  tab under Memories with Today, Yesterday and This project. Every result states
-  how many memories it was built from and how much it covered.
+  tab under Memories with Today, Yesterday, and a picker listing the projects
+  SuperLocalMemory has actually recorded activity in. Every result states how
+  many memories it was built from and how much it covered.
+- **Bounded Loops has its own page**, alongside the other integrations. It shows
+  whether Bounded Loops is installed, which agreement the two products
+  negotiated, and which finished runs have been imported — and states plainly
+  that imported evidence is read-only: SuperLocalMemory never learns from it, no
+  file paths leave your workspace, and the tamper-evidence it carries is not the
+  same thing as independent verification.
+- **Mesh shows its history**, not only who is connected this second. Sessions
+  leave the mesh when they end, so the page was empty between sessions even on a
+  machine with plenty of mesh activity.
+
+### Changed
+- **Recall Lab is the first thing you see under Memories**, with example
+  questions to start from. Summaries sits next to it. The three browsing views
+  follow.
 
 ### Fixed
+- **Memory stopped learning from use.** Recall marks which memories it returned
+  so that later use can be credited back, but the mark never reached the
+  assistant, so nothing was ever credited. Every recall was scored as neither
+  good nor bad, which is why recall quality sat at its starting value and no
+  source ever showed a settled quality signal however much the memory was used.
+- **The behavioural half of consolidation had never run.** Nothing triggered it,
+  and when it did run, two of its four steps failed without reporting anything.
+  SuperLocalMemory now runs it on a schedule while idle — never while you are
+  storing or recalling — and at session end.
+- **"This project" summaries could not work.** The button sent no project, and
+  the answer was always an error. SuperLocalMemory installs once for your whole
+  machine, so a browser tab has no way to know which project you mean; it now
+  lists the ones it has seen.
+- **Locally written summaries began with an apology.** The local model was never
+  told what it was writing, so it replied as if in a chat. It now returns the
+  summary and nothing else.
+- **A summary built from nothing claimed to cover everything.** A project with
+  recorded activity but no saved facts is now reported as a partial view.
+- **Multi-Agent Memory showed access tokens instead of agent names**, and because
+  one agent uses many tokens over time, a single agent appeared as dozens.
+- **Optimize invented a chart.** The cache hit-rate graph drew a rising trend
+  generated from the current value rather than measured; no history is recorded,
+  so it is gone until there is something real to plot. "Tokens saved" was
+  labelled as a monthly figure with an upward arrow that nothing ever set — it is
+  a total since install, and now says so. The page also explains why its numbers
+  are zero while its switches are on.
+- **One kind of memory pattern was never produced.** The query that finds it
+  asked for columns that do not exist, so it failed on every run and was skipped
+  silently.
 - **Code links never appeared for anyone.** Two separate reasons. The pass that
   creates them matched no facts at all on a real store — it looked for an empty
   archive marker, while live facts carry `live`, so every fact was excluded. And
