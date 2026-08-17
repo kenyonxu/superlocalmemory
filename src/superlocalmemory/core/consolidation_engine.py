@@ -198,27 +198,26 @@ class ConsolidationEngine:
                     from superlocalmemory.parameterization.prompt_injector import PromptInjector
                     from superlocalmemory.parameterization.prompt_lifecycle import PromptLifecycleManager
                     from superlocalmemory.learning.behavioral import BehavioralPatternStore
-                    # cross_project and workflow_miner may not exist yet — stub them
-                    try:
-                        from superlocalmemory.parameterization.cross_project import CrossProjectAggregator
-                    except ImportError:
-                        class CrossProjectAggregator:
-                            def __init__(self, db): pass
-                            def get_preferences(self, *a, **kw): return {}
-                    try:
-                        from superlocalmemory.parameterization.workflow_miner import WorkflowMiner
-                    except ImportError:
-                        class WorkflowMiner:
-                            def __init__(self, db): pass
-                            def mine(self, *a, **kw): return []
+                    from superlocalmemory.parameterization.cross_project import CrossProjectAggregator
+                    from superlocalmemory.parameterization.workflow_miner import WorkflowMiner
                     from superlocalmemory.hooks.auto_parameterize import AutoParameterizeHook
                     from superlocalmemory.core.config import ParameterizationConfig
                     p_config = getattr(self._config, "parameterization", ParameterizationConfig())
                     from superlocalmemory.infra.data_root import state_path
                     learning_db = str(state_path("learning.db"))
                     beh_store = BehavioralPatternStore(learning_db)
-                    cross_proj = CrossProjectAggregator(self._db)
-                    wf_miner = WorkflowMiner(self._db)
+                    # Both take a DB PATH, not a DatabaseManager. Passing
+                    # self._db here made Path(db_path) raise "argument should be
+                    # a str or an os.PathLike object ... not 'DatabaseManager'",
+                    # which step 9 caught at debug level — so soft prompts were
+                    # never generated and nothing said why.
+                    #
+                    # The ImportError stubs these replaced were also dead: both
+                    # modules exist and re-export the canonical classes, so the
+                    # stub branch could never run and only served to hide the
+                    # real signatures.
+                    cross_proj = CrossProjectAggregator(learning_db)
+                    wf_miner = WorkflowMiner(learning_db)
                     extractor = PatternExtractor(self._db, beh_store, cross_proj, wf_miner, p_config)
                     generator = SoftPromptGenerator(p_config)
                     injector = PromptInjector(self._db, generator, p_config)

@@ -861,6 +861,86 @@ def _start_idle_watchdog(timeout_sec: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Periodic full consolidation (4.0.8)
+# ---------------------------------------------------------------------------
+#
+# Steps 8-11 of ConsolidationEngine — behavioural assertions, soft prompts,
+# skill performance, skill evolution — had no automatic trigger at all. The
+# session-end hook is the fast path; this timer is the guarantee, because a hook
+# that does not fire is indistinguishable from a feature that does not exist.
+#
+# Two constraints shape the schedule:
+#
+#   1. Remember and recall latency must not move. So the pass only starts when
+#      the daemon has served nothing for _CONSOLIDATION_IDLE_SEC. Consolidation
+#      is catch-up work; there is never a reason for it to compete with a live
+#      request. If the machine is busy every time we look, we simply skip and
+#      check again next tick.
+#   2. It must not pile up. run_full_consolidation() holds a lock and skips
+#      rather than queues, so a slow pass cannot be overlapped by the next tick
+#      or by the session-end hook.
+
+#: How often to consider running. Not how often it runs.
+_CONSOLIDATION_CHECK_SEC = int(os.environ.get("SLM_CONSOLIDATION_CHECK_SEC", 900))
+
+#: Minimum quiet period before a scheduled pass may start.
+_CONSOLIDATION_IDLE_SEC = int(os.environ.get("SLM_CONSOLIDATION_IDLE_SEC", 300))
+
+#: Minimum gap between two scheduled passes.
+_CONSOLIDATION_MIN_GAP_SEC = int(
+    os.environ.get("SLM_CONSOLIDATION_MIN_GAP_SEC", 6 * 3600)
+)
+
+#: Delay before the first check, so daemon startup is never slowed by it.
+_CONSOLIDATION_FIRST_DELAY_SEC = int(
+    os.environ.get("SLM_CONSOLIDATION_FIRST_DELAY_SEC", 120)
+)
+
+
+async def _consolidation_timer_loop(application: FastAPI) -> None:
+    """Run full consolidation on a schedule, but only while the daemon is idle."""
+    from superlocalmemory.server.consolidation_runner import run_full_consolidation
+
+    await asyncio.sleep(_CONSOLIDATION_FIRST_DELAY_SEC)
+    last_run = 0.0
+
+    while True:
+        try:
+            await asyncio.sleep(_CONSOLIDATION_CHECK_SEC)
+
+            now = time.monotonic()
+            if last_run and (now - last_run) < _CONSOLIDATION_MIN_GAP_SEC:
+                continue
+            if (now - _last_activity) < _CONSOLIDATION_IDLE_SEC:
+                continue  # busy — try again next tick
+
+            # get_engine_lazy, not state.engine directly: a mode switch nulls
+            # state.engine, and reading it raw would silently disable scheduled
+            # consolidation until the next daemon restart.
+            from superlocalmemory.server.routes.helpers import get_engine_lazy
+
+            engine = get_engine_lazy(application.state)
+            profile_id = getattr(engine, "profile_id", None) if engine else None
+            if not profile_id:
+                continue
+
+            result = await run_full_consolidation(
+                application.state, profile_id, trigger="timer",
+            )
+            # Only a pass that actually ran resets the clock; a skip must not
+            # buy another six hours of silence.
+            if not result.get("skipped"):
+                last_run = time.monotonic()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Never let a bad pass kill the loop — that would silently disable
+            # consolidation for the life of the daemon, which is the failure
+            # mode this timer exists to end. Log loudly and try again.
+            logger.exception("scheduled consolidation failed; will retry")
+
+
+# ---------------------------------------------------------------------------
 # Legacy port TCP redirect (backward compat for port 8767)
 # ---------------------------------------------------------------------------
 
@@ -2462,6 +2542,15 @@ async def lifespan(application: FastAPI):
     except Exception as e:
         logger.warning("optimize module not available: %s", e)
 
+    # 4.0.8: periodic full consolidation. Idle-gated and lock-guarded — see
+    # _consolidation_timer_loop. Started here rather than at import so a daemon
+    # that never completes startup never schedules work.
+    _consol_task = getattr(application.state, "_consolidation_task", None)
+    if _consol_task is None or _consol_task.done():
+        application.state._consolidation_task = asyncio.create_task(
+            _consolidation_timer_loop(application)
+        )
+
     # v3.6.7: Start MCP Streamable-HTTP session manager (GOTCHA #1).
     # streamable_http_app() carries its own Starlette lifespan that initialises
     # an anyio task group inside the session manager. Without entering that
@@ -2534,6 +2623,16 @@ async def lifespan(application: FastAPI):
                 await _sync_task
             except asyncio.CancelledError:
                 pass
+    except Exception:  # pragma: no cover — defensive
+        pass
+
+    # Cancel the periodic consolidation loop. Not awaited to completion — a pass
+    # can take minutes and shutdown must not block on it; the lock and the
+    # engine's own transaction boundaries make an interrupted pass safe to redo.
+    try:
+        _consol = getattr(application.state, "_consolidation_task", None)
+        if _consol is not None and not _consol.done():
+            _consol.cancel()
     except Exception:  # pragma: no cover — defensive
         pass
 

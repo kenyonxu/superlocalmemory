@@ -1932,55 +1932,33 @@ async def trigger_consolidation(request: Request):
             profile_id=pid,
         )
 
-        # v3.7.8 SEC-M-01: the prior "WorkerPool" fast path called
-        # ``pool.send_command(...)``, a method that does not exist on
-        # WorkerPool — every call raised AttributeError, was silently
-        # swallowed by the bare ``except``, and fell through to this direct
-        # path unconditionally. That dead branch is removed; consolidation
-        # always runs directly against a lease-protected DB connection so a
-        # concurrent profile switch cannot commit mid-consolidation.
-        #
-        # v3.4.64: ConsolidationEngine.consolidate() is CPU/IO bound (seconds
-        # to minutes). Calling it directly in an async route blocks the ASGI
-        # event loop.  Moved into asyncio.to_thread() so the event loop stays
-        # live.  The runtime.operation() lease is acquired INSIDE the thread —
-        # blocking a thread is fine; blocking the event loop is not.
-        import asyncio as _asyncio
-        from superlocalmemory.core.config import SLMConfig
-        from superlocalmemory.storage.database import DatabaseManager
-        from superlocalmemory.storage import schema as _schema
-        from superlocalmemory.core.consolidation_engine import ConsolidationEngine
-        from superlocalmemory.server.profile_runtime import get_profile_runtime
+        # 4.0.8: the body of this handler moved to server/consolidation_runner
+        # so the periodic daemon trigger and this endpoint run the SAME code
+        # under the SAME lock. Two copies would be two definitions of
+        # "consolidated", and only one of them would get maintained.
+        from superlocalmemory.server.consolidation_runner import (
+            run_full_consolidation,
+        )
 
-        _app_state = request.app.state
+        # background=true returns as soon as the pass is scheduled. The
+        # session-end hook needs this: a full consolidation runs for seconds to
+        # minutes, and a hook that waits for it either blocks the user's shell
+        # or times out and wrongly concludes the run failed.
+        if body.get("background"):
+            import asyncio as _asyncio
 
-        def _run_consolidation() -> dict:
-            runtime = get_profile_runtime(_app_state)
-            with runtime.operation():
-                config = SLMConfig.load()
-                db = DatabaseManager(config.db_path)
-                db.initialize(_schema)
-                engine = ConsolidationEngine(
-                    db=db, config=config.consolidation, slm_config=config,
+            _app_state = request.app.state
+            _asyncio.create_task(
+                run_full_consolidation(
+                    _app_state, pid, lightweight=lightweight, trigger="hook",
                 )
-                res = engine.consolidate(profile_id=pid, lightweight=lightweight)
-                # v3.4.1: Auto-trigger behavioral pattern mining after consolidation
-                try:
-                    from superlocalmemory.learning.consolidation_worker import (
-                        ConsolidationWorker,
-                    )
-                    learning_db = config.base_dir / "learning.db"
-                    cw = ConsolidationWorker(str(config.db_path), str(learning_db))
-                    pattern_count = cw._generate_patterns(pid, False)
-                    res["patterns_mined"] = pattern_count
-                    logger.info(
-                        "Auto-mined %d patterns after consolidation", pattern_count
-                    )
-                except Exception as exc:
-                    logger.debug("Pattern mining after consolidation failed: %s", exc)
-            return res
+            )
+            authorization.complete()
+            return {"success": True, "started": True, "background": True}
 
-        result = await _asyncio.to_thread(_run_consolidation)
+        result = await run_full_consolidation(
+            request.app.state, pid, lightweight=lightweight, trigger="http",
+        )
         authorization.complete()
         return {"success": True, **result}
     except HTTPException:
