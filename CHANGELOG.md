@@ -14,10 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a starting value as a measured result. Source quality no longer lists internal
   identifiers; when nothing has been measured yet it says so and explains what
   would change that.
-- **Session, daily and project summaries.** A readable layer over your memories:
-  what a session covered, what a day's main topics were, and what was worked on
-  per project. Each one links back to the memories it came from, and each states
-  how much of the underlying data it could actually cover. Requested in #113.
+- **Session, daily and project summaries — generators only, not yet reachable.**
+  A readable layer over your memories: what a session covered, what a day's main
+  topics were, and what was worked on per project. Each links back to the
+  memories it came from and states how much of the underlying data it could
+  actually cover. Corrected after release: 4.0.6 ships the generators but no
+  command, tool or endpoint that calls them, so there is no way to use this yet.
+  The surface lands in 4.0.7. Requested in #113.
 - **Entity-level memory consolidation now runs.** Repeated facts about the same
   entity are merged during maintenance, and the originals are archived rather
   than deleted.
