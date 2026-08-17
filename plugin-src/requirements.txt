@@ -1,1 +1,1 @@
-superlocalmemory==4.0.5
+superlocalmemory==4.0.7

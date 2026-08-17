@@ -1,7 +1,7 @@
 ---
 name: slm-graph
 description: >
-version: "4.0.5"
+version: "4.0.7"
 agent: agent
 tools:
   - build_code_graph
