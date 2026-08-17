@@ -720,6 +720,14 @@ class TestFullPipelineSmoke:
         db.get_all_facts.return_value = [fact]
         db.get_facts_by_ids.side_effect = lambda ids, pid, **kwargs: [fact] if fact.fact_id in ids else []
         db.get_scenes_for_fact.return_value = []
+        # Correction-admission contract (4.0.2 Brain Core / M042). The temporal
+        # validity filter fails closed: an unprovable correction-lifecycle read
+        # demotes every candidate, so this smoke test saw zero results while
+        # reporting abstained=False. Real empty sets mean "admission proved, no
+        # corrections in play". 4.0.6 applied the same repair to
+        # test_evidence_floor.py and test_engine.py; this file was missed.
+        db.get_invalidated_fact_ids.return_value = set()
+        db.get_nonapplied_correction_successor_ids.return_value = set()
 
         config = RetrievalConfig(use_cross_encoder=False)
 
