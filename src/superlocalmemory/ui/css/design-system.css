@@ -135,6 +135,12 @@ a:hover { text-decoration: underline; }
 button { font-family: inherit; }
 ::selection { background: var(--violet-soft); }
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+/* Monospace values are usually paths, ids or hashes — reference data, not
+   prose. Left unbounded they set the width of whatever contains them:
+   #dashboard-basedir alone rendered 219px and pushed the Dashboard pane past
+   its own right edge. Clip instead of overflowing; the full value stays
+   available via the title attribute wherever these are rendered. */
+.mono { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .num  { font-variant-numeric: tabular-nums; }
 .muted { color: var(--fg-2); }
 .dim   { color: var(--fg-3); }
@@ -424,7 +430,15 @@ button { font-family: inherit; }
 /* ============================================================
    TABLES / LISTS
    ============================================================ */
-.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+/* A wide table scrolls INSIDE its own card at any width, not only on phones.
+   The ≤768px block already did exactly this; the rule was simply never applied
+   above that breakpoint, so between roughly 800px and 1200px a six-column
+   table (Memories renders 783px of columns) overflowed its pane instead. The
+   pane does technically scroll, but an inner scroll region with no visible
+   affordance reads as "the page is cut off on the right" — which is precisely
+   how it was reported. Keeping the scroll inside the card makes the clipped
+   edge belong to the table, where a horizontal scrollbar is expected. */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13px; display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
 .tbl th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--fg-3); font-weight: 600; padding: 10px 14px; border-bottom: 1px solid var(--border); }
 .tbl td { padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 .tbl tr:last-child td { border-bottom: 0; }
