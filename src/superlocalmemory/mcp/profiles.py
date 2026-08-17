@@ -68,8 +68,11 @@ _PROFILE_FULL: frozenset[str] = frozenset({
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
     # v3.8.0: bounded-loop tools (CLI + /slm-loop command + MCP).
     "slm_loop_run", "slm_loop_history", "slm_loop_show",
+    # v4.0.8: readable summaries (#113). In core, so it must be in full too —
+    # full is asserted to be a superset of core.
+    "get_memory_summary",
     # prestage_context remains registered but deliberately raw-server-only.
-}) | _PROFILE_FULL_MESH  # 49
+}) | _PROFILE_FULL_MESH  # 50
 
 _PROFILE_POWER: frozenset[str] = _PROFILE_FULL | frozenset({  # 61
     "get_version", "get_mode", "health", "consistency_check", "recall_trace",

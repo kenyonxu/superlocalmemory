@@ -48,7 +48,7 @@ def test_profile_definitions_keys_exact():
 
 
 # ---------------------------------------------------------------------------
-# RED-2: core == exactly the 16 names in the lifecycle contract
+# RED-2: core == exactly the 17 names in the lifecycle contract
 # ---------------------------------------------------------------------------
 
 _EXPECTED_CORE = frozenset({
@@ -56,6 +56,10 @@ _EXPECTED_CORE = frozenset({
     "session_init", "close_session",
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
     "review_correction", "list_corrections",
+    # v4.0.8 (#113): readable summaries. Read-only and off the hot path, so it
+    # belongs in the smallest profile — an agent asking "what did I do
+    # yesterday" should not need the full surface to get an answer.
+    "get_memory_summary",
 })
 
 
@@ -65,11 +69,11 @@ def test_profile_core_exact():
     assert core == _EXPECTED_CORE, (
         f"core diff — extra: {core - _EXPECTED_CORE}, missing: {_EXPECTED_CORE - core}"
     )
-    assert len(core) == 16, f"core must be 16 names, got {len(core)}"
+    assert len(core) == 17, f"core must be 17 names, got {len(core)}"
 
 
 # ---------------------------------------------------------------------------
-# RED-3: code == core | Brain + code-graph + switch_profile + loops (==31)
+# RED-3: code == core | Brain + code-graph + switch_profile + loops (==32)
 # ---------------------------------------------------------------------------
 
 _CODE_EXTRA = frozenset({
@@ -92,11 +96,11 @@ def test_profile_code_exact():
     assert code == expected, (
         f"code diff — extra: {code - expected}, missing: {expected - code}"
     )
-    assert len(code) == 31, f"code must be 31 names, got {len(code)}"
+    assert len(code) == 32, f"code must be 32 names, got {len(code)}"
 
 
 # ---------------------------------------------------------------------------
-# RED-4: full == 49 and ⊇ core memory names; built from explicit 41+8 literal
+# RED-4: full == 50 and ⊇ core memory names; built from explicit 42+8 literal
 # ---------------------------------------------------------------------------
 
 _EXPECTED_FULL_MESH = frozenset({
@@ -118,6 +122,8 @@ _EXPECTED_FULL_BASE = frozenset({
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
     # 3.8.0: bounded-loop tools (CLI + command + MCP).
     "slm_loop_run", "slm_loop_history", "slm_loop_show",
+    # 4.0.8 (#113): in core, therefore necessarily in full.
+    "get_memory_summary",
     # prestage_context is registered but intentionally not in named profiles.
 })
 
@@ -130,14 +136,14 @@ def test_profile_full_exact():
     assert full == _EXPECTED_FULL, (
         f"full diff — extra: {full - _EXPECTED_FULL}, missing: {_EXPECTED_FULL - full}"
     )
-    assert len(full) == 49, f"full must be 49 names, got {len(full)}"
+    assert len(full) == 50, f"full must be 50 names, got {len(full)}"
     # Must ⊇ core memory names
     core = mod._PROFILE_DEFINITIONS["core"]
     assert core <= full, f"full must be a superset of core; missing from full: {core - full}"
 
 
 # ---------------------------------------------------------------------------
-# RED-5: power == 61 and ⊇ full
+# RED-5: power == 62 and ⊇ full
 # ---------------------------------------------------------------------------
 
 _POWER_EXTRA = frozenset({
@@ -155,7 +161,7 @@ def test_profile_power_exact():
     assert power == _EXPECTED_POWER, (
         f"power diff — extra: {power - _EXPECTED_POWER}, missing: {_EXPECTED_POWER - power}"
     )
-    assert len(power) == 61, f"power must be 61 names, got {len(power)}"
+    assert len(power) == 62, f"power must be 62 names, got {len(power)}"
     full = mod._PROFILE_DEFINITIONS["full"]
     assert full <= power, f"power must be a superset of full; missing: {full - power}"
 
@@ -222,6 +228,7 @@ def test_every_profile_name_is_a_real_registered_tool():
     from superlocalmemory.mcp.tools_loops import register_loop_tools
     from superlocalmemory.mcp.tools_brain import register_brain_tools
     from superlocalmemory.mcp.tools_context import register_prestage_tool
+    from superlocalmemory.mcp.tools_summaries import register_summary_tools
 
     collector = _NameCollector()
     get_engine_stub = lambda: None  # noqa: E731
@@ -239,6 +246,7 @@ def test_every_profile_name_is_a_real_registered_tool():
     register_loop_tools(collector, get_engine_stub)
     register_brain_tools(collector, get_engine_stub)
     register_prestage_tool(collector, lambda *a, **k: [])
+    register_summary_tools(collector, get_engine_stub)
 
     mod = _get_module()
     all_profile_names: set[str] = set()
