@@ -96,7 +96,13 @@ def _fact_rows(
     except Exception:  # pragma: no cover - helper absent on an unusual manager
         has_archive = False
     if has_archive:
-        sql += "AND (archive_status IS NULL OR archive_status = '') "
+        # COALESCE form, matching storage/database.py:759 and the learning
+        # modules. My first version tested `IS NULL OR = ''`, which excluded
+        # every fact on a real store: live facts are marked 'live', not blank.
+        # The synthetic fixtures I developed against left the column unset, so
+        # the pass linked happily in tests and would have linked NOTHING for any
+        # actual user — 3,608 of 3,608 facts filtered out on this machine.
+        sql += "AND COALESCE(archive_status, 'live') != 'archived' "
 
     params: list[Any] = [profile_id]
     if since:
