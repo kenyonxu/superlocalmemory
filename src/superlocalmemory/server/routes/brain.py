@@ -44,8 +44,13 @@ Design notes (LLD-04 §7 hard rules):
 
 from __future__ import annotations
 
+import json as _json
 import logging
+import shutil
 import sqlite3
+import subprocess
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -84,6 +89,17 @@ _VERSION: str = __version__
 # the source-level test asserts we don't accidentally reintroduce them.
 # NOTE: do NOT add the literal forbidden-key strings here — the U4 grep
 # guard runs over this file.
+
+# ---------------------------------------------------------------------------
+# Bounded-loops detection — TTL-cached subprocess probe.
+# The binary lives in a pipx venv; importlib.util.find_spec('bounded_loops')
+# will NOT find it from our venv.  Detect via PATH / filesystem instead.
+# ---------------------------------------------------------------------------
+
+_BL_PROBE: dict[str, object] = {}
+_BL_PROBE_LOCK = threading.Lock()
+_BL_PROBE_TTL = 60.0          # seconds between re-probes
+
 
 # Memory directory (home-dir based). Always resolved at call time so that
 # tests can override via monkeypatch on ``_learning_db_path``.
@@ -622,6 +638,140 @@ def _adapter_last_sync_ago(adapter_name: str) -> int | None:
         return None
 
 
+def _detect_codex_config() -> dict:
+    """Detect Codex integration from ``~/.codex/config.toml``.
+
+    Evidence tier: CONFIGURED — the config file contains
+    ``[mcp_servers.superlocalmemory]``, which proves Codex is wired to use
+    SLM as an MCP server.  This is the same tier as Claude Code's install-
+    token check: file presence, not live traffic.
+
+    What we deliberately do NOT claim: that Codex is currently running, or
+    that the MCP connection has been used recently.  For live-traffic
+    evidence the correct signal is ``tool_events`` rows attributed to
+    ``SLM_AGENT_ID='codex'`` — a check not performed here because
+    ``tool_events`` has no ``agent_id`` column.
+    """
+    try:
+        codex_config = Path.home() / ".codex" / "config.toml"
+        if not codex_config.exists():
+            return {"active": False, "reason": "codex_config_absent"}
+        try:
+            content = codex_config.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return {"active": False, "reason": "codex_config_unreadable"}
+        if "[mcp_servers.superlocalmemory]" not in content:
+            return {"active": False, "reason": "no_slm_mcp_block"}
+        return {
+            "active": True,
+            "evidence_tier": "configured",
+            "evidence": "~/.codex/config.toml#[mcp_servers.superlocalmemory]",
+        }
+    except Exception:  # pragma: no cover — defensive
+        return {"active": False, "reason": "detection_error"}
+
+
+def _bounded_loops_probe_fresh() -> dict:
+    """Probe bounded-loops installation — may spawn one short subprocess.
+
+    Detection approach: ``shutil.which("bounded-loops-mcp")`` (PATH scan,
+    no subprocess), then ``bl --version`` with a 300 ms timeout.
+
+    Evidence tier: INSTALLED — the ``bounded-loops-mcp`` binary is on the
+    resolved PATH, meaning the pipx package is present.
+
+    What we do NOT claim: that the bridge contract ``bounded-loops.dev/
+    slm-bridge/v1`` is live or that any run has been observed.  A full
+    capability handshake requires an async MCP round-trip; that is outside
+    the scope of this synchronous probe.
+
+    Trap: do NOT use ``importlib.util.find_spec('bounded_loops')`` — the
+    package lives in its own pipx venv and is not importable from this one.
+    """
+    bl_mcp_path = shutil.which("bounded-loops-mcp")
+    if bl_mcp_path is None:
+        # Cross-check: ~/.bounded-loops data dir (pipx installs leave this).
+        bl_data = Path.home() / ".bounded-loops"
+        if bl_data.is_dir():
+            return {
+                "installed": True,
+                "version": None,
+                "bridge_contract": "bounded-loops.dev/slm-bridge/v1",
+                "evidence_tier": "data_dir",
+                "evidence": "~/.bounded-loops exists",
+                "note": "mcp binary not on PATH; data dir detected",
+                "is_real": True,
+                "source": "filesystem",
+            }
+        return {
+            "installed": False,
+            "reason": "bounded_loops_mcp_not_in_path",
+            "is_real": True,
+            "source": "shutil.which",
+        }
+
+    version: str | None = None
+    bl_path = shutil.which("bl")
+    if bl_path:
+        try:
+            # 1.5s, not 0.3s. Measured on this machine: a cold
+            # _compute_bounded_loops() takes ~226 ms end to end, most of it this
+            # subprocess — a 300 ms budget leaves ~74 ms of headroom, so under
+            # any load the probe times out and the card silently reports
+            # "Version: unknown" while `bl --version` prints "bl 0.6.4" from a
+            # shell. A version string that flickers with machine load is worse
+            # than no version string, because it looks like a real finding.
+            # The cost of widening is bounded: this runs in a worker thread via
+            # asyncio.to_thread and is TTL-cached for 60s, so the worst case is
+            # one 1.5s thread once a minute, never on the recall/remember path.
+            proc = subprocess.run(
+                [bl_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+            )
+            raw = (proc.stdout.strip() or proc.stderr.strip())
+            if raw.startswith("bl "):
+                version = raw[3:].strip()
+        except Exception:  # pragma: no cover — timeout or missing binary
+            pass
+
+    return {
+        "installed": True,
+        "version": version,
+        "bridge_contract": "bounded-loops.dev/slm-bridge/v1",
+        "evidence_tier": "path",
+        "evidence": "shutil.which(bounded-loops-mcp)",
+        "note": "bridge capability requires a runtime MCP handshake; not probed here",
+        "is_real": True,
+        "source": "shutil.which + bl --version",
+    }
+
+
+def _compute_bounded_loops() -> dict:
+    """Section ``bounded_loops`` — installation/presence status.
+
+    Wraps ``_bounded_loops_probe_fresh`` in a 60-second TTL cache so the
+    subprocess call is never inline on every Brain request.  First call may
+    take up to 300 ms (subprocess timeout); subsequent calls within the TTL
+    window return immediately from the cache.
+    """
+    now = time.monotonic()
+    with _BL_PROBE_LOCK:
+        cached = _BL_PROBE.get("result")
+        cached_at = float(_BL_PROBE.get("cached_at", 0.0))
+        if cached is not None and (now - cached_at) < _BL_PROBE_TTL:
+            return cached  # type: ignore[return-value]
+
+    fresh = _bounded_loops_probe_fresh()
+    fresh["section_enabled"] = fresh.get("installed", False)
+
+    with _BL_PROBE_LOCK:
+        _BL_PROBE["result"] = fresh
+        _BL_PROBE["cached_at"] = now
+    return fresh
+
+
 def _compute_cross_platform() -> dict:
     """Section ``cross_platform`` — live status per injection target.
 
@@ -702,26 +852,93 @@ def _compute_cross_platform() -> dict:
     out["mcp"] = {"active": True, "tool": "mcp__slm"}
     # CLI is trivially active on any install.
     out["cli"] = {"active": True}
+    # Codex: detect from ~/.codex/config.toml.
+    # evidence_tier="configured" — config proves SLM is wired; it does not
+    # prove recent MCP traffic (tool_events has no agent_id column).
+    out["codex"] = _detect_codex_config()
     return out
 
 
+def _registry_staleness() -> tuple[str, int | None]:
+    """Return (registry_status, newest_entry_seconds_ago).
+
+    Reads the raw session registry file to determine whether the registry
+    has been written to recently, regardless of profile matching.  This
+    distinguishes three silent-but-different states:
+
+    ``live``    — newest entry is within 2× the presence window (10 min)
+    ``stale``   — file exists, entries exist, but all are older than 10 min
+                  → TELEMETRY GAP: hooks exist but are not firing
+    ``empty``   — file exists but has no entries
+    ``absent``  — file does not exist (first-run or cleaned up)
+    ``unknown`` — file could not be read
+
+    IMPORTANT: the window is NOT widened here.  We report the gap honestly
+    rather than hiding it by using a larger cutoff on the query.
+    """
+    try:
+        from superlocalmemory.infra.data_root import state_path
+        registry_path = state_path(".active_sessions.json")
+        if not registry_path.exists():
+            return "absent", None
+        try:
+            raw = registry_path.read_text(encoding="utf-8")
+            data = _json.loads(raw)
+        except Exception:
+            return "unknown", None
+        if not isinstance(data, dict) or not data:
+            return "empty", None
+        now_ns = time.time_ns()
+        ts_vals = [
+            int(row.get("ts_ns", 0))
+            for row in data.values()
+            if isinstance(row, dict) and int(row.get("ts_ns", 0)) > 0
+        ]
+        if not ts_vals:
+            return "empty", None
+        newest_ns = max(ts_vals)
+        seconds_ago = max(0, int((now_ns - newest_ns) / 1_000_000_000))
+        # 2× the 300 s presence window = 600 s sane boundary.
+        if seconds_ago <= 600:
+            return "live", seconds_ago
+        return "stale", seconds_ago
+    except Exception:  # pragma: no cover — defensive
+        return "unknown", None
+
+
 def _compute_active_clients(profile_id: str) -> dict:
-    """Return recent host presence without leaking session identifiers.
+    """Return recent host presence with honest telemetry-gap detection.
 
     ``cross_platform`` describes configured integration targets.  This
-    separate read-model answers the different question users actually ask:
-    which host clients have recently interacted with this local brain?
+    separate read-model answers a different question: which host clients
+    have recently interacted with this brain?
+
+    Three distinct states are surfaced instead of a silent empty list:
+    ``NO_ACTIVITY``     — registry is live; no clients in the 5-min window
+    ``TELEMETRY_GAP``   — registry's newest entry is > 10 min old; hooks
+                          may be installed but are not writing presence
+    ``REGISTRY_ERROR``  — exception accessing the registry; reported as
+                          ``is_real: False`` rather than an empty success
     """
+    reg_status, newest_ago = _registry_staleness()
+
+    clients: list[dict] = []
+    registry_ok = True
     try:
         from superlocalmemory.hooks.session_registry import active_client_summary
         clients = active_client_summary(profile_id, within_seconds=300)
-    except Exception:
-        clients = []
+    except Exception as exc:  # distinguish failure from emptiness (Wave 4)
+        registry_ok = False
+        reg_status = "error"
+        logger.debug("active_clients: registry error: %s", exc)
+
     return {
-        "is_real": True,
+        "is_real": registry_ok,
         "scope": "profile",
         "window_seconds": 300,
         "clients": clients,
+        "registry_status": reg_status,
+        "newest_entry_seconds_ago": newest_ago,
         "source": "session_registry (ephemeral, profile-scoped)",
     }
 
@@ -1142,7 +1359,7 @@ async def get_brain(request: Request, profile_id: str | None = None) -> dict:
         preferences, learning, usage, bandit_snap, cache,
         cross_platform, outcomes_preview, evolution, active_clients,
         feedback_loop, source_quality, graph_summary, agent_experience,
-        brain_truth,
+        brain_truth, bounded_loops,
     ) = await asyncio.gather(
         asyncio.to_thread(_compute_preferences, profile_id),
         asyncio.to_thread(_compute_learning_status, profile_id, lrn_db),
@@ -1161,6 +1378,7 @@ async def get_brain(request: Request, profile_id: str | None = None) -> dict:
         asyncio.to_thread(_compute_graph_summary, profile_id),
         asyncio.to_thread(_compute_agent_experience, profile_id),
         asyncio.to_thread(truth_service.snapshot, profile_id),
+        asyncio.to_thread(_compute_bounded_loops),
         return_exceptions=True,
     )
 
@@ -1171,9 +1389,15 @@ async def get_brain(request: Request, profile_id: str | None = None) -> dict:
             return fallback
         return value
 
-    active_clients = _ok(active_clients, {"is_real": True, "scope": "profile", "clients": [],
-                                          "window_seconds": 300,
-                                          "source": "session_registry unavailable"})
+    active_clients = _ok(active_clients, {
+        "is_real": False,
+        "scope": "profile",
+        "clients": [],
+        "window_seconds": 300,
+        "registry_status": "error",
+        "newest_entry_seconds_ago": None,
+        "source": "session_registry unavailable",
+    })
     feedback_loop = _ok(feedback_loop, {"is_real": True, "signals_by_type": {},
                                          "explicit_signals": 0, "implicit_signals": 0,
                                          "settled_outcomes": 0, "mean_settled_reward": None,
@@ -1250,6 +1474,15 @@ async def get_brain(request: Request, profile_id: str | None = None) -> dict:
         "shadow_preview": _compute_shadow_preview(profile_id),
         "evolution_cost_preview": _compute_evolution_cost_preview(profile_id),
         "outcome_queue": _compute_outcome_queue_stats(profile_id),
+        # ``bounded_loops`` — lazy-probed, TTL-cached installation status.
+        # ``section_enabled`` drives the UI panel on/off decision.
+        # Evidence tier: path-based (shutil.which); bridge capability not probed.
+        "bounded_loops": _ok(bounded_loops, {
+            "is_real": True,
+            "installed": False,
+            "section_enabled": False,
+            "source": "bounded_loops_probe unavailable",
+        }),
         "meta": _meta_now(),
     }
 

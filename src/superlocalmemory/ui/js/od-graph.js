@@ -91,9 +91,32 @@
             '<button id="odg-zout" aria-label="Zoom out">-</button>' +
             '<button id="odg-zfit" aria-label="Fit" title="Fit to view">&#10562;</button>' +
           '</div>' +
+          /* odg-panel-toggle: below 1100 px the graph-shell collapses to a single
+             column and the inspector / Ask-your-memory / Quick Insights stack below
+             the 60vh stage — out of view with nothing indicating they are there.
+             This button floats at centre-bottom of the stage overlay, tells the
+             user the panel exists, and scrolls it into view on click or Enter.
+             CSS hides it at >1100px where the panel is already beside the stage
+             in the two-column grid (a permanent toggle there is clutter). */
+          '<button id="odg-panel-toggle" ' +
+            'aria-label="Show inspector and Ask your memory panel">' +
+            'Details &amp; Chat &#x2193;' +
+          '</button>' +
         '</div>' +
       '</div>' +
-      '<aside class="inspector">' +
+      /* tabindex="-1" makes the inspector programmatically focusable so the
+         odg-panel-toggle onclick can re-anchor keyboard focus here after the
+         scroll, preventing the "focus is off-screen" accessibility gap.
+         tabindex="-1" is NOT a tab stop — it keeps the element out of the
+         natural tab order while allowing focus() from code only. */
+      '<aside class="inspector" tabindex="-1">' +
+        /* odg-back-btn: companion to #odg-panel-toggle. Visible only at ≤1100px
+           (same breakpoint). Appears at the very top of the stacked inspector so
+           keyboard users can return to the graph stage without tabbing through all
+           inspector content first. CSS hides it at >1100px. */
+        '<button class="odg-back-btn" aria-label="Back to graph canvas">' +
+          '&#x2191; Graph' +
+        '</button>' +
         '<div class="inspector-scroll" id="odg-insp">' +
           '<div class="inspector-empty"><div style="font-size:34px;margin-bottom:8px">&#9671;</div>' +
           'Loading your knowledge graph…</div>' +
@@ -583,6 +606,30 @@
     q('#odg-zfit').onclick = function () { fit(); redraw(); };
     q('#odg-send').onclick = sendAsk;
     q('#odg-ask').addEventListener('keydown', function (e) { if (e.key === 'Enter') sendAsk(); });
+
+    /* odg-panel-toggle / odg-back-btn — narrow-viewport affordances (≤1100px).
+       Both buttons are display:none at >1100px (CSS), so clicks can never fire
+       on a wide desktop. scrollIntoView does NOT call resize() and does NOT assign
+       cv.width — the canvas is never wiped, the render loop is undisturbed. */
+    var panelToggle = q('#odg-panel-toggle');
+    var inspector   = q('.inspector');
+    var backBtn     = q('.odg-back-btn');
+    if (panelToggle && inspector) {
+      panelToggle.onclick = function () {
+        inspector.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        /* Re-anchor keyboard focus to the inspector so users are not left with
+           focus on an off-screen button after the scroll animation completes. */
+        inspector.focus({ preventScroll: true });
+      };
+    }
+    if (backBtn) {
+      backBtn.onclick = function () {
+        var st = q('#odg-stage');
+        if (st) st.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        /* Return focus to the panel toggle so the user can re-invoke it. */
+        if (panelToggle) panelToggle.focus({ preventScroll: true });
+      };
+    }
 
     // Quick Insight Actions — delegated on mount so buttons survive od-graph.js re-renders.
     // quick-actions.js:fetchInsight() is global (non-IIFE); it writes into #insight-results

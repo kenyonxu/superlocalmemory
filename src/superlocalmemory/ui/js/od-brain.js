@@ -743,11 +743,26 @@
   // ======================================================================
   // Tab: CONNECTED CLIENTS
   // ======================================================================
-  function buildClients(living, configured) {
+  function fmtSecondsAgo(s) {
+    if (s == null) return 'unknown';
+    var n = Number(s);
+    if (n < 120) return n + 's ago';
+    if (n < 7200) return Math.round(n / 60) + 'm ago';
+    if (n < 172800) return Math.round(n / 3600) + 'h ago';
+    return Math.round(n / 86400) + 'd ago';
+  }
+
+  // buildClients accepts an optional third argument `boundedLoops` (brain.bounded_loops).
+  // Absent / undefined is safe: the BL section is silently omitted.
+  function buildClients(living, configured, boundedLoops) {
     var sec = EL('section', { className: 'tabpane', 'data-p': 'clients' });
-    var clients = ((living && living.connected_clients) || {}).clients || [];
+    var connectedData = (living && living.connected_clients) || {};
+    var clients = connectedData.clients || [];
+    var registryStatus = String(connectedData.registry_status || '');
+    var newestAgo = connectedData.newest_entry_seconds_ago;
     var configuredData = configured || {};
 
+    // ── Recent client activity ────────────────────────────────────────────
     // Activity is presence reported by host lifecycle hooks, not the old
     // tool-event proxy.  A configured adapter and a recent client are two
     // different truths, rendered as separate cards.
@@ -757,8 +772,36 @@
     evh.appendChild(EL('span', { className: 'sub', text: 'host lifecycle presence · last 5 minutes' }));
     evc.appendChild(evh);
     var evb = EL('div', { className: 'card-pad' });
-    if (clients.length === 0) {
-      evb.appendChild(EL('p', { className: 'muted', style: 'padding:16px;text-align:center',
+
+    if (registryStatus === 'error') {
+      // Wave 4 honesty rule: failure and emptiness must not return the same value.
+      evb.appendChild(EL('p', {
+        className: 'muted',
+        style: 'padding:16px;text-align:center;font-size:13px',
+        text: 'Presence registry unavailable. Check daemon logs for details.',
+      }));
+    } else if (registryStatus === 'stale') {
+      // TELEMETRY GAP — entries exist but all are > 10 min old.
+      // "No activity" here would be indistinguishable from "hooks not firing".
+      evb.appendChild(EL('p', {
+        className: 'muted',
+        style: 'padding:16px;text-align:center;font-size:13px',
+        text: 'Presence recording gap — last hook event was ' + fmtSecondsAgo(newestAgo) + '. ' +
+          'Hooks are installed but presence has not been written recently. ' +
+          'Recent activity from integrations cannot be confirmed.',
+      }));
+    } else if (registryStatus === 'absent' || registryStatus === 'empty') {
+      // No records at all — first run or hooks have not fired yet.
+      evb.appendChild(EL('p', {
+        className: 'muted',
+        style: 'padding:16px;text-align:center;font-size:13px',
+        text: 'No presence records found. Hook events may not have fired yet on this install.',
+      }));
+    } else if (clients.length === 0) {
+      // Registry is live (recent writes) but no clients in the 5-min window.
+      evb.appendChild(EL('p', {
+        className: 'muted',
+        style: 'padding:16px;text-align:center;font-size:13px',
         text: 'No host activity in the last 5 minutes. This does not mean an integration is uninstalled.',
       }));
     } else {
@@ -766,7 +809,7 @@
         var row = EL('div', { className: 'list-row' });
         row.appendChild(EL('b', { style: 'flex:1', text: String(client.kind || 'other') }));
         row.appendChild(EL('span', { className: 'muted',
-          text: 'active ' + Number(client.last_seen_seconds_ago || 0) + 's ago',
+          text: 'active ' + fmtSecondsAgo(client.last_seen_seconds_ago),
         }));
         evb.appendChild(row);
       });
@@ -774,8 +817,11 @@
     evc.appendChild(evb);
     sec.appendChild(evc);
 
-    // Configured integrations are installation/sync state, not client activity.
-    var tc = EL('div', { className: 'card' });
+    // ── Configured integrations ───────────────────────────────────────────
+    // Installation / sync state, not client activity.
+    // For Codex, evidence_tier='configured' means config-file evidence;
+    // badge reads 'configured' rather than 'available' to be explicit.
+    var tc = EL('div', { className: 'card', style: 'margin-bottom:16px' });
     var tch = EL('div', { className: 'card-head' });
     tch.appendChild(EL('h3', { text: 'Configured integrations' }));
     tch.appendChild(EL('span', { className: 'sub', text: 'installation and sync availability' }));
@@ -785,14 +831,50 @@
       var state = configuredData[kind] || {};
       var row = EL('div', { className: 'list-row' });
       row.appendChild(EL('span', { style: 'flex:1', text: kind.replace(/_/g, ' ') }));
-      row.appendChild(EL('span', {
+      var badgeText = state.active
+        ? (state.evidence_tier === 'configured' ? 'configured' : 'available')
+        : (state.reason || 'not available');
+      var badgeEl = EL('span', {
         className: 'badge ' + (state.active ? 'ok' : 'warn'),
-        text: state.active ? 'available' : (state.reason || 'not available'),
-      }));
+        text: badgeText,
+      });
+      if (state.evidence) badgeEl.setAttribute('title', String(state.evidence));
+      row.appendChild(badgeEl);
       tcb.appendChild(row);
     });
     tc.appendChild(tcb);
     sec.appendChild(tc);
+
+    // ── Bounded Loops ─────────────────────────────────────────────────────
+    // Section is on when bounded_loops.section_enabled === true.
+    // When absent (older API or not installed) the section is silently omitted.
+    var bl = boundedLoops || {};
+    if (bl.section_enabled) {
+      var blc = EL('div', { className: 'card' });
+      var blh = EL('div', { className: 'card-head' });
+      blh.appendChild(EL('h3', { text: 'Bounded Loops' }));
+      blh.appendChild(EL('span', {
+        className: 'sub',
+        text: 'local installation' + (bl.version ? ' · v' + bl.version : ''),
+      }));
+      blc.appendChild(blh);
+      var blb = EL('div', { className: 'card-pad', style: 'display:flex;flex-direction:column;gap:2px' });
+      [
+        ['Status', 'installed'],
+        ['Version', bl.version || 'unknown'],
+        ['Bridge contract', bl.bridge_contract || '—'],
+        ['Evidence', bl.evidence || bl.evidence_tier || '—'],
+        ['Note', bl.note || '—'],
+      ].forEach(function (r) {
+        var row = EL('div', { className: 'list-row' });
+        row.appendChild(EL('span', { className: 'muted', style: 'flex:1', text: r[0] }));
+        row.appendChild(EL('b', { text: String(r[1]) }));
+        blb.appendChild(row);
+      });
+      blc.appendChild(blb);
+      sec.appendChild(blc);
+    }
+
     return sec;
   }
 
@@ -968,7 +1050,7 @@
         buildOverview(learning, behavioral, dateMap, living),
         buildReward(behavioral),
         buildBehaviour(learning, behavioral),
-        buildClients(living, brain.cross_platform),
+        buildClients(living, brain.cross_platform, brain.bounded_loops),
         buildSourceQuality(learning, living)
       );
       wireTabs(container);
