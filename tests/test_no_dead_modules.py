@@ -118,8 +118,10 @@ _KNOWN_DEAD_PACKAGES: dict[str, str] = {
     # exactly the behaviour it was added for.
     "evaluation": "INTENTIONAL — calibration artifacts, documented as isolated "
                   "from production retrieval paths. Not a defect.",
-    "summaries": "seeded 4.0.6 — issue #113 generators shipped with no command, "
-                 "tool or endpoint. Surface lands in 4.0.7.",
+    # summaries: REMOVED in 4.0.7 — reachable via `slm summary`
+    # (cli/summary_cmd.py). Seeded one release earlier precisely because the
+    # generators shipped with no caller; the ratchet forced the entry out as soon
+    # as a real surface existed, which is what it is for.
 }
 
 #: Dynamically loaded, invisible to a static scan.
