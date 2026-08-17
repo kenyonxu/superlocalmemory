@@ -1764,6 +1764,114 @@ async def patterns_deprecated(
     }
 
 
+@router.get("/bounded-loops/evidence",
+            dependencies=[Depends(require_install_token)])
+async def bounded_loops_evidence(
+    request: Request, profile_id: str | None = None, limit: int = 20,
+) -> dict:
+    """Terminal Bounded Loops runs this profile has observed.
+
+    Bounded Loops is a SEPARATE PRODUCT. SLM is one optional consumer of a
+    document any MCP client can request over the published contract
+    ``bounded-loops.dev/slm-bridge/v1``; neither product depends on the other,
+    and installing either alone is complete.
+
+    What travels is deliberately narrow, and the pane must not imply otherwise:
+
+    * **Observation, not authorization.** ``eligible_for_learning`` is a hard
+      field in the contract and is always ``False`` in v1. A SUCCEEDED run is
+      not permission to retrain, re-rank or route on it. Nothing in SLM treats
+      it as such, and this endpoint returns the flag so the UI can say so.
+    * **Digests, not paths.** ``workspace_id`` is a hash precisely so a client's
+      directory name never reaches a memory system. Gate reasons, artifact
+      contents, commands and environment values are excluded at the source.
+    * **``local_hash_chain_only``.** The receipt log is an append-only hash
+      chain on local disk: tampering is detectable by anyone holding an earlier
+      head. That is NOT authentication, notarization or independent audit, and
+      calling it "verified" would claim a guarantee no part of the system
+      provides.
+    * **``demonstration``** separates real execution from a scripted replay. A
+      demo run proves the wiring works and proves nothing about the work.
+
+    Read-only, off the hot path, and empty is a normal answer — most installs
+    have no Bounded Loops at all.
+    """
+    profile_id = _authorized_profile(request, profile_id)
+    limit = max(1, min(int(limit or 20), 100))
+
+    out: dict[str, Any] = {
+        "contract": "bounded-loops.dev/slm-bridge/v1",
+        "control_plane": "observation_only",
+        "runs": [],
+        "total": 0,
+        "demonstration_count": 0,
+        "installed": None,
+    }
+
+    try:
+        out["installed"] = bool(_compute_bounded_loops().get("installed"))
+    except Exception:  # pragma: no cover — presence probe must never 500
+        out["installed"] = None
+
+    db_path = _learning_db_path()
+    if not db_path.exists():
+        return out
+
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT run_id, run_ref, outcome, run_state, demonstration,"
+                " eligible_for_learning, terminal_at, observed_at,"
+                " receipt_sequence, receipt_trust, workspace_id, contract_id"
+                " FROM external_evidence_receipts WHERE profile_id=?"
+                " ORDER BY observed_at DESC LIMIT ?",
+                (profile_id, limit),
+            ).fetchall()
+            total = conn.execute(
+                "SELECT COUNT(*) AS n FROM external_evidence_receipts"
+                " WHERE profile_id=?", (profile_id,),
+            ).fetchone()["n"]
+            demos = conn.execute(
+                "SELECT COUNT(*) AS n FROM external_evidence_receipts"
+                " WHERE profile_id=? AND demonstration=1", (profile_id,),
+            ).fetchone()["n"]
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        # The table only exists once the bridge has been used. Absent is a
+        # normal state, not an error, and must not surface as a failed pane.
+        logger.debug("bounded-loops evidence unavailable: %s", exc)
+        return out
+
+    out["total"] = total
+    out["demonstration_count"] = demos
+    out["runs"] = [
+        {
+            "run_id": r["run_id"],
+            "run_ref": r["run_ref"],
+            "outcome": r["outcome"],
+            # Both, because the mapping to three buckets loses information: a
+            # HALTED run (budget/policy stop) and a FAILED run (work the gate
+            # rejected) are different events.
+            "run_state": r["run_state"],
+            "demonstration": bool(r["demonstration"]),
+            "eligible_for_learning": bool(r["eligible_for_learning"]),
+            "terminal_at": r["terminal_at"],
+            "observed_at": r["observed_at"],
+            "receipt_sequence": r["receipt_sequence"],
+            "trust": r["receipt_trust"],
+            "workspace_id": r["workspace_id"],
+            "contract": r["contract_id"],
+        }
+        for r in rows
+    ]
+    return out
+
+
 @router.get("/behavioral",
             dependencies=[Depends(require_install_token)])
 async def behavioral_deprecated(

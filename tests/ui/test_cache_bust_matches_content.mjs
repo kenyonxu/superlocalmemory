@@ -47,7 +47,7 @@ const UI = join(__dirname, '../../src/superlocalmemory/ui');
 //: Files whose cache-bust param is content-derived. Add a file here once its
 //: `?v=` is switched from a hand-picked number to a content hash.
 const HASHED = ['od-brain.js', 'od-graph.js', 'fact-detail.js', 'od-memories.js',
-                'od-optimize.js', 'od-mesh.js'];
+                'od-optimize.js', 'od-mesh.js', 'od-boundedloops.js'];
 
 describe('cache-bust params match file content', function () {
   const html = readFileSync(join(UI, 'index.html'), 'utf8');
