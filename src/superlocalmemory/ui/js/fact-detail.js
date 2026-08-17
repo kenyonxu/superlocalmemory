@@ -72,6 +72,67 @@ document.addEventListener('click', function(e) {
                 body.appendChild(ent);
             }
 
+            // Code this memory refers to (4.0.7). Absent for anyone without a
+            // built code graph — the API returns [] rather than an error, so no
+            // section appears and nothing looks broken.
+            //
+            // textContent throughout, never innerHTML: every string here is a
+            // qualified name or file path read out of the indexed repository, so
+            // it is untrusted input as far as this panel is concerned.
+            if (data.code_links && data.code_links.length > 0) {
+                var codeWrap = document.createElement('div');
+                codeWrap.className = 'mt-2';
+
+                var codeLabel = document.createElement('strong');
+                codeLabel.textContent = 'Code referenced:';
+                codeWrap.appendChild(codeLabel);
+
+                var list = document.createElement('ul');
+                list.className = 'mb-0 ps-3';
+                list.style.listStyle = 'none';
+
+                data.code_links.forEach(function (link) {
+                    var li = document.createElement('li');
+                    li.className = 'mt-1';
+
+                    var nameEl = document.createElement('code');
+                    nameEl.textContent = link.qualified_name || link.name || '?';
+                    li.appendChild(nameEl);
+
+                    if (link.kind) {
+                        var kind = document.createElement('span');
+                        kind.className = 'text-muted';
+                        kind.style.fontSize = '0.75rem';
+                        kind.textContent = ' ' + link.kind;
+                        li.appendChild(kind);
+                    }
+
+                    // A stale link points at code that has moved or gone. Saying
+                    // so is the whole value of tracking staleness — silently
+                    // showing it as current would be worse than not showing it.
+                    if (link.is_stale) {
+                        var stale = document.createElement('span');
+                        stale.className = 'badge bg-warning text-dark ms-1';
+                        stale.style.fontSize = '0.65rem';
+                        stale.textContent = 'code changed';
+                        li.appendChild(stale);
+                    }
+
+                    if (link.file_path) {
+                        var loc = document.createElement('div');
+                        loc.className = 'text-muted';
+                        loc.style.fontSize = '0.7rem';
+                        loc.textContent = link.file_path;
+                        li.appendChild(loc);
+                    }
+
+                    list.appendChild(li);
+                });
+
+                codeWrap.appendChild(list);
+                body.appendChild(codeWrap);
+            }
+
             panel.appendChild(body);
             item.appendChild(panel);
         })

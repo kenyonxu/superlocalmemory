@@ -156,9 +156,15 @@ def tools_with_graph(db: CodeGraphDatabase, tools: dict) -> tuple[dict, dict]:
 
     ids = _insert_test_graph(db)
 
-    # Set up the service singleton to point to our test DB
+    # Set up the service singleton to point to our test DB.
+    # bridge_enabled is explicit: the bridge tools (code_stale_check,
+    # link_memory_to_code) answer entirely from code_memory_links, so as of
+    # 4.0.7 they refuse when the bridge is off rather than returning an empty
+    # result that reads as "nothing is stale". These fixtures exercise those
+    # tools, so they must represent a user who has the feature on.
     config = CodeGraphConfig(
         enabled=True,
+        bridge_enabled=True,
         db_path=db.db_path,
     )
     svc = CodeGraphService(config)

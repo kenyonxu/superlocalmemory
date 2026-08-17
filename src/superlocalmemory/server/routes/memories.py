@@ -1061,11 +1061,72 @@ async def get_fact_detail(request: Request, fact_id: str):
             )
         except Exception:
             row["canonical_entities"] = []
+        row["code_links"] = _code_links_for_fact(fact_id)
         return row
     except HTTPException:
         raise
     except Exception:
         raise _internal_error("Fact detail error")
+
+
+def _code_links_for_fact(fact_id: str) -> list[dict]:
+    """Code entities this fact mentions, from the code graph.
+
+    Fail-open by design: this is a display extra on a detail popup. No code graph
+    built, bridge switched off, or database missing all mean "no section shown",
+    never an error on the fact itself. A user who has never touched the code
+    graph must not see a failure because of a feature they do not use.
+
+    Reads code_graph.db, which is a separate database from memory.db and is never
+    opened by the recall path — so nothing here can affect recall.
+    """
+    try:
+        from superlocalmemory.code_graph.config import CodeGraphConfig
+
+        cfg = CodeGraphConfig.load()
+        if not (cfg.enabled and cfg.bridge_enabled):
+            return []
+        db_path = cfg.get_db_path()
+        if not db_path.exists():
+            return []
+
+        import sqlite3
+
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            conn.row_factory = dict_factory
+            rows = conn.execute(
+                "SELECT cml.link_type, cml.confidence, cml.is_stale, "
+                "       cml.enriched_description, "
+                "       gn.name, gn.qualified_name, gn.kind, gn.file_path "
+                "FROM code_memory_links cml "
+                "LEFT JOIN graph_nodes gn ON gn.node_id = cml.code_node_id "
+                "WHERE cml.slm_fact_id = ? "
+                "ORDER BY cml.confidence DESC, gn.qualified_name",
+                (fact_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        return [
+            {
+                "name": r.get("name") or "",
+                "qualified_name": r.get("qualified_name") or "",
+                "kind": r.get("kind") or "",
+                "file_path": r.get("file_path") or "",
+                "link_type": r.get("link_type") or "mentions",
+                "confidence": r.get("confidence"),
+                "is_stale": bool(r.get("is_stale")),
+                "description": r.get("enriched_description") or "",
+            }
+            for r in rows
+            # A link whose node is gone (LEFT JOIN produced no row) is a stale
+            # pointer, not something to render as a blank entry.
+            if r.get("qualified_name")
+        ]
+    except Exception:
+        logger.debug("code links unavailable for %s", fact_id, exc_info=True)
+        return []
 
 
 @router.delete("/api/memories/{fact_id}")

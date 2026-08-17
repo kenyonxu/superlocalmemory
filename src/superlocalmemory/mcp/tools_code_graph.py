@@ -75,11 +75,36 @@ def _graph_not_built_error() -> dict[str, Any]:
     }
 
 
+def _bridge_is_enabled() -> bool:
+    """Whether the code↔memory bridge is switched on in the saved settings."""
+    try:
+        cfg = _get_service()
+        if cfg is not None and getattr(cfg.config, "bridge_enabled", False):
+            return True
+        # No live service yet (e.g. a tool called before any build): read the
+        # saved settings directly rather than reporting "off" by default.
+        from superlocalmemory.code_graph.config import CodeGraphConfig
+        return bool(CodeGraphConfig.load().bridge_enabled)
+    except Exception:
+        return False
+
+
 def _bridge_not_enabled_error() -> dict[str, Any]:
-    """Standard error when bridge is not enabled."""
+    """Standard error when the code↔memory bridge is not enabled.
+
+    The remediation text used to name ``code_graph.bridge.enabled``, which is not
+    a key that exists anywhere. The real field is ``bridge_enabled`` in
+    ``code_graph_config.json``, so anyone who followed this message edited
+    nothing that mattered. This helper was also never called from any tool, so
+    the message could not appear even when it was correct.
+    """
     return {
         "success": False,
-        "error": "Bridge not enabled. Set code_graph.bridge.enabled = true in config.",
+        "error": (
+            'Code↔memory bridge not enabled. Set "bridge_enabled": true in '
+            "~/.superlocalmemory/code_graph_config.json, then run "
+            "build_code_graph. Links are created during background maintenance."
+        ),
     }
 
 
@@ -167,7 +192,13 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                     p.strip() for p in exclude_patterns.split(",") if p.strip()
                 )
 
-            config = CodeGraphConfig(**config_kwargs)
+            # Start from the user's saved settings, then apply this call's
+            # arguments. Previously this constructed CodeGraphConfig(**kwargs)
+            # from scratch, so every field the caller did not name reverted to a
+            # class default — including bridge_enabled, which the setup wizard
+            # writes to code_graph_config.json. A user who enabled the code graph
+            # during setup therefore had the flag on disk and off in every build.
+            config = CodeGraphConfig.load(**config_kwargs)
             global _service
             _service = CodeGraphService(config)
 
@@ -727,6 +758,11 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                 "total_edges": stats.get("edges", 0),
                 "total_code_memory_links": total_links,
                 "stale_links": stale_links,
+                # Without this, total_code_memory_links == 0 is ambiguous: it
+                # means either "no memory mentions your code" or "the feature
+                # that creates links is switched off". Those call for opposite
+                # actions, so the reader has to be told which one it is.
+                "bridge_enabled": _bridge_is_enabled(),
                 "built": stats.get("built", False),
                 "db_path": stats.get("db_path", ""),
             }
@@ -1513,6 +1549,14 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
             err = _check_graph_exists()
             if err is not None:
                 return err
+
+            # Every answer this tool can give comes from code_memory_links, and
+            # only the bridge populates that table. With the bridge off the query
+            # returns an empty list, which reads as "nothing is stale" — the
+            # strongest possible reassurance, produced by a feature that never
+            # ran. Say so instead.
+            if not _bridge_is_enabled():
+                return _bridge_not_enabled_error()
 
             db = _get_db()
 
