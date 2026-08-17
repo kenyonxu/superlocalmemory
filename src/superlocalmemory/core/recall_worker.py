@@ -238,18 +238,39 @@ def _handle_update_memory(
     content: str,
     source_agent_id: str = "system",
 ) -> dict:
-    """Update a fact after capability-derived authorization."""
-    engine = _get_engine()
-    from superlocalmemory.core.engine_ingestion import local_trusted_actor_id
-    from superlocalmemory.core.mutations import update_fact_authorized
+    """Update a fact after capability-derived authorization.
 
-    return update_fact_authorized(
-        engine,
-        fact_id,
-        content,
-        trusted_actor_id=local_trusted_actor_id("recall-worker"),
-        source_agent_id=source_agent_id,
-    )
+    CORRECTIONS CANNOT BE PERFORMED FROM THIS WORKER, AND THAT IS BY DESIGN.
+
+    Since corrections became a review-gated lifecycle (M042) rather than an
+    in-place edit, update_fact_authorized() requires a canonical correction
+    writer. That writer is the daemon's single-writer mutation boundary
+    (CanonicalRememberRuntime, owned by unified_daemon and handed to the HTTP
+    route). A worker subprocess cannot own it: CanonicalRememberRuntime.ready
+    requires a live worker of its own, so constructing one here would nest
+    worker processes and hand a second writer the ownership context that is
+    supposed to be exclusive.
+
+    Previously this called through anyway, and mutations.py answered
+    "canonical correction writer is temporarily unavailable" with
+    retryable=True. Nothing about it was temporary — with the daemon down that
+    path can NEVER succeed, so a caller could retry forever. This is the
+    honest, non-retryable answer with the actual remedy: the daemon-backed
+    route (used automatically whenever the daemon is running) does support
+    corrections.
+    """
+    return {
+        "ok": False,
+        "retryable": False,
+        "error": (
+            "Corrections are review-gated and require the SuperLocalMemory "
+            "daemon, which owns the single correction writer. Start it with "
+            "`slm serve start` and retry — updates route through the daemon "
+            "automatically when it is running."
+        ),
+        "remedy": "slm serve start",
+        "fact_id": fact_id,
+    }
 
 
 def _handle_summarize(texts: list[str], mode: str) -> dict:

@@ -28,6 +28,19 @@ def _engine() -> MagicMock:
         # probe returns empty so a delete verifies as "nothing remains".
         if text.startswith("select content") and "from atomic_facts" in text:
             return [{"content": "old content", "memory_id": None}]
+        # The review-gated correction ledger (M042) must look PRESENT.
+        # mutations.py::_correction_ledger_available probes sqlite_master for
+        # the correction_cases table and update_memory fails CLOSED when it is
+        # missing — correct product behaviour, and the reason this test began
+        # failing once corrections became a review-gated lifecycle rather than
+        # an in-place edit. Returning [] here modelled a database that had never
+        # been migrated, which no real install is in. This test is about WHICH
+        # ACTOR a destructive write is attributed to, not about ledger
+        # availability, so the fixture must let it reach the identity
+        # assertions. Ledger-absent behaviour is covered separately by the
+        # compliance suite.
+        if "sqlite_master" in text and "correction_cases" in text:
+            return [{"1": 1}]
         return []
 
     engine._db.execute.side_effect = _execute
@@ -63,15 +76,27 @@ def test_delete_uses_capability_actor_and_treats_agent_label_as_metadata(
     engine._db.delete_fact.assert_called_once_with("fact-1", profile_id="default")
 
 
-def test_update_uses_capability_actor_and_runs_write_authorization(
+def test_update_from_worker_refuses_non_retryably_with_a_remedy(
     monkeypatch,
 ) -> None:
+    """Corrections are daemon-only, and the worker must say so honestly.
+
+    Rewritten in 4.0.6. This test previously asserted ok is True, which stopped
+    being achievable once corrections became a review-gated lifecycle (M042):
+    update_fact_authorized needs the canonical correction writer, and that
+    writer is the daemon's single-writer boundary. A worker subprocess cannot
+    own it — CanonicalRememberRuntime.ready requires a live worker of its own,
+    so building one here would nest workers and duplicate an ownership context
+    that must stay exclusive.
+
+    The old code called through regardless and surfaced
+    "canonical correction writer is temporarily unavailable" with
+    retryable=True, so a caller with the daemon down would retry an operation
+    that can never succeed. What this test now pins is the honest contract:
+    refuse, say it is not retryable, and name the remedy.
+    """
     engine = _engine()
     monkeypatch.setattr(recall_worker, "_get_engine", lambda: engine)
-    monkeypatch.setattr(
-        "superlocalmemory.core.engine_ingestion.local_trusted_actor_id",
-        lambda kind: f"trusted:{kind}",
-    )
 
     result = recall_worker._handle_update_memory(
         "fact-1",
@@ -79,23 +104,13 @@ def test_update_uses_capability_actor_and_runs_write_authorization(
         source_agent_id="caller-selected-admin",
     )
 
-    assert result["ok"] is True
-    engine._hooks.run_pre.assert_called_once_with(
-        "update",
-        {
-            "operation": "update",
-            "agent_id": "trusted:recall-worker",
-            "source_agent_id": "caller-selected-admin",
-            "profile_id": "default",
-            "fact_id": "fact-1",
-            "content_preview": "new content",
-        },
-    )
-    engine._db.update_fact.assert_called_once_with(
-        "fact-1",
-        {"content": "new content"},
-        profile_id="default",
-    )
+    assert result["ok"] is False
+    # Non-retryable is the whole point: retrying without a daemon cannot work.
+    assert result["retryable"] is False
+    assert "slm serve start" in result["remedy"]
+    assert "daemon" in result["error"].lower()
+    # And it must NOT claim to be a transient condition.
+    assert "temporarily unavailable" not in result["error"].lower()
 
 
 def test_store_uses_capability_actor_before_canonical_persistence(
