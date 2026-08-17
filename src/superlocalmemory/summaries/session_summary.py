@@ -37,6 +37,7 @@ from datetime import date, timezone
 from pathlib import Path
 
 from .base import (
+    format_highlight,
     COVERAGE_FULL,
     COVERAGE_INSUFFICIENT,
     COVERAGE_NO_SESSION,
@@ -209,8 +210,7 @@ def _build_extractive_content(
     ]
     for f in facts[:_BODY_FACTS]:
         content = f.get("content", "")
-        if len(content) > _MAX_FACT_CHARS:
-            content = content[:_MAX_FACT_CHARS - 3] + "..."
+        content = format_highlight(content)
         lines.append(f"  - {content}")
     if fact_count > _BODY_FACTS:
         lines.append(f"  ... and {fact_count - _BODY_FACTS} more facts.")

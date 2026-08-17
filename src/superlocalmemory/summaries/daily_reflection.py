@@ -34,6 +34,7 @@ from datetime import date
 from pathlib import Path
 
 from .base import (
+    format_highlight,
     COVERAGE_FULL,
     COVERAGE_INSUFFICIENT,
     COVERAGE_UNAVAILABLE,
@@ -128,7 +129,7 @@ def generate_daily_reflection(
         coverage = COVERAGE_FULL
 
     # ── extractive summary (deterministic, always available) ──────────────────
-    extractive_content = _build_extractive_content(date_str, facts, fact_count)
+    extractive_content = _build_extractive_content(date_str, facts, fact_count, db_path, profile_id)
 
     # ── LLM enrichment (optional) ─────────────────────────────────────────────
     mode = get_mode_str(config)
@@ -162,8 +163,14 @@ def _build_extractive_content(
     date_str: str,
     facts: list[dict],
     fact_count: int,
+    db_path: str | Path,
+    profile_id: str,
 ) -> str:
-    """Build a deterministic extractive daily reflection."""
+    """Build a deterministic extractive daily reflection.
+
+    ``db_path`` / ``profile_id`` are needed only to turn entity IDs into names
+    for the "Active entities" line — the facts themselves are already loaded.
+    """
     import json
 
     lines = [
@@ -174,8 +181,7 @@ def _build_extractive_content(
     ]
     for f in facts[:_BODY_FACTS]:
         content = f.get("content", "")
-        if len(content) > _MAX_FACT_CHARS:
-            content = content[:_MAX_FACT_CHARS - 3] + "..."
+        content = format_highlight(content)
         lines.append(f"  - {content}")
     if fact_count > _BODY_FACTS:
         lines.append(f"  ... and {fact_count - _BODY_FACTS} additional facts.")
@@ -193,11 +199,48 @@ def _build_extractive_content(
 
     if entity_counts:
         top_entities = sorted(entity_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-        entity_str = ", ".join(f"{e} ({c})" for e, c in top_entities)
+        # Resolve to names. canonical_entities_json stores entity IDs, so this
+        # line previously read "Active entities: 1666abc512904473 (127),
+        # 84288f2dde994afe (124)" — five 16-hex identifiers, which tell a reader
+        # nothing. They resolve to 'Fixed', 'Gateway', 'REVISED' and so on. This
+        # is the same defect 4.0.6 fixed in the Living Brain, where source
+        # quality listed internal identifiers; it survived here because this
+        # generator was never reachable to be looked at.
+        names = _entity_names(db_path, [e for e, _ in top_entities], profile_id)
+        labelled = [
+            (names.get(eid) or eid, count) for eid, count in top_entities
+        ]
+        entity_str = ", ".join(f"{name} ({c})" for name, c in labelled)
         lines.append("")
         lines.append(f"Active entities: {entity_str}")
 
     return "\n".join(lines)
+
+
+def _entity_names(
+    db_path: str | Path, entity_ids: list[str], profile_id: str
+) -> dict[str, str]:
+    """Map entity_id → canonical_name. Missing or unreadable rows are omitted.
+
+    Fail-open: a summary is still useful with a raw id in it, so a query problem
+    must not lose the whole line. The caller falls back to the id per entity.
+    """
+    if not entity_ids:
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            placeholders = ",".join("?" for _ in entity_ids)
+            rows = conn.execute(
+                f"SELECT entity_id, canonical_name FROM canonical_entities "
+                f"WHERE entity_id IN ({placeholders}) AND profile_id = ?",
+                (*entity_ids, profile_id),
+            ).fetchall()
+        finally:
+            conn.close()
+        return {r[0]: r[1] for r in rows if r[1]}
+    except sqlite3.Error:
+        return {}
 
 
 def _try_llm(

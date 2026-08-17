@@ -86,6 +86,25 @@ def _active_profile() -> str:
     return "default"
 
 
+def _load_config() -> Any:
+    """The active SLMConfig, so Mode B/C get LLM-written summaries.
+
+    Without this the generators receive ``config=None``, ``get_mode_str`` returns
+    ``"a"``, and the LLM branch is unreachable — every summary comes out
+    extractive no matter which mode the user runs. That is not a graceful
+    fallback, it is the enrichment path never being offered.
+
+    Returns None on any failure, which lands on the extractive path. That is the
+    right fallback: a deterministic summary beats an error.
+    """
+    try:
+        from superlocalmemory.core.config import SLMConfig
+
+        return SLMConfig.load()
+    except Exception:
+        return None
+
+
 def _emit(result: Any, as_json: bool) -> None:
     """Print a SummaryResult as JSON or as prose."""
     if as_json:
@@ -123,6 +142,7 @@ def cmd_summary(args: Namespace) -> None:
     as_json = bool(getattr(args, "json", False))
     profile = getattr(args, "profile", None) or _active_profile()
     db = _db_path()
+    cfg = _load_config()   # Mode B/C enrichment; None -> extractive
 
     if not db.exists():
         print(f"No memory database at {db}. Run `slm status` first.")
@@ -131,7 +151,7 @@ def cmd_summary(args: Namespace) -> None:
     if sub == "session":
         from superlocalmemory.summaries import generate_session_summary
 
-        _emit(generate_session_summary(db, args.session_id, profile), as_json)
+        _emit(generate_session_summary(db, args.session_id, profile, cfg), as_json)
         return
 
     if sub == "day":
@@ -142,14 +162,14 @@ def cmd_summary(args: Namespace) -> None:
             target = (date.today() - timedelta(days=1)).isoformat()
         elif target == "today":
             target = date.today().isoformat()
-        _emit(generate_daily_reflection(db, target, profile), as_json)
+        _emit(generate_daily_reflection(db, target, profile, cfg), as_json)
         return
 
     if sub == "project":
         from superlocalmemory.summaries import generate_project_work_log
 
         path = getattr(args, "path", None) or str(Path.cwd())
-        _emit(generate_project_work_log(db, path, profile), as_json)
+        _emit(generate_project_work_log(db, path, profile, cfg), as_json)
         return
 
     print("Usage: slm summary {session <id> | day [DATE] | project [PATH]}")

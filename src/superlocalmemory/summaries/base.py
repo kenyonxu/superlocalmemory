@@ -98,6 +98,65 @@ GENERATED_BY_LLM_C = "llm_c"
 """Cloud LLM (Mode C).  Falls back via llm_b to extractive."""
 
 
+# ── highlight formatting ────────────────────────────────────────────────────
+
+#: Display width for one bullet in a summary body.
+#:
+#: Chosen for a bullet, not for a paragraph. The generators originally truncated
+#: at 300 characters and nothing else, which looks fine on a synthetic corpus of
+#: one-line facts and falls apart on a real store: agent-written facts routinely
+#: contain blank lines and markdown headings, so a 300-character slice rendered
+#: as six or more display lines and the bullet list stopped being a list.
+HIGHLIGHT_CHARS = 180
+
+
+def format_highlight(content: str, limit: int = HIGHLIGHT_CHARS) -> str:
+    """Collapse *content* to a single readable line for a summary bullet.
+
+    Three things, in order:
+
+    1. **Flatten whitespace.** Newlines, blank lines and runs of spaces all
+       become one space. This is the fix that matters: character truncation
+       alone cannot keep a multi-paragraph fact on one line, and every
+       generator here writes into a bullet list.
+    2. **Prefer a whole first sentence** when there is one and it fits. A
+       complete sentence reads better than a slice of one, and the first
+       sentence of a report is usually its summary.
+    3. **Otherwise cut at a word boundary** and mark the cut with an ellipsis,
+       so it is visible that text was dropped rather than that a fact ended
+       mid-word.
+
+    Markdown heading markers are stripped because a flattened ``**Summary**``
+    mid-sentence reads as noise.
+    """
+    import re
+
+    text = re.sub(r"\s+", " ", (content or "")).strip()
+    # Leading/inline markdown emphasis and heading marks, once flattened, add
+    # nothing but clutter to a one-line bullet.
+    text = re.sub(r"(?:^|\s)#{1,6}\s+", " ", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+
+    # A complete first sentence, if it fits comfortably.
+    match = re.match(r"(.+?[.!?])(?:\s|$)", text)
+    if match:
+        sentence = match.group(1).strip()
+        if len(sentence) <= limit:
+            return sentence
+
+    cut = text[:limit]
+    space = cut.rfind(" ")
+    if space > limit * 0.6:          # don't cut a long unbroken token to a stub
+        cut = cut[:space]
+    return cut.rstrip(" ,;:—-") + "…"
+
+
 def get_mode_str(config: object | None) -> str:
     """Extract the operating mode string ('a', 'b', or 'c') from a config."""
     if config is None:

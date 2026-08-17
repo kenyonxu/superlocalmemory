@@ -39,6 +39,7 @@ from collections import Counter
 from pathlib import Path
 
 from .base import (
+    format_highlight,
     COVERAGE_FULL,
     COVERAGE_INSUFFICIENT,
     COVERAGE_UNAVAILABLE,
@@ -302,8 +303,7 @@ def _build_extractive_content(
         lines.append("Key facts from project sessions:")
         for f in facts_rows[:_TOP_FACTS]:
             content = f.get("content", "")
-            if len(content) > _MAX_FACT_CHARS:
-                content = content[:_MAX_FACT_CHARS - 3] + "..."
+            content = format_highlight(content)
             lines.append(f"  - {content}")
         if fact_count > _TOP_FACTS:
             lines.append(f"  ... and {fact_count - _TOP_FACTS} more facts.")
