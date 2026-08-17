@@ -453,6 +453,112 @@ class RbacEngine:
     def set_require_login(self, enabled: bool) -> None:
         self.set_policy("require_login", "1" if enabled else "0")
 
+    # -- correction review policy -----------------------------------------
+
+    # Key prefix used in rbac_settings.  One entry per profile_id.
+    _CORRECTION_POLICY_PREFIX = "correction_review_policy:"
+
+    def set_correction_review_policy(
+        self,
+        profile_id: str,
+        policy: dict,
+        *,
+        authorizer_user_id: str,
+    ) -> dict:
+        """Attach a correction-case review policy for ``profile_id``.
+
+        Authorization rules
+        -------------------
+        * PERSONAL install (no users yet / user_count == 0): the machine
+          owner is the implicit admin and may attach a policy without a
+          role check.  This matches the additive / self-hosting-correct
+          principle in the RBAC design.
+        * TEAM / ENTERPRISE install (user_count > 0): the authorizer MUST
+          hold Role.ADMIN for the target profile.  Any other role raises
+          RbacError.  This prevents a MEMBER or VIEWER from escalating their
+          own correction authority.
+
+        Governance invariants (CRIT-hardened)
+        --------------------------------------
+        C1  Non-admins cannot attach a policy (role check above).
+        C2  ``automatic_application`` is never silently promoted to True.
+            The field defaults to False; an authorizer must set it
+            explicitly, and it is recorded with the authorizer's user_id and
+            a timestamp so the action is auditable.
+        C3  Personal installs do NOT auto-create a policy.  The machine
+            owner must call this method explicitly.  Until they do,
+            ``get_correction_review_policy`` returns None and BrainTruth
+            reports the policy as not_configured.
+
+        Returns the stored policy dict.
+        """
+        import json as _json
+
+        if not profile_id:
+            raise RbacError("profile_id must be non-empty.")
+        if not authorizer_user_id:
+            raise RbacError("authorizer_user_id must be non-empty.")
+
+        # CRIT-C1: enforce admin role in multi-user (team/enterprise) mode.
+        # In personal mode (zero registered users) the machine owner is the
+        # implicit admin — deny-by-default still applies to defined users.
+        user_count = self.user_count()
+        if user_count > 0:
+            role = self.get_role(authorizer_user_id, profile_id)
+            if role != Role.ADMIN:
+                raise RbacError(
+                    f"Attaching a correction review policy requires Role.ADMIN. "
+                    f"User '{authorizer_user_id}' has role={role!r} on "
+                    f"profile '{profile_id}'."
+                )
+
+        # CRIT-C2: automatic_application is never silently set to True.
+        # The authorizer must explicitly include it in the policy dict;
+        # it is still coerced to bool so a truthy non-bool value doesn't slip through.
+        auto_apply = bool(policy.get("automatic_application", False))
+
+        safe_policy = {
+            "policy_id": str(policy.get("policy_id") or _uid()),
+            "authorized_by": authorizer_user_id,
+            "authorized_at": _now(),
+            "automatic_application": auto_apply,
+            "enabled": bool(policy.get("enabled", True)),
+            "applies_to_profile": str(policy.get("applies_to_profile", profile_id)),
+        }
+        key = f"{self._CORRECTION_POLICY_PREFIX}{profile_id}"
+        self.set_policy(key, _json.dumps(safe_policy))
+        logger.info(
+            "RBAC: correction review policy attached for profile '%s' by '%s' "
+            "(automatic_application=%s)",
+            profile_id, authorizer_user_id, auto_apply,
+        )
+        return safe_policy
+
+    def get_correction_review_policy(self, profile_id: str) -> dict | None:
+        """Return the attached correction review policy for ``profile_id``.
+
+        Returns None when no policy has been attached.  The caller (host
+        integration) should pass this to
+        ``BrainTruthService(review_policy=...)``.
+
+        This method is safe to call in personal mode (no users configured).
+        """
+        import json as _json
+
+        key = f"{self._CORRECTION_POLICY_PREFIX}{profile_id}"
+        raw = self.get_policy(key)
+        if not raw:
+            return None
+        try:
+            return _json.loads(raw)
+        except (ValueError, TypeError):
+            logger.warning(
+                "RBAC: malformed correction review policy for profile '%s' — "
+                "returning None (treat as not_configured)",
+                profile_id,
+            )
+            return None
+
     # -- authorization ----------------------------------------------------
 
     def has_permission(self, user_id: str, profile_id: str,

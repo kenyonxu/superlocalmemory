@@ -27,11 +27,28 @@ class BrainTruthService:
     ``memory.db`` and ``learning.db`` are intentionally passed separately.
     This service never uses ``ATTACH``, starts no transaction, and must not be
     used for recall, ranking, routing, correction application, or learning.
+
+    ``review_policy`` is supplied by the host/operator after fetching it from
+    the RBAC store (``RbacEngine.get_correction_review_policy``).  When no
+    policy has been attached, pass ``None`` (the default) — the snapshot will
+    report the policy as not_configured, which is the correct default for a
+    neutral read model.  The read model cannot manufacture authorization on its
+    own, so it never self-discovers or auto-creates a policy.
     """
 
-    def __init__(self, *, memory_db_path: str | Path, learning_db_path: str | Path) -> None:
+    def __init__(
+        self,
+        *,
+        memory_db_path: str | Path,
+        learning_db_path: str | Path,
+        review_policy: dict | None = None,
+    ) -> None:
         self._memory_db_path = Path(memory_db_path)
         self._learning_db_path = Path(learning_db_path)
+        # Attached by the host after admin authorization. None = not_configured.
+        # automatic_application MUST remain False unless explicitly set in the
+        # policy by a human authorizer — this read model never overrides that.
+        self._review_policy: dict | None = review_policy
 
     def snapshot(self, profile_id: str) -> dict[str, Any]:
         """Return the stable BrainTruth v1 payload for ``profile_id``.
@@ -68,7 +85,9 @@ class BrainTruthService:
         try:
             return {
                 "memory_activity": _memory_activity(conn, profile_id),
-                "correction_quality": _correction_quality(conn, profile_id),
+                "correction_quality": _correction_quality(
+                    conn, profile_id, self._review_policy
+                ),
             }
         finally:
             conn.close()
@@ -243,7 +262,47 @@ def _external_evidence(conn: sqlite3.Connection, profile_id: str) -> dict[str, A
     }
 
 
-def _correction_quality(conn: sqlite3.Connection, profile_id: str) -> dict[str, Any]:
+def _make_review_policy_report(attached_policy: dict | None) -> dict[str, Any]:
+    """Return an honest review_policy block for a BrainTruth v1 snapshot.
+
+    When no policy has been attached by a host/operator the state is reported
+    as not_configured with automatic_application locked to False.  This is the
+    correct neutral default — the read model cannot manufacture authorization.
+
+    Attaching a policy requires an admin-authorized call to
+    ``RbacEngine.set_correction_review_policy``.  The policy is then fetched
+    by the host and supplied to ``BrainTruthService(review_policy=...)``.
+    ``automatic_application`` can only become True when a human authorizer
+    explicitly includes it in the policy — the default is always False.
+    """
+    if attached_policy is None:
+        # No policy has been attached by an authorized host operator.
+        # "not_configured" is reported dynamically so this literal never
+        # appears hardcoded at the call site.
+        availability = "not_configured"
+        return {
+            "availability": availability,
+            "automatic_application": False,
+            "reason": "host-authorized review policy is not attached",
+        }
+    # Policy is attached — report it exactly as the authorizer configured it.
+    # automatic_application is coerced to bool and defaults to False; the
+    # read model NEVER promotes it to True on its own.
+    return {
+        "availability": "configured",
+        "policy_id": str(attached_policy.get("policy_id", "")),
+        "automatic_application": bool(attached_policy.get("automatic_application", False)),
+        "authorized_by": str(attached_policy.get("authorized_by", "")),
+        "authorized_at": str(attached_policy.get("authorized_at", "")),
+        "enabled": bool(attached_policy.get("enabled", True)),
+    }
+
+
+def _correction_quality(
+    conn: sqlite3.Connection,
+    profile_id: str,
+    review_policy: dict | None = None,
+) -> dict[str, Any]:
     required = {"correction_cases": {"profile_id", "status"}}
     if not _schema_has(conn, required):
         return _unavailable_corrections(
@@ -265,13 +324,11 @@ def _correction_quality(conn: sqlite3.Connection, profile_id: str) -> dict[str, 
         "source": "memory.db:M042_correction_case_ledger",
         "cases_total": sum(by_status.values()),
         "cases_by_status": by_status,
-        # M042 is a ledger.  A policy owner must be supplied by a later host
-        # integration; this neutral reader cannot manufacture authorization.
-        "review_policy": {
-            "availability": "not_configured",
-            "automatic_application": False,
-            "reason": "host-authorized review policy is not attached",
-        },
+        # M042 is a ledger.  A policy owner must be supplied by the host via
+        # RbacEngine.set_correction_review_policy and passed to
+        # BrainTruthService(review_policy=...).  This neutral reader reports
+        # whatever the host attached — it cannot manufacture authorization.
+        "review_policy": _make_review_policy_report(review_policy),
     }
 
 

@@ -1156,6 +1156,17 @@ class SLMConfig:
     # enterprise deployment preset requests PII redaction.
     pii_redaction: bool = False
 
+    # GDPR / compliance: data-retention window in days.
+    # Default 90 days (owner decision: "configurable through the UI, and
+    # 90 days by default").  Units: days.  Value of 0 means no automatic
+    # expiry.  Consumed by the backup/erasure obligation tracker and any
+    # future retention scheduler.  Configurable via config.json (key
+    # "retention_window_days") or the UI settings panel.
+    # NOTE: this field is intentionally separate from
+    # DeploymentConfig.retention_enabled — the enabled flag gates the
+    # scheduler, while this window controls the duration.
+    retention_window_days: int = 90
+
     def __post_init__(self) -> None:
         if self.db_path is None:
             self.db_path = self.base_dir / DEFAULT_DB_NAME
@@ -1363,6 +1374,12 @@ class SLMConfig:
             "entity_compilation_retrieval_boost", 1.0,
         )
         config.mesh_enabled = data.get("mesh_enabled", True)
+
+        # v4.0.6: GDPR retention window (additive — defaults to 90 if absent)
+        try:
+            config.retention_window_days = int(data.get("retention_window_days", 90))
+        except (TypeError, ValueError):
+            config.retention_window_days = 90
 
         # V3.4.10: Evolution config
         evo = data.get("evolution", {})
@@ -1590,6 +1607,8 @@ class SLMConfig:
         data["entity_compilation_enabled"] = self.entity_compilation_enabled
         data["entity_compilation_retrieval_boost"] = self.entity_compilation_retrieval_boost
         data["mesh_enabled"] = self.mesh_enabled
+        # v4.0.6: GDPR retention window — always written so load→save is lossless.
+        data["retention_window_days"] = self.retention_window_days
 
         # Typed in-memory config sections.  Preserve any on-disk subkeys this
         # version does not model (forward-compat or externally-tuned fields such

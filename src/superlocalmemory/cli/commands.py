@@ -276,6 +276,12 @@ def _cmd_ops(args: Namespace) -> None:
     cmd_ops(args)
 
 
+def _cmd_gdpr_dispatch(args: Namespace) -> None:
+    """V4.0.6: GDPR subject-rights CLI (Art.15/17/20)."""
+    from superlocalmemory.cli.gdpr_cmd import cmd_gdpr
+    cmd_gdpr(args)
+
+
 # ---- end SLM v3.6 Optimize dispatch functions ----
 
 
@@ -406,6 +412,8 @@ def dispatch(args: Namespace) -> None:
         "help": cmd_help,
         # Wave-3: operational recovery & admin remediation
         "ops": _cmd_ops,
+        # V4.0.6: GDPR subject-rights CLI (Art.15/17/20)
+        "gdpr": _cmd_gdpr_dispatch,
     }
     handler = handlers.get(args.command)
     if handler:

@@ -88,6 +88,8 @@ _NO_DAEMON_COMMANDS = {
     "help",
     # Lifecycle orchestration must run before any global auto-start hook.
     "serve", "restart",
+    # V4.0.6: GDPR CLI accesses the DB directly; no daemon required.
+    "gdpr",
 }
 
 
@@ -965,6 +967,80 @@ def main() -> None:
     for _sp in loop_sub.choices.values():
         _sp.add_argument("--json", action="store_true",
                          help="Output structured JSON (agent-native)")
+
+    # Wave-3 / V4.0.6: GDPR subject-rights CLI (Art.15/17/20)
+    gdpr_p = sub.add_parser(
+        "gdpr",
+        help="GDPR subject rights: status, export (Art.15/20), erase (Art.17), verify",
+    )
+    gdpr_sub = gdpr_p.add_subparsers(dest="gdpr_command", title="gdpr subcommands")
+
+    gdpr_status_p = gdpr_sub.add_parser(
+        "status",
+        help="Compliance posture: receipts, audit events, known gaps (read-only)",
+    )
+    gdpr_status_p.add_argument(
+        "--profile", default=None, metavar="PROFILE",
+        help="Scope to a specific profile (default: report all)",
+    )
+    gdpr_status_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON (agent-native)",
+    )
+
+    gdpr_export_p = gdpr_sub.add_parser(
+        "export",
+        help="Art.15/20 subject access / data portability export",
+    )
+    gdpr_export_p.add_argument(
+        "--profile", required=True, metavar="PROFILE",
+        help="Profile to export (required)",
+    )
+    gdpr_export_p.add_argument(
+        "--output", default=None, metavar="FILE",
+        help="Write export JSON to FILE (default: stdout)",
+    )
+    gdpr_export_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON envelope",
+    )
+
+    gdpr_erase_p = gdpr_sub.add_parser(
+        "erase",
+        help=(
+            "Art.17 right to erasure — IRREVERSIBLE. "
+            "Requires --profile PROFILE AND --yes."
+        ),
+    )
+    gdpr_erase_p.add_argument(
+        "--profile", default=None, metavar="PROFILE",
+        help="Profile to erase (required for live erasure)",
+    )
+    gdpr_erase_p.add_argument(
+        "--yes", action="store_true",
+        help="Confirm irreversible erasure (required together with --profile)",
+    )
+    gdpr_erase_p.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="Preview what would be erased without deleting anything",
+    )
+    gdpr_erase_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON",
+    )
+
+    gdpr_verify_p = gdpr_sub.add_parser(
+        "verify",
+        help="Verify HMAC integrity of an erasure receipt (exit 0=ok, 1=tampered, 2=not-found)",
+    )
+    gdpr_verify_p.add_argument(
+        "--receipt-id", dest="receipt_id", default=None, metavar="ID",
+        help="Erasure receipt ID to verify",
+    )
+    gdpr_verify_p.add_argument(
+        "--profile", default=None, metavar="PROFILE",
+        help="Scope receipt lookup to a specific profile",
+    )
+    gdpr_verify_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON",
+    )
 
     # Wave-3: operational recovery & admin remediation
     ops_p = sub.add_parser(

@@ -25,6 +25,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Generator, List, Optional
 
+from superlocalmemory.infra.backup_obligations import (
+    BackupObligationStore,
+    erase_profile_from_snapshot,
+)
 from superlocalmemory.infra.data_root import DynamicStatePath, canonical_data_root
 
 logger = logging.getLogger("superlocalmemory.backup")
@@ -387,6 +391,21 @@ class BackupCoordinator:
         # Phase C succeeded — remove pre-restore snapshots.
         self._cleanup_pre_restore_snapshots(pre_restore_map, pre_restore_lance)
 
+        # Phase D — GDPR obligation replay (invariant: no restore may resurrect
+        # erased personal data).  Must run AFTER live files are in place and
+        # pre-restore snapshots are removed so there is no window where the
+        # erased data could be read.  A replay failure raises immediately; the
+        # caller receives BackupRestoreError and must treat the restore as
+        # failed until an operator manually remediates.
+        if backup_set_dir is not None:
+            _replay_obligations_after_restore(
+                data_root=self._base_dir,
+                snapshot_key=str(backup_set_dir),
+                restored_db_paths=[
+                    self._base_dir / e.store_name for e in manifest.stores
+                ],
+            )
+
     # ------------------------------------------------------------------
     # Internal helpers (factored out for subclass testability)
     # ------------------------------------------------------------------
@@ -727,6 +746,24 @@ class BackupManager:
                 src.close()
 
             logger.info("Restored: %s -> %s", filename, target.name)
+
+            # GDPR obligation replay — prevent a restore from resurrecting
+            # previously erased personal data.  Failure is fatal: return False
+            # so the caller knows the restore is not clean.
+            try:
+                _replay_obligations_after_restore(
+                    data_root=self.db_path.parent,
+                    snapshot_key=str(backup_path),
+                    restored_db_paths=[target],
+                )
+            except BackupRestoreError as exc:
+                logger.error(
+                    "Restore obligation replay failed for %s: %s — "
+                    "restore is NOT clean; erased data may be present",
+                    filename, exc,
+                )
+                return False
+
             return True
 
         except Exception as exc:
@@ -798,3 +835,104 @@ class BackupManager:
             "total_size_mb": round(sum(b["size_mb"] for b in backups), 2),
             "backups": backups,
         }
+
+
+# ---------------------------------------------------------------------------
+# GDPR obligation replay — module-level so both backup classes can call it
+# ---------------------------------------------------------------------------
+
+
+def _replay_obligations_after_restore(
+    data_root: Path,
+    snapshot_key: str,
+    restored_db_paths: list[Path],
+) -> None:
+    """Re-apply pending erasure obligations to freshly restored database files.
+
+    This function is the enforcement point for the restore-replay invariant:
+    no restore may resurface data that was Art.17-erased from the live stores.
+
+    ``snapshot_key`` is the string path that was recorded as the obligation's
+    ``snapshot_path`` when the obligation was created (typically the backup-set
+    directory for new-style backups, or the per-file `.db` path for legacy
+    backups).
+
+    Raises:
+        BackupRestoreError: if any obligation cannot be replayed.  The caller
+            must treat the restore as failed and surface this to the operator.
+    """
+    store = BackupObligationStore(data_root)
+    obligations = store.list_pending_for_snapshot(snapshot_key)
+
+    # Belt-and-suspenders: even when path matching fails (e.g. backup moved),
+    # detect erased profiles by scanning the restored DB and checking whether
+    # any of the profiles present have pending obligations.
+    if not obligations:
+        for db_path in restored_db_paths:
+            if not db_path.exists():
+                continue
+            try:
+                import sqlite3 as _sq3
+                conn = _sq3.connect(str(db_path))
+                try:
+                    tables = {
+                        r[0] for r in
+                        conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        ).fetchall()
+                    }
+                    for tbl in ("profiles", "atomic_facts"):
+                        if tbl not in tables:
+                            continue
+                        cols = {
+                            r[1] for r in
+                            conn.execute(f"PRAGMA table_info({tbl})").fetchall()
+                        }
+                        if "profile_id" not in cols:
+                            continue
+                        for (pid,) in conn.execute(
+                            f"SELECT DISTINCT profile_id FROM {tbl}"
+                        ).fetchall():
+                            if pid:
+                                obligations.extend(
+                                    store.list_pending_for_profile(pid)
+                                )
+                finally:
+                    conn.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "_replay_obligations_after_restore: scan failed for %s: %s",
+                    db_path.name, exc,
+                )
+
+    if not obligations:
+        return
+
+    profile_ids = {o["profile_id"] for o in obligations}
+
+    for profile_id in profile_ids:
+        for db_path in restored_db_paths:
+            if not db_path.exists():
+                continue
+            try:
+                deleted = erase_profile_from_snapshot(db_path, profile_id)
+                if deleted:
+                    logger.info(
+                        "Restore replay: erased profile %r from %s: %s",
+                        profile_id, db_path.name, deleted,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                raise BackupRestoreError(
+                    f"Erasure obligation replay failed for profile {profile_id!r} "
+                    f"in {db_path.name}: {exc}.  "
+                    "The restored database may contain previously erased personal "
+                    "data.  Manual remediation required."
+                ) from exc
+
+    # Discharge obligations for this specific snapshot so they do not block
+    # the completeness flag for future erasures of the same profile.
+    discharged = store.discharge_for_snapshot(snapshot_key, "replayed_on_restore")
+    logger.info(
+        "Obligation replay: discharged %d obligations for snapshot %s",
+        discharged, snapshot_key,
+    )
