@@ -280,6 +280,8 @@ from superlocalmemory.mcp.tools_ops import register_ops_tools
 register_ops_tools(_target, get_engine)  # Wave-3: operational recovery & admin remediation
 from superlocalmemory.mcp.tools_brain import register_brain_tools
 register_brain_tools(_target, get_engine)  # v4.0.2 portable Brain receipts
+from superlocalmemory.mcp.tools_summaries import register_summary_tools
+register_summary_tools(_target, get_engine)  # v4.0.8 issue #113 summary reads
 from superlocalmemory.mcp.tools_context import register_prestage_tool
 
 

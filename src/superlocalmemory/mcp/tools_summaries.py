@@ -1,0 +1,147 @@
+# Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
+# Licensed under AGPL-3.0-or-later - see LICENSE file
+# Part of SuperLocalMemory | https://qualixar.com
+
+"""MCP surface for the readable summary layer (issue #113).
+
+WHY THIS EXISTS
+---------------
+4.0.6 shipped the summary generators with no caller at all. 4.0.7 added
+``slm summary``, which fixed it for a person at a terminal and left agents with
+nothing — the changelog said the defect was "no command, tool or endpoint" and
+only the command was built. This is the tool half.
+
+It matters more than the CLI: the natural consumer of "what did I work on
+yesterday" is the agent holding the conversation, not a human running a command.
+
+CONTRACT
+--------
+Read-only, profile-scoped, and honest about coverage. Every response carries
+``coverage`` and ``source_fact_ids``, so a caller can tell a summary of 4% of a
+session from a summary of all of it, and can drill back to the memories it came
+from. Callers must not present a partial summary as complete; the field exists
+precisely so they do not have to guess.
+
+NOT ON THE HOT PATH. Summaries read memory.db directly and are invoked on
+demand; nothing here runs during remember or recall.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import date, timedelta
+from typing import Any, Callable
+
+from mcp.types import ToolAnnotations
+
+from superlocalmemory.core.admission import admits
+from superlocalmemory.core.operation_request import OperationKind
+from superlocalmemory.infra.data_root import state_path
+
+logger = logging.getLogger("superlocalmemory.mcp.summaries")
+
+#: Accepted values for the ``kind`` argument.
+_KINDS = ("day", "project", "session")
+
+
+def _result_payload(result: Any) -> dict[str, Any]:
+    """Shape a SummaryResult for the wire.
+
+    ``coverage`` and ``source_fact_ids`` are non-negotiable parts of the
+    response: a summary that cannot be traced back, or that hides how much it
+    covered, is the opaque generic summary issue #113 asked us not to build.
+    """
+    return {
+        "success": True,
+        "kind": result.kind,
+        "profile_id": result.profile_id,
+        "summary": result.content,
+        "coverage": result.coverage,
+        "generated_by": result.generated_by,
+        "source_fact_ids": result.source_fact_ids,
+        "source_count": len(result.source_fact_ids),
+        "metadata": result.metadata,
+    }
+
+
+def _error(message: str, **extra: Any) -> dict[str, Any]:
+    out = {"success": False, "error": message}
+    out.update(extra)
+    return out
+
+
+def register_summary_tools(server: Any, get_engine: Callable[[], Any]) -> None:
+    """Register the read-only summary tool."""
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @admits(OperationKind.RECALL)
+    async def get_memory_summary(
+        kind: str = "day",
+        target: str = "",
+    ) -> dict[str, Any]:
+        """Summarise your memories: a day, a project, or one session.
+
+        Args:
+            kind: "day", "project", or "session".
+            target: For "day", an ISO date, "today" or "yesterday" (default
+                today). For "project", a directory path (default: none — supply
+                one). For "session", the session id.
+
+        Returns a summary plus ``coverage`` and ``source_fact_ids``. Coverage is
+        not decoration: session data is sparse — roughly 4% of facts carry a
+        session id — so a session summary is usually partial. Do not present a
+        partial summary as a complete record of what happened.
+
+        No language model is required; summaries are extractive unless the
+        profile runs a local or cloud model, in which case that writes them.
+        """
+        kind = (kind or "day").strip().lower()
+        if kind not in _KINDS:
+            return _error(
+                f"unknown summary kind {kind!r}; expected one of {', '.join(_KINDS)}"
+            )
+
+        engine = get_engine()
+        profile_id = getattr(engine, "profile_id", "default")
+        db_path = state_path("memory.db")
+        if not db_path.exists():
+            return _error("no memory database found", db_path=str(db_path))
+
+        # The engine's config drives Mode B/C enrichment. Passing None would
+        # silently force the extractive path for every caller regardless of
+        # mode — the exact bug the CLI shipped with in 4.0.7.
+        config = getattr(engine, "config", None)
+
+        try:
+            if kind == "day":
+                from superlocalmemory.summaries import generate_daily_reflection
+
+                day = (target or "").strip() or date.today().isoformat()
+                if day == "today":
+                    day = date.today().isoformat()
+                elif day == "yesterday":
+                    day = (date.today() - timedelta(days=1)).isoformat()
+                result = generate_daily_reflection(db_path, day, profile_id, config)
+
+            elif kind == "project":
+                from superlocalmemory.summaries import generate_project_work_log
+
+                if not (target or "").strip():
+                    return _error("kind='project' requires target=<project path>")
+                result = generate_project_work_log(
+                    db_path, target.strip(), profile_id, config,
+                )
+
+            else:  # session
+                from superlocalmemory.summaries import generate_session_summary
+
+                if not (target or "").strip():
+                    return _error("kind='session' requires target=<session id>")
+                result = generate_session_summary(
+                    db_path, target.strip(), profile_id, config,
+                )
+        except Exception as exc:
+            logger.warning("summary generation failed (%s/%s): %s", kind, target, exc)
+            return _error(f"summary generation failed: {exc}", kind=kind)
+
+        return _result_payload(result)

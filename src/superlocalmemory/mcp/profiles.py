@@ -17,13 +17,17 @@ from __future__ import annotations
 # v3.6.14 WP-01: Named profile definitions
 # ---------------------------------------------------------------------------
 
-_PROFILE_CORE: frozenset[str] = frozenset({  # 16
+_PROFILE_CORE: frozenset[str] = frozenset({  # 17
     "remember", "recall", "search", "fetch", "list_recent", "update_memory", "forget",
     "session_init", "close_session",
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
     # A client that can propose a correction must be able to inspect and
     # authenticate its review; otherwise the core lifecycle is incomplete.
     "review_correction", "list_corrections",
+    # v4.0.8: the readable summary layer (issue #113). In CORE because the
+    # natural caller is the agent holding the conversation — an assistant
+    # asked "what did I work on yesterday" should not need a power profile.
+    "get_memory_summary",
 })
 
 # Portable Brain evidence must reach the coding-host profile shipped by the
@@ -34,7 +38,7 @@ _PROFILE_BRAIN: frozenset[str] = frozenset({
     "observe_bounded_loop_evidence",
 })
 
-_PROFILE_CODE: frozenset[str] = _PROFILE_CORE | _PROFILE_BRAIN | frozenset({  # 31
+_PROFILE_CODE: frozenset[str] = _PROFILE_CORE | _PROFILE_BRAIN | frozenset({  # 32
     "build_code_graph", "get_blast_radius", "query_graph",
     "semantic_search_code", "get_review_context", "detect_changes",
     # switch_profile lets a plugin/IDE session change the active workspace over

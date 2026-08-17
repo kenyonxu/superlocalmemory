@@ -96,6 +96,7 @@ def _register_every_tool(target) -> None:
     from superlocalmemory.mcp.tools_loops import register_loop_tools
     from superlocalmemory.mcp.tools_ops import register_ops_tools
     from superlocalmemory.mcp.tools_brain import register_brain_tools
+    from superlocalmemory.mcp.tools_summaries import register_summary_tools
     from superlocalmemory.mcp.tools_v28 import register_v28_tools
     from superlocalmemory.mcp.tools_v3 import register_v3_tools
     from superlocalmemory.mcp.tools_v33 import register_v33_tools
@@ -114,6 +115,7 @@ def _register_every_tool(target) -> None:
     register_loop_tools(target, get_engine)
     register_ops_tools(target, get_engine)
     register_brain_tools(target, get_engine)
+    register_summary_tools(target, get_engine)
     from superlocalmemory.mcp.tools_context import register_prestage_tool
     register_prestage_tool(target, lambda *a, **k: [])
 
@@ -124,8 +126,11 @@ def _register_every_tool(target) -> None:
         # Portable Brain evidence is deliberately reachable from default MCP
         # clients; prestage_context remains a raw-server-only tool.
         ("essential", "", 49),
-        ("named-core", "core", 16),
-        ("whole", "whole", 94),
+        # v4.0.8: get_memory_summary added to CORE — the summary layer's MCP
+        # surface (issue #113). Counts bumped deliberately, which is what
+        # this contract exists to force.
+        ("named-core", "core", 17),
+        ("whole", "whole", 95),
     ),
 )
 def test_registration_exposure_is_exact_and_duplicate_free(
@@ -236,14 +241,14 @@ async def test_attribution_reports_current_product_identity(
 def test_imported_server_exposes_product_name_and_whole_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Imported MCP server keeps product identity and whole surface at 94."""
+    """Imported MCP server keeps product identity and whole surface at 95."""
     mod = _fresh_server(monkeypatch, "whole")
     # Public SLMFastMCP/MCPServer attribute — do not assert private internals.
     assert mod.server.name == "SuperLocalMemory V4"
     strict = _StrictToolServer()
     _register_every_tool(strict)
-    assert len(strict.tools) == 94
+    assert len(strict.tools) == 95
     actual_names = [tool.name for tool in mod.server._tool_manager.list_tools()]
-    assert len(actual_names) == 94
+    assert len(actual_names) == 95
     assert len(actual_names) == len(set(actual_names))
     assert set(actual_names) == set(strict.tools)
