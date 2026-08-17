@@ -150,6 +150,7 @@
           // Recall Lab tab — restored: recall-lab.js is already loaded in index.html and uses
           // document-level click/keydown delegation keyed on IDs below, so it survives re-renders.
           '<button class="tab" data-od-act="tab" data-tab="recall">Recall Lab</button>' +
+          '<button class="tab" data-od-act="tab" data-tab="summary">Summaries</button>' +
         '</div>' +
         '<div class="tabpane active" id="' + id + '-pane-all">' + _allScaffold(id) + '</div>' +
         '<div class="tabpane" id="' + id + '-pane-timeline">' + _tlScaffold(id) + '</div>' +
@@ -162,6 +163,18 @@
         //   #recall-lab-query (input), #recall-lab-search (button — click check),
         //   #recall-lab-per-page (select, optional), #recall-lab-meta, #recall-lab-results.
         // Backend: POST /api/v3/recall/trace
+        '<div class="tabpane" id="' + id + '-pane-summary" style="padding-top:12px">' +
+          '<p style="font-size:13px;color:var(--fg-2);margin-bottom:12px">'+
+            'A readable view of what you recorded. Every summary states how much '+
+            'of the underlying data it could actually cover.' +
+          '</p>' +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">' +
+            '<button class="tab" data-od-act="sum" data-kind="day" data-target="today">Today</button>' +
+            '<button class="tab" data-od-act="sum" data-kind="day" data-target="yesterday">Yesterday</button>' +
+            '<button class="tab" data-od-act="sum" data-kind="project" data-target="">This project</button>' +
+          '</div>' +
+          '<div id="' + id + '-sum-out" style="font-size:13px;color:var(--fg-2)">Pick a summary above.</div>' +
+        '</div>' +
         '<div class="tabpane" id="' + id + '-pane-recall" style="padding-top:12px">' +
           '<div style="margin-bottom:14px">' +
             '<p style="font-size:13px;color:var(--fg-2);margin-bottom:10px">' +
@@ -285,6 +298,56 @@
     if (pane) pane.classList.add('active');
     if (tab === 'timeline') _loadTimeline(id);
     if (tab === 'clusters')  _loadClusters(id);
+  }
+
+  /* Summaries pane (4.0.8, issue #113).
+   *
+   * Reads GET /api/summary. The generators shipped in 4.0.6 with no caller at
+   * all; 4.0.7 added the CLI; this is the surface for someone who is already
+   * looking at the dashboard rather than a terminal.
+   *
+   * Coverage is rendered on every result, never only on bad ones — a summary
+   * that hides how much of the data it saw is the failure mode #113 named.
+   */
+  function _loadSummary(id, kind, target) {
+    var out = document.getElementById(id + '-sum-out');
+    if (!out) return;
+    out.textContent = 'Building summary…';
+
+    var q = '/api/summary?kind=' + encodeURIComponent(kind);
+    // "This project" means the directory the dashboard is serving from; the
+    // daemon resolves an empty target for day, but project needs one.
+    if (kind === 'project' && !target) target = _st.projectHint || '';
+    if (target) q += '&target=' + encodeURIComponent(target);
+
+    fetch(q)
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (e) { throw new Error(e.detail || r.status); });
+        return r.json();
+      })
+      .then(function (d) {
+        out.textContent = '';
+
+        var body = document.createElement('pre');
+        body.style.cssText = 'white-space:pre-wrap;font-family:inherit;font-size:13px;' +
+          'line-height:1.65;color:var(--fg);background:var(--card-2);border:1px solid var(--border);' +
+          'border-radius:var(--r-md);padding:14px;margin:0';
+        body.textContent = d.summary || '(nothing recorded)';
+        out.appendChild(body);
+
+        var meta = document.createElement('div');
+        meta.style.cssText = 'margin-top:10px;font-size:12px;color:var(--fg-3)';
+        var n = d.source_count || 0;
+        var txt = 'Built from ' + n + ' memor' + (n === 1 ? 'y' : 'ies') +
+                  ' · coverage: ' + (d.coverage || 'unknown');
+        if (d.coverage !== 'full') txt += ' — a partial view, not a complete record';
+        if (d.generated_by) txt += ' · method: ' + d.generated_by;
+        meta.textContent = txt;
+        out.appendChild(meta);
+      })
+      .catch(function (e) {
+        out.textContent = 'Could not build summary: ' + (e && e.message ? e.message : 'error');
+      });
   }
 
   // ── Category counts (pre-fetch real totals) ──────────────────────────────────
@@ -906,6 +969,10 @@
       if (!el) return;
       var act = el.dataset.odAct;
 
+      if (act === 'sum') {
+        _loadSummary(id, el.dataset.kind, el.dataset.target || '');
+        return;
+      }
       if (act === 'tab') {
         _switchTab(id, el.dataset.tab);
         return;

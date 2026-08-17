@@ -747,6 +747,74 @@ async def search_memories(request: Request, body: SearchRequest):
         end_recall()
 
 
+@router.get("/api/summary")
+async def get_summary(request: Request, kind: str = "day", target: str = ""):
+    """Readable summary of memories: a day, a project, or one session (#113).
+
+    The dashboard surface for the summary layer. 4.0.6 shipped the generators
+    with no caller, 4.0.7 added the CLI, 4.0.8 adds this and the MCP tool — the
+    "no command, tool or endpoint" gap, closed at the third point.
+
+    Always returns ``coverage`` and ``source_fact_ids``: a summary that hides how
+    much it covered is the opaque generic summary issue #113 warned against.
+    Reads memory.db directly; never runs during remember or recall.
+    """
+    from datetime import date as _date, timedelta as _timedelta
+
+    kind = (kind or "day").strip().lower()
+    if kind not in ("day", "project", "session"):
+        raise HTTPException(status_code=400, detail=f"unknown summary kind '{kind}'")
+
+    profile = get_active_profile()
+    from superlocalmemory.infra.data_root import state_path
+    db_path = state_path("memory.db")
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail="no memory database")
+
+    # Pass the loaded config so Mode B/C write the summary. Omitting it silently
+    # forces the extractive path for every caller regardless of mode.
+    try:
+        from superlocalmemory.core.config import SLMConfig
+        cfg = SLMConfig.load()
+    except Exception:
+        cfg = None
+
+    try:
+        if kind == "day":
+            from superlocalmemory.summaries import generate_daily_reflection
+            day = (target or "").strip() or _date.today().isoformat()
+            if day == "today":
+                day = _date.today().isoformat()
+            elif day == "yesterday":
+                day = (_date.today() - _timedelta(days=1)).isoformat()
+            result = generate_daily_reflection(db_path, day, profile, cfg)
+        elif kind == "project":
+            if not (target or "").strip():
+                raise HTTPException(status_code=400, detail="project requires target")
+            from superlocalmemory.summaries import generate_project_work_log
+            result = generate_project_work_log(db_path, target.strip(), profile, cfg)
+        else:
+            if not (target or "").strip():
+                raise HTTPException(status_code=400, detail="session requires target")
+            from superlocalmemory.summaries import generate_session_summary
+            result = generate_session_summary(db_path, target.strip(), profile, cfg)
+    except HTTPException:
+        raise
+    except Exception:
+        raise _internal_error("Summary generation error")
+
+    return {
+        "kind": result.kind,
+        "profile_id": result.profile_id,
+        "summary": result.content,
+        "coverage": result.coverage,
+        "generated_by": result.generated_by,
+        "source_fact_ids": result.source_fact_ids,
+        "source_count": len(result.source_fact_ids),
+        "metadata": result.metadata,
+    }
+
+
 @router.get("/api/clusters")
 async def get_clusters(request: Request):
     """Get cluster information with member counts and statistics."""
