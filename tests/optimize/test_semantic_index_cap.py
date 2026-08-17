@@ -74,13 +74,34 @@ class TestIndexCap:
         cfg = OptimizeConfig(semantic_max_index_entries=500)
         assert cfg.semantic_max_index_entries == 500
 
+    def test_shipped_default_cap_is_unchanged(self):
+        """The production default stays pinned even though the overflow test
+        below uses a smaller cap to run in reasonable time."""
+        assert _CAP == 10_000, (
+            "the shipped semantic index cap changed — update this test and the "
+            "config documentation deliberately, not by accident"
+        )
+
     def test_index_capped_at_max_after_overflow(self, tmp_db):
-        """Adding CAP+1 distinct entries must leave exactly CAP entries."""
-        cfg = _make_config(max_entries=_CAP)
+        """Adding CAP+1 distinct entries must leave exactly CAP entries.
+
+        Uses a SMALL cap on purpose. This previously ran with the production
+        value of 10,000, so it performed 10,001 sequential writes through
+        ``_set_inner`` and took over ten minutes — it timed out in every full
+        suite run, including the 4.0.6 release, and so never actually verified
+        the cap it was written to verify.
+
+        The invariant is independent of the cap's magnitude: inserting one more
+        than the limit must leave exactly the limit. A cap of 200 proves that in
+        about a second. The shipped default is pinned separately, above, and the
+        sibling eviction-order test already uses 100.
+        """
+        cap = 200
+        cfg = _make_config(max_entries=cap)
         cache = VCacheSemantic(db=tmp_db, config=cfg)
         tenant = "tenant_cap_test"
 
-        for i in range(_CAP + 1):
+        for i in range(cap + 1):
             entry_id = f"entry_{i:06d}"
             vec = _unit_vec(entry_id)
             cache._set_inner(tenant, entry_id, vec, context_fp="")
@@ -88,8 +109,8 @@ class TestIndexCap:
         with cache._index_lock:
             actual = len(cache._index.get(tenant, []))
 
-        assert actual == _CAP, (
-            f"Expected index length {_CAP}, got {actual} — cap not enforced"
+        assert actual == cap, (
+            f"Expected index length {cap}, got {actual} — cap not enforced"
         )
 
     def test_first_entry_evicted_last_entry_present(self, tmp_db):
