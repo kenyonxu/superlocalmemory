@@ -34,7 +34,9 @@ from datetime import date
 from pathlib import Path
 
 from .base import (
+    clean_llm_summary,
     format_highlight,
+    SUMMARY_SYSTEM_PROMPT,
     COVERAGE_FULL,
     COVERAGE_INSUFFICIENT,
     COVERAGE_UNAVAILABLE,
@@ -292,6 +294,7 @@ def _call_ollama(
         payload = json.dumps({
             "model": model,
             "prompt": full_prompt,
+            "system": SUMMARY_SYSTEM_PROMPT,
             "stream": False,
             "options": {"num_predict": 300},
         }).encode()
@@ -302,7 +305,7 @@ def _call_ollama(
         )
         resp = urllib.request.urlopen(req, timeout=timeout)
         data = json.loads(resp.read().decode())
-        text = data.get("response", "").strip()
+        text = clean_llm_summary(data.get("response", ""))
         return text if text and len(text) > 20 else None
     except Exception as exc:
         logger.debug("Ollama daily reflection failed: %s", exc)
@@ -326,11 +329,12 @@ def _call_cloud_llm(
         full_prompt = f"{prompt}\n\nFacts:\n{fact_texts}"
         text = llm.generate(
             prompt=full_prompt,
-            system="You are a concise personal memory summariser.",
+            system=SUMMARY_SYSTEM_PROMPT,
             max_tokens=300,
             temperature=0.1,
         )
-        return text.strip() if text and len(text.strip()) > 20 else None
+        cleaned = clean_llm_summary(text or "")
+        return cleaned if len(cleaned) > 20 else None
     except Exception as exc:
         logger.debug("Cloud LLM daily reflection failed: %s", exc)
         return None

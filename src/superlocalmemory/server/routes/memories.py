@@ -815,6 +815,91 @@ async def get_summary(request: Request, kind: str = "day", target: str = ""):
     }
 
 
+@router.get("/api/summary/projects")
+async def get_summary_projects(request: Request):
+    """Projects SuperLocalMemory has actually observed, for the summary picker.
+
+    WHY THIS EXISTS
+    ---------------
+    SLM is installed globally and the dashboard is a browser tab — it has no
+    working directory, so there is no such thing as "this project" from the
+    server's point of view. 4.0.8 shipped a "This project" button that sent an
+    empty target and produced "project requires target" every time. A button
+    that cannot know its own answer is the wrong control; a list of the projects
+    we have seen is the right one.
+
+    Scope comes from ``tool_events.project_path`` — the directory an agent was
+    working in when it called SLM. Deliberately NOT ``entity_profiles.
+    project_name``, which has exactly one distinct value on a real store (see
+    the note at the top of summaries/project_work_log.py).
+
+    ``tool_events`` is a bounded ring buffer, so this lists recently active
+    projects rather than every project in history. ``truncated`` says so
+    honestly instead of implying the list is exhaustive.
+    """
+    profile = get_active_profile()
+    try:
+        conn = get_db_connection()
+        # get_db_connection() hands back a SHARED read connection, and other
+        # handlers set row_factory on it. Never index these rows positionally —
+        # whichever handler ran last decides whether r[0] is a column or a
+        # KeyError. Name the columns and read them by name.
+        conn.row_factory = dict_factory
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT project_path AS path, COUNT(*) AS events
+              FROM tool_events
+             WHERE project_path IS NOT NULL AND project_path != ''
+               AND profile_id = ?
+             GROUP BY project_path
+             ORDER BY events DESC
+             LIMIT 50
+            """,
+            (profile,),
+        )
+        rows = cursor.fetchall()
+        total = cursor.execute(
+            "SELECT COUNT(*) AS n FROM tool_events"
+        ).fetchone()["n"]
+    except Exception:
+        raise _internal_error("Project list error")
+
+    projects = [
+        {
+            "path": r["path"],
+            "events": r["events"],
+            "label": _project_label(r["path"]),
+        }
+        for r in rows
+    ]
+    return {
+        "projects": projects,
+        "profile_id": profile,
+        # Surfaced so the UI can explain an unexpectedly short list rather than
+        # leaving the user to assume their project was never recorded.
+        "truncated": total >= _TOOL_EVENT_RING_SIZE,
+        "event_rows": total,
+    }
+
+
+#: tool_events is capped; at the cap the project list is a recent window, not history.
+_TOOL_EVENT_RING_SIZE = 2000
+
+
+def _project_label(path: str) -> str:
+    """Short, human label for a project path.
+
+    Full paths are long and share prefixes ("/Users/x/Documents/official/..."),
+    so a dropdown of raw paths is unreadable. Last two segments keep sibling
+    projects distinguishable without the noise.
+    """
+    parts = [p for p in str(path).replace("\\", "/").split("/") if p]
+    if not parts:
+        return str(path)
+    return "/".join(parts[-2:]) if len(parts) > 1 else parts[-1]
+
+
 @router.get("/api/clusters")
 async def get_clusters(request: Request):
     """Get cluster information with member counts and statistics."""

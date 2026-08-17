@@ -157,6 +157,106 @@ def format_highlight(content: str, limit: int = HIGHLIGHT_CHARS) -> str:
     return cut.rstrip(" ,;:—-") + "…"
 
 
+# ── LLM output cleanup ──────────────────────────────────────────────────────
+
+#: Sentences a chat-tuned model emits *around* the answer rather than as part of
+#: it. Anchored to the start of a paragraph so they cannot match mid-content.
+#:
+#: Measured, not guessed: a Mode B summary on the author's own store opened with
+#: "I apologize for the previous confusion. It seems that I misunderstood the
+#: context of the texts provided.\n\nTo provide a concise summary paragraph, here
+#: is a merge of all the key information:" — 180 characters of the model talking
+#: to itself, shown to the user as their daily reflection.
+_LLM_PREAMBLE = (
+    r"^(?:"
+    r"i\s+apologi[sz]e\b.*"
+    r"|i'?m\s+sorry\b.*"
+    r"|it\s+seems\s+that\s+i\b.*"
+    r"|sure[,!.]?\s*(?:thing)?\b.*"
+    r"|certainly[,!.]?\b.*"
+    r"|of\s+course[,!.]?\b.*"
+    r"|here(?:'s|\s+is|\s+are)\b[^.!?]*:"
+    r"|to\s+(?:provide|summari[sz]e|answer)\b[^.!?]*:"
+    r"|based\s+on\s+the\s+(?:facts|texts|information|data)\s+provided[,:]?"
+    r"|as\s+(?:an|a)\s+(?:ai|language\s+model)\b.*"
+    r")\s*$"
+)
+
+#: Closing pleasantries. Same anchoring rule.
+_LLM_POSTAMBLE = (
+    r"^(?:"
+    r"(?:i\s+hope|hope)\s+(?:this|that)\s+helps\b.*"
+    r"|let\s+me\s+know\b.*"
+    r"|feel\s+free\s+to\b.*"
+    r"|would\s+you\s+like\s+me\s+to\b.*"
+    r")$"
+)
+
+
+def clean_llm_summary(text: str) -> str:
+    """Strip chat-assistant scaffolding from a model-written summary.
+
+    WHY THIS EXISTS
+    ---------------
+    Mode B/C summaries are shown to the user as *their* memory, with no chat
+    framing around them. A chat-tuned model does not know that: it opens with an
+    apology or "Here is a concise summary:" and closes with "Let me know if you
+    want more detail". Both are addressed to a conversation that the reader
+    cannot see, and both make the product look broken.
+
+    The system prompt now asks for bare prose, which handles most of it. This is
+    the second line of defence, because instruction-following on a 3B local
+    model is not something to bet the displayed output on.
+
+    Conservative by construction: patterns are anchored to whole paragraphs or
+    whole leading sentences, so a summary that legitimately contains the word
+    "sure" mid-paragraph is untouched. If stripping would empty the text, the
+    original is returned — a scaffolded summary beats a blank one.
+    """
+    import re
+
+    original = (text or "").strip()
+    if not original:
+        return ""
+
+    # Fenced code blocks wrapping the whole answer: keep the contents.
+    fenced = re.match(r"^```[a-zA-Z]*\n(.*?)\n?```$", original, re.DOTALL)
+    if fenced:
+        original = fenced.group(1).strip()
+
+    paras = [p.strip() for p in re.split(r"\n\s*\n", original) if p.strip()]
+
+    while paras and re.match(_LLM_PREAMBLE, paras[0], re.IGNORECASE | re.DOTALL):
+        paras.pop(0)
+    while paras and re.match(_LLM_POSTAMBLE, paras[-1], re.IGNORECASE | re.DOTALL):
+        paras.pop()
+
+    if not paras:
+        return original
+
+    # A preamble that shares a paragraph with real content: drop just the leading
+    # sentence, and only when what follows is substantial enough to stand alone.
+    lead = re.match(r"(.+?[.:!?])\s+(\S.*)$", paras[0], re.DOTALL)
+    if lead and re.match(_LLM_PREAMBLE, lead.group(1), re.IGNORECASE | re.DOTALL):
+        if len(lead.group(2).strip()) > 40:
+            paras[0] = lead.group(2).strip()
+
+    cleaned = "\n\n".join(paras).strip()
+    return cleaned or original
+
+
+#: System prompt for every summary generator, Mode B and Mode C alike.
+#:
+#: Mode C always sent one; Mode B sent none at all, which is why local-model
+#: output arrived wrapped in chat scaffolding while cloud output did not.
+SUMMARY_SYSTEM_PROMPT = (
+    "You summarise a person's own saved notes for them. "
+    "Reply with the summary text only — no preamble, no apologies, no sign-off, "
+    "no markdown headings, and never refer to yourself or to these instructions. "
+    "Write plain prose in the third person about the work described."
+)
+
+
 def get_mode_str(config: object | None) -> str:
     """Extract the operating mode string ('a', 'b', or 'c') from a config."""
     if config is None:

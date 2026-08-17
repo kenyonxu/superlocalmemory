@@ -39,9 +39,12 @@ from collections import Counter
 from pathlib import Path
 
 from .base import (
+    clean_llm_summary,
     format_highlight,
+    SUMMARY_SYSTEM_PROMPT,
     COVERAGE_FULL,
     COVERAGE_INSUFFICIENT,
+    COVERAGE_PARTIAL,
     COVERAGE_UNAVAILABLE,
     GENERATED_BY_EXTRACTIVE,
     GENERATED_BY_LLM_B,
@@ -122,8 +125,19 @@ def generate_project_work_log(
     event_count = len(tool_rows)
     fact_count = len(facts_rows)
 
-    coverage = COVERAGE_FULL if (event_count >= _MIN_EVENTS or fact_count >= _MIN_FACTS) \
-        else COVERAGE_INSUFFICIENT
+    # A project work log has two inputs: what was DONE (tool events) and what was
+    # LEARNED (facts). "full" means both were there.
+    #
+    # The previous rule was `events >= 1 OR facts >= 1`, which reported "full" for
+    # a project with 86 tool events and zero facts — rendered in the dashboard as
+    # "Built from 0 memories · coverage: full". Claiming full coverage of nothing
+    # is precisely the dishonest summary issue #113 exists to prevent.
+    if event_count >= _MIN_EVENTS and fact_count >= _MIN_FACTS:
+        coverage = COVERAGE_FULL
+    elif event_count >= _MIN_EVENTS or fact_count >= _MIN_FACTS:
+        coverage = COVERAGE_PARTIAL
+    else:
+        coverage = COVERAGE_INSUFFICIENT
 
     extractive_content = _build_extractive_content(
         project_path, tool_rows, facts_rows, event_count, fact_count
@@ -373,6 +387,7 @@ def _call_ollama(
         payload = json.dumps({
             "model": model,
             "prompt": full_prompt,
+            "system": SUMMARY_SYSTEM_PROMPT,
             "stream": False,
             "options": {"num_predict": 300},
         }).encode()
@@ -383,7 +398,7 @@ def _call_ollama(
         )
         resp = urllib.request.urlopen(req, timeout=timeout)
         data = json.loads(resp.read().decode())
-        text = data.get("response", "").strip()
+        text = clean_llm_summary(data.get("response", ""))
         return text if text and len(text) > 20 else None
     except Exception as exc:
         logger.debug("Ollama project work log failed: %s", exc)
@@ -414,11 +429,12 @@ def _call_cloud_llm(
         )
         text = llm.generate(
             prompt=full_prompt,
-            system="You are a concise project activity summariser.",
+            system=SUMMARY_SYSTEM_PROMPT,
             max_tokens=300,
             temperature=0.1,
         )
-        return text.strip() if text and len(text.strip()) > 20 else None
+        cleaned = clean_llm_summary(text or "")
+        return cleaned if len(cleaned) > 20 else None
     except Exception as exc:
         logger.debug("Cloud LLM project work log failed: %s", exc)
         return None
