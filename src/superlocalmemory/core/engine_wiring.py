@@ -56,8 +56,11 @@ def init_reranker(retrieval_config: Any) -> Any:
         "cross-encoder/ms-marco-MiniLM-L-12-v2",
     )
     remote_requested = is_remote_cross_encoder_backend(backend)
+    trust_plain_http_lan = getattr(retrieval_config, "trust_plain_http_lan", True)
 
-    error = validate_remote_reranker_config(backend, endpoint)
+    error = validate_remote_reranker_config(
+        backend, endpoint, trust_plain_http_lan=trust_plain_http_lan,
+    )
     if error and remote_requested:
         logger.error(
             "Remote reranker not started — %s Reranking is DISABLED; recall "
@@ -79,6 +82,7 @@ def init_reranker(retrieval_config: Any) -> Any:
                 timeout_seconds=getattr(
                     retrieval_config, "cross_encoder_timeout_seconds", 15.0,
                 ),
+                trust_plain_http_lan=trust_plain_http_lan,
             )
         except RemoteRerankerConfigError as exc:
             logger.error(

@@ -55,9 +55,12 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     async def set_mode(mode: str) -> dict:
         """Switch operating mode (a, b, or c).
 
-        Mode A: Local Guardian (zero LLM, local embeddings only).
-        Mode B: Smart Local (local Ollama LLM, on-device inference).
-        Mode C: Full Power (configured cloud LLM provider, best accuracy).
+        Mode A (Local Guardian): Nothing leaves this device. No AI language
+                model runs. Fastest and most private.
+        Mode B: All data stays on this device. Uses a local Ollama AI model
+                to improve recall quality. Requires Ollama installed.
+        Mode C: Uses a cloud AI provider (OpenAI, Anthropic, …) for best
+                recall quality. Queries leave this device; API key required.
 
         Resets the engine to apply the new mode configuration.
 
@@ -377,8 +380,19 @@ def register_v3_tools(server, get_engine: Callable) -> None:
 def _mode_description(mode: str) -> str:
     """Human-readable capability description for a mode (never a legal claim)."""
     descriptions = {
-        "a": "Local Guardian: zero LLM, local embeddings only",
-        "b": "Smart Local: local Ollama LLM, on-device inference",
-        "c": "Full Power: configured cloud LLM provider, best accuracy",
+        "a": (
+            "Local Guardian — on-device only: no AI language model runs and "
+            "nothing leaves this device. Fastest and most private."
+        ),
+        "b": (
+            "Smart Local — on-device plus a local Ollama model: better recall "
+            "quality, and nothing leaves this device. Requires Ollama to be "
+            "installed and running."
+        ),
+        "c": (
+            "Full Power — uses a cloud AI provider (OpenAI, Anthropic, …) for "
+            "the best recall quality. Your queries leave this device and an "
+            "API key is required."
+        ),
     }
     return descriptions.get(mode, "Unknown mode")

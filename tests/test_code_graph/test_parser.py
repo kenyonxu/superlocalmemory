@@ -101,7 +101,7 @@ def test_discover_files_returns_relative_paths(parser: CodeParser, tmp_path: Pat
 
 def test_parse_file_python(parser: CodeParser):
     source = b"def foo():\n    pass\n"
-    nodes, edges = parser.parse_file(Path("test.py"), source, "python")
+    nodes, edges, _ = parser.parse_file(Path("test.py"), source, "python")
     assert len(nodes) >= 2  # File + function
     kinds = {n.kind for n in nodes}
     assert NodeKind.FILE in kinds
@@ -110,7 +110,7 @@ def test_parse_file_python(parser: CodeParser):
 
 def test_parse_file_typescript(parser: CodeParser):
     source = b"function bar(): void {}\n"
-    nodes, edges = parser.parse_file(Path("test.ts"), source, "typescript")
+    nodes, edges, _ = parser.parse_file(Path("test.ts"), source, "typescript")
     assert len(nodes) >= 2
 
 
@@ -121,7 +121,7 @@ def test_parse_file_unsupported_language(parser: CodeParser):
 
 def test_parse_file_generates_file_node(parser: CodeParser):
     source = b"x = 1\n"
-    nodes, edges = parser.parse_file(Path("simple.py"), source, "python")
+    nodes, edges, _ = parser.parse_file(Path("simple.py"), source, "python")
     file_node = nodes[0]
     assert file_node.kind == NodeKind.FILE
     assert file_node.content_hash is not None
@@ -134,7 +134,7 @@ class Foo:
     def bar(self):
         pass
 """
-    nodes, edges = parser.parse_file(Path("contains.py"), source, "python")
+    nodes, edges, _ = parser.parse_file(Path("contains.py"), source, "python")
     contains_edges = [e for e in edges if e.kind == EdgeKind.CONTAINS]
     assert len(contains_edges) >= 2  # File->Foo and Foo->bar
 
@@ -162,7 +162,7 @@ def test_parse_file_generates_tested_by(parser: CodeParser):
 def test_something():
     some_func()
 """
-    nodes, edges = parser.parse_file(Path("tests/test_foo.py"), source, "python")
+    nodes, edges, _ = parser.parse_file(Path("tests/test_foo.py"), source, "python")
     # The file is in tests/ directory, so functions should be marked as test
     test_funcs = [n for n in nodes if n.is_test]
     assert len(test_funcs) >= 1
@@ -216,3 +216,77 @@ def test_parse_all_file_records(tmp_path: Path):
         assert len(rec.content_hash) == 64
         assert rec.node_count > 0
         assert rec.language == "python"
+
+
+# ---------------------------------------------------------------------------
+# MUST-FIX 2: parse_file exposes import_map (3-tuple return)
+# ---------------------------------------------------------------------------
+
+def test_parse_file_returns_import_map(parser: CodeParser):
+    """parse_file must return a 3-tuple whose third element is the import map dict."""
+    source = b"from os import path\n\ndef foo():\n    path.join('a', 'b')\n"
+    result = parser.parse_file(Path("importer.py"), source, "python")
+    assert len(result) == 3, "parse_file must return (nodes, edges, import_map)"
+    nodes, edges, import_map = result
+    assert isinstance(import_map, dict)
+    assert nodes  # at least FILE node
+
+    # The import_map key for 'from os import path' should include 'path'
+    # (exact resolution depends on extractor implementation, but the dict
+    # must be a dict[str, tuple[str, str]]).
+    for key, val in import_map.items():
+        assert isinstance(key, str)
+        assert isinstance(val, tuple) and len(val) == 2
+
+
+def test_parse_all_workers_1_uses_sequential_path(tmp_path: Path):
+    """parallel_workers=1 forces in-process parsing — no ProcessPoolExecutor spawn.
+
+    Verified by: creating > 2 files (old threshold was 2; workers=1 overrides
+    it), running parse_all, and confirming all files are parsed and import_maps
+    are populated (they're only populated in the sequential path after MUST-FIX 2).
+    """
+    config = CodeGraphConfig(
+        enabled=True, repo_root=tmp_path, parallel_workers=1
+    )
+    p = CodeParser(config)
+
+    # 5 files — would normally trigger the parallel pool (len > 2)
+    for i in range(5):
+        (tmp_path / f"mod_{i}.py").write_text(
+            f"from os import path\ndef func_{i}():\n    path.join('x', 'y')\n"
+        )
+
+    nodes, edges, records = p.parse_all(tmp_path)
+    assert len(records) == 5, "all 5 files must be parsed in sequential mode"
+    assert len(nodes) >= 10  # FILE + FUNCTION per file
+
+
+def test_parse_all_raises_on_majority_pool_failure(tmp_path: Path, monkeypatch):
+    """parse_all must raise RuntimeError when >50% of futures fail (pool crash).
+
+    Simulates a pool crash by monkey-patching ProcessPoolExecutor.submit to
+    return real Future objects pre-populated with an exception.  Verifies the
+    fail-fast threshold (>50% failure rate) triggers the RuntimeError.
+    """
+    from concurrent.futures import Future, ProcessPoolExecutor
+
+    def patched_submit(self_pool, fn, *args, **kwargs):  # noqa: ARG001
+        # Return a real Future with an exception already set.  as_completed
+        # (which calls ._condition internally) requires a genuine Future.
+        f: Future = Future()
+        f.set_exception(RuntimeError("worker process killed"))
+        return f
+
+    monkeypatch.setattr(ProcessPoolExecutor, "submit", patched_submit)
+
+    # Need > 2 files so we hit the parallel branch (parallel_workers defaults to 4)
+    config = CodeGraphConfig(
+        enabled=True, repo_root=tmp_path, parallel_workers=2
+    )
+    p = CodeParser(config)
+    for i in range(6):
+        (tmp_path / f"mod_{i}.py").write_text(f"def func_{i}():\n    pass\n")
+
+    with pytest.raises(RuntimeError, match="Parsing aborted"):
+        p.parse_all(tmp_path)

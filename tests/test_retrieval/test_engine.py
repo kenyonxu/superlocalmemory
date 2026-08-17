@@ -57,6 +57,14 @@ def _mock_db(facts: list[AtomicFact] | None = None) -> MagicMock:
         lambda ids, pid, **kwargs: [f for f in _facts if f.fact_id in ids]
     )
     db.get_scenes_for_fact.return_value = []
+    # Correction-admission contract (4.0.2 Brain Core / M042) — see the matching
+    # note in test_evidence_floor.py. temporal_validity_filter fails CLOSED when
+    # the correction-lifecycle read is unprovable, so a bare MagicMock made every
+    # recall abstain and these assertions silently exercised nothing. Real empty
+    # sets mean "admission proved, no corrections in play".
+    db.get_invalidated_fact_ids.return_value = set()
+    db.get_nonapplied_correction_successor_ids.return_value = set()
+    db.get_strict_temporal_excluded_fact_ids.return_value = set()
     return db
 
 

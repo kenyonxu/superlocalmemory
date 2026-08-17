@@ -260,6 +260,131 @@ async def set_mode(request: Request):
         return _internal_error()
 
 
+def apply_settings_update(config: "SLMConfig", payload: dict) -> "SLMConfig":
+    """Credential-safe LLM config update for the settings dashboard (fixes #119).
+
+    This is the SINGLE authoritative place where incoming dashboard save payloads
+    are merged onto the stored config.  The POST /api/v3/mode/set handler calls
+    this function after its HTTP-layer concerns (SSRF guard, auth) are settled,
+    so the acceptance gate (test_wave2_acceptance.py::P3) tests real product
+    behaviour — not a reimplementation.
+
+    SEC-L-01 PRESERVED:
+      The GET /mode route returns only ``urlparse(api_base).netloc`` (the host),
+      never the full URL.  When the UI echoes that value back on save,
+      apply_settings_update detects the scheme-less netloc and silently restores
+      the stored full URL (scheme + path).  This means the server-side logic
+      internally reads the stored URL but NEVER returns it to callers — viewer
+      users remain unable to discover the full endpoint topology.
+
+    Credential semantics:
+      api_key  blank/omitted   →  UNCHANGED  (browsers never repopulate pw fields)
+      api_key  non-blank       →  applied
+      clear_api_key = True     →  explicit "" (deliberate wipe — only way to clear)
+
+      endpoint  absent/empty   →  UNCHANGED
+      endpoint  == stored netloc (no scheme "://")  →  UNCHANGED (redacted echo)
+      endpoint  with "://"     →  applied
+      clear_base_url = True    →  explicit "" (deliberate wipe)
+
+    Security rule:  if the destination provider or endpoint genuinely changes AND
+    no new key was supplied, the stored key is cleared to prevent accidental
+    credential reuse across providers.  An explicit clear_api_key=True is
+    always honoured regardless.
+
+    NEVER logs api_key.
+    """
+    import dataclasses as _dc
+    from urllib.parse import urlparse, urlsplit, urlunsplit
+
+    stored = config.llm
+    stored_key: str = stored.api_key
+    stored_base: str = stored.api_base or ""
+
+    # ── endpoint ─────────────────────────────────────────────────────────────
+    raw_endpoint: str = (payload.get("endpoint") or payload.get("base_url") or "").strip()
+    clear_endpoint: bool = payload.get("clear_base_url") is True
+
+    if clear_endpoint:
+        new_base = ""
+        endpoint_changed = bool(stored_base)
+    elif not raw_endpoint:
+        # Nothing supplied — keep stored URL intact.
+        new_base = stored_base
+        endpoint_changed = False
+    else:
+        # Detect the SEC-L-01 redacted echo: GET /mode returns
+        # urlparse(api_base).netloc (host only, no scheme, no path).  If the
+        # client sent that exact string back, it did NOT change the endpoint —
+        # restore the full stored URL.  We compare the raw string directly to
+        # stored_netloc so that hosts with ports ("api.host.com:443") also match.
+        stored_netloc: str = urlparse(stored_base).netloc if stored_base else ""
+        is_redacted_echo: bool = bool(stored_netloc) and (raw_endpoint == stored_netloc)
+
+        if is_redacted_echo:
+            new_base = stored_base
+            endpoint_changed = False
+        else:
+            new_base = raw_endpoint
+            # Canonical comparison (strip trailing slash, normalise scheme/host
+            # case) so a harmless trailing-slash difference does not clear the key.
+            def _canonical(u: str) -> str:
+                p = urlsplit(u)
+                return urlunsplit((
+                    p.scheme.lower(), p.netloc.lower(),
+                    p.path.rstrip("/"), p.query, "",
+                ))
+            endpoint_changed = _canonical(new_base) != _canonical(stored_base)
+
+    # ── provider ─────────────────────────────────────────────────────────────
+    raw_provider: str = (payload.get("provider") or "").strip()
+    if raw_provider == "none":
+        new_provider = ""      # "none" sentinel means "clear provider"
+    elif raw_provider:
+        new_provider = raw_provider
+    else:
+        new_provider = stored.provider or ""
+
+    provider_changed: bool = new_provider != (stored.provider or "")
+
+    # ── api_key ───────────────────────────────────────────────────────────────
+    # Evaluated AFTER endpoint/provider so we know whether the destination changed.
+    raw_key: str = (payload.get("api_key") or "").strip()
+    clear_key: bool = payload.get("clear_api_key") is True
+    destination_changed: bool = provider_changed or endpoint_changed
+
+    if clear_key:
+        new_key = ""           # explicit user wipe
+    elif raw_key:
+        new_key = raw_key      # user supplied a replacement key
+    elif destination_changed:
+        # Security: destination changed but no new key → clear to prevent
+        # the stored credential from being silently redirected to a new
+        # provider or endpoint the user may not own.
+        new_key = ""
+    else:
+        # Blank key + same destination = browser did not repopulate the
+        # password field.  Preserve the stored key verbatim.
+        new_key = stored_key
+
+    # ── model ────────────────────────────────────────────────────────────────
+    raw_model: str = (payload.get("model") or "").strip()
+    new_model: str = raw_model if raw_model else (stored.model or "")
+
+    # ── apply ─────────────────────────────────────────────────────────────────
+    # dataclasses.replace preserves temperature / max_tokens / timeout_seconds.
+    # Assigning to config.llm works because SLMConfig is not frozen.
+    # NEVER include new_key in any log call.
+    config.llm = _dc.replace(
+        stored,
+        provider=new_provider,
+        model=new_model,
+        api_key=new_key,
+        api_base=new_base,
+    )
+    return config
+
+
 @router.post("/mode/set")
 async def set_full_config(request: Request):
     """Save mode + provider + model + API key together.
@@ -273,7 +398,7 @@ async def set_full_config(request: Request):
         body = await request.json()
         if not isinstance(body, dict):
             return JSONResponse({"error": "Request body must be a JSON object"}, status_code=400)
-        from superlocalmemory.core.config import SLMConfig, EmbeddingConfig, LLMConfig
+        from superlocalmemory.core.config import SLMConfig, EmbeddingConfig
         from superlocalmemory.storage.models import Mode
         from superlocalmemory.server.routes.helpers import log_mode_change
 
@@ -316,68 +441,54 @@ async def set_full_config(request: Request):
         if new_mode not in ("a", "b", "c"):
             return JSONResponse({"error": "Invalid mode"}, status_code=400)
 
-        # Field presence, not form defaults, is the persistence contract. A
-        # dashboard panel may update embeddings without sending mode/provider,
-        # and password fields deliberately reload blank. In both cases saved
-        # LLM state must remain intact unless the user supplies a replacement
-        # or explicit clear flag.
-        provider = provider_input or config.llm.provider or "none"
-        model = model_input or config.llm.model
-        _endpoint = "" if clear_base_url else (base_url_input or endpoint_input or "")
+        # Resolve the effective endpoint value before SSRF validation.
+        # Only the Ollama default injection happens here; the fallback to the
+        # stored URL (and redacted-echo detection) live inside
+        # apply_settings_update so that the P3 acceptance gate exercises
+        # the same code path as the HTTP handler — not a reimplementation.
+        _raw_ep: str = "" if clear_base_url else (base_url_input or endpoint_input or "")
         if (
-            not _endpoint and provider_input == "ollama"
+            not _raw_ep
+            and provider_input == "ollama"
             and config.llm.provider != "ollama"
             and not clear_base_url
         ):
-            _endpoint = "http://localhost:11434"
-        elif not _endpoint and not clear_base_url:
-            _endpoint = config.llm.api_base or ""
+            _raw_ep = "http://localhost:11434"
 
-        # Custom endpoints become runtime egress destinations.  Apply the
-        # same boundary policy as the connection-test route before persisting.
-        if base_url_input is not None or endpoint_input is not None:
-            client = getattr(request, "client", None)
-            endpoint_error = _validate_provider_url(
-                _endpoint, getattr(client, "host", "") if client else ""
-            )
-            if endpoint_error:
-                return JSONResponse({"error": endpoint_error}, status_code=400)
+        # SSRF guard — fires only for genuinely new egress destinations.
+        # Redacted echoes (the netloc-only string GET /mode returns per
+        # SEC-L-01) are NOT outbound targets; they will be silently replaced
+        # with the stored full URL by apply_settings_update.
+        if _raw_ep and (base_url_input is not None or endpoint_input is not None):
+            from urllib.parse import urlparse as _up
+            _stored_nl: str = _up(config.llm.api_base or "").netloc
+            _is_redacted_echo: bool = bool(_stored_nl) and (_raw_ep == _stored_nl)
+            if not _is_redacted_echo:
+                client = getattr(request, "client", None)
+                endpoint_error = _validate_provider_url(
+                    _raw_ep, getattr(client, "host", "") if client else ""
+                )
+                if endpoint_error:
+                    return JSONResponse({"error": endpoint_error}, status_code=400)
 
-        # A retained cloud credential must never be redirected to a caller's
-        # newly supplied provider or endpoint.  Compare canonical URL identity
-        # after validation so a harmless host-case or trailing-slash rewrite
-        # does not unexpectedly clear the key.
-        from urllib.parse import urlsplit, urlunsplit
+        # Build the normalised body for apply_settings_update.  Inject the
+        # resolved endpoint (Ollama default when applicable) so that the
+        # credential-safe logic sees the approved value.  Consolidate
+        # base_url → endpoint to keep apply_settings_update's lookup simple.
+        _apply_body: dict = dict(body)
+        if _raw_ep or clear_base_url:
+            _apply_body["endpoint"] = _raw_ep
+            _apply_body.pop("base_url", None)
 
-        def _endpoint_identity(url: str) -> str:
-            parsed = urlsplit(url)
-            return urlunsplit((
-                parsed.scheme.lower(), parsed.netloc.lower(),
-                parsed.path.rstrip("/"), parsed.query, "",
-            ))
+        # Credential-safe LLM update.  All field presence, preservation, and
+        # security-clearing rules live here.  Other config blocks (forgetting,
+        # injection, retrieval, math, consolidation, scope, …) are preserved
+        # because we loaded the full existing config at the top of this handler.
+        config = apply_settings_update(config, _apply_body)
 
-        destination_changed = (
-            (provider_input is not None and provider_input != config.llm.provider)
-            or (
-                (base_url_input is not None or endpoint_input is not None)
-                and _endpoint_identity(_endpoint)
-                != _endpoint_identity(config.llm.api_base or "")
-            )
-        )
-        api_key = "" if (clear_api_key or (destination_changed and not api_key_input)) else (
-            api_key_input or config.llm.api_key
-        )
-
-        # Mutate only the fields the dashboard sent — all other config blocks
-        # (forgetting, injection, retrieval, math, consolidation, scope, …) are
-        # preserved because we loaded the full existing config above.
+        # Mode switch — happens after LLM update so the correct provider/key
+        # is already in place when the runtime engine is reconfigured.
         config.mode = Mode(new_mode)
-        config.llm = LLMConfig(
-            provider=provider if provider != "none" else "",
-            model=model,
-            api_key=api_key,
-            api_base=_endpoint,
-        )
 
         # Update embedding only when the dashboard explicitly sent those fields;
         # absence means "leave it alone" (AIDEV-86 / broader fix).
@@ -423,8 +534,8 @@ async def set_full_config(request: Request):
         return {
             "success": True,
             "mode": new_mode,
-            "provider": provider,
-            "model": model,
+            "provider": config.llm.provider or "none",
+            "model": config.llm.model,
             "embedding_provider": config.embedding.provider,
             "embedding_model": config.embedding.model_name,
             "embedding_dimension": config.embedding.dimension,

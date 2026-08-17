@@ -93,7 +93,18 @@ class EmbeddingConfig:
 
 @dataclass(frozen=True)
 class LLMConfig:
-    """LLM provider configuration per mode."""
+    """LLM provider configuration per mode.
+
+    Frozen (restored in 4.0.6). ``frozen=True`` also generates ``__hash__``;
+    dropping it makes every LLMConfig unhashable, which breaks any set/dict-key
+    or cache use at runtime without necessarily failing a test. Updates build a
+    NEW instance via ``dataclasses.replace`` and assign it to the mutable
+    SLMConfig — see ``v3_api.apply_settings_update`` — so immutability here
+    costs nothing.
+
+    All production code creates new instances via LLMConfig(...) or
+    dataclasses.replace().
+    """
 
     provider: str = ""             # "" = no LLM, "ollama", "azure", "openai", "anthropic"
     model: str = ""                # Model name/deployment
@@ -291,6 +302,19 @@ class RetrievalConfig:
     # so this stays tight: a slow reranker degrades to fusion scores rather
     # than holding the recall open.
     cross_encoder_timeout_seconds: float = 15.0
+
+    # v3.9.x (issue #112): plain-HTTP trust for private-LAN reranker endpoints.
+    # When True (the default), numeric RFC1918/ULA/link-local addresses may use
+    # plain HTTP — the same security model as the local reranker, where memory
+    # text only crosses the loopback. Set to False in hardened deployments
+    # (zero-trust networks, shared colocation) to require HTTPS for all
+    # non-loopback hosts, including private-LAN addresses.
+    #
+    # THREAT MODEL: setting this True does NOT prevent a MITM attack by an
+    # adversary on the same physical LAN (e.g. ARP spoofing). This flag means
+    # "my LAN is under my control and I accept that residual risk." It is not
+    # a claim that private-LAN traffic is cryptographically secure.
+    trust_plain_http_lan: bool = True
 
     @property
     def is_remote_cross_encoder(self) -> bool:

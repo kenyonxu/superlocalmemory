@@ -2273,9 +2273,12 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
 _HELP_TOPICS: dict[str, str] = {
     "modes": """\
 Operating modes
-  a  Local Guardian — no model-provider call in the core memory path.
-  b  Smart Local    — uses a local Ollama LLM (auto-detected at setup).
-  c  Full Power     — uses a cloud LLM (OpenAI/Anthropic/…), needs a key.
+  a  On-device only  — no AI language model runs; all data stays on this
+                       device. Fastest and most private. (EU AI Act: full)
+  b  On-device + AI  — uses a local Ollama model to improve recall quality;
+                       all data stays on this device. Requires Ollama running.
+  c  Cloud AI        — uses a cloud provider (OpenAI, Anthropic, …) for best
+                       recall quality; queries leave this device. Needs a key.
 
   Switch any time:  slm mode a   (or b / c)
 """,

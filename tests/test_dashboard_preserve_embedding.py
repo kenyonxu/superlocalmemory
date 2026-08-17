@@ -406,6 +406,91 @@ class TestSetFullConfig:
         assert saved["llm"]["provider"] == "openrouter"
         assert saved["llm"]["api_key"] == "sk-firsttime"
 
+    def test_issue119_sec_l01_redacted_echo_preserves_api_key_and_scheme(
+        self, isolated_config
+    ):
+        """Issue #119 end-to-end POST proof: SEC-L-01 roundtrip must not wipe credentials.
+
+        Exact reproduction of the reported bug:
+          1. Config stored with full URL + API key.
+          2. GET /mode returns netloc-only (SEC-L-01 — host without scheme/path).
+          3. Dashboard saves back with the netloc-only string as endpoint + blank key.
+          4. Bug: credentials and scheme were wiped. Fix: treated as no-op.
+        """
+        from urllib.parse import urlparse
+
+        _write_config(isolated_config, {
+            **_BASE_CONFIG,
+            "llm": {
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": "sk-ISSUE119-DO-NOT-WIPE",
+                "base_url": "https://api.openai.com/v1",
+            },
+        })
+
+        # What GET /mode exposes (SEC-L-01 redaction):
+        displayed_host = urlparse("https://api.openai.com/v1").netloc  # "api.openai.com"
+
+        from superlocalmemory.server.routes.v3_api import set_full_config
+
+        # Dashboard no-op save: sends the redacted host + blank key (normal browser behaviour)
+        asyncio.run(set_full_config(_make_request({
+            "mode": "c",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "api_key": "",         # blank — browser never repopulates password fields
+            "endpoint": displayed_host,  # "api.openai.com" — netloc only from GET /mode
+        })))
+
+        saved = _read_config(isolated_config)
+        assert saved["llm"]["api_key"] == "sk-ISSUE119-DO-NOT-WIPE", (
+            "api_key was wiped by a no-op save — issue #119 regression"
+        )
+        assert urlparse(saved["llm"]["base_url"]).scheme in ("http", "https"), (
+            f"endpoint lost its scheme: {saved['llm']['base_url']!r} — Mode C cannot connect"
+        )
+        assert saved["llm"]["base_url"].rstrip("/").endswith("/v1"), (
+            f"endpoint path was discarded: {saved['llm']['base_url']!r}"
+        )
+
+    def test_issue119_genuine_endpoint_change_replaces_url_and_clears_key(
+        self, isolated_config, monkeypatch
+    ):
+        """A genuine new endpoint (not a SEC-L-01 echo) updates the URL and clears the key.
+
+        Security rule: supplying a new destination without a new key must clear the
+        stored key so credentials cannot be silently relayed to a different provider.
+        """
+        _write_config(isolated_config, {
+            **_BASE_CONFIG,
+            "llm": {
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": "sk-OLD",
+                "base_url": "https://api.openai.com/v1",
+            },
+        })
+
+        import superlocalmemory.server.routes.v3_api as v3_api
+
+        # Bypass SSRF check so we can test the credential logic in isolation
+        monkeypatch.setattr(v3_api, "_validate_provider_url", lambda *_: None)
+        asyncio.run(v3_api.set_full_config(_make_request({
+            "mode": "c",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "api_key": "",   # no new key supplied
+            "base_url": "https://api.different-provider.com/v1",  # genuinely new URL
+        })))
+
+        saved = _read_config(isolated_config)
+        assert saved["llm"]["base_url"] == "https://api.different-provider.com/v1"
+        assert saved["llm"]["api_key"] == "", (
+            "old key should be cleared when destination changes without a new key "
+            "— prevents silent credential relay to a different provider"
+        )
+
 
 def test_settings_render_redacted_endpoints_as_hints_not_replacements():
     """A GET response containing only a redacted host must be safe to re-save."""

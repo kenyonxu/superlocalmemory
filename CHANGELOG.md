@@ -9,12 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Storage: per-call connections now disable checkpoint-on-close
-  (`SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`). Closing a WAL-mode connection could
-  run a checkpoint that waited indefinitely on reader marks pinned by another
-  connection, while holding SQLite's process-global VFS mutex — convoying
-  every later connection in the process. `PRAGMA busy_timeout` does not apply
-  to the close path. Reported, diagnosed and fixed by **@kenyonxu** (#118),
-  with a production postmortem and an in-suite reproduction.
+  (`SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`), removing a version-dependent blocking
+  close path. On SQLite builds whose close-path checkpoint can block, closing a
+  WAL-mode connection may wait on reader marks pinned by another connection
+  while holding SQLite's process-global VFS mutex, convoying every later
+  connection in the process; `PRAGMA busy_timeout` does not apply to that path.
+  Reported, diagnosed and fixed by **@kenyonxu** (#118), from a production
+  postmortem plus an in-suite reproduction.
+  Scope note: on SQLite 3.49.1 the close-path checkpoint is passive — measured
+  at 0.075 ms with a full WAL and a pinned reader mark — so the convoy is not
+  reproducible there. This change is therefore hardening: it makes the
+  non-blocking close explicit rather than depending on the behaviour of a
+  particular SQLite build.
 - Storage: per-call connections now also set `PRAGMA wal_autocheckpoint=400`.
   This pragma is per-connection and is not persisted in the database file, so
   it previously applied only to the short-lived initialisation connection and

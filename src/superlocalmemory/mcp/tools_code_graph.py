@@ -204,8 +204,12 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                 if fp in file_groups:
                     file_groups[fp][1].append(e)
 
-            for fp, (ns, es, fr) in file_groups.items():
-                store.store_file_nodes_edges(fp, ns, es, fr)
+            # Two-phase commit: all nodes first, then edges.
+            # This makes storage order-independent so cross-file CALLS edges
+            # (e.g., a.py calls bar() defined in b.py) are never silently
+            # dropped because of the file iteration order.
+            batch = [(fp, ns, es, fr) for fp, (ns, es, fr) in file_groups.items()]
+            store.commit_build_batch(batch)
 
             # Build in-memory graph
             engine = GraphEngine(store)
@@ -357,11 +361,14 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                     continue
                 try:
                     source = full.read_bytes()
-                    file_nodes, file_edges = parser.parse_file(
+                    file_nodes, file_edges, file_import_map = parser.parse_file(
                         Path(fp), source, lang
                     )
                     import hashlib
                     from superlocalmemory.code_graph.models import FileRecord
+                    from superlocalmemory.code_graph.parser import (
+                        _clean_and_resolve_edges,
+                    )
                     fr = FileRecord(
                         file_path=fp,
                         content_hash=hashlib.sha256(source).hexdigest(),
@@ -371,7 +378,27 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                         edge_count=len(file_edges),
                         last_indexed=time.time(),
                     )
-                    store.store_file_nodes_edges(fp, file_nodes, file_edges, fr)
+                    # Wire the resolver for the incremental path.
+                    # parse_all has _clean_and_resolve_edges built in, but
+                    # update_code_graph goes through parse_file which emits raw
+                    # placeholder targets (__call__<name>).  Without resolution,
+                    # Fix B (defensive filter) drops ALL CALLS edges — silent
+                    # data loss on every incremental update.
+                    #
+                    # Load the full DB node set as the resolution universe so
+                    # Strategy 3 (global heuristic) can match cross-file calls.
+                    db_nodes, _ = store.get_all_nodes_and_edges()
+                    resolution_universe = list(file_nodes) + [
+                        n for n in db_nodes if n.file_path != fp
+                    ]
+                    resolved_edges = _clean_and_resolve_edges(
+                        resolution_universe,
+                        list(file_edges),
+                        {fp: file_import_map},
+                        repo,
+                        config,
+                    )
+                    store.store_file_nodes_edges(fp, file_nodes, resolved_edges, fr)
                 except Exception as exc:
                     logger.warning("Failed to update %s: %s", fp, exc)
 
