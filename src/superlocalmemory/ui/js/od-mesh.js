@@ -135,13 +135,34 @@
         // Two-column: peer cards (left) + conversation panel (right)
         '<div style="display:grid;grid-template-columns:1.15fr 1fr;gap:20px;align-items:start">' +
 
-          // LEFT — peer card grid
+          // LEFT — peer card grid + recent activity
           '<div>' +
             '<div class="launch-grid" id="od-mesh-peers-grid"' +
               ' style="grid-template-columns:1fr 1fr">' +
               '<div id="od-mesh-peers-ph"' +
                 ' style="grid-column:1/-1;text-align:center;padding:40px;color:var(--fg-2)">' +
                 '<div style="font-size:15px;margin-bottom:6px">Loading peers…</div>' +
+              '</div>' +
+            '</div>' +
+
+            // Recent activity, from GET /mesh/events.
+            //
+            // The pane used to render live peers and nothing else. Peers
+            // deregister when their session ends, so between sessions it showed
+            // "No mesh sessions connected" and threw away every registration
+            // that had ever happened — on this store, six of them, four from
+            // bounded-loops. That reads as "the mesh has never worked".
+            //
+            // Live peers answer "who can I message right now". This answers
+            // "has the mesh ever done anything", which is the question someone
+            // looking at an empty grid is actually asking.
+            '<div class="card" id="od-mesh-activity-card" style="margin-top:16px">' +
+              '<div class="card-head">' +
+                '<h3>Recent mesh activity</h3>' +
+                '<span class="sub" id="od-mesh-activity-sub">sessions that have joined</span>' +
+              '</div>' +
+              '<div class="card-pad" id="od-mesh-activity">' +
+                '<div style="color:var(--fg-2);font-size:13px">Loading activity…</div>' +
               '</div>' +
             '</div>' +
           '</div>' +
@@ -240,11 +261,13 @@
             'justify-content:center;margin-bottom:16px;color:var(--fg-3)">' +
             meshEmptyIcon() +
           '</div>' +
-          '<h3 style="font-size:15px;margin-bottom:6px">No mesh sessions connected</h3>' +
+          '<h3 style="font-size:15px;margin-bottom:6px">No sessions connected right now</h3>' +
           '<p style="font-size:12.5px;color:var(--fg-2);' +
-            'max-width:30ch;line-height:1.5">' +
-            'Start another agent session or connect a trusted LAN peer. Sessions register via the' +
-            ' <code>mesh_summary</code> MCP tool.' +
+            'max-width:38ch;line-height:1.55">' +
+            'Messaging needs a peer that is currently live — sessions leave the mesh ' +
+            'when they end, so this is empty between sessions rather than broken. ' +
+            'Past sessions are listed below. Start another agent session and it will ' +
+            'appear here automatically.' +
           '</p>' +
         '</div>';
       return;
@@ -454,6 +477,75 @@
           selectPeerById(null);
         }
       });
+
+    meshFetch('/mesh/events')
+      .then(function (r) { return r.ok ? r.json() : { events: [] }; })
+      .catch(function () { return { events: [] }; })
+      .then(function (d) {
+        if (_requestSeq !== requestSeq) return;
+        renderActivity(Array.isArray(d && d.events) ? d.events : []);
+      });
+  }
+
+  /* Recent mesh activity from the event log.
+   *
+   * Grouped by project rather than listed raw: a session that registers,
+   * heartbeats and leaves produces several events, and twenty rows describing
+   * four projects is less informative than four rows. Read-only — this never
+   * writes, so it cannot disturb a live mesh.
+   */
+  function renderActivity(events) {
+    var box = document.getElementById('od-mesh-activity');
+    var sub = document.getElementById('od-mesh-activity-sub');
+    if (!box) return;
+
+    if (!events.length) {
+      box.innerHTML = '<div style="color:var(--fg-2);font-size:13px;line-height:1.6">' +
+        'No mesh activity recorded yet. Sessions join the mesh automatically when ' +
+        'an agent calls the <code>mesh_summary</code> tool — nothing to configure.' +
+        '</div>';
+      if (sub) sub.textContent = 'no history';
+      return;
+    }
+
+    var byProject = {};
+    events.forEach(function (e) {
+      var payload = {};
+      try { payload = JSON.parse(e.payload || '{}'); } catch (err) { payload = {}; }
+      var key = payload.project_path || '(unknown project)';
+      var cur = byProject[key];
+      if (!cur) {
+        byProject[key] = { path: key, count: 1, last: e.created_at, type: e.event_type };
+      } else {
+        cur.count += 1;
+        if (String(e.created_at) > String(cur.last)) {
+          cur.last = e.created_at;
+          cur.type = e.event_type;
+        }
+      }
+    });
+
+    var rows = Object.keys(byProject).map(function (k) { return byProject[k]; });
+    rows.sort(function (a, b) { return String(b.last).localeCompare(String(a.last)); });
+
+    if (sub) {
+      sub.textContent = events.length + ' event' + (events.length === 1 ? '' : 's') +
+        ' · ' + rows.length + ' project' + (rows.length === 1 ? '' : 's');
+    }
+
+    box.innerHTML = rows.slice(0, 12).map(function (r) {
+      // Full paths are long and share prefixes; the tail identifies the project.
+      var parts = String(r.path).split('/').filter(Boolean);
+      var label = parts.length ? parts.slice(-2).join('/') : r.path;
+      return '<div class="list-row" style="align-items:baseline">' +
+        '<span class="mono" style="flex:1;font-size:12.5px" title="' + escapeHtml(r.path) + '">' +
+          escapeHtml(label) + '</span>' +
+        '<span style="font-size:12px;color:var(--fg-2);margin:0 10px">' +
+          escapeHtml(String(r.type || '').replace(/_/g, ' ')) + '</span>' +
+        '<span style="font-size:12px;color:var(--fg-3)">' +
+          escapeHtml(timeAgo(r.last)) + '</span>' +
+      '</div>';
+    }).join('');
   }
 
   // ── Event wiring (CSP-safe delegation — no onXxx= attributes) ─────────────
