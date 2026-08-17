@@ -418,6 +418,10 @@ class EngineRecallAdapter:
             memory_map={k: _sanitize_json_text(v) for k, v in memory_map.items()},
             per_fact_max=getattr(_rc, "recall_per_fact_max_chars", 2400),
             total_max=getattr(_rc, "recall_total_max_chars", 12000),
+            # Option B: markers only on session-bearing recalls. A marker can
+            # only buy a learning signal when a pending_outcomes row exists
+            # to settle, and those exist only when session_id is present.
+            include_marker=bool(session_id),
         )
         for _r in results:
             _r["content"] = _sanitize_json_text(_r.get("content", ""))
@@ -3978,6 +3982,10 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 memory_map={k: _sanitize_json_text(v) for k, v in memory_map.items()},
                 per_fact_max=getattr(_rc, "recall_per_fact_max_chars", 2400),
                 total_max=getattr(_rc, "recall_total_max_chars", 12000),
+                # Option B: markers only on session-bearing recalls. A marker can
+                # only buy a learning signal when a pending_outcomes row exists
+                # to settle, and those exist only when session_id is present.
+                include_marker=bool(session_id),
                 full=full,
                 include_source=include_source,
             )

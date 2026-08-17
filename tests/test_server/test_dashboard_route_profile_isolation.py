@@ -329,8 +329,21 @@ def test_consolidation_trigger_never_calls_dead_send_command(
     code_only = "\n".join(code_lines)
     assert "pool.send_command" not in code_only
     assert "WorkerPool" not in code_only
-    # v3.4.64: the blocking work moved into asyncio.to_thread(). The closure
-    # captures the app state as `_app_state` so it can be referenced from the
-    # nested thread function — the runtime is still obtained from it.
-    assert "get_profile_runtime" in code_only
-    assert "runtime.operation()" in code_only
+
+    # v4.0.8: the blocking work moved again, out of this handler and into
+    # server/consolidation_runner, so the daemon's periodic trigger and this
+    # endpoint run the SAME code under the SAME lock. The invariant is
+    # unchanged — consolidation holds the profile-runtime operation lease so a
+    # concurrent profile switch cannot commit mid-run — so assert it where the
+    # work now lives rather than where it used to.
+    assert "run_full_consolidation" in code_only, (
+        "endpoint no longer delegates to the shared runner"
+    )
+
+    from superlocalmemory.server import consolidation_runner
+
+    runner_src = inspect.getsource(consolidation_runner._consolidate_blocking)
+    assert "get_profile_runtime" in runner_src
+    assert "runtime.operation()" in runner_src
+    assert "pool.send_command" not in runner_src
+    assert "WorkerPool" not in runner_src

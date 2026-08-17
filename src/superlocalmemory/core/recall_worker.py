@@ -106,6 +106,10 @@ def _handle_recall(
         memory_map=memory_map,
         per_fact_max=getattr(_rc, "recall_per_fact_max_chars", 2400),
         total_max=getattr(_rc, "recall_total_max_chars", 12000),
+        # Option B: markers only on session-bearing recalls. A marker can
+        # only buy a learning signal when a pending_outcomes row exists
+        # to settle, and those exist only when session_id is present.
+        include_marker=bool(session_id),
     )
     return {
         "ok": True,
