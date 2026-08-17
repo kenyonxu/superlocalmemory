@@ -5,6 +5,35 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.8] — Where you were actually looking
+
+### Added
+- **Summaries reach agents and the dashboard.** 4.0.7 gave the summary layer a
+  command; an agent still had no way to ask for one, and neither did anyone
+  reading the dashboard. Adds the `get_memory_summary` tool and a **Summaries**
+  tab under Memories with Today, Yesterday and This project. Every result states
+  how many memories it was built from and how much it covered.
+
+### Fixed
+- **Code links never appeared for anyone.** Two separate reasons. The pass that
+  creates them matched no facts at all on a real store — it looked for an empty
+  archive marker, while live facts carry `live`, so every fact was excluded. And
+  the panel that displayed them was the search-results view, not the memory
+  drawer people actually open. Both fixed; on a real store this produces 7,470
+  links across 3,603 memories.
+- **"Atomic facts" always read "No atomic facts recorded for this memory."** The
+  drawer looked up child facts using the row's own id, but a row in that pane is
+  itself an atomic fact and its parent is a separate field. Records stored
+  directly, which have no parent, now say so rather than reporting missing data.
+- **Summaries ignored your mode.** The command never passed the configuration, so
+  every summary took the no-model path — a Mode B user got Mode A output. Ollama
+  now writes them when configured, falling back if it is unavailable.
+- **Summary highlights were unreadable.** Truncation counted characters but
+  ignored newlines, so one fact containing headings and blank lines rendered as
+  six lines and the list stopped being a list.
+- **"Active entities" listed internal identifiers** instead of names. It now
+  reads `Fixed (127), Gateway (124)`.
+
 ## [4.0.7] — Reachable
 
 Everything here was already built. None of it could be used.

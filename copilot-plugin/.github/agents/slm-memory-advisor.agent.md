@@ -8,7 +8,7 @@ description: >
 tools: session_init, recall, search, remember, update_memory, forget, list_recent, Read
 model: inherit
 target: vscode
-version: "4.0.7"
+version: "4.0.8"
 ---
 
 # Role
