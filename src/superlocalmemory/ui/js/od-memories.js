@@ -752,6 +752,7 @@
       '</div>' +
       '<h3 style="font-size:13px;margin:20px 0 8px">Atomic facts</h3>' +
       '<div id="od-drawer-facts" style="color:var(--fg-3);font-size:13px">Loading facts…</div>' +
+      '<div id="od-drawer-code"></div>' +
       '<div style="display:flex;gap:8px;margin-top:20px;padding-top:12px;border-top:1px solid var(--border)">' +
         '<button data-od-act="edit-mem" data-mid="' + _esc(mem.id) + '" style="padding:6px 14px;border:1px solid var(--border);border-radius:6px;background:var(--card-2);color:var(--fg);cursor:pointer;font-size:13px">Edit</button>' +
         '<button data-od-act="del-mem" data-mid="' + _esc(mem.id) + '" style="padding:6px 14px;border:1px solid var(--danger);border-radius:6px;background:transparent;color:var(--danger);cursor:pointer;font-size:13px">Delete</button>' +
@@ -759,7 +760,28 @@
 
     drawer.classList.add('open');
     scrim.classList.add('on');
-    if (mem.id) _loadFacts(mem.id);
+    // A row in this pane is an ATOMIC FACT, not a source memory: /api/memories
+    // reports total 3603 on a store holding 830 memories and 3603 facts, and
+    // every row id resolves through /api/facts/{id}. The row carries its parent
+    // separately as memory_id.
+    //
+    // "Atomic facts" therefore needs the PARENT id — it lists the other facts
+    // extracted from the same source memory. Passing mem.id asked
+    // /api/memories/{fact_id}/facts, which has no children to return, so this
+    // section read "No atomic facts recorded for this memory" for every memory
+    // on every store. Not an empty state: the wrong identifier.
+    if (mem.memory_id) {
+      _loadFacts(mem.memory_id);
+    } else {
+      // No parent row: this record was stored directly as a fact rather than
+      // extracted from a longer memory (198 of 3,608 on a real store). Saying
+      // "no atomic facts recorded" there is wrong in a way that matters — it
+      // reads as data missing, when the fact IS the record.
+      var fx = document.getElementById('od-drawer-facts');
+      if (fx) fx.textContent = 'Stored directly — this record is itself the atomic fact.';
+    }
+    // Code links hang off the FACT, so this one takes the row id.
+    if (mem.id) _loadCodeLinks(mem.id);
   }
 
   function _closeDrawer() {
@@ -790,6 +812,81 @@
         }).join('');
       })
       .catch(function () { if (el) el.textContent = 'Could not load facts.'; });
+  }
+
+  /* Code this memory refers to (4.0.8).
+   *
+   * Renders into the memory drawer — the panel actually used to inspect a
+   * memory. 4.0.7 put this in js/fact-detail.js, which only binds to
+   * `.fact-result-item` rows in the search-results view, so the feature was
+   * invisible to anyone browsing Memories.
+   *
+   * KEYED ON THE ROW'S OWN ID, which is an ATOMIC FACT id. The Memories pane
+   * lists atomic facts — /api/memories returns total 3603 on a store with 830
+   * memories and 3603 facts, and each row id resolves through /api/facts/{id}.
+   * (That mismatch is also why the drawer's "Atomic facts" block always reads
+   * "No atomic facts recorded": it asks /api/memories/{fact_id}/facts, which
+   * has no children to return. Left alone here — separate defect, separate fix.)
+   *
+   * Reads /api/facts/{id}, which serves links from code_graph.db. Recall never
+   * opens that database, so nothing here can affect retrieval.
+   *
+   * textContent throughout: every value is a qualified name or path read out of
+   * an indexed repository, i.e. untrusted input as far as this panel goes.
+   */
+  function _loadCodeLinks(factId) {
+    var host = document.getElementById('od-drawer-code');
+    if (!host || !factId) return;
+    fetch('/api/facts/' + encodeURIComponent(factId))
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        var links = (d && d.code_links) || [];
+        if (!links.length) return;   // silent when there is nothing to show
+
+        var wrap = document.createElement('div');
+        wrap.style.cssText = 'margin-top:6px;padding-top:6px;border-top:1px dashed var(--border)';
+
+        var label = document.createElement('div');
+        label.style.cssText = 'font-size:11px;color:var(--fg-3);margin-bottom:4px';
+        label.textContent = 'Code referenced (' + links.length + ')';
+        wrap.appendChild(label);
+
+        links.slice(0, 6).forEach(function (l) {
+          var row = document.createElement('div');
+          row.style.cssText = 'font-size:12px;line-height:1.5';
+
+          var code = document.createElement('code');
+          code.style.cssText = 'color:var(--violet)';
+          code.textContent = l.qualified_name || l.name || '?';
+          row.appendChild(code);
+
+          if (l.kind) {
+            var kind = document.createElement('span');
+            kind.style.cssText = 'color:var(--fg-3);font-size:10px;margin-left:6px';
+            kind.textContent = l.kind;
+            row.appendChild(kind);
+          }
+          // A stale link points at code that has moved or gone. Saying so is the
+          // entire value of tracking staleness.
+          if (l.is_stale) {
+            var stale = document.createElement('span');
+            stale.className = 'badge';
+            stale.style.cssText = 'font-size:9px;margin-left:6px';
+            stale.textContent = 'code changed';
+            row.appendChild(stale);
+          }
+          wrap.appendChild(row);
+        });
+
+        if (links.length > 6) {
+          var more = document.createElement('div');
+          more.style.cssText = 'font-size:11px;color:var(--fg-3);margin-top:2px';
+          more.textContent = '… and ' + (links.length - 6) + ' more';
+          wrap.appendChild(more);
+        }
+        host.appendChild(wrap);
+      })
+      .catch(function () { /* display extra: never surface an error here */ });
   }
 
   function _startEdit(mid) { // show inline edit form in drawer
