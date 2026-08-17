@@ -1,3 +1,21 @@
+/**
+ * Run the UI test suite.
+ *
+ * WHY THIS SCRIPT EXISTS, rather than `node --test tests/ui/`:
+ *
+ * Node 26 resolves a bare directory argument as a MODULE, not as a directory to
+ * scan. `node --test tests/ui/` therefore dies with
+ *
+ *     Error: Cannot find module '.../tests/ui'   (MODULE_NOT_FOUND)
+ *
+ * in ~48 ms, reporting one failed "test" that names nothing and points at no
+ * defect — while every file in the suite passes. Enumerating the files here and
+ * passing them individually works on every Node version and cannot produce that
+ * misleading result.
+ *
+ * Guarded by tests/ui/test_runner_invocation_is_documented_correctly.mjs.
+ */
+
 import { readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';

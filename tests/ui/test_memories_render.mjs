@@ -1,6 +1,11 @@
 /**
  * tests/ui/test_memories_render.mjs — memories.js loader tests.
- * Runner: node --test tests/ui/
+ * Runner: npm test   (scripts/run-ui-tests.mjs)
+ *
+ * NOT `node --test tests/ui/`. Node 26 resolves a bare directory as a
+ * module and dies with MODULE_NOT_FOUND before running anything — a red
+ * result that says nothing about this file. The runner enumerates
+ * test_*.mjs and passes them individually, which works on every version.
  * Requires: jsdom
  *
  * Regression target (P1f): the legacy loadMemories()/renderMemoriesTable()
