@@ -116,9 +116,19 @@ def test_brain_js_renders_all_sections() -> None:
 
 
 def test_living_brain_distinguishes_activity_from_configuration() -> None:
-    js = _UI_JS.read_text(encoding="utf-8")
+    """The shipped Brain pane must separate configuration from activity.
+
+    REPOINTED in 4.0.7 from js/brain.js to js/od-brain.js. brain.js was retired
+    in 4.0.6 — index.html mentions it only in a comment explaining the
+    retirement, and no <script> tag loads it. This test was therefore asserting
+    properties of code that does not run, and failing because the dead file still
+    contains ``control_plane`` while the live one does not. A test that guards a
+    retired file is worse than no test: it reports on something users never
+    execute.
+    """
+    js = _OD_BRAIN_JS.read_text(encoding="utf-8")
     assert "Configured integrations" in js
-    assert "Recent client activity is shown separately in Living Brain" in js
+    assert "Recent client activity" in js
     assert "control_plane" not in js, (
         "the UI must not present the observation-only read model as a control"
     )
@@ -131,7 +141,15 @@ def test_shipped_living_brain_uses_canonical_client_evidence() -> None:
     assert "Configured integrations" in js
     assert "tool-event activity over time (proxy metric)" not in js
     assert "No source-quality evidence has settled yet" in js
-    assert "Claimed evidence authority" in js
+    # The CONTRACT is that claimed evidence is labelled as claimed and kept
+    # distinct from independently verified evidence. This previously pinned the
+    # literal string "Claimed evidence authority"; 4.0.6 rewrote the pane to drop
+    # ML jargon and shortened it to "Claimed evidence", so the assertion failed
+    # on a rename while the guarantee was intact. Pinning both labels enforces
+    # the distinction that matters without freezing the wording — the same
+    # lesson recorded in tests/ui/test_od_brain_reward_truth.mjs.
+    assert "Claimed evidence" in js
+    assert "Independently verified evidence" in js
     assert "Agent evidence" in js
     assert "observation only" in js
     assert "do not change recall, ranking, or model routing" in js

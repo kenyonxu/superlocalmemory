@@ -52,7 +52,14 @@ def test_user_prompt_hook_enriches_topic_signature(monkeypatch):
     class _StubEntry:
         content = "test"
 
-    def _fake_read_entry_fast(session_id: str, topic_sig: str):
+    def _fake_read_entry_fast(session_id: str, topic_sig: str, **kwargs):
+        # **kwargs is load-bearing. The hook calls
+        #   read_entry_fast(session_id, topic_sig, require_current_admission=True)
+        # and that third argument arrived with the 4.0.2 current-truth admission
+        # work. A two-parameter stub raises TypeError during argument binding —
+        # before the body runs — so ``captured`` stayed empty and the assertion
+        # failed with a bare "None is not None" that named nothing. Accepting
+        # extra keywords keeps the stub tolerant of the real signature.
         captured["sig"] = topic_sig
         return None  # miss
 
