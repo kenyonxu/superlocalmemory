@@ -123,22 +123,42 @@ class TestDetectAllInstalls:
         assert result == []
 
     def test_is_read_only_no_writes(self, tmp_path, monkeypatch):
-        """_detect_all_installs() never writes any file."""
-        import os
+        """_detect_all_installs() must not write anything, anywhere.
 
-        original_open = open
-        writes = []
+        The earlier version defined a tracking wrapper, never installed it, and
+        ended in `assert True` — it passed whether the function wrote or not.
+        This version installs the trackers AND proves they fire, so it cannot
+        quietly become vacuous again.
+        """
+        import builtins
 
-        def tracking_open(path, mode="r", **kwargs):
-            if "w" in str(mode) or "a" in str(mode):
-                writes.append(path)
-            return original_open(path, mode, **kwargs)
+        writes: list[str] = []
+        real_open = builtins.open
 
-        # Just call it — if it writes, the list won't be empty
+        def tracking_open(path, mode="r", *a, **kw):
+            if any(ch in str(mode) for ch in ("w", "a", "x", "+")):
+                writes.append(f"open({path!r}, {mode!r})")
+            return real_open(path, mode, *a, **kw)
+
+        monkeypatch.setattr(builtins, "open", tracking_open)
+        monkeypatch.setattr(Path, "write_text",
+                            lambda self, *a, **kw: writes.append(f"write_text({self})"))
+        monkeypatch.setattr(Path, "write_bytes",
+                            lambda self, *a, **kw: writes.append(f"write_bytes({self})"))
+        monkeypatch.setattr(Path, "mkdir",
+                            lambda self, *a, **kw: writes.append(f"mkdir({self})"))
+
+        # Control: prove the trackers intercept. Without this, the assertion
+        # below is unfalsifiable and the test is lying about what it checks.
+        (tmp_path / "control.txt").write_text("x")
+        assert writes, "tracker never fired — this test cannot detect a write"
+        writes.clear()
+
         from superlocalmemory.core.install_detector import _detect_all_installs
+
         _detect_all_installs()
-        # No assertion on writes here — just verifying no exception
-        assert True  # The above must not crash
+
+        assert writes == [], f"_detect_all_installs() wrote: {writes}"
 
 
 # ---------------------------------------------------------------------------

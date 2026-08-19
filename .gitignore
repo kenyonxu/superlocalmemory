@@ -7,6 +7,7 @@ memory.db
 *.db
 !demo-memory.db
 backups/
+pre-migration-snapshots/
 profiles/
 
 # ==== BENCHMARKS (Internal — code, data, results) ====

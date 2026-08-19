@@ -197,14 +197,19 @@ class TestGcCalledAfterBackup:
         learning_db, memory_db = _minimal_dbs(tmp_path)
         backups_root = tmp_path / "backups"
 
+        # The mock must return what production returns: _pre_migration_backup
+        # returns the snapshots ROOT, not a child directory. An earlier version
+        # of this test returned a child, which made `backup_dir.parent`
+        # accidentally equal `backups_root` and hid a real defect — GC was being
+        # pointed one level above the snapshots and pruned nothing, so snapshots
+        # grew without bound at roughly half a gigabyte each.
         with mock.patch(
             "superlocalmemory.storage.migration_runner._pre_migration_backup",
-            return_value=backups_root / "pre-42-20260819-120000",
+            return_value=backups_root,
         ) as _pb, mock.patch(
             "superlocalmemory.storage.migration_runner._gc_old_backups"
         ) as gc_mock:
-            # Make backup dir appear to exist
-            (backups_root / "pre-42-20260819-120000").mkdir(parents=True)
+            backups_root.mkdir(parents=True, exist_ok=True)
             mr.apply_all(learning_db, memory_db)
 
         gc_mock.assert_called_once_with(backups_root)
@@ -216,14 +221,21 @@ class TestGcCalledAfterBackup:
 
 class TestBackupDirIgnored:
 
-    def test_backups_dir_in_gitignore(self):
-        """backups/ must appear in .gitignore so backup dirs are never committed."""
-        gitignore = Path(__file__).parents[2] / ".gitignore"
-        assert gitignore.exists(), ".gitignore missing from repo root"
-        content = gitignore.read_text()
-        assert "backups/" in content or "backups" in content, (
-            "'backups/' must be in .gitignore to prevent committing backup dirs"
-        )
+    def test_snapshot_dirs_ignored_by_git_and_npm(self):
+        """Both backup directories must be ignored by git AND npm.
+
+        Snapshots contain the user's memories in full. One escaping into a
+        commit or an npm tarball would publish them. The earlier version of
+        this test checked only `backups/`, and only in `.gitignore`, with an
+        `or "backups"` clause that could not fail.
+        """
+        root = Path(__file__).parents[2]
+        for name in (".gitignore", ".npmignore"):
+            path = root / name
+            assert path.exists(), f"{name} missing from repo root"
+            content = path.read_text()
+            for entry in ("backups/", "pre-migration-snapshots/"):
+                assert entry in content, f"{entry!r} must be listed in {name}"
 
     def test_backups_dir_in_npmignore(self):
         """backups/ must appear in .npmignore so backup dirs are not published."""

@@ -9,6 +9,7 @@ memory.db
 *.db
 !demo-memory.db
 backups/
+pre-migration-snapshots/
 profiles/
 vectors/
 cold-storage/

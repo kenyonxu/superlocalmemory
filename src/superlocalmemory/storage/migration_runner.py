@@ -415,7 +415,11 @@ def apply_all(
             learning_db, memory_db,
             backups_root=memory_db.parent / "pre-migration-snapshots",
         )
-        _gc_old_backups(backup_dir.parent)
+        # _pre_migration_backup returns the snapshots root itself, so this is
+        # the directory to prune. Passing .parent pointed the collector at the
+        # data directory, where it matched nothing and pruned nothing — leaving
+        # every snapshot on disk for ever.
+        _gc_old_backups(backup_dir)
         details["_backup"] = str(backup_dir)
 
     schema_error = _bootstrap_learning_schema(learning_db, dry_run=dry_run)
