@@ -2,16 +2,16 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com
 
-"""WP-08 portable kit — ``slm connect <ide>`` MCP-wiring.
+"""Portable kit — ``slm connect <ide>`` MCP-wiring.
 
 Writes SLM's MCP block into the target IDE config via MERGE-NOT-CLOBBER:
 - Only touches the ``superlocalmemory`` server key.
 - All other servers + top-level keys are preserved byte-for-byte.
 - Atomic write (.tmp + os.replace); aborts on parse error (file untouched).
-- claude-code is OUT: short-circuits to a WP-06 plugin pointer, no config written.
+- claude-code is OUT: short-circuits to a plugin pointer, no config written.
 - AGENTS.md is appended with <!-- SLM-START/END --> markers (never overwrite).
 
-IDE_MATRIX verified against ide/configs/* templates (read-only, WP-04 owns).
+IDE_MATRIX verified against ide/configs/* templates (read-only; configs are the authoritative source).
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ SLM_MARKER_END = "<!-- SLM-END -->"
 VALID_TRANSPORTS: frozenset[str] = frozenset({"stdio", "http", "http-mcp-remote"})
 
 CLAUDE_CODE_PLUGIN_POINTER = (
-    "slm connect claude-code: Claude Code is configured via the SLM plugin (WP-06).\n"
+    "slm connect claude-code: Claude Code is configured via the SLM plugin (see plugin/ directory).\n"
     "Run: slm plugin install  OR  see plugin-src/ for manual installation.\n"
     "No MCP config file is written by this command."
 )
@@ -206,17 +206,17 @@ IDE_MATRIX: dict[str, IDEDescriptor] = {
         },
         caveats="contextProviders is a LIST; append+dedupe by serverName",
     ),
-    # --- OUT: claude-code defers to WP-06 ---
+    # --- OUT: claude-code defers to the plugin installer ---
     "claude-code": IDEDescriptor(
         ide_id="claude-code",
-        display="Claude Code (WP-06 plugin)",
+        display="Claude Code (plugin)",
         mcp_path_global="",
         mcp_path_project=None,
         server_key="",
         fmt="",
         agents_md_path=None,
         server_block={},
-        caveats="OUT — WP-06 plugin pointer only; no MCP config written",
+        caveats="OUT — plugin pointer only; no MCP config written",
     ),
     # --- EXPERIMENTAL (gated, not wired by default) ---
     # chatgpt-desktop, perplexity, cody: gated behind --experimental
@@ -702,7 +702,7 @@ if __name__ == "__main__":  # pragma: no cover
         metavar="IDE",
         help=(
             "IDE ids to connect.  Pass 'all' to connect every supported IDE "
-            "(excluding claude-code which uses the WP-06 plugin)."
+            "(excluding claude-code which uses the plugin installer)."
         ),
     )
     _parser.add_argument("--home", help="Override home directory (test hook).")

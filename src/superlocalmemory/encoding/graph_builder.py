@@ -9,7 +9,7 @@ last 50 memories; this version searches ALL facts per canonical entity.
 
 Edge types: ENTITY (shared entity, weight 1.0), TEMPORAL (exp-decay,
 1-week window), SEMANTIC (ANN cosine > 0.7), CAUSAL (causal markers,
-weight 0.8). CONTRADICTION exposed for external Sheaf module (Wave 4).
+weight 0.8). CONTRADICTION exposed for external Sheaf module (added in v3.5).
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
 License: AGPL-3.0-or-later
@@ -101,7 +101,7 @@ class GraphBuilder:
         self, fact_id_a: str, fact_id_b: str, profile_id: str,
         severity: float = 1.0,
     ) -> GraphEdge:
-        """Add a contradiction edge. Called by Sheaf module (Wave 4)."""
+        """Add a contradiction edge. Called by the Sheaf module (introduced in v3.5)."""
         edge = GraphEdge(
             profile_id=profile_id,
             source_id=fact_id_a,

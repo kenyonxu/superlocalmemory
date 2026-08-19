@@ -162,7 +162,10 @@ def test_wait_remember_completes_same_canonical_operation(
     payload = response.json()
     assert payload["materialization_state"] == "queryable"
     assert payload["fact_ids"]
-    assert payload["wait_ignored"] is True
+    assert payload["wait_ignored"] is False, (
+        "wait now buys a larger best-effort enrichment budget; it is no "
+        "longer discarded"
+    )
     operation = engine_with_mock_deps._db.execute(
         "SELECT state, session_id FROM ingestion_operations "
         "WHERE operation_id=?",
@@ -189,7 +192,10 @@ def test_wait_remember_never_runs_inline_materialization(engine_with_mock_deps) 
     payload = response.json()
     assert payload["status"] == "queryable"
     assert payload["materialization_state"] == "queryable"
-    assert payload["wait_ignored"] is True
+    assert payload["wait_ignored"] is False, (
+        "wait now buys a larger best-effort enrichment budget; it is no "
+        "longer discarded"
+    )
 
 
 def test_trust_rejection_occurs_before_journal_or_canonical_write(

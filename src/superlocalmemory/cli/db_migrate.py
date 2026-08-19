@@ -4,8 +4,6 @@
 
 """CLI handler for ``slm db migrate``.
 
-LLD reference: ``.backup/active-brain/lld/LLD-06-windows-binary-and-legacy-migration.md``
-Section 7.2 (slm db migrate CLI).
 
 Thin wrapper over the canonical runner in
 ``superlocalmemory.storage.migration_runner``. This module owns only

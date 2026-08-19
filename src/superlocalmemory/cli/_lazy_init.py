@@ -2,7 +2,7 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
-"""WP-07 — Lazy first-run initialisation (pip cross-install).
+"""Lazy first-run initialisation for pip cross-installs.
 
 Lightweight import only — zero heavy imports, STDOUT-SILENT.
 

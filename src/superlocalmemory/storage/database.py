@@ -40,6 +40,7 @@ from superlocalmemory.storage.models import (
     TemporalEvent,
     TrustScore,
 )
+from superlocalmemory.storage.embedding_codec import decode_embedding, encode_embedding
 from superlocalmemory.storage.write_lock import get_write_lock
 
 logger = logging.getLogger(__name__)
@@ -555,7 +556,7 @@ class DatabaseManager:
                  fact.interval_start, fact.interval_end,
                  fact.confidence, fact.importance, fact.evidence_count, fact.access_count,
                  json.dumps(fact.source_turn_ids), fact.session_id,
-                 _jd(fact.embedding), _jd(fact.fisher_mean), _jd(fact.fisher_variance),
+                 encode_embedding(fact.embedding), _jd(fact.fisher_mean), _jd(fact.fisher_variance),
                  fact.lifecycle.value, _jd(fact.langevin_position),
                  fact.emotional_valence, fact.emotional_arousal,
                  fact.signal_type.value, fact.created_at, _scope, _shared),
@@ -591,7 +592,7 @@ class DatabaseManager:
             evidence_count=d["evidence_count"], access_count=d["access_count"],
             source_turn_ids=_jl(d.get("source_turn_ids_json")),
             session_id=d.get("session_id", ""),
-            embedding=_jl(d.get("embedding"), None),
+            embedding=decode_embedding(d.get("embedding"), fact_id=d.get("fact_id", "<unknown>")),
             fisher_mean=_jl(d.get("fisher_mean"), None),
             fisher_variance=_jl(d.get("fisher_variance"), None),
             lifecycle=MemoryLifecycle(d["lifecycle"]) if d.get("lifecycle") else MemoryLifecycle.ACTIVE,
@@ -645,7 +646,7 @@ class DatabaseManager:
                 fact.access_count,
                 json.dumps(fact.source_turn_ids),
                 fact.session_id,
-                _jd(fact.embedding),
+                encode_embedding(fact.embedding),
                 _jd(fact.fisher_mean),
                 _jd(fact.fisher_variance),
                 fact.lifecycle.value,
@@ -873,7 +874,13 @@ class DatabaseManager:
             raise ValueError(f"Disallowed column(s): {bad_keys}")
         clean: dict[str, Any] = {}
         for k, v in updates.items():
-            if isinstance(v, (list, dict)):
+            if k == "embedding":
+                # Embeddings are stored in the canonical binary form. Falling
+                # through to json.dumps here would write a text row back into a
+                # converted store, one fact at a time, undoing the conversion
+                # wherever a fact is updated.
+                clean[k] = encode_embedding(v) if v is not None else None
+            elif isinstance(v, (list, dict)):
                 clean[k] = json.dumps(v)
             elif isinstance(v, (MemoryLifecycle, FactType, SignalType)):
                 clean[k] = v.value

@@ -2,7 +2,7 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
-"""WP-02 RED tests: recall limit parity across surfaces.
+"""RED tests: recall limit parity across surfaces.
 
 Validates that CANONICAL_RECALL_LIMIT == 20 and is the default used by:
   - MCP recall tool (tools_core.py)
@@ -105,7 +105,7 @@ def _get_cli_recall_default() -> int:
 # ---------------------------------------------------------------------------
 
 class TestRecallLimitParity:
-    """WP-02 D9: recall default limit == CANONICAL_RECALL_LIMIT across surfaces."""
+    """recall default limit == CANONICAL_RECALL_LIMIT across surfaces."""
 
     def test_recall_default_limit_parity_across_surfaces(self):
         """CANONICAL_RECALL_LIMIT==20; MCP recall default==20; CLI argparse default==20.

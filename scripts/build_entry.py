@@ -4,8 +4,6 @@
 
 """AST-extract binary hook entry.
 
-LLD reference: ``.backup/active-brain/lld/LLD-06-windows-binary-and-legacy-migration.md``
-Section 3 (Binary Entry — no code duplication).
 
 This generator reads the two canonical source modules
 (``src/superlocalmemory/core/topic_signature.py`` and

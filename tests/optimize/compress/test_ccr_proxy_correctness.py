@@ -2,11 +2,11 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later
 #
-# WP-10: CCR proxy correctness tests.
+# CCR proxy correctness tests.
 # RED phase: tests written before implementation.
 # Covers D6 (store-after-success) and D5-B (disable-lossy-on-proxy).
 
-"""CCR proxy correctness tests for WP-10.
+"""CCR proxy correctness tests.
 
 Tests:
     test_d6_no_reduction_stores_zero_ccr_rows

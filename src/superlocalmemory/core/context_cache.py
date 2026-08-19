@@ -4,8 +4,6 @@
 
 """Context cache — separate SQLite WAL DB, read-path <10 ms.
 
-LLD reference: `.backup/active-brain/lld/LLD-01-context-cache-and-hot-path-hooks.md`
-Section 4.1.
 
 Two concerns in one module:
   - Writer (``ContextCache``) — used by the daemon only. Owns pragmas,

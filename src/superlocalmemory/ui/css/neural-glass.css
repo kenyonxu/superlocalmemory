@@ -1593,7 +1593,7 @@ body.ng-privacy-blur::before {
   }
 }
 
-/* WP-12 — pane-error dark-mode override */
+/* pane-error dark-mode override */
 .ng-dark .pane-error {
   color: var(--ng-status-error);
 }

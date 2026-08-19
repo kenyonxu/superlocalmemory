@@ -4,8 +4,6 @@
 
 """Forward-only additive migrations for SLM v3.4.22.
 
-LLD reference: ``.backup/active-brain/lld/LLD-07-schema-migrations-and-security-primitives.md``
-Section 4 (Migration Runner).
 
 Contract:
   - ``apply_all(learning_db, memory_db, *, dry_run=False) -> dict`` —

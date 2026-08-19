@@ -139,6 +139,28 @@ def _backup_via_sqlite_api(src: Path, dest: Path) -> None:
         staging.unlink(missing_ok=True)   # never leave a partial file behind
         raise
 
+    # Verifying the copy read-only makes SQLite materialise a -shm beside the
+    # staging file, and a read-only connection cannot remove it on close. The
+    # rename below moves only the main file, so the companion is left behind
+    # under the staging name — observed: every snapshot left a stray
+    # `.partial-shm` and `.partial-wal` in the snapshot directory. Removing them
+    # is safe because the copy was checkpointed when its read-write connection
+    # closed, so whatever exists now came from verification and holds nothing.
+    # That is checked rather than trusted: content in the log would mean the copy
+    # was not fully checkpointed, and renaming it would strand those pages.
+    for suffix in ("-wal", "-shm"):
+        companion = staging.with_name(staging.name + suffix)
+        if not companion.exists():
+            continue
+        if suffix == "-wal" and companion.stat().st_size > 0:
+            staging.unlink(missing_ok=True)
+            companion.unlink(missing_ok=True)
+            raise SnapshotUnusableError(
+                f"copy left {companion.stat().st_size} bytes in its write-ahead log; "
+                f"renaming it would strand those pages: {dest}"
+            )
+        companion.unlink(missing_ok=True)
+
     staging.replace(dest)
 
 

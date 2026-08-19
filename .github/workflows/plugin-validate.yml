@@ -1,4 +1,4 @@
-# WP-06: Claude Code plugin validation CI gate (AC-1)
+# Claude Code plugin validation CI gate
 # Runs: build the plugin then validate schema with `claude plugin validate`
 name: Plugin Validate
 

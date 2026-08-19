@@ -13,10 +13,13 @@ Covers:
   * Parameterised query — SQL-injection-shaped fact_id probes.
 
 Contract refs:
-  - Stage 8 H-03 (architect) + H-06 (skeptic) — see
-    ``.backup/active-brain/audit/stage8-CONSOLIDATED.md`` §HIGH.
-  - LLD-12 §5 — reward-gated archive criterion 2.
-  - LLD-00 §1.4 — action_outcomes schema.
+  - H-03 (architect contract): join must be left-outer so facts with no
+    outcome still appear, and outcome rows must be profile-scoped.
+  - H-06 (skeptic contract): SQL-injection-shaped fact_id probes must not
+    reach the query — parameterised queries only.
+  - Reward-gated archive criterion: fact must have ≥1 positive outcome
+    before archival; see reward_from_outcomes.py.
+  - action_outcomes schema: profile_id, fact_id, action_type, reward_value.
 """
 
 from __future__ import annotations

@@ -2,7 +2,7 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com
 
-"""WP-07 cross-install tests — RED phase.
+"""Cross-install tests for lazy first-run initialisation — RED phase.
 
 Tests for:
   - _ensure_initialized() creating dirs + config on fresh home (AC1)

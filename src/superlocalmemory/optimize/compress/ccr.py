@@ -99,7 +99,7 @@ class CCRStore:
     def delete(self, ccr_id: str, *, tenant_id: str = "default") -> None:
         """Delete a CCR row by ccr_id scoped to tenant. Idempotent — never raises.
 
-        WP-10 D6: defensive infra. Deleting a non-existent ccr_id is a no-op.
+        Defensive delete — idempotent: deleting a non-existent ccr_id is a no-op.
         H-02: tenant_id guard prevents cross-tenant deletion.
         """
         try:

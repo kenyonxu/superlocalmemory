@@ -2,7 +2,7 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
-"""Tests for WP-03: slm doctor Surface-B (optimize) stats.
+"""Tests for slm doctor Surface-B (optimize) stats.
 
 Drives the ACTIVE cmd_doctor in cli/commands.py (dispatched via commands.py:123).
 Does NOT extend or modify the orphan test_doctor.py (which tests doctor_cmd.py).

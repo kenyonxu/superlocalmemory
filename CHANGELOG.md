@@ -944,7 +944,7 @@ Eight community pull requests merged after line-by-line review, plus fixes for t
 
 ## [3.6.14] - 2026-06-18 — Audit-hardened: memory bounds, cross-tenant cache isolation, atomic credentials
 
-Shipped through two adversarial audit passes (Qualixar Iron Pattern Stages 8–9), validated against a green 5933-test suite under the real 3.12 runtime. Default single-machine behavior is unchanged.
+Shipped through two adversarial audit passes (architecture audit + adversarial code review), validated against a green 5933-test suite under the real 3.12 runtime. Default single-machine behavior is unchanged.
 
 ### Security
 

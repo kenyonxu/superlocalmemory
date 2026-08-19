@@ -4,8 +4,6 @@
 
 """Authentication primitives for the /internal/prewarm daemon route.
 
-LLD reference: `.backup/active-brain/lld/LLD-01-context-cache-and-hot-path-hooks.md`
-Section 4.5.
 
 Four gates, applied in order, BEFORE any engine work:
   1. Loopback-only — client address must be 127.0.0.1 / ::1.

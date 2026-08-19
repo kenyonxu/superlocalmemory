@@ -1,5 +1,5 @@
 /**
- * tests/ui/harness.mjs — jsdom harness for WP-12 pane-error tests.
+ * tests/ui/harness.mjs — jsdom harness for pane-error tests.
  *
  * CRITICAL: window.fetch MUST be stubbed before core.js is eval'd because
  * core.js:25 self-patches window.fetch at eval time. If fetch isn't present

@@ -4360,10 +4360,49 @@ def _register_daemon_routes(application: FastAPI) -> None:
             )
             payload = dict(receipt.payload)
             fact_ids = list(payload.get("fact_ids") or [])
+
+            # The durable receipt is already committed above; nothing below can
+            # fail this write. What remains is the window in which the memory can
+            # only be found by quoting its own wording — a fact with no vector is
+            # invisible to the semantic channel, so the memory describing what is
+            # happening right now is the hardest one to find.
+            #
+            # Every entry point — command line, tool interface, dashboard —
+            # arrives here, so closing the window here closes it for all of them
+            # rather than for whichever door happened to be used.
+            #
+            # Strictly bounded, because this daemon serves many sessions at once:
+            # the work runs off the event loop, on one shared single-worker pool,
+            # and yields to any recall in flight. Past the deadline the caller
+            # gets exactly the previous behaviour and the background materializer
+            # finishes the job.
+            enrich_budget = (
+                _REMEMBER_ENRICHMENT_WAIT_SECONDS if wait
+                else min(0.5, _REMEMBER_ENRICHMENT_WAIT_SECONDS)
+            )
+            enriched = 0
+            try:
+                enriched = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        engine.enrich_new_facts_now, fact_ids, timeout_s=enrich_budget,
+                    ),
+                    timeout=enrich_budget + 0.25,
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                logger.debug("inline enrichment exceeded its budget — deferred")
+            except Exception as exc:
+                logger.debug("inline enrichment unavailable (%s) — deferred", exc)
+
+            searchable = "meaning" if enriched == len(fact_ids) and fact_ids else "wording"
             return {
                 "ok": True,
                 "fact_ids": fact_ids,
                 "count": len(fact_ids),
+                # Storing a memory and being able to find it again are different
+                # things, and reporting only the first is how a caller ends up
+                # believing a memory is retrievable when it is not yet.
+                "searchable_by": searchable,
+                "enriched_now": enriched,
                 "operation_id": payload["operation_id"],
                 # One-release compatibility alias. The durable operation ID is
                 # opaque and replaces the integer pending.db row identifier.
@@ -4371,8 +4410,17 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 "status": "queryable",
                 "materialization_state": payload["materialization_state"],
                 "commit_sequence": payload.get("commit_sequence"),
-                "note": "queryable now; canonical enrichment continues in the background",
-                "wait_ignored": bool(wait),
+                "note": (
+                    "stored and searchable by meaning"
+                    if searchable == "meaning"
+                    else "stored and searchable by wording; "
+                         "searchable by meaning shortly"
+                ),
+                # Retained for callers that already read it. It used to be
+                # unconditionally true, because `wait` bought nothing. It now
+                # buys a larger best-effort enrichment budget — still never a
+                # guarantee, and still never a block on durability.
+                "wait_ignored": False if wait else True,
             }
         except Exception as exc:
             from superlocalmemory.core.remember_admission import AdmissionRejected

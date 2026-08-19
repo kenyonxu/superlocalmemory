@@ -159,7 +159,7 @@ _all_tools = _os_reg.environ.get("SLM_MCP_ALL_TOOLS") == "1"
 _user_allowlist_str = _os_reg.environ.get("SLM_MCP_TOOLS", "").strip()
 
 # ---------------------------------------------------------------------------
-# v3.6.14 WP-01: Named profile definitions
+# Named profile definitions (introduced in v3.6.14)
 # Extracted to mcp/profiles.py (v3.8.0) — pure data, no side effects.
 # All names re-exported here for backward compatibility with existing tests
 # and any code that imports them from this module.

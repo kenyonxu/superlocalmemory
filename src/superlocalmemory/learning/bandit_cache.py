@@ -4,8 +4,6 @@
 
 """Per-(profile, stratum) posterior LRU cache for the contextual bandit.
 
-LLD reference: ``.backup/active-brain/lld/LLD-03-contextual-bandit-and-ensemble.md``
-Section 5.2.
 
 Key design:
   - Loader runs OUTSIDE the lock so DB reads never serialise across strata.

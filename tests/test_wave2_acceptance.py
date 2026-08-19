@@ -1,6 +1,6 @@
-"""Wave 2 acceptance gates — authored by the release coordinator, NOT by implementers.
+"""v3.5 acceptance gates — authored by the release coordinator, NOT by implementers.
 
-These tests define "done" for Wave 2. Implementation agents may NOT modify this
+These tests define the acceptance criteria. Implementation agents may NOT modify this
 file; they change product code until these pass. Any agent that edits this file
 to make its work pass has failed the task.
 

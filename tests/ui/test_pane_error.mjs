@@ -1,5 +1,5 @@
 /**
- * tests/ui/test_pane_error.mjs — WP-12 pane error-state tests.
+ * tests/ui/test_pane_error.mjs — pane error-state tests.
  * Runner: npm test   (scripts/run-ui-tests.mjs)
  *
  * NOT `node --test tests/ui/`. Node 26 resolves a bare directory as a

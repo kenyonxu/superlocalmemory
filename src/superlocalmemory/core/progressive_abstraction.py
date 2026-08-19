@@ -16,7 +16,7 @@ The persona is one bounded roll-up per profile that consumes the top community
 summaries. It is recall-GATED (never auto-injected into the hot recall path —
 avoids the V3.4.40 summary-pollution regression) and SIZE-bounded. Drill-down
 (``get_sources``) walks the hierarchy back down to the source atoms, matching
-the market bar for summary->source provenance (Zep-style).
+the design goal for summary->source provenance (Zep-style attribution).
 
 Runs in the background consolidation lane after community summaries.
 Fail-open throughout; recompute replaces a profile's row.

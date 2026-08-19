@@ -1147,7 +1147,7 @@ def _cmd_context_dispatch(args: Namespace) -> None:
 
 
 def _agents_md_source_factory():
-    """Return a callable that reads the WP-05 AGENTS.md content, or None on failure.
+    """Return a callable that reads the bundled AGENTS.md content, or None on failure.
 
     Source: plugin-src/rules/AGENTS.md (relative to package root).
     Gracefully skips if absent — never fails the MCP write.
@@ -1168,7 +1168,7 @@ def _agents_md_source_factory():
             if candidate.exists():
                 return candidate.read_text(encoding="utf-8")
         logger.warning(
-            "WP-05 AGENTS.md is not bundled — skipping AGENTS.md write"
+            "AGENTS.md is not bundled in this distribution — skipping AGENTS.md write"
         )
         return None
 
@@ -1178,15 +1178,15 @@ def _agents_md_source_factory():
 def cmd_connect(args: Namespace) -> None:
     """Configure IDE integrations.
 
-    Dispatch priority (WP-08):
+    Dispatch priority:
     1. ``slm connect <ide>`` where ide ∈ IDE_MATRIX → portable_kit.connect_ide
-       (MCP-wiring + AGENTS.md; includes claude-code short-circuit to WP-06).
+       (MCP-wiring + AGENTS.md; claude-code short-circuits to the plugin pointer).
     2. ``--cross-platform`` / ``--disable`` → LLD-05 CrossPlatformConnector.
     3. Bare ``slm connect`` / ``--list`` → legacy IDEConnector (markdown-rules).
     """
     ide_arg = getattr(args, "ide", None)
 
-    # WP-08: intercept known IDE_MATRIX ids before legacy branches (CRIT-1)
+    # Intercept known IDE_MATRIX ids before legacy branches (critical: must run first)
     if ide_arg is not None:
         from superlocalmemory.hooks.portable_kit import (
             IDE_MATRIX,
@@ -1922,7 +1922,7 @@ def cmd_status(args: Namespace) -> None:
             ])
             return
 
-        # WP-02 D8: canonical key set — db_size_mb always present (0.0 if absent).
+        # canonical key set — db_size_mb always present (0.0 if absent).
         db_size_mb = 0.0
         if config.db_path.exists():
             db_size_mb = round(config.db_path.stat().st_size / 1024 / 1024, 2)
@@ -2774,7 +2774,7 @@ def cmd_doctor(args: Namespace) -> None:
     else:
         _check("Database", "PASS", "not yet created (will initialize on first use)")
 
-    # 11. PEP 668 advisory — WP-07: detect EXTERNALLY-MANAGED marker and
+    # 11. PEP 668 advisory: detect EXTERNALLY-MANAGED marker and
     #     recommend pipx when the system Python is managed by the OS package
     #     manager (e.g. Homebrew, Debian/Ubuntu, Fedora 38+).
     try:
@@ -3442,7 +3442,7 @@ def _cmd_init_auto(
     config_exists: bool,
     force: bool,
 ) -> None:
-    """WP-07: non-interactive --auto branch for slm init.
+    """Non-interactive --auto branch for slm init.
 
     Best-effort at every step; only exits non-zero when config save fails.
     No TTY required.  Does NOT run IDE connect (AC6).
@@ -3504,7 +3504,7 @@ def cmd_init(args: Namespace) -> None:
     slm_data_dir = slm_home()
     config_exists = (slm_data_dir / "config.json").exists()
 
-    # WP-07: --auto branch — fully non-interactive, no TTY required (AC6).
+    # --auto branch — fully non-interactive, no TTY required.
     if auto:
         os.environ["SLM_NON_INTERACTIVE"] = "1"
         _cmd_init_auto(args, slm_data_dir, config_exists, force)

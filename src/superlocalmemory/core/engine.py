@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -535,6 +536,141 @@ class MemoryEngine:
             trusted_actor_id=local_trusted_actor_id("python-api-prebuilt"),
         )
 
+    def _warm_guard_embed(
+        self, text: str, *, timeout_s: float | None = None,
+    ) -> tuple[list[float] | None, Any, Any]:
+        """Embed now if it is cheap and safe to, otherwise leave it to the materializer.
+
+        A fact with no vector is invisible to the semantic channel, so a memory
+        written moments ago is the hardest thing in the store to find. Computing
+        it inline closes that window — but only when doing so cannot hurt anyone
+        else, because this daemon serves many sessions at once.
+
+        Four constraints, each load-bearing:
+
+        * only when the embedder is provably warm and local, so a cold start or a
+          network round-trip can never be paid on a write;
+        * on one shared single-worker pool, so N concurrent writers cannot spawn
+          N threads — the sixth caller simply misses its deadline and defers;
+        * inside ``background_work()``, so a foreground recall preempts it rather
+          than queueing behind it;
+        * behind a hard deadline, after which the caller proceeds with no
+          embedding and the background materializer finishes the job.
+
+        Returns ``(embedding, fisher_mean, fisher_variance)``, any of which may be
+        ``None``. Never raises: every failure means "not now", not "write failed".
+        """
+        emb = None
+        fmean = fvar = None
+        _embedder_ref = self._embedder
+        if (
+            _embedder_ref is None
+            or getattr(_embedder_ref, "_available", None) is not True
+            or _is_remote_embedder(_embedder_ref)
+        ):
+            return None, None, None
+
+        import concurrent.futures as _cf
+
+        # Lazy-init once per engine — avoids per-call thread churn. Double-checked
+        # locking guards against TOCTOU on concurrent first calls.
+        if self._store_fast_embed_pool is None:
+            with self._store_fast_embed_pool_lock:
+                if self._store_fast_embed_pool is None:
+                    self._store_fast_embed_pool = _cf.ThreadPoolExecutor(
+                        max_workers=1,
+                        thread_name_prefix="slm-sg-embed",
+                    )
+        if timeout_s is None:
+            try:
+                timeout_s = int(os.environ.get("SLM_STORE_FAST_EMBED_TIMEOUT_MS", 500)) / 1000.0
+            except (ValueError, TypeError):
+                timeout_s = 0.5
+        try:
+            def _best_effort_embed():
+                from superlocalmemory.core.recall_gate import background_work
+                with background_work():
+                    return _embedder_ref.embed(text)
+
+            _future = self._store_fast_embed_pool.submit(_best_effort_embed)
+            try:
+                emb = _future.result(timeout=timeout_s)
+                if emb:
+                    fmean, fvar = _embedder_ref.compute_fisher_params(emb)
+            except _cf.TimeoutError:
+                logger.debug(
+                    "warm-guard embed timed out (>%.0fms) — deferring to materializer",
+                    timeout_s * 1000,
+                )
+                emb = None
+            except Exception as _exc:
+                logger.debug("warm-guard embed failed (%s) — deferring to materializer", _exc)
+                emb = None
+        except Exception as _exc:
+            logger.debug("warm-guard pool submit failed (%s)", _exc)
+            emb = None
+        return emb, fmean, fvar
+
+    def enrich_new_facts_now(
+        self, fact_ids: list[str], *, timeout_s: float | None = None,
+    ) -> int:
+        """Attach vectors to just-written facts, within a deadline. Returns how many.
+
+        Every write path in the product — the command line, the tool interface and
+        the dashboard — commits through one durable receipt and then relies on a
+        background pass for enrichment. Until that pass runs, the memory can only
+        be found by quoting its own wording, which is not how anyone asks. This
+        closes that window for whichever facts it can reach in time, and reports
+        honestly how many it reached.
+
+        The durable write has already happened before this is called. Nothing here
+        can fail it: on any error or timeout the fact simply keeps its place in the
+        background queue.
+        """
+        if not fact_ids:
+            return 0
+        # Components are built on demand. Without this the embedder is still
+        # None and every fact is silently skipped as "nothing to do" — which
+        # looks exactly like "there was nothing to enrich".
+        self._require_full("enrich_new_facts_now")
+        self._ensure_init()
+        from superlocalmemory.core.mutations import _sync_vector_ann
+
+        deadline = time.monotonic() + (timeout_s if timeout_s is not None else 0.5)
+        enriched = 0
+        for fact_id in fact_ids:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                fact = self._db.get_fact(fact_id, self._profile_id)
+                if fact is None or getattr(fact, "embedding", None):
+                    continue
+                emb, fmean, fvar = self._warm_guard_embed(
+                    fact.content, timeout_s=remaining,
+                )
+                if not emb:
+                    continue
+                self._db.update_fact(
+                    fact_id,
+                    {"embedding": emb, "fisher_mean": fmean, "fisher_variance": fvar},
+                    profile_id=self._profile_id,
+                )
+                # The semantic channel reads the vector projection, not the
+                # canonical column, so writing only the column would leave the
+                # fact exactly as unfindable as before.
+                # The projection lives on the engine, not on the retrieval
+                # engine: reaching for it in the wrong place writes the canonical
+                # column, silently skips the projection the semantic channel
+                # actually reads, and leaves the fact exactly as unfindable.
+                _sync_vector_ann(
+                    self, fact_id, self._profile_id, emb, operation="update",
+                )
+                enriched += 1
+            except Exception as exc:
+                logger.debug("inline enrichment skipped for %s: %s", fact_id[:12], exc)
+        return enriched
+
     def store_fast(
         self, content: str, metadata: dict[str, Any] | None = None,
         *, scope: str = "personal", shared_with: list[str] | None = None,
@@ -616,55 +752,7 @@ class MemoryEngine:
         # exception, fall through to emb=None — the materializer fills it async.
         # This preserves the 3.8.2 invariant for cold start while eliminating the
         # semantic-channel blind spot on warm daemons (the top UX complaint).
-        emb = None
-        fmean = fvar = None
-        _embedder_ref = self._embedder
-        if (
-            _embedder_ref is not None
-            and getattr(_embedder_ref, "_available", None) is True
-            and not _is_remote_embedder(_embedder_ref)
-        ):
-            import concurrent.futures as _cf
-            # Lazy-init the pool once per engine instance — avoids per-call
-            # thread churn and the associated resource leak from discard-on-exit.
-            # Double-checked locking guards against TOCTOU on concurrent first calls.
-            if self._store_fast_embed_pool is None:
-                with self._store_fast_embed_pool_lock:
-                    if self._store_fast_embed_pool is None:
-                        self._store_fast_embed_pool = _cf.ThreadPoolExecutor(
-                            max_workers=1,
-                            thread_name_prefix="slm-sg-embed",
-                        )
-            try:
-                _timeout_s = int(os.environ.get("SLM_STORE_FAST_EMBED_TIMEOUT_MS", 500)) / 1000.0
-            except (ValueError, TypeError):
-                _timeout_s = 0.5  # default 500 ms
-            try:
-                def _best_effort_embed():
-                    from superlocalmemory.core.recall_gate import background_work
-                    with background_work():
-                        return _embedder_ref.embed(fact_text)
-
-                _future = self._store_fast_embed_pool.submit(_best_effort_embed)
-                try:
-                    emb = _future.result(timeout=_timeout_s)
-                    if emb:
-                        fmean, fvar = _embedder_ref.compute_fisher_params(emb)
-                except _cf.TimeoutError:
-                    logger.debug(
-                        "store_fast: warm-guard embed timed out (>%.0fms) — deferring to materializer",
-                        _timeout_s * 1000,
-                    )
-                    emb = None
-                except Exception as _exc:
-                    logger.debug(
-                        "store_fast: warm-guard embed failed (%s) — deferring to materializer",
-                        _exc,
-                    )
-                    emb = None
-            except Exception as _exc:
-                logger.debug("store_fast: warm-guard pool submit failed (%s)", _exc)
-                emb = None
+        emb, fmean, fvar = self._warm_guard_embed(fact_text)
         fact = AtomicFact(
             fact_id=_uuid.uuid4().hex[:16], memory_id=record.memory_id,
             profile_id=self._profile_id, content=fact_text,

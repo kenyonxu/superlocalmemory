@@ -2,7 +2,9 @@
 /**
  * SuperLocalMemory v3.4.21 — slm-hook binary fetcher.
  *
- * LLD reference: .backup/active-brain/lld/LLD-06-windows-binary-and-legacy-migration.md §6.2
+ * Fetches the pre-compiled slm-hook binary for the current platform/arch.
+ * Designed for Windows where spawning a Python subprocess on every keystroke
+ * is too slow; the compiled binary avoids that overhead.
  *
  * Fails open: any network / SHA / unpack failure logs a warning and
  * exits 0. The dispatcher (bin/slm) falls back to the Python path so

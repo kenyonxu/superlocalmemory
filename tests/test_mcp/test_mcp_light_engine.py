@@ -8,9 +8,9 @@ End-user contract enforced here:
 
 These are structural assertions — they don't measure RSS directly, but
 together they guarantee the dominant RSS contributor (the ONNX embedder,
-~800 MB-1 GB) never loads in the MCP process. Absolute RSS numbers for
-Varun's MBP are captured by the companion bench script at
-`.backup/plans/slm-3426-unified-queue/baseline/mcp_light_rss.py`.
+~800 MB-1 GB) never loads in the MCP process. Absolute RSS numbers vary by machine and workload; measure with
+``/usr/bin/time -l`` or ``psutil.Process().memory_info().rss``
+against a warm MCP server to establish your own baseline.
 """
 from __future__ import annotations
 

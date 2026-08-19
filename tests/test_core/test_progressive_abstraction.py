@@ -122,7 +122,7 @@ class TestDrillDown:
         sources = pa.get_sources("default", "persona")
         assert sources["node_type"] == "persona"
         assert sources["communities"]                 # child communities
-        # Drill-down reaches the source atoms (market bar: non-empty provenance).
+        # Drill-down reaches the source atoms (required: non-empty provenance).
         assert set(sources["fact_ids"]) >= {"f1", "f2"}
 
     def test_community_sources_return_its_atoms(self, db: DatabaseManager) -> None:

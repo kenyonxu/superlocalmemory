@@ -1,9 +1,9 @@
-"""Wave 4 acceptance gates — Brain truth data layer. Authored by the release
+"""v3.5 acceptance gates — Brain truth data layer. Authored by the release
 coordinator, NOT by implementers. Do not modify this file.
 
 WHY THIS WAVE EXISTS
 --------------------
-Wave 5 rebuilds the Living Brain UI for an audience that is 75% non-technical.
+The Living Brain UI is designed for an audience that is 75% non-technical.
 Rebuilding it on today's read model would make the existing confusion look
 nicer. The data must be honest first.
 
@@ -31,7 +31,7 @@ INVARIANTS ENFORCED HERE
 ------------------------
 I6  Truthful UI - every displayed figure traceable to a named source.
 I5  Read-only projections - the Brain read model must never block the write path.
-I1  Recall/remember latency must not regress (enforced by the Wave 1 perf gate;
+I1  Recall/remember latency must not regress (enforced by the performance gate;
     restated here because instrumenting engagement touches the hot path).
 
 Gates assert OBSERVABLE behaviour - payload contents and stored rows - never
@@ -91,7 +91,7 @@ class TestProvenanceOnEveryFigure:
 
     brain/truth.py already does this well for several sections (each carries
     availability + source, e.g. 'memory.db:atomic_facts',
-    'learning.db:learning_signals'). This gate makes it non-optional so Wave 5
+    'learning.db:learning_signals'). This gate makes it non-optional so the UI layer
     can render 'what this means' for every metric.
     """
 
@@ -157,7 +157,7 @@ class TestSignalsAreNotBlended:
 
     A non-technical reader takes that as "it learned from 5,339 things I told
     it". The read model already separates these - this gate stops that
-    distinction being dropped, so Wave 5 can render them apart.
+    distinction being dropped, so the UI layer can render them apart.
     """
 
     def test_feedback_section_separates_explicit_from_implicit(self) -> None:

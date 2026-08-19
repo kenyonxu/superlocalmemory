@@ -411,7 +411,7 @@ class CompressRouter:
             logger.debug("CCR update_compressed failed (non-fatal): %s", exc)
 
     def _ccr_delete(self, ccr_id: str) -> None:
-        """WP-10 D6: Defensive delete — idempotent, never raises.
+        """Defensive delete — idempotent, never raises.
 
         Used to clean up a CCR row if post-store processing fails. In the
         store-after-success D6 path this should never be needed (no orphans

@@ -255,6 +255,56 @@ def _canonical_feedback_count(profile_id: str) -> int | None:
         return None
 
 
+# How far ahead a session looks for scheduled facts, and how many it shows.
+# A session preamble is not a calendar: a long horizon or a large cap turns a
+# useful heads-up into a wall of text nobody reads.
+_SCHEDULED_HORIZON_DAYS = 14
+_SCHEDULED_LIMIT = 5
+
+
+def _upcoming_scheduled_facts(engine, now: datetime.datetime) -> list[dict]:
+    """Facts scheduled from today through the horizon, soonest first.
+
+    Bounded and index-backed, because this runs on every session start. Returns
+    an empty list on any failure: a session must still open when this query
+    cannot answer, so the caller omits the surface entirely rather than showing
+    an empty section that reads like a defect.
+
+    Selects on the stored type of the fact, which is a classification recorded at
+    write time. It is unrelated to the similarly named retrieval channel despite
+    sharing the word.
+    """
+    try:
+        db = getattr(engine, "_db", None) or getattr(engine, "db", None)
+        if db is None or not hasattr(db, "execute"):
+            return []
+        # Both 'YYYY-MM-DD' and full timestamps compare correctly as text,
+        # because ISO-8601 orders lexicographically. The upper bound is
+        # exclusive, so the horizon day itself is included.
+        start = now.date().isoformat()
+        end = (now + datetime.timedelta(days=_SCHEDULED_HORIZON_DAYS + 1)).date().isoformat()
+        rows = db.execute(
+            "SELECT fact_id, content, referenced_date"
+            " FROM atomic_facts"
+            " WHERE profile_id = ?"
+            "   AND fact_type = 'temporal'"
+            "   AND referenced_date IS NOT NULL"
+            "   AND referenced_date >= ?"
+            "   AND referenced_date < ?"
+            " ORDER BY referenced_date ASC"
+            f" LIMIT {_SCHEDULED_LIMIT}",
+            (engine.profile_id, start, end),
+        )
+        return [
+            {"fact_id": r["fact_id"], "content": r["content"],
+             "scheduled_at": r["referenced_date"]}
+            for r in rows
+        ]
+    except Exception as exc:
+        logger.warning("scheduled-fact surface failed: %s", exc)
+        return []
+
+
 def register_active_tools(server, get_engine: Callable) -> None:
     """Register 3 active memory tools on *server*."""
 
@@ -519,6 +569,8 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 f"-{uuid.uuid4().hex[:8]}"
             )
 
+            _upcoming_events = _upcoming_scheduled_facts(engine, _now)
+
             return {
                 "success": True,
                 "session_id": session_id,
@@ -553,6 +605,10 @@ def register_active_tools(server, get_engine: Callable) -> None:
                         else "trained"
                     ),
                 },
+                # Scheduled-event surface: present only when facts exist in the
+                # 14-day window. Absent means the window is empty, not an error.
+                **( {"upcoming_events": _upcoming_events}
+                    if _upcoming_events else {} ),
             }
         except Exception as exc:
             logger.exception("session_init failed")

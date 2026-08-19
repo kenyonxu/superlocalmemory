@@ -1,5 +1,5 @@
 """
-WP-13 README integrity tests.
+README integrity tests.
 
 LLD §6 blocking CI job. Every assertion corresponds to an AC in the LLD.
 These tests run against README.md in the repo root.

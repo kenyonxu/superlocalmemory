@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
-# Part of SuperLocalMemory V3 | WP-08 connect_many tests
+# Part of SuperLocalMemory V3 | connect_many tests
 
 """TDD tests for hooks.portable_kit.connect_many.
 

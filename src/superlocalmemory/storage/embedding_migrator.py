@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from superlocalmemory.storage.embedding_codec import encode_embedding
+
 if TYPE_CHECKING:
     from superlocalmemory.core.config import SLMConfig
 
@@ -185,7 +187,7 @@ def _activate_staged_vectors(
                 updated = conn.execute(
                     "UPDATE atomic_facts SET embedding = ? "
                     "WHERE fact_id = ? AND profile_id = ?",
-                    (embedding_json, fact_id, profile_id),
+                    (encode_embedding(vector), fact_id, profile_id),
                 )
                 if updated.rowcount != 1:
                     raise RuntimeError(
@@ -606,7 +608,7 @@ def backfill_missing_embeddings(
                 logger.warning("backfill: null vector for fact %s — skipping.", fid[:16])
                 continue
             try:
-                embedding_json = json.dumps(vec)
+                embedding_blob = encode_embedding(vec)
                 # Metadata is not an independent record: it is the pointer to
                 # a sqlite-vec row. Creating it before the vector payload leaves
                 # semantic recall permanently blind while reporting success.
@@ -638,7 +640,7 @@ def backfill_missing_embeddings(
                     # this remains the supported JSON-only fallback path.
                     db.execute(
                         "UPDATE atomic_facts SET embedding = ? WHERE fact_id = ?",
-                        (embedding_json, fid),
+                        (embedding_blob, fid),
                     )
                 except Exception:
                     if projection_written and vector_store is not None:

@@ -4,8 +4,6 @@
 
 """Bandit / LightGBM ensemble blender.
 
-LLD reference: ``.backup/active-brain/lld/LLD-03-contextual-bandit-and-ensemble.md``
-Section 5.4.
 
 D8 blend policy (``choose_ensemble``):
   - 0..199 signals OR model is None → ``EnsembleWeights(1.0, 0.0)`` (bandit-only).

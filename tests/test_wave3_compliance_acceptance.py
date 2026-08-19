@@ -1,4 +1,4 @@
-"""Wave 3 acceptance gates — GDPR / compliance core. Authored by the release
+"""v3.4 acceptance gates — GDPR / compliance core. Authored by the release
 coordinator, NOT by implementers.
 
 These define "done" for the compliance work that SuperLocalMemory 4.0.6 is

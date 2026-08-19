@@ -1,4 +1,4 @@
-"""WP-11 + WP-11a — Vertex surface + gemini-native authorization-header fix.
+"""Vertex surface + gemini-native authorization-header fix.
 
 LLD §6 test harness — 19 tests covering:
   - path validation (valid / traversal / unknown-method)
@@ -13,8 +13,8 @@ LLD §6 test harness — 19 tests covering:
   - upstream 401 passthrough, nothing cached
   - SSRF malformed path → 400 BEFORE upstream (mock NOT called)
   - route absent when proxy_enabled=False
-  - WP-11a: gemini-native authorization forwarded
-  - WP-11a: gemini-native cache key byte-identical after fix
+  - gemini-native authorization forwarded
+  - gemini-native cache key byte-identical after fix
   - CRIT-2: model read from path not body
 """
 
@@ -559,12 +559,12 @@ async def test_route_absent_when_proxy_disabled() -> None:
 
 
 # ---------------------------------------------------------------------------
-# §13: WP-11a — gemini-native forwards authorization header
+# §13: gemini-native forwards authorization header
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_wp11a_gemini_authorization_forwarded() -> None:
-    """WP-11a: after the fix, gemini-native forwards Authorization upstream."""
+    """After the auth-header fix, gemini-native forwards Authorization upstream."""
     captured: list[httpx.Request] = []
 
     async def _handler(req: httpx.Request) -> httpx.Response:
@@ -591,18 +591,18 @@ async def test_wp11a_gemini_authorization_forwarded() -> None:
     assert len(captured) == 1
     fwd_auth = captured[0].headers.get("authorization")
     assert fwd_auth == bearer, (
-        f"WP-11a: Authorization not forwarded on gemini-native: {fwd_auth!r}"
+        f"Authorization not forwarded on gemini-native: {fwd_auth!r}"
     )
 
     await proxy.http_client.aclose()
 
 
 # ---------------------------------------------------------------------------
-# §14: WP-11a — gemini-native cache key byte-identical after the fix
+# §14: gemini-native cache key byte-identical after the auth-header fix
 # ---------------------------------------------------------------------------
 
 def test_wp11a_gemini_cache_key_unchanged(tmp_path: Path) -> None:
-    """WP-11a no-regression: gemini-native cache key byte-identical before/after fix.
+    """No-regression: gemini-native cache key byte-identical before/after the auth-header fix.
 
     The fix adds 'authorization' to _GEMINI_NATIVE_FORWARD_HEADERS (a header
     forward set), NOT to key-building logic. build_key reads only body fields
@@ -615,7 +615,7 @@ def test_wp11a_gemini_cache_key_unchanged(tmp_path: Path) -> None:
         "messages": [{"role": "user", "content": "hello"}],
     }
 
-    # Request WITHOUT authorization header (pre-WP-11a simulation)
+    # Request WITHOUT authorization header (pre-fix simulation)
     req_no_auth = ProxyRequest(
         provider="gemini",
         method="POST",
@@ -628,7 +628,7 @@ def test_wp11a_gemini_cache_key_unchanged(tmp_path: Path) -> None:
         has_tools=False,
     )
 
-    # Request WITH authorization header (post-WP-11a simulation)
+    # Request WITH authorization header (post-fix simulation)
     req_with_auth = ProxyRequest(
         provider="gemini",
         method="POST",
@@ -646,7 +646,7 @@ def test_wp11a_gemini_cache_key_unchanged(tmp_path: Path) -> None:
 
     # build_key reads only .body — headers not included — keys must be identical
     assert key_no_auth == key_with_auth, (
-        f"WP-11a cache key changed after auth header fix: "
+        f"cache key changed after auth-header fix: "
         f"{key_no_auth!r} != {key_with_auth!r}"
     )
 

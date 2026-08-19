@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
-# Tests for WP-09: MCP→CLI fallback adapter
+# Tests for the MCP→CLI fallback adapter
 
 """RED-first TDD tests for mcp/cli_fallback.py.
 

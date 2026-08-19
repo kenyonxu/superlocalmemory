@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later — see LICENSE file
-"""WP-06 plugin manifest tests — validates DOC-CORRECT plugin/ layout.
+"""Plugin manifest tests — validates the plugin/ layout.
 
 DOC-CORRECT layout (v3.6.14):
   .claude-plugin/marketplace.json   (repo root; source:"./plugin")
@@ -23,7 +23,7 @@ Tests verify:
   - marketplace.json: at repo root .claude-plugin/, NO version key in plugin entry, source="./plugin"
   - hooks.json: SessionStart fires ensure-venv.sh with ${CLAUDE_PLUGIN_ROOT}
   - settings.json: does NOT auto-allow mutating tools (forget/update_memory/delete_memory)
-  - Generator: after build, all WP-06 files exist in plugin/ matching plugin-src sources
+  - Generator: after build, all plugin files exist in plugin/ matching plugin-src sources
   - 7 skills present in plugin/skills/, no commands/ dir
 """
 

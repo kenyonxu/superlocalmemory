@@ -2,7 +2,7 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
-"""WP-02 RED tests: CLI↔MCP status field parity.
+"""RED tests: CLI↔MCP status field parity.
 
 Validates that cli/commands.py cmd_status --json and mcp/tools_core.py
 get_status return the same canonical KEY SET (not value-case).
@@ -13,7 +13,7 @@ Canonical field set (LLD §5):
 
 Envelope keys (success, next_actions) are excluded from the key-set test.
 v3.6.12 fields that must NOT be removed: the fields already present
-before WP-02.
+before this parity fix.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
 """
@@ -160,7 +160,7 @@ def _run_cli_status_json(
 # ---------------------------------------------------------------------------
 
 class TestStatusFieldParity:
-    """WP-02 D8: CLI json and MCP get_status must expose the same key set."""
+    """CLI json and MCP get_status must expose the same key set."""
 
     def test_cli_mcp_status_canonical_fields_equal(self):
         """cli_keys == CANONICAL == mcp_keys (key sets; NOT value equality).
@@ -234,7 +234,7 @@ class TestStatusFieldParity:
         )
 
     def test_cli_status_json_does_not_create_db_on_fresh_install(self):
-        """REGRESSION (WP-02 review BLOCKER): `slm status --json` must stay
+        """REGRESSION guard: `slm status --json` must stay
         observational. On a fresh install (no db yet) it must NOT open the
         engine — which would mkdir/connect/migrate the db as a side effect.
 

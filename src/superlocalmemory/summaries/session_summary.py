@@ -8,7 +8,7 @@ CRITICAL DATA HONESTY NOTE
 ---------------------------
 On a real 3,294-fact store, only 127 facts (3.9%) carry a session_id.
 A Session Summary that presents itself as "everything you did this session"
-while silently covering 4% of the facts is the same overclaiming Wave 4
+while silently covering 4% of the facts is overclaiming — the same defect
 removed from brain/truth.py.
 
 Coverage is ALWAYS disclosed.  If the session has too few facts to summarise
