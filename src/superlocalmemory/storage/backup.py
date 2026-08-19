@@ -252,7 +252,13 @@ def _pre_migration_backup(
     if backups_root is None:
         backups_root = canonical_data_root() / "pre-migration-snapshots"
 
-    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    # Second granularity is not enough. Two migrations inside the same second —
+    # a daemon restart loop, or the second apply_all() during startup — produced
+    # identical filenames, and the atomic rename then replaced the FIRST
+    # snapshot cleanly. The first is the valuable one: it holds the state before
+    # anything was touched. Microseconds make a collision practically
+    # impossible, and the loop below refuses to overwrite regardless.
+    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
 
     # Measure combined size of databases that actually exist, INCLUDING their
     # write-ahead log and shared-memory files. On a busy store the -wal file can
@@ -281,14 +287,27 @@ def _pre_migration_backup(
     # Perform the backup.  Each db gets a flat file with a -pre-migration suffix
     # so the GC glob *-pre-migration.db identifies our files precisely.
     t0 = time.monotonic()
+
+    def _free_name(stem: str) -> Path:
+        """Never overwrite an existing snapshot; the older one may be the only
+        copy of the pre-migration state."""
+        candidate = backups_root / f"{stem}-{timestamp}-pre-migration.db"
+        suffix = 1
+        while candidate.exists():
+            candidate = backups_root / f"{stem}-{timestamp}-{suffix}-pre-migration.db"
+            suffix += 1
+        return candidate
+
+    written: list[Path] = []
     for stem, db_path in (("memory", memory_db), ("learning", learning_db)):
         if db_path.exists():
-            dest = backups_root / f"{stem}-{timestamp}-pre-migration.db"
+            dest = _free_name(stem)
             _backup_via_sqlite_api(db_path, dest)
+            written.append(dest)
 
     elapsed = time.monotonic() - t0
 
-    written = sorted(backups_root.glob(f"*-{timestamp}-pre-migration.db"))
+    written = sorted(written)
     size_bytes = sum(f.stat().st_size for f in written)
     size_mb = size_bytes / (1024 * 1024)
     filenames = "\n  ".join(f.name for f in written)

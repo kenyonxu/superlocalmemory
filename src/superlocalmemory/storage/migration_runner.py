@@ -482,6 +482,21 @@ def apply_all(
     }
 
 
+def _deferred_already_applied(conn: sqlite3.Connection, name: str) -> bool:
+    """True when ``name`` is already recorded in this database's migration_log.
+
+    Used only to decide whether a snapshot is needed. On any error it returns
+    False, which errs toward taking a snapshot — the safe direction.
+    """
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM migration_log WHERE name = ? LIMIT 1", (name,)
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
+
+
 def apply_deferred(
     learning_db: Path,
     memory_db: Path,
@@ -516,6 +531,25 @@ def apply_deferred(
     failed: list[str] = []
     details: dict[str, str] = {}
 
+    # apply_all snapshots before it touches anything; this pass did not, yet it
+    # applies real DDL to both managed databases — including the column the
+    # daemon needs to start. An interrupted deferred pass therefore had no
+    # recoverable copy at all. The snapshot is taken LAZILY, immediately before
+    # the first migration that will actually be applied, so a pass with nothing
+    # to do costs no disk and does not capture post-init state unnecessarily.
+    _snapshot_state: dict[str, object] = {"taken": dry_run}
+
+    def _ensure_snapshot() -> None:
+        if _snapshot_state["taken"]:
+            return
+        _snapshot_state["taken"] = True
+        backup_dir = _pre_migration_backup(
+            learning_db, memory_db,
+            backups_root=memory_db.parent / "pre-migration-snapshots",
+        )
+        _gc_old_backups(backup_dir)
+        details["_deferred_backup"] = str(backup_dir)
+
     blocked: set[str] = set()
     for migration in DEFERRED_MIGRATIONS:
         unmet = [d for d in migration.dependencies if d in failed or d in blocked]
@@ -549,6 +583,9 @@ def apply_deferred(
                     "refusing to create split-brain log"
                 )
                 continue
+
+            if not dry_run and not _deferred_already_applied(conn, migration.name):
+                _ensure_snapshot()
 
             outcome, detail = _apply_single(conn, migration, dry_run=dry_run)
             details[migration.name] = detail

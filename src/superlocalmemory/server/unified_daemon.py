@@ -1690,6 +1690,7 @@ async def lifespan(application: FastAPI):
         _path_config = None
 
     try:
+        from superlocalmemory.storage.backup import InsufficientDiskSpaceError
         from superlocalmemory.storage.migration_runner import apply_all
         if _path_config is None:
             # Catastrophic early-load failure: still one root via Mode-A default
@@ -1750,6 +1751,34 @@ async def lifespan(application: FastAPI):
                 _version_marker.write_text(_slm_version, encoding="utf-8")
             except OSError:
                 pass  # non-fatal
+    except InsufficientDiskSpaceError as _disk_exc:
+        # This is not a crash and it must not be reported as "non-fatal". The
+        # migration deliberately refused to start because there was not enough
+        # room to keep a recoverable copy first. The store is intact and
+        # unmigrated; the generic handler below would have logged a warning and
+        # left the daemon serving as though nothing had happened.
+        logger.error(
+            "MIGRATION NOT RUN — not enough free disk to keep a recoverable "
+            "copy first. Your data has NOT been modified. Need %s bytes, have "
+            "%s free. Free some space and restart; run `slm doctor` for details.",
+            f"{_disk_exc.needed_bytes:,}", f"{_disk_exc.free_bytes:,}",
+        )
+        try:
+            _log_path = _write_migration_error_log(
+                ["_insufficient_disk_space"], None,
+                slm_home=locals().get("_memory_db").parent if locals().get("_memory_db") else None,
+            )
+            logger.error("Details written to %s", _log_path)
+        except OSError:
+            pass
+        application.state.migration_result = {
+            "applied": [], "skipped": [], "failed": ["_insufficient_disk_space"],
+            "details": {
+                "_needed_bytes": _disk_exc.needed_bytes,
+                "_free_bytes": _disk_exc.free_bytes,
+                "_store_modified": False,
+            },
+        }
     except Exception as _exc:
         logger.warning("migration runner crashed (non-fatal): %s", _exc)
         application.state.migration_result = {
