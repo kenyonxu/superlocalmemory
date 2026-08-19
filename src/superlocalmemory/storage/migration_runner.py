@@ -406,6 +406,33 @@ def _foreign_live_daemon(memory_db: Path) -> "int | None":
         return None
 
 
+def _nothing_left_to_apply(learning_db: Path, memory_db: Path) -> bool:
+    """True when every migration is already recorded in its target database.
+
+    Used to decide whether a snapshot is worth taking. A snapshot is only
+    valuable when something is about to change; taking one on a start where
+    nothing changes copies the ALREADY-MIGRATED store and then prunes a
+    generation — so after two such starts the last copy of the original is gone,
+    and the safety net has quietly deleted the thing it exists to protect.
+
+    Errs toward False, which means "take the snapshot" — the safe direction.
+    """
+    try:
+        for migration in MIGRATIONS:
+            db_path = _db_for(migration.db_target, learning_db, memory_db)
+            if not db_path.exists():
+                return False
+            conn = _connect(db_path)
+            try:
+                if not _deferred_already_applied(conn, migration.name):
+                    return False
+            finally:
+                conn.close()
+    except Exception:  # noqa: BLE001 — any doubt means take the snapshot
+        return False
+    return True
+
+
 def apply_all(
     learning_db: Path,
     memory_db: Path,
@@ -437,7 +464,15 @@ def apply_all(
     # never captured mid-transaction. InsufficientDiskSpaceError propagates
     # to the caller — migration is intentionally aborted when disk is too
     # tight to keep a recoverable copy.
-    if not dry_run:
+    # A snapshot is only worth taking when something is about to change. This
+    # runs on every engine construction, not just upgrades, so snapshotting
+    # unconditionally meant an ordinary start copied the already-migrated store
+    # and pruned a generation — two extra starts and the original was gone.
+    _pending = not _nothing_left_to_apply(learning_db, memory_db)
+    if not dry_run and not _pending:
+        details["_backup"] = "skipped: every migration already applied"
+
+    if not dry_run and _pending:
         _other = _foreign_live_daemon(memory_db)
         if _other is not None:
             logger.warning(

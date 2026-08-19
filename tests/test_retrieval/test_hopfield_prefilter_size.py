@@ -216,6 +216,18 @@ class TestResultSetStableAcrossPoolSizes:
     """
 
     def test_same_top_facts_when_vs_returns_same_candidates(self) -> None:
+        """Given the SAME candidates, pool size does not change the answer.
+
+        Stated precisely, because this is easy to over-read as "shrinking the
+        pool is free". It is not: the smaller pool ASKS the index for fewer
+        candidates, so anything ranked beyond the new size never reaches this
+        stage — and both runs here are handed an identical list, so this test
+        cannot see that. What it shows is narrower: the pool size is not itself
+        a ranking input.
+
+        The cost of the narrower request is a real trade, measured against a
+        store rather than asserted here.
+        """
         from superlocalmemory.math.hopfield import HopfieldConfig
         from superlocalmemory.retrieval.hopfield_channel import HopfieldChannel
 

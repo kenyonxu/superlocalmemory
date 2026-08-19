@@ -5,7 +5,7 @@
 """Tests for present-tense and recency query classification in strategy.py.
 
 Covers:
-  - Present-tense words (now, today, yesterday, current, currently) classify
+  - Present-tense words (now, today, yesterday, currently) classify
     as temporal or recency — not factual.
   - Present-activity phrases ("working on", "at the moment", etc.) classify
     as recency, not factual.
@@ -48,7 +48,6 @@ PRESENT_TEMPORAL_WORDS = [
     ("now",       "what did I do now"),
     ("today",     "what did I do today"),
     ("yesterday", "what did I do yesterday"),
-    ("current",   "what is the current status"),
     ("currently", "what am I currently focused on"),
     ("tonight",   "what did I do tonight"),
     ("tomorrow",  "what is happening tomorrow"),
@@ -112,6 +111,29 @@ FACTUAL_QUERIES = [
 ]
 
 
+# A word that hints at time does not make a question about a topic.
+# "current" was originally in the present-tense set, so "what is the current
+# database schema" was routed to the time-aware path — which weights
+# word-matching MORE heavily than the topical path, amplifying the exact signal
+# that made this release necessary. These are the forms an audit found missing
+# from the regression table: time-flavoured wording, topical intent.
+TIME_FLAVOURED_BUT_TOPICAL = [
+    "what is the current database schema",
+    "what is the current state of the migration",
+    "what is the current architecture",
+]
+
+
+@pytest.mark.parametrize("query", TIME_FLAVOURED_BUT_TOPICAL)
+def test_time_flavoured_topical_question_stays_factual(query: str) -> None:
+    got = classify_query(query).query_type
+    assert got == "factual", (
+        f"{query!r} classified as {got!r}. It asks about a topic; routing it to a "
+        f"time-aware strategy boosts word-matching above the topical preset and "
+        f"answers a question about the schema with whatever is newest"
+    )
+
+
 @pytest.mark.parametrize("query,expected", FACTUAL_QUERIES, ids=[q for q, _ in FACTUAL_QUERIES])
 def test_factual_query_not_over_triggered(
     clf: QueryStrategyClassifier, query: str, expected: str
@@ -141,7 +163,7 @@ class TestClassifyQueryFunction:
 
     def test_mandatory_words_via_classify_query(self) -> None:
         """Gate condition 2: five mandatory words classify as temporal or recency."""
-        mandatory = ("now", "today", "yesterday", "current", "currently")
+        mandatory = ("now", "today", "yesterday", "currently")
         for w in mandatory:
             qt = classify_query(f"what did I do {w}").query_type
             assert qt in ("temporal", "recency"), (

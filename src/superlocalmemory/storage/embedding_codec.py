@@ -101,13 +101,17 @@ def decode_embedding(
                 f"{len(raw)} bytes is not a multiple of 4 (float32)"
             )
         if len(raw) != EMBEDDING_BYTES:
-            # Smaller vectors are legitimate in tests, so this is not an error.
-            # It is logged because the other way to get one is a truncated
-            # write, which otherwise looks like a perfectly valid short vector.
-            logger.debug(
+            # A torn write that happens to land on a 4-byte boundary is
+            # indistinguishable from a short vector by length alone, and it was
+            # accepted silently at debug level: 767 of 768 values still looks
+            # like a valid embedding, and every similarity computed from it is
+            # quietly wrong. Smaller vectors ARE legitimate in tests, so this is
+            # a warning rather than a refusal, but it must be visible.
+            logger.warning(
                 "embedding for fact %s is %d bytes (%d floats), not the expected "
-                "%d — fine for a test vector, a truncated write otherwise",
-                fact_id, len(raw), len(raw) // 4, EMBEDDING_BYTES,
+                "%d (%d floats) — expected only for a test vector; on a real "
+                "store this is a truncated write",
+                fact_id, len(raw), len(raw) // 4, EMBEDDING_BYTES, EMBEDDING_DIM,
             )
         return np.frombuffer(raw, dtype=np.float32).tolist()
 

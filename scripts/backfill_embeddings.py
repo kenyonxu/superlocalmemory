@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 from superlocalmemory.storage.embedding_codec import (  # noqa: E402
     EMBEDDING_BYTES as _EMBEDDING_BYTES,
     EMBEDDING_DIM as _EMBEDDING_DIM,
+    encode_embedding,
 )
 _DEFAULT_DB = Path.home() / ".superlocalmemory" / "memory.db"
 _DEFAULT_BATCH = 200
@@ -104,19 +105,22 @@ def backfill(
             logger.info("Nothing to convert.")
             return 0
 
-        # Load all TEXT embedding row-IDs and raw values in one read.
-        # Ordered by rowid for deterministic resume: if the run is interrupted,
-        # the next run will process the same rows in the same order.
-        rows = conn.execute(
-            "SELECT fact_id, embedding FROM atomic_facts "
-            "WHERE typeof(embedding)='text' ORDER BY rowid"
-        ).fetchall()
-
+        # Read one batch at a time. Loading every TEXT row first held the whole
+        # column in memory — on a 50,000-fact store that is hundreds of megabytes
+        # of JSON before Python's own overhead, on the machine someone is using.
+        # Ordered by rowid so an interrupted run resumes in the same order, and
+        # re-reading is safe because converted rows stop matching typeof='text'.
         converted = 0
         skipped = 0
 
-        for batch_start in range(0, len(rows), batch_size):
-            batch = rows[batch_start : batch_start + batch_size]
+        while True:
+            batch = conn.execute(
+                "SELECT fact_id, embedding FROM atomic_facts "
+                "WHERE typeof(embedding)='text' ORDER BY rowid LIMIT ?",
+                (batch_size,),
+            ).fetchall()
+            if not batch:
+                break
             updates: list[tuple[bytes, str]] = []
 
             for row in batch:
@@ -142,8 +146,12 @@ def backfill(
                     skipped += 1
                     continue
 
-                blob = np.array(vec, dtype=np.float32).tobytes()
-                assert len(blob) == _EMBEDDING_BYTES  # dimension guard
+                # Through the codec, not a private copy of the format. This
+                # script rewrites every embedded row; a second implementation
+                # here is the one most likely to be missed when the format
+                # changes, and it would rewrite the whole store wrongly.
+                blob = encode_embedding(vec)
+                assert blob is not None and len(blob) == _EMBEDDING_BYTES
                 updates.append((blob, fact_id))
 
             if updates:
@@ -196,7 +204,15 @@ def _snapshot_before_writing(db_path: Path) -> Path:
     # store's own newest snapshot: the directory also holds the learning-plane
     # snapshot, and checking that one against this store would compare two
     # unrelated databases and call the mismatch a failure.
-    candidates = sorted(root.glob(f"{db_path.stem}-*-pre-migration.db"))
+    # By modification time, not by name. This directory is shared with the
+    # snapshots the daemon takes, and lexical order only coincides with recency
+    # while every filename has an identical shape — a collision suffix on one of
+    # them is enough to pick a sibling copy of the same store, which then passes
+    # the count check and is kept as "the copy we just made".
+    candidates = sorted(
+        root.glob(f"{db_path.stem}-*-pre-migration.db"),
+        key=lambda f: f.stat().st_mtime,
+    )
     if not candidates:
         raise RuntimeError(f"no snapshot for {db_path.name} was written into {root}")
     snapshot = candidates[-1]

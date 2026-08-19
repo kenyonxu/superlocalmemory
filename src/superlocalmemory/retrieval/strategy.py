@@ -43,7 +43,7 @@ _TEMPORAL_WORDS: frozenset[str] = frozenset({
     "until", "while", "between", "january", "february", "march",
     "april", "may", "june", "july", "august", "september", "october",
     "november", "december",
-    "now", "today", "yesterday", "current", "currently",
+    "now", "today", "yesterday", "currently",
     "tonight", "tomorrow", "latest",
 })
 
@@ -128,6 +128,21 @@ class QueryStrategy:
     confidence: float = 0.5
 
 
+
+def _recency_enabled() -> bool:
+    """Whether the present-tense path is switched on.
+
+    Reads configuration if the caller supplied one, otherwise defaults to on.
+    Kept as a module-level function so the classifier stays usable without an
+    engine, which is how the gate and several tests call it.
+    """
+    import os
+
+    if os.environ.get("SLM_DISABLE_RECENCY_STRATEGY", "0") == "1":
+        return False
+    return True
+
+
 class QueryStrategyClassifier:
     """Classifies queries and produces adaptive channel weights."""
 
@@ -162,6 +177,20 @@ class QueryStrategyClassifier:
         if len(proper_nouns) >= 2 and words & _CAUSAL_TEMPORAL_WORDS:
             return "multi_hop"
 
+        # `enable_recency_strategy=False` is documented as the one-line rollback
+        # for this whole path. It was declared and never read, so the rollback
+        # did nothing — a switch that does not switch is worse than no switch,
+        # because it is reached for in an incident.
+        if not _recency_enabled():
+            pass
+        # Checked BEFORE the single-word test below. "what am I working on right
+        # now" contains "now", so the word test claimed it first and routed a
+        # question about the present down the retrospective path — which weights
+        # word-matching at 1.5 against this path's 0.7, and word-matching on
+        # "working" is exactly what surfaced a month-old note about a working
+        # tree. A whole phrase states intent; a single word only hints at it.
+        elif any(p in q for p in _RECENCY_PHRASES):
+            return "recency"
         if words & _TEMPORAL_WORDS:
             return "temporal"
         if words & _AGGREGATION_WORDS:
@@ -173,8 +202,6 @@ class QueryStrategyClassifier:
             return "opinion"
         if len(proper_nouns) >= 2:
             return "entity"
-        if any(p in q for p in _RECENCY_PHRASES):
-            return "recency"
         if q.startswith(("what ", "where ", "who ", "which ", "how ")):
             return "factual"
         # Vague/fuzzy recall — Hopfield pattern completion excels here

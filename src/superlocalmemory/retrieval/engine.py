@@ -1345,10 +1345,6 @@ class RetrievalEngine:
                 _cond_boost = min(_cond_boost, _max_amp)
                 boosted_score = boosted_score * _cond_boost
 
-            # Embedding-lag floor (task 2.6).
-            # When a fact's semantic score is 0.0 AND it was written within the
-            # floor window, the absence of an embedding is the cause — not
-            # semantic irrelevance. Substituting the corpus-median semantic
             # v3.5.0 (M2): soft-normalize to [0,1]. RRF weights + scene/entity
             # boosts push raw scores well above 1 (observed: 27.97). A sigmoid
             # preserves rank (monotonic) while giving users a readable 0-1 range.

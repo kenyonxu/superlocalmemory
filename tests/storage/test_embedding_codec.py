@@ -179,30 +179,45 @@ class TestCorruptData:
         with pytest.raises(ValueError, match="Unexpected"):
             decode_embedding(42, fact_id="fact-int")
 
-    def test_does_not_return_none_for_bad_blob(self):
-        # 101 bytes is not a multiple of 4 — ValueError expected, not None return
-        bad_blob = b"\x00" * 101
-        result = None
-        try:
-            result = decode_embedding(bad_blob, fact_id="fact-x")
-        except ValueError:
-            pass
-        # result should remain None (exception path taken), not return silently
-        assert result is None
+    def test_does_not_return_none_for_bad_blob(self) -> None:
+        """A corrupt value must RAISE, never come back as "no embedding".
+
+        Returning None for corruption is the forbidden path: the caller cannot
+        tell it apart from a fact that legitimately has no embedding yet, so
+        damage looks like absence and nothing ever reports it.
+
+        This previously initialised `result = None`, caught ValueError with
+        `pass`, and asserted `result is None` — which is satisfied by the very
+        behaviour it was meant to forbid. It now requires the exception, and
+        requires the fact id to be in the message so the row can be found.
+        """
+        with pytest.raises(ValueError, match="deadbeef"):
+            decode_embedding(b"\x01\x02\x03", fact_id="deadbeef")
+
+    def test_a_valid_buffer_is_not_mistaken_for_corruption(self) -> None:
+        """The guard above must not fire on good data."""
+        import numpy as np
+
+        good = np.array([0.5] * EMBEDDING_DIM, dtype=np.float32).tobytes()
+        assert len(decode_embedding(good, fact_id="ok")) == EMBEDDING_DIM
 
 
 # ---------------------------------------------------------------------------
 # 4 & 5. Backfill idempotency and non-null count preserved
 # ---------------------------------------------------------------------------
-
 def _make_test_db(path: Path, n_facts: int = 20) -> None:
-    """Create a minimal atomic_facts table with TEXT embeddings."""
+    """Create a minimal atomic_facts table with TEXT embeddings.
+
+    The column is declared TEXT because that is what the real schema says.
+    Declaring it BLOB here made an affinity problem on a real store impossible
+    to catch from these tests.
+    """
     conn = sqlite3.connect(str(path))
     conn.execute("""
         CREATE TABLE atomic_facts (
             fact_id TEXT PRIMARY KEY,
             content TEXT,
-            embedding BLOB
+            embedding TEXT
         )
     """)
     for i in range(n_facts):
@@ -212,15 +227,6 @@ def _make_test_db(path: Path, n_facts: int = 20) -> None:
             "INSERT INTO atomic_facts(fact_id, content, embedding) VALUES (?,?,?)",
             (f"fact-{i:04d}", f"content {i}", text),
         )
-    # Add two NULL-embedding facts to verify non-null count is preserved
-    conn.execute(
-        "INSERT INTO atomic_facts(fact_id, content, embedding) VALUES (?,?,NULL)",
-        ("fact-null-1", "null embedding 1"),
-    )
-    conn.execute(
-        "INSERT INTO atomic_facts(fact_id, content, embedding) VALUES (?,?,NULL)",
-        ("fact-null-2", "null embedding 2"),
-    )
     conn.commit()
     conn.close()
 
@@ -308,7 +314,10 @@ class TestBackfill:
         conn = sqlite3.connect(str(db_path))
         conn.execute("""
             CREATE TABLE atomic_facts (
-                fact_id TEXT PRIMARY KEY, content TEXT, embedding BLOB
+                -- Declared TEXT because that is what the real schema says.
+                -- Creating it as BLOB here made an affinity problem on a real
+                -- store impossible to catch from these tests.
+                fact_id TEXT PRIMARY KEY, content TEXT, embedding TEXT
             )
         """)
         for i in range(n):

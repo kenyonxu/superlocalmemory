@@ -152,13 +152,19 @@ def _backup_via_sqlite_api(src: Path, dest: Path) -> None:
         companion = staging.with_name(staging.name + suffix)
         if not companion.exists():
             continue
-        if suffix == "-wal" and companion.stat().st_size > 0:
-            staging.unlink(missing_ok=True)
-            companion.unlink(missing_ok=True)
-            raise SnapshotUnusableError(
-                f"copy left {companion.stat().st_size} bytes in its write-ahead log; "
-                f"renaming it would strand those pages: {dest}"
-            )
+        if suffix == "-wal":
+            leftover = companion.stat().st_size
+            if leftover > 0:
+                # Read the size BEFORE unlinking. Reading it inside the message
+                # after the unlink raised FileNotFoundError instead of this
+                # error, so the caller saw a generic crash — and the staging
+                # file was already gone, taking the evidence with it.
+                staging.unlink(missing_ok=True)
+                companion.unlink(missing_ok=True)
+                raise SnapshotUnusableError(
+                    f"copy left {leftover} bytes in its write-ahead log; "
+                    f"renaming it would strand those pages: {dest}"
+                )
         companion.unlink(missing_ok=True)
 
     staging.replace(dest)

@@ -120,17 +120,21 @@ class TemporalChannel:
         # Strategy 2: Date proximity search
         if query_dt is None:
             recent: list[tuple[str, float]] = []
-            if query_type in ("recency", "temporal"):
-                # A question about the present has no date to be near, so this
-                # channel answers with what is actually recent.
-                #
-                # This deliberately does NOT depend on the entity search coming
-                # back empty. It used to sit inside a guard that required both,
-                # inherited from the case where there is simply nothing to do —
-                # which meant a single entity match anywhere silently disabled
-                # recency. On a real store something almost always matches, so
-                # the fallback effectively never ran, and "what am I working on"
-                # answered with month-old notes containing the word "working".
+            # For a question that IS about the present ("what am I working on"),
+            # recency is the answer, and it runs regardless of what else matched.
+            # It used to sit inside a guard that also required the entity search
+            # to be empty — inherited from the case where there is simply nothing
+            # to do — so on a real store, where something almost always matches,
+            # it effectively never ran.
+            #
+            # For a merely time-FLAVOURED question ("what is the latest
+            # authentication design"), recency is a last resort, not the answer:
+            # this channel returns up to 50 newest facts with no regard for topic,
+            # and at temporal's weight of 2.0 that buries the very subject the
+            # user named. So there it runs only when nothing else matched at all.
+            if query_type == "recency" or (
+                query_type == "temporal" and not entity_results
+            ):
                 recent = self._recency_fallback(
                     profile_id,
                     include_global=include_global,
@@ -148,6 +152,7 @@ class TemporalChannel:
 
         events = self._load_events(
             profile_id, include_global=include_global, include_shared=include_shared,
+            near_date=query_dt.date().isoformat() if query_dt is not None else None,
         )
         scored: dict[str, float] = {}
 
@@ -253,7 +258,16 @@ class TemporalChannel:
         profile_id: str,
         include_global: bool | None = None,
         include_shared: bool | None = None,
+        near_date: str | None = None,
     ) -> list[dict]:
+        """Load a bounded slice of temporal events.
+
+        ``near_date`` decides WHICH slice. Without it the newest events are
+        taken, which suits "what is recent". With it the events closest to that
+        date are taken, which is the only slice that can answer a question about
+        a particular time — the newest-first bound silently excluded anything
+        old, so a question about last year returned nothing rather than slowly.
+        """
         if include_global is None:
             include_global = bool(getattr(self, "include_global", False))
         if include_shared is None:
@@ -264,15 +278,37 @@ class TemporalChannel:
             include_shared=include_shared,
             prefix="af",
         )
-        rows = self._db.execute(
-            "SELECT te.fact_id, te.observation_date, te.referenced_date, "
-            "te.interval_start, te.interval_end, af.created_at "
-            "FROM temporal_events AS te "
-            "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
-            f"WHERE {where} "
-            "ORDER BY te.rowid DESC LIMIT 5000",
-            (*params,),
-        )
+        # The bound has to match what the caller is looking for. Taking the
+        # newest 5,000 rows is right when the question is "what is recent", and
+        # wrong when it is "what happened in March 2024" — those events carry old
+        # rowids and were simply never loaded, so the answer was missing rather
+        # than slow. When a target date is known, bound by proximity to THAT date
+        # instead; the scan stays bounded either way.
+        if near_date is not None:
+            rows = self._db.execute(
+                "SELECT te.fact_id, te.observation_date, te.referenced_date, "
+                "te.interval_start, te.interval_end, af.created_at "
+                "FROM temporal_events AS te "
+                "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
+                f"WHERE {where} "
+                "  AND (te.referenced_date IS NOT NULL "
+                "       OR te.observation_date IS NOT NULL) "
+                "ORDER BY ABS(julianday(COALESCE(te.referenced_date, "
+                "                               te.observation_date)) "
+                "             - julianday(?)) ASC "
+                "LIMIT 5000",
+                (*params, near_date),
+            )
+        else:
+            rows = self._db.execute(
+                "SELECT te.fact_id, te.observation_date, te.referenced_date, "
+                "te.interval_start, te.interval_end, af.created_at "
+                "FROM temporal_events AS te "
+                "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
+                f"WHERE {where} "
+                "ORDER BY te.rowid DESC LIMIT 5000",
+                (*params,),
+            )
         return [dict(r) for r in rows]
 
     def _recency_fallback(

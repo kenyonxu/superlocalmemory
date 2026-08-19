@@ -124,18 +124,36 @@ class TestAbsenceThatIsRealEvidence:
 
 class TestItStaysOutOfTheWay:
     def test_disabled_by_configuration(self) -> None:
-        cfg = RetrievalConfig()
-        cfg = type(cfg)(**{**cfg.__dict__, "write_recency_floor_enabled": False}) \
-            if hasattr(cfg, "__dict__") else cfg
-        eng = _engine(["fresh"], config=cfg)
-        ch = {"semantic": [("s0", 0.9)], "bm25": [("fresh", 50.0)]}
-        if getattr(cfg, "write_recency_floor_enabled", True) is False:
-            assert eng._semantic_rank_for_unenriched(ch) is ch
+        """Switching it off must switch it off — and on must still do something.
+
+        This previously wrapped its only assertion in `if flag is False`, so if
+        rebuilding the config silently failed the test passed having checked
+        nothing. It now asserts the flag really is off, and asserts the SAME
+        input is changed when the flag is on — otherwise an implementation that
+        does nothing at all would satisfy the "disabled" half.
+        """
+        ch = {"semantic": [("s0", 0.9), ("s1", 0.8)], "bm25": [("fresh", 50.0)]}
+
+        on = _engine(["fresh"])
+        assert on._semantic_rank_for_unenriched(ch) is not ch, (
+            "with the feature enabled the ranking was returned untouched, so the "
+            "disabled case below would prove nothing"
+        )
+
+        cfg = RetrievalConfig(write_recency_floor_enabled=False)
+        assert cfg.write_recency_floor_enabled is False, "config did not take"
+        off = _engine(["fresh"], config=cfg)
+        assert off._semantic_rank_for_unenriched(ch) is ch
 
     def test_disabled_by_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Same input, both settings, so an inert implementation cannot pass."""
+        ch = {"semantic": [("s0", 0.9), ("s1", 0.8)], "bm25": [("fresh", 50.0)]}
+        eng = _engine(["fresh"])
+        assert eng._semantic_rank_for_unenriched(ch) is not ch, (
+            "unset, the feature changed nothing — the disabled case proves nothing"
+        )
         monkeypatch.setenv("SLM_WRITE_RECENCY_NO_FLOOR", "1")
-        ch = {"semantic": [("s0", 0.9)], "bm25": [("fresh", 50.0)]}
-        assert _engine(["fresh"])._semantic_rank_for_unenriched(ch) is ch
+        assert eng._semantic_rank_for_unenriched(ch) is ch
 
     def test_no_semantic_channel_is_a_no_op(self) -> None:
         """With nothing to be ranked among, there is no median to occupy."""

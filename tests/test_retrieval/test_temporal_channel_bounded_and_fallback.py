@@ -94,6 +94,28 @@ def _seed_fact_and_event(
 class TestBoundedEventScan:
     """_load_events() must be bounded and deterministically ordered."""
 
+    def test_a_dated_question_is_bounded_around_that_date(self) -> None:
+        """Bounded is not enough — it must be bounded around what was ASKED for.
+
+        The bound added for scan cost took the newest rows by insertion order.
+        That is right for "what is recent" and wrong for "what happened in March
+        last year": those events carry old row ids, were never loaded, and the
+        answer came back empty rather than slow. The existing test above requires
+        a LIMIT, so it passed the whole time this was broken — a bound can be
+        present and still be the wrong bound.
+        """
+        db = MagicMock()
+        db.execute.return_value = []
+        ch = TemporalChannel(db)
+        ch._load_events(_PROFILE, near_date="2024-03-15")
+        sql, params = db.execute.call_args[0][0], db.execute.call_args[0][1]
+        assert "julianday" in sql, (
+            "a dated question was bounded by insertion order, so events near the "
+            "date asked about are excluded whenever the store has newer ones"
+        )
+        assert "2024-03-15" in params, "the date asked about never reached the query"
+        assert "LIMIT" in sql.upper(), "the scan must still be bounded"
+
     def test_sql_contains_limit_and_order_by(self) -> None:
         """The SQL issued by _load_events() must contain both ORDER BY and LIMIT.
 

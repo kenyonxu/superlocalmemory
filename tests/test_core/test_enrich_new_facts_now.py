@@ -48,6 +48,20 @@ def engine(tmp_path: Path) -> MemoryEngine:
     return eng
 
 
+def _local_embedder_mock() -> MagicMock:
+    """A mock that the engine treats as a LOCAL embedder.
+
+    `_is_remote_embedder` reads `embedder._config` and a bare `MagicMock`
+    auto-creates it, so `is_cloud` comes back as a truthy mock and the engine
+    classifies the mock as remote — returning before it touches the code below.
+    Three tests in this file passed that way without ever executing the path
+    they claimed to cover. `_config = None` is what a local embedder looks like.
+    """
+    m = MagicMock()
+    m._config = None
+    return m
+
+
 def _fact_without_a_vector(engine: MemoryEngine, content: str) -> str:
     """Write a fact and strip every trace of its enrichment.
 
@@ -102,12 +116,30 @@ class TestTheVectorIsAttached:
             "searching by meaning still cannot reach this memory"
         )
 
-    def test_a_fact_that_already_has_one_is_left_alone(self, engine: MemoryEngine) -> None:
+    def test_a_fact_that_already_has_one_counts_without_being_re_embedded(
+        self, engine: MemoryEngine,
+    ) -> None:
+        """It is already searchable, so it counts — and costs nothing.
+
+        The returned number answers "how many of these can be found by meaning",
+        which is what the caller reports to the user. Returning 0 for a fact that
+        is already fully searchable would make the receipt say "wording only"
+        about a memory that is in fact findable.
+
+        Both halves are asserted. Checking only the count would pass on an
+        implementation that re-embeds every time; checking only the embedder
+        would pass on one that always returns 0.
+        """
         fact_id = engine.store_fast("Procurement confirmed the tariff schedule.")[0]
-        assert engine.enrich_new_facts_now([fact_id]) == 0, (
-            "a fact that already has a vector was re-embedded, paying for work "
-            "that was already done"
+        spy = MagicMock(wraps=engine._embedder)
+        spy._config = None
+        spy._available = getattr(engine._embedder, "_available", None)
+        engine._embedder = spy
+        assert engine.enrich_new_facts_now([fact_id]) == 1, (
+            "a fact that is already searchable by meaning must count towards the "
+            "caller's receipt, otherwise the user is told it cannot be found"
         )
+        spy.embed.assert_not_called()
 
     def test_nothing_to_do_is_not_an_error(self, engine: MemoryEngine) -> None:
         assert engine.enrich_new_facts_now([]) == 0
@@ -119,7 +151,7 @@ class TestItCannotHarmTheWrite:
 
     def test_a_cold_embedder_defers_instead_of_failing(self, engine: MemoryEngine) -> None:
         fact_id = _fact_without_a_vector(engine, "A note recorded while the embedder is cold.")
-        cold = MagicMock()
+        cold = _local_embedder_mock()
         cold._available = False
         engine._embedder = cold
         assert engine.enrich_new_facts_now([fact_id]) == 0
@@ -128,7 +160,7 @@ class TestItCannotHarmTheWrite:
 
     def test_an_embedder_that_raises_does_not_propagate(self, engine: MemoryEngine) -> None:
         fact_id = _fact_without_a_vector(engine, "A note recorded while the embedder is broken.")
-        broken = MagicMock()
+        broken = _local_embedder_mock()
         broken._available = True
         broken.embed.side_effect = RuntimeError("model not loaded")
         engine._embedder = broken
@@ -143,7 +175,7 @@ class TestItCannotHarmTheWrite:
         import time as _time
 
         fact_id = _fact_without_a_vector(engine, "A note recorded while the embedder is slow.")
-        slow = MagicMock()
+        slow = _local_embedder_mock()
         slow._available = True
         slow.embed.side_effect = lambda _t: (_time.sleep(1.5), [0.1] * 768)[1]
         engine._embedder = slow

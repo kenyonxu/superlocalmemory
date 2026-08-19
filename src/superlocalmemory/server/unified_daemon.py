@@ -26,6 +26,8 @@ License: AGPL-3.0-or-later
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import functools
 import hashlib
 import json
 import logging
@@ -240,6 +242,29 @@ _FACT_ENTITY_REPAIR_MAX_RETRY_SECONDS = 30.0
 # an immediate durable/queryable receipt; explicit waiters get this small
 # completion window, then the M018 materializer continues in the background.
 _REMEMBER_ENRICHMENT_WAIT_SECONDS = 0.75
+
+# Enrichment runs off the event loop, but NOT on the loop's default executor.
+# `asyncio.to_thread` uses that default pool, so N simultaneous writers really did
+# create N threads — and every other handler that borrows the same pool queued
+# behind them. One shared, small pool bounds the cost of a burst: past its width
+# the extra callers miss their deadline and defer, which is the intended
+# degradation, instead of multiplying threads.
+_ENRICHMENT_WORKERS = 2
+_enrichment_pool: "concurrent.futures.ThreadPoolExecutor | None" = None
+_enrichment_pool_lock = threading.Lock()
+
+
+def _enrichment_executor():
+    """The one pool inline enrichment may use. Created on first need."""
+    global _enrichment_pool
+    if _enrichment_pool is None:
+        with _enrichment_pool_lock:
+            if _enrichment_pool is None:
+                _enrichment_pool = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=_ENRICHMENT_WORKERS,
+                    thread_name_prefix="slm-enrich",
+                )
+    return _enrichment_pool
 _SENSITIVE_READ_PREFIXES = (
     "/api/memories", "/api/facts", "/api/clusters", "/api/graph",
     "/api/v3/associations", "/api/v3/core-memory",
@@ -1746,9 +1771,25 @@ async def lifespan(application: FastAPI):
                     applied=_applied,
                 )
                 import sys as _sys
+                # "Data is safe" is only true when NOTHING was applied. Migrations
+                # are non-fatal and applied in order, so a later failure can leave
+                # earlier ones committed — a partially changed store. Saying the
+                # data is untouched then tells the user to ignore the one copy
+                # that still holds the original.
+                if _applied:
+                    _headline = (
+                        f"[SLM] Migration incomplete. YOUR DATABASE WAS PARTIALLY "
+                        f"CHANGED — {len(_applied)} step(s) applied, "
+                        f"{len(_failed)} failed. The pre-change copy is at "
+                        f"{_backup_path} — keep it until this is resolved."
+                    )
+                else:
+                    _headline = (
+                        f"[SLM] Migration failed before any change was made. Your "
+                        f"data is as it was; a copy is also at {_backup_path}."
+                    )
                 print(
-                    f"[SLM] Migration failed. Data is safe — backup at: "
-                    f"{_backup_path}. See {_err_log}. Run: slm doctor",
+                    f"{_headline} See {_err_log}. Run: slm doctor",
                     file=_sys.stderr,
                     flush=True,
                 )
@@ -4382,16 +4423,30 @@ def _register_daemon_routes(application: FastAPI) -> None:
             )
             enriched = 0
             try:
+                loop = asyncio.get_running_loop()
                 enriched = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        engine.enrich_new_facts_now, fact_ids, timeout_s=enrich_budget,
+                    loop.run_in_executor(
+                        _enrichment_executor(),
+                        functools.partial(
+                            engine.enrich_new_facts_now,
+                            fact_ids, timeout_s=enrich_budget,
+                        ),
                     ),
                     timeout=enrich_budget + 0.25,
                 )
             except (TimeoutError, asyncio.TimeoutError):
-                logger.debug("inline enrichment exceeded its budget — deferred")
+                # Worth seeing. Sustained timeouts mean writes are coming back
+                # findable by wording only, which is a real degradation and was
+                # previously visible at debug level alone.
+                logger.warning(
+                    "inline enrichment exceeded its budget for %d fact(s) — "
+                    "deferred to the background pass", len(fact_ids),
+                )
             except Exception as exc:
-                logger.debug("inline enrichment unavailable (%s) — deferred", exc)
+                logger.warning(
+                    "inline enrichment unavailable (%s: %s) — deferred to the "
+                    "background pass", type(exc).__name__, exc,
+                )
 
             searchable = "meaning" if enriched == len(fact_ids) and fact_ids else "wording"
             return {
