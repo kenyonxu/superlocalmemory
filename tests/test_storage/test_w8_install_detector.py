@@ -292,3 +292,36 @@ class TestSchemaVersionErrorNamesAllInstalls:
         ):
             # Should not raise
             check_version_or_raise(db)
+
+
+class TestWindowsSitePackagesLayout:
+    """Version detection must work on the Windows virtualenv layout.
+
+    POSIX venvs use ``lib/python3.13/site-packages``. Windows uses
+    ``Lib/site-packages`` — capitalised, and with no version component. Only
+    the POSIX shape was searched, so on Windows detection returned None and the
+    version-mismatch error named no installations at all.
+    """
+
+    @staticmethod
+    def _make(base: Path, rel: str, version: str) -> None:
+        pkg = base / rel / "superlocalmemory"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text(f'__version__ = "{version}"\n')
+
+    def test_finds_version_in_windows_layout(self, tmp_path):
+        from superlocalmemory.core.install_detector import _read_python_version
+
+        self._make(tmp_path, "Lib/site-packages", "4.0.8")
+        assert _read_python_version(tmp_path) == "4.0.8"
+
+    def test_finds_version_in_posix_layout(self, tmp_path):
+        from superlocalmemory.core.install_detector import _read_python_version
+
+        self._make(tmp_path, "lib/python3.13/site-packages", "4.0.9")
+        assert _read_python_version(tmp_path) == "4.0.9"
+
+    def test_returns_none_when_no_layout_matches(self, tmp_path):
+        from superlocalmemory.core.install_detector import _read_python_version
+
+        assert _read_python_version(tmp_path) is None

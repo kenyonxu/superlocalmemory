@@ -40,10 +40,24 @@ def _npm_global_root() -> Optional[Path]:
 
 
 def _read_python_version(base: Path) -> Optional[str]:
-    """Read __version__ from the first matching site-packages layout under base."""
-    pattern = str(base / "lib" / "python*" / "site-packages" / "superlocalmemory" / "__init__.py")
-    matches = glob.glob(pattern)
-    for init_path in sorted(matches):
+    """Read __version__ from the first matching site-packages layout under base.
+
+    Both layouts are searched. POSIX virtualenvs use
+    ``lib/python3.13/site-packages``; Windows uses ``Lib/site-packages`` with no
+    version component and a capitalised directory. Searching only the POSIX
+    shape made detection silently return None on Windows — which is precisely
+    where multi-install divergence between pip and npm is most likely, and where
+    the version-mismatch error would then name no installations at all.
+    """
+    patterns = [
+        str(base / "lib" / "python*" / "site-packages" / "superlocalmemory" / "__init__.py"),
+        str(base / "Lib" / "site-packages" / "superlocalmemory" / "__init__.py"),
+        str(base / "lib" / "site-packages" / "superlocalmemory" / "__init__.py"),
+    ]
+    matches: list[str] = []
+    for pattern in patterns:
+        matches.extend(glob.glob(pattern))
+    for init_path in sorted(set(matches)):
         try:
             text = Path(init_path).read_text(encoding="utf-8", errors="replace")
             for line in text.splitlines():

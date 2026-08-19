@@ -18,6 +18,8 @@ from unittest import mock
 import pytest
 
 from superlocalmemory.storage.backup import (
+    SnapshotUnusableError,
+    restore_pre_migration_snapshot,
     InsufficientDiskSpaceError,
     _backup_via_sqlite_api,
     _gc_old_backups,
@@ -633,3 +635,78 @@ class TestRestoreFromSnapshot:
         assert rows == [("original-data",)], (
             f"Restore must return the pre-migration data; got {rows!r}"
         )
+
+
+class TestSafeSnapshotRestore:
+    """The documented restore path must not be able to destroy the live store.
+
+    Reproduced against BackupManager.restore_backup(): with 11 snapshots and
+    max_backups=10, its internal pre-restore backup runs retention, retention
+    unlinks the snapshot being restored, sqlite3.connect recreates that path as
+    an empty database, and the empty database is copied over the live store —
+    returning True. 500 facts became 0 tables.
+    """
+
+    @staticmethod
+    def _store(path: Path, n: int) -> None:
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE atomic_facts(fact_id TEXT, content TEXT)")
+        conn.executemany("INSERT INTO atomic_facts VALUES(?,?)",
+                         [(f"f{i}", f"m{i}") for i in range(n)])
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def _facts(path: Path) -> int:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM atomic_facts").fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_restores_content_and_keeps_a_copy_of_what_it_replaced(self, tmp_path):
+        live = tmp_path / "memory.db"
+        self._store(live, 500)
+        snaps = tmp_path / "pre-migration-snapshots"
+        snaps.mkdir()
+        snap = snaps / "memory-20260819-000000-pre-migration.db"
+        _backup_via_sqlite_api(live, snap)
+
+        # the live store then diverges, as it would after a bad migration
+        conn = sqlite3.connect(live)
+        conn.execute("DELETE FROM atomic_facts")
+        conn.commit()
+        conn.close()
+        assert self._facts(live) == 0
+
+        safety = restore_pre_migration_snapshot(snap, live)
+
+        assert self._facts(live) == 500, "snapshot content must be restored"
+        assert safety.exists(), "the replaced state must be preserved"
+        assert self._facts(safety) == 0, "safety copy holds the pre-restore state"
+        assert safety.parent != snaps, (
+            "the safety copy must live outside the snapshot directory so no "
+            "retention policy can reclaim it"
+        )
+
+    def test_refuses_an_empty_snapshot_without_touching_the_live_store(self, tmp_path):
+        live = tmp_path / "memory.db"
+        self._store(live, 42)
+        empty = tmp_path / "memory-20260819-000000-pre-migration.db"
+        empty.touch()          # exactly what connect() leaves behind after an unlink
+
+        with pytest.raises(SnapshotUnusableError):
+            restore_pre_migration_snapshot(empty, live)
+
+        assert self._facts(live) == 42, "live store must be untouched on refusal"
+
+    def test_refuses_a_tableless_snapshot_without_touching_the_live_store(self, tmp_path):
+        live = tmp_path / "memory.db"
+        self._store(live, 7)
+        hollow = tmp_path / "memory-20260819-000001-pre-migration.db"
+        sqlite3.connect(hollow).close()      # a valid but empty database
+
+        with pytest.raises(SnapshotUnusableError):
+            restore_pre_migration_snapshot(hollow, live)
+
+        assert self._facts(live) == 7, "live store must be untouched on refusal"

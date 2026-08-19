@@ -23,28 +23,29 @@ Public API intended for use by the migration runner:
 
 Restoring a pre-migration snapshot
 -----------------------------------
-When a migration goes wrong and you need to roll back to the database state
-captured immediately before the migration ran, use ``BackupManager`` pointed
-at the snapshots directory.  Example (adapt paths to your installation)::
+Use ``restore_pre_migration_snapshot()`` in this module::
 
     from pathlib import Path
-    from superlocalmemory.infra.backup import BackupManager
+    from superlocalmemory.storage.backup import restore_pre_migration_snapshot
     from superlocalmemory.infra.data_root import canonical_data_root
 
-    snapshots_dir = canonical_data_root() / "pre-migration-snapshots"
-    mgr = BackupManager(
-        base_dir=canonical_data_root(),
-        backup_dir=snapshots_dir,
-    )
+    root = canonical_data_root()
+    snap = root / "pre-migration-snapshots" / "memory-20260819-120000-pre-migration.db"
+    restore_pre_migration_snapshot(snap, root / "memory.db")
 
-    # List snapshot files to find the one taken before the failed migration:
-    #   ls -lt ~/.superlocalmemory/pre-migration-snapshots/
-    # Then pass the bare filename (no directory component):
-    mgr.restore_backup("memory-20260819-120000-pre-migration.db")
+It verifies the snapshot is a readable database with content and refuses before
+touching the live store if it is not, copies the current live database aside
+into ``pre-restore/`` first, and only then writes the snapshot into place.
 
-``restore_backup`` derives the target database from the filename stem
-(``"memory"`` → ``memory.db``), creates a safety snapshot of the current
-state first, and overwrites the live database via ``sqlite3.backup()``.
+**Do not use ``BackupManager.restore_backup()`` for these snapshots.** It checks
+that the source exists, then takes its own pre-restore backup, which runs
+retention across the same directory. Retention can unlink the file being
+restored; ``sqlite3.connect`` then recreates that path as an EMPTY database, and
+the empty database is copied over the live store — and the call returns ``True``.
+The snapshot is left as a zero-byte file under its original name, so a second
+attempt also appears to succeed. Reproduced: a 500-fact store became 0 tables
+while the call reported success.
+
 
 Why snapshots live outside ``backups/``
 ----------------------------------------
@@ -60,6 +61,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import os
 import sqlite3
 import time
 from datetime import UTC, datetime
@@ -99,17 +101,103 @@ def _backup_via_sqlite_api(src: Path, dest: Path) -> None:
     Both connections are closed in a finally block even if an error occurs.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write to a temporary sibling and rename into place. A copy interrupted by
+    # a full disk or a crash would otherwise leave a truncated file at the final
+    # name — a snapshot that looks present and restores nothing. rename() within
+    # one directory is atomic, so the final name only ever appears complete.
+    staging = dest.with_name(dest.name + ".partial")
     src_conn = sqlite3.connect(str(src), check_same_thread=False)
-    dst_conn = sqlite3.connect(str(dest))
+    dst_conn = sqlite3.connect(str(staging))
     try:
         # pages=-1 copies all pages in a single pass (fastest; no yielding to
         # other writers between batches, which is acceptable here because the
         # backup happens before the migration run begins — no other migration
         # writer is active at this point).
         src_conn.backup(dst_conn, pages=-1)
+        dst_conn.commit()
     finally:
         src_conn.close()
         dst_conn.close()
+
+    # Verify and durably flush BEFORE the rename, so the final name never
+    # appears over incomplete or corrupt content.
+    try:
+        fd = os.open(str(staging), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        verify = sqlite3.connect(f"file:{staging}?mode=ro", uri=True)
+        try:
+            if verify.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise SnapshotUnusableError(
+                    f"snapshot failed its integrity check immediately after copy: {dest}")
+        finally:
+            verify.close()
+    except Exception:
+        staging.unlink(missing_ok=True)   # never leave a partial file behind
+        raise
+
+    staging.replace(dest)
+
+
+class SnapshotUnusableError(RuntimeError):
+    """Raised when a snapshot cannot be verified, BEFORE the live store is touched."""
+
+
+def restore_pre_migration_snapshot(snapshot: Path, target: Path) -> Path:
+    """Restore ``snapshot`` over ``target``, verifying before it destroys anything.
+
+    Do NOT restore these snapshots with ``BackupManager.restore_backup()``. That
+    method checks the source exists, then takes its own "pre-restore" backup,
+    which runs retention over the same directory. Retention can unlink the very
+    file being restored; ``sqlite3.connect`` then RECREATES that path as an empty
+    database, and the empty database is copied over the live store. It returns
+    True. The snapshot is left as a zero-byte file with its original name, so a
+    second attempt appears to succeed as well. Reproduced: a 500-fact store
+    restored to 0 tables while the call reported success.
+
+    This function instead:
+      1. verifies the snapshot is a readable database with content, and refuses
+         before touching ``target`` if it is not,
+      2. copies the CURRENT ``target`` aside first, outside the snapshot
+         directory so no retention policy can reclaim it,
+      3. copies the snapshot into place through the SQLite backup API.
+
+    Returns the path of the safety copy of the pre-restore state.
+    """
+    if not snapshot.is_file() or snapshot.stat().st_size == 0:
+        raise SnapshotUnusableError(f"snapshot is missing or empty: {snapshot}")
+    try:
+        conn = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
+        try:
+            tables = [r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")]
+            if not tables:
+                raise SnapshotUnusableError(
+                    f"snapshot contains no tables, refusing to restore it over "
+                    f"{target.name}: {snapshot}")
+            if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise SnapshotUnusableError(f"snapshot failed integrity check: {snapshot}")
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        raise SnapshotUnusableError(f"snapshot is not a readable database: {snapshot}") from exc
+
+    # Safety copy of what we are about to overwrite, deliberately NOT in the
+    # snapshot directory — nothing prunes this location.
+    safety_dir = target.parent / "pre-restore"
+    safety_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safety = safety_dir / f"{target.stem}-{stamp}-before-restore{target.suffix}"
+    if target.exists():
+        _backup_via_sqlite_api(target, safety)
+
+    _backup_via_sqlite_api(snapshot, target)
+    logger.info("[SLM] Restored %s from %s (previous state saved to %s)",
+                target.name, snapshot.name, safety)
+    return safety
 
 
 def _find_existing_ancestor(path: Path) -> Path:
@@ -166,17 +254,25 @@ def _pre_migration_backup(
 
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
 
-    # Measure combined size of databases that actually exist.
+    # Measure combined size of databases that actually exist, INCLUDING their
+    # write-ahead log and shared-memory files. On a busy store the -wal file can
+    # hold a large fraction of the data not yet checkpointed into the main file,
+    # and the snapshot materialises all of it. Sizing against the main file
+    # alone under-counts the requirement and lets a migration start with too
+    # little room, which is the situation the check exists to prevent.
     total_bytes = 0
     for db_path in (memory_db, learning_db):
-        if db_path.exists():
-            total_bytes += db_path.stat().st_size
+        for companion in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
+            if companion.exists():
+                total_bytes += companion.stat().st_size
 
     # Check that the target filesystem has enough room.  We check against an
     # existing ancestor because the snapshot directory itself may not exist yet.
     check_path = _find_existing_ancestor(backups_root)
     free_bytes = shutil.disk_usage(str(check_path)).free
-    needed_bytes = int(total_bytes * 1.1)
+    # 1.1x headroom for the snapshot, plus room for the staging copy that is
+    # written before the atomic rename — the peak on disk is briefly both.
+    needed_bytes = int(total_bytes * 2.1)
     if free_bytes < needed_bytes:
         raise InsufficientDiskSpaceError(needed_bytes, free_bytes)
 
@@ -202,61 +298,55 @@ def _pre_migration_backup(
         "  Location : %s\n"
         "  Files    :\n  %s\n"
         "  To restore if migration fails:\n"
-        "    from superlocalmemory.infra.backup import BackupManager\n"
-        "    from superlocalmemory.infra.data_root import canonical_data_root\n"
-        "    mgr = BackupManager(\n"
-        "        base_dir=canonical_data_root(),\n"
-        "        backup_dir=%r,\n"
-        "    )\n"
-        "    mgr.restore_backup(%r)",
+        "    from pathlib import Path\n"
+        "    from superlocalmemory.storage.backup import restore_pre_migration_snapshot\n"
+        "    restore_pre_migration_snapshot(Path(%r), Path(%r))",
         size_mb,
         elapsed,
         str(backups_root),
         filenames,
-        str(backups_root),
-        written[0].name if written else "<snapshot file>",
+        str(backups_root / (written[0].name if written else "<snapshot file>")),
+        str(memory_db),
     )
 
     return backups_root
 
 
 def _gc_old_backups(backups_root: Path, keep: int = 2) -> None:
-    """Remove oldest pre-migration snapshot files, retaining ``keep`` newest.
+    """Remove old pre-migration snapshot GENERATIONS, retaining ``keep`` newest.
 
-    Only flat files directly under ``backups_root`` whose names match the
-    ``*-pre-migration.db`` pattern are eligible for deletion. Files without
-    this suffix (such as ``memory-*.db`` or ``learning-*.db`` produced by
-    ``BackupManager``) are never touched. Every deletion uses an explicit
-    full path after confirming the path's parent is ``backups_root`` — no
-    glob pattern is passed to the deletion call.
+    A generation is one migration's snapshots — ``memory-<ts>-pre-migration.db``
+    and ``learning-<ts>-pre-migration.db`` share a timestamp and are only useful
+    together. Counting files instead of generations kept ``keep`` FILES: with
+    ``keep=2`` that is a single generation, and where mtimes interleave it could
+    retain a ``memory`` snapshot whose matching ``learning`` snapshot had been
+    deleted — a half set that cannot restore a consistent store.
 
-    Args:
-        backups_root: The directory that holds pre-migration snapshot files.
-        keep: Number of most-recent snapshots to retain.  Defaults to 2.
+    Only files directly under ``backups_root`` matching ``*-pre-migration.db``
+    are eligible. Every deletion uses an explicit full path; no glob is ever
+    passed to the deletion call.
     """
     if not backups_root.exists():
         return
 
-    # List only direct children matching *-pre-migration.db that are files.
-    candidates: list[Path] = [
-        f
-        for f in backups_root.glob("*-pre-migration.db")
-        if f.is_file() and f.parent == backups_root
-    ]
+    generations: dict[str, list[Path]] = {}
+    for candidate in backups_root.glob("*-pre-migration.db"):
+        if not candidate.is_file() or candidate.parent != backups_root:
+            continue
+        # "memory-20260819-120000-pre-migration.db" -> "20260819-120000"
+        stamp = candidate.name.split("-", 1)[-1].rsplit("-pre-migration.db", 1)[0]
+        generations.setdefault(stamp, []).append(candidate)
 
-    if len(candidates) <= keep:
+    if len(generations) <= keep:
         return
 
-    # Sort ascending by mtime so oldest entries are first.
-    candidates.sort(key=lambda f: f.stat().st_mtime)
-
-    to_delete = candidates[: len(candidates) - keep]
-    for target in to_delete:
-        # Double-check the invariant before touching anything.
-        if target.parent != backups_root:
-            logger.warning(
-                "[SLM] GC skipped %s — parent is not backups_root", target
-            )
-            continue
-        logger.info("[SLM] GC removing old snapshot: %s", target)
-        target.unlink()
+    ordered = sorted(
+        generations.items(),
+        key=lambda kv: max(p.stat().st_mtime for p in kv[1]),
+    )
+    for _stamp, files in ordered[: len(generations) - keep]:
+        for target in sorted(files):
+            if target.parent != backups_root or not target.is_file():
+                continue
+            logger.info("[SLM] Removing old pre-migration snapshot: %s", target)
+            target.unlink()
