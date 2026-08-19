@@ -84,19 +84,62 @@ def write_schema_version(conn: sqlite3.Connection, version: int) -> None:
     )
 
 
+def _detect_all_installs() -> list:
+    """Delegate to core.install_detector; fail-open (returns [] on any error)."""
+    try:
+        from superlocalmemory.core.install_detector import (
+            _detect_all_installs as _real,
+        )
+        return _real()
+    except Exception:  # import error, timeout, etc.
+        return []
+
+
+def _format_install_block(installs: list) -> str:
+    """Return a formatted multi-line string listing all detected installs."""
+    if not installs:
+        return ""
+
+    _upgrade_hints = {
+        "pipx": "  pipx upgrade superlocalmemory",
+        "venv": "  pip install -U superlocalmemory  (in ~/.slm-venv)",
+        "npm": "  npm install -g superlocalmemory@latest",
+    }
+
+    lines = ["\nAll detected installs:"]
+    seen_types: set[str] = set()
+    for entry in installs:
+        install_type = entry.get("type", "unknown")
+        version = entry.get("version", "unknown")
+        path = entry.get("path", "")
+        lines.append(f"  {install_type:<6} ({version}): {path}")
+        seen_types.add(install_type)
+
+    lines.append("\nUpgrade all installs to the latest version:")
+    for install_type, cmd in _upgrade_hints.items():
+        if install_type in seen_types:
+            lines.append(cmd)
+
+    return "\n".join(lines)
+
+
 def check_version_or_raise(db_path: Path) -> None:
     """Raise SchemaVersionError if the DB's stored version exceeds supported max.
+
+    When raising, the error message lists every SLM installation detected on
+    this machine so the user knows which copies to upgrade.
 
     Non-mutating.  Must be called before any write at startup.
     """
     stored = read_schema_version(db_path)
     if stored > SUPPORTED_SCHEMA_VERSION:
+        installs = _detect_all_installs()
+        install_block = _format_install_block(installs)
         raise SchemaVersionError(
             f"Database schema_version={stored} exceeds the maximum "
             f"supported version={SUPPORTED_SCHEMA_VERSION}. "
-            "This installation is too old for this database. "
-            "Upgrade SLM to a version that supports schema_version "
-            f"{stored} or higher."
+            "This installation is too old for this database."
+            + install_block
         )
 
 

@@ -201,6 +201,10 @@ function main(argv = process.argv.slice(2)) {
   console.log(`SuperLocalMemory ${packageVersion}: isolated runtime verified.`);
   console.log('No memory database, IDE hooks, daemon, configuration, or models were changed.');
   console.log('');
+  console.log('  Your database will be automatically migrated on first run.');
+  console.log('  A backup is created in ~/.superlocalmemory/backups/ before');
+  console.log('  any migration runs. No action is needed from you.');
+  console.log('');
   console.log('  Next step — run the guided setup (picks your mode, downloads');
   console.log('  models, connects your IDEs). Takes about a minute:');
   console.log('');

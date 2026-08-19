@@ -2376,6 +2376,30 @@ def cmd_help(args: Namespace) -> None:
     print("Docs:                https://superlocalmemory.com")
 
 
+def _migration_error_logs() -> list:
+    """Return a sorted list of migration-error log files in the SLM home dir.
+
+    Returns an empty list when none exist or when the directory is not readable.
+    """
+    try:
+        from superlocalmemory.infra.data_root import canonical_data_root
+        slm_home = canonical_data_root()
+        return sorted(slm_home.glob("migration-error-*.log"))
+    except Exception:
+        return []
+
+
+def _detect_all_installs() -> list:
+    """Thin shim so cmd_doctor can be tested without importing install_detector."""
+    try:
+        from superlocalmemory.core.install_detector import (
+            _detect_all_installs as _real,
+        )
+        return _real()
+    except Exception:
+        return []
+
+
 def cmd_doctor(args: Namespace) -> None:
     """Comprehensive pre-flight check — verify everything works.
 
@@ -2781,6 +2805,58 @@ def cmd_doctor(args: Namespace) -> None:
             _check(f"Component: {_c.label}", _status, _detail, _c.fix_cmd)
     except Exception as _cr_exc:
         _check("Component registry", "WARN", f"probe failed: {_cr_exc}")
+
+    # 13. Install version convergence — detect all copies of SLM on this machine
+    #     and warn when they are at different versions. Silent divergence is the
+    #     most common source of unexpected behaviour after an upgrade.
+    try:
+        _installs = _detect_all_installs()  # shim defined above cmd_doctor
+        _versions = {i["version"] for i in _installs}
+        if not _installs:
+            _check(
+                "install_versions",
+                "PASS",
+                "No additional SLM installs detected on this machine",
+            )
+        elif len(_versions) > 1:
+            _detail = "Version divergence: " + ", ".join(
+                f"{i['type']}={i['version']}" for i in _installs
+            )
+            _check(
+                "install_versions",
+                "WARN",
+                _detail,
+                fix="Upgrade all installs: "
+                    "pipx upgrade superlocalmemory  |  "
+                    "pip install -U superlocalmemory (in ~/.slm-venv)  |  "
+                    "npm install -g superlocalmemory@latest",
+            )
+        else:
+            _unified = next(iter(_versions))
+            _types = ", ".join(i["type"] for i in _installs)
+            _check(
+                "install_versions",
+                "PASS",
+                f"All installs at {_unified} ({_types})",
+            )
+    except Exception as _inst_exc:  # noqa: BLE001 — never break doctor
+        _check("install_versions", "WARN", f"could not probe installs: {_inst_exc}")
+
+    # 14. Migration error logs — surface any unresolved failure from a previous
+    #     upgrade attempt. The daemon writes these and they persist until the
+    #     user takes action; doctor is the right place to surface them.
+    try:
+        _err_logs = _migration_error_logs()
+        if _err_logs:
+            _latest = _err_logs[-1]
+            _check(
+                "migration_errors",
+                "FAIL",
+                f"Unresolved migration failure: {_latest.name}",
+                fix=f"Review {_latest} then run: slm doctor --fix",
+            )
+    except Exception as _mel_exc:  # noqa: BLE001 — never break doctor
+        _check("migration_errors", "WARN", f"could not check error logs: {_mel_exc}")
 
     # 12. Optimize (Surface B) — reads daemon-persisted metrics (≤60s stale).
     info = _gather_optimize_surface_b()

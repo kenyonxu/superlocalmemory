@@ -67,6 +67,104 @@ from superlocalmemory.infra.data_root import (
 )
 
 
+def _notify_migration_applied(
+    applied: list,
+    elapsed: float,
+    backup_dir: "Path | None" = None,
+) -> None:
+    """Print a one-line confirmation after migrations complete successfully.
+
+    Written to stdout so it is visible in daemon.log and in interactive runs.
+    """
+    count = len(applied)
+    if count == 0:
+        return
+    parts = [f"[SLM] {count} migration(s) applied in {elapsed:.1f}s."]
+    if backup_dir is not None:
+        parts.append(f"Backup: {backup_dir}")
+    print(" ".join(parts), flush=True)
+
+
+def _write_migration_error_log(
+    failed: list,
+    backup_dir: "Path | None",
+    slm_home: "Path | None" = None,
+) -> "Path":
+    """Write a migration-error-{timestamp}.log to the SLM home directory.
+
+    Returns the Path of the written log file.
+    """
+    import datetime
+
+    if slm_home is None:
+        slm_home = canonical_data_root()
+
+    slm_home.mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = slm_home / f"migration-error-{ts}.log"
+
+    lines = [
+        f"Migration error — {ts}",
+        f"Failed: {', '.join(str(f) for f in failed)}",
+    ]
+    if backup_dir is not None:
+        lines.append(f"Backup location: {backup_dir}")
+        lines.append("Your data was not modified. The backup above is intact.")
+    lines.append("")
+    lines.append("To diagnose and repair, run: slm doctor")
+
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return log_path
+
+
+def _notify_windows_user(message: str) -> None:
+    """Best-effort notification on Windows.  Silent no-op on other platforms."""
+    import sys
+
+    if sys.platform != "win32":
+        return
+
+    # Attempt 1 — Windows MessageBox via PowerShell
+    try:
+        import subprocess
+
+        safe_msg = message.replace("'", "").replace('"', "")
+        subprocess.run(
+            [
+                "powershell",
+                "-Command",
+                "[System.Reflection.Assembly]::LoadWithPartialName"
+                "('System.Windows.Forms') | Out-Null; "
+                f"[System.Windows.Forms.MessageBox]::Show('{safe_msg}', "
+                "'SuperLocalMemory')",
+            ],
+            check=False,
+            timeout=5,
+        )
+        return
+    except Exception:
+        pass
+
+    # Attempt 2 — Windows Application EventLog
+    try:
+        import subprocess
+
+        subprocess.run(
+            [
+                "eventcreate",
+                "/T", "INFORMATION",
+                "/ID", "1001",
+                "/L", "APPLICATION",
+                "/SO", "SuperLocalMemory",
+                "/D", message[:512],
+            ],
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        pass  # best-effort only
+
+
 def _learning_db_for_config(config) -> Path:
     """Single learning.db path for daemon migration + engine (F-05).
 
@@ -1602,13 +1700,39 @@ async def lifespan(application: FastAPI):
             _path_config = _SLMFallback.for_mode(_ModeFallback.A)
         _learning_db = _learning_db_for_config(_path_config)
         _memory_db = _memory_db_for_config(_path_config)
+        import time as _time_mod
+        _t0 = _time_mod.monotonic()
         _result = apply_all(_learning_db, _memory_db)
+        _elapsed = _time_mod.monotonic() - _t0
         _applied = _result.get("applied", [])
         _failed = _result.get("failed", [])
+        _backup_dir = _result.get("details", {}).get("_backup")
+        _backup_path = Path(_backup_dir) if _backup_dir else None
         if _applied:
             logger.info("migrations applied: %s", _applied)
+            _notify_migration_applied(_applied, _elapsed, _backup_path)
+            _notify_windows_user(
+                f"SuperLocalMemory: {len(_applied)} database migration(s) applied."
+            )
         if _failed:
             logger.warning("migrations failed (non-fatal): %s", _failed)
+            try:
+                _err_log = _write_migration_error_log(
+                    _failed, _backup_path,
+                    slm_home=_memory_db.parent if _memory_db else None,
+                )
+                import sys as _sys
+                print(
+                    f"[SLM] Migration failed. Data is safe — backup at: "
+                    f"{_backup_path}. See {_err_log}. Run: slm doctor",
+                    file=_sys.stderr,
+                    flush=True,
+                )
+                _notify_windows_user(
+                    f"SuperLocalMemory migration failed. Run slm doctor. Log: {_err_log}"
+                )
+            except Exception:
+                pass  # notification failures are non-fatal
         application.state.migration_result = _result
         # S9-SKEP-15: only commit the new `.last_version` AFTER migrations
         # complete with zero failures. A partial upgrade (schema didn't

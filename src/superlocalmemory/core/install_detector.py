@@ -1,0 +1,117 @@
+# Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
+# Licensed under AGPL-3.0-or-later - see LICENSE file
+
+"""Detect all SuperLocalMemory installations present on this machine.
+
+Supports three install types: pipx, venv (~/.slm-venv), and npm global.
+All detection is read-only and fast (< 200 ms). No writes are ever performed.
+"""
+
+from __future__ import annotations
+
+import glob
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Optional
+
+# Roots for the two Python install types. Patched in tests.
+_VENV_ROOT: Path = Path.home() / ".slm-venv"
+_PIPX_ROOT: Path = Path.home() / ".local" / "pipx" / "venvs" / "superlocalmemory"
+
+
+def _npm_global_root() -> Optional[Path]:
+    """Return the npm global node_modules root, or None on any failure."""
+    try:
+        result = subprocess.run(
+            ["npm", "root", "-g"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            root = result.stdout.strip()
+            if root:
+                return Path(root)
+    except Exception:  # npm absent, timeout, etc.
+        pass
+    return None
+
+
+def _read_python_version(base: Path) -> Optional[str]:
+    """Read __version__ from the first matching site-packages layout under base."""
+    pattern = str(base / "lib" / "python*" / "site-packages" / "superlocalmemory" / "__init__.py")
+    matches = glob.glob(pattern)
+    for init_path in sorted(matches):
+        try:
+            text = Path(init_path).read_text(encoding="utf-8", errors="replace")
+            for line in text.splitlines():
+                line = line.strip()
+                if line.startswith("__version__"):
+                    # __version__ = "4.1.0"  or  __version__ = '4.1.0'
+                    parts = line.split("=", 1)
+                    if len(parts) == 2:
+                        return parts[1].strip().strip("\"'")
+        except OSError:
+            continue
+    return None
+
+
+def _read_npm_version(npm_root: Path) -> Optional[str]:
+    """Read version from npm global package.json."""
+    pkg_json = npm_root / "superlocalmemory" / "package.json"
+    try:
+        data = json.loads(pkg_json.read_text(encoding="utf-8"))
+        return str(data.get("version", "")).strip() or None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _detect_all_installs() -> list[dict]:
+    """Return all SuperLocalMemory installs detected on this machine.
+
+    Each entry is a dict with keys:
+      - ``path``    (str) — directory of the install
+      - ``version`` (str) — version string read from package metadata
+      - ``type``    (str) — one of "pipx", "venv", "npm"
+
+    Detection is read-only and best-effort. A missing or unreadable install
+    produces no entry rather than an error. Subprocess calls are bounded to
+    5 seconds total.
+    """
+    results: list[dict] = []
+
+    # --- pipx ---
+    pipx_version = _read_python_version(_PIPX_ROOT)
+    if pipx_version is not None:
+        results.append({
+            "path": str(_PIPX_ROOT) + "/",
+            "version": pipx_version,
+            "type": "pipx",
+        })
+
+    # --- ~/.slm-venv ---
+    venv_version = _read_python_version(_VENV_ROOT)
+    if venv_version is not None:
+        results.append({
+            "path": str(_VENV_ROOT) + "/",
+            "version": venv_version,
+            "type": "venv",
+        })
+
+    # --- npm global ---
+    npm_root = _npm_global_root()
+    if npm_root is not None:
+        npm_version = _read_npm_version(npm_root)
+        if npm_version is not None:
+            results.append({
+                "path": str(npm_root / "superlocalmemory") + "/",
+                "version": npm_version,
+                "type": "npm",
+            })
+
+    return results
+
+
+__all__ = ["_detect_all_installs"]

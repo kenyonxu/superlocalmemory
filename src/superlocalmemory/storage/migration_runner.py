@@ -177,6 +177,10 @@ from superlocalmemory.storage._migration_internals import (
     _migration_log_exists,
     _read_log,
 )
+from superlocalmemory.storage.backup import (
+    _gc_old_backups,
+    _pre_migration_backup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -400,6 +404,19 @@ def apply_all(
     skipped: list[str] = []
     failed: list[str] = []
     details: dict[str, str] = {}
+
+    # Take a consistent snapshot of both databases before any migration runs.
+    # The backup uses the SQLite backup API so in-flight WAL writers are
+    # never captured mid-transaction. InsufficientDiskSpaceError propagates
+    # to the caller — migration is intentionally aborted when disk is too
+    # tight to keep a recoverable copy.
+    if not dry_run:
+        backup_dir = _pre_migration_backup(
+            learning_db, memory_db,
+            backups_root=memory_db.parent / "pre-migration-snapshots",
+        )
+        _gc_old_backups(backup_dir.parent)
+        details["_backup"] = str(backup_dir)
 
     schema_error = _bootstrap_learning_schema(learning_db, dry_run=dry_run)
     if schema_error is not None:

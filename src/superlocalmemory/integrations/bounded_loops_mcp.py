@@ -96,6 +96,29 @@ async def observe_terminal_runs(
     return observed
 
 
+def _assert_trusted_executable(executable: Path) -> None:
+    """Raise BridgeUnavailable if executable does not pass the bridge trust checks."""
+    try:
+        st = executable.stat()
+    except OSError as exc:
+        raise BridgeUnavailable("bounded-loops bridge path is unavailable") from exc
+    mode = st.st_mode
+    if not stat.S_ISREG(mode) or (
+        os.name != "nt" and mode & (stat.S_IWGRP | stat.S_IWOTH)
+    ):
+        raise BridgeUnavailable("bounded-loops executable is not a trusted regular file")
+    # Windows trust-check limitation: only S_ISREG applies on Windows.
+    # The mode-bit check above (group/other writable) and the uid/owner check
+    # below are both skipped because:
+    #   - Python's os.stat() on Windows returns emulated Unix-style mode bits
+    #     that do not reflect real ACL permissions; the check would be meaningless.
+    #   - os.geteuid() does not exist on Windows (AttributeError); st_uid is
+    #     always 0 there, so the ownership check cannot identify non-root owners.
+    # Proper Windows ownership verification requires Win32 ACL APIs (advapi32),
+    # which would introduce a heavy optional dependency.  Scoped for a future release.
+    if os.name != "nt" and st.st_uid not in {0, os.geteuid()}:
+        raise BridgeUnavailable("bounded-loops executable owner is not trusted")
+
 async def observe_from_stdio(*, command: str, cwd: str, profile_id: str) -> list[dict[str, Any]]:
     """Run one bounded, explicit MCP 2 observation; never call from recall or remember."""
     executable, workspace = Path(command), Path(cwd)
@@ -112,15 +135,9 @@ async def observe_from_stdio(*, command: str, cwd: str, profile_id: str) -> list
     try:
         executable = executable.resolve(strict=True)
         workspace = workspace.resolve(strict=True)
-        mode = executable.stat().st_mode
     except OSError as exc:
         raise BridgeUnavailable("bounded-loops bridge path is unavailable") from exc
-    if not stat.S_ISREG(mode) or (
-        os.name != "nt" and mode & (stat.S_IWGRP | stat.S_IWOTH)
-    ):
-        raise BridgeUnavailable("bounded-loops executable is not a trusted regular file")
-    if executable.stat().st_uid not in {0, os.geteuid()}:
-        raise BridgeUnavailable("bounded-loops executable owner is not trusted")
+    _assert_trusted_executable(executable)
 
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
