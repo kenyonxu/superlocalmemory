@@ -2382,9 +2382,31 @@ def _migration_error_logs() -> list:
     Returns an empty list when none exist or when the directory is not readable.
     """
     try:
+        from superlocalmemory.core.config import SLMConfig
         from superlocalmemory.infra.data_root import canonical_data_root
-        slm_home = canonical_data_root()
-        return sorted(slm_home.glob("migration-error-*.log"))
+        from superlocalmemory.storage.models import Mode
+
+        # The daemon writes this log beside the memory database it was actually
+        # configured with, which is not necessarily the canonical data root —
+        # any of SLM_DATA_DIR / SL_MEMORY_PATH / SLM_HOME can move it. Globbing
+        # only the canonical root reported "clean" while the log sat unread in
+        # the real directory. Search both, de-duplicated.
+        roots = {canonical_data_root()}
+        try:
+            cfg = SLMConfig.for_mode(Mode.A)
+            db = getattr(cfg, "memory_db_path", None) or getattr(cfg, "db_path", None)
+            if db:
+                roots.add(pathlib.Path(db).parent)
+        except Exception:
+            pass
+
+        found: list = []
+        for root in roots:
+            try:
+                found.extend(root.glob("migration-error-*.log"))
+            except OSError:
+                continue
+        return sorted(set(found))
     except Exception:
         return []
 
@@ -2853,8 +2875,20 @@ def cmd_doctor(args: Namespace) -> None:
                 "migration_errors",
                 "FAIL",
                 f"Unresolved migration failure: {_latest.name}",
-                fix=f"Review {_latest} then run: slm doctor --fix",
+                # `--fix` heals models, sqlite-vec and stale locks. It does NOT
+                # re-run a migration or restore a snapshot, so pointing here at
+                # `--fix` sent the user round a loop that could never clear this
+                # check. The log itself carries the restore command.
+                fix=(
+                    f"Read {_latest} — it names what failed and, if a snapshot "
+                    f"was taken, the exact command to restore it. Restart the "
+                    f"daemon to retry the upgrade. Delete the log once resolved."
+                ),
             )
+        else:
+            # Reporting nothing when clean made "no failures" and "the check
+            # never ran" look identical in the output.
+            _check("migration_errors", "PASS", "no unresolved migration failures")
     except Exception as _mel_exc:  # noqa: BLE001 — never break doctor
         _check("migration_errors", "WARN", f"could not check error logs: {_mel_exc}")
 

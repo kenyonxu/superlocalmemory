@@ -34,6 +34,7 @@ catalogue and the public orchestration functions.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from pathlib import Path
 
@@ -379,6 +380,34 @@ def _bootstrap_learning_schema(learning_db: Path, *, dry_run: bool) -> str | Non
     return None
 
 
+def _foreign_live_daemon(memory_db: Path) -> "int | None":
+    """Return the pid of another live daemon holding this data dir, or None.
+
+    Migrations are not fenced against concurrent writers. The realistic hazard
+    is an OLD daemon still running after an upgrade while a NEW one starts: its
+    WAL appends continue while DDL is applied, which can make a migration fail
+    non-deterministically. The snapshot itself stays consistent — the SQLite
+    backup API copies committed pages only — and a racing migration is recorded
+    as ``failed`` and is non-fatal, so this does not corrupt data.
+
+    This detects the condition and reports it. It deliberately does NOT refuse:
+    ``apply_all`` runs inside the daemon's own startup, so refusing whenever "a
+    daemon is running" would refuse on itself, and blocking on a lock here would
+    risk wedging startup — a worse outcome than a retryable failed step.
+    """
+    try:
+        pid_file = memory_db.parent / "daemon.pid"
+        if not pid_file.is_file():
+            return None
+        pid = int(pid_file.read_text().strip() or 0)
+        if pid <= 0 or pid == os.getpid():
+            return None
+        os.kill(pid, 0)          # signal 0 tests liveness without touching it
+        return pid
+    except (OSError, ValueError):
+        return None
+
+
 def apply_all(
     learning_db: Path,
     memory_db: Path,
@@ -411,6 +440,19 @@ def apply_all(
     # to the caller — migration is intentionally aborted when disk is too
     # tight to keep a recoverable copy.
     if not dry_run:
+        _other = _foreign_live_daemon(memory_db)
+        if _other is not None:
+            logger.warning(
+                "Another SuperLocalMemory daemon (pid %s) is still running and "
+                "writing to this data directory. Migrations are not fenced "
+                "against concurrent writers, so a step may fail and need a "
+                "retry. Your data is not at risk: the snapshot copies committed "
+                "pages only, and a failed step is recorded, never forced. Stop "
+                "the other daemon and restart if a step fails.",
+                _other,
+            )
+            details["_concurrent_daemon_pid"] = str(_other)
+
         backup_dir = _pre_migration_backup(
             learning_db, memory_db,
             backups_root=memory_db.parent / "pre-migration-snapshots",

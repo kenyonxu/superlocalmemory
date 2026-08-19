@@ -89,6 +89,7 @@ def _write_migration_error_log(
     failed: list,
     backup_dir: "Path | None",
     slm_home: "Path | None" = None,
+    applied: "list | None" = None,
 ) -> "Path":
     """Write a migration-error-{timestamp}.log to the SLM home directory.
 
@@ -107,11 +108,32 @@ def _write_migration_error_log(
         f"Migration error — {ts}",
         f"Failed: {', '.join(str(f) for f in failed)}",
     ]
+    # An upgrade is applied step by step and is deliberately non-fatal: some
+    # steps can succeed while a later one fails. Saying "your data was not
+    # modified" whenever a snapshot exists was therefore untrue in exactly the
+    # case that matters — and a user who believes nothing changed may delete the
+    # snapshot to reclaim space.
+    if applied:
+        lines.append(f"Applied before the failure: {', '.join(str(a) for a in applied)}")
+        lines.append(
+            "YOUR DATABASE WAS PARTIALLY CHANGED. The steps listed above "
+            "completed; the ones under 'Failed' did not."
+        )
+    elif applied is not None:
+        lines.append("No steps completed, so your database was not changed.")
     if backup_dir is not None:
-        lines.append(f"Backup location: {backup_dir}")
-        lines.append("Your data was not modified. The backup above is intact.")
+        lines.append(f"Snapshot of the state before the upgrade: {backup_dir}")
+        lines.append(
+            "That snapshot is intact and can be restored. Keep it until you are "
+            "satisfied your data is correct."
+        )
+    else:
+        lines.append(
+            "NO SNAPSHOT WAS TAKEN for this attempt — do not assume a recovery "
+            "copy exists. Check for earlier snapshots before changing anything."
+        )
     lines.append("")
-    lines.append("To diagnose and repair, run: slm doctor")
+    lines.append("To diagnose, run: slm doctor")
 
     log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return log_path
@@ -1721,6 +1743,7 @@ async def lifespan(application: FastAPI):
                 _err_log = _write_migration_error_log(
                     _failed, _backup_path,
                     slm_home=_memory_db.parent if _memory_db else None,
+                    applied=_applied,
                 )
                 import sys as _sys
                 print(
@@ -1767,6 +1790,7 @@ async def lifespan(application: FastAPI):
             _log_path = _write_migration_error_log(
                 ["_insufficient_disk_space"], None,
                 slm_home=locals().get("_memory_db").parent if locals().get("_memory_db") else None,
+                applied=[],
             )
             logger.error("Details written to %s", _log_path)
         except OSError:

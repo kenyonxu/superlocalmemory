@@ -298,16 +298,20 @@ def _pre_migration_backup(
             suffix += 1
         return candidate
 
-    written: list[Path] = []
+    # Keep each snapshot paired with the database it came from. Emitting a
+    # single restore command built from written[0] named the LEARNING snapshot
+    # (it sorts first) against memory.db as the target — a command that would
+    # restore the wrong database over the user's memories.
+    pairs: list[tuple[Path, Path]] = []
     for stem, db_path in (("memory", memory_db), ("learning", learning_db)):
         if db_path.exists():
             dest = _free_name(stem)
             _backup_via_sqlite_api(db_path, dest)
-            written.append(dest)
+            pairs.append((dest, db_path))
 
     elapsed = time.monotonic() - t0
 
-    written = sorted(written)
+    written = [snap for snap, _ in pairs]
     size_bytes = sum(f.stat().st_size for f in written)
     size_mb = size_bytes / (1024 * 1024)
     filenames = "\n  ".join(f.name for f in written)
@@ -316,16 +320,19 @@ def _pre_migration_backup(
         "[SLM] Pre-migration snapshot written (%.0f MB in %.1fs):\n"
         "  Location : %s\n"
         "  Files    :\n  %s\n"
-        "  To restore if migration fails:\n"
+        "  To restore if migration fails — run the line for the database you\n"
+        "  need; each snapshot restores only its own database:\n"
         "    from pathlib import Path\n"
         "    from superlocalmemory.storage.backup import restore_pre_migration_snapshot\n"
-        "    restore_pre_migration_snapshot(Path(%r), Path(%r))",
+        "%s",
         size_mb,
         elapsed,
         str(backups_root),
         filenames,
-        str(backups_root / (written[0].name if written else "<snapshot file>")),
-        str(memory_db),
+        "\n".join(
+            f"    restore_pre_migration_snapshot(Path({str(snap)!r}), Path({str(db)!r}))"
+            for snap, db in pairs
+        ) or "    (no snapshot was written — nothing to restore)",
     )
 
     return backups_root
