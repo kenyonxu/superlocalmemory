@@ -911,7 +911,7 @@ def test_obligation_schema_negative_cache_resets_after_migration(tmp_path: Path)
 
 
 # ---------------------------------------------------------------------------
-# D. FINAL MICRO-PASS — 4 P2 residuals (Grok 4.5 re-audit 2026-08-03)
+# D. FINAL MICRO-PASS — 4 P2 residuals (2026-08-03)
 # ---------------------------------------------------------------------------
 # TDD: tests D1/D3/D4/D5/D6/D7/D8 are RED before the fixes, GREEN after.
 # D2 (real proofs via ErasureService) is GREEN immediately — companion to D1.

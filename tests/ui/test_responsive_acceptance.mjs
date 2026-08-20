@@ -1,5 +1,5 @@
 /**
- * Wave 6 acceptance gates — responsive layout + integration visibility.
+ * Acceptance gates — responsive layout + integration visibility.
  * Authored by the release coordinator, NOT by implementers.
  * Implementation agents may NOT modify this file.
  *

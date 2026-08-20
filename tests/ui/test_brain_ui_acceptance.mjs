@@ -1,5 +1,5 @@
 /**
- * Wave 5 acceptance gates — Living Brain UI + Knowledge Graph.
+ * Acceptance gates — Living Brain UI + Knowledge Graph.
  * Authored by the release coordinator, NOT by implementers.
  * Implementation agents may NOT modify this file.
  *

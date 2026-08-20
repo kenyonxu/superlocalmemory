@@ -30,7 +30,7 @@ THE OPEN TENSION THIS WAVE MUST RESOLVE:
   to sit with it.
 
 SCOPE NOTE: this file checks DOCUMENTS against FACTS THE TEST SUITE CAN ESTABLISH.
-It cannot judge prose quality. The Grok and Muse cross-audits cover that, and the
+It cannot judge prose quality. Independent review covers that, and the
 owner reviews the final wording.
 """
 

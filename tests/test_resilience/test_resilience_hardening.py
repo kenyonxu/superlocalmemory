@@ -2,7 +2,7 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V4 | https://qualixar.com | https://varunpratap.com
 
-"""Tests for the Grok audit verified fix set (G-01 through G-10).
+"""Tests for the verified resilience fix set (G-01 through G-10).
 
 TDD: tests written first, then fixes applied, then verified GREEN.
 All tests:
