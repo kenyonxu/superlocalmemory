@@ -1024,11 +1024,15 @@ class RetrievalEngine:
         # cost every time it binds, and it is sized to be as generous as the
         # recall budget allows rather than as tight as possible.
         #
-        # Derived from the 2.0 s recall ceiling and what is measured to happen
-        # after this point: entity expansion and enhancement average ~0.45 s and
-        # the remaining work ~0.09 s, so a channel deadline of 1.4 s puts the
-        # worst case at roughly 1.94 s. Raising it further would breach the
-        # ceiling; lowering it buys time nobody needs and loses answers.
+        # Worst case after channels complete: bridge.discover (~0.3 s, no time
+        # gate), then load + rerank + build_results (~0.09 s).  Scene expansion
+        # is gated at elapsed < 0.8 s and entity enhancement at elapsed < 0.9 s
+        # from the start of recall (_e0); when channels run to their full 1.4 s
+        # deadline, elapsed is already above both gates so neither stage fires —
+        # their ~0.45 s average does NOT add to this worst case.  Total worst
+        # case: ~1.4 + 0.3 + 0.09 ≈ 1.79 s, within the 2.0 s ceiling.
+        # Raising the deadline further leaves less than 0.2 s for bridge +
+        # finalise; lowering it buys nothing and loses channel answers.
         channel_timeout_seconds = 1.4
         # One shared deadline keeps parallel dispatch genuinely bounded.  A
         # per-future timeout here would serialise the wait and turn five slow
@@ -1380,6 +1384,13 @@ class RetrievalEngine:
                 evidence_chain=evidence,
                 trust_score=raw_trust,
             ))
+        # ranking_score incorporates every modifier computed in this loop
+        # (Ebbinghaus decay, quality, trust, and the query-type-conditioned
+        # recency amplifier). Sort here so RecallResponse.results[0] is
+        # always the highest-ranked fact — callers that rely on the returned
+        # order get the amplified ranking, not the pre-amplifier fused order.
+        # Tie-break on fact_id keeps two runs over an unchanged store stable.
+        results.sort(key=lambda r: (-(r.ranking_score or 0.0), r.fact.fact_id))
         return results
 
 

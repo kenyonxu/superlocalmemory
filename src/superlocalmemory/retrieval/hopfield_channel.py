@@ -261,8 +261,14 @@ class HopfieldChannel:
         # Step 4: Similarity to all patterns
         similarities = memory_matrix @ retrieved  # shape (n,)
 
-        # Step 5: Top-K selection
-        top_indices = np.argsort(-similarities)[:top_k]
+        # Step 5: Top-K selection with stable tie-break on fact_id.
+        # argsort(-similarities) is score-only: equal similarities are ordered
+        # by row index, which tracks the order facts were loaded from the DB
+        # and varies between sessions.  lexsort breaks ties on fact_id so the
+        # same query over the same store returns the same ranking every time.
+        id_arr = np.array(fact_ids, dtype=object)
+        order = np.lexsort((id_arr, -similarities))  # primary: -similarity, secondary: fact_id
+        top_indices = order[:top_k]
         results: list[tuple[str, float]] = [
             (fact_ids[int(i)], float(similarities[i]))
             for i in top_indices

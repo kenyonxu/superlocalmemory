@@ -130,7 +130,7 @@ FACTUAL_QUERIES = [
 # "current" was originally in the present-tense set, so "what is the current
 # database schema" was routed to the time-aware path — which weights
 # word-matching MORE heavily than the topical path, amplifying the exact signal
-# that made this release necessary. These are the forms an audit found missing
+# that made this release necessary. These are the forms that were missing
 # from the regression table: time-flavoured wording, topical intent.
 TIME_FLAVOURED_BUT_TOPICAL = [
     "what is the current database schema",

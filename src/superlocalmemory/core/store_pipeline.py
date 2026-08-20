@@ -311,8 +311,13 @@ def enrich_fact(
 # Vector dual-write helper (P1-2 / embeddings-vector-01)
 # ---------------------------------------------------------------------------
 
-def _upsert_fact_vectors(fact, profile_id, ann_index, vector_store, embedder=None):
-    """Dual-write a fact's embedding to the ANN index + sqlite-vec store.
+def _upsert_fact_vectors(fact, profile_id, ann_index, vector_store, embedder=None) -> bool:
+    """Dual-write a fact's embedding to the sqlite-vec projection and the ANN index.
+
+    Write order mirrors _attach_vector: the sqlite-vec projection is attempted
+    first because that is what a meaning-based search reads.  The ANN index is
+    updated only when the projection accepts the vector.  Returns True when the
+    fact is now findable by meaning (the projection accepted the vector).
 
     Embeds on-demand when the fact has no embedding (e.g. consolidated
     summary facts created without one), so UPDATE/SUPERSEDE and consolidated
@@ -325,18 +330,44 @@ def _upsert_fact_vectors(fact, profile_id, ann_index, vector_store, embedder=Non
         except Exception as _emb_exc:  # pragma: no cover - defensive
             _reraise_materialization_deferral(_emb_exc)
             logger.debug("on-demand embed failed for %s: %s", fact.fact_id, _emb_exc)
-            return
+            return False
     if not getattr(fact, "embedding", None):
-        return
-    if ann_index:
-        ann_index.add(fact.fact_id, fact.embedding)
-    # V3.2: VectorStore upsert (sqlite-vec) -- dual-write (Rule 12)
+        return False
+
+    projected = False
+    # Projection first: what a meaning-based search reads.
     if vector_store and getattr(vector_store, "available", False):
-        vector_store.upsert(
-            fact_id=fact.fact_id,
-            profile_id=profile_id,
-            embedding=fact.embedding,
-        )
+        try:
+            projected = bool(vector_store.upsert(
+                fact_id=fact.fact_id,
+                profile_id=profile_id,
+                embedding=fact.embedding,
+            ))
+            if not projected:
+                logger.warning(
+                    "vector projection refused for %s — stored but not "
+                    "findable by meaning", fact.fact_id[:12],
+                )
+        except Exception as _vs_exc:
+            logger.warning(
+                "vector projection failed for %s (%s: %s) — stored but not "
+                "findable by meaning",
+                fact.fact_id[:12], type(_vs_exc).__name__, _vs_exc,
+            )
+
+    # ANN index only when the projection accepted the vector so both
+    # representations stay consistent.  Writing ANN without a vector-store
+    # entry creates a ghost that disappears on restart (ANN is rebuilt from
+    # the vector store at startup).
+    if projected and ann_index:
+        try:
+            ann_index.add(fact.fact_id, fact.embedding)
+        except Exception:
+            logger.warning(
+                "in-memory index rejected %s", fact.fact_id[:12], exc_info=True,
+            )
+
+    return projected
 
 
 class _TombstoneReadError(Exception):
@@ -741,6 +772,15 @@ def run_store(
             materialization_progress["relational_started"] = True
 
         is_queryable_promotion = fact.fact_id in queryable_ids
+        # When a promoted fact is being materialised the embedding column is
+        # written in a separate step AFTER the projection attempt so that the
+        # two representations stay in the correct order: projection first,
+        # canonical column second (mirroring _attach_vector's invariant).
+        # Writing the column before the projection and then failing the
+        # projection leaves the fact with embedding IS NOT NULL but no entry
+        # in fact_embeddings — invisible to meaning-search and invisible to
+        # every repair pass that selects WHERE embedding IS NULL.
+        _deferred_canonical_embedding = None  # set below if promotion path taken
         if is_queryable_promotion:
             db.update_fact(fact.fact_id, {
                 "content": fact.content,
@@ -757,15 +797,22 @@ def run_store(
                 "access_count": fact.access_count,
                 "source_turn_ids_json": fact.source_turn_ids,
                 "session_id": fact.session_id,
-                "embedding": fact.embedding,
-                "fisher_mean": fact.fisher_mean,
-                "fisher_variance": fact.fisher_variance,
+                # embedding / fisher fields omitted here — written after
+                # the projection attempt below so canonical is never ahead
+                # of the projection.
                 "lifecycle": fact.lifecycle,
                 "langevin_position": fact.langevin_position,
                 "emotional_valence": fact.emotional_valence,
                 "emotional_arousal": fact.emotional_arousal,
                 "signal_type": fact.signal_type,
             })
+            if fact.embedding:
+                _deferred_canonical_embedding = (
+                    fact.fact_id,
+                    fact.embedding,
+                    fact.fisher_mean,
+                    fact.fisher_variance,
+                )
         if consolidator:
             try:
                 action = consolidator.consolidate(
@@ -793,6 +840,9 @@ def run_store(
                     target_id = action.existing_fact_id
                     if is_queryable_promotion and target_id:
                         db.delete_fact(fact.fact_id)
+                        # The original promoted fact was deleted; its deferred
+                        # canonical embedding write must not happen.
+                        _deferred_canonical_embedding = None
                     existing_fact = db.get_fact(target_id) if target_id else None
                     if existing_fact is None:
                         continue
@@ -838,9 +888,31 @@ def run_store(
             if materialization_progress is not None:
                 materialization_progress["fact_ids"] = tuple(stored_ids)
 
-        # Dual-write embedding to ANN index + vector store (embed on-demand if
-        # a consolidated ADD fact arrived without one). See _upsert_fact_vectors.
+        # Projection first (vector store then ANN index, on-demand embed for
+        # consolidated facts that arrived without one).
         _upsert_fact_vectors(fact, profile_id, ann_index, vector_store, embedder)
+
+        # Canonical embedding write: deferred to here from the queryable-
+        # promotion block above so the projection is always attempted first.
+        # The column is written regardless of whether the projection accepted
+        # the vector (the vector is real data; withholding it would force
+        # every repair pass to re-compute a model call that the same
+        # installation condition would refuse again anyway).
+        if _deferred_canonical_embedding is not None:
+            _dc_fid, _dc_emb, _dc_fmean, _dc_fvar = _deferred_canonical_embedding
+            try:
+                db.update_fact(_dc_fid, {
+                    "embedding": _dc_emb,
+                    "fisher_mean": _dc_fmean,
+                    "fisher_variance": _dc_fvar,
+                })
+            except Exception as _dc_exc:
+                logger.warning(
+                    "canonical embedding write failed for %s: %s",
+                    _dc_fid[:12], _dc_exc,
+                )
+            _deferred_canonical_embedding = None
+
         # Phase 2: Generate contextual description (after consolidator, before graph_builder)
         if context_generator:
             try:
@@ -1139,15 +1211,11 @@ def run_store_fact_direct(
         )
         fact.canonical_entities = list(canonical.values())
     db.store_fact(fact)
-    if fact.embedding and ann_index:
-        ann_index.add(fact.fact_id, fact.embedding)
-    # V3.2: VectorStore upsert (dual-write)
-    if fact.embedding and vector_store and vector_store.available:
-        vector_store.upsert(
-            fact_id=fact.fact_id,
-            profile_id=profile_id,
-            embedding=fact.embedding,
-        )
+    # Projection first (vector store), ANN only on success — matching
+    # _attach_vector's invariant.  The return value (projected) is not used
+    # here because run_store_fact_direct is a fire-and-forget path with no
+    # receipt to update; the caller is responsible for any enrichment status.
+    _upsert_fact_vectors(fact, profile_id, ann_index, vector_store)
     if graph_builder:
         graph_builder.build_edges(fact, profile_id)
     # The graph projection must run after GraphBuilder: syncing immediately

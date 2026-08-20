@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sqlite3
 import sys
 import time
@@ -156,11 +157,46 @@ def backfill(
                     skipped += 1
                     continue
 
+                # Validate that every element is a scalar finite number.
+                # Passing this check to encode_embedding without validation:
+                #   - A string element causes np.array(..., dtype=float32) to raise
+                #     ValueError, which was uncaught and killed the process.  Every
+                #     subsequent restart died on the same row.
+                #   - A single-element sub-list [[v], ...] produces shape (768, 1)
+                #     from np.array; tobytes() is still 3072 bytes so the assert
+                #     passes, but the stored blob would be wrong for any element
+                #     that was not the intended scalar value.
+                #   - An oversized exponent (1e400) deserialises to float('inf')
+                #     via json.loads; storing infinity in a vector index corrupts
+                #     all similarity comparisons involving that fact.
+                bad_elem = next(
+                    (
+                        i for i, v in enumerate(vec)
+                        if not isinstance(v, (int, float))
+                        or not math.isfinite(v)
+                    ),
+                    None,
+                )
+                if bad_elem is not None:
+                    logger.error(
+                        "SKIP %s: element [%d] is %r — expected a finite float",
+                        fact_id, bad_elem, vec[bad_elem],
+                    )
+                    skipped += 1
+                    continue
+
                 # Through the codec, not a private copy of the format. This
                 # script rewrites every embedded row; a second implementation
                 # here is the one most likely to be missed when the format
                 # changes, and it would rewrite the whole store wrongly.
-                blob = encode_embedding(vec)
+                try:
+                    blob = encode_embedding(vec)
+                except (ValueError, TypeError) as exc:
+                    logger.error(
+                        "SKIP %s: encode_embedding failed — %s", fact_id, exc
+                    )
+                    skipped += 1
+                    continue
                 assert blob is not None and len(blob) == _EMBEDDING_BYTES
                 updates.append((blob, fact_id))
 

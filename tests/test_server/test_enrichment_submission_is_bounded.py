@@ -180,3 +180,93 @@ def test_the_pool_is_never_replaced_by_the_default_executor(
     monkeypatch.setattr(ud, "_enrichment_pool_closed", True)
     with pytest.raises(RuntimeError):
         ud._enrichment_executor()
+
+
+class TestShutdownIsFinalAndCapacitySurvivesIt:
+    """The accessor must never hand back the event loop's default executor.
+
+    ``run_in_executor(None, ...)`` means *the loop's own* executor: unbounded and
+    shared with every other handler. So a helper that returns ``None`` after
+    shutdown does not merely fail — it silently restores the exact behaviour the
+    bounded pool exists to replace, at the moment the process is stopping.
+    """
+
+    def test_it_raises_after_shutdown_whatever_the_global_holds(self) -> None:
+        """Both states, because only one of them used to be covered.
+
+        An earlier test set the pool to ``None`` before calling, so it only ever
+        reached the creation branch. The defect lived on the other path: a caller
+        that found a live pool, lost the CPU, and resumed after shutdown fell
+        through to a ``return`` that re-read the global and handed back ``None``.
+        """
+        import concurrent.futures
+
+        try:
+            ud._open_enrichment_pool()
+            for held in (None, concurrent.futures.ThreadPoolExecutor(max_workers=1)):
+                ud._enrichment_pool = held
+                ud._enrichment_pool_closed = True
+                with pytest.raises(RuntimeError):
+                    ud._enrichment_executor()
+                if held is not None:
+                    held.shutdown(wait=False)
+        finally:
+            ud._enrichment_pool = None
+            ud._open_enrichment_pool()
+
+    def test_a_real_shutdown_makes_the_accessor_refuse(self) -> None:
+        try:
+            ud._open_enrichment_pool()
+            assert ud._enrichment_executor() is not None
+            ud._shutdown_enrichment_pool_if_created()
+            with pytest.raises(RuntimeError):
+                ud._enrichment_executor()
+        finally:
+            ud._enrichment_pool = None
+            ud._open_enrichment_pool()
+
+    def test_capacity_is_whole_again_after_a_reopen(self) -> None:
+        """Cancelled work never runs its release, so permits must be reset.
+
+        Shutdown cancels tasks that were queued and never started. A task that
+        never starts never reaches the release in its ``finally``, so its permit
+        is gone. Without a reset the next run in this process would start with
+        reduced capacity — or none — and the only symptom would be every write
+        coming back findable by wording, with nothing in the log to explain it.
+        """
+        try:
+            ud._open_enrichment_pool()
+            # Simulate exactly that: permits taken by work that is then cancelled.
+            assert ud._enrichment_semaphore.acquire(blocking=False)
+            assert ud._enrichment_semaphore.acquire(blocking=False)
+            ud._shutdown_enrichment_pool_if_created()
+
+            ud._open_enrichment_pool()
+
+            regained = 0
+            while ud._enrichment_semaphore.acquire(blocking=False):
+                regained += 1
+            for _ in range(regained):
+                ud._enrichment_semaphore.release()
+            assert regained == ud._ENRICHMENT_WORKERS, (
+                f"capacity came back as {regained} of {ud._ENRICHMENT_WORKERS}; "
+                "permits held by cancelled work were never returned, so this "
+                "process runs degraded for its whole life"
+            )
+        finally:
+            ud._enrichment_pool = None
+            ud._open_enrichment_pool()
+
+
+def test_the_store_ceiling_is_shared_between_the_two_phases() -> None:
+    """The durable write and the enrichment window must not each get the full budget.
+
+    They run one after the other, so granting each the whole ceiling produced
+    receipts at over 3 s against a stated 1.5 s. A caller that explicitly asked
+    to wait may exceed it — that is what asking means — but the default path may
+    not.
+    """
+    assert ud._REMEMBER_TOTAL_CEILING_SECONDS == 1.5
+    assert ud._REMEMBER_ENRICHMENT_WAIT_SECONDS <= ud._REMEMBER_TOTAL_CEILING_SECONDS, (
+        "the enrichment window alone is larger than the whole request's ceiling"
+    )

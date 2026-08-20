@@ -81,6 +81,28 @@ logger = logging.getLogger(__name__)
 # exists.  Both forms are matched by this pattern.
 _SNAPSHOT_TIMESTAMP_RE = re.compile(r"^(\d{8}-\d{6}-\d{6})(?:-(\d+))?$")
 
+# Pattern used to extract a timestamp (and optional collision suffix) from the
+# RIGHT side of a stripped filename.  Anchoring at the END means the stem may
+# contain hyphens without confusing the parser: only the rightmost field that
+# looks like a full YYYYMMDD-HHmmss-ffffff[-N] is extracted.
+_SNAPSHOT_TIMESTAMP_TAIL_RE = re.compile(
+    r"(\d{8}-\d{6}-\d{6})(?:-(\d+))?$"
+)
+
+
+def _extract_snapshot_stamp(name_without_suffix: str) -> re.Match | None:
+    """Return a regex match for the timestamp[-N] tail of a stripped filename.
+
+    ``name_without_suffix`` is the filename after removing the
+    ``-pre-migration.db`` suffix (i.e. ``{stem}-{timestamp}[-{N}]``).
+
+    Using ``re.search`` anchored at ``$`` instead of ``split('-', 1)[-1]``
+    means a stem that contains hyphens (e.g. ``pre-migration``) does not
+    shift the extracted timestamp to the right, which would cause the file
+    to sort as if it were newer than any validly-named snapshot.
+    """
+    return _SNAPSHOT_TIMESTAMP_TAIL_RE.search(name_without_suffix)
+
 
 def _parse_generation_stamp(raw_stamp: str) -> str:
     """Return the base YYYYMMDD-HHmmss-ffffff portion of a raw snapshot stamp.
@@ -110,15 +132,27 @@ def _snapshot_sort_key(path: Path) -> tuple[str, int]:
 
     Sorting ascending and indexing ``[-1]`` yields the newest snapshot,
     regardless of filesystem mtime granularity.
+
+    The timestamp is found by searching from the right of the stripped name
+    rather than by splitting on the first hyphen, so stems that contain
+    hyphens do not corrupt the extracted timestamp.
     """
     name = path.name
-    raw = name.split("-", 1)[-1].rsplit("-pre-migration.db", 1)[0]
-    m = _SNAPSHOT_TIMESTAMP_RE.match(raw)
+    stripped = name.rsplit("-pre-migration.db", 1)[0]
+    m = _extract_snapshot_stamp(stripped)
     if m:
         base = m.group(1)
         suffix = int(m.group(2)) if m.group(2) is not None else 0
         return (base, suffix)
-    return (raw, 0)
+    # Unrecognised filename format; use the full stripped name as a fallback
+    # key so GC never crashes, but log a warning — a file that lands here
+    # may sort unexpectedly relative to validly-named snapshots.
+    logger.warning(
+        "[SLM] Cannot parse timestamp from snapshot filename %r; "
+        "it will sort by raw name and may be kept or deleted out of order",
+        name,
+    )
+    return (stripped, 0)
 
 
 class InsufficientDiskSpaceError(Exception):
@@ -353,15 +387,33 @@ def _pre_migration_backup(
     # existing ancestor because the snapshot directory itself may not exist yet.
     check_path = _find_existing_ancestor(backups_root)
     free_bytes = shutil.disk_usage(str(check_path)).free
-    # Snapshots are written SEQUENTIALLY (one store at a time, staging-then-rename).
-    # Peak extra disk usage occurs when both final snapshots are on disk simultaneously,
-    # which equals total_bytes.  A 10 % safety buffer covers filesystem bookkeeping
-    # and any WAL pages materialised during the copy.
+    # Peak disk requirement — sequential writes, staging-then-rename:
     #
-    # The previous formula used total_bytes * 2.1, which was derived for a single
-    # database (1.0 × staging + 1.0 × final + 0.1 × headroom = 2.1 ×).  Applied
-    # to the SUM of two databases it over-reserved by a factor of ~2 and blocked
-    # migrations on machines with limited disk even when the backup would fit.
+    #   Step 1: write memory.staging  (up to memory_size bytes)
+    #   Step 2: rename memory.staging → memory.final  (0 extra bytes; atomic)
+    #   Step 3: write learning.staging (up to learning_size bytes)
+    #   Step 4: rename learning.staging → learning.final (0 extra bytes)
+    #
+    #   Peak between steps 3-4: memory.final + learning.staging
+    #                         = memory_size + learning_size = total_bytes
+    #
+    # The 10 % buffer (0.1 × total_bytes) covers:
+    #   - filesystem metadata: directory entries and inode table entries for
+    #     2 new files are at most a few KiB — negligible for MB-sized stores.
+    #   - WAL pages materialised during the copy: _backup_via_sqlite_api uses
+    #     sqlite3.Connection.backup(pages=-1), a single-pass read lock.  The
+    #     daemon is expected to be idle while this script runs (the caller
+    #     checks _writer_lock_held() before calling this function), so WAL
+    #     growth during the copy is near zero.  If the caller has not stopped
+    #     the daemon, a concurrent checkpoint could transiently inflate the
+    #     source WAL, but that WAL growth is bounded by the daemon's own write
+    #     rate and is already counted in total_bytes (we measure the -wal file
+    #     size before the copy).  10 % headroom covers reasonable variance.
+    #
+    # The previous formula used total_bytes * 2.1.  That was derived for a
+    # SINGLE database (1.0 × staging + 1.0 × final + 0.1 × headroom = 2.1 ×)
+    # but was mistakenly applied to the SUM of two databases, over-reserving
+    # by ~2 × and blocking migrations on machines with limited disk space.
     needed_bytes = int(total_bytes * 1.1)
     if free_bytes < needed_bytes:
         raise InsufficientDiskSpaceError(needed_bytes, free_bytes)
@@ -450,7 +502,13 @@ def _gc_old_backups(backups_root: Path, keep: int = 2) -> None:
         # count one migration's files as two separate generations and can delete
         # one file from a paired set, leaving a snapshot that cannot be used for
         # a consistent restore.
-        raw_stamp = candidate.name.split("-", 1)[-1].rsplit("-pre-migration.db", 1)[0]
+        #
+        # Search from the RIGHT side of the stripped name so a stem that
+        # contains hyphens does not shift the extracted timestamp — the same
+        # fix applied to _snapshot_sort_key.
+        stripped = candidate.name.rsplit("-pre-migration.db", 1)[0]
+        m = _extract_snapshot_stamp(stripped)
+        raw_stamp = m.group(1) if m else stripped
         stamp = _parse_generation_stamp(raw_stamp)
         generations.setdefault(stamp, []).append(candidate)
 

@@ -110,6 +110,16 @@ class _Projection:
     def raw_vector_present(self, fact_id: str) -> bool:
         return fact_id in self.held
 
+    def is_searchable_by_meaning(self, fact_id: str, profile_id: str | None = None) -> bool:
+        """The question the engine actually asks.
+
+        Without this method the engine's check fails closed and every test in
+        this file takes the re-project path — so the "already findable" branch
+        was never reached, and an implementation of it that always answered
+        "no" would have passed.
+        """
+        return fact_id in self.held
+
 
 class TestARefusedProjectionIsNeverReportedAsFindable:
     """The case that makes a memory silently unfindable if it is got wrong.

@@ -445,30 +445,30 @@ class SpreadingActivation:
                     SELECT * FROM (
                         SELECT target_id AS neighbor_id, weight FROM graph_edges AS ge
                         WHERE source_id = ? AND {graph_where}
-                        ORDER BY weight DESC LIMIT ?
+                        ORDER BY weight DESC, target_id ASC LIMIT ?
                     )
                     UNION ALL
                     SELECT * FROM (
                         SELECT target_fact_id AS neighbor_id, weight
                         FROM association_edges AS ae
                         WHERE source_fact_id = ? AND {assoc_where}
-                        ORDER BY weight DESC LIMIT ?
+                        ORDER BY weight DESC, target_fact_id ASC LIMIT ?
                     )
                     UNION ALL
                     SELECT * FROM (
                         SELECT source_id AS neighbor_id, weight FROM graph_edges AS ge
                         WHERE target_id = ? AND {graph_where}
-                        ORDER BY weight DESC LIMIT ?
+                        ORDER BY weight DESC, source_id ASC LIMIT ?
                     )
                     UNION ALL
                     SELECT * FROM (
                         SELECT source_fact_id AS neighbor_id, weight
                         FROM association_edges AS ae
                         WHERE target_fact_id = ? AND {assoc_where}
-                        ORDER BY weight DESC LIMIT ?
+                        ORDER BY weight DESC, source_fact_id ASC LIMIT ?
                     )
                 )
-                ORDER BY weight DESC
+                ORDER BY weight DESC, neighbor_id ASC
                 LIMIT ?
                 """,
                 (

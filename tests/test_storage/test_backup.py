@@ -872,3 +872,110 @@ class TestDiskSpaceCheck:
             mock_du.return_value.free = free
             with pytest.raises(InsufficientDiskSpaceError):
                 _pre_migration_backup(learning_db, memory_db, backups_root=snaps)
+
+
+# ---------------------------------------------------------------------------
+# Finding 3: _snapshot_sort_key must handle filenames with hyphenated stems
+# ---------------------------------------------------------------------------
+
+
+class TestSnapshotSortKeyRobustness:
+    """_snapshot_sort_key must extract the correct timestamp regardless of stem."""
+
+    def test_normal_stem_returns_timestamp_key(self, tmp_path: Path) -> None:
+        """Baseline: memory-<ts>-pre-migration.db extracts correctly."""
+        from superlocalmemory.storage.backup import _snapshot_sort_key
+
+        p = tmp_path / "memory-20260819-120000-123456-pre-migration.db"
+        p.touch()
+        assert _snapshot_sort_key(p) == ("20260819-120000-123456", 0)
+
+    def test_collision_suffix_is_integer(self, tmp_path: Path) -> None:
+        """Collision-suffixed file returns (base_ts, collision_int)."""
+        from superlocalmemory.storage.backup import _snapshot_sort_key
+
+        p = tmp_path / "memory-20260819-120000-123456-2-pre-migration.db"
+        p.touch()
+        assert _snapshot_sort_key(p) == ("20260819-120000-123456", 2)
+
+    def test_hyphenated_stem_does_not_corrupt_timestamp(self, tmp_path: Path) -> None:
+        """A stem containing a hyphen must not shift the extracted timestamp.
+
+        split('-', 1)[-1] on "pre-migration-20260819-120000-123456-pre-migration.db"
+        yields "migration-20260819-120000-123456-pre-migration.db", leaving
+        "migration-" as a prefix in the raw stamp.  The regex then misses the
+        timestamp and returns the full "migration-20260819-..." string as the
+        sort key, which sorts alphabetically after all numeric keys and makes
+        the file appear to be newer than any real snapshot.
+        """
+        from superlocalmemory.storage.backup import _snapshot_sort_key
+
+        p = tmp_path / "pre-migration-20260819-120000-123456-pre-migration.db"
+        p.touch()
+        key = _snapshot_sort_key(p)
+        assert key == ("20260819-120000-123456", 0), (
+            f"hyphenated stem must not bleed into the timestamp key; got {key!r}"
+        )
+
+    def test_hyphenated_stem_sorts_consistently_with_plain_stem(
+        self, tmp_path: Path
+    ) -> None:
+        """A hyphenated-stem snapshot at the same timestamp must sort equal to a
+        plain-stem snapshot at the same timestamp, not sort after it.
+
+        If the sort key is wrong the -1 index in sorted(candidates)[-1] returns
+        the malformed file as the newest snapshot and the caller crashes trying
+        to open it as a SQLite database.
+        """
+        from superlocalmemory.storage.backup import _snapshot_sort_key
+
+        good = tmp_path / "memory-20260819-120000-000001-pre-migration.db"
+        hyphen = tmp_path / "pre-migration-20260819-120000-000001-pre-migration.db"
+        good.touch()
+        hyphen.touch()
+        good_key = _snapshot_sort_key(good)
+        bad_key = _snapshot_sort_key(hyphen)
+        assert good_key[0] == bad_key[0], (
+            f"timestamp component must match across stems: good={good_key}, "
+            f"hyphenated={bad_key}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Finding 3 (GC side): _gc_old_backups must group hyphenated-stem files
+# correctly into generations
+# ---------------------------------------------------------------------------
+
+class TestGcRobustWithHyphenatedStem:
+    """GC generation grouping must not split a generation due to a hyphenated stem."""
+
+    def test_gc_does_not_remove_files_from_active_generation(
+        self, tmp_path: Path
+    ) -> None:
+        """Files whose generation stamp parses correctly must be grouped together.
+
+        If the stamp extraction is wrong for a hyphenated stem, GC may see it as
+        a separate 'new' generation and delete the actual newest valid generation.
+        """
+        snaps = tmp_path / "snaps"
+        snaps.mkdir()
+
+        # Three generations — keep=2 means the oldest should be removed.
+        old_ts = "20260810-100000-000000"
+        mid_ts = "20260815-100000-000000"
+        new_ts = "20260819-120000-123456"
+
+        for ts in (old_ts, mid_ts, new_ts):
+            for stem in ("memory", "learning"):
+                (snaps / f"{stem}-{ts}-pre-migration.db").touch()
+
+        _gc_old_backups(snaps, keep=2)
+
+        remaining = {f.name for f in snaps.iterdir() if f.is_file()}
+        # Old generation must be gone; mid and new must survive.
+        for stem in ("memory", "learning"):
+            assert f"{stem}-{old_ts}-pre-migration.db" not in remaining, (
+                "oldest generation must have been removed"
+            )
+            assert f"{stem}-{mid_ts}-pre-migration.db" in remaining
+            assert f"{stem}-{new_ts}-pre-migration.db" in remaining

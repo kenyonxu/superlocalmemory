@@ -244,6 +244,10 @@ _FACT_ENTITY_REPAIR_MAX_RETRY_SECONDS = 30.0
 # window is most of the budget, not a token amount of it. ``wait=true`` is still
 # never permission to hold the event loop open indefinitely — past this the
 # background pass finishes the job.
+# The ceiling for a whole store request, shared by the durable write and the
+# window that makes the memory findable by meaning. Both are sequential, so the
+# second gets what the first left rather than a fresh grant.
+_REMEMBER_TOTAL_CEILING_SECONDS = 1.5
 _REMEMBER_ENRICHMENT_WAIT_SECONDS = 1.2
 
 # Enrichment runs off the event loop, but NOT on the loop's default executor.
@@ -291,16 +295,25 @@ def _enrichment_executor():
     exactly the moment the process is trying to stop.
     """
     global _enrichment_pool
-    if _enrichment_pool is None:
-        with _enrichment_pool_lock:
-            if _enrichment_pool_closed:
-                raise RuntimeError("enrichment pool is shut down")
-            if _enrichment_pool is None:
-                _enrichment_pool = concurrent.futures.ThreadPoolExecutor(
-                    max_workers=_ENRICHMENT_WORKERS,
-                    thread_name_prefix="slm-enrich",
-                )
-    return _enrichment_pool
+    # Everything happens under the lock, including the read that is returned. An
+    # earlier version checked the closed flag only on the create branch and then
+    # returned the global, so a caller that found a live pool, lost the CPU, and
+    # resumed after shutdown returned None — and None means the event loop's own
+    # default executor, unbounded and shared with every other handler. That is
+    # the precise failure this function exists to prevent, reintroduced at the
+    # one moment it matters.
+    with _enrichment_pool_lock:
+        if _enrichment_pool_closed:
+            raise RuntimeError("enrichment pool is shut down")
+        if _enrichment_pool is None:
+            _enrichment_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=_ENRICHMENT_WORKERS,
+                thread_name_prefix="slm-enrich",
+            )
+        pool = _enrichment_pool
+    if pool is None:  # pragma: no cover — belt and braces around the invariant
+        raise RuntimeError("enrichment pool is unavailable")
+    return pool
 
 
 def _open_enrichment_pool() -> None:
@@ -312,9 +325,16 @@ def _open_enrichment_pool() -> None:
     than once) would find enrichment permanently refused and every write would
     come back findable by wording only, with nothing in the logs to explain it.
     """
-    global _enrichment_pool_closed
+    global _enrichment_pool_closed, _enrichment_semaphore
     with _enrichment_pool_lock:
         _enrichment_pool_closed = False
+        # A fresh run starts with its full capacity. Shutdown cancels work that
+        # was queued and never started, and a task that never starts never runs
+        # the release in its finally — so permits taken by cancelled work are
+        # gone. Without this reset the next run in the same process would run at
+        # reduced capacity, or none at all, and the only symptom would be every
+        # write coming back findable by wording with nothing in the log.
+        _enrichment_semaphore = threading.Semaphore(_ENRICHMENT_WORKERS)
 
 
 def _enrich_and_release(engine, fact_ids: list[str], budget: float) -> int:
@@ -4499,6 +4519,10 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 allowed_profiles=frozenset({engine._profile_id}),
                 allowed_scopes=frozenset({scope}),
             )
+            # The whole request has a 1.5 s ceiling, and the two phases below
+            # are sequential, so the ceiling has to be shared between them
+            # rather than granted twice. Measured from here.
+            _store_started = time.monotonic()
             receipt = await asyncio.to_thread(
                 runtime.remember,
                 admission,
@@ -4527,10 +4551,28 @@ def _register_daemon_routes(application: FastAPI) -> None:
             # token one. Almost no client passes wait=true, so a small budget
             # here meant almost every memory in practice was returned findable by
             # wording only — the default path deciding the product's behaviour.
-            enrich_budget = (
-                _REMEMBER_ENRICHMENT_WAIT_SECONDS if wait
-                else min(1.0, _REMEMBER_ENRICHMENT_WAIT_SECONDS)
-            )
+            #
+            # But it gets what is LEFT of the ceiling, not a second full budget.
+            # The durable write above can legitimately consume most of the 1.5 s
+            # under contention, and granting the full enrichment window on top of
+            # that produced receipts well past 3 s — over a ceiling the changelog
+            # states. A caller that asked to wait may exceed the shared ceiling,
+            # because that is what asking to wait means; nobody else may.
+            _elapsed = time.monotonic() - _store_started
+            _remaining = _REMEMBER_TOTAL_CEILING_SECONDS - _elapsed
+            if wait:
+                enrich_budget = _REMEMBER_ENRICHMENT_WAIT_SECONDS
+            else:
+                enrich_budget = min(
+                    1.0, _REMEMBER_ENRICHMENT_WAIT_SECONDS, max(0.0, _remaining),
+                )
+            if enrich_budget <= 0.0:
+                logger.warning(
+                    "the durable write used the whole %.1fs budget (%.2fs) — this "
+                    "memory is findable by its wording and the background pass "
+                    "will attach its vector",
+                    _REMEMBER_TOTAL_CEILING_SECONDS, _elapsed,
+                )
             enriched = 0
             # Taken before submitting, released by the worker. If none is free
             # the pool is already saturated, and queueing behind it would mean

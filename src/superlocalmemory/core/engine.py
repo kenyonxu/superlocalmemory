@@ -815,33 +815,45 @@ class MemoryEngine:
         # looks exactly like "there was nothing to enrich".
         self._require_full("enrich_new_facts_now")
         self._ensure_init()
-        deadline = time.monotonic() + (timeout_s if timeout_s is not None else 0.5)
+        # Matches the default the write path uses for its own embedding attempt;
+        # the two were allowed to drift apart, so a direct caller got half the
+        # budget the daemon gives.
+        deadline = time.monotonic() + (timeout_s if timeout_s is not None else 1.0)
         enriched = 0
         for fact_id in fact_ids:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            # Re-checked immediately before the writes below as well. The caller
-            # awaits this on a thread and stops waiting at its own deadline, but
-            # the thread keeps running — so a late write could land while the next
-            # request already holds the write lock. Past the deadline this stops
-            # writing rather than racing a transaction nobody is waiting for.
             try:
                 fact = self._db.get_fact(fact_id, self._profile_id)
                 if fact is None:
                     continue
-                if self._projection_has(fact_id):
-                    # Already searchable by meaning. Counting it keeps the
-                    # caller's receipt truthful: saying "wording only" about a
-                    # fact that is already fully searchable is wrong too.
+                already = self._projection_has(fact_id)
+                if already and getattr(fact, "embedding", None):
+                    # Findable by meaning, and the two representations agree.
+                    # Counting it keeps the caller's receipt truthful: saying
+                    # "wording only" about a fact that is already fully
+                    # searchable is its own kind of wrong.
                     #
-                    # Read off the projection and never off the canonical
-                    # column. A row can carry a vector in the column with no
-                    # projection behind it, and that fact is precisely the one
-                    # that needs repairing — treating the column as proof of
-                    # findability skips the only pass that would fix it.
+                    # BOTH are required. A projection with no canonical vector is
+                    # a fact a search can return while an export, a backup or a
+                    # direct fetch sees nothing — and treating the projection
+                    # alone as proof of health means no pass ever repairs it. A
+                    # canonical vector with no projection is the opposite, and
+                    # equally unrepaired. Requiring agreement is what makes both
+                    # states heal instead of persisting silently.
                     enriched += 1
                     continue
+                # Answering "is it already findable" costs one indexed lookup and
+                # no model call, so it is done BEFORE the budget check: a caller
+                # that is out of time still deserves an honest answer about a
+                # fact that needs no work. Only the work below needs a budget.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                # Re-checked immediately before the writes below as well. The
+                # caller awaits this on a thread and stops waiting at its own
+                # deadline, but the thread keeps running — so a late write could
+                # land while the next request already holds the write lock. Past
+                # the deadline this stops writing rather than racing a
+                # transaction nobody is waiting for.
                 emb = getattr(fact, "embedding", None)
                 fmean = getattr(fact, "fisher_mean", None)
                 fvar = getattr(fact, "fisher_variance", None)
@@ -950,7 +962,7 @@ class MemoryEngine:
         #
         # 3.8.4 extension: when the embedder is PROVABLY warm (_available is True)
         # AND is a local embedder (not a remote cloud/OpenAI endpoint), compute the
-        # embedding synchronously with a hard 500ms cap. On timeout or any
+        # embedding synchronously with a hard 1s cap. On timeout or any
         # exception, fall through to emb=None — the materializer fills it async.
         # This preserves the 3.8.2 invariant for cold start while eliminating the
         # semantic-channel blind spot on warm daemons (the top UX complaint).

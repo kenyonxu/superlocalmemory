@@ -99,6 +99,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   question or only by quoting its own words. A retrieval channel is likewise
   given more time to answer, because a channel that runs out of time contributes
   nothing at all and the answer silently loses whatever only it could see.
+- **Asking the same question twice gives the same answer more often.** Several
+  points in retrieval ordered results by score alone, so memories that scored
+  equally were ranked by where they happened to sit on disk or which thread
+  finished first — which changes between runs. Ordering is now decided only by
+  the data. This is a correctness fix rather than a measured improvement: the
+  remaining run-to-run variation is caused by something else, and is still open.
+- **A ranking adjustment for questions about time now actually affects the
+  order results come back in.** It was being calculated and then discarded.
+- **Storing a memory stays inside its time budget.** The durable write and the
+  work that makes the memory findable by meaning run one after the other, and
+  each had been given the whole budget, so a slow write could push the reply to
+  several seconds. The second now takes what the first left.
+- **Converting a store can no longer report success while storing nonsense.**
+  Two malformed shapes — a vector of one-element lists, and numbers too large to
+  represent — passed the size check and would have been written as garbage.
+  Both are now rejected and reported, and the memory keeps its original value.
+- **A memory is no longer reported findable by meaning unless both of its stored
+  forms agree.** Either one alone could be present without the other, and each
+  case was invisible to the pass that repairs it.
+- **Shutting the service down twice in one process no longer halves the capacity
+  that makes new memories findable.**
 - **More of your memories can be reached at all.** One stage of retrieval decides
   the final set of results, and the number of candidates handed to it had been cut
   to save time — which quietly meant anything ranked below that cut could never be
@@ -1050,7 +1071,7 @@ Eight community pull requests merged after line-by-line review, plus fixes for t
 
 ## [3.6.14] - 2026-06-18 — Audit-hardened: memory bounds, cross-tenant cache isolation, atomic credentials
 
-Shipped through two adversarial audit passes (architecture audit + adversarial code review), validated against a green 5933-test suite under the real 3.12 runtime. Default single-machine behavior is unchanged.
+Default single-machine behavior is unchanged.
 
 ### Security
 

@@ -241,10 +241,11 @@ class TemporalChannel:
                 "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
                 f"WHERE {where} AND LOWER(ce.canonical_name) = LOWER(?) "
                 # The score below is derived from each row's POSITION in this
-                # result, so without an explicit order the score depends on
-                # SQLite's page layout rather than on the data, and the same
-                # question returns different scores on two runs.
-                "ORDER BY te.fact_id",
+                # result. Position must reflect temporal order so that the comment
+                # "first events more likely relevant" holds: oldest fact first,
+                # tie-broken by fact_id so two facts created in the same instant
+                # produce the same score on two runs.
+                "ORDER BY af.created_at ASC, te.fact_id ASC",
                 (*params, name),
             )
             for row in rows:
@@ -374,7 +375,7 @@ class TemporalChannel:
             "FROM atomic_facts AS af "
             f"WHERE {where} "
             "  AND af.created_at >= datetime('now', '-90 days') "
-            "ORDER BY af.created_at DESC "
+            "ORDER BY af.created_at DESC, af.fact_id ASC "
             "LIMIT 50",
             (*params,),
         )

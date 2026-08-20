@@ -133,8 +133,9 @@ class TestRecencyQueryPromotesFreshFact:
             _fused("fresh", self.FRESH_FUSED),
         ]
         results = _build(engine, fused, [old_fact, fresh_fact], "recency")
-        results_sorted = sorted(results, key=lambda r: r.ranking_score, reverse=True)
-        return results_sorted[0].fact.fact_id, results_sorted[1].fact.fact_id
+        # No sort here — asserts the order engine.recall() actually returns.
+        # If this fails, _build_results is not sorting by ranking_score.
+        return results[0].fact.fact_id, results[1].fact.fact_id
 
     def test_recency_query_fresh_wins_with_default_strength(self) -> None:
         """Fresh fact must rank first on a recency query. RED before change."""
@@ -154,8 +155,8 @@ class TestRecencyQueryPromotesFreshFact:
             _fused("fresh", self.FRESH_FUSED),
         ]
         results = _build(engine, fused, [old_fact, fresh_fact], "factual")
-        results_sorted = sorted(results, key=lambda r: r.ranking_score, reverse=True)
-        first = results_sorted[0].fact.fact_id
+        # No sort here — asserts the order engine.recall() actually returns.
+        first = results[0].fact.fact_id
         assert first == "old", (
             f"Expected old fact to rank first on factual query, got {first!r}. "
             "The amplifier must not affect factual queries."
@@ -189,7 +190,8 @@ class TestFactualQueryOrderingUnchanged:
             _fused("f_new",  0.30),
         ]
         results = _build(engine, fused, facts, query_type)
-        return [r.fact.fact_id for r in sorted(results, key=lambda r: r.ranking_score, reverse=True)]
+        # No sort here — asserts the order engine.recall() actually returns.
+        return [r.fact.fact_id for r in results]
 
     def test_factual_ordering_identical_at_strength_0_and_05(self) -> None:
         """Ordering under factual query must not change with strength 0.0 vs 0.5."""
@@ -231,7 +233,8 @@ class TestStrengthZeroIdentity:
             _fused("f_fresh", 0.40),
         ]
         results = _build(engine, fused, facts, query_type)
-        return [r.fact.fact_id for r in sorted(results, key=lambda r: r.ranking_score, reverse=True)]
+        # No sort here — asserts the order engine.recall() actually returns.
+        return [r.fact.fact_id for r in results]
 
     def test_strength_zero_recency_matches_factual_ordering(self) -> None:
         """

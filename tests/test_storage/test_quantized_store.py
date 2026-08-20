@@ -380,3 +380,85 @@ def test_batch_compress_missing_embedding(
         ["exists", "missing"], "p1", embeddings, target_bit_width=4,
     )
     assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# search() must use a stable secondary sort key
+# ---------------------------------------------------------------------------
+
+
+def _seed_fact_retention(test_db: MagicMock, fact_id: str, profile_id: str) -> None:
+    """Insert an 'active' fact_retention row so the search JOIN can match it."""
+    test_db._test_conn.execute(
+        "INSERT OR IGNORE INTO fact_retention "
+        "(fact_id, profile_id, retention_score, lifecycle_zone) "
+        "VALUES (?, ?, 1.0, 'active')",
+        (fact_id, profile_id),
+    )
+    test_db._test_conn.commit()
+
+
+class TestSearchTieBreaking:
+    """search() must return a deterministic order when two similarities are equal.
+
+    Without a secondary sort key, SQLite resolves tied rows by storage order,
+    which is page-layout-dependent and varies across SQLite versions and
+    hardware.  Two facts with identical approximate similarity must come back
+    in a stable, reproducible order determined by fact_id.
+    """
+
+    def test_tied_scores_return_deterministic_order(
+        self,
+        store: QuantizedEmbeddingStore,
+        test_db: MagicMock,
+    ) -> None:
+        """Insert two facts whose approximate_similarity is identical; running
+        search multiple times must always return the same ranking.
+        """
+        profile_id = "p-tie"
+        v = _random_vec(768, seed=42)
+
+        for fid in ("fact-zzz", "fact-aaa"):
+            _seed_fact_retention(test_db, fid, profile_id)
+            store.compress_fact(fid, profile_id, v, 4)
+
+        orders: list[list[str]] = []
+        for _ in range(5):
+            results = store.search(v, profile_id, top_k=10)
+            orders.append([fid for fid, _ in results])
+
+        assert all(o == orders[0] for o in orders), (
+            f"search returned different orderings across identical runs: {orders}"
+        )
+
+    def test_lower_fact_id_comes_first_on_tied_scores(
+        self,
+        store: QuantizedEmbeddingStore,
+        test_db: MagicMock,
+    ) -> None:
+        """When similarities are equal, the lexicographically smaller fact_id
+        must sort first — this pins the tiebreak direction so callers can rely on it.
+
+        "fact-aaa" < "fact-zzz" lexicographically; with the old score-only sort
+        the winner was whoever happened to appear first in the SQLite page, which
+        is insertion order here ("fact-zzz" was inserted first, so it would come
+        first — the wrong order).
+        """
+        profile_id = "p-order"
+        v = _random_vec(768, seed=99)
+
+        # Insert "fact-zzz" first — with score-only sort it would come first.
+        for fid in ("fact-zzz", "fact-aaa"):
+            _seed_fact_retention(test_db, fid, profile_id)
+            store.compress_fact(fid, profile_id, v, 4)
+
+        results = store.search(v, profile_id, top_k=10)
+        ids = [fid for fid, _ in results]
+
+        assert len(ids) >= 2, f"expected 2 results, got {ids}"
+        aaa_pos = ids.index("fact-aaa")
+        zzz_pos = ids.index("fact-zzz")
+        assert aaa_pos < zzz_pos, (
+            f"'fact-aaa' must precede 'fact-zzz' on equal similarity; "
+            f"got order {ids}"
+        )
