@@ -4,8 +4,6 @@
 
 """UserPromptSubmit hook — Python fallback (compiled binary preferred).
 
-LLD reference: `.backup/active-brain/lld/LLD-01-context-cache-and-hot-path-hooks.md`
-Section 4.3.
 
 HARD RULES (enforced by tests):
   - stdlib-only imports at module load (SLM modules delayed-imported).

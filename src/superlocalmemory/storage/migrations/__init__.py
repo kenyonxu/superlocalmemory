@@ -40,7 +40,7 @@ from . import (
 # ``superlocalmemory/storage/migrations.py`` shipped in v3.4.20 carried
 # ``CURRENT_SCHEMA_VERSION`` / ``get_schema_version`` / ``set_schema_version``
 # / ``is_v1_database`` / ``needs_migration`` / ``backup_database``. Creating
-# the ``migrations/`` package in Wave 1 shadowed that flat module, so any
+# the ``migrations/`` package (introduced in v3.4) shadowed that flat module, so any
 # caller that did ``from superlocalmemory.storage.migrations import X``
 # broke. We re-load the legacy module under a distinct name and re-export
 # the symbols here so pre-3.4.22 callers (and the pre-existing tests at

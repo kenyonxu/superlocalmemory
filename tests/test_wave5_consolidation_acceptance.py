@@ -1,4 +1,4 @@
-"""Wave 5 acceptance gates — issue #113 consolidation layer.
+"""v3.5.x acceptance gates — issue #113 consolidation layer.
 Authored by the release coordinator, NOT by implementers.
 Implementation agents may NOT modify this file.
 
@@ -242,7 +242,7 @@ class TestD3Traceability:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# D4 — honesty about coverage (the Wave 4 principle, applied to summaries)
+# D4 — honesty about coverage (the overclaiming-prevention principle, applied to summaries)
 # ─────────────────────────────────────────────────────────────────────────────
 class TestD4HonestCoverage:
     def test_sparse_session_data_is_disclosed_not_hidden(self) -> None:

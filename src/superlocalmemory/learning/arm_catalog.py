@@ -4,8 +4,6 @@
 
 """Static 40-arm catalog for the contextual Thompson bandit.
 
-LLD reference: ``.backup/active-brain/lld/LLD-03-contextual-bandit-and-ensemble.md``
-Section 5.1 — arm = (semantic, bm25, entity_graph, temporal,
 cross_encoder_bias) weight bundle drawn from a 7-point canonical grid.
 
 Pure-data module — zero imports from the rest of the codebase. Audit-friendly

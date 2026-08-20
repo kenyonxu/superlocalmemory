@@ -4,8 +4,6 @@
 
 """Cross-platform adapter base — shared Protocol and atomic write primitive.
 
-LLD reference: ``.backup/active-brain/lld/LLD-05-cross-platform-adapters.md``
-Sections: 2 (component catalog), 4.4 (atomic write), 9.3 (sync log contract).
 
 Every adapter (Cursor, Antigravity, Copilot) implements the ``Adapter``
 Protocol. The shared ``_atomic_write`` primitive enforces the hard-rule

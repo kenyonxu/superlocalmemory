@@ -4,8 +4,6 @@
 
 """Forward-only additive migrations for SLM v3.4.22.
 
-LLD reference: ``.backup/active-brain/lld/LLD-07-schema-migrations-and-security-primitives.md``
-Section 4 (Migration Runner).
 
 Contract:
   - ``apply_all(learning_db, memory_db, *, dry_run=False) -> dict`` —
@@ -34,6 +32,7 @@ catalogue and the public orchestration functions.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from pathlib import Path
 
@@ -176,6 +175,10 @@ from superlocalmemory.storage._migration_internals import (
     _ensure_migration_log,
     _migration_log_exists,
     _read_log,
+)
+from superlocalmemory.storage.backup import (
+    _gc_old_backups,
+    _pre_migration_backup,
 )
 
 logger = logging.getLogger(__name__)
@@ -375,6 +378,61 @@ def _bootstrap_learning_schema(learning_db: Path, *, dry_run: bool) -> str | Non
     return None
 
 
+def _foreign_live_daemon(memory_db: Path) -> "int | None":
+    """Return the pid of another live daemon holding this data dir, or None.
+
+    Migrations are not fenced against concurrent writers. The realistic hazard
+    is an OLD daemon still running after an upgrade while a NEW one starts: its
+    WAL appends continue while DDL is applied, which can make a migration fail
+    non-deterministically. The snapshot itself stays consistent — the SQLite
+    backup API copies committed pages only — and a racing migration is recorded
+    as ``failed`` and is non-fatal, so this does not corrupt data.
+
+    This detects the condition and reports it. It deliberately does NOT refuse:
+    ``apply_all`` runs inside the daemon's own startup, so refusing whenever "a
+    daemon is running" would refuse on itself, and blocking on a lock here would
+    risk wedging startup — a worse outcome than a retryable failed step.
+    """
+    try:
+        pid_file = memory_db.parent / "daemon.pid"
+        if not pid_file.is_file():
+            return None
+        pid = int(pid_file.read_text().strip() or 0)
+        if pid <= 0 or pid == os.getpid():
+            return None
+        os.kill(pid, 0)          # signal 0 tests liveness without touching it
+        return pid
+    except (OSError, ValueError):
+        return None
+
+
+def _nothing_left_to_apply(learning_db: Path, memory_db: Path) -> bool:
+    """True when every migration is already recorded in its target database.
+
+    Used to decide whether a snapshot is worth taking. A snapshot is only
+    valuable when something is about to change; taking one on a start where
+    nothing changes copies the ALREADY-MIGRATED store and then prunes a
+    generation — so after two such starts the last copy of the original is gone,
+    and the safety net has quietly deleted the thing it exists to protect.
+
+    Errs toward False, which means "take the snapshot" — the safe direction.
+    """
+    try:
+        for migration in MIGRATIONS:
+            db_path = _db_for(migration.db_target, learning_db, memory_db)
+            if not db_path.exists():
+                return False
+            conn = _connect(db_path)
+            try:
+                if not _deferred_already_applied(conn, migration.name):
+                    return False
+            finally:
+                conn.close()
+    except Exception:  # noqa: BLE001 — any doubt means take the snapshot
+        return False
+    return True
+
+
 def apply_all(
     learning_db: Path,
     memory_db: Path,
@@ -400,6 +458,44 @@ def apply_all(
     skipped: list[str] = []
     failed: list[str] = []
     details: dict[str, str] = {}
+
+    # Take a consistent snapshot of both databases before any migration runs.
+    # The backup uses the SQLite backup API so in-flight WAL writers are
+    # never captured mid-transaction. InsufficientDiskSpaceError propagates
+    # to the caller — migration is intentionally aborted when disk is too
+    # tight to keep a recoverable copy.
+    # A snapshot is only worth taking when something is about to change. This
+    # runs on every engine construction, not just upgrades, so snapshotting
+    # unconditionally meant an ordinary start copied the already-migrated store
+    # and pruned a generation — two extra starts and the original was gone.
+    _pending = not _nothing_left_to_apply(learning_db, memory_db)
+    if not dry_run and not _pending:
+        details["_backup"] = "skipped: every migration already applied"
+
+    if not dry_run and _pending:
+        _other = _foreign_live_daemon(memory_db)
+        if _other is not None:
+            logger.warning(
+                "Another SuperLocalMemory daemon (pid %s) is still running and "
+                "writing to this data directory. Migrations are not fenced "
+                "against concurrent writers, so a step may fail and need a "
+                "retry. Your data is not at risk: the snapshot copies committed "
+                "pages only, and a failed step is recorded, never forced. Stop "
+                "the other daemon and restart if a step fails.",
+                _other,
+            )
+            details["_concurrent_daemon_pid"] = str(_other)
+
+        backup_dir = _pre_migration_backup(
+            learning_db, memory_db,
+            backups_root=memory_db.parent / "pre-migration-snapshots",
+        )
+        # _pre_migration_backup returns the snapshots root itself, so this is
+        # the directory to prune. Passing .parent pointed the collector at the
+        # data directory, where it matched nothing and pruned nothing — leaving
+        # every snapshot on disk for ever.
+        _gc_old_backups(backup_dir)
+        details["_backup"] = str(backup_dir)
 
     schema_error = _bootstrap_learning_schema(learning_db, dry_run=dry_run)
     if schema_error is not None:
@@ -461,6 +557,21 @@ def apply_all(
     }
 
 
+def _deferred_already_applied(conn: sqlite3.Connection, name: str) -> bool:
+    """True when ``name`` is already recorded in this database's migration_log.
+
+    Used only to decide whether a snapshot is needed. On any error it returns
+    False, which errs toward taking a snapshot — the safe direction.
+    """
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM migration_log WHERE name = ? LIMIT 1", (name,)
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
+
+
 def apply_deferred(
     learning_db: Path,
     memory_db: Path,
@@ -495,6 +606,25 @@ def apply_deferred(
     failed: list[str] = []
     details: dict[str, str] = {}
 
+    # apply_all snapshots before it touches anything; this pass did not, yet it
+    # applies real DDL to both managed databases — including the column the
+    # daemon needs to start. An interrupted deferred pass therefore had no
+    # recoverable copy at all. The snapshot is taken LAZILY, immediately before
+    # the first migration that will actually be applied, so a pass with nothing
+    # to do costs no disk and does not capture post-init state unnecessarily.
+    _snapshot_state: dict[str, object] = {"taken": dry_run}
+
+    def _ensure_snapshot() -> None:
+        if _snapshot_state["taken"]:
+            return
+        _snapshot_state["taken"] = True
+        backup_dir = _pre_migration_backup(
+            learning_db, memory_db,
+            backups_root=memory_db.parent / "pre-migration-snapshots",
+        )
+        _gc_old_backups(backup_dir)
+        details["_deferred_backup"] = str(backup_dir)
+
     blocked: set[str] = set()
     for migration in DEFERRED_MIGRATIONS:
         unmet = [d for d in migration.dependencies if d in failed or d in blocked]
@@ -528,6 +658,9 @@ def apply_deferred(
                     "refusing to create split-brain log"
                 )
                 continue
+
+            if not dry_run and not _deferred_already_applied(conn, migration.name):
+                _ensure_snapshot()
 
             outcome, detail = _apply_single(conn, migration, dry_run=dry_run)
             details[migration.name] = detail

@@ -4,8 +4,6 @@
 
 """PostToolUse async:true hook — fire-and-forget prewarm via stdlib urllib.
 
-LLD reference: `.backup/active-brain/lld/LLD-01-context-cache-and-hot-path-hooks.md`
-Section 4.4.
 
 HARD RULES (enforced by tests):
   - stdlib only — ``urllib.request``, NOT ``httpx`` / ``requests``.

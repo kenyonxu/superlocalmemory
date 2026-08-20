@@ -1,4 +1,4 @@
-"""vertex_surface.py — Vertex AI passthrough proxy surface (WP-11).
+"""vertex_surface.py — Vertex AI passthrough proxy surface.
 
 Transparent passthrough: forward Authorization bearer untouched (AC-2),
 cache by body content never by token (SEC), no SSE — always single JSON.
@@ -14,7 +14,7 @@ Key design decisions (per LLD §5 STAGE-5 RESOLUTIONS):
   SECURITY (AC-3): bearer token structurally excluded from cache key, value,
            logs, and stored ProxyRequest.headers (redacted via _redact_headers).
 
-WP-11a (gemini-native fix) lives in _helpers.py:_GEMINI_NATIVE_FORWARD_HEADERS.
+The gemini-native Authorization-header fix lives in _helpers.py:_GEMINI_NATIVE_FORWARD_HEADERS.
 """
 
 from __future__ import annotations

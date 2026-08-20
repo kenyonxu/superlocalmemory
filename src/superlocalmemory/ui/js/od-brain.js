@@ -774,7 +774,7 @@
     var evb = EL('div', { className: 'card-pad' });
 
     if (registryStatus === 'error' || registryStatus === 'unknown') {
-      // Wave 4 honesty rule: failure and emptiness must not return the same value.
+      // Honesty constraint: failure and emptiness must not return the same value.
       // 'unknown' belongs HERE, not in the healthy-empty branch below. The
       // registry reader is fail-soft — a corrupt or unreadable file makes
       // _load() return {} and active_client_summary() return [], so the read

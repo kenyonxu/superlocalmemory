@@ -134,7 +134,7 @@ def main() -> None:
         and "--apply" not in sys.argv[2:]
     )
 
-    # WP-07: lazy first-run init — runs after hook/mcp fast-paths so stdout
+    # lazy first-run init — runs after hook/mcp fast-paths so stdout
     # is never polluted on those paths (CRIT-3, MCP JSON-RPC purity).
     # Guarded: any failure must not crash the CLI (AC4).
     _is_mcp_cmd = len(sys.argv) >= 2 and sys.argv[1] == "mcp"
@@ -169,7 +169,7 @@ def main() -> None:
                 from superlocalmemory.migrations.v3_4_25_to_v3_4_26 import (
                     migrate_if_safe as _migrate_if_safe,
                 )
-                # WP-07: route through slm_home() so all 3 env aliases are honoured.
+                # route through slm_home() so all 3 env aliases are honoured.
                 from superlocalmemory.cli._lazy_init import slm_home as _slm_home
                 _data = _slm_home()
                 _res = _migrate_if_safe(_data)
@@ -209,7 +209,7 @@ def main() -> None:
         "--gate", action="store_true",
         help="Enable PreToolUse gate (experimental — blocks tools until session_init)",
     )
-    # WP-07: non-interactive auto setup (pip post-install, CI, scripts).
+    # non-interactive auto setup (pip post-install, CI, scripts).
     init_p.add_argument(
         "--auto", action="store_true",
         help="Non-interactive setup: mode A + hooks (no TTY required, for CI/scripts)",
@@ -243,7 +243,7 @@ def main() -> None:
         "--list", action="store_true", help="List all supported IDEs",
     )
     connect_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
-    # WP-08 CRIT-1: declare missing flags so cmd_connect can read them without getattr fallback
+    # declare missing flags so cmd_connect can read them without getattr fallback
     connect_p.add_argument(
         "--here", action="store_true", default=False,
         help="Write config relative to current working directory (project scope)",
@@ -258,7 +258,7 @@ def main() -> None:
     )
     connect_p.add_argument(
         "--profile", metavar="PROFILE", default=None,
-        help="Inject SLM_MCP_PROFILE env var into the MCP server block (WP-01)",
+        help="Inject SLM_MCP_PROFILE env var into the MCP server block (named profile selection)",
     )
     connect_p.add_argument(
         "--dry-run", action="store_true", dest="dry_run", default=False,

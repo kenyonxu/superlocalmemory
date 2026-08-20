@@ -12,7 +12,7 @@ Covers:
 - Fail-open: a bad fact is skipped, rest continue
 - No-op: 0 NULLs returns early
 - Return dict: scanned/embedded/remaining_null counts are correct
-- Byte-compat: embedding JSON is a float list (~16-17KB for dim=768)
+- Byte-compat: the stored embedding is binary float32 of the expected width
 """
 
 from __future__ import annotations
@@ -222,11 +222,20 @@ class TestBackfillMissingEmbeddings:
     def test_byte_compatibility_embedding_format(
         self, db: DatabaseManager, config: SLMConfig, mock_embedder: MagicMock
     ) -> None:
-        """Backfilled embedding is a JSON float list compatible with get_all_facts.
+        """A backfilled embedding is stored in the canonical format and reads back whole.
 
-        Dimension: 768, size: ~12-20KB (matching existing embeddings).
-        Can be deserialized to a list of 768 floats.
+        The contract this pins is that whatever the backfill writes can be read
+        by the normal read path as 768 floats. It previously also pinned the
+        encoding as JSON text of 10-25 KB; embeddings are now binary float32, so
+        that part is asserted against the current format instead. The size check
+        is kept because it is what catches a value silently written at the wrong
+        width or dimension.
         """
+        from superlocalmemory.storage.embedding_codec import (
+            EMBEDDING_BYTES,
+            EMBEDDING_DIM,
+            decode_embedding,
+        )
         from superlocalmemory.storage.embedding_migrator import backfill_missing_embeddings
 
         _seed_facts(db, "default", ["content to embed"])
@@ -234,18 +243,22 @@ class TestBackfillMissingEmbeddings:
 
         rows = db.execute("SELECT embedding FROM atomic_facts WHERE profile_id = 'default'")
         assert len(rows) == 1
-        emb_json = rows[0]["embedding"]
-        assert emb_json is not None
+        stored = rows[0]["embedding"]
+        assert stored is not None
 
-        parsed = json.loads(emb_json)
-        assert isinstance(parsed, list)
-        assert len(parsed) == 768
-        assert isinstance(parsed[0], float)
-
-        # Size should be in the range of existing embeddings (~12KB-20KB)
-        assert 10_000 < len(emb_json) < 25_000, (
-            f"Unexpected embedding JSON size: {len(emb_json)} bytes"
+        assert isinstance(stored, bytes), (
+            f"embedding was written as {type(stored).__name__}, not the canonical "
+            f"binary format — a writer is bypassing the codec"
         )
+        assert len(stored) == EMBEDDING_BYTES, (
+            f"embedding is {len(stored)} bytes, expected {EMBEDDING_BYTES} "
+            f"({EMBEDDING_DIM} float32 values)"
+        )
+
+        parsed = decode_embedding(stored)
+        assert isinstance(parsed, list)
+        assert len(parsed) == EMBEDDING_DIM
+        assert isinstance(parsed[0], float)
 
     def test_idempotent_resumable(
         self, db: DatabaseManager, config: SLMConfig, mock_embedder: MagicMock

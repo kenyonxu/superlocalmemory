@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from superlocalmemory.core.ram_lock import ram_reservation
+from superlocalmemory.storage.embedding_codec import decode_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -71,19 +72,18 @@ __all__ = (
 )
 
 
-def _parse_embedding(raw: str | None) -> list[float] | None:
+def _parse_embedding(raw: bytes | str | None) -> list[float] | None:
+    """Parse an embedding from either TEXT (JSON) or BLOB (binary float32).
+
+    Returns None only when the embedding is genuinely absent (None or empty).
+    Raises ValueError for malformed data so callers can distinguish absence
+    from corruption.
+    """
     if not raw:
         return None
-    try:
-        vec = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(vec, list) or not vec:
-        return None
-    try:
-        return [float(x) for x in vec]
-    except (TypeError, ValueError):
-        return None
+    # decode_embedding raises ValueError for corrupt data; callers that want
+    # to skip a bad fact should catch ValueError explicitly, not silently.
+    return decode_embedding(raw)
 
 
 # L-P-01: vectorise ``_cosine`` via NumPy when available. NumPy cold

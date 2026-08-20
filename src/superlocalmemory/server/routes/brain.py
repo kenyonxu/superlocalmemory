@@ -806,7 +806,7 @@ def _compute_cross_platform() -> dict:
     ``memory.db`` (LLD-07 M004). On any adapter error, that adapter
     reports ``active: false`` with ``reason: error:<ExcName>`` rather
     than crashing the whole Brain endpoint (LLD-04 §2 — "honest, never
-    fake"). An unimportable adapter means the install is missing Wave 2C
+    fake"). An unimportable adapter means the install is missing the
     components, which is legitimate for an older 3.4.20 → 3.4.22 upgrade
     mid-migration.
     """
@@ -953,7 +953,7 @@ def _compute_active_clients(profile_id: str) -> dict:
     try:
         from superlocalmemory.hooks.session_registry import active_client_summary
         clients = active_client_summary(profile_id, within_seconds=300)
-    except Exception as exc:  # distinguish failure from emptiness (Wave 4)
+    except Exception as exc:  # distinguish failure from emptiness (important: these are different states)
         registry_ok = False
         reg_status = "error"
         logger.debug("active_clients: registry error: %s", exc)

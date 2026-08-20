@@ -1147,7 +1147,7 @@ def _cmd_context_dispatch(args: Namespace) -> None:
 
 
 def _agents_md_source_factory():
-    """Return a callable that reads the WP-05 AGENTS.md content, or None on failure.
+    """Return a callable that reads the bundled AGENTS.md content, or None on failure.
 
     Source: plugin-src/rules/AGENTS.md (relative to package root).
     Gracefully skips if absent — never fails the MCP write.
@@ -1168,7 +1168,7 @@ def _agents_md_source_factory():
             if candidate.exists():
                 return candidate.read_text(encoding="utf-8")
         logger.warning(
-            "WP-05 AGENTS.md is not bundled — skipping AGENTS.md write"
+            "AGENTS.md is not bundled in this distribution — skipping AGENTS.md write"
         )
         return None
 
@@ -1178,15 +1178,15 @@ def _agents_md_source_factory():
 def cmd_connect(args: Namespace) -> None:
     """Configure IDE integrations.
 
-    Dispatch priority (WP-08):
+    Dispatch priority:
     1. ``slm connect <ide>`` where ide ∈ IDE_MATRIX → portable_kit.connect_ide
-       (MCP-wiring + AGENTS.md; includes claude-code short-circuit to WP-06).
+       (MCP-wiring + AGENTS.md; claude-code short-circuits to the plugin pointer).
     2. ``--cross-platform`` / ``--disable`` → LLD-05 CrossPlatformConnector.
     3. Bare ``slm connect`` / ``--list`` → legacy IDEConnector (markdown-rules).
     """
     ide_arg = getattr(args, "ide", None)
 
-    # WP-08: intercept known IDE_MATRIX ids before legacy branches (CRIT-1)
+    # Intercept known IDE_MATRIX ids before legacy branches (critical: must run first)
     if ide_arg is not None:
         from superlocalmemory.hooks.portable_kit import (
             IDE_MATRIX,
@@ -1922,7 +1922,7 @@ def cmd_status(args: Namespace) -> None:
             ])
             return
 
-        # WP-02 D8: canonical key set — db_size_mb always present (0.0 if absent).
+        # canonical key set — db_size_mb always present (0.0 if absent).
         db_size_mb = 0.0
         if config.db_path.exists():
             db_size_mb = round(config.db_path.stat().st_size / 1024 / 1024, 2)
@@ -2376,6 +2376,52 @@ def cmd_help(args: Namespace) -> None:
     print("Docs:                https://superlocalmemory.com")
 
 
+def _migration_error_logs() -> list:
+    """Return a sorted list of migration-error log files in the SLM home dir.
+
+    Returns an empty list when none exist or when the directory is not readable.
+    """
+    try:
+        from superlocalmemory.core.config import SLMConfig
+        from superlocalmemory.infra.data_root import canonical_data_root
+        from superlocalmemory.storage.models import Mode
+
+        # The daemon writes this log beside the memory database it was actually
+        # configured with, which is not necessarily the canonical data root —
+        # any of SLM_DATA_DIR / SL_MEMORY_PATH / SLM_HOME can move it. Globbing
+        # only the canonical root reported "clean" while the log sat unread in
+        # the real directory. Search both, de-duplicated.
+        roots = {canonical_data_root()}
+        try:
+            cfg = SLMConfig.for_mode(Mode.A)
+            db = getattr(cfg, "memory_db_path", None) or getattr(cfg, "db_path", None)
+            if db:
+                roots.add(pathlib.Path(db).parent)
+        except Exception:
+            pass
+
+        found: list = []
+        for root in roots:
+            try:
+                found.extend(root.glob("migration-error-*.log"))
+            except OSError:
+                continue
+        return sorted(set(found))
+    except Exception:
+        return []
+
+
+def _detect_all_installs() -> list:
+    """Thin shim so cmd_doctor can be tested without importing install_detector."""
+    try:
+        from superlocalmemory.core.install_detector import (
+            _detect_all_installs as _real,
+        )
+        return _real()
+    except Exception:
+        return []
+
+
 def cmd_doctor(args: Namespace) -> None:
     """Comprehensive pre-flight check — verify everything works.
 
@@ -2728,7 +2774,7 @@ def cmd_doctor(args: Namespace) -> None:
     else:
         _check("Database", "PASS", "not yet created (will initialize on first use)")
 
-    # 11. PEP 668 advisory — WP-07: detect EXTERNALLY-MANAGED marker and
+    # 11. PEP 668 advisory: detect EXTERNALLY-MANAGED marker and
     #     recommend pipx when the system Python is managed by the OS package
     #     manager (e.g. Homebrew, Debian/Ubuntu, Fedora 38+).
     try:
@@ -2781,6 +2827,70 @@ def cmd_doctor(args: Namespace) -> None:
             _check(f"Component: {_c.label}", _status, _detail, _c.fix_cmd)
     except Exception as _cr_exc:
         _check("Component registry", "WARN", f"probe failed: {_cr_exc}")
+
+    # 13. Install version convergence — detect all copies of SLM on this machine
+    #     and warn when they are at different versions. Silent divergence is the
+    #     most common source of unexpected behaviour after an upgrade.
+    try:
+        _installs = _detect_all_installs()  # shim defined above cmd_doctor
+        _versions = {i["version"] for i in _installs}
+        if not _installs:
+            _check(
+                "install_versions",
+                "PASS",
+                "No additional SLM installs detected on this machine",
+            )
+        elif len(_versions) > 1:
+            _detail = "Version divergence: " + ", ".join(
+                f"{i['type']}={i['version']}" for i in _installs
+            )
+            _check(
+                "install_versions",
+                "WARN",
+                _detail,
+                fix="Upgrade all installs: "
+                    "pipx upgrade superlocalmemory  |  "
+                    "pip install -U superlocalmemory (in ~/.slm-venv)  |  "
+                    "npm install -g superlocalmemory@latest",
+            )
+        else:
+            _unified = next(iter(_versions))
+            _types = ", ".join(i["type"] for i in _installs)
+            _check(
+                "install_versions",
+                "PASS",
+                f"All installs at {_unified} ({_types})",
+            )
+    except Exception as _inst_exc:  # noqa: BLE001 — never break doctor
+        _check("install_versions", "WARN", f"could not probe installs: {_inst_exc}")
+
+    # 14. Migration error logs — surface any unresolved failure from a previous
+    #     upgrade attempt. The daemon writes these and they persist until the
+    #     user takes action; doctor is the right place to surface them.
+    try:
+        _err_logs = _migration_error_logs()
+        if _err_logs:
+            _latest = _err_logs[-1]
+            _check(
+                "migration_errors",
+                "FAIL",
+                f"Unresolved migration failure: {_latest.name}",
+                # `--fix` heals models, sqlite-vec and stale locks. It does NOT
+                # re-run a migration or restore a snapshot, so pointing here at
+                # `--fix` sent the user round a loop that could never clear this
+                # check. The log itself carries the restore command.
+                fix=(
+                    f"Read {_latest} — it names what failed and, if a snapshot "
+                    f"was taken, the exact command to restore it. Restart the "
+                    f"daemon to retry the upgrade. Delete the log once resolved."
+                ),
+            )
+        else:
+            # Reporting nothing when clean made "no failures" and "the check
+            # never ran" look identical in the output.
+            _check("migration_errors", "PASS", "no unresolved migration failures")
+    except Exception as _mel_exc:  # noqa: BLE001 — never break doctor
+        _check("migration_errors", "WARN", f"could not check error logs: {_mel_exc}")
 
     # 12. Optimize (Surface B) — reads daemon-persisted metrics (≤60s stale).
     info = _gather_optimize_surface_b()
@@ -3332,7 +3442,7 @@ def _cmd_init_auto(
     config_exists: bool,
     force: bool,
 ) -> None:
-    """WP-07: non-interactive --auto branch for slm init.
+    """Non-interactive --auto branch for slm init.
 
     Best-effort at every step; only exits non-zero when config save fails.
     No TTY required.  Does NOT run IDE connect (AC6).
@@ -3394,7 +3504,7 @@ def cmd_init(args: Namespace) -> None:
     slm_data_dir = slm_home()
     config_exists = (slm_data_dir / "config.json").exists()
 
-    # WP-07: --auto branch — fully non-interactive, no TTY required (AC6).
+    # --auto branch — fully non-interactive, no TTY required.
     if auto:
         os.environ["SLM_NON_INTERACTIVE"] = "1"
         _cmd_init_auto(args, slm_data_dir, config_exists, force)

@@ -4,8 +4,6 @@
 
 """Background signal drain worker.
 
-LLD reference: ``.backup/active-brain/lld/LLD-02-signal-pipeline-and-lightgbm.md``
-Section 4.2 — moves signal writes off the recall hot path.
 
 Contract (hard rules, enforced by tests):
     SW1 — Hot path never waits for disk.

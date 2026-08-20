@@ -560,7 +560,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             if db_path.exists():
                 db_size_mb = round(os.path.getsize(db_path) / (1024 * 1024), 2)
 
-            # WP-02 D8: additive canonical key set — provider/base_dir/db_path added.
+            # additive canonical key set — provider/base_dir/db_path added.
             # All pre-existing keys are preserved (zero removals).
             cfg = engine._config
             return {

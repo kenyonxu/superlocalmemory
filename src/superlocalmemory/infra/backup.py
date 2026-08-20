@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import shutil
+import tempfile
 import sqlite3
 import time
 import uuid
@@ -735,15 +736,50 @@ class BackupManager:
         target = self.db_path.parent / target_name
 
         try:
-            self.create_backup(label="pre-restore")
+            # Stage the source OUTSIDE backup_dir before anything else runs.
+            #
+            # create_backup() below calls _enforce_retention(), which globs this
+            # same directory and unlinks the oldest files — including, when the
+            # backup being restored is the oldest, the source itself. A plain
+            # sqlite3.connect() on that now-missing path RECREATES it as an
+            # empty database, which is then copied over the live store while the
+            # call returns True, leaving a zero-byte file under the original
+            # name so a second attempt also appears to succeed.
+            #
+            # Reproduced before this fix: 11 snapshots, max_backups=10, a
+            # 500-fact store restored to 0 tables, restore_backup() -> True.
+            with tempfile.TemporaryDirectory(prefix="slm-restore-") as staging:
+                staged = Path(staging) / filename
 
-            src = sqlite3.connect(str(backup_path))
-            dst = sqlite3.connect(str(target))
-            try:
-                src.backup(dst)
-            finally:
-                dst.close()
-                src.close()
+                # mode=ro fails loudly on a missing file instead of creating one.
+                src_ro = sqlite3.connect(f"file:{backup_path}?mode=ro", uri=True)
+                try:
+                    if not [r[0] for r in src_ro.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'")]:
+                        logger.error(
+                            "Restore rejected: %s contains no tables — refusing to "
+                            "overwrite %s with an empty database",
+                            filename, target_name,
+                        )
+                        return False
+                    staged_dst = sqlite3.connect(str(staged))
+                    try:
+                        src_ro.backup(staged_dst)
+                    finally:
+                        staged_dst.close()
+                finally:
+                    src_ro.close()
+
+                self.create_backup(label="pre-restore")
+
+                # Restore from the staged copy, which retention cannot reach.
+                src = sqlite3.connect(f"file:{staged}?mode=ro", uri=True)
+                dst = sqlite3.connect(str(target))
+                try:
+                    src.backup(dst)
+                finally:
+                    dst.close()
+                    src.close()
 
             logger.info("Restored: %s -> %s", filename, target.name)
 

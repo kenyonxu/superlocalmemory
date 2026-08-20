@@ -19,7 +19,7 @@ Geodesic distance (Atkinson & Mitchell 1981, Pinele et al. 2020):
     Diagonal multivariate (product-manifold decomposition):
         d_FR(p, q) = sqrt( sum_i  d_i^2 )
 
-Bayesian variance update (NEW in Innovation Wave 4):
+Bayesian variance update (added in v3.5):
 
     V1 bug: query always received UNIFORM variance, so Fisher degenerated
     to a monotonic transform of cosine.  FIX: every fact maintains its own

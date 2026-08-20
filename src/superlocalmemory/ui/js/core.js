@@ -292,7 +292,7 @@ function showEmpty(containerId, icon, message) {
 }
 
 // ============================================================================
-// Pane error state — WP-12
+// Pane error state
 // showPaneError / clearPaneError / paneErrorMessage
 // ============================================================================
 

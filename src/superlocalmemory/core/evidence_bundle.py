@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+
+from superlocalmemory.storage.embedding_codec import encode_embedding
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -435,7 +437,7 @@ def rebuild_derived_state(
                 vector = embedder.embed(str(fact["content"]))
                 db.execute(
                     "UPDATE atomic_facts SET embedding=? WHERE fact_id=? AND profile_id=?",
-                    (json.dumps(vector, separators=(",", ":")), fact["fact_id"], profile_id),
+                    (encode_embedding(vector), fact["fact_id"], profile_id),
                 )
                 embeddings += 1
     return {"bm25_rows": bm25_rows, "embeddings": embeddings}

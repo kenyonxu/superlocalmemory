@@ -4,8 +4,6 @@
 
 """Shared content builder — single source for every adapter body.
 
-LLD reference: ``.backup/active-brain/lld/LLD-05-cross-platform-adapters.md``
-Section 3 (Content Builder). One builder → five formatters. Every string is
 passed through ``redact_secrets`` before entering the dataclass, so no
 adapter ever writes an unredacted secret.
 

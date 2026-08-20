@@ -4,8 +4,6 @@
 
 """3-phase adaptive ranker — from heuristic to ML.
 
-LLD reference: ``.backup/active-brain/lld/LLD-02-signal-pipeline-and-lightgbm.md``
-Sections 4.4 + 4.5.
 
 Phase 1: cross-encoder score only (cold start)
 Phase 2: heuristic boosts (some data)

@@ -1,8 +1,8 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
-# Tests for WP-01: MCP Profile Selector
+# Tests for the MCP Profile Selector
 
-"""Tests for _PROFILE_DEFINITIONS and _resolve_profile_allowed (WP-01).
+"""Tests for _PROFILE_DEFINITIONS and _resolve_profile_allowed.
 
 RED-first per TDD contract. All tests import symbols directly from the
 module; no server side-effects are exercised.

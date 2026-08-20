@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
-# Part of SuperLocalMemory V3 | WP-08 portable-kit tests
+# Part of SuperLocalMemory V3 | portable-kit tests
 
 """TDD tests for hooks.portable_kit — RED first, then GREEN.
 
@@ -399,7 +399,7 @@ def test_malformed_config_aborts(ide_id: str, fake_home: Path):
 
 
 def test_claude_code_skips_mcp(fake_home: Path, capsys):
-    """slm connect claude-code writes NO config, exits 0 with WP-06 pointer."""
+    """slm connect claude-code writes NO config, exits 0 with a plugin pointer."""
     result = connect_ide("claude-code", home=fake_home)
 
     assert result["mcp_config"] == "skipped"

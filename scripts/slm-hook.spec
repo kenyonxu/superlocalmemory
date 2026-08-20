@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# LLD reference: .backup/active-brain/lld/LLD-06-windows-binary-and-legacy-migration.md §4.2
+# PyInstaller spec for the slm-hook binary.
 # Mode: onedir (not onefile) — LLD-06 §4.1, verification claim 7.
 # console=False, upx=False, strip=True.
 

@@ -22,6 +22,17 @@ STRATEGY_PRESETS: dict[str, dict[str, float]] = {
     "opinion": {"semantic": 1.8, "bm25": 0.6, "entity_graph": 0.8, "temporal": 0.3, "spreading_activation": 0.5, "hopfield": 0.5},
     "factual": {"semantic": 1.2, "bm25": 1.4, "entity_graph": 1.0, "temporal": 0.6, "spreading_activation": 0.8, "hopfield": 0.8},
     "entity": {"semantic": 1.0, "bm25": 1.2, "entity_graph": 3.0, "temporal": 0.5, "spreading_activation": 1.5, "hopfield": 0.9},
+    # A question about the present carries almost no topical information in its
+    # words: "what am I working on" matches anything containing "working",
+    # including a note from a month ago about a working tree. Word-matching was
+    # set to 1.5 here, ABOVE the 1.4 of the preset this one exists to replace,
+    # so the new path boosted the exact signal that caused the original failure.
+    # It is now the weakest signal, because for this question it is the least
+    # informative one; time is what the question is actually about.
+    "recency": {
+        "temporal": 2.5, "bm25": 0.7, "semantic": 1.2,
+        "entity_graph": 1.0, "spreading_activation": 0.8, "hopfield": 0.5,
+    },
     "general": {},
     "vague": {"semantic": 0.8, "bm25": 0.5, "entity_graph": 0.6, "temporal": 0.3, "spreading_activation": 1.5, "hopfield": 1.1},
 }
@@ -32,6 +43,8 @@ _TEMPORAL_WORDS: frozenset[str] = frozenset({
     "until", "while", "between", "january", "february", "march",
     "april", "may", "june", "july", "august", "september", "october",
     "november", "december",
+    "now", "today", "yesterday", "currently",
+    "tonight", "tomorrow", "latest",
 })
 
 _MULTI_HOP_PHRASES: tuple[str, ...] = (
@@ -62,6 +75,20 @@ _CAUSAL_TEMPORAL_WORDS: frozenset[str] = frozenset({
     "start", "stop", "begin", "end", "move", "leave",
     "join", "visit", "return",
 })
+
+# Phrases that signal a present-activity or ongoing-state question.
+# Checked after multi_hop, entity and temporal word filters so retrospective
+# queries ("what did I work on recently") do not short-circuit here.
+# Order inside the tuple is irrelevant; all are substring-matched against the
+# lowercased query.
+_RECENCY_PHRASES: tuple[str, ...] = (
+    "working on",
+    "am i working", "are we working", "been working",
+    "what's happening", "what is happening",
+    "right now", "these days", "at the moment",
+    "currently doing", "currently working",
+    "what have i been", "what am i doing", "what have we been",
+)
 
 _AGGREGATION_WORDS: frozenset[str] = frozenset({
     "all", "list", "every", "everything", "various", "different",
@@ -101,6 +128,21 @@ class QueryStrategy:
     confidence: float = 0.5
 
 
+
+def _recency_enabled() -> bool:
+    """Whether the present-tense path is switched on.
+
+    Reads configuration if the caller supplied one, otherwise defaults to on.
+    Kept as a module-level function so the classifier stays usable without an
+    engine, which is how the gate and several tests call it.
+    """
+    import os
+
+    if os.environ.get("SLM_DISABLE_RECENCY_STRATEGY", "0") == "1":
+        return False
+    return True
+
+
 class QueryStrategyClassifier:
     """Classifies queries and produces adaptive channel weights."""
 
@@ -135,6 +177,20 @@ class QueryStrategyClassifier:
         if len(proper_nouns) >= 2 and words & _CAUSAL_TEMPORAL_WORDS:
             return "multi_hop"
 
+        # `enable_recency_strategy=False` is documented as the one-line rollback
+        # for this whole path. It was declared and never read, so the rollback
+        # did nothing — a switch that does not switch is worse than no switch,
+        # because it is reached for in an incident.
+        if not _recency_enabled():
+            pass
+        # Checked BEFORE the single-word test below. "what am I working on right
+        # now" contains "now", so the word test claimed it first and routed a
+        # question about the present down the retrospective path — which weights
+        # word-matching at 1.5 against this path's 0.7, and word-matching on
+        # "working" is exactly what surfaced a month-old note about a working
+        # tree. A whole phrase states intent; a single word only hints at it.
+        elif any(p in q for p in _RECENCY_PHRASES):
+            return "recency"
         if words & _TEMPORAL_WORDS:
             return "temporal"
         if words & _AGGREGATION_WORDS:
@@ -152,3 +208,16 @@ class QueryStrategyClassifier:
         if any(p in q for p in _VAGUE_PHRASES):
             return "vague"
         return "general"
+
+
+_DEFAULT_CLASSIFIER = QueryStrategyClassifier()
+
+
+def classify_query(query: str, base_weights: dict[str, float] | None = None) -> QueryStrategy:
+    """Classify a query and return adapted channel weights.
+
+    Convenience function for callers that do not maintain a classifier instance.
+    Uses an empty weight dict when base_weights is omitted, which leaves
+    absolute weights undefined — useful for type-detection only.
+    """
+    return _DEFAULT_CLASSIFIER.classify(query, base_weights or {})

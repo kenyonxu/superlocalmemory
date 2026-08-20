@@ -26,6 +26,8 @@ License: AGPL-3.0-or-later
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import functools
 import hashlib
 import json
 import logging
@@ -65,6 +67,126 @@ from superlocalmemory.infra.data_root import (
     canonical_data_root,
     state_path,
 )
+
+
+def _notify_migration_applied(
+    applied: list,
+    elapsed: float,
+    backup_dir: "Path | None" = None,
+) -> None:
+    """Print a one-line confirmation after migrations complete successfully.
+
+    Written to stdout so it is visible in daemon.log and in interactive runs.
+    """
+    count = len(applied)
+    if count == 0:
+        return
+    parts = [f"[SLM] {count} migration(s) applied in {elapsed:.1f}s."]
+    if backup_dir is not None:
+        parts.append(f"Backup: {backup_dir}")
+    print(" ".join(parts), flush=True)
+
+
+def _write_migration_error_log(
+    failed: list,
+    backup_dir: "Path | None",
+    slm_home: "Path | None" = None,
+    applied: "list | None" = None,
+) -> "Path":
+    """Write a migration-error-{timestamp}.log to the SLM home directory.
+
+    Returns the Path of the written log file.
+    """
+    import datetime
+
+    if slm_home is None:
+        slm_home = canonical_data_root()
+
+    slm_home.mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = slm_home / f"migration-error-{ts}.log"
+
+    lines = [
+        f"Migration error — {ts}",
+        f"Failed: {', '.join(str(f) for f in failed)}",
+    ]
+    # An upgrade is applied step by step and is deliberately non-fatal: some
+    # steps can succeed while a later one fails. Saying "your data was not
+    # modified" whenever a snapshot exists was therefore untrue in exactly the
+    # case that matters — and a user who believes nothing changed may delete the
+    # snapshot to reclaim space.
+    if applied:
+        lines.append(f"Applied before the failure: {', '.join(str(a) for a in applied)}")
+        lines.append(
+            "YOUR DATABASE WAS PARTIALLY CHANGED. The steps listed above "
+            "completed; the ones under 'Failed' did not."
+        )
+    elif applied is not None:
+        lines.append("No steps completed, so your database was not changed.")
+    if backup_dir is not None:
+        lines.append(f"Snapshot of the state before the upgrade: {backup_dir}")
+        lines.append(
+            "That snapshot is intact and can be restored. Keep it until you are "
+            "satisfied your data is correct."
+        )
+    else:
+        lines.append(
+            "NO SNAPSHOT WAS TAKEN for this attempt — do not assume a recovery "
+            "copy exists. Check for earlier snapshots before changing anything."
+        )
+    lines.append("")
+    lines.append("To diagnose, run: slm doctor")
+
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return log_path
+
+
+def _notify_windows_user(message: str) -> None:
+    """Best-effort notification on Windows.  Silent no-op on other platforms."""
+    import sys
+
+    if sys.platform != "win32":
+        return
+
+    # Attempt 1 — Windows MessageBox via PowerShell
+    try:
+        import subprocess
+
+        safe_msg = message.replace("'", "").replace('"', "")
+        subprocess.run(
+            [
+                "powershell",
+                "-Command",
+                "[System.Reflection.Assembly]::LoadWithPartialName"
+                "('System.Windows.Forms') | Out-Null; "
+                f"[System.Windows.Forms.MessageBox]::Show('{safe_msg}', "
+                "'SuperLocalMemory')",
+            ],
+            check=False,
+            timeout=5,
+        )
+        return
+    except Exception:
+        pass
+
+    # Attempt 2 — Windows Application EventLog
+    try:
+        import subprocess
+
+        subprocess.run(
+            [
+                "eventcreate",
+                "/T", "INFORMATION",
+                "/ID", "1001",
+                "/L", "APPLICATION",
+                "/SO", "SuperLocalMemory",
+                "/D", message[:512],
+            ],
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        pass  # best-effort only
 
 
 def _learning_db_for_config(config) -> Path:
@@ -120,6 +242,29 @@ _FACT_ENTITY_REPAIR_MAX_RETRY_SECONDS = 30.0
 # an immediate durable/queryable receipt; explicit waiters get this small
 # completion window, then the M018 materializer continues in the background.
 _REMEMBER_ENRICHMENT_WAIT_SECONDS = 0.75
+
+# Enrichment runs off the event loop, but NOT on the loop's default executor.
+# `asyncio.to_thread` uses that default pool, so N simultaneous writers really did
+# create N threads — and every other handler that borrows the same pool queued
+# behind them. One shared, small pool bounds the cost of a burst: past its width
+# the extra callers miss their deadline and defer, which is the intended
+# degradation, instead of multiplying threads.
+_ENRICHMENT_WORKERS = 2
+_enrichment_pool: "concurrent.futures.ThreadPoolExecutor | None" = None
+_enrichment_pool_lock = threading.Lock()
+
+
+def _enrichment_executor():
+    """The one pool inline enrichment may use. Created on first need."""
+    global _enrichment_pool
+    if _enrichment_pool is None:
+        with _enrichment_pool_lock:
+            if _enrichment_pool is None:
+                _enrichment_pool = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=_ENRICHMENT_WORKERS,
+                    thread_name_prefix="slm-enrich",
+                )
+    return _enrichment_pool
 _SENSITIVE_READ_PREFIXES = (
     "/api/memories", "/api/facts", "/api/clusters", "/api/graph",
     "/api/v3/associations", "/api/v3/core-memory",
@@ -1592,6 +1737,7 @@ async def lifespan(application: FastAPI):
         _path_config = None
 
     try:
+        from superlocalmemory.storage.backup import InsufficientDiskSpaceError
         from superlocalmemory.storage.migration_runner import apply_all
         if _path_config is None:
             # Catastrophic early-load failure: still one root via Mode-A default
@@ -1602,13 +1748,56 @@ async def lifespan(application: FastAPI):
             _path_config = _SLMFallback.for_mode(_ModeFallback.A)
         _learning_db = _learning_db_for_config(_path_config)
         _memory_db = _memory_db_for_config(_path_config)
+        import time as _time_mod
+        _t0 = _time_mod.monotonic()
         _result = apply_all(_learning_db, _memory_db)
+        _elapsed = _time_mod.monotonic() - _t0
         _applied = _result.get("applied", [])
         _failed = _result.get("failed", [])
+        _backup_dir = _result.get("details", {}).get("_backup")
+        _backup_path = Path(_backup_dir) if _backup_dir else None
         if _applied:
             logger.info("migrations applied: %s", _applied)
+            _notify_migration_applied(_applied, _elapsed, _backup_path)
+            _notify_windows_user(
+                f"SuperLocalMemory: {len(_applied)} database migration(s) applied."
+            )
         if _failed:
             logger.warning("migrations failed (non-fatal): %s", _failed)
+            try:
+                _err_log = _write_migration_error_log(
+                    _failed, _backup_path,
+                    slm_home=_memory_db.parent if _memory_db else None,
+                    applied=_applied,
+                )
+                import sys as _sys
+                # "Data is safe" is only true when NOTHING was applied. Migrations
+                # are non-fatal and applied in order, so a later failure can leave
+                # earlier ones committed — a partially changed store. Saying the
+                # data is untouched then tells the user to ignore the one copy
+                # that still holds the original.
+                if _applied:
+                    _headline = (
+                        f"[SLM] Migration incomplete. YOUR DATABASE WAS PARTIALLY "
+                        f"CHANGED — {len(_applied)} step(s) applied, "
+                        f"{len(_failed)} failed. The pre-change copy is at "
+                        f"{_backup_path} — keep it until this is resolved."
+                    )
+                else:
+                    _headline = (
+                        f"[SLM] Migration failed before any change was made. Your "
+                        f"data is as it was; a copy is also at {_backup_path}."
+                    )
+                print(
+                    f"{_headline} See {_err_log}. Run: slm doctor",
+                    file=_sys.stderr,
+                    flush=True,
+                )
+                _notify_windows_user(
+                    f"SuperLocalMemory migration failed. Run slm doctor. Log: {_err_log}"
+                )
+            except Exception:
+                pass  # notification failures are non-fatal
         application.state.migration_result = _result
         # S9-SKEP-15: only commit the new `.last_version` AFTER migrations
         # complete with zero failures. A partial upgrade (schema didn't
@@ -1626,6 +1815,35 @@ async def lifespan(application: FastAPI):
                 _version_marker.write_text(_slm_version, encoding="utf-8")
             except OSError:
                 pass  # non-fatal
+    except InsufficientDiskSpaceError as _disk_exc:
+        # This is not a crash and it must not be reported as "non-fatal". The
+        # migration deliberately refused to start because there was not enough
+        # room to keep a recoverable copy first. The store is intact and
+        # unmigrated; the generic handler below would have logged a warning and
+        # left the daemon serving as though nothing had happened.
+        logger.error(
+            "MIGRATION NOT RUN — not enough free disk to keep a recoverable "
+            "copy first. Your data has NOT been modified. Need %s bytes, have "
+            "%s free. Free some space and restart; run `slm doctor` for details.",
+            f"{_disk_exc.needed_bytes:,}", f"{_disk_exc.free_bytes:,}",
+        )
+        try:
+            _log_path = _write_migration_error_log(
+                ["_insufficient_disk_space"], None,
+                slm_home=locals().get("_memory_db").parent if locals().get("_memory_db") else None,
+                applied=[],
+            )
+            logger.error("Details written to %s", _log_path)
+        except OSError:
+            pass
+        application.state.migration_result = {
+            "applied": [], "skipped": [], "failed": ["_insufficient_disk_space"],
+            "details": {
+                "_needed_bytes": _disk_exc.needed_bytes,
+                "_free_bytes": _disk_exc.free_bytes,
+                "_store_modified": False,
+            },
+        }
     except Exception as _exc:
         logger.warning("migration runner crashed (non-fatal): %s", _exc)
         application.state.migration_result = {
@@ -4183,10 +4401,63 @@ def _register_daemon_routes(application: FastAPI) -> None:
             )
             payload = dict(receipt.payload)
             fact_ids = list(payload.get("fact_ids") or [])
+
+            # The durable receipt is already committed above; nothing below can
+            # fail this write. What remains is the window in which the memory can
+            # only be found by quoting its own wording — a fact with no vector is
+            # invisible to the semantic channel, so the memory describing what is
+            # happening right now is the hardest one to find.
+            #
+            # Every entry point — command line, tool interface, dashboard —
+            # arrives here, so closing the window here closes it for all of them
+            # rather than for whichever door happened to be used.
+            #
+            # Strictly bounded, because this daemon serves many sessions at once:
+            # the work runs off the event loop, on one shared single-worker pool,
+            # and yields to any recall in flight. Past the deadline the caller
+            # gets exactly the previous behaviour and the background materializer
+            # finishes the job.
+            enrich_budget = (
+                _REMEMBER_ENRICHMENT_WAIT_SECONDS if wait
+                else min(0.5, _REMEMBER_ENRICHMENT_WAIT_SECONDS)
+            )
+            enriched = 0
+            try:
+                loop = asyncio.get_running_loop()
+                enriched = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        _enrichment_executor(),
+                        functools.partial(
+                            engine.enrich_new_facts_now,
+                            fact_ids, timeout_s=enrich_budget,
+                        ),
+                    ),
+                    timeout=enrich_budget + 0.25,
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                # Worth seeing. Sustained timeouts mean writes are coming back
+                # findable by wording only, which is a real degradation and was
+                # previously visible at debug level alone.
+                logger.warning(
+                    "inline enrichment exceeded its budget for %d fact(s) — "
+                    "deferred to the background pass", len(fact_ids),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "inline enrichment unavailable (%s: %s) — deferred to the "
+                    "background pass", type(exc).__name__, exc,
+                )
+
+            searchable = "meaning" if enriched == len(fact_ids) and fact_ids else "wording"
             return {
                 "ok": True,
                 "fact_ids": fact_ids,
                 "count": len(fact_ids),
+                # Storing a memory and being able to find it again are different
+                # things, and reporting only the first is how a caller ends up
+                # believing a memory is retrievable when it is not yet.
+                "searchable_by": searchable,
+                "enriched_now": enriched,
                 "operation_id": payload["operation_id"],
                 # One-release compatibility alias. The durable operation ID is
                 # opaque and replaces the integer pending.db row identifier.
@@ -4194,8 +4465,17 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 "status": "queryable",
                 "materialization_state": payload["materialization_state"],
                 "commit_sequence": payload.get("commit_sequence"),
-                "note": "queryable now; canonical enrichment continues in the background",
-                "wait_ignored": bool(wait),
+                "note": (
+                    "stored and searchable by meaning"
+                    if searchable == "meaning"
+                    else "stored and searchable by wording; "
+                         "searchable by meaning shortly"
+                ),
+                # Retained for callers that already read it. It used to be
+                # unconditionally true, because `wait` bought nothing. It now
+                # buys a larger best-effort enrichment budget — still never a
+                # guarantee, and still never a block on durability.
+                "wait_ignored": False if wait else True,
             }
         except Exception as exc:
             from superlocalmemory.core.remember_admission import AdmissionRejected

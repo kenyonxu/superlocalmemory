@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from superlocalmemory.storage.embedding_codec import decode_embedding
+
 if TYPE_CHECKING:
     from superlocalmemory.storage.database import DatabaseManager
     from superlocalmemory.storage.models import AtomicFact
@@ -251,7 +253,9 @@ class SheafConsistencyChecker:
         if raw is None or raw == "":
             return None
         try:
-            data = json.loads(raw) if isinstance(raw, str) else raw
-            return np.asarray(data, dtype=np.float64)
-        except (json.JSONDecodeError, TypeError, ValueError):
+            data = decode_embedding(raw, fact_id=str(fact_id))
+        except ValueError:
             return None
+        if data is None:
+            return None
+        return np.asarray(data, dtype=np.float64)

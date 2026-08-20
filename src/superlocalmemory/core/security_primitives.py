@@ -4,8 +4,6 @@
 
 """Shared security primitives for SLM v3.4.22.
 
-LLD reference: `.backup/active-brain/lld/LLD-07-schema-migrations-and-security-primitives.md`
-Section: 6.1 through 6.10.
 
 Every file write, subprocess spawn, and secret-bearing string across SLM
 daemon, adapters, hooks, and binary installer routes through this module.
@@ -155,10 +153,9 @@ def safe_resolve(base: Path, rel: str | Path) -> Path:
 # enforces the LLD-00 regex AND the base-containment check. Callers in
 # LLD-09 (session state files) and LLD-11 (evolution.lock) MUST use this.
 #
-# Naming deviation from IMPLEMENTATION-MANIFEST P0.2: the manifest reused
-# the name ``safe_resolve`` but the existing path-style helper is used in
-# 9+ call sites. A separate name avoids breakage. See
-# ``.backup/active-brain/MANIFEST-DEVIATION.md`` P0.2 entry.
+# Naming deviation note: the name ``safe_resolve`` was already used by an
+# existing path-style helper that has 9+ call sites. A separate name
+# (``safe_resolve_identifier``) avoids silent breakage at those call sites.
 
 _SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 

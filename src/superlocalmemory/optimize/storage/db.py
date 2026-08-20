@@ -959,7 +959,7 @@ class CacheDB:
     def ccr_delete(self, ccr_id: str, *, tenant_id: str = "default") -> None:
         """Delete a CCR row by ccr_id scoped to tenant. Idempotent — warns on sqlite error, never raises.
 
-        WP-10 D6: defensive infra + sweep parity. Deleting a non-existent row is a no-op.
+        Defensive delete — idempotent: deleting a non-existent row is a no-op.
         H-02: tenant_id guard prevents a tenant from deleting another tenant's CCR.
         """
         try:
@@ -973,7 +973,7 @@ class CacheDB:
     def ccr_count(self) -> int:
         """Return UNFILTERED count of rows in llmcache_ccr_originals.
 
-        WP-10 CRIT-2: Do NOT reuse TTL-filtered count at :646. A fresh no-expiry row
+        Do NOT reuse TTL-filtered count from the query above. A fresh no-expiry row
         has ttl_expires=None, so the TTL filter returns 0 and D6 orphan tests would
         falsely pass. This unfiltered count is test infrastructure only.
         """

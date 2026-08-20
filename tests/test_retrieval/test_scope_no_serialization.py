@@ -43,6 +43,13 @@ class _FlagRecordingChannel:
     Implements only what RetrievalEngine._run_channels requires: a
     ``search`` method whose first positional arg is the query/embedding and
     that returns a list[tuple[str, float]].
+
+    Accepts and ignores any other keyword the engine passes. Channel errors are
+    caught and logged rather than raised, so a stub that rejects a newly added
+    keyword does not fail loudly — the channel just silently returns nothing,
+    which reads as "this channel found no matches" rather than "this channel
+    never ran". That is exactly how this stub behaved when the engine began
+    passing the query type through.
     """
 
     def __init__(self, name: str) -> None:
@@ -58,6 +65,7 @@ class _FlagRecordingChannel:
         top_k: int = 10,
         include_global: bool | None = None,
         include_shared: bool | None = None,
+        **kwargs: Any,
     ) -> list[tuple[str, float]]:
         # Resolve using the same fallback contract as the real channels.
         if include_global is None:

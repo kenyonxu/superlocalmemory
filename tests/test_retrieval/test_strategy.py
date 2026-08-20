@@ -214,5 +214,5 @@ class TestStrategyPresets:
                 assert "bm25" in preset
 
     def test_preset_names(self) -> None:
-        expected = {"temporal", "multi_hop", "aggregation", "opinion", "factual", "entity", "general", "vague"}
+        expected = {"temporal", "multi_hop", "aggregation", "opinion", "factual", "entity", "general", "vague", "recency"}
         assert set(STRATEGY_PRESETS.keys()) == expected

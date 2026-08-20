@@ -20,6 +20,7 @@ import concurrent.futures
 import functools
 import logging
 import math
+import os
 import re
 import threading
 import time
@@ -251,6 +252,7 @@ class RetrievalEngine:
         total = sum(len(v) for v in ch_results.values())
 
         # 3. Single-pass RRF fusion
+        ch_results = self._semantic_rank_for_unenriched(ch_results)
         fused = weighted_rrf(ch_results, strat.weights, k=self._config.rrf_k)
         _em("rrf_fusion")
 
@@ -408,7 +410,35 @@ class RetrievalEngine:
         if strat.query_type == "aggregation" and facts:
             top = self._enforce_session_diversity(top, facts, min_sessions=3, top_k=20)
 
-        # 5. Cross-encoder rerank (optional)
+        # v3.6.6: Evidence floor — gate on per-channel scores (NOT fused/RRF score).
+        # Nonsense queries fuse at 0.75-0.78 because RRF is rank-derived and
+        # uncalibrated. The discriminator is EARNED CHANNEL EVIDENCE:
+        #   semantic >= min_semantic_evidence (0.60) OR bm25 > 0
+        #   OR entity_graph > 0 OR temporal > 0 OR fact is pinned.
+        # spreading_activation and hopfield do NOT count — they are associative
+        # amplifiers that fabricated the nonsense results in calibration tests.
+        # Kill-switch: SLM_RECALL_NO_FLOOR=1 bypasses the floor.
+        # Runs BEFORE the cross-encoder so the CE batch contains only
+        # evidence-qualified candidates. The floor gates on channel_scores
+        # (semantic, bm25, entity_graph, temporal) which are assigned during
+        # channel execution and are not affected by CE reranking. Moving the
+        # floor here does not change which queries abstain; it reduces the CE
+        # batch from ~180 candidates to the qualified subset (~30–60).
+        import os as _os_floor
+        floor_enabled = (
+            getattr(self._config, "evidence_floor_enabled", True)
+            and _os_floor.environ.get("SLM_RECALL_NO_FLOOR", "0") != "1"
+        )
+        if floor_enabled:
+            min_sem = getattr(self._config, "min_semantic_evidence", 0.60)
+            # Qualify the rerank pool BEFORE applying the caller's limit.  RRF
+            # can rank associative-only hits above an exact BM25 match; slicing
+            # first allowed those hits to occupy every output slot and then be
+            # removed by the floor, producing a false abstention even though a
+            # qualified candidate was immediately below the slice.
+            top = self._apply_evidence_floor(top, facts, min_sem)
+
+        # 5. Cross-encoder rerank (optional, on the evidence-qualified pool)
         # Bug 4 fix: reduced alpha for multi-hop/temporal to preserve diversity
         # V3.3.21: Skip reranker if worker isn't ready yet (cold start).
         # Returns results without CE reranking (~5-10pp lower quality) but instant
@@ -430,28 +460,6 @@ class RetrievalEngine:
         elif reranker_ready:
             reranker_status = "no_candidates"
         _em(f"rerank(ready={reranker_ready})")
-
-        # v3.6.6: Evidence floor — gate on per-channel scores (NOT fused/RRF score).
-        # Nonsense queries fuse at 0.75-0.78 because RRF is rank-derived and
-        # uncalibrated. The discriminator is EARNED CHANNEL EVIDENCE:
-        #   semantic >= min_semantic_evidence (0.60) OR bm25 > 0
-        #   OR entity_graph > 0 OR temporal > 0 OR fact is pinned.
-        # spreading_activation and hopfield do NOT count — they are associative
-        # amplifiers that fabricated the nonsense results in calibration tests.
-        # Kill-switch: SLM_RECALL_NO_FLOOR=1 bypasses the floor.
-        import os as _os_floor
-        floor_enabled = (
-            getattr(self._config, "evidence_floor_enabled", True)
-            and _os_floor.environ.get("SLM_RECALL_NO_FLOOR", "0") != "1"
-        )
-        if floor_enabled:
-            min_sem = getattr(self._config, "min_semantic_evidence", 0.60)
-            # Qualify the rerank pool BEFORE applying the caller's limit.  RRF
-            # can rank associative-only hits above an exact BM25 match; slicing
-            # first allowed those hits to occupy every output slot and then be
-            # removed by the floor, producing a false abstention even though a
-            # qualified candidate was immediately below the slice.
-            top = self._apply_evidence_floor(top, facts, min_sem)
 
         # V3.4.11: Channel diversity — guarantee entity_graph results appear in
         # the final output. Applied AFTER reranking and evidence qualification
@@ -799,6 +807,94 @@ class RetrievalEngine:
         self._query_embedding_cache[query] = emb
         return emb
 
+    def _semantic_rank_for_unenriched(
+        self, ch_results: dict[str, list[tuple[str, float]]],
+    ) -> dict[str, list[tuple[str, float]]]:
+        """Give a candidate whose vector does not exist yet a fair semantic rank.
+
+        Fusion here is rank-based, so a fact the semantic channel did not return
+        forfeits that channel's entire contribution — the most heavily weighted
+        one. When the reason for that absence is simply that the vector has not
+        been computed yet, the absence describes the ingest pipeline and says
+        nothing about the fact. Left alone, a memory written seconds ago is the
+        hardest thing in the store to find, which is the worst possible failure
+        for this product.
+
+        Such candidates are placed at the MEDIAN of the semantic ranking, never
+        near the top: enough to compete on their other evidence, not enough to
+        win on freshness alone. A candidate that HAS a vector and still was not
+        returned is left exactly as it is — that absence is real evidence of
+        irrelevance, and the two must not be confused.
+
+        Returns a new mapping; the input is not modified.
+        """
+        sem = ch_results.get("semantic") or []
+        if not sem:
+            return ch_results
+        if not getattr(self._config, "write_recency_floor_enabled", True):
+            return ch_results
+        if os.environ.get("SLM_WRITE_RECENCY_NO_FLOOR", "0") == "1":
+            return ch_results
+
+        have = {fid for fid, _ in sem}
+        elsewhere = {
+            fid
+            for name, rows in ch_results.items()
+            if name != "semantic"
+            for fid, _ in rows
+        }
+        candidates = sorted(elsewhere - have)
+        if not candidates:
+            return ch_results
+
+        from datetime import UTC, datetime, timedelta
+
+        minutes = float(getattr(self._config, "write_recency_floor_minutes", 60.0))
+        cutoff = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
+        placeholders = ",".join("?" for _ in candidates)
+        try:
+            # A missing embedding_metadata row means no vector projection exists,
+            # which is what makes the semantic channel's silence uninformative.
+            unenriched = [
+                dict(r)["fact_id"]
+                for r in self._db.execute(
+                    f"SELECT af.fact_id FROM atomic_facts AS af "
+                    f"LEFT JOIN embedding_metadata AS em ON em.fact_id = af.fact_id "
+                    f"WHERE af.fact_id IN ({placeholders}) "
+                    f"  AND em.fact_id IS NULL "
+                    f"  AND af.created_at >= ?",
+                    (*candidates, cutoff),
+                )
+            ]
+        except (NameError, AttributeError, TypeError):
+            # These mean this code is wrong, not that the data is unusual. A bare
+            # `except Exception` here hid a missing import and left the whole
+            # feature silently inert while every test still passed.
+            raise
+        except Exception as exc:
+            # A store without this table, or a locked database: ranking must still
+            # return. Logged at warning, because "silently did nothing" is the
+            # failure mode this task exists to fix.
+            logger.warning("recent-unenriched admission skipped: %s: %s",
+                           type(exc).__name__, exc)
+            return ch_results
+        if not unenriched:
+            return ch_results
+
+        scores = sorted(s for _, s in sem)
+        mid = len(scores) // 2
+        median = (
+            scores[mid] if len(scores) % 2 == 1
+            else (scores[mid - 1] + scores[mid]) / 2.0
+        )
+        insert_at = len(sem) // 2
+        merged = list(sem[:insert_at]) + [(fid, median) for fid in unenriched] + list(sem[insert_at:])
+        logger.debug(
+            "admitted %d recent un-enriched candidate(s) at semantic rank %d of %d",
+            len(unenriched), insert_at + 1, len(merged),
+        )
+        return {**ch_results, "semantic": merged}
+
     def _run_channels(
         self,
         query: str,
@@ -894,6 +990,7 @@ class RetrievalEngine:
                 functools.partial(
                     self._temporal.search,
                     include_global=include_global, include_shared=include_shared,
+                    query_type=strat.query_type,
                 ),
                 query, profile_id, self._config.bm25_top_k,
             )
@@ -936,6 +1033,7 @@ class RetrievalEngine:
                     "Channel %s exceeded %.1fs latency budget",
                     name, channel_timeout_seconds,
                 )
+                fut.cancel()  # no-op if already running; prevents queued jobs from starting
                 continue
             try:
                 ch_name, result = fut.result()
@@ -1188,10 +1286,12 @@ class RetrievalEngine:
             #   0d, 0acc → 1.10×   45d, 0acc → 0.91×   90d, 0acc → 0.84×
             #   45d, 5acc → 0.95×  90d, 10acc → 0.90×  (frequently used memories stay relevant)
             age_days = 0.0
+            age_known = False
             if fact.created_at:
                 try:
                     created = datetime.fromisoformat(fact.created_at.replace("Z", "+00:00"))
                     age_days = max(0.0, (now - created).total_seconds() / 86400.0)
+                    age_known = True
                 except (ValueError, TypeError):
                     pass
             _access = max(0, getattr(fact, "access_count", 0) or 0)
@@ -1213,6 +1313,38 @@ class RetrievalEngine:
             trust_weight, raw_trust = self._get_trust_weight(fact, profile_id)
 
             boosted_score = fr.fused_score * recency_boost * quality * trust_weight
+
+            # Query-type-conditioned recency amplifier.
+            # Applied only to "recency" and "temporal" queries; factual, entity,
+            # and all other types receive a factor of exactly 1.0 (no change).
+            # The amplitude scalar is read from RetrievalConfig so it can be tuned
+            # or zeroed at runtime.  strength=0.0 is a strict no-op — the if-guard
+            # ensures the previous ranking is reproduced byte-for-byte.
+            #
+            # recency  — 7-day half-life, 1.5× maximum (present-activity queries)
+            # temporal — 30-day half-life, 1.2× maximum (past-event queries)
+            #
+            # Hook for the follow-on embedding-lag adjustment (task 2.6): that
+            # adjustment also multiplies boosted_score and belongs immediately after
+            # this block, conditioned on channel_scores["semantic"] == 0.0 AND
+            # age_days < 1.0. Add it as an independent if-block here so the two
+            # factors compose cleanly without restructuring what is above or below.
+            _prior_strength = getattr(self._config, "recency_prior_strength", 0.5)
+            # age_known matters here: the fallback above leaves age_days at 0.0
+            # when a fact carries no usable timestamp, which reads as "written
+            # moments ago" and would hand an undated fact the largest possible
+            # boost for being new. Not knowing when something was written is not
+            # evidence that it is fresh.
+            if (_prior_strength > 0.0 and age_known
+                    and strat.query_type in ("recency", "temporal")):
+                _half_life = 7.0 if strat.query_type == "recency" else 30.0
+                _max_amp = 1.5 if strat.query_type == "recency" else 1.2
+                _cond_boost = 1.0 + _prior_strength * math.exp(
+                    -(math.log(2) / _half_life) * age_days
+                )
+                _cond_boost = min(_cond_boost, _max_amp)
+                boosted_score = boosted_score * _cond_boost
+
             # v3.5.0 (M2): soft-normalize to [0,1]. RRF weights + scene/entity
             # boosts push raw scores well above 1 (observed: 27.97). A sigmoid
             # preserves rank (monotonic) while giving users a readable 0-1 range.

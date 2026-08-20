@@ -1,4 +1,4 @@
-"""Wave 7 acceptance gates — documentation must not outrun implementation.
+"""Documentation audit gates — documentation must not outrun implementation.
 Authored by the release coordinator, NOT by implementers.
 
 OWNER CONTEXT (verbatim): "the main thing about this V4 version is product GDPR
@@ -17,7 +17,7 @@ WHAT IS ALREADY RIGHT (measured before writing this — must not regress):
                   policy, and audit features that CAN SUPPORT a compliance
                   program"
   README.md:605  "ships built-in controls that SUPPORT GDPR compliance programs"
-Those are the correct register — capability, not certification. Wave 3 removed
+Those are the correct register — capability, not certification. v3.4 removed
 "EU AI Act compliant" from the MCP Mode descriptions for the same reason, and
 tests/test_mcp/test_f02_mode_no_compliance_claims.py guards that. This file
 extends that discipline to the docs.
@@ -201,7 +201,7 @@ class TestDocumentedCommandsExist:
 # ─────────────────────────────────────────────────────────────────────────────
 class TestComplianceGuardsStillActive:
     def test_mode_descriptions_still_free_of_compliance_claims(self) -> None:
-        """Wave 3 removed "EU AI Act compliant" from MCP Mode descriptions."""
+        """v3.4 removed "EU AI Act compliant" from MCP Mode descriptions."""
         tools = (_SRC / "mcp" / "tools_v3.py").read_text(encoding="utf-8")
         assert "EU AI Act" not in tools, (
             "an EU AI Act claim reappeared in the MCP Mode descriptions. Wave 3 "

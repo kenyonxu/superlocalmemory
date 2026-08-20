@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later — see LICENSE file
-"""WP-05 lint test — verifies plugin-src agents + rules frontmatter + allowlists.
+"""Lint test — verifies plugin-src agents + rules frontmatter + allowlists.
 
 Tests are parametrized over agent + rules md files. plugin-src/commands/ was
 removed in v3.6.18 (superseded by the skills system). Uses stdlib + PyYAML only.

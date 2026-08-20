@@ -207,7 +207,7 @@ class TestRecallEdgeCases:
             result = asyncio.run(recall(""))
 
         assert result["success"] is True
-        # WP-02 D9: default limit is now CANONICAL_RECALL_LIMIT (20)
+        # default limit is now CANONICAL_RECALL_LIMIT (20)
         from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
         pool.recall.assert_called_once_with(
             "", limit=CANONICAL_RECALL_LIMIT, session_id="mcp:mcp_client", fast=None,

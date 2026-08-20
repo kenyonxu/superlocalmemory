@@ -14,7 +14,7 @@ Do NOT import FastMCP, MemoryEngine, or any heavy dependency here.
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# v3.6.14 WP-01: Named profile definitions
+# Named profile definitions (introduced in v3.6.14)
 # ---------------------------------------------------------------------------
 
 _PROFILE_CORE: frozenset[str] = frozenset({  # 17

@@ -15,6 +15,8 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import json
+
+from superlocalmemory.storage.embedding_codec import decode_embedding
 import logging
 from datetime import UTC, datetime
 
@@ -357,8 +359,12 @@ class SceneBuilder:
             embedding = None
             if raw_embedding:
                 try:
-                    embedding = json.loads(raw_embedding)
-                except (TypeError, ValueError, json.JSONDecodeError):
+                    embedding = decode_embedding(
+                        raw_embedding, fact_id=str(data.get("scene_id", "<scene>")),
+                    )
+                except ValueError:
+                    # A malformed stored value, not an absent one. Scenes are an
+                    # optimisation, so one bad row must not sink the batch.
                     embedding = None
             result[str(data["scene_id"])] = embedding
         return result

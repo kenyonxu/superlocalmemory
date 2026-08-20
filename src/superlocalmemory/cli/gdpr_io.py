@@ -73,7 +73,7 @@ def _audit_chain_path() -> Path:
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Known gaps in this release — reported honestly so a DPO can plan remediation.
-# Gaps C1 and C2 are tracked as open items in the Wave 3 backlog.
+# Gaps C1 and C2 (cross-device erase verification and audit-log replay) remain open.
 KNOWN_GAPS = [
     {
         "ref": "C1",

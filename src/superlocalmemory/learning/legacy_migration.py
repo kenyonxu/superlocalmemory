@@ -4,8 +4,6 @@
 
 """Legacy ``learning_feedback`` row migration — data movement only.
 
-LLD reference: ``.backup/active-brain/lld/LLD-07-schema-migrations-and-security-primitives.md``
-Section 5 (Legacy learning_feedback Migration).
 
 Hard rule H15 (LLD-06 §10): this module MUST NOT contain any schema
 DDL. All schema definitions live in

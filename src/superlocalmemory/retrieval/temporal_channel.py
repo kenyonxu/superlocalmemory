@@ -81,6 +81,7 @@ class TemporalChannel:
         top_k: int = 30,
         include_global: bool | None = None,
         include_shared: bool | None = None,
+        query_type: str = "general",
     ) -> list[tuple[str, float]]:
         """Search for temporally relevant facts.
 
@@ -117,11 +118,41 @@ class TemporalChannel:
         )
 
         # Strategy 2: Date proximity search
-        if query_dt is None and not entity_results:
-            return []
+        if query_dt is None:
+            recent: list[tuple[str, float]] = []
+            # For a question that IS about the present ("what am I working on"),
+            # recency is the answer, and it runs regardless of what else matched.
+            # It used to sit inside a guard that also required the entity search
+            # to be empty — inherited from the case where there is simply nothing
+            # to do — so on a real store, where something almost always matches,
+            # it effectively never ran.
+            #
+            # For a merely time-FLAVOURED question ("what is the latest
+            # authentication design"), recency is a last resort, not the answer:
+            # this channel returns up to 50 newest facts with no regard for topic,
+            # and at temporal's weight of 2.0 that buries the very subject the
+            # user named. So there it runs only when nothing else matched at all.
+            if query_type == "recency" or (
+                query_type == "temporal" and not entity_results
+            ):
+                recent = self._recency_fallback(
+                    profile_id,
+                    include_global=include_global,
+                    include_shared=include_shared,
+                )
+            if not entity_results:
+                return recent
+            if recent:
+                # Both signals are real: an entity the question named, and the
+                # fact that the question is about now. Recency leads because
+                # that is what this channel was asked about; entity matches
+                # follow, and anything already present keeps its better place.
+                seen = {fid for fid, _ in recent}
+                return recent + [(f, s) for f, s in entity_results if f not in seen]
 
         events = self._load_events(
             profile_id, include_global=include_global, include_shared=include_shared,
+            near_date=query_dt.date().isoformat() if query_dt is not None else None,
         )
         scored: dict[str, float] = {}
 
@@ -227,7 +258,16 @@ class TemporalChannel:
         profile_id: str,
         include_global: bool | None = None,
         include_shared: bool | None = None,
+        near_date: str | None = None,
     ) -> list[dict]:
+        """Load a bounded slice of temporal events.
+
+        ``near_date`` decides WHICH slice. Without it the newest events are
+        taken, which suits "what is recent". With it the events closest to that
+        date are taken, which is the only slice that can answer a question about
+        a particular time — the newest-first bound silently excluded anything
+        old, so a question about last year returned nothing rather than slowly.
+        """
         if include_global is None:
             include_global = bool(getattr(self, "include_global", False))
         if include_shared is None:
@@ -238,15 +278,98 @@ class TemporalChannel:
             include_shared=include_shared,
             prefix="af",
         )
-        rows = self._db.execute(
-            "SELECT te.fact_id, te.observation_date, te.referenced_date, "
-            "te.interval_start, te.interval_end "
-            "FROM temporal_events AS te "
-            "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
-            f"WHERE {where}",
-            (*params,),
-        )
+        # The bound has to match what the caller is looking for. Taking the
+        # newest 5,000 rows is right when the question is "what is recent", and
+        # wrong when it is "what happened in March 2024" — those events carry old
+        # rowids and were simply never loaded, so the answer was missing rather
+        # than slow. When a target date is known, bound by proximity to THAT date
+        # instead; the scan stays bounded either way.
+        if near_date is not None:
+            rows = self._db.execute(
+                "SELECT te.fact_id, te.observation_date, te.referenced_date, "
+                "te.interval_start, te.interval_end, af.created_at "
+                "FROM temporal_events AS te "
+                "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
+                f"WHERE {where} "
+                "  AND (te.referenced_date IS NOT NULL "
+                "       OR te.observation_date IS NOT NULL) "
+                "ORDER BY ABS(julianday(COALESCE(te.referenced_date, "
+                "                               te.observation_date)) "
+                "             - julianday(?)) ASC "
+                "LIMIT 5000",
+                (*params, near_date),
+            )
+        else:
+            rows = self._db.execute(
+                "SELECT te.fact_id, te.observation_date, te.referenced_date, "
+                "te.interval_start, te.interval_end, af.created_at "
+                "FROM temporal_events AS te "
+                "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
+                f"WHERE {where} "
+                "ORDER BY te.rowid DESC LIMIT 5000",
+                (*params,),
+            )
         return [dict(r) for r in rows]
+
+    def _recency_fallback(
+        self,
+        profile_id: str,
+        include_global: bool | None,
+        include_shared: bool | None,
+    ) -> list[tuple[str, float]]:
+        """Return recently created facts with Gaussian age-decay scoring.
+
+        Called when the query carries no date and the caller has said the
+        question is about the present. It deliberately does not depend on the
+        entity search being empty — requiring that made this unreachable on any
+        store where something matches, which is most of them.
+
+        One entry per fact. Facts scored here compete in fusion against semantic
+        and BM25 results, and fusion ranks facts, so repeating a fact spends
+        ranks without adding candidates.
+
+        Scoring: Gaussian with sigma=7 days. Facts older than 90 days score
+        below 0.01 and are excluded. Returns at most 50 (fact_id, score) pairs,
+        ordered highest-score first.
+        """
+        _SIGMA = 7.0          # days — tighter than _proximity_score's 30d
+        _MAX_AGE_DAYS = 90.0  # cut-off: exp(-(90^2)/(2*7^2)) ≈ 0.0
+        now_dt = datetime.now(tz=timezone.utc)
+
+        events = self._load_events(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+        )
+        # Keyed by fact, not by event. A fact carries one row per temporal event
+        # it participates in, so appending per event made a fact with six events
+        # occupy six of the fifty slots. Measured on a real store: fifty entries
+        # covering EIGHT distinct facts. Fusion ranks facts, so the channel
+        # looked full while offering almost nothing, and genuinely recent facts
+        # were crowded out by copies of each other.
+        best: dict[str, float] = {}
+        for ev in events:
+            fid = ev.get("fact_id")
+            if not fid:
+                continue
+            created = _parse_iso(ev.get("created_at"))
+            if created is None:
+                continue
+            utc_created = _as_utc(created)
+            if utc_created is None:
+                continue
+            age_days = max(
+                0.0,
+                (now_dt - utc_created).total_seconds() / 86400.0,
+            )
+            if age_days > _MAX_AGE_DAYS:
+                continue
+            score = math.exp(-(age_days ** 2) / (2.0 * _SIGMA * _SIGMA))
+            if score > 0.01 and score > best.get(fid, 0.0):
+                best[fid] = score
+
+        out = sorted(best.items(), key=lambda kv: kv[1], reverse=True)
+        return out[:50]
 
     @staticmethod
     def _try_parse(text: str) -> datetime | None:

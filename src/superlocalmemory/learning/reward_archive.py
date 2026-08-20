@@ -34,6 +34,7 @@ from pathlib import Path
 from superlocalmemory.learning.fact_outcome_joins import (
     has_recent_positive_reward,
 )
+from superlocalmemory.storage.embedding_codec import decode_embedding
 from superlocalmemory.storage.write_lock import get_write_lock
 
 logger = logging.getLogger(__name__)
@@ -113,13 +114,17 @@ def run_reward_gated_archive(
                 window_days=REWARD_WINDOW_DAYS,
             ):
                 continue
+            # Decode the embedding to list[float] so json.dumps(payload)
+            # succeeds regardless of whether the row is TEXT or BLOB.
+            # ValueError (corrupt buffer) propagates — a silent None here
+            # would archive a fact with a missing embedding, which loses data.
             to_archive.append({
                 "fid": fid,
                 "content": row["content"],
                 "canonical_entities_json": row["canonical_entities_json"],
                 "importance": row["importance"],
                 "confidence": row["confidence"],
-                "embedding": row["embedding"],
+                "embedding": decode_embedding(row["embedding"], fact_id=fid),
                 "created_at": row["created_at"],
             })
     finally:

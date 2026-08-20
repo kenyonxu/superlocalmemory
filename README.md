@@ -386,8 +386,8 @@ Full docs: [docs/multi-machine.md](docs/multi-machine.md) · [docs/distributed-d
 | **Python CLI + SDK** (primary) | Activate a Python virtual environment, then `python -m pip install superlocalmemory` | Python 3.11+; the `slm` CLI and importable SDK stay inside that environment |
 | **Repository clone — macOS/Linux** | `./scripts/install.sh install` | Research/contributor path; delegates to an existing uv or pipx installation |
 | **Repository clone — Windows** | `.\scripts\install.ps1 -Action Install` | Research/contributor path; delegates to an existing uv or pipx installation |
-| **Claude Code Plugin** (WP-06) | `/plugin marketplace add qualixar/superlocalmemory` then `/plugin install superlocalmemory@qualixar` | Self-bootstraps venv, isolated SLM_DATA_DIR, additive — 16-tool core. Ships the skills/agents/hooks/commands |
-| **Portable / IDE connect** (WP-08) | `slm connect <ide> [--here]` | Wire any IDE without reinstalling; `slm connect claude-code` → plugin pointer |
+| **Claude Code Plugin** | `/plugin marketplace add qualixar/superlocalmemory` then `/plugin install superlocalmemory@qualixar` | Self-bootstraps venv, isolated SLM_DATA_DIR, additive — 16-tool core. Ships the skills/agents/hooks/commands |
+| **Portable / IDE connect** | `slm connect <ide> [--here]` | Wire any IDE without reinstalling; `slm connect claude-code` → plugin pointer |
 
 After any install path: `slm setup` → `slm doctor` → `slm warmup` (optional, pre-downloads ~500MB embedding model).
 
@@ -433,7 +433,7 @@ Or: `claude mcp add --transport http superlocalmemory http://127.0.0.1:8765/mcp/
 { "mcpServers": { "superlocalmemory": { "command": "slm", "args": ["mcp"] } } }
 ```
 
-### MCP Profiles (WP-01)
+### MCP Profiles
 
 Control tool surface via `SLM_MCP_PROFILE`:
 

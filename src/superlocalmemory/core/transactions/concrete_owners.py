@@ -15,6 +15,7 @@ from superlocalmemory.core.transactions.owners import (
     OwnerResult,
 )
 from superlocalmemory.core.transactions.service import MemoryTransactionService
+from superlocalmemory.storage.embedding_codec import decode_embedding
 
 REQUIRED_ADMISSION_OWNERS: tuple[str, ...] = ("bm25", "temporal", "vector")
 
@@ -438,10 +439,16 @@ class VectorOwner(_FactScopedOwner):
         for row in rows:
             record = dict(row)
             fid = record.get("fact_id")
-            embedding = record.get("embedding")
-            if fid is None or not embedding:
+            raw_embedding = record.get("embedding")
+            if fid is None or not raw_embedding:
                 continue
-            result[fid] = _fingerprint("vector", str(embedding))
+            # Decode so TEXT and BLOB rows produce the same fingerprint for the
+            # same embedding values.  A ValueError here (corrupt buffer) must
+            # propagate — a bad fingerprint is worse than no fingerprint.
+            decoded = decode_embedding(raw_embedding, fact_id=fid)
+            if decoded is None:
+                continue
+            result[fid] = _fingerprint("vector", str(decoded))
         return result
 
     def _table_present(
@@ -496,11 +503,11 @@ class VectorOwner(_FactScopedOwner):
         raw = dict(rows[0]).get("embedding")
         if not raw:
             return False
-        try:
-            embedding = json.loads(raw)
-        except (TypeError, json.JSONDecodeError):
-            return False
-        if not isinstance(embedding, list) or not embedding:
+        # decode_embedding accepts both TEXT (JSON) and BLOB (float32 binary);
+        # ValueError for corrupt data propagates — a heal that silently
+        # returns False on corruption is indistinguishable from "not present".
+        embedding = decode_embedding(raw, fact_id=fact_id)
+        if not embedding:
             return False
         ok = self._vector_store.upsert(
             fact_id=fact_id, profile_id=context.profile_id, embedding=embedding,

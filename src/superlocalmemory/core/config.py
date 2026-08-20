@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Canonical limits (WP-02 — single source of truth across all surfaces)
+# Canonical limits — single source of truth across all surfaces
 # ---------------------------------------------------------------------------
 
 #: Default number of results returned by recall across MCP, CLI, daemon, and
@@ -387,6 +387,21 @@ class RetrievalConfig:
     # fail-open — never a per-query LLM call. Kill-switch for tuning.
     enable_community_context: bool = True
 
+    # Recency query strategy.
+    # When False, queries matching present-activity phrases fall through to
+    # factual routing — one-line rollback without touching strategy.py.
+    enable_recency_strategy: bool = True
+    # Strength of the recency prior applied during final-score fusion.
+    # 0.0 = no recency bias (restores previous ranking exactly).
+    # Consumed by a separate ranking stage; this field makes the knob
+    # configurable without further edits to this class.
+    recency_prior_strength: float = 0.5
+    # A fact written moments ago has no embedding yet, so it scores zero on the
+    # semantic channel — the same score a genuinely unrelated fact gets. Inside
+    # this window that zero is read as "not computed yet", not as "unrelated".
+    write_recency_floor_enabled: bool = True
+    write_recency_floor_minutes: float = 60.0
+
 
 # ---------------------------------------------------------------------------
 # Math Config
@@ -564,7 +579,7 @@ class HopfieldConfig:
     max_iterations: int = 1
     convergence_epsilon: float = 1e-6
     prefilter_threshold: int = 10_000
-    prefilter_candidates: int = 1000
+    prefilter_candidates: int = 150
     skip_threshold: int = 100_000
     cache_ttl_seconds: float = 60.0
 
@@ -1727,7 +1742,7 @@ class SLMConfig:
         embedding_dimension: int = 0,
     ) -> SLMConfig:
         """Create config with mode-appropriate defaults."""
-        # WP-07: resolve base dir via slm_home() at call time when not explicit.
+        # resolve base dir via slm_home() at call time when base_dir is not explicit.
         if base_dir is None:
             try:
                 from superlocalmemory.cli._lazy_init import slm_home as _slm_home
@@ -1895,7 +1910,7 @@ class SLMConfig:
 
         Returns ``\"b\"`` (the default) if the file doesn't exist.
         """
-        # WP-07: resolve via slm_home() at call time when base_dir not explicit.
+        # resolve via slm_home() at call time when base_dir is not explicit.
         if base_dir is None:
             try:
                 from superlocalmemory.cli._lazy_init import slm_home as _slm_home
@@ -1913,7 +1928,7 @@ class SLMConfig:
     @staticmethod
     def write_current_mode(mode: str, base_dir: Path | None = None) -> None:
         """Write the current mode letter to ``current_mode``."""
-        # WP-07: resolve via slm_home() at call time when base_dir not explicit.
+        # resolve via slm_home() at call time when base_dir is not explicit.
         if base_dir is None:
             try:
                 from superlocalmemory.cli._lazy_init import slm_home as _slm_home
@@ -1956,7 +1971,7 @@ class SLMConfig:
         import dataclasses
 
         from superlocalmemory.storage.models import Mode as _M
-        # WP-07: resolve via slm_home() at call time when base_dir not explicit.
+        # resolve via slm_home() at call time when base_dir is not explicit.
         if base_dir is None:
             try:
                 from superlocalmemory.cli._lazy_init import slm_home as _slm_home
@@ -2031,7 +2046,7 @@ class SLMConfig:
         Called on daemon boot. Idempotent — if ``current_mode`` already
         exists, this is a no-op. Returns True if migration was performed.
         """
-        # WP-07: resolve via slm_home() at call time when base_dir not explicit.
+        # resolve via slm_home() at call time when base_dir is not explicit.
         if base_dir is None:
             try:
                 from superlocalmemory.cli._lazy_init import slm_home as _slm_home

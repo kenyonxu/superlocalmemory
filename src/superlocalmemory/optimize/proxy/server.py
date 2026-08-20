@@ -150,7 +150,7 @@ def build_proxy_router(proxy: ProxyApp) -> APIRouter:
     async def gemini_openai_models_route(request: Request) -> Response:
         return await handle_gemini_openai_compat(proxy, request)
 
-    # WP-11: Vertex AI passthrough — must be registered AFTER exact /v1/* routes
+    # Vertex AI passthrough — must be registered AFTER exact /v1/* routes
     # to avoid shadowing /v1/messages, /v1/chat/completions, /v1/embeddings, etc.
     # FastAPI resolves routes in registration order; the exact routes above are
     # declared before this catch-path, so there is no shadowing.

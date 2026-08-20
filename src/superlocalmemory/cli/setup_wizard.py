@@ -29,7 +29,7 @@ from typing import Any
 # Constants
 # ---------------------------------------------------------------------------
 
-# WP-07: resolve via slm_home() so all 3 env aliases are honoured.
+# resolve via slm_home() so all 3 env aliases are honoured.
 # Fallback keeps stdlib-only path if the import fails during early bootstrap.
 def _resolve_slm_home() -> Path:
     from superlocalmemory.infra.data_root import canonical_data_root
