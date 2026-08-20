@@ -1,13 +1,12 @@
-"""v3.5 acceptance gates — Brain truth data layer. Authored by the release
-coordinator, NOT by implementers. Do not modify this file.
+"""v3.5 release criteria — Brain truth data layer.
 
-WHY THIS WAVE EXISTS
+WHY THIS EXISTS
 --------------------
 The Living Brain UI is designed for an audience that is 75% non-technical.
 Rebuilding it on today's read model would make the existing confusion look
 nicer. The data must be honest first.
 
-MEASURED ON THE OWNER'S LIVE DAEMON (4.0.5/4.0.6, this machine):
+MEASURED ON A LIVE DAEMON (4.0.5/4.0.6, this machine):
 
   GET /api/learning/status -> engagement:
       health_status "INACTIVE", days_active 0, memories_per_day 0,
@@ -35,7 +34,7 @@ I1  Recall/remember latency must not regress (enforced by the performance gate;
     restated here because instrumenting engagement touches the hot path).
 
 Gates assert OBSERVABLE behaviour - payload contents and stored rows - never
-internal dataclass shape. A previous wave's gate asserted attribute mutation and
+internal dataclass shape. An earlier version of this file asserted attribute mutation and
 pushed a product regression; not repeated here.
 """
 
@@ -54,7 +53,7 @@ class TestEngagementIsRecorded:
     def test_store_and_recall_produce_engagement_activity(self, tmp_path) -> None:
         """After real stores and recalls, engagement must not be all-zero.
 
-        The mechanism is the implementer's choice (hook, write-path counter,
+        The mechanism is an implementation choice (hook, write-path counter,
         derived-on-read from existing tables). This asserts only the outcome:
         a brain that has been used does not report itself unused.
         """

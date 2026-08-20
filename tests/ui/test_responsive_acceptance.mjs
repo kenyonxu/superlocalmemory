@@ -1,17 +1,13 @@
 /**
- * Acceptance gates — responsive layout + integration visibility.
- * Authored by the release coordinator, NOT by implementers.
- * Implementation agents may NOT modify this file.
+ * Release criteria — responsive layout + integration visibility.
  *
- * OWNER REQUIREMENT (verbatim):
- *   "the whole UI of the dashboard of super local memory should be responsive
- *    everywhere, whether people open it on any kind of screen (mobile, tablet,
- *    and desktop view). All three sections, column-wise, the left column, right
- *    column, and the thing in between, should be so much right and flexible."
- * Reported symptom: "where is the chat gone? It is gone on the right side."
+ * REQUIREMENT: the whole dashboard UI must be responsive on any screen size
+ * (mobile, tablet, desktop). All three columns — left, right, and the panel
+ * between them — must lay out correctly and flex.
+ * Reported symptom: the chat panel disappeared off the right-hand side.
  *
- * MEASURED BASELINE — taken in a real browser before any Wave 6 work.
- * Do NOT re-derive these; they are the ground truth this wave is built on.
+ * MEASURED BASELINE — taken in a real browser before this work.
+ * Do NOT re-derive these; they are the ground truth this work is built on.
  *
  *   1920 CSS px  .app = 248px + 1672px   .graph-shell = 1168px + 340px
  *                right panel x=1442 w=340 right=1782      -> CORRECT
@@ -27,7 +23,7 @@
  *    375 CSS px  .app = single column, sidebar off-canvas at x=-264,
  *                hamburger present, no horizontal overflow -> ALREADY CORRECT
  *
- * SO: mobile is largely handled already. This wave is NOT a responsive
+ * SO: mobile is largely handled already. This work is NOT a responsive
  * rebuild. Do not rewrite the working mobile behaviour. The failure is the
  * middle band — roughly 640px to 1100px — where the third column becomes
  * unreachable rather than adapting.
@@ -74,7 +70,7 @@ const designCss = () => read('css/design-system.css');
 //
 // The real defect is narrower and is a UX one: below 1100px the stage takes
 // 60vh, so "Ask your memory", the node inspector and Quick Insights sit a full
-// screen-height below the fold with NOTHING indicating they exist. The owner's
+// screen-height below the fold with NOTHING indicating they exist. A user's
 // report — "where is the chat gone? It is gone on the right side" — is a
 // discoverability failure, not a layout failure. Fixing it by rewriting the
 // working breakpoints would be the wrong repair and would risk the parts that
@@ -125,7 +121,7 @@ describe('R3 responsive floor (already correct — do not break)', function () {
     const offCanvas = /transform:\s*translateX\(\s*-|left:\s*-|margin-left:\s*-/.test(css);
     assert.ok(offCanvas,
       'the phone layout moved the sidebar off-canvas (measured x=-264 at ' +
-      '375px). That behaviour is correct and must survive this wave.');
+      '375px). That behaviour is correct and must survive this work.');
   });
 
   it('keeps the app shell free of horizontal overflow', function () {
@@ -139,19 +135,19 @@ describe('R3 responsive floor (already correct — do not break)', function () {
   it('does not reintroduce a retired implementation while restyling', function () {
     const html = read('index.html');
     assert.ok(!/<script[^>]+js\/brain\.js/.test(html),
-      'js/brain.js was retired in Wave 5 — do not re-add it.');
+      'js/brain.js was retired in earlier work — do not re-add it.');
     assert.ok(!/<script[^>]+js\/knowledge-graph\.js/.test(html),
-      'js/knowledge-graph.js was retired in Wave 5 — do not re-add it.');
+      'js/knowledge-graph.js was retired in earlier work — do not re-add it.');
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// R4 — integration visibility (the original Wave 6 scope)
+// R4 — integration visibility (the original scope)
 // ─────────────────────────────────────────────────────────────────────────────
 describe('R4 connected integrations', function () {
   it('can report Codex as an integration', function () {
     // Measured on the live Connected clients tab: antigravity, claude code,
-    // cli, copilot, cursor, mcp. Codex is absent, and the owner runs Codex.
+    // cli, copilot, cursor, mcp. Codex is absent, and Codex is in use.
     const js = read('js/od-brain.js');
     const py = readFileSync(
       join(UI, '../server/routes/brain.py'), 'utf8',
@@ -166,7 +162,7 @@ describe('R4 connected integrations', function () {
       join(UI, '../server/routes/brain.py'), 'utf8',
     );
     assert.ok(/bounded[_-]?loop/i.test(py),
-      'the brain read model never mentions bounded-loops. The owner requires ' +
+      'the brain read model never mentions bounded-loops. The requirement is ' +
       'that when Bounded Loops is installed the dashboard detects it and ' +
       'surfaces it, instead of the section silently reading as empty.');
   });

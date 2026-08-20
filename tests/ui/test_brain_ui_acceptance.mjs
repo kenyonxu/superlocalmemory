@@ -1,7 +1,5 @@
 /**
- * Acceptance gates — Living Brain UI + Knowledge Graph.
- * Authored by the release coordinator, NOT by implementers.
- * Implementation agents may NOT modify this file.
+ * Release criteria — Living Brain UI + Knowledge Graph.
  *
  * WHAT THIS FILE PROVES, AND WHAT IT DOES NOT
  * -------------------------------------------
@@ -13,7 +11,7 @@
  * So: this file is the REGRESSION net (cheap, CI-able, catches re-breakage).
  * The live browser run is the PROOF. Both are required. Neither substitutes.
  *
- * MEASURED BASELINE (live 4.0.5 daemon on :8765, captured before any Wave 5 work)
+ * MEASURED BASELINE (live 4.0.5 daemon on :8765, captured before this work)
  * ------------------------------------------------------------------------------
  * Knowledge Graph, cold load into #graph-pane:
  *   - canvas exists, 1280x1320 backing / 640x660 CSS, and EVERY PIXEL IS ZERO
@@ -43,7 +41,7 @@
  * from NOT-YET-MEASURED, and must never render an uninformative prior as a
  * finding. An honest "nothing learned yet, here is what would produce this" is
  * strictly better than 18 rows of 0.50 under a heading that says "quality".
- * This is the same fail-closed honesty Wave 4 put into brain/truth.py, applied
+ * This is the same fail-closed honesty earlier work put into brain/truth.py, applied
  * to the pixels.
  *
  * LESSON APPLIED FROM WAVE 2: a gate that asserts internal shape pushes bad
@@ -67,7 +65,7 @@ const odGraph = () => read('js/od-graph.js');
 const odBrain = () => read('js/od-brain.js');
 
 /** Strip block and line comments so copy gates gauge SHIPPED STRINGS, not prose.
- *  (Wave 4 lesson: my own jargon gate matched its own explanatory comment.) */
+ *  (Earlier lesson: the jargon check matched its own explanatory comment.) */
 function stripComments(src) {
   return src
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
@@ -114,12 +112,12 @@ describe('G1 single implementation per surface', function () {
 // G2 — Knowledge graph must paint on a cold load
 // ─────────────────────────────────────────────────────────────────────────────
 describe('G2 knowledge graph cold load', function () {
-  it('defaults the node budget to the owner-specified 50', function () {
+  it('defaults the node budget to the specified 50', function () {
     const m = odGraph().match(/MAX_NODES\s*=\s*(\d+)/);
     assert.ok(m, 'MAX_NODES not found in od-graph.js');
     const v = Number(m[1]);
     assert.ok(v >= 50 && v <= 60,
-      `MAX_NODES default is ${v}; owner set it to "50 only or 50-60". ` +
+      `MAX_NODES default is ${v}; the specified value is "50 only or 50-60". ` +
       'At 120 the first paint is both slow and (today) blank.');
   });
 
@@ -237,7 +235,7 @@ describe('G4 plain language', function () {
       const src = stripComments(odBrain());
       assert.ok(!src.includes(term),
         `"${term}" is rendered to users on the Brain pane. It was measured on ` +
-        'the live 4.0.5 dashboard. Replace with language a non-technical owner ' +
+        'the live 4.0.5 dashboard. Replace with language a non-technical reader ' +
         'of their own memory can act on.');
     });
   }
@@ -265,13 +263,13 @@ describe('G4 plain language', function () {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// G5 — floor: properties already correct that this wave must not break
+// G5 — floor: properties already correct that this work must not break
 // ─────────────────────────────────────────────────────────────────────────────
 describe('G5 regression floor', function () {
   it('keeps the observation-only disclaimer on agent evidence', function () {
     const src = odBrain();
     assert.match(src, /do not change recall, ranking, or model routing/,
-      'the observation-only disclaimer was removed. Wave 4 established that SLM ' +
+      'the observation-only disclaimer was removed. earlier work established that SLM ' +
       'stores integration-reported evidence WITHOUT verifying it; the UI must ' +
       'keep saying so or the product overclaims.');
   });

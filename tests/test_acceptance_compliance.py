@@ -1,9 +1,6 @@
-"""v3.4 acceptance gates — GDPR / compliance core. Authored by the release
-coordinator, NOT by implementers.
+"""v3.4 release criteria — GDPR / compliance core.
 
-These define "done" for the compliance work that SuperLocalMemory 4.0.6 is
-being marketed on. Implementation agents may NOT modify this file.
-
+These define "done" for the compliance capabilities.
 Invariant I7 (release-blocking):
     No erasure or export path may claim completeness while data survives
     ANYWHERE — memory.db, learning.db, code_graph.db, the vector store, FTS
@@ -11,7 +8,7 @@ Invariant I7 (release-blocking):
 
 Every assertion is written against OBSERVABLE behaviour — CLI exit codes and
 JSON, receipt contents, on-disk state — never against internal dataclass shape.
-A previous wave's gate asserted direct attribute mutation and pushed a product
+An earlier version of this file asserted direct attribute mutation and pushed a product
 regression (an immutable config was un-frozen to satisfy the test). Not again.
 
 VERIFIED-CORRECT TODAY (must not regress):
@@ -102,7 +99,7 @@ class TestC1BackupsInComplianceScope:
     def test_erasure_receipt_declares_backup_obligations(self, tmp_path) -> None:
         """A receipt must state what remains in backups, not stay silent.
 
-        The mechanism is the implementer's (owner-approved: an obligation ledger
+        The mechanism is an implementation choice (an obligation ledger
         plus re-erasure on restore). This asserts only that the receipt is
         HONEST about snapshots — silence is what makes the current claim false.
         """
@@ -121,7 +118,7 @@ class TestC1BackupsInComplianceScope:
         """`complete` must not be True while snapshots hold erased data.
 
         gdpr.py already refuses to claim completeness on learning-db failure,
-        vector residue, context-cache failure and owner-erasure gaps. Backups
+        vector residue, context-cache failure and erasure gaps. Backups
         must join that list — anything else is a false completeness claim.
         """
         from superlocalmemory.compliance import gdpr as gdpr_mod
@@ -176,7 +173,7 @@ class TestC4ReviewPolicyIsReal:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Retention — owner decision: configurable, default 90 days
+# Retention: configurable, default 90 days
 # ─────────────────────────────────────────────────────────────────────────────
 class TestRetentionWindow:
     def test_retention_window_defaults_to_90_days(self) -> None:
@@ -188,7 +185,7 @@ class TestRetentionWindow:
         assert found, (
             "no retention-window setting defaulting to 90 days found on "
             "SLMConfig. The backup/erasure obligation window must be "
-            "configurable, and the owner set the default at 90 days."
+            "configurable, and the default is 90 days."
         )
 
 
@@ -196,7 +193,7 @@ class TestRetentionWindow:
 # Security floor — must NOT regress while adding the above
 # ─────────────────────────────────────────────────────────────────────────────
 class TestComplianceSecurityFloor:
-    """Properties already correct today. Breaking any of these fails the wave."""
+    """Properties already correct today. Breaking any of these fails this release."""
 
     def test_erasure_still_fails_closed_on_learning_db(self) -> None:
         from superlocalmemory.compliance import gdpr as gdpr_mod

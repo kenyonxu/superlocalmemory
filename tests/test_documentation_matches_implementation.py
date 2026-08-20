@@ -1,13 +1,8 @@
-"""Documentation audit gates — documentation must not outrun implementation.
-Authored by the release coordinator, NOT by implementers.
+"""Documentation must not outrun implementation.
 
-OWNER CONTEXT (verbatim): "the main thing about this V4 version is product GDPR
-policies. That is the main core of this product... we are marketing it as the
-full compliance product for the company's teams and everyone."
-
-That is precisely why this gate exists. A compliance product that overstates its
-own compliance is the worst possible failure mode: the claim is the product, so
-an inflated claim is a defect in the product itself, not a marketing nit.
+Compliance capability is the core of this release, which is exactly why these
+checks exist. When the claim IS the product, an overstated claim is a defect in
+the product itself, not a wording nit.
 
 THE RULE: no user-facing document may assert a capability the code does not
 implement, and no document may imply certification SLM does not hold.
@@ -31,7 +26,7 @@ THE OPEN TENSION THIS WAVE MUST RESOLVE:
 
 SCOPE NOTE: this file checks DOCUMENTS against FACTS THE TEST SUITE CAN ESTABLISH.
 It cannot judge prose quality. Independent review covers that, and the
-owner reviews the final wording.
+the final wording is reviewed.
 """
 
 from __future__ import annotations
@@ -204,7 +199,7 @@ class TestComplianceGuardsStillActive:
         """v3.4 removed "EU AI Act compliant" from MCP Mode descriptions."""
         tools = (_SRC / "mcp" / "tools_v3.py").read_text(encoding="utf-8")
         assert "EU AI Act" not in tools, (
-            "an EU AI Act claim reappeared in the MCP Mode descriptions. Wave 3 "
+            "an EU AI Act claim reappeared in the MCP Mode descriptions. earlier work "
             "removed it; test_f02_mode_no_compliance_claims.py guards it. Mode "
             "descriptions state CAPABILITY (Local Guardian / Smart Local / Full "
             "Power), never regulatory conformance."

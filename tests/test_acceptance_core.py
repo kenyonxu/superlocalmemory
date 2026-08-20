@@ -1,16 +1,15 @@
-"""v3.5 acceptance gates — authored by the release coordinator, NOT by implementers.
+"""v3.5 release criteria.
 
-These tests define the acceptance criteria. Implementation agents may NOT modify this
-file; they change product code until these pass. Any agent that edits this file
-to make its work pass has failed the task.
+These tests are the specification: product code changes until they pass. They
+are not edited to accommodate the code — doing so defeats their only purpose.
 
 Covered:
   P2  code-graph resolver wiring       — build_code_graph must succeed on real code
   P3  issue #119 dashboard config wipe — save must not destroy api_key or URL scheme
   P4  issue #112 private-LAN endpoints — trusted plain-HTTP LAN reranker must work
 
-Every test asserts OBSERVABLE BEHAVIOUR, not implementation shape, so an agent
-cannot satisfy it by special-casing the test.
+Every test asserts OBSERVABLE BEHAVIOUR, not implementation shape, so it
+cannot be satisfied by special-casing the test.
 """
 
 from __future__ import annotations
@@ -227,7 +226,7 @@ class TestP4TrustedPrivateLanEndpoints:
     def test_private_lan_plain_http_can_be_trusted(self, endpoint: str) -> None:
         """A private-LAN endpoint must be usable when the operator opts in.
 
-        The mechanism is the implementer's choice (config flag, allowlist, or
+        The mechanism is an implementation choice (config flag, allowlist, or
         RFC1918 detection) — this asserts only the outcome the reporter needs.
         Whatever the mechanism, it must be reachable from configuration.
         """

@@ -1,6 +1,4 @@
-"""v3.5.x acceptance gates — issue #113 consolidation layer.
-Authored by the release coordinator, NOT by implementers.
-Implementation agents may NOT modify this file.
+"""v3.5.x release criteria — issue #113 consolidation layer.
 
 WHAT #113 ACTUALLY ASKS FOR
 ---------------------------
@@ -15,7 +13,7 @@ The maintainer's own public reply on that issue sets the binding constraint:
     "views must be customizable, profile-scoped, privacy-aware, and traceable
      back to the underlying memories rather than becoming opaque generic summaries"
 
-OWNER DECISION FOR 4.0.6 (recorded): deliver the three BOUNDED summaries plus the
+DECISION FOR 4.0.6 (recorded): deliver the three BOUNDED summaries plus the
 wiring of the existing compaction module. Prompt-driven custom views are
 deferred to 4.0.7 — they are non-deterministic, hard to make traceable, and a
 prompt-injection surface, which is the wrong thing to add to a release whose
@@ -28,7 +26,7 @@ same entity, archives the originals, and records provenance in
 fact_consolidations. It is correct for what it does and it is WIRED TO NOTHING —
 imported only by its own test, listed in tests/test_no_dead_modules.py as
 _KNOWN_DEAD. It satisfies none of #113's user-facing asks. Both halves are in
-scope this wave: wire the compaction, and build the summaries on top.
+scope this work: wire the compaction, and build the summaries on top.
 
 MEASURED DATA REALITY (live store, 3,294 facts — verified before writing this gate)
 -----------------------------------------------------------------------------------
@@ -43,10 +41,8 @@ Implementers MUST build against these numbers, not against assumptions:
   exactly ONE distinct value. Grouping a Project Work Log by that column yields a
   single meaningless bucket. Project scope must come from tool_events.project_path.
 
-RELEASE-BLOCKING INVARIANTS (owner, verbatim): "recall and remember timing should
-not impact ... There should not be any deadlocks in the database due to your
-things. Everything should be backward compatible. Also ... there should not be
-any memory leaks."
+RELEASE-BLOCKING INVARIANTS: recall and remember timing must not regress; no
+database deadlocks; fully backward compatible; no memory leaks.
 """
 
 from __future__ import annotations
@@ -237,7 +233,7 @@ class TestD3Traceability:
         assert "profile_id" in blob, (
             "summaries are not profile-scoped. Cross-profile leakage in a "
             "generated summary is a compliance defect, not a cosmetic one — this "
-            "release is marketed on GDPR completeness."
+            "release claims GDPR completeness."
         )
 
 
@@ -261,7 +257,7 @@ class TestD4HonestCoverage:
         ), (
             "no coverage/sparsity handling. 96% of facts on a real store carry no "
             "session_id. A summary that silently covers 4% of the data while "
-            "reading as complete is the same overclaiming Wave 4 removed from "
+            "reading as complete is the same overclaiming earlier work removed from "
             "brain/truth.py."
         )
 
@@ -314,7 +310,7 @@ class TestD5HotPathUntouched:
         The first version of this test searched the raw source text. That is
         the wrong check twice over: store_pipeline.py legitimately discusses
         session summaries in its docstrings, and a prose match invites an
-        implementer to reword a comment rather than change behaviour — which
+        a change to reword a comment rather than change behaviour — which
         is exactly what happened. Parse the imports instead; that is the thing
         that actually determines whether the hot path can invoke this code.
         """
