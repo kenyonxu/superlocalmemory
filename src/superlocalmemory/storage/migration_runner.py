@@ -558,14 +558,21 @@ def apply_all(
 
 
 def _deferred_already_applied(conn: sqlite3.Connection, name: str) -> bool:
-    """True when ``name`` is already recorded in this database's migration_log.
+    """True when ``name`` is recorded as ``complete`` in this database's migration_log.
 
     Used only to decide whether a snapshot is needed. On any error it returns
     False, which errs toward taking a snapshot — the safe direction.
+
+    A row whose status is ``failed`` or ``in_progress`` is NOT considered applied:
+    the runner will retry those entries, and the store deserves a fresh snapshot
+    before any retry runs DDL against it.  Counting any row (regardless of status)
+    caused ``_nothing_left_to_apply`` to return True after a failed migration,
+    so the retry ran against the already-partial store with no new safety copy.
     """
     try:
         row = conn.execute(
-            "SELECT 1 FROM migration_log WHERE name = ? LIMIT 1", (name,)
+            "SELECT 1 FROM migration_log WHERE name = ? AND status = 'complete' LIMIT 1",
+            (name,),
         ).fetchone()
         return row is not None
     except sqlite3.Error:

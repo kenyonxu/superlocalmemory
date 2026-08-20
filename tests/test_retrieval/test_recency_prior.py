@@ -90,7 +90,10 @@ def _expected_cond(query_type: str, age_days: float, strength: float) -> float:
     if strength <= 0.0 or query_type not in ("recency", "temporal"):
         return 1.0
     half_life = 7.0 if query_type == "recency" else 30.0
-    max_amp = 1.5 if query_type == "recency" else 1.2
+    # Both query types use max_amp=1.5. The temporal type previously used 1.2,
+    # which caused the prior to be inert for the first ~39 days (both 0d and
+    # 30d raw values clamp to 1.2). The cap was raised to 1.5 so decay is visible.
+    max_amp = 1.5
     raw = 1.0 + strength * math.exp(-(math.log(2) / half_life) * age_days)
     return min(raw, max_amp)
 
@@ -312,24 +315,37 @@ class TestDecayFactors:
             f"recency 30d: got {factor:.4f}, expected near 1.026. Decay not working."
         )
 
-    def test_temporal_at_0_days_hits_temporal_cap(self) -> None:
-        """At 0 days, temporal cond_boost must equal max_amp=1.2 (capped)."""
+    def test_temporal_at_0_days_hits_cap(self) -> None:
+        """At 0 days, temporal cond_boost must equal max_amp=1.5.
+
+        The previous cap was 1.2. With half_life=30 and strength=0.5:
+          raw at 0d = 1.0 + 0.5 * 1.0 = 1.5
+
+        Both 0d and 30d (raw=1.25) were clamped to 1.2, making the prior
+        produce the same value for the first ~39 days — completely inert.
+        The cap was raised to 1.5 so the decay is visible across that range:
+        0d → 1.5, 30d → 1.25, older → approaches 1.0.
+        This changes ranking: a 2-day-old fact and a 30-day-old fact now
+        receive different boosts. This is a correction, not a measured gain.
+        """
         factor = self._implied_cond("temporal", 0.0)
-        expected = 1.2  # min(1.0 + 0.5 * 1.0, 1.2) = 1.2
+        expected = 1.5  # min(1.0 + 0.5 * 1.0, 1.5) = 1.5
         assert factor == pytest.approx(expected, rel=0.01), (
             f"temporal 0d: got {factor:.4f}, expected {expected:.4f}"
         )
 
-    def test_temporal_at_30_days_still_at_cap(self) -> None:
-        """
-        At 30 days, temporal cond_boost is still capped at 1.2.
-        The formula gives 1.25 (above cap), so effective factor = 1.2.
-        Decay below cap only appears past ~40 days.
+    def test_temporal_at_30_days_below_cap(self) -> None:
+        """At 30 days (the half-life), temporal cond_boost must equal 1.25.
+
+        With max_amp=1.5, half_life=30, strength=0.5:
+          raw at 30d = 1.0 + 0.5 * exp(-ln2) = 1.0 + 0.25 = 1.25
+        This is below the 1.5 cap, so the decay is now visible — a 30d fact
+        receives less boost than a 0d fact, as intended.
         """
         factor = self._implied_cond("temporal", 30.0)
-        expected = 1.2  # min(1.25, 1.2) = 1.2 — still capped
+        expected = 1.25  # 1.0 + 0.5 * 0.5 = 1.25 (no longer capped)
         assert factor == pytest.approx(expected, rel=0.01), (
-            f"temporal 30d: got {factor:.4f}, expected {expected:.4f} (capped)"
+            f"temporal 30d: got {factor:.4f}, expected {expected:.4f}"
         )
 
     def test_factual_at_any_age_gives_exactly_1(self) -> None:
@@ -347,3 +363,62 @@ class TestDecayFactors:
             assert factor == pytest.approx(1.0, abs=1e-9), (
                 f"query_type={qt!r}: got {factor:.6f}, expected exactly 1.0"
             )
+
+
+# ---------------------------------------------------------------------------
+# The time-based prior must discriminate within the first 30 days
+# ---------------------------------------------------------------------------
+
+class TestTemporalPriorVaries:
+    """The temporal cond_boost must produce different values at different ages.
+
+    The formula is min(1.0 + strength * exp(-ln2/half_life * age), max_amp).
+    With max_amp=1.2, half_life=30, strength=0.5:
+      at 0 days:  raw = 1.5 → clamped to 1.2
+      at 30 days: raw = 1.25 → clamped to 1.2
+    Both clamp to the same value; the prior does not discriminate at all
+    within the first ~39 days. A question about 2 days ago and a question
+    about a month ago receive the same boost, making the prior inert over
+    the entire range it was designed for.
+
+    The fix raises max_amp to 1.5 for temporal queries, matching the recency
+    setting. This allows the formula to vary from 1.5 (fresh) down through
+    1.25 (30 days) toward 1.0 (old), giving the prior its intended behaviour.
+
+    This changes ranking: facts from 2 days ago and 30 days ago now receive
+    different boosts. The change is a reasoned correction to a clamp that made
+    the prior inert, not a measured performance gain.
+    """
+
+    def _implied_cond(self, query_type: str, age_days: float) -> float:
+        """Extract the implied cond_boost from the engine's ranking output."""
+        engine = _engine(recency_prior_strength=0.5)
+        fact = _fact("f", age_days)
+        fused = [_fused("f", 0.5)]
+        results = _build(engine, fused, [fact], query_type)
+        assert results, "Expected at least one result"
+        rs = results[0].ranking_score
+        base = 0.5 * _ebbinghaus(age_days)
+        return rs / base
+
+    def test_temporal_boost_at_0_days_differs_from_30_days(self) -> None:
+        """Temporal cond_boost at 0 days must be strictly greater than at 30 days.
+
+        This fails before the fix because both ages clamp to 1.2, making the
+        prior identical (and inert) over that entire range.
+        """
+        boost_0 = self._implied_cond("temporal", 0.0)
+        boost_30 = self._implied_cond("temporal", 30.0)
+        assert boost_0 > boost_30, (
+            f"Temporal prior is identical at 0d ({boost_0:.4f}) and 30d ({boost_30:.4f}). "
+            "Both ages are clamped to max_amp=1.2, making the prior inert over "
+            "the first ~39 days. Raise max_amp for temporal so the decay is visible."
+        )
+
+    def test_temporal_boost_at_0_days_is_above_1_2(self) -> None:
+        """At age 0, temporal cond_boost must exceed the old inert cap of 1.2."""
+        boost = self._implied_cond("temporal", 0.0)
+        assert boost > 1.2, (
+            f"Temporal boost at 0 days is {boost:.4f} — equal to the cap. "
+            "This means the cap is still suppressing the fresh-fact signal."
+        )

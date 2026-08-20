@@ -108,19 +108,29 @@ def backfill(
         # Read one batch at a time. Loading every TEXT row first held the whole
         # column in memory — on a 50,000-fact store that is hundreds of megabytes
         # of JSON before Python's own overhead, on the machine someone is using.
-        # Ordered by rowid so an interrupted run resumes in the same order, and
-        # re-reading is safe because converted rows stop matching typeof='text'.
+        #
+        # Cursor-based pagination: track the highest rowid seen so far and
+        # advance past it on every iteration. This guarantees termination even
+        # when a row is permanently unconvertible (invalid JSON, wrong dimension,
+        # empty list): skipped rows stay TEXT but their rowid is behind the
+        # cursor, so the next query does not re-read them.  The old LIMIT-only
+        # approach re-read the same uncovertible rows forever once no convertible
+        # rows remained, causing an infinite sleep loop.
         converted = 0
         skipped = 0
+        last_rowid = -1  # rows start at rowid 1; -1 is before the first row
 
         while True:
             batch = conn.execute(
-                "SELECT fact_id, embedding FROM atomic_facts "
-                "WHERE typeof(embedding)='text' ORDER BY rowid LIMIT ?",
-                (batch_size,),
+                "SELECT rowid, fact_id, embedding FROM atomic_facts "
+                "WHERE rowid > ? AND typeof(embedding)='text' ORDER BY rowid LIMIT ?",
+                (last_rowid, batch_size),
             ).fetchall()
             if not batch:
                 break
+            # Advance cursor past everything in this batch, whether converted
+            # or skipped, so we never re-read any row.
+            last_rowid = max(row["rowid"] for row in batch)
             updates: list[tuple[bytes, str]] = []
 
             for row in batch:
@@ -163,7 +173,7 @@ def backfill(
                 conn.execute("COMMIT")
                 converted += len(updates)
                 logger.info(
-                    "Progress: %d/%d converted (%d skipped)",
+                    "Progress: %d/%d converted (%d skipped so far)",
                     converted, remaining, skipped,
                 )
 
@@ -204,14 +214,16 @@ def _snapshot_before_writing(db_path: Path) -> Path:
     # store's own newest snapshot: the directory also holds the learning-plane
     # snapshot, and checking that one against this store would compare two
     # unrelated databases and call the mismatch a failure.
-    # By modification time, not by name. This directory is shared with the
-    # snapshots the daemon takes, and lexical order only coincides with recency
-    # while every filename has an identical shape — a collision suffix on one of
-    # them is enough to pick a sibling copy of the same store, which then passes
-    # the count check and is kept as "the copy we just made".
+    # Sort by the base timestamp embedded in the filename rather than st_mtime.
+    # Filesystem mtime granularity can be 1-2 seconds (e.g. FAT, relatime ext4),
+    # so two snapshots written in the same second tie and the winner is arbitrary.
+    # The filename already encodes microseconds and is deterministic; a collision
+    # suffix (-N) appears after the timestamp, and sorting by (timestamp, suffix)
+    # ascending puts the newest file last regardless of mtime resolution.
+    from superlocalmemory.storage.backup import _snapshot_sort_key
     candidates = sorted(
         root.glob(f"{db_path.stem}-*-pre-migration.db"),
-        key=lambda f: f.stat().st_mtime,
+        key=_snapshot_sort_key,
     )
     if not candidates:
         raise RuntimeError(f"no snapshot for {db_path.name} was written into {root}")

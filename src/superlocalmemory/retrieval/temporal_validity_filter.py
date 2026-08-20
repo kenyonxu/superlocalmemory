@@ -460,7 +460,7 @@ class TemporalValidityFilter:
             ]
             # Re-sort descending so demoted facts fall below currently-valid
             # facts in this channel's rank order.
-            new_list.sort(key=lambda pair: pair[1], reverse=True)
+            new_list.sort(key=lambda pair: (-pair[1], pair[0]))
             demoted[channel_name] = new_list
         return demoted
 

@@ -1061,3 +1061,49 @@ def test_apply_deferred_m017_upgrade_preserves_rows_and_is_idempotent(
             "WHERE block_id = 'ccq_legacy'"
         ).fetchone()
     assert row == ("legacy consolidated memory", "personal")
+
+
+# ---------------------------------------------------------------------------
+# A retry after a failed migration must take a fresh snapshot
+# ---------------------------------------------------------------------------
+
+def test_retry_after_failed_migration_takes_snapshot(
+    fresh_dbs: tuple[Path, Path], tmp_path: Path,
+) -> None:
+    """A failed migration entry must not fool _nothing_left_to_apply into skipping.
+
+    Before the fix, _deferred_already_applied returned True for ANY row in
+    migration_log — including status='failed'. This caused _nothing_left_to_apply
+    to return True, so apply_all skipped the snapshot and the retry ran against
+    the already-partial store with no fresh safety copy.
+
+    After the fix: a 'failed' row is not 'applied'; the snapshot is taken before
+    the retry, and details['_backup'] is a real directory path.
+    """
+    learning_db, memory_db = fresh_dbs
+
+    # First pass: full migration run to completion
+    mr.apply_all(learning_db, memory_db)
+
+    # Simulate: the last run left one migration as 'failed'
+    with sqlite3.connect(str(learning_db)) as conn:
+        conn.execute(
+            "UPDATE migration_log SET status = 'failed' "
+            "WHERE name = 'M001_add_signal_features_columns'"
+        )
+        conn.commit()
+
+    # Retry — _nothing_left_to_apply must return False because of the failed row
+    stats = mr.apply_all(learning_db, memory_db)
+
+    backup_val = stats["details"].get("_backup", "")
+    assert backup_val != "skipped: every migration already applied", (
+        "details['_backup'] must not be the 'skipped' sentinel when retrying "
+        "a failed migration — the runner skipped the snapshot and left the store "
+        "unprotected for the retry."
+    )
+    from pathlib import Path as _Path
+    assert _Path(backup_val).is_dir(), (
+        f"details['_backup'] should be a real directory path after fixing a "
+        f"failed migration, got: {backup_val!r}"
+    )

@@ -371,3 +371,126 @@ class TestBackfill:
             assert blen == EMBEDDING_BYTES, (
                 f"{fact_id}: {blen} bytes, expected {EMBEDDING_BYTES}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Conversion must terminate when unconvertible rows are present
+# ---------------------------------------------------------------------------
+
+class TestBackfillTerminatesOnUnconvertibleRows:
+    """Skipped (unconvertible) rows must not stall the run.
+
+    Without a cursor advance past skipped rows, the loop re-queries the same
+    rows forever, sleeping 50 ms each iteration.  A 5-second thread timeout
+    detects that case fast enough to be useful in CI.
+    """
+
+    def _make_db_with_hostile_rows(self, path: Path) -> None:
+        conn = sqlite3.connect(str(path))
+        conn.execute(
+            "CREATE TABLE atomic_facts "
+            "(fact_id TEXT PRIMARY KEY, content TEXT, embedding TEXT)"
+        )
+        # 5 valid 768-dim rows
+        for i in range(5):
+            vec = _random_vec(seed=200 + i)
+            conn.execute(
+                "INSERT INTO atomic_facts VALUES (?,?,?)",
+                (f"valid-{i:04d}", f"c{i}", json.dumps(vec)),
+            )
+        # Unconvertible rows — wrong dimension, invalid JSON, empty list
+        conn.execute(
+            "INSERT INTO atomic_facts VALUES (?,?,?)",
+            ("bad-dim", "x", json.dumps([0.1, 0.2])),   # wrong dim
+        )
+        conn.execute(
+            "INSERT INTO atomic_facts VALUES (?,?,?)",
+            ("bad-json", "x", "{not valid json"),         # invalid JSON
+        )
+        conn.execute(
+            "INSERT INTO atomic_facts VALUES (?,?,?)",
+            ("bad-empty", "x", "[]"),                     # empty list
+        )
+        conn.commit()
+        conn.close()
+
+    def test_backfill_terminates_and_converts_valid_rows(self, tmp_path):
+        import sys
+        import threading
+
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
+        from backfill_embeddings import backfill  # type: ignore
+
+        db_path = tmp_path / "hostile.db"
+        self._make_db_with_hostile_rows(db_path)
+
+        result: dict = {"done": False, "converted": None, "error": None}
+
+        def _run() -> None:
+            try:
+                result["converted"] = backfill(db_path)
+                result["done"] = True
+            except Exception as exc:
+                result["error"] = exc
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        thread.join(timeout=5.0)
+
+        assert result["done"], (
+            "backfill did not finish within 5 s — infinite loop on unconvertible row. "
+            f"error={result['error']!r}"
+        )
+        assert result["converted"] == 5, (
+            f"Expected 5 conversions, got {result['converted']}"
+        )
+
+        conn = sqlite3.connect(str(db_path))
+        blob_count = conn.execute(
+            "SELECT COUNT(*) FROM atomic_facts WHERE typeof(embedding)='blob'"
+        ).fetchone()[0]
+        text_count = conn.execute(
+            "SELECT COUNT(*) FROM atomic_facts WHERE typeof(embedding)='text'"
+        ).fetchone()[0]
+        conn.close()
+
+        assert blob_count == 5, f"Expected 5 BLOBs after backfill, got {blob_count}"
+        assert text_count == 3, (
+            f"Expected 3 TEXT rows (unconvertible), got {text_count}"
+        )
+
+    def test_backfill_all_rows_unconvertible_terminates_immediately(self, tmp_path):
+        """A store where every row is unconvertible must also terminate."""
+        import sys
+        import threading
+
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
+        from backfill_embeddings import backfill  # type: ignore
+
+        db_path = tmp_path / "all_bad.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE atomic_facts "
+            "(fact_id TEXT PRIMARY KEY, content TEXT, embedding TEXT)"
+        )
+        for i in range(10):
+            conn.execute(
+                "INSERT INTO atomic_facts VALUES (?,?,?)",
+                (f"bad-{i}", "x", json.dumps([0.0] * 3)),  # wrong dim
+            )
+        conn.commit()
+        conn.close()
+
+        result: dict = {"done": False}
+
+        def _run() -> None:
+            backfill(db_path)
+            result["done"] = True
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        thread.join(timeout=5.0)
+
+        assert result["done"], (
+            "backfill hung when every row was unconvertible"
+        )

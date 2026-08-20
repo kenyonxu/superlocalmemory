@@ -267,7 +267,7 @@ class BM25Channel:
         except Exception as exc:  # pragma: no cover — legacy/missing expansion FTS
             logger.debug("Expansion FTS search skipped: %s", exc)
 
-        out.sort(key=lambda x: x[1], reverse=True)
+        out.sort(key=lambda x: (-x[1], x[0]))
         return out[:top_k]
 
     def search(
@@ -341,7 +341,7 @@ class BM25Channel:
                         bonus *= 1.5  # 50% boost for exact phrase match
                 scored.append((self._fact_ids[i], bonus))
 
-        scored.sort(key=lambda x: x[1], reverse=True)
+        scored.sort(key=lambda x: (-x[1], x[0]))
         return scored[:top_k]
 
     def update_fact(self, fact_id: str, new_content: str, profile_id: str) -> None:

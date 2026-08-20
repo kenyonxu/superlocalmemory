@@ -710,3 +710,165 @@ class TestSafeSnapshotRestore:
             restore_pre_migration_snapshot(hollow, live)
 
         assert self._facts(live) == 7, "live store must be untouched on refusal"
+
+
+# ---------------------------------------------------------------------------
+# _gc_old_backups: a collision suffix must not split one generation in two
+# ---------------------------------------------------------------------------
+
+class TestGcCollisionSuffix:
+    """A -N collision suffix on one file of a generation must not break GC."""
+
+    def test_collision_suffixed_file_grouped_with_base_generation(
+        self, tmp_path: Path
+    ) -> None:
+        """A file with a -N collision suffix must share a generation with its base timestamp.
+
+        Without normalisation, GC counts the -1 file as a different generation
+        from the base and, with keep=2 and mtime ordering, can prune the BASE
+        file while keeping the COLLISION — leaving half a generation that
+        restore_pre_migration_snapshot cannot use.
+
+        Three content generations are created.  Gen3 has both a base and a
+        collision-suffixed file.  Gen3_base is given the OLDEST mtime so that
+        mtime-based ordering incorrectly prunes it.  After the fix (filename
+        timestamp ordering), gen1 is correctly pruned and both gen3 files survive.
+        """
+        root = tmp_path / "snapshots"
+        root.mkdir()
+
+        gen1_ts = "20260817-120000-000001"
+        gen2_ts = "20260818-120000-000002"
+        gen3_ts = "20260819-120000-000003"
+
+        gen1_file = root / f"memory-{gen1_ts}-pre-migration.db"
+        gen2_file = root / f"memory-{gen2_ts}-pre-migration.db"
+        gen3_base = root / f"memory-{gen3_ts}-pre-migration.db"
+        gen3_coll = root / f"memory-{gen3_ts}-1-pre-migration.db"
+
+        for f in (gen1_file, gen2_file, gen3_base, gen3_coll):
+            _make_simple_db(f)
+
+        # Mtimes that fool mtime-based ordering: gen3_base gets the OLDEST mtime
+        # so the old code would prune it as a separate "generation", keeping gen1
+        # (newer mtime) and gen3_coll — the wrong pair.
+        now = time.time()
+        os.utime(str(gen3_base), (now - 1000, now - 1000))
+        os.utime(str(gen2_file), (now - 500, now - 500))
+        os.utime(str(gen1_file), (now - 100, now - 100))
+        os.utime(str(gen3_coll), (now - 50, now - 50))
+
+        _gc_old_backups(root, keep=2)
+
+        # After fix: 3 generations by timestamp; keep=2 prunes gen1 (oldest ts).
+        assert gen3_base.exists(), (
+            "gen3_base must survive — it and gen3_coll share the same generation"
+        )
+        assert gen3_coll.exists(), "gen3_coll (collision twin) must also survive"
+        assert not gen1_file.exists(), (
+            "gen1 is the oldest generation by timestamp and must be pruned"
+        )
+
+    def test_gc_counts_generations_not_files(self, tmp_path: Path) -> None:
+        """keep=2 retains 2 complete generations, not just 2 files."""
+        root = tmp_path / "snapshots"
+        root.mkdir()
+
+        # 3 generations, each with memory + learning
+        for g in range(3):
+            ts = f"2026010{g + 1}-120000-000000"
+            for stem in ("memory", "learning"):
+                _make_simple_db(root / f"{stem}-{ts}-pre-migration.db")
+
+        _gc_old_backups(root, keep=2)
+
+        remaining = list(root.glob("*-pre-migration.db"))
+        assert len(remaining) == 4, (
+            f"keep=2 with 2-file generations must leave 4 files (2 gens × 2), "
+            f"got {len(remaining)}: {[f.name for f in remaining]}"
+        )
+
+    def test_gc_orders_by_filename_not_mtime(self, tmp_path: Path) -> None:
+        """The oldest generation is removed even when all mtimes are identical."""
+        root = tmp_path / "snapshots"
+        root.mkdir()
+
+        ts_list = [
+            "20260818-120000-000001",  # oldest
+            "20260819-120000-000002",
+            "20260820-120000-000003",  # newest
+        ]
+        files = []
+        for ts in ts_list:
+            f = root / f"memory-{ts}-pre-migration.db"
+            _make_simple_db(f)
+            # Force all mtimes to be identical — simulates FAT or 1-second mtime
+            same_t = 1_700_000_000.0
+            os.utime(str(f), (same_t, same_t))
+            files.append(f)
+
+        _gc_old_backups(root, keep=2)
+
+        remaining_names = {f.name for f in root.glob("*-pre-migration.db")}
+        assert files[0].name not in remaining_names, (
+            "Oldest file (by timestamp in name) must be removed "
+            "even when all mtimes are equal"
+        )
+        assert files[2].name in remaining_names, (
+            "Newest file (by timestamp in name) must be retained"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The disk-space check must not over-reserve for sequential writes
+# ---------------------------------------------------------------------------
+
+class TestDiskSpaceCheck:
+    def test_backup_succeeds_with_1_15x_free_space(self, tmp_path: Path) -> None:
+        """_pre_migration_backup must not raise when free >= 1.1× total DB bytes.
+
+        Sequential snapshot writes peak at total_bytes on disk (both final
+        snapshots exist simultaneously).  The old formula required 2.1× the
+        sum, blocking a backup that would have fit.
+        """
+        memory_db = tmp_path / "memory.db"
+        learning_db = tmp_path / "learning.db"
+        snaps = tmp_path / "snaps"
+        _make_simple_db(memory_db)
+        _make_simple_db(learning_db)
+
+        # Real on-disk sizes are tiny; we only need the ratio check to work.
+        actual_total = memory_db.stat().st_size + learning_db.stat().st_size
+        # 1.15× is above the 1.1× needed but below the broken 2.1×
+        free = int(actual_total * 1.15)
+
+        with mock.patch("shutil.disk_usage") as mock_du:
+            mock_du.return_value.free = free
+            try:
+                _pre_migration_backup(learning_db, memory_db, backups_root=snaps)
+            except InsufficientDiskSpaceError as exc:
+                pytest.fail(
+                    f"InsufficientDiskSpaceError raised with {free:,} free bytes "
+                    f"(1.15× of {actual_total:,}). needed_bytes={exc.needed_bytes:,}. "
+                    "Sequential writes peak at total_bytes, not 2× total — "
+                    "the check over-reserved."
+                )
+
+    def test_backup_still_fails_when_space_is_genuinely_too_tight(
+        self, tmp_path: Path
+    ) -> None:
+        """The disk check must still fire when free < 1.0× total DB bytes."""
+        memory_db = tmp_path / "memory.db"
+        learning_db = tmp_path / "learning.db"
+        snaps = tmp_path / "snaps"
+        _make_simple_db(memory_db)
+        _make_simple_db(learning_db)
+
+        actual_total = memory_db.stat().st_size + learning_db.stat().st_size
+        # Only 0.5× — genuinely too little to hold both snapshots
+        free = int(actual_total * 0.5)
+
+        with mock.patch("shutil.disk_usage") as mock_du:
+            mock_du.return_value.free = free
+            with pytest.raises(InsufficientDiskSpaceError):
+                _pre_migration_backup(learning_db, memory_db, backups_root=snaps)

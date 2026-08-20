@@ -56,7 +56,10 @@ class HopfieldConfig:
     max_iterations: int = 1
     convergence_epsilon: float = 1e-6
     prefilter_threshold: int = 10_000
-    prefilter_candidates: int = 150  # must match core/config.py HopfieldConfig default
+    # MUST match HopfieldConfig.prefilter_candidates in core/config.py, where the
+    # reasoning for the value is written. This stage decides final membership, so
+    # this number is a hard limit on which memories can be returned at all.
+    prefilter_candidates: int = 500
     skip_threshold: int = 100_000
     cache_ttl_seconds: float = 60.0
 

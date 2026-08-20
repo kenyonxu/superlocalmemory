@@ -382,3 +382,184 @@ class TestOneEntryPerFactNotPerEvent:
             f"a fact created just now scored {out['scored-1']:.4f}; collapsing its "
             f"duplicate events must keep the best score, not the last one seen"
         )
+
+
+# ---------------------------------------------------------------------------
+# The recency lookup must see a fact that has no dated-event row yet
+# ---------------------------------------------------------------------------
+
+class TestRecencyFallbackSeesNewFacts:
+    """The fallback must query atomic_facts.created_at directly.
+
+    The materializer populates temporal_events asynchronously, and only for
+    facts that have both canonical entities and resolved dates. A plain note
+    ("spent the afternoon on the ranking bug") never receives a row, so a
+    fallback that joins temporal_events cannot see it. The headline promise
+    of the recency strategy — "what am I working on" returns today's work —
+    holds only by accident unless the fallback reads from the source table.
+    """
+
+    def test_fallback_sees_fact_with_no_temporal_event_row(self, tmp_path: Path) -> None:
+        """A fact with no temporal_events row must be returned by _recency_fallback.
+
+        This fails before the fix because _recency_fallback joins temporal_events,
+        which has no row for a fact that has not been materialised yet.
+        """
+        db = _make_db(tmp_path)
+        # Insert a memory and fact WITHOUT a temporal_events row.
+        mem = MemoryRecord(
+            memory_id="m-no-event",
+            profile_id=_PROFILE,
+            scope="personal",
+            content="spent the afternoon on the ranking bug",
+        )
+        db.store_memory(mem)
+        db.store_fact(AtomicFact(
+            fact_id="no-event-fact",
+            memory_id="m-no-event",
+            profile_id=_PROFILE,
+            scope="personal",
+            content="spent the afternoon on the ranking bug",
+        ))
+        # Confirm no temporal_events row was created
+        rows = db.execute(
+            "SELECT COUNT(*) as c FROM temporal_events WHERE fact_id=?",
+            ("no-event-fact",),
+        )
+        count = dict(list(rows)[0])["c"]
+        assert count == 0, "test setup error: fact should have no temporal_events row"
+
+        ch = TemporalChannel(db)
+        results = ch._recency_fallback(_PROFILE, include_global=False, include_shared=False)
+        fact_ids = [fid for fid, _ in results]
+        assert "no-event-fact" in fact_ids, (
+            "A fact with no temporal_events row was invisible to _recency_fallback. "
+            "The fallback must query atomic_facts.created_at directly, not join "
+            "temporal_events (which is populated asynchronously)."
+        )
+
+    def test_fallback_fact_without_event_scores_near_one_when_just_written(
+        self, tmp_path: Path
+    ) -> None:
+        """A fact created moments ago must score near 1.0 regardless of event rows."""
+        db = _make_db(tmp_path)
+        mem = MemoryRecord(
+            memory_id="m-fresh",
+            profile_id=_PROFILE,
+            scope="personal",
+            content="just wrote this note",
+        )
+        db.store_memory(mem)
+        db.store_fact(AtomicFact(
+            fact_id="fresh-no-event",
+            memory_id="m-fresh",
+            profile_id=_PROFILE,
+            scope="personal",
+            content="just wrote this note",
+        ))
+
+        ch = TemporalChannel(db)
+        results_dict = dict(ch._recency_fallback(_PROFILE, include_global=False, include_shared=False))
+        assert "fresh-no-event" in results_dict, (
+            "Fact written moments ago must appear in _recency_fallback output."
+        )
+        score = results_dict["fresh-no-event"]
+        assert score > 0.9, (
+            f"A fact created just now scored {score:.4f}; expected >0.9 "
+            f"(Gaussian sigma=7d, age ~0 → score ~1.0)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# A date-anchored scan must include events that span a period
+# ---------------------------------------------------------------------------
+
+class TestDatedScanIncludesIntervalEvents:
+    """_load_events with near_date must not exclude interval-only events.
+
+    An event describing a duration ("during March 2024") carries interval_start
+    and interval_end with null referenced_date and null observation_date. The
+    original WHERE clause filtered these out entirely; the ORDER BY proximity
+    used COALESCE(referenced_date, observation_date) which was always NULL for
+    these rows, so they were silently missed.
+    """
+
+    def test_interval_only_event_is_returned_by_dated_scan(self, tmp_path: Path) -> None:
+        """A temporal event with only interval dates must appear in _load_events.
+
+        This fails before the fix because the WHERE clause requires
+        referenced_date IS NOT NULL OR observation_date IS NOT NULL,
+        which excludes interval-only events.
+        """
+        db = _make_db(tmp_path)
+        mem = MemoryRecord(
+            memory_id="m-interval",
+            profile_id=_PROFILE,
+            scope="personal",
+            content="worked on the project during march 2024",
+        )
+        db.store_memory(mem)
+        db.store_fact(AtomicFact(
+            fact_id="interval-fact",
+            memory_id="m-interval",
+            profile_id=_PROFILE,
+            scope="personal",
+            content="worked on the project during march 2024",
+        ))
+        # Temporal event with interval dates only — no referenced_date, no observation_date
+        db.store_temporal_event(TemporalEvent(
+            event_id="t-interval",
+            profile_id=_PROFILE,
+            entity_id=_ENTITY_ID,
+            fact_id="interval-fact",
+            interval_start="2024-03-01",
+            interval_end="2024-03-31",
+            description="worked on the project during march 2024",
+            scope="personal",
+        ))
+
+        ch = TemporalChannel(db)
+        rows = ch._load_events(_PROFILE, near_date="2024-03-15")
+        fact_ids = [r["fact_id"] for r in rows]
+        assert "interval-fact" in fact_ids, (
+            "An interval-only event (no referenced_date, no observation_date) "
+            "was excluded from _load_events near_date='2024-03-15'. "
+            "Events with only interval_start/interval_end must be reachable."
+        )
+
+    def test_interval_event_reachable_in_default_scan(
+        self, tmp_path: Path
+    ) -> None:
+        """The default (no near_date) scan uses rowid order and reaches interval events."""
+        db = _make_db(tmp_path)
+        mem = MemoryRecord(
+            memory_id="m-interval2",
+            profile_id=_PROFILE,
+            scope="personal",
+            content="interval event test",
+        )
+        db.store_memory(mem)
+        db.store_fact(AtomicFact(
+            fact_id="interval-fact2",
+            memory_id="m-interval2",
+            profile_id=_PROFILE,
+            scope="personal",
+            content="interval event test",
+        ))
+        db.store_temporal_event(TemporalEvent(
+            event_id="t-interval2",
+            profile_id=_PROFILE,
+            entity_id=_ENTITY_ID,
+            fact_id="interval-fact2",
+            interval_start="2024-03-01",
+            interval_end="2024-03-31",
+            description="interval event test",
+            scope="personal",
+        ))
+        ch = TemporalChannel(db)
+        # Default scan (no near_date) uses rowid DESC — interval events are rows too
+        rows = ch._load_events(_PROFILE)
+        fact_ids = [r["fact_id"] for r in rows]
+        assert "interval-fact2" in fact_ids, (
+            "Default scan (no near_date) must include interval-only events."
+        )

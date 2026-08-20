@@ -43,8 +43,17 @@ _TEMPORAL_WORDS: frozenset[str] = frozenset({
     "until", "while", "between", "january", "february", "march",
     "april", "may", "june", "july", "august", "september", "october",
     "november", "december",
-    "now", "today", "yesterday", "currently",
-    "tonight", "tomorrow", "latest",
+    "now", "today", "yesterday",
+    "tonight", "tomorrow",
+    # "current" was removed earlier because "what is the current database schema"
+    # was being answered by newest-fact recency instead of topical search.
+    # "latest" and "currently" carry the same over-trigger: in "what is the
+    # latest authentication design" or "what is the currently supported format"
+    # they mean "most recent version of X", not "at what time did X happen".
+    # Routing those queries to temporal causes the recency fallback to dump the
+    # 50 newest facts with no topic filter at temporal weight 2.0, burying the
+    # subject the user named. Present-activity phrases ("currently working",
+    # "currently doing", "currently focused") are covered by _RECENCY_PHRASES.
 })
 
 _MULTI_HOP_PHRASES: tuple[str, ...] = (
@@ -86,7 +95,7 @@ _RECENCY_PHRASES: tuple[str, ...] = (
     "am i working", "are we working", "been working",
     "what's happening", "what is happening",
     "right now", "these days", "at the moment",
-    "currently doing", "currently working",
+    "currently doing", "currently working", "currently focused",
     "what have i been", "what am i doing", "what have we been",
 )
 
@@ -129,10 +138,14 @@ class QueryStrategy:
 
 
 
-def _recency_enabled() -> bool:
+def _recency_enabled(config: object | None = None) -> bool:
     """Whether the present-tense path is switched on.
 
-    Reads configuration if the caller supplied one, otherwise defaults to on.
+    The env var SLM_DISABLE_RECENCY_STRATEGY=1 is checked first (incident
+    override). If unset, the RetrievalConfig.enable_recency_strategy field is
+    consulted when a config object is supplied. Defaults to on when neither
+    is present.
+
     Kept as a module-level function so the classifier stays usable without an
     engine, which is how the gate and several tests call it.
     """
@@ -140,11 +153,25 @@ def _recency_enabled() -> bool:
 
     if os.environ.get("SLM_DISABLE_RECENCY_STRATEGY", "0") == "1":
         return False
+    if config is not None and not getattr(config, "enable_recency_strategy", True):
+        return False
     return True
 
 
 class QueryStrategyClassifier:
     """Classifies queries and produces adaptive channel weights."""
+
+    def __init__(self, config: object | None = None) -> None:
+        """Initialise the classifier.
+
+        Args:
+            config: Optional RetrievalConfig-like object. When supplied,
+                ``enable_recency_strategy=False`` on that object acts as a
+                persistent rollback without requiring an env var change.
+                The env var SLM_DISABLE_RECENCY_STRATEGY=1 always takes
+                precedence.
+        """
+        self._config = config
 
     def classify(self, query: str, base_weights: dict[str, float]) -> QueryStrategy:
         """Classify query and return adapted weights."""
@@ -177,19 +204,17 @@ class QueryStrategyClassifier:
         if len(proper_nouns) >= 2 and words & _CAUSAL_TEMPORAL_WORDS:
             return "multi_hop"
 
-        # `enable_recency_strategy=False` is documented as the one-line rollback
-        # for this whole path. It was declared and never read, so the rollback
-        # did nothing — a switch that does not switch is worse than no switch,
-        # because it is reached for in an incident.
-        if not _recency_enabled():
-            pass
         # Checked BEFORE the single-word test below. "what am I working on right
         # now" contains "now", so the word test claimed it first and routed a
         # question about the present down the retrospective path — which weights
         # word-matching at 1.5 against this path's 0.7, and word-matching on
         # "working" is exactly what surfaced a month-old note about a working
         # tree. A whole phrase states intent; a single word only hints at it.
-        elif any(p in q for p in _RECENCY_PHRASES):
+        #
+        # The enable_recency_strategy config field and SLM_DISABLE_RECENCY_STRATEGY
+        # env var both feed into _recency_enabled(). When either signals disabled,
+        # this block is skipped and the query falls through to subsequent checks.
+        if _recency_enabled(self._config) and any(p in q for p in _RECENCY_PHRASES):
             return "recency"
         if words & _TEMPORAL_WORDS:
             return "temporal"

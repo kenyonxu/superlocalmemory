@@ -131,16 +131,20 @@ class TestStartParentWatchdog:
 
     def test_does_not_crash(self) -> None:
         stop = threading.Event()
-        thread = start_parent_watchdog(stop_event=stop)
+        # Patch os.getppid so the function always enters the "start thread"
+        # branch regardless of real process parentage (e.g. CI reparenting,
+        # PID-namespace containers, or suites that affect ppid indirectly).
+        with patch("os.getppid", return_value=os.getpid()):
+            thread = start_parent_watchdog(stop_event=stop)
         assert thread is not None
         stop.set()
         thread.join(timeout=1)
         assert not thread.is_alive()
 
     def test_creates_daemon_thread(self) -> None:
-        import threading
         stop = threading.Event()
-        thread = start_parent_watchdog(stop_event=stop)
+        with patch("os.getppid", return_value=os.getpid()):
+            thread = start_parent_watchdog(stop_event=stop)
         assert thread is not None
         assert thread.daemon
         assert thread.name == "parent-watchdog"

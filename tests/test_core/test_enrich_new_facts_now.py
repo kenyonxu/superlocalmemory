@@ -126,9 +126,13 @@ class TestTheVectorIsAttached:
         is already fully searchable would make the receipt say "wording only"
         about a memory that is in fact findable.
 
-        Both halves are asserted. Checking only the count would pass on an
-        implementation that re-embeds every time; checking only the embedder
-        would pass on one that always returns 0.
+        Three halves are asserted, and the third is the one that matters. The
+        count alone would pass on an implementation that re-embeds every time;
+        the embedder alone would pass on one that always returns 0; and both
+        together would still pass for a fact that has a vector in its canonical
+        column and no projection behind it — which is unreachable by a search on
+        meaning, and is exactly the state this number must not claim success for.
+        So the end state is checked too.
         """
         fact_id = engine.store_fast("Procurement confirmed the tariff schedule.")[0]
         spy = MagicMock(wraps=engine._embedder)
@@ -140,6 +144,11 @@ class TestTheVectorIsAttached:
             "caller's receipt, otherwise the user is told it cannot be found"
         )
         spy.embed.assert_not_called()
+        assert _state(engine, fact_id) == ("blob", 1), (
+            "the count said this fact is findable by meaning, but the projection "
+            "a meaning-based search reads is not there; the number is a claim "
+            "about reachability and has to be checked against it"
+        )
 
     def test_nothing_to_do_is_not_an_error(self, engine: MemoryEngine) -> None:
         assert engine.enrich_new_facts_now([]) == 0

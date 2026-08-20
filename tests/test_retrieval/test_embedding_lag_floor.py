@@ -156,11 +156,50 @@ class TestItStaysOutOfTheWay:
         assert eng._semantic_rank_for_unenriched(ch) is ch
 
     def test_no_semantic_channel_is_a_no_op(self) -> None:
-        """With nothing to be ranked among, there is no median to occupy."""
+        """With nothing to be ranked among, there is no median to occupy.
+
+        Paired with a positive control: the same input WITH a semantic key
+        causes the output to differ.  Without that control an always-return-
+        unchanged implementation satisfies the no-semantic assertion while being
+        entirely inert.
+        """
+        # Positive control: semantic key present → output must change.
+        ch_with_semantic = {
+            "semantic": [("s0", 0.9), ("s1", 0.8)],
+            "bm25": [("fresh", 50.0)],
+        }
+        assert (
+            _engine(["fresh"])._semantic_rank_for_unenriched(ch_with_semantic)
+            is not ch_with_semantic
+        ), (
+            "positive control failed: with a semantic channel and a fresh "
+            "un-enriched candidate the output must differ from the input — "
+            "otherwise the no-semantic-channel assertion below proves nothing"
+        )
+
+        # Actual no-op case: no semantic key in the mapping.
         ch = {"bm25": [("fresh", 50.0)]}
         assert _engine(["fresh"])._semantic_rank_for_unenriched(ch) is ch
 
     def test_no_new_candidates_is_a_no_op(self) -> None:
+        """When no un-enriched candidates exist, the ranking is returned unchanged.
+
+        Paired with a positive control: WITH a fresh un-enriched candidate the
+        output differs.  Without that control an always-return-unchanged
+        implementation satisfies the no-candidates assertion while being inert.
+        """
+        # Positive control: fresh candidate present → output must change.
+        ch_with_fresh = {"semantic": [("s0", 0.9)], "bm25": [("fresh", 12.0)]}
+        assert (
+            _engine(["fresh"])._semantic_rank_for_unenriched(ch_with_fresh)
+            is not ch_with_fresh
+        ), (
+            "positive control failed: with a fresh un-enriched candidate present "
+            "the output must differ from the input — otherwise the "
+            "no-new-candidates assertion below proves nothing"
+        )
+
+        # Actual no-op case: engine reports nothing as un-enriched.
         ch = {"semantic": [("s0", 0.9)], "bm25": [("s0", 12.0)]}
         assert _engine([])._semantic_rank_for_unenriched(ch) is ch
 

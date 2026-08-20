@@ -60,6 +60,7 @@ override) will not list or touch these files.  That is intentional.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import os
 import sqlite3
@@ -70,6 +71,54 @@ from pathlib import Path
 from superlocalmemory.infra.data_root import canonical_data_root
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Filename parsing helpers for snapshot ordering and generation grouping
+# ---------------------------------------------------------------------------
+
+# Timestamps in snapshot filenames are YYYYMMDD-HHmmss-ffffff (microseconds).
+# _free_name appends a collision suffix -N (integer ≥ 1) when a file already
+# exists.  Both forms are matched by this pattern.
+_SNAPSHOT_TIMESTAMP_RE = re.compile(r"^(\d{8}-\d{6}-\d{6})(?:-(\d+))?$")
+
+
+def _parse_generation_stamp(raw_stamp: str) -> str:
+    """Return the base YYYYMMDD-HHmmss-ffffff portion of a raw snapshot stamp.
+
+    Strips any trailing -N collision suffix added by ``_free_name``, so that::
+
+        memory-20260819-120000-123456-pre-migration.db
+        memory-20260819-120000-123456-1-pre-migration.db
+
+    are recognised as the same logical generation.
+
+    If the stamp does not match the expected pattern (e.g. an externally
+    created file), the raw stamp is returned unchanged so GC does not crash.
+    """
+    m = _SNAPSHOT_TIMESTAMP_RE.match(raw_stamp)
+    return m.group(1) if m else raw_stamp
+
+
+def _snapshot_sort_key(path: Path) -> tuple[str, int]:
+    """Stable sort key for a ``*-pre-migration.db`` file.
+
+    Returns ``(base_timestamp, collision_suffix_int)`` so that:
+
+    * Files from earlier migrations sort before later ones.
+    * Among files sharing a base timestamp (collision duplicates), the
+      unsuffixed file sorts first (-0) and each higher suffix follows.
+
+    Sorting ascending and indexing ``[-1]`` yields the newest snapshot,
+    regardless of filesystem mtime granularity.
+    """
+    name = path.name
+    raw = name.split("-", 1)[-1].rsplit("-pre-migration.db", 1)[0]
+    m = _SNAPSHOT_TIMESTAMP_RE.match(raw)
+    if m:
+        base = m.group(1)
+        suffix = int(m.group(2)) if m.group(2) is not None else 0
+        return (base, suffix)
+    return (raw, 0)
 
 
 class InsufficientDiskSpaceError(Exception):
@@ -304,9 +353,16 @@ def _pre_migration_backup(
     # existing ancestor because the snapshot directory itself may not exist yet.
     check_path = _find_existing_ancestor(backups_root)
     free_bytes = shutil.disk_usage(str(check_path)).free
-    # 1.1x headroom for the snapshot, plus room for the staging copy that is
-    # written before the atomic rename — the peak on disk is briefly both.
-    needed_bytes = int(total_bytes * 2.1)
+    # Snapshots are written SEQUENTIALLY (one store at a time, staging-then-rename).
+    # Peak extra disk usage occurs when both final snapshots are on disk simultaneously,
+    # which equals total_bytes.  A 10 % safety buffer covers filesystem bookkeeping
+    # and any WAL pages materialised during the copy.
+    #
+    # The previous formula used total_bytes * 2.1, which was derived for a single
+    # database (1.0 × staging + 1.0 × final + 0.1 × headroom = 2.1 ×).  Applied
+    # to the SUM of two databases it over-reserved by a factor of ~2 and blocked
+    # migrations on machines with limited disk even when the backup would fit.
+    needed_bytes = int(total_bytes * 1.1)
     if free_bytes < needed_bytes:
         raise InsufficientDiskSpaceError(needed_bytes, free_bytes)
 
@@ -387,16 +443,27 @@ def _gc_old_backups(backups_root: Path, keep: int = 2) -> None:
     for candidate in backups_root.glob("*-pre-migration.db"):
         if not candidate.is_file() or candidate.parent != backups_root:
             continue
-        # "memory-20260819-120000-pre-migration.db" -> "20260819-120000"
-        stamp = candidate.name.split("-", 1)[-1].rsplit("-pre-migration.db", 1)[0]
+        # Extract the raw stamp and normalise away any collision suffix so that
+        # "memory-20260819-120000-123456-pre-migration.db" and
+        # "memory-20260819-120000-123456-1-pre-migration.db" land in the same
+        # generation bucket.  Without normalisation a collision suffix makes GC
+        # count one migration's files as two separate generations and can delete
+        # one file from a paired set, leaving a snapshot that cannot be used for
+        # a consistent restore.
+        raw_stamp = candidate.name.split("-", 1)[-1].rsplit("-pre-migration.db", 1)[0]
+        stamp = _parse_generation_stamp(raw_stamp)
         generations.setdefault(stamp, []).append(candidate)
 
     if len(generations) <= keep:
         return
 
+    # Sort by the base timestamp string.  YYYYMMDD-HHmmss-ffffff is lexically
+    # monotonic, so alphabetical order is chronological order.  Using st_mtime
+    # here was nondeterministic when two snapshots landed in the same filesystem
+    # timestamp second (FAT, relatime ext4).
     ordered = sorted(
         generations.items(),
-        key=lambda kv: max(p.stat().st_mtime for p in kv[1]),
+        key=lambda kv: kv[0],
     )
     for _stamp, files in ordered[: len(generations) - keep]:
         for target in sorted(files):

@@ -104,7 +104,7 @@ class RetrievalEngine:
         self._spreading_activation = channels.get("spreading_activation")
         self._embedder = embedder
         self._reranker = reranker
-        self._strategy = strategy or QueryStrategyClassifier()
+        self._strategy = strategy or QueryStrategyClassifier(config=config)
         self._base_weights = (base_weights or ChannelWeights()).as_dict()
         self._profile_channel = profile_channel
         self._bridge = bridge_discovery
@@ -353,7 +353,7 @@ class RetrievalEngine:
                             ))
                         else:
                             boosted.append(fr)
-                    fused = sorted(boosted, key=lambda r: r.fused_score, reverse=True)
+                    fused = sorted(boosted, key=lambda r: (-r.fused_score, r.fact_id))
             except Exception as exc:
                 logger.warning("Entity graph signal enhancement: %s", exc)
 
@@ -670,7 +670,7 @@ class RetrievalEngine:
                 channel_ranks=fr.channel_ranks,
                 channel_scores=fr.channel_scores,
             ))
-        boosted.sort(key=lambda r: r.fused_score, reverse=True)
+        boosted.sort(key=lambda r: (-r.fused_score, r.fact_id))
         return boosted
 
     # -- Session diversity enforcement ----------------------------------------
@@ -1017,10 +1017,19 @@ class RetrievalEngine:
                 q_emb, profile_id, self._config.bm25_top_k,
             )
 
-        # Each local channel gets a strict latency budget.  A slow graph walk
-        # must not make an interactive recall wait 30 seconds; completed
-        # channels still participate in fusion and the timeout is observable.
-        channel_timeout_seconds = 1.0
+        # Each local channel gets a latency budget, so that a slow graph walk
+        # cannot make an interactive recall wait 30 seconds. But a channel that
+        # runs out of time contributes NOTHING to fusion — the answer is missing
+        # whatever that channel alone could see — so this deadline is a quality
+        # cost every time it binds, and it is sized to be as generous as the
+        # recall budget allows rather than as tight as possible.
+        #
+        # Derived from the 2.0 s recall ceiling and what is measured to happen
+        # after this point: entity expansion and enhancement average ~0.45 s and
+        # the remaining work ~0.09 s, so a channel deadline of 1.4 s puts the
+        # worst case at roughly 1.94 s. Raising it further would breach the
+        # ceiling; lowering it buys time nobody needs and loses answers.
+        channel_timeout_seconds = 1.4
         # One shared deadline keeps parallel dispatch genuinely bounded.  A
         # per-future timeout here would serialise the wait and turn five slow
         # channels into five seconds of UI latency.
@@ -1211,7 +1220,7 @@ class RetrievalEngine:
             )
             for fr in fused
         ]
-        updated.sort(key=lambda r: r.fused_score, reverse=True)
+        updated.sort(key=lambda r: (-r.fused_score, r.fact_id))
         return updated, True, "applied"
 
     # -- Agentic adapter -----------------------------------
@@ -1270,7 +1279,9 @@ class RetrievalEngine:
                 continue
             evidence = [
                 f"{ch}(rank={rk}, score={fr.channel_scores.get(ch, 0.0):.4f})"
-                for ch, rk in sorted(fr.channel_ranks.items(), key=lambda x: x[1])
+                # Channel name breaks a tie, so the evidence string a caller
+                # sees is the same on two runs when two channels agree on rank.
+                for ch, rk in sorted(fr.channel_ranks.items(), key=lambda x: (x[1], x[0]))
                 if rk < 1000
             ]
             # Recency decay: Ebbinghaus exponential + FSRS stability strengthening (v3.4.51).
@@ -1338,7 +1349,17 @@ class RetrievalEngine:
             if (_prior_strength > 0.0 and age_known
                     and strat.query_type in ("recency", "temporal")):
                 _half_life = 7.0 if strat.query_type == "recency" else 30.0
-                _max_amp = 1.5 if strat.query_type == "recency" else 1.2
+                # Both query types use max_amp=1.5 so the decay is visible.
+                # With max_amp=1.2 and half_life=30, the raw value at age 0d
+                # is 1.5 and at age 30d is 1.25 — both clamp to 1.2. The prior
+                # was inert over the first ~39 days, which is the range it was
+                # built to discriminate. Raising the cap to 1.5 lets the
+                # formula vary from 1.5 (fresh) through 1.25 (30d) toward 1.0
+                # (old). This changes ranking: facts from 2 days ago and 30
+                # days ago now receive different boosts. The change is a
+                # correction to a clamp that made the prior inert, not a
+                # measured gain.
+                _max_amp = 1.5
                 _cond_boost = 1.0 + _prior_strength * math.exp(
                     -(math.log(2) / _half_life) * age_days
                 )

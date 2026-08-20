@@ -121,70 +121,106 @@ class _VS:
 # Test 100 — pin the default prefilter size
 # ---------------------------------------------------------------------------
 
-class TestPrefilterDefaultIs150:
-    """The HopfieldConfig default for prefilter_candidates must be 150.
+class TestPrefilterDefaultIsLargeEnoughToBeComplete:
+    """The default candidate pool must be 500, and the two copies must agree.
 
-    RED: fails with AssertionError when the default is 1000.
-    GREEN: passes after the default is changed to 150.
+    This stage decides final membership, so a fact the index ranks past this
+    number never reaches it and can never be returned. The pool size is therefore
+    a direct limit on which memories are reachable at all, not a tuning knob.
+
+    150 was too small: it made everything the index ranked past 150th
+    unreachable. 1000 was too large: it pushed retrieval channels past their
+    deadline, and a channel that misses its deadline contributes nothing, so the
+    same question stopped returning the same answer. 500 was measured to give
+    3.3x the reachability of 150 for 142 ms, with zero channel timeouts and about
+    860 ms of headroom under the 2 s recall ceiling.
+
+    The value is declared in two places that must not drift apart, so both are
+    checked here — a test that pinned only one would let them diverge silently.
     """
 
-    def test_default_prefilter_candidates_is_150(self) -> None:
+    def test_default_prefilter_candidates_is_500(self) -> None:
         from superlocalmemory.math.hopfield import HopfieldConfig
 
         cfg = HopfieldConfig()
-        assert cfg.prefilter_candidates == 150, (
-            f"Expected prefilter_candidates=150, got {cfg.prefilter_candidates}. "
-            "Change HopfieldConfig.prefilter_candidates default to 150."
+        assert cfg.prefilter_candidates == 500, (
+            f"Expected prefilter_candidates=500, got {cfg.prefilter_candidates}. "
+            "Smaller silently makes facts beyond it unreachable; larger pushes "
+            "channels past their deadline, which costs whole channels."
+        )
+
+    def test_the_two_declarations_agree(self) -> None:
+        from superlocalmemory.core.config import HopfieldConfig as CoreHopfieldConfig
+        from superlocalmemory.math.hopfield import HopfieldConfig as MathHopfieldConfig
+
+        assert (
+            MathHopfieldConfig().prefilter_candidates
+            == CoreHopfieldConfig().prefilter_candidates
+        ), (
+            "the two prefilter_candidates defaults have drifted apart; whichever "
+            "one the running code reads decides which memories are reachable"
         )
 
 
 # ---------------------------------------------------------------------------
-# Test 101 — prefilter path is taken for a 200-fact corpus with default config
+# Test 101 — the candidate pool decides whether the pre-filter runs at all
 # ---------------------------------------------------------------------------
 
-class TestPrefilterPathTakenWithDefaultConfig:
-    """A 200-fact corpus must route through the ANN pre-filter with default config.
+class TestPrefilterRoutesOnTheCandidatePool:
+    """Whether the pre-filter runs is decided by the pool size, both ways.
 
-    With prefilter_candidates=1000 (old): 200 <= 1000, so full-matrix path is
-    taken and VectorStore.search() is NOT called for the pre-filter.
+    A store smaller than the pool needs no pre-filtering at all — every fact goes
+    through, which is the whole point of a pool large enough to be complete. A
+    store larger than the pool must pre-filter, or the matrix is unbounded.
 
-    With prefilter_candidates=150 (new): 200 > 150, so the prefilter path is
-    taken and VectorStore.search() IS called.
-
-    RED: VectorStore.search not called → asserts False.
-    GREEN: VectorStore.search is called → asserts True.
+    Both halves are checked. A test that only asserted the pre-filter runs would
+    pass on a pool of 1 and read as if it proved something about routing.
     """
 
-    def test_prefilter_path_taken_for_200_facts(self) -> None:
-        from superlocalmemory.math.hopfield import HopfieldConfig
+    def _search_calls(self, corpus_size: int) -> list[int]:
         from superlocalmemory.retrieval.hopfield_channel import HopfieldChannel
 
-        corpus = _facts(200)
-        # VectorStore returns top-5 facts as KNN result.
-        knn_top5 = [(f"f{i}", 0.95 - i * 0.01) for i in range(5)]
-        db = _DB(corpus, reported_count=200)
-        vs = _VS(available=True, count_val=200, results=knn_top5)
-
-        # Use the DEFAULT config (no explicit prefilter_candidates).
+        corpus = _facts(corpus_size)
+        knn = [(f"f{i}", 0.95 - i * 0.01) for i in range(5)]
+        db = _DB(corpus, reported_count=corpus_size)
+        vs = _VS(available=True, count_val=corpus_size, results=knn)
         channel = HopfieldChannel(db=db, vector_store=vs)
 
-        # Wrap vs.search so we can detect whether it was called.
         real_search = vs.search
-        search_calls: list[Any] = []
+        calls: list[int] = []
 
-        def tracking_search(query: list[float], top_k: int = 50, profile_id: str | None = None) -> list[tuple[str, float]]:
-            search_calls.append(top_k)
+        def tracking_search(
+            query: list[float], top_k: int = 50, profile_id: str | None = None,
+        ) -> list[tuple[str, float]]:
+            calls.append(top_k)
             return real_search(query, top_k, profile_id)
 
         vs.search = tracking_search  # type: ignore[method-assign]
+        channel.search(_normed_vec(999), "p", top_k=5)
+        return calls
 
-        query = _normed_vec(999)
-        channel.search(query, "p", top_k=5)
+    def test_a_store_smaller_than_the_pool_is_used_whole(self) -> None:
+        """200 facts and a pool of 1000: nothing is filtered out.
 
-        assert len(search_calls) > 0, (
-            "VectorStore.search was not called, meaning the full-matrix path "
-            "was taken. With prefilter_candidates=150 and 200 facts, the "
-            "prefilter path must be taken (200 > 150)."
+        This is the behaviour the larger pool buys. Under a pool of 150 the same
+        store was pre-filtered and everything the index ranked past 150th became
+        unreachable.
+        """
+        assert self._search_calls(200) == [], (
+            "the pre-filter ran on a store smaller than the candidate pool, so "
+            "facts were discarded that the pool had room for"
+        )
+
+    def test_a_store_larger_than_the_pool_is_prefiltered(self) -> None:
+        """The other half: the matrix must stay bounded on a large store."""
+        calls = self._search_calls(1500)
+        assert calls, (
+            "the pre-filter did not run on a store larger than the candidate "
+            "pool, so the matrix is unbounded"
+        )
+        assert calls[0] == 500, (
+            f"the pre-filter asked for {calls[0]} candidates; it must ask for the "
+            "full pool, or the pool size is not what decides reachability"
         )
 
 
@@ -192,70 +228,130 @@ class TestPrefilterPathTakenWithDefaultConfig:
 # Test 102 — result set is stable when both pool sizes use the same candidates
 # ---------------------------------------------------------------------------
 
-class TestResultSetStableAcrossPoolSizes:
-    """When both pool sizes use the prefilter path and the VectorStore returns
-    the same candidate set, Hopfield produces identical results regardless of
-    which prefilter_candidates value was used to request those candidates.
+class TestPoolSizeActuallyBoundsVSRequest:
+    """The prefilter_candidates value controls how many candidates the channel
+    asks the VS for, which in turn determines which facts ever reach Hopfield.
 
-    This is the quality-safety contract for the 1000 → 150 reduction:
-    on stores large enough that both values trigger the prefilter path
-    (reported_count > max(150, 1000)), and where the VectorStore returns the
-    same N facts for both top_k requests (because the VS has exactly N facts),
-    the returned fact-ID list must be identical.
+    A fact at VS-rank 151 cannot enter the Hopfield sub-matrix when
+    prefilter=150, because the VS is only asked for 150 candidates.
+    With prefilter=200 the same fact is inside the window and is therefore
+    presented to the DB retrieval stage.
 
-    Design note: this is a quality-contract test, not a RED → GREEN constant
-    test. Both runs explicitly supply their own HopfieldConfig so the result
-    is independent of the module-level default. The test is always GREEN for
-    correct implementations; it would fail only if the Hopfield math itself
-    produced non-deterministic results given the same input sub-matrix.
+    We verify by intercepting db.get_facts_by_ids() — the gate between the
+    VS pre-filter and the Hopfield computation.  If a fact ID never appears
+    as an argument to get_facts_by_ids() it cannot affect any result,
+    regardless of its embedding.
 
-    The reported_count is set to 5000 so that 5000 > 1000 > 150 — both pool
-    sizes trigger the prefilter path. The VectorStore result list is capped at
-    150 items, so both top_k=150 and top_k=1000 requests receive the same 150
-    candidates. Hopfield operates on the identical sub-matrix in both cases.
+    This approach is independent of Hopfield's numerical output, which with
+    many candidates and beta = 1/sqrt(d) produces a nearly-uniform softmax
+    that does not reliably surface any single pattern in top-10.
     """
 
-    def test_same_top_facts_when_vs_returns_same_candidates(self) -> None:
-        """Given the SAME candidates, pool size does not change the answer.
+    def test_smaller_pool_misses_fact_ranked_beyond_its_boundary(self) -> None:
+        """f151 reaches the DB only when prefilter allows it.
 
-        Stated precisely, because this is easy to over-read as "shrinking the
-        pool is free". It is not: the smaller pool ASKS the index for fewer
-        candidates, so anything ranked beyond the new size never reaches this
-        stage — and both runs here are handed an identical list, so this test
-        cannot see that. What it shows is narrower: the pool size is not itself
-        a ranking input.
+        Setup
+        -----
+        * 300 facts in the corpus, all for profile "p".
+        * VS results list is ordered f0 (highest score) … f299 (lowest).
+          f151 sits at index 151, making it the 152nd candidate.
+        * reported_count=5000 > 200 > 150, so the prefilter path is taken
+          for both runs.
+        * DIM_SMALL=8 keeps computation fast; the test does not depend on
+          Hopfield's output, only on which IDs were ever queried from DB.
 
-        The cost of the narrower request is a real trade, measured against a
-        store rather than asserted here.
+        Assertions
+        ----------
+        With prefilter=150: VS returns f0–f149.  f151 is NOT in the candidate
+          set → must NOT appear in the queried IDs set.
+
+        With prefilter=200: VS returns f0–f199.  f151 IS in the candidate set
+          → MUST appear in the queried IDs set.
+
+        Backwards-compatibility check: if the VS stub reverts to returning a
+        fixed list that ignores top_k, both runs would receive the same
+        candidates and at least one assertion below must fail — the test would
+        correctly report that the prefilter bound is not being honoured.
         """
         from superlocalmemory.math.hopfield import HopfieldConfig
         from superlocalmemory.retrieval.hopfield_channel import HopfieldChannel
 
-        # 150 real facts; reported count 5000 → prefilter path for both pool sizes.
-        corpus = _facts(150)
-        query = _normed_vec(999)
+        DIM_SMALL = 8  # small dimension keeps Hopfield matrix ops fast
 
-        # VS result list has exactly 150 entries — both top_k=150 and top_k=1000
-        # requests will receive the same 150 candidates.
-        knn_results = [(f"f{i}", 0.99 - i * 0.001) for i in range(150)]
+        def _sv(seed: int) -> list[float]:
+            rng = np.random.default_rng(seed)
+            v = rng.standard_normal(DIM_SMALL).astype(np.float32)
+            v /= max(float(np.linalg.norm(v)), 1e-8)
+            return v.tolist()
 
-        def _run(prefilter: int) -> list[str]:
-            cfg = HopfieldConfig(prefilter_candidates=prefilter)
-            # reported_count=5000 > both pool sizes → prefilter path guaranteed.
-            db = _DB(corpus, reported_count=5000)
-            vs = _VS(available=True, count_val=5000, results=knn_results)
-            ch = HopfieldChannel(db=db, vector_store=vs, config=cfg)
-            results = ch.search(query, "p", top_k=10)
-            return [fid for fid, _ in results]
+        query = np.array(_sv(999), dtype=np.float32)
+        n_facts = 300
 
-        ids_at_150 = _run(150)
-        ids_at_1000 = _run(1000)
+        corpus = [
+            _Fact(
+                fact_id=f"f{i}",
+                profile_id="p",
+                embedding=query.tolist() if i == 151 else _sv(200 + i),
+            )
+            for i in range(n_facts)
+        ]
 
-        assert ids_at_150 == ids_at_1000, (
-            "Hopfield results differ despite both pool sizes receiving the same "
-            "150 ANN candidates. This indicates non-determinism in the math, "
-            "not a pool-size quality issue. "
-            f"at-150: {ids_at_150}, at-1000: {ids_at_1000}"
+        # VS result list: f0 best, f151 at index 151, f299 worst.
+        vs_results = [
+            (f"f{i}", max(0.0, 0.999 - i * 0.001)) for i in range(n_facts)
+        ]
+
+        def _run(prefilter: int) -> set[str]:
+            """Return every fact ID ever passed to db.get_facts_by_ids()."""
+            queried_ids: set[str] = set()
+            orig_db = _DB(corpus, reported_count=5000)
+
+            class _TrackingDB:
+                def get_fact_count(self, *a: Any, **kw: Any) -> int:
+                    return orig_db.get_fact_count(*a, **kw)
+
+                def get_all_facts(self, *a: Any, **kw: Any) -> list[_Fact]:
+                    return orig_db.get_all_facts(*a, **kw)
+
+                def get_facts_by_ids(
+                    self,
+                    fact_ids: list[str],
+                    profile_id: str,
+                    include_global: bool = False,
+                    include_shared: bool = False,
+                ) -> list[_Fact]:
+                    queried_ids.update(fact_ids)
+                    return orig_db.get_facts_by_ids(
+                        fact_ids, profile_id,
+                        include_global=include_global,
+                        include_shared=include_shared,
+                    )
+
+                def get_external_visible_facts(
+                    self, *a: Any, **kw: Any
+                ) -> list[_Fact]:
+                    return []
+
+            cfg = HopfieldConfig(prefilter_candidates=prefilter, dimension=DIM_SMALL)
+            vs = _VS(available=True, count_val=5000, results=vs_results)
+            ch = HopfieldChannel(db=_TrackingDB(), vector_store=vs, config=cfg)
+            ch.search(query.tolist(), "p", top_k=10)
+            return queried_ids
+
+        queried_at_150 = _run(150)
+        queried_at_200 = _run(200)
+
+        # With prefilter=200: f151 (at VS-rank 151) must reach the DB stage.
+        assert "f151" in queried_at_200, (
+            "f151 was not queried from DB with prefilter=200 even though it is "
+            "at VS-rank 151, which is inside the 200-candidate window. "
+            f"Queried IDs (first 20): {sorted(queried_at_200)[:20]}"
         )
-        # Verify the prefilter path was actually taken (non-empty results).
-        assert len(ids_at_150) > 0, "Prefilter path returned no results."
+
+        # With prefilter=150: f151 must NOT reach the DB stage.
+        assert "f151" not in queried_at_150, (
+            "f151 was queried from DB with prefilter=150 even though it is at "
+            "VS-rank 151, outside the 150-candidate window.  Either the VS stub "
+            "is not respecting top_k or the channel is ignoring prefilter_candidates. "
+            f"Queried IDs (first 20): {sorted(queried_at_150)[:20]}"
+        )

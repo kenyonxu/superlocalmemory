@@ -596,7 +596,7 @@ class RemoteReranker:
             (fact, float(score))
             for (fact, _), score in zip(ranked, scores)
         ]
-        scored.sort(key=lambda pair: pair[1], reverse=True)
+        scored.sort(key=lambda pair: (-pair[1], pair[0].fact_id))
         return scored[:top_k], True, "applied"
 
     def score_pair(self, query: str, document: str) -> float:
@@ -735,7 +735,7 @@ class RemoteReranker:
     def _fusion_order(
         candidates: list[tuple[AtomicFact, float]],
     ) -> list[tuple[AtomicFact, float]]:
-        return sorted(candidates, key=lambda pair: pair[1], reverse=True)
+        return sorted(candidates, key=lambda pair: (-pair[1], pair[0].fact_id))
 
 
 class _RetryableRemoteError(RemoteRerankerError):

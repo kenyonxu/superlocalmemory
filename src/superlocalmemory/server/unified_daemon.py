@@ -237,11 +237,14 @@ _SOURCE_QUALITY_MAX_BATCH_SIZE = 250
 _SOURCE_QUALITY_PROFILE_REFRESH_SECONDS = 60.0
 _FACT_ENTITY_REPAIR_MIN_RETRY_SECONDS = 0.05
 _FACT_ENTITY_REPAIR_MAX_RETRY_SECONDS = 30.0
-# ``wait=true`` is a compatibility affordance, never permission to hold the
-# ASGI event loop hostage to a local LLM.  Normal clients omit it and receive
-# an immediate durable/queryable receipt; explicit waiters get this small
-# completion window, then the M018 materializer continues in the background.
-_REMEMBER_ENRICHMENT_WAIT_SECONDS = 0.75
+# How long a write may spend making itself findable by meaning before the
+# receipt goes out. Storing a memory has a 1.5 s ceiling, and this is a ceiling
+# rather than a target: the cost of coming in under it is a memory that can only
+# be found by quoting its own wording, which is not how anyone asks. So the
+# window is most of the budget, not a token amount of it. ``wait=true`` is still
+# never permission to hold the event loop open indefinitely — past this the
+# background pass finishes the job.
+_REMEMBER_ENRICHMENT_WAIT_SECONDS = 1.2
 
 # Enrichment runs off the event loop, but NOT on the loop's default executor.
 # `asyncio.to_thread` uses that default pool, so N simultaneous writers really did
@@ -253,18 +256,103 @@ _ENRICHMENT_WORKERS = 2
 _enrichment_pool: "concurrent.futures.ThreadPoolExecutor | None" = None
 _enrichment_pool_lock = threading.Lock()
 
+# Bounds how much enrichment may be in flight at once. A ThreadPoolExecutor
+# queues without limit, so bounding the pool's WIDTH does not bound what can be
+# handed to it: a burst of writers all submit, the first two run, and the rest sit
+# in a queue nobody is waiting for any more — then wake up and write to the
+# database after their callers have already been answered. A permit is taken
+# before submitting and released by the worker when it has really finished, so at
+# most `_ENRICHMENT_WORKERS` pieces of work exist at once and a caller that
+# cannot get one is told immediately instead of being queued.
+_enrichment_semaphore = threading.Semaphore(_ENRICHMENT_WORKERS)
+
+# Set once the pool has been shut down, and never cleared. Without it, a caller
+# that passed the unlocked check below arrives after shutdown, finds None, and
+# builds a replacement pool that the completed shutdown will never reach.
+_enrichment_pool_closed = False
+
+
+class _EnrichmentAtCapacity(Exception):
+    """No permit was free, so nothing was submitted.
+
+    Its own type, so that "we chose not to start" is never reported through the
+    same path as "it started and then failed" — those are different events and
+    only one of them is worth a warning about degradation.
+    """
+
 
 def _enrichment_executor():
-    """The one pool inline enrichment may use. Created on first need."""
+    """The one pool inline enrichment may use. Created on first need.
+
+    Raises ``RuntimeError`` once the pool has been shut down. It deliberately
+    does not return ``None`` on that path: ``run_in_executor(None, ...)`` means
+    *the event loop's default executor*, which is the unbounded-thread behaviour
+    this pool exists to replace, so a None here would silently reintroduce it at
+    exactly the moment the process is trying to stop.
+    """
     global _enrichment_pool
     if _enrichment_pool is None:
         with _enrichment_pool_lock:
+            if _enrichment_pool_closed:
+                raise RuntimeError("enrichment pool is shut down")
             if _enrichment_pool is None:
                 _enrichment_pool = concurrent.futures.ThreadPoolExecutor(
                     max_workers=_ENRICHMENT_WORKERS,
                     thread_name_prefix="slm-enrich",
                 )
     return _enrichment_pool
+
+
+def _open_enrichment_pool() -> None:
+    """Allow the pool to be created again, for a fresh run in this process.
+
+    The closed flag has to survive shutdown — that is its whole purpose — so
+    something has to clear it when a new run legitimately begins. Without this a
+    second startup in one process (a restart, or a test that builds the app more
+    than once) would find enrichment permanently refused and every write would
+    come back findable by wording only, with nothing in the logs to explain it.
+    """
+    global _enrichment_pool_closed
+    with _enrichment_pool_lock:
+        _enrichment_pool_closed = False
+
+
+def _enrich_and_release(engine, fact_ids: list[str], budget: float) -> int:
+    """Run inline enrichment, releasing the permit only when it is really done.
+
+    The permit has to be released here rather than by the caller. A caller that
+    stops waiting at its own deadline has not finished the work — the worker is
+    still holding a pool thread — so releasing on the caller's timeout would let
+    the next request submit into a pool that is still fully occupied, which is
+    the unbounded queueing this permit exists to prevent.
+    """
+    try:
+        return engine.enrich_new_facts_now(fact_ids, timeout_s=budget)
+    finally:
+        _enrichment_semaphore.release()
+
+
+def _shutdown_enrichment_pool_if_created() -> None:
+    """Shut down the enrichment pool if it was ever created.
+
+    Safe to call when the pool was never created (no-op) and safe to call
+    twice (second call is a no-op because the pool is set to None under the
+    lock before shutdown is called).
+
+    cancel_futures=True drops any work that is still queued but has not yet
+    started.  Workers already inside embed() will finish their current call
+    and then stop; they do not block the caller because wait=False.
+    """
+    global _enrichment_pool, _enrichment_pool_closed
+    with _enrichment_pool_lock:
+        # Marked closed under the same lock that guards creation, so a caller
+        # already past the unlocked check cannot build a replacement pool that
+        # this shutdown has already walked past.
+        _enrichment_pool_closed = True
+        pool = _enrichment_pool
+        _enrichment_pool = None
+    if pool is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
 _SENSITIVE_READ_PREFIXES = (
     "/api/memories", "/api/facts", "/api/clusters", "/api/graph",
     "/api/v3/associations", "/api/v3/core-memory",
@@ -1644,6 +1732,11 @@ def _stop_deployment_retention(application) -> bool:
 async def lifespan(application: FastAPI):
     """Initialize engine, workers, and optional services on startup."""
     global _last_activity
+
+    # A previous run in this process left the enrichment pool closed so that a
+    # write racing its shutdown could not resurrect it. This run is entitled to
+    # one.
+    _open_enrichment_pool()
 
     engine = None
     config = None
@@ -3040,6 +3133,19 @@ async def lifespan(application: FastAPI):
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning("perf_log flush failed: %s", exc)
 
+    # Shut down the enrichment pool before engine.close() so that any worker
+    # still inside embed() receives cancellation before the embed pool is torn
+    # down.  shutdown(wait=False, cancel_futures=True) is non-blocking: queued
+    # futures are dropped and running futures complete their current call on
+    # their own.  This prevents Python's atexit handler from calling
+    # shutdown(wait=True) on a live embed worker, which would push the daemon
+    # past the graceful-shutdown budget and cause the service manager to
+    # SIGKILL the process.
+    try:
+        _shutdown_enrichment_pool_if_created()
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("enrichment pool shutdown failed (non-fatal): %s", exc)
+
     materializer_stopped = _stop_pending_materializer()
     canonical_writer_stopped = _release_canonical_remember_runtime(application)
     _profile_runtime = None
@@ -4413,27 +4519,51 @@ def _register_daemon_routes(application: FastAPI) -> None:
             # rather than for whichever door happened to be used.
             #
             # Strictly bounded, because this daemon serves many sessions at once:
-            # the work runs off the event loop, on one shared single-worker pool,
-            # and yields to any recall in flight. Past the deadline the caller
-            # gets exactly the previous behaviour and the background materializer
-            # finishes the job.
+            # the work runs off the event loop, on a two-worker pool, and yields
+            # to any recall in flight. Past the deadline the caller gets exactly
+            # the previous behaviour and the background materializer finishes the
+            # job.
+            # A caller that did not ask to wait still gets a real attempt, not a
+            # token one. Almost no client passes wait=true, so a small budget
+            # here meant almost every memory in practice was returned findable by
+            # wording only — the default path deciding the product's behaviour.
             enrich_budget = (
                 _REMEMBER_ENRICHMENT_WAIT_SECONDS if wait
-                else min(0.5, _REMEMBER_ENRICHMENT_WAIT_SECONDS)
+                else min(1.0, _REMEMBER_ENRICHMENT_WAIT_SECONDS)
             )
             enriched = 0
+            # Taken before submitting, released by the worker. If none is free
+            # the pool is already saturated, and queueing behind it would mean
+            # writing to the database after this response has been sent — so the
+            # write is simply reported as findable by wording and the background
+            # pass picks it up, which is the intended degradation.
+            _permit = _enrichment_semaphore.acquire(blocking=False)
+            if not _permit:
+                logger.warning(
+                    "inline enrichment at capacity for %d fact(s) — deferred to "
+                    "the background pass", len(fact_ids),
+                )
             try:
+                if not _permit:
+                    raise _EnrichmentAtCapacity
                 loop = asyncio.get_running_loop()
-                enriched = await asyncio.wait_for(
-                    loop.run_in_executor(
+                try:
+                    _pending = loop.run_in_executor(
                         _enrichment_executor(),
                         functools.partial(
-                            engine.enrich_new_facts_now,
-                            fact_ids, timeout_s=enrich_budget,
+                            _enrich_and_release,
+                            engine, fact_ids, enrich_budget,
                         ),
-                    ),
-                    timeout=enrich_budget + 0.25,
+                    )
+                except BaseException:
+                    # Never handed to a worker, so nothing will release it.
+                    _enrichment_semaphore.release()
+                    raise
+                enriched = await asyncio.wait_for(
+                    _pending, timeout=enrich_budget + 0.25,
                 )
+            except _EnrichmentAtCapacity:
+                pass
             except (TimeoutError, asyncio.TimeoutError):
                 # Worth seeing. Sustained timeouts mean writes are coming back
                 # findable by wording only, which is a real degradation and was

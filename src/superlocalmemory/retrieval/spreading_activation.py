@@ -234,7 +234,7 @@ class SpreadingActivation:
 
             # Return top-K sorted by activation
             results = sorted(
-                activations.items(), key=lambda x: x[1], reverse=True,
+                activations.items(), key=lambda x: (-x[1], x[0]),
             )
             return filter_authorized_results(
                 self._db,
@@ -296,7 +296,7 @@ class SpreadingActivation:
                 continue
             score = (float(np.dot(q_vec, fact_vec) / denominator) + 1.0) / 2.0
             scored.append((fact.fact_id, score))
-        return sorted(scored, key=lambda item: item[1], reverse=True)[:self._config.top_m]
+        return sorted(scored, key=lambda item: (-item[1], item[0]))[:self._config.top_m]
 
     def _propagate(
         self,
@@ -391,7 +391,7 @@ class SpreadingActivation:
 
             # Step 3: Lateral inhibition -- keep only top-M
             sorted_nodes = sorted(
-                new_activations.items(), key=lambda x: x[1], reverse=True,
+                new_activations.items(), key=lambda x: (-x[1], x[0]),
             )
             top_m_nodes = sorted_nodes[: cfg.top_m]
 

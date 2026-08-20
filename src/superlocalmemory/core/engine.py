@@ -50,7 +50,7 @@ def _verify_ingestion_schema(memory_db: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Workstream D (3.8.4) — warm-guard sync embed helpers
+# Embedding a memory on the write path, before the receipt is returned
 # ---------------------------------------------------------------------------
 
 def _is_remote_embedder(embedder: object) -> bool:
@@ -133,11 +133,18 @@ class MemoryEngine:
         self._consolidation_engine = None
         self._maintenance_scheduler = None
         self._hooks = HookRegistry()
-        # Workstream D (3.8.4): single-worker pool reused across store_fast() calls.
-        # Lazy-created on first warm-guard attempt; avoids per-call thread churn.
+        # One single-worker pool reused across store_fast() calls, created on the
+        # first warm-guard attempt. Reusing it avoids a thread per call.
         self._store_fast_embed_pool: object | None = None
-        # Lock guards the lazy-init to prevent TOCTOU race on concurrent first calls.
+        # Guards the lazy creation so concurrent first calls cannot each build one.
         self._store_fast_embed_pool_lock = threading.Lock()
+        # Set once the engine is closed, and never cleared. A caller already
+        # inside the warm-guard path when close() runs will reach the creation
+        # check afterwards and find None; without this it would build a
+        # replacement pool that nothing owns and nothing will shut down, so a
+        # burst of writes arriving during shutdown leaks a thread each and holds
+        # the process open past its shutdown budget.
+        self._store_fast_embed_pool_closed = False
 
     # -- Public properties (Phase 2+ access) --------------------------------
 
@@ -576,16 +583,28 @@ class MemoryEngine:
         # locking guards against TOCTOU on concurrent first calls.
         if self._store_fast_embed_pool is None:
             with self._store_fast_embed_pool_lock:
+                if self._store_fast_embed_pool_closed:
+                    # Shutdown happened while this call was between the check
+                    # above and this lock. Decline rather than resurrect the
+                    # pool: the fact is already committed durably and keeps its
+                    # place in the background queue.
+                    return None, None, None
                 if self._store_fast_embed_pool is None:
                     self._store_fast_embed_pool = _cf.ThreadPoolExecutor(
                         max_workers=1,
                         thread_name_prefix="slm-sg-embed",
                     )
+        # A ceiling, not a target. Storing a memory is allowed up to 1.5 s in
+        # total, and giving up on the embedding early is not free: it is the
+        # difference between a memory that can be found by asking a question and
+        # one that can only be found by quoting its own words. Within the budget
+        # the more complete outcome wins, so this waits a full second rather than
+        # half of one. Both values below are milliseconds via the environment.
         if timeout_s is None:
             try:
-                timeout_s = int(os.environ.get("SLM_STORE_FAST_EMBED_TIMEOUT_MS", 500)) / 1000.0
+                timeout_s = int(os.environ.get("SLM_STORE_FAST_EMBED_TIMEOUT_MS", 1000)) / 1000.0
             except (ValueError, TypeError):
-                timeout_s = 0.5
+                timeout_s = 1.0
         try:
             def _best_effort_embed():
                 from superlocalmemory.core.recall_gate import background_work
@@ -616,6 +635,156 @@ class MemoryEngine:
             logger.debug("warm-guard pool submit failed (%s)", _exc)
             emb = None
         return emb, fmean, fvar
+
+    def _projection_has(self, fact_id: str) -> bool:
+        """Can the meaning-based channel reach this fact?
+
+        Answered by the vector store, which owns the question, and never from
+        ``atomic_facts.embedding``. The column and the projection can disagree,
+        and when they do it is the projection that decides whether a search
+        finds the fact. Reachability also needs more than a stored vector: the
+        search joins two projection tables, so a vector present in one of them
+        and absent from the other is not reachable. That predicate belongs to
+        the store; duplicating it here is how the column and the projection
+        drifted apart in the first place.
+
+        Fails closed. A store that cannot answer is treated as "not reachable",
+        which costs at most one redundant idempotent write and can never report
+        a fact as findable when it is not.
+        """
+        store = getattr(self, "_vector_store", None)
+        answer = getattr(store, "is_searchable_by_meaning", None) if store else None
+        if not callable(answer):
+            return False
+        try:
+            return bool(answer(fact_id, self._profile_id))
+        except Exception:
+            return False
+
+    def _attach_vector(
+        self, fact_id: str, emb: list[float],
+        fmean: float | None, fvar: float | None,
+    ) -> bool:
+        """Attach a vector to a stored fact. True only if a search can now find it.
+
+        Two representations are involved and they answer different questions. The
+        vector projection is what a search on meaning queries, so it decides
+        whether the fact is *findable*. The ``atomic_facts.embedding`` column is
+        where the vector *lives* — it is what an export, a backup or a direct
+        fetch reads, and what a re-projection would be rebuilt from.
+
+        So:
+
+        * **The projection is attempted first**, because that is the ordering that
+          keeps the two consistent when both can succeed.
+        * **The column is written either way.** The vector has already been
+          computed and it is real data; withholding it because the projection was
+          refused would discard it and leave the repair pass paying for the model
+          again on every pass. Every reason a projection is refused — no search
+          extension on this platform, a dimension change, a store at a different
+          dimension — is a property of the installation and not of this fact, so
+          withholding one fact's column repairs nothing.
+        * **The return value is the honest answer to "can this be found by
+          meaning", and it is False whenever the projection did not accept the
+          vector.** That is what keeps a receipt from claiming a memory is
+          searchable when no search can reach it, which was the actual harm in
+          writing these two out of order — not the column itself.
+        * **If the projection succeeded and the column write then failed, the
+          projection is rolled back.** Otherwise a search finds a fact whose
+          vector nothing else can see, and nothing would ever reconcile them.
+
+        Never raises. The durable write has already happened before this runs; a
+        fact that is not projected keeps its place in the background queue.
+
+        Once started, the pair runs to completion and is not interrupted by a
+        caller deadline. Abandoning it half-way is what produces the disagreeing
+        states above, so a deadline can decide whether to *begin* the pair, never
+        whether to finish it. Callers check their budget immediately before
+        calling. Bounding the pair itself is a property of the write lock.
+        """
+        projected = False
+        store = getattr(self, "_vector_store", None)
+        if store is not None and getattr(store, "available", False):
+            try:
+                projected = bool(store.upsert(fact_id, self._profile_id, emb))
+                if not projected:
+                    logger.warning(
+                        "vector projection refused for %s — stored but not "
+                        "findable by meaning", fact_id[:12],
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "vector projection failed for %s (%s: %s) — stored but not "
+                    "findable by meaning",
+                    fact_id[:12], type(exc).__name__, exc,
+                )
+            if projected:
+                index = getattr(self, "_ann_index", None)
+                if index is not None:
+                    try:
+                        index.add(fact_id, emb)
+                    except Exception:
+                        logger.warning(
+                            "in-memory index rejected %s", fact_id[:12],
+                            exc_info=True,
+                        )
+
+        if not self._write_canonical_vector(fact_id, emb, fmean, fvar):
+            if projected:
+                logger.warning(
+                    "canonical vector write failed for %s — undoing the "
+                    "projection so the two representations cannot disagree",
+                    fact_id[:12],
+                )
+                self._detach_vector(fact_id)
+            return False
+        return projected
+
+    def _write_canonical_vector(
+        self, fact_id: str, emb: list[float],
+        fmean: float | None, fvar: float | None,
+    ) -> bool:
+        """Write the vector to ``atomic_facts``. False if it did not land."""
+        try:
+            self._db.update_fact(
+                fact_id,
+                {"embedding": emb, "fisher_mean": fmean, "fisher_variance": fvar},
+                profile_id=self._profile_id,
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "canonical vector write failed for %s (%s: %s)",
+                fact_id[:12], type(exc).__name__, exc,
+            )
+            return False
+
+    def _detach_vector(self, fact_id: str) -> None:
+        """Undo a projection whose canonical write did not land.
+
+        Returns the row to the one state that heals itself: no vector anywhere,
+        which is what the repair pass looks for.
+        """
+        store = getattr(self, "_vector_store", None)
+        delete = getattr(store, "delete", None) if store else None
+        if callable(delete):
+            try:
+                delete(fact_id)
+            except Exception:
+                logger.warning(
+                    "could not undo the projection for %s; it and the canonical "
+                    "column now disagree", fact_id[:12], exc_info=True,
+                )
+        index = getattr(self, "_ann_index", None)
+        remove = getattr(index, "remove", None) if index else None
+        if callable(remove):
+            try:
+                remove(fact_id)
+            except Exception:
+                logger.warning(
+                    "could not undo the index entry for %s", fact_id[:12],
+                    exc_info=True,
+                )
 
     def enrich_new_facts_now(
         self, fact_ids: list[str], *, timeout_s: float | None = None,
@@ -661,48 +830,40 @@ class MemoryEngine:
                 fact = self._db.get_fact(fact_id, self._profile_id)
                 if fact is None:
                     continue
-                if getattr(fact, "embedding", None):
+                if self._projection_has(fact_id):
                     # Already searchable by meaning. Counting it keeps the
                     # caller's receipt truthful: saying "wording only" about a
                     # fact that is already fully searchable is wrong too.
+                    #
+                    # Read off the projection and never off the canonical
+                    # column. A row can carry a vector in the column with no
+                    # projection behind it, and that fact is precisely the one
+                    # that needs repairing — treating the column as proof of
+                    # findability skips the only pass that would fix it.
                     enriched += 1
                     continue
-                emb, fmean, fvar = self._warm_guard_embed(
-                    fact.content, timeout_s=remaining,
-                )
+                emb = getattr(fact, "embedding", None)
+                fmean = getattr(fact, "fisher_mean", None)
+                fvar = getattr(fact, "fisher_variance", None)
                 if not emb:
-                    continue
-                if time.monotonic() >= deadline:
-                    # The embed itself consumed the budget; the caller has moved
-                    # on. Leave this fact to the background pass.
-                    break
-                # PROJECTION FIRST, canonical column second, and this order is
-                # load-bearing. Searching by meaning reads the projection; the
-                # repair pass looks at the column and only revisits rows where it
-                # is NULL. Writing the column first and then failing to project
-                # leaves a fact that is not searchable by meaning AND is invisible
-                # to the repair pass forever — while the receipt claims success.
-                store = getattr(self, "_vector_store", None)
-                if store is None or not getattr(store, "available", False):
-                    continue
-                if not store.upsert(fact_id, self._profile_id, emb):
-                    # Refused rather than raised: unavailable, or a dimension
-                    # mismatch. Leave the column NULL so the repair pass retries.
-                    logger.warning(
-                        "vector projection refused for %s — left for the "
-                        "background pass rather than reported as searchable",
-                        fact_id[:12],
+                    emb, fmean, fvar = self._warm_guard_embed(
+                        fact.content, timeout_s=remaining,
                     )
-                    continue
-                index = getattr(self, "_ann_index", None)
-                if index is not None:
-                    index.add(fact_id, emb)
-                self._db.update_fact(
-                    fact_id,
-                    {"embedding": emb, "fisher_mean": fmean, "fisher_variance": fvar},
-                    profile_id=self._profile_id,
-                )
-                enriched += 1
+                    if not emb:
+                        continue
+                    if time.monotonic() >= deadline:
+                        # The embed itself consumed the budget; the caller has
+                        # moved on. Leave this fact to the background pass.
+                        break
+                # The row already holds a vector that never reached the
+                # projection: reuse it rather than paying for the model again.
+                if time.monotonic() >= deadline:
+                    # Checked here as well as after the embed, because reusing a
+                    # vector already on the row skips that check entirely and the
+                    # fetch above can itself be slow under write contention.
+                    break
+                if self._attach_vector(fact_id, emb, fmean, fvar):
+                    enriched += 1
             except Exception as exc:
                 # Warning, not debug. A run that enriches nothing returns 0 in a
                 # millisecond and reads exactly like "there was nothing to do".
@@ -800,19 +961,20 @@ class MemoryEngine:
             fact_type=FactType.EPISODIC, entities=ents,
             observation_date=session_date or now[:10],
             confidence=0.7, importance=0.5,
-            embedding=emb, fisher_mean=fmean, fisher_variance=fvar,
+            # The vector is attached after this row exists, not with it. The
+            # projection that the meaning-based channel searches has a foreign
+            # key onto this row, so it cannot be written first; and writing this
+            # column first would hide the fact from the repair pass if the
+            # projection then failed. _attach_vector owns that ordering.
+            embedding=None, fisher_mean=None, fisher_variance=None,
             created_at=now,
             scope=scope, shared_with=shared_with,
         )
         self._db.store_fact(fact)  # FTS5 trigger → immediately BM25-recallable
-        # Upsert to vector store so the semantic channel finds it now.
-        if index_external:
-            try:
-                vs = getattr(self, "_vector_store", None)
-                if emb and vs and getattr(vs, "available", False):
-                    vs.upsert(fact.fact_id, self._profile_id, emb)
-            except Exception:
-                pass
+        # Attach the vector so the meaning-based channel finds it now, through
+        # the same ordering every other write path uses.
+        if emb and index_external:
+            self._attach_vector(fact.fact_id, emb, fmean, fvar)
         # Persist BM25 tokens too (covers the in-memory rank_bm25 fallback path).
         if index_external:
             try:
@@ -957,8 +1119,13 @@ class MemoryEngine:
         embed_pool_lock = getattr(self, "_store_fast_embed_pool_lock", None)
         if embed_pool_lock is not None:
             with embed_pool_lock:
+                # Marked closed under the same lock that guards creation, so a
+                # call already past the unlocked check declines instead of
+                # building an unowned replacement.
+                self._store_fast_embed_pool_closed = True
                 embed_pool, self._store_fast_embed_pool = self._store_fast_embed_pool, None
         else:
+            self._store_fast_embed_pool_closed = True
             self._store_fast_embed_pool = None
         if embed_pool is not None:
             try:

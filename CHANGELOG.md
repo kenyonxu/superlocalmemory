@@ -18,14 +18,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model costs a short wait and never the write itself. The receipt says which of
   three states a memory is in: stored, findable by its wording, findable by
   meaning.
-- **"What am I working on" answered with notes from a month ago.** Three separate
-  faults sat between the question and the answer: the present-tense path weighted
+- **"What am I working on" answered with notes from a month ago.** Four separate
+  faults sat between the question and the answer. The present-tense path weighted
   word-matching more heavily than the path it replaced, so a stale note
-  containing the word "working" beat a fresh one; a recency lookup was switched
-  off by an unrelated condition that is almost always true; and a fact carrying
-  several dated events crowded out other recent facts with copies of itself.
-  Questions about topics still answer on topic — asking about the schema does not
-  return whatever is newest.
+  containing the word "working" beat a fresh one. A recency lookup was switched
+  off by an unrelated condition that is almost always true. A fact carrying
+  several dated events crowded out other recent facts with copies of itself. And
+  the lookup drew its candidates from a list that is only assembled later, and
+  only for notes that mention a recognisable name and a date — so a plain note
+  written seconds ago was not merely ranked low, it was not a candidate at all.
+  Recent notes are now read from the memories themselves. Questions about topics
+  still answer on topic — asking about the schema does not return whatever is
+  newest.
+- **A memory could be reported as findable by meaning when it was not.** Two
+  things have to agree before a search on meaning can reach a memory, and one of
+  the two ways of storing one wrote them in the wrong order: if the second write
+  was refused — because the store was at a different size, or the search
+  extension was unavailable on the platform — the memory was left in a state that
+  reads as complete, so the pass that repairs missed memories skipped it forever
+  while the receipt claimed success. Both writes now happen in the one order that
+  is safe, through shared code rather than two copies of it, and if the second
+  fails the first is undone so the repair pass can retry. "Already findable" is
+  now decided by asking whether a search could actually return the memory.
+- **Questions like "what is the latest authentication design" returned the newest
+  notes rather than an answer.** Two words routed any question containing them
+  down the time-based path, where a question with no recognisable name in it fell
+  back to listing recent memories with no regard for the topic. Asking what is
+  latest about something now answers about that something. "What am I currently
+  focused on" still answers with current work.
+- **A question about a span of time missed anything recorded as spanning it.** An
+  entry describing a period rather than a moment carries no single date, and the
+  lookup for date-anchored questions required one — so "what happened in March
+  2024" could not return an entry that says it covers March 2024.
+- **The documented switch for turning the present-tense ranking off did nothing
+  when set in configuration.** It worked only as an environment variable, which
+  is not what it is documented as. Both now work, and the environment variable
+  still wins.
+- **Converting a store could stop making progress instead of finishing.** A row
+  that cannot be converted — malformed, or the wrong size — was left in place and
+  then selected again on the next pass, so a single bad row meant the conversion
+  ran indefinitely without converting anything further. It now moves past what it
+  cannot convert, reports how many, and finishes.
+- **Retention could delete half of a safety copy.** The two files taken before an
+  upgrade were sometimes counted as two separate copies rather than one, so
+  retention could keep one file of a pair and discard the other, leaving a copy
+  that cannot be restored from. Choosing the newest copy also relied on file
+  timestamps, which on some filesystems cannot tell two copies apart; it now uses
+  the timestamp in the name, which can.
+- **An upgrade could be refused on a disk with room for it.** The space check
+  asked for roughly twice what the copy actually needs.
+- **Retrying an upgrade that had failed did not take a fresh copy first.** A
+  failed step was treated as a finished one, so the retry ran against the
+  half-changed store with no new copy taken. The message now also says where the
+  copy from the first attempt is.
+- **Shutting the service down could exceed its shutdown budget** and be killed
+  mid-write, because the workers that make new memories searchable were never
+  released. They are now released on shutdown, and a memory arriving during
+  shutdown is declined rather than starting new work.
 - **A question about a particular time missed anything older than the most recent
   few thousand events**, returning nothing rather than answering slowly.
 - **`slm remember --sync` promised to wait and did not.** The flag is now
@@ -44,8 +93,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   last decimal, five and a half times smaller. Existing stores are converted in
   place; the conversion copies the store aside and verifies the copy first,
   refuses while a service still holds it, and asks before rewriting anything.
-- **Recall tail latency is roughly halved.** Warm recall is faster but not yet
-  where it should be, and the remaining time has not been accounted for.
+- **Recall tail latency is roughly halved**, and the time a write may spend
+  making itself findable has been raised rather than lowered. Giving up early on
+  that was never free: it decided whether a memory could be found by asking a
+  question or only by quoting its own words. A retrieval channel is likewise
+  given more time to answer, because a channel that runs out of time contributes
+  nothing at all and the answer silently loses whatever only it could see.
+- **More of your memories can be reached at all.** One stage of retrieval decides
+  the final set of results, and the number of candidates handed to it had been cut
+  to save time — which quietly meant anything ranked below that cut could never be
+  returned, no matter how well it matched. The cut is undone. Recall spends a
+  little longer and can reach everything.
+- **Questions about the past distinguish two days ago from a month ago again.**
+  The adjustment applied to time-based questions was capped so low that it landed
+  on the same value for everything inside about five weeks, so it could not tell
+  recent from distant. Note that this changes ranking order for such questions.
 - Storing a memory reports whether it is searchable by meaning yet, so a caller
   no longer has to assume.
 

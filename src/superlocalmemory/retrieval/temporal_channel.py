@@ -186,7 +186,7 @@ class TemporalChannel:
                     fid = ev["fact_id"]
                     scored[fid] = max(scored.get(fid, 0.0), best)
 
-        results = sorted(scored.items(), key=lambda x: x[1], reverse=True)
+        results = sorted(scored.items(), key=lambda x: (-x[1], x[0]))
         return results[:top_k]
 
     def _entity_temporal_search(
@@ -239,7 +239,12 @@ class TemporalChannel:
                 "SELECT te.fact_id FROM temporal_events AS te "
                 "JOIN canonical_entities AS ce ON ce.entity_id = te.entity_id "
                 "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
-                f"WHERE {where} AND LOWER(ce.canonical_name) = LOWER(?)",
+                f"WHERE {where} AND LOWER(ce.canonical_name) = LOWER(?) "
+                # The score below is derived from each row's POSITION in this
+                # result, so without an explicit order the score depends on
+                # SQLite's page layout rather than on the data, and the same
+                # question returns different scores on two runs.
+                "ORDER BY te.fact_id",
                 (*params, name),
             )
             for row in rows:
@@ -285,6 +290,12 @@ class TemporalChannel:
         # than slow. When a target date is known, bound by proximity to THAT date
         # instead; the scan stays bounded either way.
         if near_date is not None:
+            # Include events that carry only interval_start/interval_end with no
+            # referenced_date or observation_date. The original filter required
+            # at least one of the point-date columns to be non-NULL, which
+            # excluded duration events ("during March 2024") entirely. The
+            # ORDER BY now uses the best available date column so that duration
+            # events are ranked by their interval_start when no point date exists.
             rows = self._db.execute(
                 "SELECT te.fact_id, te.observation_date, te.referenced_date, "
                 "te.interval_start, te.interval_end, af.created_at "
@@ -292,10 +303,15 @@ class TemporalChannel:
                 "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
                 f"WHERE {where} "
                 "  AND (te.referenced_date IS NOT NULL "
-                "       OR te.observation_date IS NOT NULL) "
+                "       OR te.observation_date IS NOT NULL "
+                "       OR te.interval_start IS NOT NULL) "
+                # Thousands of events can tie on the proximity expression when
+                # they share a date, and a tie with no secondary key is broken by
+                # storage order. That decides which of them survive the LIMIT.
                 "ORDER BY ABS(julianday(COALESCE(te.referenced_date, "
-                "                               te.observation_date)) "
-                "             - julianday(?)) ASC "
+                "                               te.observation_date, "
+                "                               te.interval_start)) "
+                "             - julianday(?)) ASC, te.fact_id ASC "
                 "LIMIT 5000",
                 (*params, near_date),
             )
@@ -331,28 +347,45 @@ class TemporalChannel:
         Scoring: Gaussian with sigma=7 days. Facts older than 90 days score
         below 0.01 and are excluded. Returns at most 50 (fact_id, score) pairs,
         ordered highest-score first.
+
+        Source table: atomic_facts, not temporal_events. The materializer
+        populates temporal_events asynchronously and only for facts with both
+        canonical entities and resolved dates. A plain note written moments ago
+        never receives a temporal_events row until that background pass runs, so
+        a join against temporal_events makes newly written facts structurally
+        invisible here — exactly when the caller needs them most.
         """
         _SIGMA = 7.0          # days — tighter than _proximity_score's 30d
         _MAX_AGE_DAYS = 90.0  # cut-off: exp(-(90^2)/(2*7^2)) ≈ 0.0
         now_dt = datetime.now(tz=timezone.utc)
 
-        events = self._load_events(
+        if include_global is None:
+            include_global = bool(getattr(self, "include_global", False))
+        if include_shared is None:
+            include_shared = bool(getattr(self, "include_shared", False))
+        where, params = _scope_where(
             profile_id,
             include_global=include_global,
             include_shared=include_shared,
+            prefix="af",
         )
-        # Keyed by fact, not by event. A fact carries one row per temporal event
-        # it participates in, so appending per event made a fact with six events
-        # occupy six of the fifty slots. Measured on a real store: fifty entries
-        # covering EIGHT distinct facts. Fusion ranks facts, so the channel
-        # looked full while offering almost nothing, and genuinely recent facts
-        # were crowded out by copies of each other.
+        rows = self._db.execute(
+            "SELECT af.fact_id, af.created_at "
+            "FROM atomic_facts AS af "
+            f"WHERE {where} "
+            "  AND af.created_at >= datetime('now', '-90 days') "
+            "ORDER BY af.created_at DESC "
+            "LIMIT 50",
+            (*params,),
+        )
+
         best: dict[str, float] = {}
-        for ev in events:
-            fid = ev.get("fact_id")
+        for row in rows:
+            d = dict(row)
+            fid = d.get("fact_id")
             if not fid:
                 continue
-            created = _parse_iso(ev.get("created_at"))
+            created = _parse_iso(d.get("created_at"))
             if created is None:
                 continue
             utc_created = _as_utc(created)
@@ -368,7 +401,7 @@ class TemporalChannel:
             if score > 0.01 and score > best.get(fid, 0.0):
                 best[fid] = score
 
-        out = sorted(best.items(), key=lambda kv: kv[1], reverse=True)
+        out = sorted(best.items(), key=lambda kv: (-kv[1], kv[0]))
         return out[:50]
 
     @staticmethod
