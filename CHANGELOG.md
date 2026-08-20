@@ -5,6 +5,50 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.9] — Findable the moment you write it
+
+### Fixed
+- **A memory you just wrote could not be found by asking for it.** Until a
+  background pass caught up, a new memory was reachable only by quoting its own
+  wording — which is not how anyone asks a question. "What am I working on"
+  shares no distinctive word with any particular note, so the memory describing
+  what you are doing right now was the hardest thing in the store to find. Every
+  way of storing one — command line, tool interface, dashboard — now makes it
+  searchable by meaning before it answers, bounded so that a slow or missing
+  model costs a short wait and never the write itself. The receipt says which of
+  three states a memory is in: stored, findable by its wording, findable by
+  meaning.
+- **"What am I working on" answered with notes from a month ago.** Three separate
+  faults sat between the question and the answer: the present-tense path weighted
+  word-matching more heavily than the path it replaced, so a stale note
+  containing the word "working" beat a fresh one; a recency lookup was switched
+  off by an unrelated condition that is almost always true; and a fact carrying
+  several dated events crowded out other recent facts with copies of itself.
+  Questions about topics still answer on topic — asking about the schema does not
+  return whatever is newest.
+- **A question about a particular time missed anything older than the most recent
+  few thousand events**, returning nothing rather than answering slowly.
+- **`slm remember --sync` promised to wait and did not.** The flag is now
+  honoured, and asking to wait buys a longer attempt at making the memory
+  searchable.
+- **A failed upgrade could report that your data was untouched when earlier steps
+  had already been applied.** The message now distinguishes a partial change from
+  no change, and points at the copy taken beforehand.
+- **The copy taken before an upgrade could be deleted by a later start.** It was
+  being retaken on every ordinary start and pruned by retention, so two restarts
+  after an upgrade removed the last copy of the original. It is now taken only
+  when something is actually about to change.
+
+### Changed
+- **Embeddings are stored in binary rather than text** — the same values to the
+  last decimal, five and a half times smaller. Existing stores are converted in
+  place; the conversion copies the store aside and verifies the copy first,
+  refuses while a service still holds it, and asks before rewriting anything.
+- **Recall tail latency is roughly halved.** Warm recall is faster but not yet
+  where it should be, and the remaining time has not been accounted for.
+- Storing a memory reports whether it is searchable by meaning yet, so a caller
+  no longer has to assume.
+
 ## [4.0.8] — Where you were actually looking
 
 ### Added
