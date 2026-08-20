@@ -58,6 +58,46 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# How long the parallel channel phase may run before a channel is abandoned.
+#
+# This is a guard against a genuinely wedged channel, NOT a speed cutoff, and
+# the distinction is the whole point. A channel that misses this limit is
+# cancelled and contributes NOTHING to fusion: its candidates are not reordered,
+# they are absent. So whenever this limit binds, the answer is decided partly by
+# what else the machine happened to be doing — the same question returns a
+# different answer under load, which is a correctness failure, not a slow one.
+#
+# It replaced a 1.4 s cutoff that was chosen to keep the recall p95 low. Six
+# runs of identical code against the same 0.95 GB store logged 0, 0, 25, 2, 0
+# and 0 abandoned channels; in the third run `hopfield` was cut off on 13 of
+# 140 queries and `temporal` on 9, while the first run lost nothing on those
+# same queries. That spread was the last remaining source of unrepeatable
+# recall, and it is why fixing tie-breaks everywhere else moved top-10 churn
+# from 40.7% to 22.9% and left rank-1 disagreement sitting at ~15%: a
+# tie-break cannot repair a missing input.
+#
+# The value comes from the measured cost of the channels themselves, on that
+# same store, 140 queries, with the limit raised out of the way so nothing was
+# truncated (p95 / max, ms):
+#
+#     temporal  580 / 1983      hopfield  492 / 945      bm25  230 / 1093
+#     semantic  264 /  662      spreading_activation  238 / 571
+#
+# The slowest channel's p95 is 580 ms and its worst single run was 1,983 ms, so
+# 8 s is roughly four times the worst observed cost — it should never bind on a
+# machine that is merely busy. It also stays well inside the daemon's own
+# last-resort recall budget (25 s, `_recall_budget_s`), which is the layer that
+# exists to catch a true hang and which already tells the caller when it fires
+# (`retrieval_mode=degraded_lexical`). Before this change the inner 1.4 s cutoff
+# silently overrode that outer promise of "quality recall under load".
+#
+# Lowering this to improve a latency percentile means buying that percentile
+# with missing answers. Per HARD-RULES RULE 6 the ordering is Correct, then
+# Complete, then Repeatable, and only then Fast — so if this needs to move,
+# measure what it costs in answer quality first and record the number.
+CHANNEL_HANG_GUARD_SECONDS = 8.0
+
+
 class CrossEncoderProtocol(Protocol):
     """Duck-typed cross-encoder interface."""
     def rerank(self, query: str, candidates: list[tuple[str, str]]) -> list[tuple[str, float]]: ...
@@ -226,12 +266,16 @@ class RetrievalEngine:
         # 3. Run channels. Both scope flags AND extra_disabled_channels travel as
         # explicit call parameters so concurrent recalls with different flags
         # cannot corrupt each other.  No lock needed — no shared mutable state.
+        # Owned by this call, so concurrent recalls cannot report each other's
+        # losses.  Non-empty means this answer is incomplete, not just slow.
+        dropped_channels: set[str] = set()
         ch_results = self._run_channels(
             query, profile_id, strat,
             extra_disabled_channels=extra_disabled_channels,
             include_global=include_global, include_shared=include_shared,
             as_of=as_of, known_as_of=known_as_of, valid_at=valid_at,
             include_unknown=include_unknown,
+            dropped_channels=dropped_channels,
         )
         _em("run_channels")
         # One request may need admission before fusion and again after optional
@@ -298,10 +342,29 @@ class RetrievalEngine:
             except Exception as exc:
                 logger.warning("Bridge discovery: %s", exc)
 
-        # Scene expansion (v3.5.0: batch + time-budgeted).
-        # Skip if channels already exceeded the per-recall time budget;
-        # the scene signal is nice-to-have, never worth delaying response.
-        if fused and (_time_e.monotonic() - _e0) < 0.8:
+        # Scene expansion (v3.5.0: batch).
+        #
+        # This used to be skipped when more than 0.8 s of the recall had already
+        # elapsed, on the reasoning that the scene signal is nice-to-have and
+        # never worth delaying a response. The reasoning was wrong, because the
+        # stage does not merely decorate the answer — it appends candidates that
+        # can outrank what fusion produced. Gating it on a stopwatch therefore
+        # made the ANSWER depend on how busy the machine was, and 0.8 s sits on
+        # top of recall's own median (~1,044 ms on the 0.95 GB archive), so it
+        # was not a rare safety valve: measured over two runs of 60 queries, the
+        # two clock gates flipped their decision on 22 of 60, and of the 19
+        # queries whose answer changed, every one had a flipped gate.
+        #
+        # Removing both gates moved rank-1 disagreement between two runs from
+        # 20.0% to 3.3% and top-10 from 31.7% to 10.0%, for about 100-180 ms of
+        # p95 (1,191-1,230 ms -> 1,256-1,375 ms, ceiling 2,000 ms). Per
+        # HARD-RULES RULE 6 that is the correct direction: Correct, Complete,
+        # Repeatable, and only then Fast.
+        #
+        # So do not reintroduce a time condition here. If this stage ever needs
+        # bounding, bound it by DATA — a candidate count, a scene cap — so the
+        # same input always takes the same path.
+        if fused:
             try:
                 top_ids = [fr.fact_id for fr in fused[:20]]
                 scenes_map = self._db.get_scenes_for_facts_batch(top_ids, profile_id)
@@ -325,10 +388,14 @@ class RetrievalEngine:
         # Instead of competing as independent channel, entity_graph SCORES
         # the candidates from other channels by graph proximity to query entities.
         # Research: Microsoft GraphRAG DRIFT, Pistis-RAG cascaded architecture.
+        # The 0.9 s clock gate that used to guard this stage is gone for the
+        # reason given above the scene expansion, and it mattered more here:
+        # this stage re-scores every fused candidate and then re-sorts them, so
+        # whether it ran decided the top answer outright rather than adding to
+        # it. Bound by data if it ever needs bounding, never by elapsed time.
         if (self._entity is not None
                 and "entity_graph" not in set(self._config.disabled_channels)
-                and fused
-                and (_time_e.monotonic() - _e0) < 0.9):
+                and fused):
             try:
                 candidate_ids = [fr.fact_id for fr in fused[:100]]
                 eg_scores = self._entity.score_candidates(
@@ -497,6 +564,7 @@ class RetrievalEngine:
             # Q2b: thematic context when the top results cluster in one
             # community. Precomputed summary lookup only — no per-query LLM.
             community_context=self._community_context(results, profile_id),
+            incomplete_channels=tuple(sorted(dropped_channels)),
         )
 
     # -- Community context (Wave Q2b) --------------------------------------
@@ -908,6 +976,7 @@ class RetrievalEngine:
         known_as_of: str | None = None,
         valid_at: str | None = None,
         include_unknown: bool = False,
+        dropped_channels: set[str] | None = None,
     ) -> dict[str, list[tuple[str, float]]]:
         """Run active retrieval channels.
 
@@ -918,6 +987,13 @@ class RetrievalEngine:
         enabled and healthy, parallel dispatch generally bounds the producer
         phase by the slowest submitted producer, plus serial embedding and
         result-collection overhead.
+
+        ``dropped_channels``, when given, receives the name of every channel
+        abandoned at ``CHANNEL_HANG_GUARD_SECONDS``. Those channels contributed
+        nothing, so the caller needs to know the answer is incomplete rather
+        than merely late. It is a caller-owned set passed down per recall and
+        deliberately not an attribute of self — two concurrent recalls sharing
+        one would report each other's losses (the v3.4.64 race).
         """
         import os as _os_e
         import time as _time_e
@@ -1017,35 +1093,24 @@ class RetrievalEngine:
                 q_emb, profile_id, self._config.bm25_top_k,
             )
 
-        # Each local channel gets a latency budget, so that a slow graph walk
-        # cannot make an interactive recall wait 30 seconds. But a channel that
-        # runs out of time contributes NOTHING to fusion — the answer is missing
-        # whatever that channel alone could see — so this deadline is a quality
-        # cost every time it binds, and it is sized to be as generous as the
-        # recall budget allows rather than as tight as possible.
-        #
-        # Worst case after channels complete: bridge.discover (~0.3 s, no time
-        # gate), then load + rerank + build_results (~0.09 s).  Scene expansion
-        # is gated at elapsed < 0.8 s and entity enhancement at elapsed < 0.9 s
-        # from the start of recall (_e0); when channels run to their full 1.4 s
-        # deadline, elapsed is already above both gates so neither stage fires —
-        # their ~0.45 s average does NOT add to this worst case.  Total worst
-        # case: ~1.4 + 0.3 + 0.09 ≈ 1.79 s, within the 2.0 s ceiling.
-        # Raising the deadline further leaves less than 0.2 s for bridge +
-        # finalise; lowering it buys nothing and loses channel answers.
-        channel_timeout_seconds = 1.4
-        # One shared deadline keeps parallel dispatch genuinely bounded.  A
+        # One shared limit keeps parallel dispatch genuinely bounded.  A
         # per-future timeout here would serialise the wait and turn five slow
         # channels into five seconds of UI latency.
         done, pending = concurrent.futures.wait(
-            futures.values(), timeout=channel_timeout_seconds,
+            futures.values(), timeout=CHANNEL_HANG_GUARD_SECONDS,
         )
         for name, fut in futures.items():
             if fut in pending:
-                logger.warning(
-                    "Channel %s exceeded %.1fs latency budget",
-                    name, channel_timeout_seconds,
+                # Not a latency notice: this answer is missing whatever this
+                # channel alone could see, so it is logged at the level that
+                # says so and recorded for the caller.
+                logger.error(
+                    "Channel %s did not finish within %.1fs; this recall is "
+                    "answering without it",
+                    name, CHANNEL_HANG_GUARD_SECONDS,
                 )
+                if dropped_channels is not None:
+                    dropped_channels.add(name)
                 fut.cancel()  # no-op if already running; prevents queued jobs from starting
                 continue
             try:

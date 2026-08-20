@@ -109,17 +109,29 @@ def test_search_endpoint_passes_fast_true_to_engine(
     )
 
 
-def test_search_endpoint_does_not_wait_for_spreading_activation(
+def test_search_endpoint_is_bounded_when_a_channel_is_slow(
     engine_with_mock_deps,
 ) -> None:
-    """A slow spreading_activation channel must NOT block /api/search.
+    """A slow channel must not hang /api/search — but it IS waited for.
 
-    With fast=False (the bug), spreading_activation is included and the
-    channel_executor submit waits up to 30 s for it.  With fast=True (the fix),
-    spreading_activation is in extra_disabled and is never submitted.
+    This test used to assert the route returned in under 2.5 s with a 3 s
+    channel injected, on the stated grounds that ``fast=True`` puts
+    spreading_activation into ``extra_disabled`` so it is never submitted. That
+    is not what ``fast`` does, and has not been for some time: ``recall()``'s
+    own docstring says it "controls only the internal agentic verification
+    round; all six local retrieval channels + reranker run regardless", and
+    ``run_recall`` hardcodes ``extra_disabled = None`` with the comment "the
+    interactive path must retain the complete local retrieval contract".
 
-    We simulate the hang by injecting a 3-second SA channel and asserting the
-    route returns within 2 seconds.
+    So the channel WAS running and the assertion was being satisfied by
+    something else entirely: a 1.4 s cutoff in the channel phase that abandoned
+    it mid-flight. The test passed, for a reason it did not state, and would
+    have kept passing if ``fast`` had stopped being passed at all.
+
+    That cutoff is now a hang guard set above any channel's measured cost,
+    because abandoning a channel silently drops whatever only it could see. What
+    is left worth asserting is the real contract: a slow channel delays the
+    response and does not hang it, and the response still arrives.
     """
     from superlocalmemory.server.unified_daemon import create_app
 
@@ -149,10 +161,20 @@ def test_search_endpoint_does_not_wait_for_spreading_activation(
     resp = client.post("/api/search", json={"query": "fast path check", "limit": 5})
     elapsed = time.monotonic() - t0
 
+    from superlocalmemory.retrieval.engine import CHANNEL_HANG_GUARD_SECONDS
+
     assert resp.status_code == 200, resp.text
-    assert elapsed < 2.5, (
-        f"POST /api/search took {elapsed:.1f}s — spreading_activation is running "
-        "because fast=False is being used. Fix: use fast=True in memories.py."
+    # The 3 s channel is waited for, so the response cannot beat it. Asserting
+    # otherwise is what hid the fact that it was being abandoned.
+    assert elapsed >= 2.5, (
+        f"POST /api/search returned in {elapsed:.1f}s with a 3 s channel "
+        "injected, so that channel contributed nothing to the answer — either "
+        "it was abandoned or it was never dispatched"
+    )
+    # And it is bounded: the guard plus the work after the channel phase.
+    assert elapsed < CHANNEL_HANG_GUARD_SECONDS + 4.0, (
+        f"POST /api/search took {elapsed:.1f}s — the channel phase is not "
+        f"bounded by the {CHANNEL_HANG_GUARD_SECONDS}s hang guard"
     )
 
 

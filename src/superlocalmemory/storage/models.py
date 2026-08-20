@@ -452,3 +452,10 @@ class RecallResponse:
     # fall into (thematic context). None unless results cluster into one
     # community above threshold. Additive — backward compatible.
     community_context: dict | None = None
+    # Channels abandoned at the hang guard, so they contributed no candidates
+    # to this answer. Non-empty means the result is INCOMPLETE, not merely
+    # slow: asking the same question again on an idle machine can legitimately
+    # return something better. Empty is the normal case and the only one in
+    # which two runs of one query are expected to agree. Sorted, so the field
+    # is itself repeatable. Additive — backward compatible.
+    incomplete_channels: tuple[str, ...] = ()

@@ -490,14 +490,28 @@ class VectorStore:
                             (*base_params, search_k),
                         ).fetchall()
 
-            results: list[tuple[str, float]] = []
-            for row in rows[:top_k]:
-                fid = str(row["fact_id"])
-                similarity = max(0.0, 1.0 - row["distance"])
-                results.append((fid, similarity))
-
+            # Rank the whole candidate list, THEN cut it. The expansion above
+            # can leave `rows` longer than top_k, and the SQL has no ORDER BY —
+            # vec0 applies k, then a relational join emits the survivors in an
+            # order SQLite is free to choose. Cutting first therefore cut by
+            # position and only ranked what survived, which can drop a nearer
+            # fact in favour of a farther one.
+            #
+            # Measured on the 0.95 GB archive: 29 of 60 queries do take the
+            # expansion path (orphan vectors are common), and the produced set
+            # matched the true nearest-k in all 29 — the join does emit in
+            # distance order in practice. So this was latent, not active. It is
+            # fixed because "the planner happens to" is not a guarantee: add an
+            # index, change SQLite, or change the join and the answer moves.
+            #
+            # The tie-break on fact_id makes the cut total, so two facts at
+            # equal distance cannot swap across the top_k boundary between runs.
+            results: list[tuple[str, float]] = [
+                (str(row["fact_id"]), max(0.0, 1.0 - row["distance"]))
+                for row in rows
+            ]
             results.sort(key=lambda x: (-x[1], x[0]))
-            return results
+            return results[:top_k]
 
         except Exception as exc:
             logger.debug("search failed: %s", exc)

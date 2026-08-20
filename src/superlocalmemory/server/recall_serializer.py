@@ -298,4 +298,14 @@ def recall_response_metadata(response: Any) -> dict:
         # Q2b: thematic community summary (pure pass-through; computed upstream
         # in the engine where DB access is available). None on most recalls.
         "thematic_context": getattr(response, "community_context", None),
+        # Channels abandoned at the hang guard, so their candidates are absent
+        # from this answer. Empty on a healthy recall, which is the normal case.
+        # Non-empty is the one situation in which asking the same question twice
+        # may legitimately give different answers, so it has to travel with the
+        # response rather than living only in a server log — otherwise a caller
+        # comparing two runs has no way to tell an incomplete answer from a
+        # changed one. A list, because JSON has no tuple.
+        "incomplete_channels": list(
+            getattr(response, "incomplete_channels", ()) or ()
+        ),
     }

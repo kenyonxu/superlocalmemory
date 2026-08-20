@@ -98,13 +98,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that was never free: it decided whether a memory could be found by asking a
   question or only by quoting its own words. A retrieval channel is likewise
   given more time to answer, because a channel that runs out of time contributes
-  nothing at all and the answer silently loses whatever only it could see.
-- **Asking the same question twice gives the same answer more often.** Several
-  points in retrieval ordered results by score alone, so memories that scored
-  equally were ranked by where they happened to sit on disk or which thread
-  finished first — which changes between runs. Ordering is now decided only by
-  the data. This is a correctness fix rather than a measured improvement: the
-  remaining run-to-run variation is caused by something else, and is still open.
+  nothing at all and the answer silently loses whatever only it could see. That
+  limit is now what it was always described as — a guard against one part of
+  retrieval getting stuck, set far above how long any of them actually takes,
+  rather than a cutoff that trims the wait by dropping part of the answer.
+- **When part of an answer is missing, the reply now says which part.** If one
+  source of results has to be abandoned, its memories are absent from that
+  answer rather than merely late — so asking again can legitimately give
+  something better. Replies carry the list of anything that was abandoned, which
+  is empty on a healthy answer, so it is possible to tell an incomplete answer
+  from a changed one instead of guessing.
+- **Asking the same question twice gives the same answer.** This had two
+  separate causes. Several points in retrieval ordered results by score alone,
+  so memories that scored equally were ranked by where they happened to sit on
+  disk or which thread finished first. And two stages that improve an answer —
+  one that brings in related memories, one that re-scores results by how they
+  connect to the things your question mentions — ran only if the answer was not
+  already taking too long. Both stages change which memory comes first, so
+  whether they ran decided the answer, and the time they were measured against
+  was close to how long a typical question takes anyway. The same question
+  asked twice took different paths depending on how busy the machine was, and
+  nothing in the reply said so. Ordering is now decided only by the data, and
+  those stages always run. Measured over 140 questions on a 1 GB store, asked
+  twice: the top answer changed on 15% of them before and 5.7% after, and the
+  top ten changed on 41% before and 13.6% after. Answering takes roughly a
+  tenth of a second longer.
 - **A ranking adjustment for questions about time now actually affects the
   order results come back in.** It was being calculated and then discarded.
 - **Storing a memory stays inside its time budget.** The durable write and the
