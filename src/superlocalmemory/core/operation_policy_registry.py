@@ -281,7 +281,7 @@ class OperationPolicyRegistry:
                 allowed_transports=_ALL_TRANSPORTS,
                 audit_level="full",
             ),
-            # Operational recovery & admin remediation (Wave-3 resilience slice)
+            # Operational recovery & admin remediation (resilience slice)
             # OPS_INSPECT: read-only listing of failed/stuck/degraded ops.
             # Allowed over all transports so dashboard, MCP, and CLI all work.
             OperationKind.OPS_INSPECT: OperationPolicy(

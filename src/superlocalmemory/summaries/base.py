@@ -62,7 +62,7 @@ class SummaryResult:
 
 # ── coverage constants ──────────────────────────────────────────────────────
 #
-# Use these strings; the acceptance gate checks for their presence
+# Use these strings; the tests check for their presence
 # and the values must be human-interpretable without this file.
 
 COVERAGE_FULL = "full"

@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later
 
-"""Canonical ingestion command contracts for V3.7 Wave 3."""
+"""Canonical ingestion command contracts for V3.7."""
 
 from __future__ import annotations
 

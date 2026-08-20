@@ -1,4 +1,4 @@
-"""Wave 4 native-host certification for the *shipped* Codex and Claude assets.
+"""an earlier stage native-host certification for the *shipped* Codex and Claude assets.
 
 This is deliberately an isolated contract test, not a test of Varun's live
 host configuration.  It exercises the exact stdio environment shape used by

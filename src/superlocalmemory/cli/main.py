@@ -977,7 +977,7 @@ def main() -> None:
 
     register_summary_parser(sub)
 
-    # Wave-3 / V4.0.6: GDPR subject-rights CLI (Art.15/17/20)
+    # V4.0.6: GDPR subject-rights CLI (Art.15/17/20)
     gdpr_p = sub.add_parser(
         "gdpr",
         help="GDPR subject rights: status, export (Art.15/20), erase (Art.17), verify",
@@ -1051,7 +1051,7 @@ def main() -> None:
         "--json", action="store_true", help="Output structured JSON",
     )
 
-    # Wave-3: operational recovery & admin remediation
+    # Operational recovery & admin remediation
     ops_p = sub.add_parser(
         "ops",
         help="Operational recovery: list failures, resolve stuck ops, check status",

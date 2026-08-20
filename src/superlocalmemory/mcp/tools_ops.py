@@ -2,7 +2,7 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V4 | https://qualixar.com | https://varunpratap.com
 
-"""Wave-3 Operational Recovery & Admin Remediation MCP tools (2 tools).
+"""Operational Recovery & Admin Remediation MCP tools (2 tools).
 
 list_failed_operations — Surface dead-letter, degraded, and exhausted ops.
 resolve_operation      — Admin retry/force-reconcile/cancel for stuck ops.
@@ -28,7 +28,7 @@ _VALID_ACTIONS = frozenset({"retry", "force_reconcile", "cancel"})
 
 
 def register_ops_tools(server, get_engine: Callable) -> None:
-    """Register Wave-3 operational-recovery MCP tools on *server*."""
+    """Register operational-recovery MCP tools on *server*."""
 
     # ------------------------------------------------------------------
     # 1. list_failed_operations — surface all stuck/failed/degraded ops

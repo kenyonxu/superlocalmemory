@@ -332,7 +332,7 @@ def test_no_fstring_sql_in_lld02_new_modules():
     Pre-existing f-string SQL with hard-coded values (e.g. iterating a tuple
     of known table names in ``database.reset()`` or ``IN``-clause
     placeholders in ``_generate_patterns``) is out of scope for LLD-02
-    Wave 2 Stream B; the rule in §7 targets user-data interpolation.
+    this stream; the rule in §7 targets user-data interpolation.
     """
     import re
     new_modules = [

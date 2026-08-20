@@ -1,4 +1,4 @@
-"""Wave 4 portable-host certification boundaries.
+"""an earlier stage portable-host certification boundaries.
 
 This module makes two deliberately narrow claims, and no more:
 
@@ -68,7 +68,7 @@ def _read(path: Path, fmt: str) -> dict[str, Any]:
         value = json.loads(text)
     elif fmt == "yaml":
         value = yaml.safe_load(text)
-    else:  # The Wave 4 portable subset is JSON + Continue YAML.
+    else:  # The an earlier stage portable subset is JSON + Continue YAML.
         raise AssertionError(f"unexpected portable host format: {fmt}")
     assert isinstance(value, dict)
     return value

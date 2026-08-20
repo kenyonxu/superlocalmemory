@@ -266,7 +266,7 @@ def apply_settings_update(config: "SLMConfig", payload: dict) -> "SLMConfig":
     This is the SINGLE authoritative place where incoming dashboard save payloads
     are merged onto the stored config.  The POST /api/v3/mode/set handler calls
     this function after its HTTP-layer concerns (SSRF guard, auth) are settled,
-    so the acceptance gate (test_wave2_acceptance.py::P3) tests real product
+    so the test suite (test_acceptance_core.py::P3) tests real product
     behaviour — not a reimplementation.
 
     SEC-L-01 PRESERVED:
@@ -444,7 +444,7 @@ async def set_full_config(request: Request):
         # Resolve the effective endpoint value before SSRF validation.
         # Only the Ollama default injection happens here; the fallback to the
         # stored URL (and redacted-echo detection) live inside
-        # apply_settings_update so that the P3 acceptance gate exercises
+        # apply_settings_update so that the P3 test exercises
         # the same code path as the HTTP handler — not a reimplementation.
         _raw_ep: str = "" if clear_base_url else (base_url_input or endpoint_input or "")
         if (

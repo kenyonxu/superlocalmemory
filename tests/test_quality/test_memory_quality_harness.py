@@ -1,4 +1,4 @@
-"""Synthetic, redacted Wave 2 quality contracts for SLM 4.0.5.
+"""Synthetic, redacted an earlier stage quality contracts for SLM 4.0.5.
 
 These tests deliberately use generated identifiers and fixture text only.  They
 exercise the existing temporal and receipt boundaries without reading the live

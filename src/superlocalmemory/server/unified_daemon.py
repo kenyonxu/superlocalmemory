@@ -4146,7 +4146,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
             "runtime_state": runtime_state,
             "active_profile": profile_snapshot.profile_id,
             "profile_generation": profile_snapshot.generation,
-            # Wave-3: operational failure counts (visible to all team members)
+            # operational failure counts (visible to all team members)
             **_ops_failure_counts(engine, application),
             # issue #107: does this daemon's *imported* code still match the
             # installed distribution? ``version`` above reports what this
@@ -4859,7 +4859,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
             # index backfill after an upgrade). Dashboard renders a plain
             # "Optimizing memory…" line from this. Defaults to idle before start.
             "self_heal": globals().get("_SELF_HEAL_STATUS", {"state": "idle"}),
-            # Wave-3: operational failure counts (dead-letter, degraded, stalled)
+            # operational failure counts (dead-letter, degraded, stalled)
             **_ops_failure_counts(engine, application),
         }
 
@@ -4913,7 +4913,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
         return {"status": "started"}
 
     # ------------------------------------------------------------------
-    # Wave-3: Operational Recovery & Admin Remediation  (V4 resilience slice)
+    # Operational Recovery & Admin Remediation  (V4 resilience slice)
     # ------------------------------------------------------------------
 
     @application.get("/operations/failed")
@@ -5460,7 +5460,7 @@ def _terminalize_orphan_operation(engine, operation_id: str) -> None:
 
 
 def _ops_failure_counts(engine, application) -> dict:
-    """Return Wave-3 operational failure counts for /status and /health.
+    """Return operational failure counts for /status and /health.
 
     Always returns a dict (never raises). Counts default to 0 on any error.
     Includes: dead_letter_count, degraded_operations, exhausted_obligations,

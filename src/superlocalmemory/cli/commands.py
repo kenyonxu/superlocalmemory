@@ -271,7 +271,7 @@ def _cmd_loop(args: Namespace) -> None:
 
 
 def _cmd_ops(args: Namespace) -> None:
-    """Wave-3: operational recovery & admin remediation commands."""
+    """Operational recovery & admin remediation commands."""
     from superlocalmemory.cli.ops_cmd import cmd_ops
     cmd_ops(args)
 
@@ -416,7 +416,7 @@ def dispatch(args: Namespace) -> None:
         "loop": _cmd_loop,
         # V3.8.2 super-help — grouped overview of every command + topics
         "help": cmd_help,
-        # Wave-3: operational recovery & admin remediation
+        # Operational recovery & admin remediation
         "ops": _cmd_ops,
         # V4.0.6: GDPR subject-rights CLI (Art.15/17/20)
         "gdpr": _cmd_gdpr_dispatch,
