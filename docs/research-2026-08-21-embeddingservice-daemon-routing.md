@@ -211,6 +211,6 @@ def _is_remote_embedder(embedder: object) -> bool:
 
 ## 9. 待决策
 
-1. 是否立项实施?(本调研建议:做,fork 先行验证,稳定后作为第二个上游 PR)
-2. 认证模型:跟随 v3.5.9 无凭据 loopback(最小 diff)还是直接上 capability token?
-3. 内存压力分支是否纳入 fallback 触发条件(本调研建议:纳入)
+1. 是否立项实施?(本调研建议:做,fork 先行验证,稳定后作为第二个上游 PR)(2026-08-21 已定并实施:无凭据 loopback / 双触发 / 报可用,见 spec)
+2. 认证模型:跟随 v3.5.9 无凭据 loopback(最小 diff)还是直接上 capability token?(2026-08-21 已定并实施:无凭据 loopback / 双触发 / 报可用,见 spec)
+3. 内存压力分支是否纳入 fallback 触发条件(本调研建议:纳入)(2026-08-21 已定并实施:无凭据 loopback / 双触发 / 报可用,见 spec)
