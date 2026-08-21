@@ -108,14 +108,9 @@ def test_fallback_recovers_embedding_over_real_http(monkeypatch, caplog, tmp_pat
             svc = EmbeddingService(EmbeddingConfig(dimension=_DIM))
             try:
                 with caplog.at_level(logging.WARNING):
-                    # First request loses the singleton race: it attaches the
-                    # daemon fallback and degrades gracefully with the
-                    # pre-fallback None contract (unchanged behaviour for that
-                    # call). The very next request is served by the daemon
-                    # over real HTTP — that is the recovery this test proves.
-                    first = svc.embed("hello world")
-                    assert first is None
-                    assert svc.embedder_mode == "daemon-fallback"
+                    # The very first request loses the singleton race, attaches
+                    # the daemon fallback, and is served by the daemon in the
+                    # SAME call — no silent first-call None degradation.
                     vec = svc.embed("hello world")
                 assert vec is not None and len(vec) == _DIM
                 # Exact stub payload: the vector provably came from the

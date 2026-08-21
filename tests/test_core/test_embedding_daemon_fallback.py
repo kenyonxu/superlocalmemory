@@ -93,6 +93,30 @@ class TestDelegation:
         ensure.assert_called_once()
         svc._daemon_fallback.embed_batch.assert_not_called()
 
+    def test_first_call_after_attach_delegates_immediately(self) -> None:
+        # Fix round 1: the call that loses the singleton race and attaches the
+        # fallback must itself be served by the daemon — no first-call None.
+        svc = _svc()
+        proxy = MagicMock()
+        proxy.is_available.return_value = True
+        proxy.embed_batch.return_value = [[0.1] * 384]
+        with patch(
+            "superlocalmemory.core.embeddings.acquire_embedding_lock",
+            return_value=False,
+        ), patch(
+            "superlocalmemory.core.mcp_embedder_proxy.McpEmbedderProxy",
+            return_value=proxy,
+        ), patch.object(
+            EmbeddingService, "_ensure_worker", wraps=svc._ensure_worker,
+        ) as ensure_spy:
+            # First call: attaches the fallback AND returns the vector.
+            assert svc.embed("x") == [0.1] * 384
+            # Second call: top short-circuit serves it — _ensure_worker must
+            # NOT run again (no double-delegation through the attach path).
+            assert svc.embed("x") == [0.1] * 384
+        assert ensure_spy.call_count == 1
+        assert proxy.embed_batch.call_count == 2
+
 
 class TestFailureCounting:
     def test_detach_after_three_connect_errors(self) -> None:

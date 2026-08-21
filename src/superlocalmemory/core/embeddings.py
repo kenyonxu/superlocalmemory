@@ -494,6 +494,14 @@ class EmbeddingService:
 
             self._ensure_worker()
             if self._worker_proc is None:
+                # _ensure_worker() may have attached a daemon fallback on THIS
+                # call (singleton held by another process, memory pressure).
+                # Delegate immediately instead of degrading this first request
+                # to None — a silent None here is the failure class this
+                # feature exists to eliminate. Real spawn failures never attach
+                # a fallback, so they keep the pre-existing None behaviour.
+                if self._available is False and self._daemon_fallback is not None:
+                    return self._embed_via_daemon(texts)
                 return None
 
             req = json.dumps({
