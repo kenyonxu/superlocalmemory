@@ -22,6 +22,8 @@
 | 对外可用性 | fallback 激活时 `is_available()` 报 `True`;`_is_remote_embedder()` 为 config 属性判定,对本地 config 返回 `False` → warm-guard 视为"可用且本地",store 同步嵌入经 HTTP,超预算自动降级 materializer;engine.py 零改动 |
 | 默认开关 | 默认开启;`SLM_EMBED_DAEMON_FALLBACK=0` 一键回退 |
 
+> 实施后修正(2026-08-21 最终评审):engine.py 的 `_warm_guard_embed` 读取的是原始属性 `_available`(engine.py:572-577),fallback 激活时 `_available is False`(§4"内部诚实"约束),因此 store 快路径的同步内联嵌入在 fallback 模式下**不启用**,写入嵌入由后台 materializer 异步兜底(daemon 侧 4.0.9 充实池双保险)。该行为严格更安全(写路径不承载 30s 级 HTTP)、严格优于修复前基线(materializer 此前拿到 None,现在经 daemon 成功),且是"engine.py 零改动"约束下的唯一一致解。上游 PR 叙事以此为准。
+
 ## 3. 架构与组件边界
 
 核心改动集中在 `core/embeddings.py`,另有一个 proxy 类扩展点和 health 暴露点。
@@ -73,7 +75,7 @@ embed()/embed_batch()
 - **维度校验**:proxy 返回向量照常过 `_validate_dimension()`;不匹配抛 `DimensionMismatchError`,消息含 "via daemon fallback"。
 - **`is_warm`**:fallback 成功服务 ≥1 次(`_fallback_served > 0`)后返回 `True`,避免 background enrichment 误判冷嵌入。
 - **`unload()`/shutdown**:对 proxy 为 no-op,不影响 daemon 侧。
-- **store 快路径双保险**:gateway 侧同步嵌入经 HTTP 超 warm-guard 预算时自动推迟给 materializer;daemon 侧 4.0.9 `_enrich_and_release` 充实池亦会兜底。
+- **store 快路径双保险**:fallback 模式下 gateway 侧同步内联嵌入**不启用**(warm-guard 读原始属性 `_available`,fallback 时为 `False`,见 §2 实施后修正),写入嵌入由后台 materializer 异步兜底;daemon 侧 4.0.9 `_enrich_and_release` 充实池亦会兜底。
 
 ## 5. 错误处理、超时与可观测性
 
