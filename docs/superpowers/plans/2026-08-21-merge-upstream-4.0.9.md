@@ -376,11 +376,11 @@ Expected: doctor 通过;embedding worker 冷启动成功(走的是带 proxy env 
 
 ```bash
 cd /tmp/slm-merge-409
-slm daemon start
+slm serve start
 sleep 5
-slm daemon status
+slm serve status
 slm recall "test query" --limit 3
-slm daemon stop
+slm serve stop
 ```
 
 Expected: daemon 正常起停,recall 有结果或空结果但无异常堆栈。注意 4.0.8 引入 backup-before-migrate:首次启动会对测试用数据目录跑迁移并自动打快照——确认迁移日志无 ERROR。
@@ -391,7 +391,7 @@ Expected: daemon 正常起停,recall 有结果或空结果但无异常堆栈。�
 
 ```bash
 cd /tmp/slm-merge-409
-slm daemon start
+slm serve start
 python - <<'EOF'
 import logging
 logging.basicConfig(level=logging.WARNING)
@@ -401,7 +401,7 @@ resp = _daemon_api("GET", "/recall?q=embedding&limit=3", timeout=8.0)
 assert resp is not None, "daemon recall returned None"
 print("daemon-routed recall OK:", str(resp)[:200])
 EOF
-slm daemon stop
+slm serve stop
 ```
 
 Expected: 无 embedding-None 警告,daemon 路由返回结果(复刻 4.2.0 联调实证形态:全通道分数,零警告)。
@@ -435,13 +435,13 @@ git branch -d merge/upstream-4.0.9
 
 ```bash
 # 1. 停 daemon
-slm daemon stop
+slm serve stop
 # 2. 手动备份数据目录(4.0.8 的自动快照不替代异地备份)
 cp -a ~/.superlocalmemory ~/.superlocalmemory.bak-2026-08-21   # 实际路径以 slm 配置为准
 # 3. 升级安装
 cd $HOME/github/superlocalmemory && uv tool install --force .  # 或既有安装方式
 # 4. 启动并观察首启迁移日志(4.0.8 会自动打 pre-migration 快照)
-slm daemon start && slm daemon status
+slm serve start && slm serve status
 # 5. 生产召回抽查(知惠全通道)+ 观察 24h;备份至少保留一个版本周期
 ```
 
