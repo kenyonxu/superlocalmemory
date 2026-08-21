@@ -33,7 +33,7 @@
 - [ ] **Step 1: 确认工作区干净并同步上游引用**
 
 ```bash
-cd /home/kai-remote/github/superlocalmemory
+cd $HOME/github/superlocalmemory
 git status --porcelain   # 必须为空;若有未提交内容先处理
 git fetch upstream --tags
 git rev-parse upstream/main   # 记录,后续 merge 用它
@@ -424,7 +424,7 @@ Expected: 无 embedding-None 警告,daemon 路由返回结果(复刻 4.2.0 联�
 - [ ] **Step 2: 合回 main**
 
 ```bash
-cd /home/kai-remote/github/superlocalmemory
+cd $HOME/github/superlocalmemory
 git checkout main
 git merge --ff-only merge/upstream-4.0.9   # 若不能 ff 则普通 merge,先查明 main 是否动过
 git worktree remove /tmp/slm-merge-409
@@ -439,7 +439,7 @@ slm daemon stop
 # 2. 手动备份数据目录(4.0.8 的自动快照不替代异地备份)
 cp -a ~/.superlocalmemory ~/.superlocalmemory.bak-2026-08-21   # 实际路径以 slm 配置为准
 # 3. 升级安装
-cd /home/kai-remote/github/superlocalmemory && uv tool install --force .  # 或既有安装方式
+cd $HOME/github/superlocalmemory && uv tool install --force .  # 或既有安装方式
 # 4. 启动并观察首启迁移日志(4.0.8 会自动打 pre-migration 快照)
 slm daemon start && slm daemon status
 # 5. 生产召回抽查(知惠全通道)+ 观察 24h;备份至少保留一个版本周期
