@@ -84,7 +84,19 @@ def list_entities(
 
     conn = get_read_connection(engine._config.db_path)
     try:
-        where = ["ce.profile_id = ?"]
+        # Hide the placeholder that dated facts with no recognised entity
+        # attach their temporal events to (core/store_pipeline.py,
+        # _ensure_unresolved_entity). It is a hook for a foreign key, not a
+        # concept, and it would otherwise appear here as a nameless entity and
+        # be counted in the total the owner reads as "entities I have".
+        #
+        # Only the presentation layer needs this. The other readers of
+        # canonical_entities are unaffected on inspection: graph_pruner uses
+        # `NOT IN (SELECT entity_id ...)` to find orphaned edges, where
+        # including it is correct; community_summary builds from graph edges and
+        # the placeholder has none; scale_engine counts for backend sync, not
+        # for display.
+        where = ["ce.profile_id = ?", "ce.entity_type != 'unresolved'"]
         params: list[object] = [profile]
         if entity_type and entity_type.lower() != "all":
             where.append("ce.entity_type = ? COLLATE NOCASE")

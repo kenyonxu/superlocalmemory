@@ -164,7 +164,12 @@ _MARKUP = re.compile(
 )
 
 
-def is_non_answer(text: str | None, *, min_chars: int = 0) -> tuple[bool, str]:
+def is_non_answer(
+    text: str | None,
+    *,
+    min_chars: int = 0,
+    model_written: bool = True,
+) -> tuple[bool, str]:
     """Whether ``text`` is a model talking about the prompt, not a memory.
 
     Returns ``(rejected, reason)``. ``reason`` is empty when the text is
@@ -175,6 +180,14 @@ def is_non_answer(text: str | None, *, min_chars: int = 0) -> tuple[bool, str]:
     ``min_chars`` defaults to **no floor**. A caller that knows its own output
     should be long — a summarizer merging three or more facts — passes
     :data:`MIN_USEFUL_CHARS`. See that constant for why this is not the default.
+
+    ``model_written=False`` applies only the rules that hold for text no model
+    composed: the length floor and the markup check. Every other rule here
+    describes a MODEL's behaviour — refusing, apologising, discussing the
+    prompt — and an extractive summary is the owner's own sentences reassembled,
+    so a memory that happens to say "the facts provided" would be rejected for
+    having phrased itself like a chatbot. Nothing is lost by exempting it: an
+    extractive summary cannot refuse, because there is nobody there to refuse.
 
     Cheap and side-effect free: safe to call on every candidate write.
 
@@ -199,6 +212,9 @@ def is_non_answer(text: str | None, *, min_chars: int = 0) -> tuple[bool, str]:
 
     if _MARKUP.search(stripped):
         return True, "contains tool-call or chat-template markup"
+
+    if not model_written:
+        return False, ""
 
     for pattern, why in NON_ANSWER_PATTERNS:
         if pattern.search(stripped):

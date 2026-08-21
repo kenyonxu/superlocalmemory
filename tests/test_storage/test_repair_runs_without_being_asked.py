@@ -393,3 +393,209 @@ class TestTheRepairIsRegisteredWhereItWillActuallyRun:
         from superlocalmemory.storage._migration_internals import _MODULES
 
         assert _MODULES.get(M043.NAME) is M043
+
+
+class TestWhatTheAuditFound:
+    """Four defects two independent audits turned up in this migration.
+
+    Kept together because each was a case the first version got wrong for the
+    same underlying reason: it was written against ONE store, and that store
+    happened to be the shape where the mistake did not show.
+    """
+
+    def test_a_victim_with_a_mid_range_score_is_restored(
+        self, tmp_path: Path,
+    ) -> None:
+        """The most important finding of the audit.
+
+        The first restore predicate required ``retention_score > 0.8``, on the
+        reasoning that the retention maths maps anything above 0.8 to 'active'
+        so zone 'archive' must be a contradiction. All 528 hidden memories on
+        the author's store scored exactly 1.0, so it worked -- and that store is
+        the LUCKY shape. They scored 1.0 because they had no prior retention row
+        and the schema default is 1.0.
+
+        On a store where the forgetting scheduler has been running, which is the
+        default, a victim carries whatever score it had drifted to, typically
+        0.21 to 0.80, because archiving moves the zone and leaves the score
+        alone. The score-based predicate cannot see those rows: they stay
+        hidden, verify() returns true because it cannot see them either, and
+        doctor reports healthy. A repair silent about what it failed to repair
+        is worse than one that fails loudly.
+        """
+        db = tmp_path / "drifted.db"
+        conn = _open(db)
+        try:
+            create_all_tables(conn)
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute(
+                "CREATE TABLE fact_consolidations (consolidation_id TEXT PRIMARY"
+                " KEY, profile_id TEXT, consolidated_fact_id TEXT NOT NULL,"
+                " source_fact_ids TEXT NOT NULL, strategy TEXT, created_at TEXT)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS fact_retention (fact_id TEXT PRIMARY"
+                " KEY, profile_id TEXT, retention_score REAL, memory_strength"
+                " REAL, access_count INTEGER, last_accessed_at TEXT,"
+                " last_computed_at TEXT, lifecycle_zone TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO memories (memory_id, profile_id, content) "
+                "VALUES ('m1', ?, 'src')", (_PROFILE,),
+            )
+            # archived by consolidation, score drifted to a mid-range value
+            conn.execute(
+                "INSERT INTO atomic_facts (fact_id, memory_id, profile_id,"
+                " content, lifecycle, created_at) VALUES "
+                "('drifted','m1',?,'A decision the owner made in March.',"
+                " 'archived','2026-03-01')", (_PROFILE,),
+            )
+            conn.execute(
+                "INSERT INTO fact_retention (fact_id, profile_id,"
+                " retention_score, lifecycle_zone) VALUES ('drifted',?,0.65,"
+                " 'archive')", (_PROFILE,),
+            )
+            # genuinely faded: low score, archived because it should be
+            conn.execute(
+                "INSERT INTO atomic_facts (fact_id, memory_id, profile_id,"
+                " content, lifecycle, created_at) VALUES "
+                "('faded','m1',?,'Something nobody needed for a year.',"
+                " 'archived','2025-01-01')", (_PROFILE,),
+            )
+            conn.execute(
+                "INSERT INTO fact_retention (fact_id, profile_id,"
+                " retention_score, lifecycle_zone) VALUES ('faded',?,0.10,"
+                " 'archive')", (_PROFILE,),
+            )
+            conn.execute(
+                "INSERT INTO atomic_facts (fact_id, memory_id, profile_id,"
+                " content, created_at) VALUES ('s1','',?,"
+                "'A model summary long enough to matter here.','2026-08-01')",
+                (_PROFILE,),
+            )
+            conn.execute(
+                "INSERT INTO fact_consolidations VALUES ('c1',?,'s1',"
+                "'[\"drifted\"]','entity_cluster','2026-08-01')", (_PROFILE,),
+            )
+            conn.commit()
+
+            M043.apply(conn)
+
+            assert _one(
+                conn, "SELECT lifecycle_zone FROM fact_retention WHERE fact_id='drifted'"
+            ) == "warm", (
+                "a memory archived by consolidation at score 0.65 was left "
+                "hidden; the restore is still keyed on the score rather than "
+                "on whether consolidation archived it"
+            )
+            assert _one(
+                conn, "SELECT lifecycle FROM atomic_facts WHERE fact_id='drifted'"
+            ) == "warm"
+            # and the restore must not become "un-forget everything"
+            assert _one(
+                conn, "SELECT lifecycle_zone FROM fact_retention WHERE fact_id='faded'"
+            ) == "archive", "a genuinely faded memory was un-hidden"
+            assert M043.verify(conn) is True
+        finally:
+            conn.close()
+
+    def test_content_changing_after_preservation_does_not_wedge_it(
+        self, store: Path,
+    ) -> None:
+        """Two bugs met here, and the second was created by fixing the first.
+
+        The insert named one constraint in its ON CONFLICT clause and the table
+        has two, so a row whose content changed conflicted on the primary key
+        and raised -- and because repair() is apply(), that raised on every
+        start forever. Making the conflict clause untargeted stopped the raise
+        and exposed the next layer: verify() matched preserved rows on content,
+        which after a content change can never match again. Same permanent
+        failure, no exception to notice it by.
+        """
+        conn = _open(store)
+        try:
+            M043.apply(conn)
+            assert M043.verify(conn) is True
+            conn.execute(
+                "UPDATE atomic_facts SET content = ? WHERE fact_id = 'summary-0'",
+                ("A different summary, long enough to pass the floor.",),
+            )
+            M043.apply(conn)
+            assert M043.verify(conn) is True, (
+                "verify cannot become true after a preserved row's content "
+                "changed, so repair() will fail on every start from now on"
+            )
+        finally:
+            conn.close()
+
+    def test_one_malformed_ledger_row_does_not_take_the_repair_down(
+        self, store: Path,
+    ) -> None:
+        """``json_each`` raises on invalid JSON, and it was unguarded.
+
+        A single corrupt ``source_fact_ids`` anywhere in the ledger made apply()
+        roll back, verify() stay false, and repair() re-raise on every start --
+        one bad row disabling the whole repair for the life of the store.
+        """
+        conn = _open(store)
+        try:
+            conn.execute(
+                "INSERT INTO fact_consolidations (consolidation_id, profile_id,"
+                " consolidated_fact_id, source_fact_ids, strategy, created_at) "
+                "VALUES ('cbad', ?, 'summary-0', 'not json at all',"
+                " 'entity_cluster', '2026-08-01')", (_PROFILE,),
+            )
+            conn.commit()
+            M043.apply(conn)
+            assert M043.verify(conn) is True
+            assert _one(
+                conn, "SELECT COUNT(*) FROM atomic_facts WHERE quarantined=1"
+            ) == 2, "the repair stopped withholding after hitting a bad row"
+        finally:
+            conn.close()
+
+    def test_it_still_works_with_no_provenance_ledger(
+        self, tmp_path: Path,
+    ) -> None:
+        """The provenance half of the predicate must degrade, not crash.
+
+        With no ledger there is nothing to attribute archiving to, so only the
+        self-evident contradiction is repaired. Strictly weaker, and all such a
+        store can support.
+        """
+        db = tmp_path / "noledger.db"
+        conn = _open(db)
+        try:
+            create_all_tables(conn)
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS fact_retention (fact_id TEXT PRIMARY"
+                " KEY, profile_id TEXT, retention_score REAL, memory_strength"
+                " REAL, access_count INTEGER, last_accessed_at TEXT,"
+                " last_computed_at TEXT, lifecycle_zone TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO memories (memory_id, profile_id, content) "
+                "VALUES ('m1', ?, 'src')", (_PROFILE,),
+            )
+            conn.execute(
+                "INSERT INTO atomic_facts (fact_id, memory_id, profile_id,"
+                " content, lifecycle, created_at) VALUES "
+                "('r','m1',?,'A memory scored to keep.','archived','2026-03-01')",
+                (_PROFILE,),
+            )
+            conn.execute(
+                "INSERT INTO fact_retention (fact_id, profile_id,"
+                " retention_score, lifecycle_zone) VALUES ('r',?,1.0,'archive')",
+                (_PROFILE,),
+            )
+            conn.commit()
+            M043.apply(conn)
+            assert _one(
+                conn, "SELECT lifecycle_zone FROM fact_retention WHERE fact_id='r'"
+            ) == "active"
+            assert M043.verify(conn) is True
+        finally:
+            conn.close()

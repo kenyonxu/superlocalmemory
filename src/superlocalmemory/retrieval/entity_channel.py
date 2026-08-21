@@ -398,9 +398,15 @@ class EntityGraphChannel:
                 include_global=include_global,
                 include_shared=include_shared,
             )
+            # Withheld rows must not enter the entity map at all. They carry
+            # their whole cluster's pooled entity list, which is exactly why
+            # they out-ranked real memories here in the first place — leaving
+            # them in the map would keep spending this channel's budget on
+            # candidates that hydration then discards.
             rows = self._db.execute(
                 "SELECT fact_id, canonical_entities_json "
-                f"FROM atomic_facts WHERE {where} "
+                f"FROM atomic_facts WHERE {where}"
+                f"{self._db.visible_fact_clause()} "
                 "ORDER BY created_at DESC LIMIT ?",
                 (*params, _unbounded_facts_ceiling()),
             )

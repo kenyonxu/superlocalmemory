@@ -123,15 +123,65 @@ _CONSOLIDATOR_ROWS = """
            )
 """
 
-#: A retention row that hides a memory the retention maths says to keep.
-_WRONGLY_HIDDEN = """
+#: A genuine memory that consolidation hid.
+#:
+#: BY PROVENANCE, NOT BY SCORE. The first version of this required
+#: ``retention_score > 0.8``, reasoning that a score above 0.8 maps to 'active'
+#: so zone 'archive' must be a contradiction. Every one of the 528 hidden
+#: memories on the author's store scored exactly 1.0, so it worked there — and
+#: that store is the LUCKY shape. Those rows scored 1.0 because they had no
+#: prior retention row and the schema default is 1.0.
+#:
+#: On a store where the forgetting scheduler has been running (the default,
+#: ``ForgettingConfig.enabled = True``) a consolidation victim carries whatever
+#: score it had drifted to — typically 0.21 to 0.80 — because
+#: ``set_fact_lifecycle_zone`` moves the zone and leaves the score alone. The
+#: score-based predicate does not see those rows at all: they stay archived,
+#: ``verify()`` returns true because it cannot see them either, and ``doctor``
+#: reports healthy while the memories remain unreachable. A repair that is
+#: silent about what it failed to repair is worse than one that fails loudly.
+#:
+#: So the test is the same one the withhold step uses: was this row a
+#: consolidation source? That is recorded, and it does not depend on a number
+#: that something else was free to change afterwards.
+#:
+#: Self-correcting rather than indiscriminate: the zone is RECOMPUTED from the
+#: score, so a source that has genuinely faded maps straight back to
+#: archive/forgotten and nothing moves. Only a row whose own score says it
+#: should be reachable becomes reachable.
+_WRONGLY_HIDDEN_BASE = """
     SELECT r.fact_id
       FROM fact_retention r
       JOIN atomic_facts af ON af.fact_id = r.fact_id
      WHERE r.lifecycle_zone IN ('archive', 'forgotten')
-       AND r.retention_score > 0.8
        AND af.memory_id <> ''
+       AND ({extra})
 """
+
+#: The provenance half. Only usable when the ledger exists, which is why this
+#: is composed at call time rather than being one constant: a first version
+#: baked the subquery in and ``verify()`` then raised "no such table:
+#: fact_consolidations" on a store without a ledger -- caught by the test for
+#: exactly that store shape.
+_ARCHIVED_BY_CONSOLIDATION = """
+    af.fact_id IN (
+        SELECT je.value
+          FROM fact_consolidations fc, json_each(fc.source_fact_ids) je
+         WHERE json_valid(fc.source_fact_ids)
+    )
+"""
+
+#: The score half: hidden while the retention maths says to keep.
+_SCORED_TO_KEEP = "r.retention_score > 0.8"
+
+
+def _wrongly_hidden(conn: sqlite3.Connection) -> str:
+    """The restore predicate, using whichever halves this store supports."""
+    if _table_exists(conn, "fact_consolidations"):
+        return _WRONGLY_HIDDEN_BASE.format(
+            extra=f"{_SCORED_TO_KEEP} OR {_ARCHIVED_BY_CONSOLIDATION}"
+        )
+    return _WRONGLY_HIDDEN_BASE.format(extra=_SCORED_TO_KEEP)
 
 
 def apply(conn: sqlite3.Connection) -> None:
@@ -224,6 +274,7 @@ def _preserve(conn: sqlite3.Connection) -> int:
                COALESCE(
                    (SELECT fc.source_fact_ids FROM fact_consolidations fc
                      WHERE fc.consolidated_fact_id = af.fact_id
+                       AND json_valid(fc.source_fact_ids)
                      ORDER BY fc.created_at DESC LIMIT 1),
                    '[]'
                ),
@@ -244,12 +295,18 @@ def _preserve(conn: sqlite3.Connection) -> int:
                -- summary-of-summaries therefore reports 0, which is the honest
                -- number, and the endpoint ranks it below one that covers real
                -- memories.
+               -- json_valid guards every json_each in this file. Without it
+               -- ONE malformed source_fact_ids anywhere in the ledger makes
+               -- json_each raise, apply() roll back, verify() stay false, and
+               -- repair() re-raise on every start for the life of the store —
+               -- a single bad row taking the whole repair down with it.
                (SELECT COUNT(*) FROM atomic_facts src
                  WHERE src.memory_id <> ''
                    AND src.fact_id IN (
                        SELECT je.value FROM fact_consolidations fc,
                               json_each(fc.source_fact_ids) je
-                        WHERE fc.consolidated_fact_id = af.fact_id)),
+                        WHERE fc.consolidated_fact_id = af.fact_id
+                          AND json_valid(fc.source_fact_ids))),
                LENGTH(af.content),
                'migrated',
                COALESCE(af.scope, 'personal'),
@@ -266,17 +323,33 @@ def _preserve(conn: sqlite3.Connection) -> int:
                    AND src.fact_id IN (
                        SELECT je.value FROM fact_consolidations fc,
                               json_each(fc.source_fact_ids) je
-                        WHERE fc.consolidated_fact_id = af.fact_id)),
+                        WHERE fc.consolidated_fact_id = af.fact_id
+                          AND json_valid(fc.source_fact_ids))),
                (SELECT MAX(src.created_at) FROM atomic_facts src
                  WHERE src.memory_id <> ''
                    AND src.fact_id IN (
                        SELECT je.value FROM fact_consolidations fc,
                               json_each(fc.source_fact_ids) je
-                        WHERE fc.consolidated_fact_id = af.fact_id)),
+                        WHERE fc.consolidated_fact_id = af.fact_id
+                          AND json_valid(fc.source_fact_ids))),
                af.created_at
           FROM atomic_facts af
          WHERE af.fact_id IN (""" + _CONSOLIDATOR_ROWS + """)
-        ON CONFLICT (profile_id, entity_id, content) DO NOTHING
+        -- UNTARGETED. `ON CONFLICT (profile_id, entity_id, content)` names one
+        -- constraint and raises on any other, and this table has two: that
+        -- unique triple, and summary_id as primary key. summary_id is the
+        -- source fact_id, so a row whose CONTENT changed between runs conflicts
+        -- on the primary key, which the targeted form does not catch --
+        -- reproduced as `IntegrityError: UNIQUE constraint failed:
+        -- consolidated_summaries.summary_id`. Because the runner calls
+        -- repair() (which is apply()) whenever verify() fails, that failure
+        -- would then repeat on every single start, forever.
+        --
+        -- Untargeted DO NOTHING absorbs both. Losing the newer text is the
+        -- right trade: this is a display copy of a row that is about to be
+        -- withheld, and the first copy taken is the one the owner has already
+        -- been shown.
+        ON CONFLICT DO NOTHING
     """)
     return _count(conn, "SELECT COUNT(*) FROM consolidated_summaries") - before
 
@@ -292,36 +365,48 @@ def _withhold(conn: sqlite3.Connection) -> int:
 
 
 def _restore(conn: sqlite3.Connection) -> int:
-    """Un-hide memories the retention maths says to keep. Returns rows changed."""
+    """Un-hide memories consolidation archived. Returns rows changed.
+
+    Needs both tables: ``fact_retention`` to hold the zone, and
+    ``fact_consolidations`` for the provenance half of the predicate. Without
+    the ledger it falls back to the score-only test, which is strictly weaker
+    but is all a store with no ledger can support.
+    """
     if not _table_exists(conn, "fact_retention"):
         return 0
     cur = conn.execute(
         "UPDATE fact_retention SET lifecycle_zone = (" + _ZONE_FROM_SCORE + ") "
-        "WHERE fact_id IN (" + _WRONGLY_HIDDEN + ")"
+        "WHERE fact_id IN (" + _wrongly_hidden(conn) + ")"
     )
     changed = int(cur.rowcount or 0)
     if changed:
-        # Keep the legacy atomic_facts.lifecycle mirror consistent with the
-        # canonical zone, the same mapping core/lifecycle_state.py applies:
-        # archive/forgotten -> 'archived', everything else keeps its own name.
-        conn.execute("""
-            UPDATE atomic_facts
-               SET lifecycle = (
-                     SELECT CASE
-                              WHEN r.lifecycle_zone IN ('archive', 'forgotten')
-                                   THEN 'archived'
-                              ELSE r.lifecycle_zone
-                            END
-                       FROM fact_retention r
-                      WHERE r.fact_id = atomic_facts.fact_id
-                   )
-             WHERE lifecycle = 'archived'
-               AND fact_id IN (
-                     SELECT fact_id FROM fact_retention
-                      WHERE lifecycle_zone NOT IN ('archive', 'forgotten')
-                   )
-        """)
+        _sync_lifecycle_mirror(conn)
     return changed
+
+
+def _sync_lifecycle_mirror(conn: sqlite3.Connection) -> None:
+    """Bring atomic_facts.lifecycle back in line with the canonical zone.
+
+    Same mapping core/lifecycle_state.py applies: archive/forgotten map to
+    'archived', every other zone keeps its own name.
+    """
+    conn.execute("""
+        UPDATE atomic_facts
+           SET lifecycle = (
+                 SELECT CASE
+                          WHEN r.lifecycle_zone IN ('archive', 'forgotten')
+                               THEN 'archived'
+                          ELSE r.lifecycle_zone
+                        END
+                   FROM fact_retention r
+                  WHERE r.fact_id = atomic_facts.fact_id
+               )
+         WHERE lifecycle = 'archived'
+           AND fact_id IN (
+                 SELECT fact_id FROM fact_retention
+                  WHERE lifecycle_zone NOT IN ('archive', 'forgotten')
+               )
+    """)
 
 
 def verify(conn: sqlite3.Connection) -> bool:
@@ -348,21 +433,35 @@ def verify(conn: sqlite3.Connection) -> bool:
             return False
 
         # Every withheld row must still be visible somewhere, or the repair has
-        # deleted the user's view of it rather than moved it.
+        # deleted the owner's view of it rather than moved it.
+        #
+        # BY IDENTITY *OR* CONTENT, and the "or" is what makes this an invariant
+        # rather than a trap. Matching on content alone could never become true
+        # once a row's content changed after being preserved: the display copy
+        # keeps the old text, verify stays false, repair() runs apply() again,
+        # apply() cannot change the past, and the migration is reported failed
+        # on every start for the rest of the store's life. Matching on identity
+        # alone fails the other way, because two withheld rows with identical
+        # text collapse into one display row under the unique triple, leaving the
+        # second with no row of its own id.
+        #
+        # Either match satisfies the guarantee that actually matters: nothing
+        # the owner could see has stopped being visible.
         unpreserved = _count(conn, """
             SELECT COUNT(*) FROM atomic_facts af
              WHERE af.fact_id IN (""" + _CONSOLIDATOR_ROWS + """)
                AND NOT EXISTS (
                      SELECT 1 FROM consolidated_summaries cs
                       WHERE cs.profile_id = af.profile_id
-                        AND cs.content = af.content
+                        AND (cs.summary_id = af.fact_id
+                             OR cs.content = af.content)
                    )
         """)
         if unpreserved:
             return False
 
     if _table_exists(conn, "fact_retention"):
-        if _count(conn, "SELECT COUNT(*) FROM (" + _WRONGLY_HIDDEN + ")"):
+        if _count(conn, "SELECT COUNT(*) FROM (" + _wrongly_hidden(conn) + ")"):
             return False
     return True
 

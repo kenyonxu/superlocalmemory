@@ -378,10 +378,14 @@ class TemporalChannel:
             include_shared=include_shared,
             prefix="af",
         )
+        # The recency fallback is where these rows won before: they have no
+        # temporal_events at all, so they reached the top through created_at
+        # alone. Fifty slots, and 1,195 withheld rows all written recently.
         rows = self._db.execute(
             "SELECT af.fact_id, af.created_at "
             "FROM atomic_facts AS af "
-            f"WHERE {where} "
+            f"WHERE {where}"
+            f"{self._db.visible_fact_clause('af')} "
             "  AND af.created_at >= datetime('now', '-90 days') "
             "ORDER BY af.created_at DESC, af.fact_id ASC "
             "LIMIT 50",

@@ -686,8 +686,12 @@ class DatabaseManager:
             include_shared=include_shared,
             prefix="f",
         )
+        # Pins are injected straight into an agent's context, which makes this
+        # the most consequential display path in the class: a withheld row here
+        # is not merely shown, it is asserted as background truth.
         rows = self.execute(
             f"SELECT f.* FROM atomic_facts f WHERE {where} AND f.pinned = 1 "
+            f"{self.visible_fact_clause('f')} "
             "AND NOT EXISTS ("
             "    SELECT 1 FROM fact_temporal_validity tv "
             "    WHERE tv.fact_id = f.fact_id "
@@ -754,6 +758,44 @@ class DatabaseManager:
             self._quarantine_col_present = True
         return present
 
+    def visible_fact_clause(
+        self, prefix: str = "", *, include_quarantined: bool = False,
+    ) -> str:
+        """AND-clause excluding rows no caller should be shown as a memory.
+
+        Two exclusions, one definition: soft-deleted (``archive_status``) and
+        withheld (``quarantined``). Both are presence-guarded, because each
+        column arrives with a migration and may be absent on a store the engine
+        has not opened.
+
+        WHY THIS EXISTS AS A FUNCTION. 4.0.10 first put the quarantine filter in
+        ``get_facts_by_ids`` alone, reasoning that every retrieval channel
+        re-authorises through it and the engine drops what it cannot hydrate.
+        That reasoning was correct and the conclusion was wrong: it covered the
+        RECALL pipeline, and ``search``, ``list_recent``, ``fetch``, the MCP
+        resources and the dashboard's own search are not the recall pipeline.
+        Measured on a copy of the author's store, ``search_facts_fts`` returned
+        20 withheld rows out of 50 and ``get_all_facts`` 66 out of 400 — the
+        exact defect the design was meant to prevent, in the paths the design
+        never looked at.
+
+        There is no single SQL choke point in this codebase; ``_scope_where`` is
+        spliced against six other tables and cannot carry a fact column. So the
+        honest form of "one place" is one CLAUSE with an enumerable set of call
+        sites, and a test that fails when a read path does not use it:
+        tests/test_storage/test_no_read_path_shows_a_withheld_row.py
+
+        ``include_quarantined=True`` is for repair, erasure and export — paths
+        that must reach a withheld row to act on it.
+        """
+        table = f"{prefix}." if prefix else ""
+        clause = ""
+        if self._has_archive_status():
+            clause += f" AND COALESCE({table}archive_status, 'live') != 'archived'"
+        if not include_quarantined and self._has_quarantine_column():
+            clause += f" AND COALESCE({table}quarantined, 0) = 0"
+        return clause
+
     def get_all_facts(
         self, profile_id: str, limit: int | None = None,
         *,
@@ -776,14 +818,10 @@ class DatabaseManager:
         # hard, env-tunable ceiling even when the caller passes limit=None.
         if limit is None:
             limit = _unbounded_facts_ceiling()
-        # Archived facts are not live; never surface them in direct reads.
-        archive_clause = (
-            " AND COALESCE(archive_status, 'live') != 'archived'"
-            if self._has_archive_status()
-            else ""
-        )
+        # Soft-deleted and withheld rows are not memories a caller may see.
         rows = self.execute(
-            f"SELECT * FROM atomic_facts WHERE {where}{archive_clause} "
+            f"SELECT * FROM atomic_facts WHERE {where}"
+            f"{self.visible_fact_clause()} "
             "ORDER BY created_at DESC LIMIT ?",
             (*params, int(limit)),
         )
@@ -811,14 +849,12 @@ class DatabaseManager:
             include_global=include_global,
             include_shared=include_shared,
         )
-        archive_clause = (
-            " AND COALESCE(archive_status, 'live') != 'archived'"
-            if self._has_archive_status()
-            else ""
-        )
+        # Crossing a profile boundary is the last place a withheld row should
+        # appear: it would be a model's non-answer presented to somebody else
+        # as one of this profile's shared memories.
         rows = self.execute(
             f"SELECT * FROM atomic_facts WHERE {where} AND profile_id != ?"
-            f"{archive_clause} ORDER BY created_at DESC",
+            f"{self.visible_fact_clause()} ORDER BY created_at DESC",
             (*params, profile_id),
         )
         return [self._row_to_fact(r) for r in rows]
@@ -974,14 +1010,21 @@ class DatabaseManager:
         include_global: bool = False,
         include_shared: bool = False,
     ) -> int:
-        """Total fact count for a profile."""
+        """Memories this profile has, as the owner would count them.
+
+        Counts what a caller can be shown, which is why it applies
+        ``visible_fact_clause``. It fed the dashboard's "All memories 5,093" and
+        was counting 1,195 withheld summaries and every soft-deleted row into
+        that figure -- a number the owner reads as "how much do I remember".
+        """
         where, params = _scope_where(
             profile_id,
             include_global=include_global,
             include_shared=include_shared,
         )
         rows = self.execute(
-            f"SELECT COUNT(*) AS c FROM atomic_facts WHERE {where}", (*params,),
+            f"SELECT COUNT(*) AS c FROM atomic_facts WHERE {where}"
+            f"{self.visible_fact_clause()}", (*params,),
         )
         return int(rows[0]["c"]) if rows else 0
 
@@ -1251,16 +1294,15 @@ class DatabaseManager:
             include_shared=include_shared,
             prefix="f",
         )
-        # Archived facts must not surface via full-text search either.
-        archive_clause = (
-            " AND COALESCE(f.archive_status, 'live') != 'archived'"
-            if self._has_archive_status()
-            else ""
-        )
+        # Full-text search is a display path: the dashboard search box, the
+        # `search` tool and `fetch` all land here, and none of them go through
+        # the recall engine. Before 4.0.10 put the clause here it returned 20
+        # withheld rows out of 50 on the author's store.
         rows = self.execute(
             f"""SELECT f.* FROM atomic_facts_fts AS fts
                JOIN atomic_facts AS f ON f.fact_id = fts.fact_id
-               WHERE fts.atomic_facts_fts MATCH ? AND {where}{archive_clause}
+               WHERE fts.atomic_facts_fts MATCH ? AND {where}
+                     {self.visible_fact_clause('f')}
                ORDER BY fts.rank LIMIT ?""",
             (match_expr, *params, limit),
         )
@@ -1291,12 +1333,22 @@ class DatabaseManager:
     # ------------------------------------------------------------------
 
     def get_fact(self, fact_id: str, profile_id: str | None = None) -> AtomicFact | None:
-        """Get a single fact by ID.
+        """Get a single row by ID, exactly as stored. NOT a display path.
 
         C4 defense-in-depth: when ``profile_id`` is provided the lookup is
         tenant-scoped so a fact_id from another profile cannot resolve. Left
         optional (fact_id is a random UUID sourced from already-scoped queries)
         to avoid destabilizing the core store/consolidation write path.
+
+        DELIBERATELY UNFILTERED, and this is load-bearing. It applies neither
+        ``archive_status`` nor ``quarantined`` because it is the primitive that
+        write paths, correction handling and the 4.0.10 repair use to read a row
+        they already hold the id of — including a withheld one, which they must
+        be able to see in order to act on it. ``visible_fact_clause`` is for the
+        paths that answer a question; this one answers "what is in that row".
+
+        A caller taking a fact_id from user input and rendering the result wants
+        ``get_facts_by_ids`` instead.
         """
         if profile_id is not None:
             rows = self.execute(
@@ -1350,20 +1402,11 @@ class DatabaseManager:
             include_global=include_global,
             include_shared=include_shared,
         )
-        archive_clause = (
-            " AND COALESCE(archive_status, 'live') != 'archived'"
-            if self._has_archive_status()
-            else ""
-        )
-        quarantine_clause = (
-            ""
-            if include_quarantined or not self._has_quarantine_column()
-            else " AND COALESCE(quarantined, 0) = 0"
-        )
         placeholders = ",".join("?" for _ in fact_ids)
         rows = self.execute(
             f"SELECT * FROM atomic_facts WHERE fact_id IN ({placeholders}) "
-            f"AND {where}{archive_clause}{quarantine_clause} "
+            f"AND {where}"
+            f"{self.visible_fact_clause(include_quarantined=include_quarantined)} "
             "ORDER BY created_at DESC",
             (*fact_ids, *params),
         )

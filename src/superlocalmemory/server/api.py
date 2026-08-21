@@ -246,7 +246,12 @@ def create_app() -> FastAPI:
                 "<p><a href='/docs'>API Documentation</a></p>"
                 "</body></html>"
             )
-        return index_path.read_text()
+        from superlocalmemory.server.asset_versions import render_index
+        from superlocalmemory import __version__ as _v
+
+        return render_index(
+            index_path, UI_DIR, substitutions={"__SLM_VERSION__": _v},
+        )
 
     @application.get("/health")
     async def health_check():

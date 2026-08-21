@@ -231,7 +231,14 @@ def create_app() -> FastAPI:
                 "<p><a href='/api/docs'>API Documentation</a></p>"
                 "</body></html>"
             )
-        return index_path.read_text()
+        from superlocalmemory.server.asset_versions import render_index
+        from superlocalmemory import __version__ as _v
+
+        # __SLM_VERSION__ was substituted only by the unified daemon, so the
+        # dashboard's upgrade detector did nothing when served from here.
+        return render_index(
+            index_path, UI_DIR, substitutions={"__SLM_VERSION__": _v},
+        )
 
     @application.get("/favicon.ico", include_in_schema=False)
     async def favicon():

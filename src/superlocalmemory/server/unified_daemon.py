@@ -610,6 +610,21 @@ class RememberRequest(BaseModel):
         recorded while the memory quietly filed itself under today — which is
         the exact failure this field exists to fix, reintroduced one layer up.
         Rejecting is recoverable: the caller sees the error and resends.
+
+        ISO ONLY, DELIBERATELY, even though this system ships a parser that is
+        far more permissive. ``encoding/temporal_parser.parse_session_date``
+        accepts "May 8, 2026", "1:56 pm on 8 May, 2026", "14/03/2026", and also
+        "last tuesday" and "March 2026" — and those last two are why it is not
+        used here. Asked on 2026-08-21 it resolves "last tuesday" to
+        **2026-08-25**, four days into the future, and "March 2026" to the 21st,
+        a day it invents. Accepting either at this boundary would file a memory
+        under a confidently wrong date, silently, which is precisely the class
+        of defect this field was added to remove.
+
+        The caller here is a program — the command line, the tool interface, the
+        dashboard — not a person typing. ISO is the right contract for a
+        program, and a caller holding a human-typed date can run it through the
+        parser itself and send the result.
         """
         if not value:
             return value
@@ -621,7 +636,11 @@ class RememberRequest(BaseModel):
         except ValueError:
             raise ValueError(
                 "session_date must be YYYY-MM-DD or a full ISO 8601 timestamp; "
-                f"got {value!r}"
+                f"got {value!r}. To accept looser human phrasing, parse it "
+                "first with TemporalParser.parse_session_date and send the ISO "
+                "result — but check what it returns, because it resolves "
+                "relative phrases against today and can answer with a future "
+                "date."
             ) from None
         return text
     # v3.6.15 multi-scope: visibility of the new memory. ``None`` scope means
@@ -4049,8 +4068,16 @@ def _register_dashboard_routes(application: FastAPI) -> None:
         # v3.4.23: substitute version placeholder so the dashboard can detect
         # upgrades and auto-reload. Read fresh each request (daemon uptime is
         # days, but we want zero caching surprises during development).
-        html = index_path.read_text()
-        return html.replace("__SLM_VERSION__", _SLM_VERSION)
+        #
+        # 4.0.10: asset ?v= strings are now derived from file content instead of
+        # being hand-written literals that tracked nothing. See
+        # server/asset_versions.py — including what that does and does not fix.
+        from superlocalmemory.server.asset_versions import render_index
+
+        return render_index(
+            index_path, UI_DIR,
+            substitutions={"__SLM_VERSION__": _SLM_VERSION},
+        )
 
     @application.get("/favicon.ico", include_in_schema=False)
     async def favicon():

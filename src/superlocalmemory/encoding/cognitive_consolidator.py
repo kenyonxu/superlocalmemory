@@ -327,6 +327,17 @@ class CognitiveConsolidator:
               AND r.lifecycle_zone IN ('warm', 'cold')
               AND r.retention_score < ?
               AND f.lifecycle != 'forgotten'
+              -- Withheld rows are not candidates, and this is not tidiness.
+              -- 304 of them remain warm/cold in atomic_facts after 4.0.10
+              -- withholds them, and each still carries its cluster's POOLED
+              -- canonical_entities_json. CCQ clusters on entity overlap, so one
+              -- withheld summary naming ten entities joins a cluster of real
+              -- memories, contributes model prose to the gist, and then this
+              -- pass archives every source in the cluster -- including the real
+              -- memories, at scores M043's restore would not bring back.
+              -- Exactly the damage this release exists to stop, on a path the
+              -- release did not otherwise touch.
+              AND COALESCE(f.quarantined, 0) = 0
               AND f.fact_id NOT IN (
                   SELECT je.value
                   FROM ccq_consolidated_blocks ccb,
@@ -494,7 +505,10 @@ class CognitiveConsolidator:
             f"SELECT fact_id, content, importance, confidence, "
             f"       canonical_entities_json "
             f"FROM atomic_facts "
-            f"WHERE fact_id IN ({placeholders}) AND profile_id = ?",
+            f"WHERE fact_id IN ({placeholders}) AND profile_id = ? "
+            # Belt and braces with the identify query above: a cluster assembled
+            # before a row was withheld must not contribute its text to a gist.
+            f"  AND COALESCE(quarantined, 0) = 0",
             (*cluster.fact_ids, profile_id),
         )
 

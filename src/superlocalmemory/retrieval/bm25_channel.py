@@ -221,14 +221,10 @@ class BM25Channel:
             include_shared=include_shared,
             prefix="af",
         )
-        # Archived facts are not live; never surface them in keyword recall.
-        # Guarded on column presence: the archive column is added by a deferred
-        # migration and may be absent on an unmigrated database.
-        archive_clause = (
-            " AND COALESCE(af.archive_status, 'live') != 'archived'"
-            if self._db._has_archive_status()
-            else ""
-        )
+        # Soft-deleted and withheld rows are not live. Filtered HERE rather
+        # than only at hydration so neither spends one of this channel's top_k
+        # slots; the shared clause keeps the definition in one place.
+        archive_clause = self._db.visible_fact_clause("af")
         sql = (
             "SELECT af.fact_id AS fact_id, bm25(atomic_facts_fts) AS rank "
             "FROM atomic_facts_fts "

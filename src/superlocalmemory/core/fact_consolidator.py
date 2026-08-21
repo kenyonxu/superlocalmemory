@@ -58,6 +58,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -127,6 +128,9 @@ def consolidate_facts(
         # failure, but a run where every cluster is refused means the model is
         # misbehaving and that has to be visible.
         "rejected": 0,
+        # Clusters whose summary already existed over the same sources, so no
+        # model call was made. On a settled store this becomes the whole count.
+        "unchanged": 0,
         "facts_archived": 0,  # retained at 0 for callers that still read it
         "errors": 0,
         "error_detail": "",
@@ -164,6 +168,25 @@ def consolidate_facts(
                         facts = [dict(f) for f in facts]
 
                     if len(facts) < _MIN_CLUSTER_SIZE:
+                        continue
+
+                    # Step 2b: has this exact cluster already been summarised?
+                    #
+                    # Necessary because 4.0.10 stopped archiving the sources. The
+                    # old code made a cluster ineligible by archiving it; now the
+                    # same warm facts are eligible on every maintenance pass, so
+                    # without this the summarizer is re-run for an unchanged
+                    # cluster every 30 minutes forever. Measured over five
+                    # consecutive passes on one cluster before this check:
+                    # consolidated_summaries converged at 1, but
+                    # fact_consolidations grew 1, 2, 3, 4, 5 -- and in Mode B/C
+                    # each of those passes paid for a model call to regenerate
+                    # text it already had.
+                    #
+                    # Checked before generation, not after, because the cost
+                    # being avoided IS the generation.
+                    if _already_summarised(db_path, profile_id, entity_id, fact_ids):
+                        stats["unchanged"] += 1
                         continue
 
                     # Step 3: generate summary OUTSIDE any write lock.
@@ -297,6 +320,46 @@ def _run_consolidation(
             "Fact consolidation: %d display summaries written over %d facts",
             stats["consolidated"], stats["facts_summarized"],
         )
+
+
+def _already_summarised(
+    db_path: "str | Path",
+    profile_id: str,
+    entity_id: str,
+    fact_ids: list[str],
+) -> bool:
+    """Whether this exact cluster already has a display summary.
+
+    Compares SORTED source ids, because cluster order comes from an
+    ``ORDER BY confidence DESC, created_at DESC`` that two equal-confidence
+    facts can swap between passes -- comparing the raw lists would report
+    "changed" on a cluster that did not.
+
+    Any error means "not summarised", which costs one redundant generation and
+    never skips work that was needed. Read-only.
+    """
+    from superlocalmemory.storage.memory_write import memory_read
+
+    wanted = sorted(fact_ids)
+    try:
+        with memory_read(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT source_fact_ids FROM consolidated_summaries "
+                " WHERE profile_id = ? AND entity_id = ?",
+                (profile_id, entity_id),
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001 -- never block consolidation
+        logger.debug("cluster-unchanged check skipped: %s", exc)
+        return False
+
+    for row in rows:
+        try:
+            if sorted(json.loads(row["source_fact_ids"] or "[]")) == wanted:
+                return True
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return False
 
 
 def _find_consolidation_clusters(
@@ -496,9 +559,19 @@ def _consolidate_cluster(
         # `strategy` distinguishes a display summary from the retrieval-corpus
         # rows the old path wrote, so 'entity_cluster' remains an exact
         # selector for what has to be quarantined.
-        consolidation_id = uuid.uuid4().hex[:16]
+        # Deterministic id + INSERT OR IGNORE, so re-running over the same
+        # cluster does not append a row. fact_consolidations carries no unique
+        # constraint, so a random uuid grew the ledger by one row per
+        # maintenance pass per cluster with nothing to show for it -- roughly a
+        # thousand rows a day on a store with twenty clusters.
+        consolidation_id = hashlib.sha256(
+            "\0".join((
+                profile_id, new_fact_id, "display_summary",
+                *sorted(fact_ids),
+            )).encode("utf-8")
+        ).hexdigest()[:16]
         c.execute("""
-            INSERT INTO fact_consolidations
+            INSERT OR IGNORE INTO fact_consolidations
             (consolidation_id, profile_id, consolidated_fact_id,
              source_fact_ids, strategy, created_at)
             VALUES (?, ?, ?, ?, 'display_summary', ?)
@@ -567,12 +640,16 @@ def _generate_summary(
         if m:
             mode = getattr(m, 'value', str(m)).lower()
 
-    def _vet(text: str | None, source: str) -> str | None:
+    def _vet(
+        text: str | None, source: str, *, model_written: bool = True,
+    ) -> str | None:
         """Clean, then reject a non-answer. Returns None if unusable."""
         if not text:
             return None
         cleaned = clean_llm_summary(text)
-        rejected, why = is_non_answer(cleaned, min_chars=MIN_USEFUL_CHARS)
+        rejected, why = is_non_answer(
+            cleaned, min_chars=MIN_USEFUL_CHARS, model_written=model_written,
+        )
         if rejected:
             logger.info(
                 "%s summary for '%s' discarded (%s); falling back",
@@ -599,9 +676,15 @@ def _generate_summary(
 
     if not result:
         # Extractive is assembled from the facts' own sentences, so it has no
-        # opinion to refuse with. Still vetted: a cluster of facts that all
-        # carried tool-call markup would otherwise reassemble it verbatim.
-        result = _vet(_summarize_extractive(entity_name, facts), "Extractive")
+        # opinion to refuse with — and applying the refusal rules to it would
+        # reject a summary because the owner's own memory happened to contain a
+        # phrase like "the facts provided". Still checked for the two things
+        # that do apply: length, and tool-call markup, which a cluster of
+        # markup-carrying facts would otherwise reassemble verbatim.
+        result = _vet(
+            _summarize_extractive(entity_name, facts), "Extractive",
+            model_written=False,
+        )
         generated_by = "extractive"
 
     # Uniform cap across all modes

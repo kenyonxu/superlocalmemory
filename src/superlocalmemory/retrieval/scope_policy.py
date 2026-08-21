@@ -53,9 +53,30 @@ def authorized_fact_ids(
             include_shared=include_shared,
         )
         placeholders = ",".join("?" for _ in unique_ids)
+        # Mirror the primary path's visibility rule, not just its scope rule.
+        # This branch exists for lightweight wrappers that expose execute() but
+        # not get_facts_by_ids, and it was authorizing withheld and
+        # soft-deleted rows that the primary path refuses -- so any channel
+        # whose db object took this branch had a different idea of what is
+        # visible than the engine that hydrates its results.
+        # Resolved on the TYPE, not the instance. A MagicMock fabricates any
+        # attribute you ask for, so an instance check returns a callable that
+        # returns another MagicMock, whose repr then lands in the SQL string and
+        # makes the whole query a syntax error -- and this function's `except`
+        # turns that into an empty authorized set, i.e. every candidate silently
+        # dropped. tests/test_retrieval/test_spreading_activation.py caught it
+        # by passing exactly such a mock. The same reasoning is already written
+        # up in retrieval/engine.py for the reranker's optional contract.
+        visible = ""
+        clause_fn = getattr(type(db), "visible_fact_clause", None)
+        if callable(clause_fn):
+            try:
+                visible = clause_fn(db)
+            except Exception:  # noqa: BLE001 -- fall back to scope-only
+                visible = ""
         rows = db.execute(
             f"SELECT fact_id FROM atomic_facts WHERE fact_id IN ({placeholders}) "
-            f"AND {where}",
+            f"AND {where}{visible}",
             (*unique_ids, *params),
         )
         if not isinstance(rows, list):

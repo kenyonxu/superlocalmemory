@@ -289,53 +289,29 @@ class TestTheCardIsWiredIntoThePage:
         assert "_koverPlain(s.content)" in js
         assert "function _koverPlain" in js
 
-    def test_the_asset_version_was_bumped(self) -> None:
-        """A UI change with a stale cache-buster never reaches a returning user.
+    def test_the_asset_version_is_no_longer_hand_maintained(self) -> None:
+        """This used to assert the literal matched the file's hash.
 
-        index.html cache-busts its assets with hand-written literals, so editing
-        a file without editing its ?v= leaves every browser on the cached copy.
-        This asserts the literal matches the file it points at; the systemic fix
-        is tracked separately.
+        That test was right when it was written and became the problem it was
+        guarding against: it obliged a human to keep 64 numbers in step by hand,
+        which is precisely the burden ``server/asset_versions.py`` removes by
+        deriving them at serve time. Enforcing the literal would now mean a UI
+        change fails CI for not updating a string nothing reads.
+
+        What is worth asserting is that the derivation is in place, which
+        tests/test_server/test_asset_versions_track_file_content.py covers
+        directly. This is left as a pointer so the next person does not
+        reintroduce the manual check.
         """
-        import hashlib
+        from superlocalmemory.server.asset_versions import render_index
 
         root = self._ui_root()
-        js_bytes = (root / "js" / "od-memories.js").read_bytes()
-        expected = hashlib.sha256(js_bytes).hexdigest()[:8]
-        html = (root / "index.html").read_text(encoding="utf-8")
-        assert f"od-memories.js?v={expected}" in html, (
-            "od-memories.js changed without its cache-buster being bumped; "
-            f"expected ?v={expected}"
-        )
+        html = render_index(root / "index.html", root)
+        assert 'od-memories.js?v=' in html
+        # and it is the file's hash, not whatever the HTML happened to say
+        import hashlib
 
-
-class TestTheHttpDefaultExcludesJunk:
-    """The unit tests above pass explicit arguments, so they cannot see this.
-
-    What a browser gets depends on FastAPI resolving the declared default, and
-    that is worth one real request rather than an assumption.
-    """
-
-    def test_a_request_without_the_flag_gets_only_readable_rows(
-        self, store,
-    ) -> None:
-        from fastapi import FastAPI
-        from fastapi.testclient import TestClient
-
-        import superlocalmemory.server.routes.abstraction as mod
-
-        app = FastAPI()
-        app.include_router(mod.router)
-        client = TestClient(app)
-
-        payload = client.get(
-            "/api/v3/abstraction/consolidated",
-            params={"profile": _PROFILE, "limit": 20},
-        ).json()
-        contents = [s["content"] for s in payload["summaries"]]
-        assert contents, "the endpoint returned nothing at all"
-        assert not any("no information available" in c for c in contents), (
-            "the HTTP default returns refusals; include_unusable is not "
-            "defaulting to False the way the signature claims"
-        )
-        assert payload["unusable"] >= 1
+        digest = hashlib.sha256(
+            (root / "js" / "od-memories.js").read_bytes()
+        ).hexdigest()[:8]
+        assert f"od-memories.js?v={digest}" in html

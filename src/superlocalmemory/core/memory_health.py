@@ -27,6 +27,7 @@ One implementation so the three cannot disagree with each other.
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -236,8 +237,15 @@ def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
 
 
 def _prefixed(clause: str, prefix: str) -> str:
-    """Qualify a bare column reference for use in a joined query."""
-    return clause.replace("quarantined", f"{prefix}.quarantined")
+    """Qualify a bare column reference for use in a joined query.
+
+    Word-bounded, so a future column named ``quarantined_at`` is not silently
+    rewritten to ``af.quarantined_at`` by a substring match. No such column
+    exists today; the point is that the failure would be a wrong count rather
+    than an error, and a wrong count in a health report is the one thing this
+    module must not produce.
+    """
+    return re.sub(r"\bquarantined\b", f"{prefix}.quarantined", clause)
 
 
 def _count(conn: sqlite3.Connection, sql: str) -> int:
