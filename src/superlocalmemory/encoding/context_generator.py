@@ -98,7 +98,7 @@ class ContextGenerator:
             FactType.EPISODIC: "episodic event",
             FactType.SEMANTIC: "semantic knowledge",
             FactType.OPINION: "opinion or preference",
-            FactType.TEMPORAL: "time-bounded event",
+            FactType.PROSPECTIVE: "time-bounded event",
         }
         type_label = type_labels.get(fact.fact_type, "memory")
 

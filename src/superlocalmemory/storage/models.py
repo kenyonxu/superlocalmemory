@@ -29,7 +29,12 @@ class FactType(str, Enum):
     EPISODIC = "episodic"      # Events: who did what when
     SEMANTIC = "semantic"      # World knowledge: X is Y
     OPINION = "opinion"        # Subjective with confidence
-    TEMPORAL = "temporal"      # Time-bounded events with intervals
+    # Something the user intends to do later: a deadline, an appointment, a
+    # plan. Named "temporal" until 4.1.0, which collided with the retrieval
+    # channel of the same name — that one scores every fact by date proximity
+    # and has nothing to do with this. EdgeType.TEMPORAL and
+    # SignalType.TEMPORAL below are also unrelated and deliberately unchanged.
+    PROSPECTIVE = "prospective"
 
 
 class EdgeType(str, Enum):

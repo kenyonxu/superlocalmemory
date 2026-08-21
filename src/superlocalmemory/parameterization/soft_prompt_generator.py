@@ -53,6 +53,11 @@ CATEGORY_TEMPLATES: dict[str, str] = {
         "Current active project: {project_name}. "
         "Key context: {context_summary}."
     ),
+    # Says only what is actually known — that these subjects recur — rather
+    # than inferring a preference, a project or a tool choice from them.
+    "topic_interest": (
+        "Subjects that come up often in the user's notes: {topics}."
+    ),
     "decision_history": (
         "Recent key decisions: {decisions}. "
         "These reflect the user's current direction."
@@ -75,6 +80,7 @@ CATEGORY_PRIORITY_ORDER: list[str] = [
     "behavioral",  # v3.4.7: behavioral assertions after communication style
     "workflow_pattern",
     "project_context",
+    "topic_interest",
     "decision_history",
     "avoidance",
 ]
@@ -104,6 +110,98 @@ class SoftPromptTemplate:
 # ---------------------------------------------------------------------------
 # SoftPromptGenerator class
 # ---------------------------------------------------------------------------
+
+#: The technologies a "preferred technology stack" claim is allowed to name.
+#: Assembled from the vocabularies already used to detect them elsewhere, so
+#: there is one list to extend rather than two that drift.
+def _known_technologies() -> frozenset[str]:
+    names: set[str] = set()
+    try:
+        from superlocalmemory.learning.cross_project import TECH_CATEGORIES
+
+        for group in TECH_CATEGORIES.values():
+            names.update(n.lower() for n in group)
+    except Exception:  # pragma: no cover — vocabulary is additive
+        pass
+    try:
+        from superlocalmemory.parameterization.pattern_extractor import (
+            _TECH_KEYWORDS,
+        )
+
+        # The generic members ("tool", "api", "framework") are what let ordinary
+        # prose be classified as a technology preference in the first place, so
+        # they do not count as evidence that a claim names one.
+        generic = {
+            "framework", "library", "language", "database", "tool", "sdk",
+            "api", "node", "go", "java",
+        }
+        names.update(k.lower() for k in _TECH_KEYWORDS if k.lower() not in generic)
+    except Exception:  # pragma: no cover
+        pass
+    return frozenset(names)
+
+
+_KNOWN_TECHNOLOGIES = _known_technologies()
+
+#: Below this, a value is a fragment rather than a statement.
+_MIN_VALUE_CHARS = 6
+
+
+def _is_substantive(category: str, values: dict[str, str]) -> bool:
+    """Whether a rendered prompt actually says something about the user.
+
+    Judged on the substituted values, not the finished string: the template
+    supplies most of the words, so a prompt built entirely from junk still reads
+    as fluent prose and looks fine in a log.
+
+    A stopword list was tried first and does not work. The live failing case is
+    "test, gate, practices, compliance, projects, while, their, processing,
+    data" — and "compliance" is a perfectly ordinary word that is simply not a
+    technology. No list of words-to-exclude separates it from "postgres"; only a
+    list of what a technology IS does.
+
+    So ``tech_preference`` is checked against the known-technology vocabulary,
+    and everything else against a length floor. The trade is deliberate: a user
+    whose stack is genuinely unlisted loses that one prompt until the vocabulary
+    is extended, which is a smaller cost than asserting nine wrong things about
+    them on every single turn.
+    """
+    filled = [v for v in values.values() if isinstance(v, str) and v.strip()]
+    if not filled:
+        return False
+
+    if category == "tech_preference":
+        for value in filled:
+            terms = {
+                t.strip().lower()
+                for t in value.replace(";", ",").split(",")
+                if t.strip()
+            }
+            if terms & _KNOWN_TECHNOLOGIES:
+                return True
+        return False
+
+    return any(len(v.strip()) >= _MIN_VALUE_CHARS for v in filled)
+
+
+def _fix_stutter(content: str) -> str:
+    """Remove the duplicated conjunction where a template meets its value.
+
+    ``"The user typically {workflow_description}"`` was rendering as "The user
+    typically When when using X" — the template supplies the lead-in and the
+    value already starts with its own. Observed on 19 of 34 stored prompts.
+    """
+    import re as _re
+
+    for word in ("when", "typically", "prefers", "often", "usually"):
+        content = _re.sub(
+            rf"\b({word})\s+{word}\b", r"\1", content, flags=_re.IGNORECASE,
+        )
+    # "typically When when" collapses to "typically When"; then the lead-in and
+    # the value's own opener are adjacent duplicates of different case.
+    content = _re.sub(r"\btypically\s+When\b", "typically, when", content)
+    return content
+
 
 class SoftPromptGenerator:
     """Convert extracted pattern assertions into natural language soft prompts.
@@ -243,10 +341,23 @@ class SoftPromptGenerator:
 
         # Clean up
         content = self._clean_content(content)
+        content = _fix_stutter(content)
 
         # Filter PII
         content = self._pii_filter.filter_text(content)
         if not content.strip():
+            return None
+
+        # A prompt that says nothing must not be injected. These go into the
+        # model's context on every turn, so an empty claim is not neutral — it
+        # spends the budget and asserts something false. Measured on a live
+        # store: 15 of 34 stored prompts read "the user's preferred technology
+        # stack includes: data, processing, their, projects, test", built from
+        # common words that happened to appear near a technology keyword.
+        if not _is_substantive(category, values):
+            logger.debug(
+                "soft prompt for %r dropped: no substantive values", category,
+            )
             return None
 
         # Trim to 100 tokens per category
@@ -304,6 +415,9 @@ class SoftPromptGenerator:
 
         elif category == "workflow_pattern":
             values["workflow_description"] = "; ".join(pat_values)
+
+        elif category == "topic_interest":
+            values["topics"] = ", ".join(pat_values)
 
         elif category == "project_context":
             values["project_name"] = pat_values[0] if pat_values else ""

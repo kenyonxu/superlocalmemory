@@ -330,3 +330,136 @@ def evolution_lineage(request: Request, skill_name: str = ""):
     finally:
         if conn is not None:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Approving a quarantined skill
+#
+# A mutation that passes blind verification stops at VERIFIED_QUARANTINED and
+# waits. Nothing moved it from there: auto-approval is off by default, correctly
+# — this system rewrites the instructions an AI follows, and doing that without
+# a person saying yes is not a default anyone should ship. But there was no way
+# for the person to say yes either, so every verified improvement sat in a
+# quarantine directory permanently.
+#
+# This is that path. It does NOT change the default: approval remains explicit,
+# per-candidate, and recorded in the transition chain with who did it.
+# ---------------------------------------------------------------------------
+
+
+class ApproveSkillRequest(BaseModel):
+    """Which candidate to approve. Named by record id, not by skill name.
+
+    A skill can have several candidates over time and only one of them is the
+    one being looked at. Approving "the latest candidate for skill X" would make
+    the outcome depend on when the call happened to arrive.
+    """
+
+    record_id: str
+
+
+_APPROVABLE = ("verified_quarantined", "promoted")
+
+
+@router.post("/api/evolution/approve")
+def evolution_approve(request: Request, body: ApproveSkillRequest):
+    """Activate a quarantined skill mutation after human approval."""
+    _require_manage(request)
+    try:
+        from superlocalmemory.evolution.evolution_store import EvolutionStore
+        from superlocalmemory.evolution.skill_activator import SkillActivator
+        from superlocalmemory.evolution.types import EvolutionStatus
+
+        profile_id = get_active_profile()
+        store = EvolutionStore(str(MEMORY_DIR / "memory.db"))
+
+        record = store.get_record(body.record_id, profile_id)
+        if record is None:
+            return {"success": False, "error": "No such evolution candidate"}
+
+        # Prefer the transition chain over the record's own column: the chain is
+        # the audited history and the column is a cache of its last entry.
+        latest = store.get_latest_status(body.record_id, profile_id)
+        current = (latest.value if latest is not None
+                   else getattr(record.status, "value", ""))
+
+        if current not in _APPROVABLE:
+            # Refusing an already-active candidate matters: activating twice
+            # would overwrite the backup taken the first time with the mutation
+            # itself, and the rollback target would become the thing being
+            # rolled back.
+            return {
+                "success": False,
+                "error": (
+                    f"Candidate is {current!r}; only a verified candidate "
+                    "awaiting approval can be activated"
+                ),
+                "status": current,
+            }
+
+        if not record.quarantine_dir_name:
+            return {
+                "success": False,
+                "error": "Candidate has no quarantined artifact to activate",
+            }
+
+        actor = "dashboard"
+        activation = SkillActivator().activate(
+            record.skill_name, record.quarantine_dir_name, actor_id=actor,
+        )
+
+        # Both transitions are recorded, not just the end state. "It became
+        # active" and "a person approved it and then it became active" are
+        # different histories, and only the second can be audited.
+        store.append_transition(
+            body.record_id, profile_id,
+            EvolutionStatus(current), EvolutionStatus.APPROVED,
+            actor_id=actor, reason="approved by request",
+        )
+        store.append_transition(
+            body.record_id, profile_id,
+            EvolutionStatus.APPROVED, EvolutionStatus.ACTIVE,
+            actor_id=actor, reason="activated from quarantine",
+            metadata={"content_hash": activation.get("content_hash", "")},
+        )
+
+        return {
+            "success": True,
+            "record_id": body.record_id,
+            "skill_name": record.skill_name,
+            "status": EvolutionStatus.ACTIVE.value,
+            "live_path": activation.get("live_path"),
+            "backup_path": activation.get("backup_path"),
+            "content_hash": activation.get("content_hash"),
+            # So the caller knows how to undo it without reading the source.
+            "rollback": "POST /api/evolution/rollback",
+        }
+    except FileNotFoundError as exc:
+        return {"success": False, "error": f"Quarantined artifact missing: {exc}"}
+    except Exception:
+        logger.exception("evolution_approve error")
+        return {"success": False, "error": "Internal server error"}
+
+
+class RollbackSkillRequest(BaseModel):
+    skill_name: str
+
+
+@router.post("/api/evolution/rollback")
+def evolution_rollback(request: Request, body: RollbackSkillRequest):
+    """Restore a skill's previous instructions after an approval goes wrong.
+
+    Approval is reversible, and it has to be: the reason a person is in this
+    loop is that a verified mutation can still be a bad one, and finding that
+    out happens after it is live.
+    """
+    _require_manage(request)
+    try:
+        from superlocalmemory.evolution.skill_activator import SkillActivator
+
+        return {"success": True, **SkillActivator().rollback(body.skill_name)}
+    except FileNotFoundError as exc:
+        return {"success": False, "error": f"No backup to restore: {exc}"}
+    except Exception:
+        logger.exception("evolution_rollback error")
+        return {"success": False, "error": "Internal server error"}

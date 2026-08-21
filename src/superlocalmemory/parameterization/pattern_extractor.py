@@ -66,7 +66,17 @@ _BEHAVIORAL_TYPE_MAP: dict[str, str] = {
     "query_type": "workflow_pattern",
     "time_of_day": "workflow_pattern",
     "refinement": "communication_style",
-    "interest": "tech_preference",
+    # An "interest" is a word that shows up often in this user's memories. It is
+    # NOT a statement about their tooling, and calling it one produced the
+    # single worst thing this subsystem has shipped: a prompt injected on every
+    # turn reading "the user's preferred technology stack includes: test, gate,
+    # practices, compliance, projects, while, their, processing, data".
+    #
+    # Every one of those words is a real and frequent topic for this user. The
+    # values were right; the claim about them was false. Measured on a live
+    # store, `_store_patterns` holds correct tech_preference rows alongside
+    # these — Node.js, Go, Git, pip — so the two kinds were never the same kind.
+    "interest": "topic_interest",
     "archival": "avoidance",
 }
 
@@ -90,6 +100,9 @@ class PatternCategory(str, Enum):
     WORKFLOW_PATTERN = "workflow_pattern"
     PROJECT_CONTEXT = "project_context"
     DECISION_HISTORY = "decision_history"
+    # Topics that come up a lot in this user's memories. Deliberately separate
+    # from TECH_PREFERENCE: a frequent word is not a tooling choice.
+    TOPIC_INTEREST = "topic_interest"
     AVOIDANCE = "avoidance"
     CUSTOM = "custom"
 

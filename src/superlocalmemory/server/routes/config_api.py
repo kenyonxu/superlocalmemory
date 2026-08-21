@@ -136,7 +136,11 @@ class ForgettingConfigUpdate(BaseModel):
     forget_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
     learning_rate: Optional[float] = Field(None, gt=0.0)
     forgetting_drift_scale: Optional[float] = Field(None, gt=0.0)
-    trust_kappa: Optional[float] = Field(None, gt=0.0)
+    # ge, not gt: zero is a meaningful setting — it turns trust-modulated decay
+    # off, so every memory fades at the same rate regardless of where it came
+    # from. A greater-than bound made the one value that disables the feature
+    # the one value the API refused.
+    trust_kappa: Optional[float] = Field(None, ge=0.0)
     scheduler_interval_minutes: Optional[int] = Field(None, ge=1)
     core_memory_immune: Optional[StrictBool] = None
 

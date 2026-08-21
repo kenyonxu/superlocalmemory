@@ -47,7 +47,10 @@ def test_v4_ports_mainline_migrations_under_unique_serials() -> None:
     assert targets["M040_agent_experience_receipts"] == "learning"
     assert targets["M041_external_evidence_receipts"] == "learning"
     assert targets["M042_correction_case_ledger"] == "memory"
-    assert SUPPORTED_SCHEMA_VERSION == 42
+    # Tracks the trailing serial of the last migration. It stayed at 42 while
+    # M043 through M045 shipped, which is how the ceiling came to sit three
+    # migrations behind the schema it was meant to guard.
+    assert SUPPORTED_SCHEMA_VERSION == 46
 
 
 def test_schema_42_is_stamped_only_after_correction_storage_completes(tmp_path: Path) -> None:

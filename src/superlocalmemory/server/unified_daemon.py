@@ -2088,6 +2088,23 @@ async def lifespan(application: FastAPI):
         engine = MemoryEngine(config)
         engine.initialize()
 
+        # Tell the hook subprocesses that skill evolution is on. The hook reads
+        # this env var as its fast-path signal and nothing ever set it, so the
+        # feature was off for everyone who had switched it on in config: the
+        # hook checked, found nothing, and returned False. Hooks are launched as
+        # children of this process and inherit its environment, which is the
+        # only channel between the two.
+        try:
+            if getattr(getattr(config, "evolution", None), "enabled", False):
+                os.environ["SLM_EVOLUTION_ENABLED"] = "1"
+            else:
+                # Cleared as well as set: a daemon restarted with the setting
+                # turned off must not leave the previous run's answer behind in
+                # an environment the next hook inherits.
+                os.environ.pop("SLM_EVOLUTION_ENABLED", None)
+        except Exception as _evo_exc:  # pragma: no cover — never block startup
+            logger.debug("evolution flag not exported: %s", _evo_exc)
+
         # Refresh migration state now that the engine is initialised.  Any
         # schema work the engine's own bootstrap may have applied (e.g.
         # runtime-table creation) is captured here so the dashboard and

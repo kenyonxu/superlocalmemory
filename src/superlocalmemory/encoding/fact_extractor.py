@@ -17,7 +17,7 @@ the majority of benchmark score differences.
 Key patterns implemented:
   - Conversation chunking (5-10 turns, 2-turn overlap)
   - Three-date temporal model (observation, referenced, interval)
-  - Typed fact classification (episodic / semantic / opinion / temporal)
+  - Typed fact classification (episodic / semantic / opinion / prospective)
   - Importance scoring (entity frequency + emotional markers + recency)
   - Narrative fact extraction in LLM modes (self-contained, context-rich)
 
@@ -153,7 +153,7 @@ _SYSTEM_PROMPT = (
     "- episodic: personal event or experience (visited, attended, did)\n"
     "- semantic: objective fact about the world (jobs, locations, relations)\n"
     "- opinion: subjective belief or preference (likes, thinks, prefers)\n"
-    "- temporal: time-bound fact with dates or deadlines\n\n"
+    "- prospective: something planned for later, with a date or deadline\n\n"
     "Respond ONLY with a JSON array. Example:\n"
     '[{"text":"Alice works at Google as a software engineer",'
     '"fact_type":"semantic","entities":["Alice","Google"],'
@@ -322,7 +322,7 @@ def _extract_entities(text: str) -> list[str]:
 def _classify_sentence(sentence: str) -> FactType:
     """Classify a sentence into a FactType using keyword markers."""
     if _TEMPORAL_MARKERS.search(sentence):
-        return FactType.TEMPORAL
+        return FactType.PROSPECTIVE
     if _OPINION_MARKERS.search(sentence):
         return FactType.OPINION
     if _EXPERIENCE_MARKERS.search(sentence):
@@ -370,7 +370,7 @@ def _signal_from_fact_type(ft: FactType) -> SignalType:
         FactType.EPISODIC: SignalType.FACTUAL,
         FactType.SEMANTIC: SignalType.FACTUAL,
         FactType.OPINION: SignalType.OPINION,
-        FactType.TEMPORAL: SignalType.TEMPORAL,
+        FactType.PROSPECTIVE: SignalType.TEMPORAL,
     }
     return mapping.get(ft, SignalType.FACTUAL)
 
@@ -770,7 +770,10 @@ class FactExtractor:
             "semantic": FactType.SEMANTIC,
             "world": FactType.SEMANTIC,
             "opinion": FactType.OPINION,
-            "temporal": FactType.TEMPORAL,
+            "prospective": FactType.PROSPECTIVE,
+            # Kept alongside the current word for the reason given in
+            # type_router: an unrecognised type falls through to SEMANTIC.
+            "temporal": FactType.PROSPECTIVE,
         }
         fact_type = type_map.get(raw_type, FactType.SEMANTIC)
 

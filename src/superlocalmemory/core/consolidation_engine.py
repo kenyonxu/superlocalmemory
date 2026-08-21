@@ -634,7 +634,41 @@ class ConsolidationEngine:
         )
         result["entity_community_count"] = ec.get("community_count", 0)
         result["community_summaries"] = ec.get("summaries_written", 0)
+        result["entities_compiled"] = self._compile_entities(profile_id)
         return result
+
+    def _compile_entities(self, profile_id: str) -> int:
+        """Bring each entity's summary up to date with its facts.
+
+        This ran only on the maintenance endpoint, never on the periodic
+        consolidation that the daemon schedules on its own. The effect was that
+        almost every entity carried no compiled summary at all: the explorer
+        asked for one, got null, and showed an entity with no description and
+        an empty timeline — which reads as "there is nothing here" rather than
+        "nothing has compiled this yet".
+
+        Runs beside the community recompute because both derive a view over the
+        same graph and both belong to the same pass. Never fatal: a compilation
+        that fails leaves the previous summary in place, and no summary is a
+        worse answer than a stale one but not a broken store.
+        """
+        try:
+            from superlocalmemory.core.config import SLMConfig
+            from superlocalmemory.learning.entity_compiler import EntityCompiler
+
+            db_path = getattr(self._db, "db_path", None)
+            if not db_path:
+                return 0
+            compiled = EntityCompiler(str(db_path), SLMConfig.load()).compile_all(
+                profile_id,
+            )
+            count = int(compiled.get("compiled", 0) or 0)
+            if count:
+                logger.info("Entity compilation: %d entities compiled", count)
+            return count
+        except Exception as exc:
+            logger.debug("Entity compilation skipped: %s", exc)
+            return 0
 
     # ------------------------------------------------------------------
     # Step 6: Derive Associations

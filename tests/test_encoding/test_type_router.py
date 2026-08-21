@@ -63,10 +63,11 @@ class TestKeywordClassification:
         fact = self._make_fact("I think Python is better than Java")
         assert router.classify(fact) == FactType.OPINION
 
-    def test_temporal(self) -> None:
+    def test_prospective(self) -> None:
+        """"scheduled" and "deadline" are what this type was always matching."""
         router = TypeRouter(mode=Mode.A)
         fact = self._make_fact("The deadline is scheduled for next week")
-        assert router.classify(fact) == FactType.TEMPORAL
+        assert router.classify(fact) == FactType.PROSPECTIVE
 
     def test_episodic(self) -> None:
         router = TypeRouter(mode=Mode.A)

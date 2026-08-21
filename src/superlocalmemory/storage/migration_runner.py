@@ -164,6 +164,7 @@ from superlocalmemory.storage.migrations import (
 )
 from superlocalmemory.storage.migrations import (
     M045_fact_outcome_score as _M045,
+    M046_prospective_memory_has_its_own_name as _M046,
 )
 from superlocalmemory.storage.migrations import (
     M043_quarantine_display_summaries as _M043,
@@ -342,6 +343,14 @@ DEFERRED_MIGRATIONS: list[Migration] = [
     # averages.
     Migration(name=_M045.NAME, db_target="memory", ddl=_M045.DDL,
               dependencies=(_M006.NAME,)),
+    # M046 renames the fact type used for planned future events, which means
+    # rebuilding atomic_facts to widen a CHECK constraint SQLite cannot alter.
+    # Deferred for the same reason as M043: atomic_facts is bootstrapped at
+    # engine init, and apply_deferred takes a verified snapshot before the first
+    # migration it applies, so a table rebuild has something to fall back to.
+    # Depends on M043 so the two never contend for the same table in one pass.
+    Migration(name=_M046.NAME, db_target="memory", ddl=_M046.DDL,
+              dependencies=(_M043.NAME,)),
 ]
 
 

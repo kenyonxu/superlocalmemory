@@ -767,8 +767,8 @@ class ParameterizationConfig:
     max_memory_tokens: int = 1500      # Token budget for regular memories
     categories_enabled: tuple[str, ...] = (
         "identity", "tech_preference", "communication_style",
-        "workflow_pattern", "project_context", "decision_history",
-        "avoidance",
+        "workflow_pattern", "project_context", "topic_interest",
+        "decision_history", "avoidance",
     )
 
     # Lifecycle

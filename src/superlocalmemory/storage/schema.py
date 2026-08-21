@@ -157,7 +157,7 @@ CREATE TABLE IF NOT EXISTS atomic_facts (
     content            TEXT NOT NULL,
     fact_type          TEXT NOT NULL DEFAULT 'semantic'
                             CHECK (fact_type IN (
-                                'episodic', 'semantic', 'opinion', 'temporal'
+                                'episodic', 'semantic', 'opinion', 'prospective'
                             )),
 
     -- Entities (JSON arrays)
