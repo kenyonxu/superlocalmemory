@@ -122,3 +122,57 @@ class TestFailureCounting:
         proxy.embed_batch.side_effect = [[[0.1] * 384]]  # 成功重置
         svc.embed("x")
         assert svc._fallback_read_timeouts == 0
+
+
+class TestEdgeInputRobustness:
+    """Fix round 1: env parse crashes, None-padded daemon results,
+    consecutive-read-timeout chain semantics, counter resets."""
+
+    def test_malformed_port_env_does_not_crash(self, monkeypatch) -> None:
+        monkeypatch.setenv("SLM_DAEMON_PORT", "abc")
+        svc = _svc()
+        with patch("superlocalmemory.core.embeddings.acquire_embedding_lock", return_value=False):
+            svc._ensure_worker()  # must not raise ValueError
+        assert svc._daemon_fallback is None
+
+    def test_none_padded_result_treated_as_failure(self) -> None:
+        svc = _svc()
+        svc._available = False
+        proxy = MagicMock()
+        proxy.embed_batch.return_value = [[0.1] * 384, None]
+        svc._daemon_fallback = proxy
+        result = svc.embed_batch(["a", "b"])
+        # Graceful: embed_batch never returns None itself; the internal
+        # _subprocess_embed result is None, surfaced as the pre-fallback
+        # None-list behavior instead of crashing in _validate_dimension.
+        assert result == [None, None]
+        assert svc._fallback_fail_count == 1
+
+    def test_read_timeout_chain_broken_by_other_error(self) -> None:
+        svc = _svc()
+        svc._available = False
+        proxy = MagicMock()
+        svc._daemon_fallback = proxy
+        proxy.embed_batch.side_effect = [
+            httpx.ReadTimeout("slow"),
+            httpx.ConnectError("refused"),
+            httpx.ReadTimeout("slow"),
+        ]
+        svc.embed("x")   # rt=1, tolerated
+        assert svc._fallback_fail_count == 0
+        svc.embed("x")   # connect error: counts 1 AND breaks the rt chain
+        svc.embed("x")   # rt=1 again (chain restarted) — still tolerated
+        assert svc._fallback_fail_count == 1
+        assert svc._fallback_read_timeouts == 1
+
+    def test_counters_reset_on_attach(self) -> None:
+        svc = _svc()
+        svc._fallback_read_timeouts = 1
+        svc._fallback_fail_count = 2
+        proxy = MagicMock()
+        proxy.is_available.return_value = True
+        with patch("superlocalmemory.core.mcp_embedder_proxy.McpEmbedderProxy", return_value=proxy):
+            svc._try_attach_daemon_fallback()
+        assert svc._daemon_fallback is proxy
+        assert svc._fallback_fail_count == 0
+        assert svc._fallback_read_timeouts == 0

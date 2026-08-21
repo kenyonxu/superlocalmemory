@@ -710,14 +710,17 @@ class EmbeddingService:
             return
         if self._daemon_fallback is not None:
             return
-        port = int(os.environ.get("SLM_DAEMON_PORT", "") or 8765)
-        timeout = float(os.environ.get("SLM_EMBED_DAEMON_TIMEOUT", "30"))
         try:
+            # Env parsing lives inside the try so a malformed port/timeout
+            # degrades to "no fallback" instead of crashing embed().
+            port = int(os.environ.get("SLM_DAEMON_PORT", "") or 8765)
+            timeout = float(os.environ.get("SLM_EMBED_DAEMON_TIMEOUT", "30"))
             from superlocalmemory.core.mcp_embedder_proxy import McpEmbedderProxy
             proxy = McpEmbedderProxy(port=port, timeout=timeout, strict=True)
             if proxy.is_available():
                 self._daemon_fallback = proxy
                 self._fallback_fail_count = 0
+                self._fallback_read_timeouts = 0
                 logger.info(
                     "Embedding worker unavailable locally — "
                     "using daemon fallback (port %d)", port,
@@ -733,6 +736,14 @@ class EmbeddingService:
         except Exception as exc:  # strict proxy re-raises httpx/ValueError
             self._record_fallback_failure(exc)
             return None
+        # A short-batch proxy pads missing texts with None and still returns
+        # normally. Treat any gap as a failure so callers get the graceful
+        # pre-fallback None instead of crashing in _validate_dimension.
+        if len(result) < len(texts) or any(vec is None for vec in result):
+            self._record_fallback_failure(
+                ValueError("daemon returned incomplete embeddings")
+            )
+            return None
         self._fallback_served += 1
         self._fallback_read_timeouts = 0
         return result
@@ -747,6 +758,10 @@ class EmbeddingService:
             if self._fallback_read_timeouts < 2:
                 return
             self._fallback_read_timeouts = 0
+        else:
+            # A non-ReadTimeout failure breaks the consecutive-read-timeout
+            # chain (it still counts its own full failure below).
+            self._fallback_read_timeouts = 0
         self._fallback_fail_count += 1
         if self._fallback_fail_count >= 3:
             logger.warning(
@@ -755,6 +770,7 @@ class EmbeddingService:
             )
             self._daemon_fallback = None
             self._fallback_fail_count = 0
+            self._fallback_read_timeouts = 0
 
     def _ensure_worker(self) -> None:
         """Spawn worker subprocess if not running.
