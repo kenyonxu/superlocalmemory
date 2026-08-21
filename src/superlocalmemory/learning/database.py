@@ -620,6 +620,19 @@ class LearningDatabase:
                     "learning_features",
                     "learning_model_state",
                     "engagement_metrics",
+                    # bandit_plays holds shown_fact_ids — the identifiers of the
+                    # memories a person was actually shown — and bandit_arms is
+                    # a derived behavioural profile. Both are personal data and
+                    # neither was erased: this list was hardcoded, so
+                    # forget_profile() reported success and left a row reading
+                    # ["alice-private-memory-1", ...] in place. Reproduced
+                    # before fixing.
+                    #
+                    # The retention sweep is not a substitute. It deletes only
+                    # SETTLED plays older than the horizon, so an unsettled row
+                    # would have survived indefinitely.
+                    "bandit_plays",
+                    "bandit_arms",
                 ]
                 receipt_tables = {
                     row[0]
@@ -631,7 +644,17 @@ class LearningDatabase:
                 }
                 if profile_id is None:
                     tables.extend(sorted(receipt_tables))
+                present = {
+                    row[0] for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
                 for table in tables:
+                    # A store predating any of these tables must not abort the
+                    # erasure of the rest — an Article 17 request that fails
+                    # halfway is worse than one that skips an absent table.
+                    if table not in present:
+                        continue
                     if profile_id:
                         conn.execute(
                             f"DELETE FROM {table} WHERE profile_id = ?",
@@ -640,6 +663,15 @@ class LearningDatabase:
                     else:
                         conn.execute(f"DELETE FROM {table}")
                 conn.commit()
+                # The in-process ranking counter holds this profile's recent
+                # winners. Ephemeral, but an erasure must not leave them in a
+                # live process for the rest of its lifetime.
+                try:
+                    from superlocalmemory.learning.pcos import RECENT_TOPS
+
+                    RECENT_TOPS.forget(profile_id or "")
+                except Exception:  # pragma: no cover — advisory
+                    pass
                 logger.info(
                     "Learning data reset%s",
                     f" for profile {profile_id}" if profile_id else " (all)",

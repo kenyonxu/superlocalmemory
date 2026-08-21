@@ -12,11 +12,15 @@ the settlements it took part in.
 
 WHY IT LIVES IN memory.db
 -------------------------
-Beside ``atomic_facts``, because the read path resolves it with a LEFT JOIN in
-the query that already loads a fact. SQLite cannot join across databases without
-ATTACH, and taking an ATTACH on the recall hot path to reach a single REAL would
-cost more than the number is worth. ``action_outcomes`` — the backfill source —
-is in memory.db too, so the whole thing stays in one file.
+Beside ``atomic_facts`` and ``action_outcomes``, the backfill source, so the
+whole thing stays in one file. SQLite cannot join across databases without
+ATTACH, and taking an ATTACH on the recall path to reach a single REAL would
+cost more than the number is worth.
+
+The ranker reads it with one batched keyed lookup rather than a LEFT JOIN into
+fact hydration: ``_row_to_fact`` builds ``AtomicFact`` from named columns and
+silently drops any it does not declare, so a JOIN would mean adding fields to a
+model used across the whole codebase to carry a value only the ranker reads.
 
 profile_id IS PART OF THE PRIMARY KEY, AND THAT IS NOT COSMETIC
 ---------------------------------------------------------------

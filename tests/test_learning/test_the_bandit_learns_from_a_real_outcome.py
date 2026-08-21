@@ -56,6 +56,9 @@ from superlocalmemory.storage.migrations import M005_bandit_tables as _M005
 from superlocalmemory.storage.migrations import (
     M044_play_carries_its_own_evidence as _M044,
 )
+from superlocalmemory.storage.migrations import (
+    M045_fact_outcome_score as _M045,
+)
 
 _PROFILE = "default"
 _FACT_SHOWN = "aaaaaaaaaaaaaaaa"
@@ -85,6 +88,10 @@ def store(tmp_path: Path) -> tuple[Path, Path]:
         " timestamp TEXT, reward REAL, settled INTEGER, settled_at TEXT,"
         " recall_query_id TEXT)"
     )
+    # Settlement also folds the reward into the per-fact score, so the table
+    # M045 creates has to be here or the PCOS write is silently skipped and a
+    # credit-attribution test proves nothing.
+    _M045.apply(conn)
     conn.commit()
     conn.close()
     return learning, memory
@@ -374,16 +381,200 @@ class TestTheReplacementModuleActuallyExists:
         assert callable(mod.settle_from_outcomes)
 
     def test_the_loop_settles_outcomes_before_it_defaults(self) -> None:
-        """Order is the whole design. Reversed, the default wins every race."""
+        """Order is the whole design. Reversed, the default wins every race.
+
+        Asserted from the AST. The first version compared
+        ``src.index("settle_from_outcomes,")`` against
+        ``src.index("settle_stale_plays,")`` — and the first match for the
+        former is the IMPORT at offset 264 while the call sits at 1009, so the
+        assertion passed no matter which order the calls were in. An audit
+        demonstrated it by swapping them. A substring offset cannot answer "which
+        is called first"; the tree can.
+        """
+        import ast
         import inspect
+        import textwrap
 
         from superlocalmemory.server import bandit_loops
 
-        src = inspect.getsource(bandit_loops._reward_proxy_loop)
-        assert "settle_from_outcomes" in src, (
-            "the outcome settler is never called, so a reported outcome never "
-            "reaches an arm"
+        tree = ast.parse(textwrap.dedent(
+            inspect.getsource(bandit_loops._reward_proxy_loop)
+        ))
+        # to_thread(fn, ...) — the settler is the FIRST ARGUMENT, so read that
+        # rather than the name of the call being made.
+        dispatched: list[tuple[int, str]] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(
+                node.func, "attr", None
+            ) == "to_thread" and node.args:
+                target = getattr(node.args[0], "id", None) or getattr(
+                    node.args[0], "attr", None
+                )
+                if target:
+                    dispatched.append((node.lineno, target))
+        order = [n for _, n in sorted(dispatched)]
+        assert "settle_from_outcomes" in order, (
+            "the outcome settler is never dispatched, so a reported outcome "
+            f"never reaches an arm: {order}"
         )
-        assert src.index("settle_from_outcomes,") < src.index(
-            "settle_stale_plays,"
-        ), "the default sweep runs before the outcome settler"
+        assert "settle_stale_plays" in order, order
+        assert order.index("settle_from_outcomes") < order.index(
+            "settle_stale_plays"
+        ), (
+            "the neutral default sweep runs before the outcome settler, so it "
+            f"claims every play first: {order}"
+        )
+
+
+class TestOneOutcomeIsEvidenceAboutOneRecall:
+    """The tests above never constructed two plays. That was the whole gap.
+
+    The consequence was reproduced: an outcome was matched against
+    every unsettled play whose shown memories intersected it, and never
+    consumed. Five recalls displaying the same memory plus one reported outcome
+    settled five plays and moved five arms. Twenty settled twenty.
+
+    The damage is not just arithmetic. The arm is the retrieval STRATEGY of one
+    query, so crediting twenty arms for one judgement teaches the sampler which
+    memories were nearby rather than which strategy helped — arms come off their
+    prior and the ranker stays random, which is indistinguishable from success
+    by every check that looks only at ``alpha != beta``.
+    """
+
+    @staticmethod
+    def _play(learning: Path, qid: str, shown: list[str]) -> int:
+        bandit = ContextualBandit(learning, profile_id=_PROFILE)
+        choice = bandit.choose(
+            {"query_type": "open_domain", "entity_count": 0}, qid,
+        )
+        assert choice.play_id
+        bandit.record_shown(choice.play_id, shown)
+        return choice.play_id
+
+    @staticmethod
+    def _moved(learning: Path) -> int:
+        conn = sqlite3.connect(str(learning))
+        n = conn.execute(
+            "SELECT COUNT(*) FROM bandit_arms WHERE alpha != beta"
+        ).fetchone()[0]
+        conn.close()
+        return n
+
+    def test_one_outcome_settles_one_play_not_every_overlapping_one(
+        self, store,
+    ) -> None:
+        learning, memory = store
+        for i in range(5):
+            self._play(learning, f"q-{i}", ["fact-shared"])
+        played = datetime.fromisoformat(
+            _play_row(learning, 1)["played_at"]
+        )
+        _report(memory, facts=["fact-shared"], reward=1.0,
+                at=played + timedelta(seconds=30))
+        n = settle_from_outcomes(
+            _PROFILE, learning, memory, now=played + timedelta(seconds=120),
+        )
+        assert n == 1, (
+            f"one reported outcome settled {n} plays; it is evidence about the "
+            "recall it was reported against, not about every recall that "
+            "happened to display the same memory"
+        )
+
+    def test_the_credited_memory_is_the_one_that_was_judged(
+        self, store,
+    ) -> None:
+        """Settlement used to write the reward to everything displayed.
+
+        An outcome naming one of five shown memories moved all five to 0.55
+        with play_count 1 — and play_count is what the confidence weight reads,
+        so co-displayed memories were promoted toward "proven" on a judgement
+        that was never about them.
+        """
+        learning, memory = store
+        self._play(learning, "q-1", ["JUDGED", "co-1", "co-2", "co-3", "co-4"])
+        played = datetime.fromisoformat(_play_row(learning, 1)["played_at"])
+        _report(memory, facts=["JUDGED"], reward=1.0,
+                at=played + timedelta(seconds=30))
+        settle_from_outcomes(
+            _PROFILE, learning, memory, now=played + timedelta(seconds=120),
+        )
+        conn = sqlite3.connect(str(memory))
+        scored = [r[0] for r in conn.execute(
+            "SELECT fact_id FROM fact_outcome_score ORDER BY fact_id"
+        )]
+        conn.close()
+        assert scored == ["JUDGED"], (
+            f"credit reached memories nobody judged: {scored}"
+        )
+
+    def test_two_outcomes_settle_two_plays(self, store) -> None:
+        """The other direction. Consumption must not starve real evidence."""
+        learning, memory = store
+        for i in range(2):
+            self._play(learning, f"q-{i}", ["fact-shared"])
+        played = datetime.fromisoformat(_play_row(learning, 1)["played_at"])
+        _report(memory, facts=["fact-shared"], reward=1.0,
+                at=played + timedelta(seconds=30))
+        _report(memory, facts=["fact-shared"], reward=0.0,
+                at=played + timedelta(seconds=40), outcome="failure")
+        n = settle_from_outcomes(
+            _PROFILE, learning, memory, now=played + timedelta(seconds=120),
+        )
+        assert n == 2, f"two outcomes should settle two plays, settled {n}"
+
+    def test_an_exact_query_id_still_has_to_be_in_the_window(
+        self, store,
+    ) -> None:
+        """A judgement cannot arrive ten days late and still be about this.
+
+        The exact-id branch skipped the horizon entirely: an outcome ten days
+        later, naming completely different memories, settled a long-closed play
+        at reward 0.0. Reproduced before the fix.
+        """
+        learning, memory = store
+        self._play(learning, "q-reused", ["fact-A"])
+        played = datetime.fromisoformat(_play_row(learning, 1)["played_at"])
+        _report(memory, facts=["something-else"], reward=0.0,
+                at=played + timedelta(days=10), query_id="q-reused",
+                outcome="failure")
+        n = settle_from_outcomes(
+            _PROFILE, learning, memory,
+            now=played + timedelta(days=10, seconds=60),
+        )
+        assert n == 0, "an outcome ten days later settled the play"
+        assert _play_row(learning, 1)["settled_at"] is None
+
+
+class TestAPlayWithNoEvidenceIsNotHeldOpen:
+    def test_an_empty_shown_list_does_not_buy_the_grace_window(self) -> None:
+        """``"[]"`` is truthy, which is the whole bug.
+
+        A play that recorded no memories was given the full grace window it can
+        never use — nothing can overlap an empty set — so it stayed unsettled
+        forever, and the retention sweep only removes SETTLED rows. Reproduced:
+        ``"[]"`` returned 900 s where it must return 120 s.
+        """
+        from superlocalmemory.learning.reward_proxy import (
+            _MAX_AGE_SEC,
+            _default_deadline,
+        )
+
+        class _Row(dict):
+            def __getitem__(self, key):
+                if key not in self:
+                    raise KeyError(key)
+                return dict.get(self, key)
+
+        assert _default_deadline(None, _Row(shown_fact_ids="[]")) == float(
+            _MAX_AGE_SEC
+        ), "an empty list still buys the grace window"
+        assert _default_deadline(None, _Row(shown_fact_ids=None)) == float(
+            _MAX_AGE_SEC
+        )
+        assert _default_deadline(None, _Row(shown_fact_ids="not json")) == float(
+            _MAX_AGE_SEC
+        )
+        # a play that DID record memories keeps the longer window
+        assert _default_deadline(
+            None, _Row(shown_fact_ids='["a"]'),
+        ) > float(_MAX_AGE_SEC)

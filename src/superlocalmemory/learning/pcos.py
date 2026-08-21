@@ -158,12 +158,23 @@ class RecentTopCounter:
         self._seen: dict[str, int] = defaultdict(int)
 
     def record_top(self, profile_id: str, fact_id: str) -> None:
-        """Note that ``fact_id`` took first place for ``profile_id``."""
+        """Note that ``fact_id`` took first place for ``profile_id``.
+
+        The window DECAYS rather than being dropped. Emptying it wholesale every
+        ``_WINDOW`` queries handed every previously-capped memory its bonus back
+        at the same instant, so concentration spiked immediately after each
+        reset — the cap stopped biting exactly when the run-up had made it most
+        necessary. Halving instead keeps a repeat winner near its cap and lets a
+        memory that has stopped winning recover gradually.
+        """
         key = profile_id or ""
         self._seen[key] += 1
         if self._seen[key] > self._WINDOW:
-            self._counts.pop(key, None)
-            self._seen[key] = 1
+            bucket = self._counts.get(key)
+            if bucket:
+                halved = {f: c // 2 for f, c in bucket.items() if c > 1}
+                self._counts[key] = defaultdict(int, halved)
+            self._seen[key] = 0
         self._counts[key][fact_id] += 1
 
     def tops(self, profile_id: str, fact_id: str) -> int:
@@ -174,6 +185,12 @@ class RecentTopCounter:
         return self.tops(profile_id, fact_id) >= _CAP_MIN
 
     def forget(self, profile_id: str) -> None:
+        """Drop everything held for a profile. Called on erasure.
+
+        In-process and ephemeral, so it dies with the process anyway — but an
+        Article 17 request must not leave a profile's recent winners sitting in
+        a live process's memory for the rest of its lifetime.
+        """
         key = profile_id or ""
         self._counts.pop(key, None)
         self._seen.pop(key, None)

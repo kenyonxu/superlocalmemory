@@ -211,3 +211,121 @@ class TestTheLexicalChannelSharesAScaleWithTheOthers:
         assert src.count("_to_unit_scale(") == 2, (
             "one of the two return paths is unscaled"
         )
+
+
+class TestRetrainRefusesAZeroSignalCorpus:
+    """The refusal was implemented and never tested. That was found later.
+
+    The abort reason ``insufficient_label_signal`` appeared in zero tests. Two
+    existing retrain tests were merely padded from 30 and 40 rows to 60 and 120
+    so they cleared the new gate — which exercises the gate being *passed*, not
+    the gate *refusing*. Those are different code paths and only one of them was
+    the point.
+    """
+
+    @staticmethod
+    def _rows(n: int, reward: float | None) -> list[dict]:
+        from superlocalmemory.learning import consolidation_worker as cw
+
+        return [
+            {"query_id": "q1", "fact_id": f"f{i}", "position": i,
+             "features": {name: 0.0 for name in cw._feature_names()},
+             "outcome_reward": reward}
+            for i in range(n)
+        ]
+
+    def _cycle(self, monkeypatch, tmp_path, rows: list[dict]) -> dict:
+        from superlocalmemory.learning import consolidation_worker as cw
+
+        monkeypatch.setattr(cw, "_fetch_training_rows", lambda db, pid: (rows, []))
+        monkeypatch.setattr(
+            cw, "_train_booster",
+            lambda *a, **k: pytest.fail(
+                "training started on a corpus the gate should have refused"
+            ),
+        )
+        return cw._run_shadow_cycle(
+            memory_db_path=str(tmp_path / "memory.db"),
+            learning_db_path=str(tmp_path / "learning.db"),
+            profile_id="p1",
+        )
+
+    def test_the_live_shape_is_refused(self, monkeypatch, tmp_path) -> None:
+        """Every training row carrying no outcome at all — the measured shape.
+
+        5,000 rows fetched from the real store, ``outcome_reward`` None on all
+        5,000: nothing has ever been reported, so there is nothing to learn
+        from. The predicate first proposed for this gate,
+        ``len(set(labels)) <= 1``, inspected a different column entirely and
+        would have let training proceed.
+
+        Writing this test is what corrected the number in the release record. It
+        had said "2 informative labels", read off ``learning_features.label``;
+        the gate reads ``outcome_reward``, and the honest figure is 0.
+        """
+        out = self._cycle(monkeypatch, tmp_path, self._rows(5000, None))
+        assert out["aborted"] == "insufficient_label_signal", out
+        assert out["candidate_persisted"] is False
+        assert out["metrics"]["informative_labels"] == 0
+        assert out["metrics"]["required"] == 50
+        assert out["metrics"]["rows"] == 5000
+
+    def test_a_failure_is_informative_even_though_it_is_zero(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """0.0 means "this did not help" — that is evidence, not absence.
+
+        Worth pinning because the obvious implementation of "informative" is
+        "truthy", which would silently discard every negative outcome and leave
+        the ranker able to learn only what works, never what does not.
+        """
+        from superlocalmemory.learning import consolidation_worker as cw
+
+        rows = self._rows(60, 0.0)
+        monkeypatch.setattr(cw, "_fetch_training_rows", lambda db, pid: (rows, []))
+        assert cw._count_informative_labels(rows) == 60
+
+    def test_the_neutral_default_is_not_a_label(self, monkeypatch, tmp_path) -> None:
+        """0.5 is what settlement writes when NO outcome was reported.
+
+        A corpus of those says nothing happened, however many rows it has.
+        """
+        out = self._cycle(monkeypatch, tmp_path, self._rows(500, 0.5))
+        assert out["aborted"] == "insufficient_label_signal", out
+        assert out["metrics"]["informative_labels"] == 0
+
+    def test_a_missing_reward_column_is_not_a_label(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """``outcome_reward`` is None before M006 runs."""
+        out = self._cycle(monkeypatch, tmp_path, self._rows(500, None))
+        assert out["aborted"] == "insufficient_label_signal", out
+
+    def test_it_stops_refusing_once_the_signal_arrives(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """The other half of the gate. A refusal that never lifts is a wall.
+
+        Note the trained path is NOT stubbed to fail here — reaching it is the
+        expected outcome, so this test would catch a gate that refuses forever.
+        """
+        from superlocalmemory.learning import consolidation_worker as cw
+
+        rows = self._rows(60, 1.0) + self._rows(60, 0.0)
+        monkeypatch.setattr(cw, "_fetch_training_rows", lambda db, pid: (rows, []))
+        reached = {"train": False}
+
+        def _train(*_a, **_k):
+            reached["train"] = True
+            raise RuntimeError("stop here — reaching training is the assertion")
+
+        monkeypatch.setattr(cw, "_train_booster", _train)
+        out = cw._run_shadow_cycle(
+            memory_db_path=str(tmp_path / "memory.db"),
+            learning_db_path=str(tmp_path / "learning.db"),
+            profile_id="p1",
+        )
+        assert reached["train"], (
+            f"120 informative labels still did not clear the gate: {out}"
+        )
+        assert out["aborted"] != "insufficient_label_signal"

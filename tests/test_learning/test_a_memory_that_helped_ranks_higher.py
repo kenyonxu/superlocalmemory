@@ -147,26 +147,69 @@ class TestItIsNotAModelFeature:
         )
 
     def test_it_is_applied_after_the_model_not_inside_it(self) -> None:
+        """Order asserted from the AST, not from string offsets.
+
+        The first version compared ``src.index("ensemble_rerank(")`` against
+        ``src.index("_apply_outcome_bonus(")``. Two problems, both real: a
+        substring match breaks the moment the call is reformatted onto another
+        line (it did), and an ``index`` on a name that also appears in an import
+        finds the import rather than the call — the exact trap that made a
+        sibling test in this suite vacuous. Walking the tree asks the question
+        directly: in what order does this function CALL these two things?
+        """
+        import ast
         import inspect
+        import textwrap
 
         from superlocalmemory.core import recall_pipeline
 
-        src = inspect.getsource(recall_pipeline.apply_v2_bandit_ensemble)
-        assert "_apply_outcome_bonus(final_results" in src, (
-            "the outcome bonus is never applied, so PCOS is a column nobody "
-            "reads"
+        tree = ast.parse(textwrap.dedent(
+            inspect.getsource(recall_pipeline.apply_v2_bandit_ensemble)
+        ))
+        calls: list[tuple[int, str]] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = getattr(node.func, "id", None) or getattr(
+                    node.func, "attr", None
+                )
+                if name in {"ensemble_rerank", "_apply_outcome_bonus"}:
+                    calls.append((node.lineno, name))
+        made = [n for _, n in sorted(calls)]
+        assert "_apply_outcome_bonus" in made, (
+            "the outcome bonus is never called, so PCOS is a column nobody reads"
         )
-        assert src.index("ensemble_rerank(") < src.index(
-            "_apply_outcome_bonus("
-        ), "the bonus is applied before the model score, not after it"
+        assert "ensemble_rerank" in made
+        assert made.index("ensemble_rerank") < made.index(
+            "_apply_outcome_bonus"
+        ), f"the bonus is applied before the model score: {made}"
 
-    def test_the_bonus_reorders_something(self) -> None:
-        """A bonus that cannot change an order is decoration.
+    def test_the_bonus_actually_reorders_a_result_list(
+        self, tmp_path: Path,
+    ) -> None:
+        """Calls the real ranking function against a real store.
 
-        Two candidates a hair apart, one with a proven history: the proven one
-        must come first afterwards.
+        The first version of this test computed ``bonus_for(...)`` in the test
+        process and asserted arithmetic. It never called
+        ``_apply_outcome_bonus``, so it would have passed with the ranking hook
+        deleted — which is the failure it existed to catch. This version drives the function.
         """
         from dataclasses import dataclass
+
+        from superlocalmemory.core.recall_pipeline import _apply_outcome_bonus
+
+        db = tmp_path / "memory.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE fact_outcome_score (fact_id TEXT, profile_id TEXT,"
+            " score REAL, play_count INTEGER, updated_at TEXT,"
+            " PRIMARY KEY (fact_id, profile_id))"
+        )
+        conn.execute(
+            "INSERT INTO fact_outcome_score VALUES ('proven',?,0.95,25,'x')",
+            (_PROFILE,),
+        )
+        conn.commit()
+        conn.close()
 
         @dataclass
         class _Fact:
@@ -178,13 +221,47 @@ class TestItIsNotAModelFeature:
             score: float
             ranking_score: float
 
-        a = _Result(_Fact("a"), 0.80, 0.80)   # no history
-        b = _Result(_Fact("b"), 0.78, 0.78)   # proven
-        assert a.ranking_score > b.ranking_score
-        b_bonus = bonus_for(0.95, 20)
-        assert b.ranking_score + b_bonus > a.ranking_score, (
-            "a proven memory cannot overtake a marginally better match, so "
-            "the bonus can never change an answer"
+        # The better match has no history; the slightly worse one is proven.
+        results = [
+            _Result(_Fact("better-match"), 0.80, 0.80),
+            _Result(_Fact("proven"), 0.78, 0.78),
+        ]
+        out = _apply_outcome_bonus(list(results), _PROFILE, db)
+        assert [r.fact.fact_id for r in out] == ["proven", "better-match"], (
+            "the outcome bonus did not reorder anything, so a memory's history "
+            "cannot affect an answer"
+        )
+        assert out[0].ranking_score == pytest.approx(0.78 + bonus_for(0.95, 25))
+
+    def test_it_reads_the_store_it_is_given(self, tmp_path: Path) -> None:
+        """Not whichever store the data-root default resolves to.
+
+        The hook used to open ``state_path("memory.db")`` unconditionally. On a
+        default install that is the right file; anywhere else — a second data
+        root, a test store, a config whose ``db_path`` diverges — it read
+        another store's scores under the same profile name, or nothing. Both
+        fail modes are silent, because the hook is fail-open.
+        """
+        from dataclasses import dataclass
+
+        from superlocalmemory.core.recall_pipeline import _apply_outcome_bonus
+
+        @dataclass
+        class _Fact:
+            fact_id: str
+
+        @dataclass
+        class _Result:
+            fact: _Fact
+            score: float
+            ranking_score: float
+
+        empty = tmp_path / "empty.db"
+        sqlite3.connect(str(empty)).close()
+        results = [_Result(_Fact("proven"), 0.5, 0.5)]
+        out = _apply_outcome_bonus(list(results), _PROFILE, empty)
+        assert out[0].ranking_score == pytest.approx(0.5), (
+            "a store with no scores still changed the ranking"
         )
 
 
@@ -205,15 +282,45 @@ class TestErasureReachesIt:
 
         assert "fact_outcome_score" not in GDPRCompliance._NON_MEMORY_SCOPED
 
-    def test_one_profiles_erasure_leaves_the_others_intact(self, store) -> None:
+    def test_erasure_reaches_it_through_the_real_discovery(
+        self, store, tmp_path: Path,
+    ) -> None:
+        """Drives ``GDPRCompliance._profile_scoped_tables`` on a real store.
+
+        The first version of this hand-ran
+        ``DELETE FROM fact_outcome_score WHERE profile_id = ?`` and a comment
+        claiming that is "what forget_profile does". Asserting the equivalence
+        in a comment is not testing it, and the shortcut had a cost: the real
+        erasure path also calls ``LearningDatabase.reset``, which turned out to
+        omit the bandit tables entirely. A test that called the real path had a
+        chance of catching that. This one does.
+        """
         update_scores(store, "alice", ["f1"], 0.9)
         update_scores(store, "bob", ["f1"], 0.9)
         store.commit()
 
-        # What forget_profile does to every discovered profile-scoped table.
-        store.execute(
-            "DELETE FROM fact_outcome_score WHERE profile_id = ?", ("alice",),
+        from superlocalmemory.compliance.gdpr import GDPRCompliance
+
+        class _Db:
+            """Minimal adapter: discovery only needs execute()."""
+
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, sql, params=()):
+                self._conn.row_factory = sqlite3.Row
+                return self._conn.execute(sql, params).fetchall()
+
+        discovered = GDPRCompliance(_Db(store))._profile_scoped_tables()
+        assert "fact_outcome_score" in discovered, (
+            "erasure's own table discovery does not see the learned scores, so "
+            "forget_profile would report success and leave them behind"
         )
+
+        for table in discovered:
+            store.execute(
+                f"DELETE FROM {table} WHERE profile_id = ?", ("alice",),
+            )
         store.commit()
 
         assert fetch_scores(store, "alice", ["f1"]) == {}
@@ -367,4 +474,62 @@ class TestItDoesNotConcentrateOnAFewMemories:
         assert "RECENT_TOPS.capped" in src
         assert "* 0.1" not in src and "*= 0.1" not in src, (
             "a capped fact is being demoted rather than merely not rewarded"
+        )
+
+
+class TestTheCapWindowDecaysRatherThanResetting:
+    """Emptying the window handed every capped memory its bonus back at once.
+
+    ``_WINDOW`` queries in, the counter dropped every count it held. So a memory
+    that had been capped for winning repeatedly became eligible again at the
+    same instant as every other capped memory — concentration spiked right after
+    each reset, which is exactly when the run-up had made the cap most
+    necessary. Halving keeps a repeat winner near its cap and lets one that has
+    stopped winning recover gradually.
+    """
+
+    def test_a_repeat_winner_stays_capped_across_the_boundary(self) -> None:
+        from superlocalmemory.learning.pcos import RecentTopCounter
+
+        c = RecentTopCounter()
+        for _ in range(20):
+            c.record_top("p", "dominant")
+        assert c.capped("p", "dominant")
+
+        # push past the window boundary with unrelated traffic
+        for i in range(RecentTopCounter._WINDOW + 5):
+            c.record_top("p", f"other-{i}")
+
+        assert c.capped("p", "dominant"), (
+            "a memory that won 20 times became eligible for the bonus again the "
+            "moment the window rolled over"
+        )
+
+    def test_a_memory_that_stops_winning_recovers(self) -> None:
+        from superlocalmemory.learning.pcos import RecentTopCounter
+
+        c = RecentTopCounter()
+        for _ in range(4):
+            c.record_top("p", "was-hot")
+        assert c.capped("p", "was-hot")
+        before = c.tops("p", "was-hot")
+
+        for i in range(RecentTopCounter._WINDOW + 1):
+            c.record_top("p", f"other-{i}")
+
+        after = c.tops("p", "was-hot")
+        assert after < before, (
+            f"the count never decays ({before} -> {after}), so a memory is "
+            "capped forever on old history"
+        )
+
+    def test_the_counter_is_scoped_per_profile(self) -> None:
+        from superlocalmemory.learning.pcos import RecentTopCounter
+
+        c = RecentTopCounter()
+        for _ in range(5):
+            c.record_top("alice", "f1")
+        assert c.capped("alice", "f1")
+        assert not c.capped("bob", "f1"), (
+            "one profile's ranking history capped another profile's memory"
         )

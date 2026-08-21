@@ -347,10 +347,23 @@ def _default_deadline(
     except Exception:  # pragma: no cover — defensive
         return float(_MAX_AGE_SEC)
     try:
-        shown = play["shown_fact_ids"]
+        raw = play["shown_fact_ids"]
     except (IndexError, KeyError):
         return float(_MAX_AGE_SEC)
-    return max(float(_MAX_AGE_SEC), GRACE_SEC) if shown else float(_MAX_AGE_SEC)
+    # PARSE, do not test the raw string. "[]" is truthy, so a play that recorded
+    # no memories used to buy the full grace window it could never use: nothing
+    # can overlap an empty set, so it stayed unsettled forever, and the
+    # retention sweep only removes SETTLED rows. Reproduced: "[]" returned
+    # 900 s where it should return 120 s.
+    try:
+        parsed = json.loads(raw) if raw else []
+    except (TypeError, ValueError):
+        parsed = []
+    has_evidence = bool(parsed) if isinstance(parsed, list) else False
+    return (
+        max(float(_MAX_AGE_SEC), GRACE_SEC) if has_evidence
+        else float(_MAX_AGE_SEC)
+    )
 
 
 def settle_stale_plays(

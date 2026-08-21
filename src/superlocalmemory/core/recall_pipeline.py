@@ -360,6 +360,7 @@ def apply_ranking(
     pipeline_version: str = "v2-ensemble",
     record_signals: bool = False,
     record_plays: bool = True,
+    memory_db_path: Any = None,
 ) -> "RecallResponse":
     """Run the ranking pipeline at the requested version.
 
@@ -396,6 +397,7 @@ def apply_ranking(
             response, query, profile_id, query_id,
             record_signals=record_signals,
             record_plays=record_plays,
+            memory_db_path=memory_db_path,
         )
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("apply_ranking ensemble step skipped: %s", exc)
@@ -618,7 +620,9 @@ def apply_v2_adaptive_ranking(
 # ---------------------------------------------------------------------------
 
 
-def _apply_outcome_bonus(results: list, profile_id: str) -> list:
+def _apply_outcome_bonus(
+    results: list, profile_id: str, memory_db_path: Any = None,
+) -> list:
     """Nudge ranking by whether each memory has demonstrably helped before.
 
     Bounded to ``pcos.MAX_BONUS`` (0.15) and weighted by how often the fact has
@@ -647,9 +651,14 @@ def _apply_outcome_bonus(results: list, profile_id: str) -> list:
         ids = [r.fact.fact_id for r in results if getattr(r, "fact", None)]
         if not ids:
             return results
-        conn = _sq.connect(
-            f"file:{state_path('memory.db')}?mode=ro", uri=True, timeout=0.5,
-        )
+        # The store the RECALL used, not whichever one the data-root default
+        # resolves to. Hardcoding state_path("memory.db") worked on a default
+        # install and silently read another store's scores — or nothing at all —
+        # anywhere the engine was pointed elsewhere: a second data root, a test
+        # store, a config whose db_path diverges. Both fail modes are silent,
+        # because this function is fail-open by design.
+        db_file = Path(memory_db_path) if memory_db_path else state_path("memory.db")
+        conn = _sq.connect(f"file:{db_file}?mode=ro", uri=True, timeout=0.5)
         try:
             scores = fetch_scores(conn, profile_id, ids)
         finally:
@@ -697,6 +706,7 @@ def apply_v2_bandit_ensemble(
     learning_db_path: Any = None,
     record_signals: bool = False,
     record_plays: bool = True,
+    memory_db_path: Any = None,
 ) -> RecallResponse:
     """Apply contextual bandit + optional LGBM ensemble rerank. Safe on error.
 
@@ -807,7 +817,9 @@ def apply_v2_bandit_ensemble(
         # live 20-feature model. Applying it here also makes it
         # true by construction: the model cannot learn from a signal it
         # never sees, so there is no self-reinforcing loop to exclude.
-        final_results = _apply_outcome_bonus(final_results, profile_id)
+        final_results = _apply_outcome_bonus(
+            final_results, profile_id, memory_db_path,
+        )
 
         # Give the play its evidence: which memories this query actually
         # surfaced, so the reward proxy can settle it from a downstream
@@ -1054,6 +1066,9 @@ def run_recall(
         response = apply_ranking(
             response, query, profile_id, query_id,
             config=config, pipeline_version=mode, record_signals=False,
+            # the store THIS recall read from, so the outcome bonus
+            # cannot resolve a different one
+            memory_db_path=getattr(db, "db_path", None),
         )
     except Exception as exc:
         logger.debug("Ranking pipeline skipped: %s", exc)

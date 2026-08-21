@@ -191,6 +191,7 @@ def _candidate_outcomes(
         except (TypeError, ValueError):
             continue
         out.append({
+            "id": str(r["outcome_id"]),
             "at": at,
             "facts": {str(f) for f in facts if f},
             "reward": max(0.0, min(1.0, reward)),
@@ -199,34 +200,69 @@ def _candidate_outcomes(
     return out
 
 
-def _match(play_at: datetime, query_id: str, shown: set[str],
-           outcomes: list[dict]) -> float | None:
-    """Reward for this play, or None if no outcome can be attributed to it.
+def _match(
+    play_at: datetime,
+    query_id: str,
+    shown: set[str],
+    outcomes: list[dict],
+    claimed: set[str],
+) -> dict | None:
+    """The one outcome attributable to this play, or None.
 
-    Exact ``recall_query_id`` first — an explicit statement of which recall the
-    report is about beats any inference. Then overlap on the memories the play
-    actually showed, within the match window. Earliest qualifying outcome wins,
-    because the first reaction to an answer is the one that judges it.
+    Returns the outcome itself rather than its reward, because the caller needs
+    to know WHICH memories that outcome named — see ``settle_from_outcomes``.
+
+    AN OUTCOME IS EVIDENCE ABOUT ONE RECALL, AND IS CONSUMED
+    -------------------------------------------------------
+    The first version of this matched an outcome against every unsettled play
+    whose shown memories intersected it, and never consumed it. Both audits
+    reproduced the consequence and it is severe: five recalls that happened to
+    display the same memory, plus one reported outcome, settled **five** plays
+    and moved five arms; twenty recalls settled twenty. One person saying "that
+    helped" became twenty pieces of evidence about twenty different retrieval
+    strategies, most of which had nothing to do with it.
+
+    It also inflated confidence. ``play_count`` is what
+    ``pcos.confidence_weight`` reads, so the same fan-out could push a memory to
+    "proven" — full bonus — on a single judgement.
+
+    The effect on the learning claim is the part that matters: Thompson sampling
+    would be learning which memories were *nearby*, not which strategy helped.
+    That is how arms come off their prior and the ranker is still random.
+
+    So ``claimed`` carries the outcome ids already spent this pass, and an
+    outcome may be spent once. Plays are offered outcomes oldest-first, so the
+    recall that ran first gets the credit — the report is far more likely to be
+    about the answer the user actually saw.
+
+    THE EXACT PATH IS ALSO BOUNDED IN TIME. A ``recall_query_id`` is a stronger
+    statement of intent than overlap and is tried first, but it used to skip the
+    horizon check entirely: an outcome ten days later, naming completely
+    different memories, settled a long-closed play at reward 0.0. Reproduced.
+    Both paths now require the outcome to fall inside the window.
     """
     horizon = play_at + timedelta(seconds=_MATCH_WINDOW_SEC)
 
+    def _in_window(o: dict) -> bool:
+        return play_at <= o["at"] <= horizon
+
+    def _first(candidates: list[dict]) -> dict | None:
+        fresh = [o for o in candidates if o["id"] not in claimed]
+        return min(fresh, key=lambda o: o["at"]) if fresh else None
+
     if query_id:
-        exact = [
+        exact = _first([
             o for o in outcomes
-            if o["query_id"] and o["query_id"] == query_id
-        ]
-        if exact:
-            return min(exact, key=lambda o: o["at"])["reward"]
+            if o["query_id"] and o["query_id"] == query_id and _in_window(o)
+        ])
+        if exact is not None:
+            return exact
 
     if not shown:
         return None
-    overlapping = [
-        o for o in outcomes
-        if play_at <= o["at"] <= horizon and (o["facts"] & shown)
-    ]
-    if not overlapping:
-        return None
-    return min(overlapping, key=lambda o: o["at"])["reward"]
+    return _first([
+        o for o in outcomes if _in_window(o) and (o["facts"] & shown)
+    ])
 
 
 def settle_from_outcomes(
@@ -271,27 +307,35 @@ def settle_from_outcomes(
         if not outcomes:
             return 0
 
+        # Outcome ids spent this pass. An outcome is evidence about one recall.
+        claimed: set[str] = set()
+
         for row in plays:
             played = _parse_iso(row["played_at"])
             if played is None:
                 continue
-            reward = _match(
-                played, str(row["query_id"] or ""),
-                _shown(row["shown_fact_ids"]), outcomes,
+            shown = _shown(row["shown_fact_ids"])
+            outcome = _match(
+                played, str(row["query_id"] or ""), shown, outcomes, claimed,
             )
-            if reward is None:
+            if outcome is None:
                 continue
-            if bandit.update(int(row["play_id"]), reward,
+            if bandit.update(int(row["play_id"]), outcome["reward"],
                              kind=SETTLEMENT_KIND):
                 settled += 1
-                # Same authenticated moment, so the per-fact score and the arm
-                # posterior can never disagree about what happened. Best-effort:
-                # PCOS is advisory and must not be able to fail a settlement.
-                shown = _shown(row["shown_fact_ids"])
-                if shown:
+                claimed.add(outcome["id"])
+                # Credit ONLY the memories the outcome actually named. Writing
+                # it to everything the play displayed spread one judgement
+                # across up to five memories: an outcome naming one of them
+                # moved all five to 0.55 with play_count 1. Co-displayed
+                # memories inherited credit, the bonus then lifted them, and
+                # they were shown again — the rich-get-richer path this was
+                # built to prevent, one hop removed.
+                judged = sorted(outcome["facts"] & shown) if shown else []
+                if judged:
                     try:
                         update_scores(
-                            memory_conn, profile_id, sorted(shown), reward,
+                            memory_conn, profile_id, judged, outcome["reward"],
                         )
                         memory_conn.commit()
                     except Exception as exc:  # pragma: no cover — defensive
