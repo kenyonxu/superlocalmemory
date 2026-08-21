@@ -230,6 +230,10 @@ class EmbeddingService:
         self._request_count: int = 0
         self._http_client: object | None = None
         self._remote_ready = False
+        self._daemon_fallback: object | None = None
+        self._fallback_fail_count: int = 0
+        self._fallback_served: int = 0
+        self._fallback_read_timeouts: int = 0
 
         # Register for atexit cleanup (prevent orphaned workers)
         ref = weakref.ref(self, _live_embedding_services.discard)
@@ -462,6 +466,8 @@ class EmbeddingService:
             # convention. Using ``not self._available`` here bricked the local
             # worker on the first heal tick, because ``None`` is falsy.
             if self._available is False:
+                if self._daemon_fallback is not None:
+                    return self._embed_via_daemon(texts)
                 return None
             # Worker recycling: restart after N requests to prevent
             # C++ allocator fragmentation over long-running sessions.
@@ -694,6 +700,62 @@ class EmbeddingService:
             pass  # On error, allow through (don't block functionality)
         return True
 
+    def _try_attach_daemon_fallback(self) -> None:
+        """Attach a daemon embed proxy when the local worker cannot spawn.
+
+        Only called from _ensure_worker's give-up branches (singleton held by
+        another process, memory pressure). Never masks real spawn failures.
+        """
+        if os.environ.get("SLM_EMBED_DAEMON_FALLBACK", "1") == "0":
+            return
+        if self._daemon_fallback is not None:
+            return
+        port = int(os.environ.get("SLM_DAEMON_PORT", "") or 8765)
+        timeout = float(os.environ.get("SLM_EMBED_DAEMON_TIMEOUT", "30"))
+        try:
+            from superlocalmemory.core.mcp_embedder_proxy import McpEmbedderProxy
+            proxy = McpEmbedderProxy(port=port, timeout=timeout, strict=True)
+            if proxy.is_available():
+                self._daemon_fallback = proxy
+                self._fallback_fail_count = 0
+                logger.info(
+                    "Embedding worker unavailable locally — "
+                    "using daemon fallback (port %d)", port,
+                )
+        except Exception as exc:
+            logger.debug("Daemon fallback attach skipped: %s", exc)
+
+    def _embed_via_daemon(self, texts: list[str]) -> list[list[float] | None] | None:
+        """Delegate to the daemon fallback with failure accounting."""
+        assert self._daemon_fallback is not None
+        try:
+            result = self._daemon_fallback.embed_batch(texts)
+        except Exception as exc:  # strict proxy re-raises httpx/ValueError
+            self._record_fallback_failure(exc)
+            return None
+        self._fallback_served += 1
+        self._fallback_read_timeouts = 0
+        return result
+
+    def _record_fallback_failure(self, exc: Exception) -> None:
+        """Classify a proxy failure; detach after the threshold (3)."""
+        import httpx
+        if isinstance(exc, httpx.ReadTimeout):
+            # Cold-start tolerance: only every second CONSECUTIVE read
+            # timeout counts as one failure.
+            self._fallback_read_timeouts += 1
+            if self._fallback_read_timeouts < 2:
+                return
+            self._fallback_read_timeouts = 0
+        self._fallback_fail_count += 1
+        if self._fallback_fail_count >= 3:
+            logger.warning(
+                "Daemon fallback detached after %d failures (last: %s)",
+                self._fallback_fail_count, exc,
+            )
+            self._daemon_fallback = None
+            self._fallback_fail_count = 0
+
     def _ensure_worker(self) -> None:
         """Spawn worker subprocess if not running.
 
@@ -715,11 +777,13 @@ class EmbeddingService:
         # worker and launch memory-heavy children.
         if not acquire_embedding_lock():
             logger.debug("Embedding worker owned by another process")
+            self._try_attach_daemon_fallback()
             self._available = False
             return
         if _is_embedding_worker_alive():
             release_embedding_lock()
             logger.debug("Embedding worker already alive after lock acquisition")
+            self._try_attach_daemon_fallback()
             self._available = False
             return
 
@@ -727,6 +791,7 @@ class EmbeddingService:
         if not self._check_memory_pressure():
             release_embedding_lock()
             logger.warning("Skipping embedding worker spawn due to memory pressure")
+            self._try_attach_daemon_fallback()
             self._available = False
             return
 
