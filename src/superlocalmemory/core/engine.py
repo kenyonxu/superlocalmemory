@@ -1016,12 +1016,16 @@ class MemoryEngine:
     ) -> RecallResponse:
         """Recall relevant facts for a query.
 
-        S9-DASH-02: when ``session_id`` is provided, the recall is
-        non-blockingly enqueued to the outcome queue so downstream
-        hooks (PostToolUse, Stop) can attach engagement signals.
-        Zero additional latency on the hot path — enqueue is a
-        ``put_nowait`` and the actual ``pending_outcomes`` INSERT runs
-        on a background worker.
+        ``session_id`` gives the recall continuity: memories this session was
+        recently shown are held in a small in-process working set and bias the
+        ranking of subsequent queries in the same session. Retrieval still runs
+        in full every time — the working set reorders the answer, it never
+        replaces the search. Costs no query and no file access.
+
+        Omitting it is supported and means every recall starts cold, which is
+        what every caller got before. The parameter was previously accepted and
+        then ignored: it was documented as enqueueing a ``pending_outcomes`` row
+        for downstream hooks, and no such row was ever written.
 
         ``fast`` controls only the internal agentic verification round; all six
         local retrieval channels + reranker run regardless. ``fast=None`` (the
@@ -1060,6 +1064,7 @@ class MemoryEngine:
         try:
             response = run_recall(
                 query, pid, mode=mode, limit=limit, agent_id=agent_id,
+                session_id=session_id,
                 config=self._config,
                 retrieval_engine=self._retrieval_engine,
                 trust_scorer=self._trust_scorer,
@@ -1099,8 +1104,21 @@ class MemoryEngine:
             )
 
     def close_session(self, session_id: str) -> int:
-        """Create session-level temporal summary."""
+        """Create session-level temporal summary and release its working set.
+
+        The working set is what the session was recently looking at. It exists
+        to connect one turn to the next, so it has no meaning once there are no
+        more turns; holding it would let a later session that reuses this id
+        inherit ranking bias from a conversation that already ended.
+        """
         self._ensure_init()
+
+        try:
+            from superlocalmemory.core.working_memory import discard
+
+            discard(self._profile_id, session_id)
+        except Exception as exc:  # pragma: no cover — never block a close
+            logger.debug("working-set discard skipped: %s", exc)
 
         from superlocalmemory.core.store_pipeline import run_close_session
         return run_close_session(

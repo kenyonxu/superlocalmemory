@@ -645,6 +645,20 @@ class GDPRCompliance:
             else 0
         )
 
+        # In-process residue. The erased profile's recently-shown memories are
+        # held in a per-session working set that biases ranking; those are the
+        # subject's data too, and a later session reusing one of their session
+        # ids would otherwise inherit the bias. Runs after the deletes rather
+        # than inside them: an in-memory dict cannot participate in a rollback,
+        # so clearing it early would be unrecoverable if the wipe then failed.
+        try:
+            from superlocalmemory.core.working_memory import discard_profile
+
+            counts["working_sets"] = discard_profile(profile_id)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("GDPR erase: working-set discard failed: %s", exc)
+            counts["working_sets_failed"] = 1
+
         try:
             from superlocalmemory.compliance.audit import AuditChain
             from superlocalmemory.infra.data_root import state_path

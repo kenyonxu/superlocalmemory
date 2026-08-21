@@ -620,6 +620,23 @@ def apply_v2_adaptive_ranking(
 # ---------------------------------------------------------------------------
 
 
+def _rank_key(result) -> tuple[float, str]:
+    """Descending ordering key for the score-bias passes.
+
+    Falls back to ``score`` exactly as the writes do. Falling back to 0.0
+    instead — which is what a bare ``ranking_score or 0.0`` does — sorts every
+    result that no bias touched as if it scored nothing, collapsing the whole
+    un-adjusted tail to the bottom in fact_id order and discarding the ordering
+    retrieval worked for. ``ensemble_rerank`` populates ``ranking_score`` on
+    every candidate, so that only bites when the ensemble is disabled or has
+    fallen back — which is precisely when a bias must still behave.
+
+    One function rather than the same expression at each call site: two passes
+    that sort by different keys silently overwrite each other's ordering.
+    """
+    return (-float(result.ranking_score or result.score or 0.0), result.fact.fact_id)
+
+
 def _apply_outcome_bonus(
     results: list, profile_id: str, memory_db_path: Any = None,
 ) -> list:
@@ -673,9 +690,9 @@ def _apply_outcome_bonus(
                 adjusted.append(r)
                 continue
             # A fact that has been winning first place lately stops EARNING the
-            # bonus. It keeps everything retrieval gave it — the alternative in
-            # the alternative was a 10x demotion, which would bury a memory whose only
-            # offence is having been useful.
+            # bonus. It keeps everything retrieval gave it — the alternative
+            # considered was a 10x demotion, which would bury a memory whose
+            # only offence is having been useful.
             if RECENT_TOPS.capped(profile_id, r.fact.fact_id):
                 adjusted.append(r)
                 continue
@@ -686,15 +703,101 @@ def _apply_outcome_bonus(
             adjusted.append(replace(
                 r, ranking_score=float(r.ranking_score or r.score) + delta,
             ))
-        adjusted.sort(
-            key=lambda r: (-(r.ranking_score or 0.0), r.fact.fact_id),
-        )
+        adjusted.sort(key=_rank_key)
         if adjusted:
             RECENT_TOPS.record_top(profile_id, adjusted[0].fact.fact_id)
         return adjusted
     except Exception as exc:  # pragma: no cover — advisory, never fatal
         logger.debug("outcome bonus skipped: %s", exc)
         return results
+
+
+#: Largest lift a memory can earn purely from having been in the last few
+#: turns. Additive on ``ranking_score``, deliberately not a multiplier.
+#:
+#: A multiplier was the first design and it is scale-dependent, which makes the
+#: same constant mean different things on two installs. Measured: with a
+#: cross-encoder loaded, ranking scores land near [0, 1] and 1.5x is worth about
+#: +0.45; with no reranker configured, raw fusion scores top out at
+#: ``n_channels/(rrf_k+1)`` — 0.08 at k=60 — and the same 1.5x is worth +0.03.
+#: One constant, a fifteen-fold difference in effect, decided by installed
+#: optional components. An additive cap behaves the same everywhere.
+#:
+#: 0.20 sits just above the ceiling on the outcome bonus (0.15), so continuity
+#: of attention outranks historical usefulness when the two disagree. Both are
+#: bounded, so neither can drag a genuinely poor match to the top.
+WM_MAX_BONUS = 0.20
+
+
+def _apply_working_memory_bias(
+    results: list, profile_id: str, session_id: str,
+) -> list:
+    """Lift memories this session was just looking at.
+
+    Retrieval still runs in full and this changes nothing about what was
+    retrieved — it reorders what came back. A memory absent from the working
+    set is untouched, so an empty working set is exactly the identity function
+    and the first turn of every session behaves as before.
+
+    Reads only in-process state: no query, no connection, no file. Deliberately
+    does not create a working set — a bias that ran on every recall would
+    otherwise register an entry for every session id that ever appears.
+
+    Never raises. Attention is advisory; a recall that cannot be biased is
+    still a correct recall.
+    """
+    if not results or not session_id:
+        return results
+    try:
+        from superlocalmemory.core.working_memory import peek
+
+        wm = peek(profile_id, session_id)
+        if wm is None:
+            return results
+        held = wm.boost_set()
+        if not held:
+            return results
+
+        adjusted = []
+        for r in results:
+            fact = getattr(r, "fact", None)
+            if fact is None or fact.fact_id not in held:
+                adjusted.append(r)
+                continue
+            adjusted.append(replace(
+                r,
+                ranking_score=float(r.ranking_score or r.score) + WM_MAX_BONUS,
+            ))
+        # Same ordering key as the outcome bonus, so the two compose instead of
+        # one silently overwriting the other's sort.
+        adjusted.sort(key=_rank_key)
+        return adjusted
+    except Exception as exc:  # pragma: no cover — advisory, never fatal
+        logger.debug("working-memory bias skipped: %s", exc)
+        return results
+
+
+def _admit_to_working_memory(
+    results: list, profile_id: str, session_id: str,
+) -> None:
+    """Remember what this answer showed, so the next turn is not cold.
+
+    Runs last, on the order the caller will actually see. Admitting the
+    pre-rerank order would teach the session something it was never shown.
+    """
+    if not results or not session_id:
+        return
+    try:
+        from superlocalmemory.core.working_memory import ADMIT_TOP_N, get_or_create
+
+        shown = [
+            r.fact.fact_id for r in results[:ADMIT_TOP_N]
+            if getattr(r, "fact", None) is not None and r.fact.fact_id
+        ]
+        if shown:
+            get_or_create(profile_id, session_id).admit(shown)
+    except Exception as exc:  # pragma: no cover — advisory, never fatal
+        logger.debug("working-memory admit skipped: %s", exc)
 
 
 def apply_v2_bandit_ensemble(
@@ -915,6 +1018,7 @@ def run_recall(
     mode: Mode | None = None,
     limit: int = 20,
     agent_id: str = "unknown",
+    session_id: str | None = None,
     *,
     config: SLMConfig,
     retrieval_engine: Any,
@@ -1073,6 +1177,17 @@ def run_recall(
     except Exception as exc:
         logger.debug("Ranking pipeline skipped: %s", exc)
 
+    # Continuity of attention, applied after every learned layer and outside
+    # the ranking-version switch: a session's recent memories bias this answer
+    # whether or not the bandit and the model are enabled, because they are
+    # unrelated features and coupling them would make one disappear with the
+    # other. In-process only — no query is added to the recall path.
+    _sid = session_id or ""
+    if _sid and response.results:
+        response.results = _apply_working_memory_bias(
+            response.results, profile_id, _sid,
+        )
+
     _preserve_exact_lexical_evidence(response, query)
     _mark("learning+ranking")
     # Deliberately no trust, Fisher, retention, lifecycle, popularity, or graph
@@ -1085,6 +1200,11 @@ def run_recall(
     # LLD-00 §3 — stamp HMAC markers on every result so post_tool_outcome_hook
     # can validate fact_ids observed in downstream tool output.
     _apply_markers_to_response(response)
+
+    # Last, on the order the caller receives, so the next turn of this session
+    # starts from what was actually shown.
+    if _sid:
+        _admit_to_working_memory(response.results, profile_id, _sid)
 
     _mark("TOTAL(fisher+trust+markers)")
     return response
