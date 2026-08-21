@@ -72,6 +72,10 @@ CREATE INDEX IF NOT EXISTS idx_engagement_profile_metric
 """
 
 
+
+from superlocalmemory.learning.signal_kinds import FEEDBACK_ONLY_SQL
+
+
 class LearningDatabase:
     """Persistent storage for the adaptive ranker's training pipeline.
 
@@ -182,7 +186,8 @@ class LearningDatabase:
         conn = self._connect()
         try:
             row = conn.execute(
-                "SELECT COUNT(*) AS cnt FROM learning_signals WHERE profile_id = ?",
+                "SELECT COUNT(*) AS cnt FROM learning_signals "
+                f"WHERE profile_id = ?{FEEDBACK_ONLY_SQL}",
                 (profile_id,),
             ).fetchone()
             return int(row["cnt"]) if row else 0
@@ -364,15 +369,22 @@ class LearningDatabase:
     # ------------------------------------------------------------------
 
     def count_signals(self, profile_id: str) -> int:
-        """Count ``learning_signals`` rows for ``profile_id``.
+        """Count FEEDBACK rows in ``learning_signals`` for ``profile_id``.
 
         Used by ``_compute_ranker_phase`` + consolidation_worker training
         gate. Pure SELECT — thread-safe without lock.
+
+        Exposure rows are excluded. This counted every row until 4.1.0, which
+        on a live store meant 5,352 instead of 2 — a 2,675x inflation that
+        held the ranker in Phase 3 on two feedback events. See
+        ``learning/signal_kinds.py`` for why the predicate excludes exposures
+        rather than naming feedback kinds.
         """
         conn = self._connect()
         try:
             row = conn.execute(
-                "SELECT COUNT(*) AS cnt FROM learning_signals WHERE profile_id = ?",
+                "SELECT COUNT(*) AS cnt FROM learning_signals "
+                f"WHERE profile_id = ?{FEEDBACK_ONLY_SQL}",
                 (profile_id,),
             ).fetchone()
             return int(row["cnt"]) if row else 0

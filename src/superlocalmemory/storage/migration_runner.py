@@ -160,6 +160,12 @@ from superlocalmemory.storage.migrations import (
     M042_correction_case_ledger as _M042,
 )
 from superlocalmemory.storage.migrations import (
+    M044_play_carries_its_own_evidence as _M044,
+)
+from superlocalmemory.storage.migrations import (
+    M045_fact_outcome_score as _M045,
+)
+from superlocalmemory.storage.migrations import (
     M043_quarantine_display_summaries as _M043,
 )
 from superlocalmemory.storage._schema_version import (
@@ -252,6 +258,13 @@ MIGRATIONS: list[Migration] = [
     # contains identifiers only and does not alter temporal fact state.
     Migration(name=_M042.NAME, db_target="memory", ddl=_M042.DDL,
               dependencies=(_M032.NAME,)),
+    # M044 lets a bandit play record which memories it showed, so the reward
+    # proxy can settle it from evidence instead of always falling through to
+    # the 120-second neutral default. Additive column on M005's bandit_plays,
+    # and eager on purpose: nothing bootstraps that table at engine init, so
+    # there is no reason to defer it.
+    Migration(name=_M044.NAME, db_target="learning", ddl=_M044.DDL,
+              dependencies=(_M005.NAME,)),
     # M006 + M011 are deliberately NOT here — see DEFERRED_MIGRATIONS below.
 ]
 
@@ -323,6 +336,12 @@ DEFERRED_MIGRATIONS: list[Migration] = [
     # store is recoverable.
     Migration(name=_M043.NAME, db_target="memory", ddl=_M043.DDL,
               dependencies=(_M011.NAME,)),
+    # M045 holds the per-fact outcome score. Deferred because its backfill
+    # reads action_outcomes, which engine init bootstraps — the same reason
+    # M006 and M011 are deferred. Depends on M006 for the reward column it
+    # averages.
+    Migration(name=_M045.NAME, db_target="memory", ddl=_M045.DDL,
+              dependencies=(_M006.NAME,)),
 ]
 
 

@@ -410,7 +410,10 @@ def test_retrain_wall_time_capped_30s(
                 {"query_id": "q1", "fact_id": f"f{i}", "position": i,
                  "features": {n: 0.0 for n in cw_mod._feature_names()},
                  "outcome_reward": float(i % 2)}
-                for i in range(40)
+                # 120 rows so 60 carry a non-neutral reward — above
+                # MIN_INFORMATIVE_LABELS. This test is about the wall-time
+                # cap; the count only has to clear the retrain gate.
+                for i in range(120)
             ],
             ["cand"],
         ),
@@ -466,7 +469,10 @@ def test_candidate_not_auto_promoted(
                 {"query_id": "q1", "fact_id": f"f{i}", "position": i,
                  "features": {n: 0.0 for n in cw_mod._feature_names()},
                  "outcome_reward": 1.0}
-                for i in range(30)
+                # Above MIN_INFORMATIVE_LABELS: this test is about a
+                # candidate NOT being auto-promoted, not about how much
+                # label signal exists.
+                for i in range(60)
             ],
             ["cand"],
         ),

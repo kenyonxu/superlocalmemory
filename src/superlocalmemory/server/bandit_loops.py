@@ -68,19 +68,35 @@ async def _reward_proxy_loop(
     interval_sec: float,
 ) -> None:
     """Run the proxy settler on a steady interval. Never raises."""
+    from superlocalmemory.learning.reward_from_outcomes import (
+        settle_from_outcomes,
+    )
     from superlocalmemory.learning.reward_proxy import settle_stale_plays
 
     while True:
         try:
             await asyncio.sleep(interval_sec)
+            # Reported outcomes FIRST. The proxy defaults a play once its
+            # window closes; if it ran first it would claim every play and a
+            # real outcome arriving later would find nothing to settle.
+            real = await asyncio.to_thread(
+                settle_from_outcomes,
+                profile_id, learning_db, memory_db,
+            )
             # The settler is synchronous + fast; run in a thread to avoid
             # blocking the event loop on unusual DB lock stalls.
             n = await asyncio.to_thread(
                 settle_stale_plays,
                 profile_id, learning_db, memory_db,
             )
+            # INFO, not DEBUG, when a real outcome moved an arm: this is the
+            # only line that distinguishes a learning loop that is running
+            # from one that merely starts. Its absence for a month is what
+            # made this defect invisible.
+            if real:
+                logger.info("bandit settled %d play(s) from outcomes", real)
             if n:
-                logger.debug("bandit.reward_proxy settled=%d", n)
+                logger.debug("bandit.reward_proxy settled=%d (default)", n)
         except asyncio.CancelledError:  # pragma: no cover — lifecycle
             raise
         except Exception as exc:  # pragma: no cover — defensive

@@ -295,6 +295,13 @@ class TestBM25FTS5Path:
     def test_fts5_negates_bm25_and_preserves_order(self):
         # FTS5 bm25() returns negative (lower=better). Channel must negate to
         # higher=better and keep the DB's ORDER BY rank ordering.
+        #
+        # The raw negated value is no longer what the channel returns: scores
+        # are mapped through a saturating transform into [0, 1) so that
+        # apply_channel_weights — which SUMS channel scores — is not dominated
+        # by BM25's unbounded scale. Order and sign are exactly what this test
+        # was written to protect and are asserted directly; the magnitudes are
+        # pinned to the transform so a change to it has to be deliberate.
         rows = [
             {"fact_id": "f1", "rank": -23.6},
             {"fact_id": "f2", "rank": -16.8},
@@ -302,7 +309,19 @@ class TestBM25FTS5Path:
         ]
         ch = BM25Channel(self._fts_db(rows))
         out = ch.search("context injection", "default", top_k=10)
-        assert out == [("f1", 23.6), ("f2", 16.8), ("f3", 5.1)]
+
+        assert [fid for fid, _ in out] == ["f1", "f2", "f3"], (
+            "the DB's rank ordering was not preserved"
+        )
+        scores = [s for _, s in out]
+        assert all(s > 0.0 for s in scores), "negation to higher=better is gone"
+        assert all(s < 1.0 for s in scores), "a score reached certainty"
+        assert scores[0] > scores[1] > scores[2], "order broken by rescaling"
+
+        from superlocalmemory.retrieval.bm25_channel import _BM25_SATURATION
+
+        for raw, got in zip((23.6, 16.8, 5.1), scores):
+            assert got == pytest.approx(raw / (raw + _BM25_SATURATION))
 
     def test_fts5_empty_tokens_returns_empty(self):
         ch = BM25Channel(self._fts_db([]))

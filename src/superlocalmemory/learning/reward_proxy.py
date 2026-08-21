@@ -27,6 +27,7 @@ Hard rules:
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -76,16 +77,60 @@ def _fetch_unsettled(
     now: datetime,
 ) -> list[sqlite3.Row]:
     try:
-        return learning_conn.execute(
-            "SELECT play_id, query_id, played_at, stratum "
-            "FROM bandit_plays "
-            "WHERE profile_id = ? AND settled_at IS NULL "
-            "ORDER BY played_at ASC LIMIT 500",
-            (profile_id,),
-        ).fetchall()
+        # shown_fact_ids arrives with M044; the NULL alias keeps this working
+        # on a store where it has not run yet.
+        for columns in (
+            "play_id, query_id, played_at, stratum, shown_fact_ids",
+            "play_id, query_id, played_at, stratum, NULL AS shown_fact_ids",
+        ):
+            try:
+                return learning_conn.execute(
+                    f"SELECT {columns} FROM bandit_plays "
+                    "WHERE profile_id = ? AND settled_at IS NULL "
+                    "ORDER BY played_at ASC LIMIT 500",
+                    (profile_id,),
+                ).fetchall()
+            except sqlite3.Error:
+                continue
+        return []
     except sqlite3.Error as exc:
         logger.debug("reward_proxy: fetch_unsettled: %s", exc)
         return []
+
+
+def _shown_fact_ids(
+    learning_conn: sqlite3.Connection,
+    play_id: int,
+) -> list[str]:
+    """The fact_ids this play recorded at recall time (M044), or [].
+
+    Preferred over the ``learning_signals`` lookup below because it does not
+    depend on the exposure enqueue, which is off: twenty rows per query, and
+    the source of a 2,675x inflation in the ranking-phase counter. With no
+    signals rows there was nothing to look for, so every play settled as the
+    120-second default and 165 arms sat at alpha == beta.
+
+    Returns [] on a store where M044 has not run — "no such column" is an
+    ``sqlite3.Error`` and is caught, so an unmigrated install falls back to the
+    old lookup rather than losing settlement entirely.
+    """
+    try:
+        row = learning_conn.execute(
+            "SELECT shown_fact_ids FROM bandit_plays WHERE play_id = ?",
+            (int(play_id),),
+        ).fetchone()
+    except sqlite3.Error:
+        return []
+    raw = (row[0] if row else None) or ""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(f) for f in parsed[:3] if f]
 
 
 def _top3_fact_ids(
@@ -95,6 +140,8 @@ def _top3_fact_ids(
     """Return up to 3 fact_ids for this query_id ordered by position ASC.
 
     Returns [] if learning_signals is missing or has no rows for this qid.
+    Kept as the fallback for plays written before M044 and for installs that
+    do run the exposure enqueue.
     """
     try:
         rows = learning_conn.execute(
@@ -281,6 +328,31 @@ def _extract_query(payload_json: str | None) -> str:
     return ""
 
 
+def _default_deadline(
+    learning_conn: sqlite3.Connection, play: sqlite3.Row,
+) -> float:
+    """Age in seconds at which this play may be defaulted to 0.5.
+
+    120 s for a play that recorded nothing — no evidence can ever arrive for
+    it, so holding it open buys nothing but an unsettled row.
+
+    Longer for a play that recorded which memories it showed (M044), because a
+    reported outcome CAN settle it and two minutes is not long enough for
+    anyone to decide whether an answer helped. Defaulting first would make the
+    neutral fallback win a race it should not be in — which is how 1,405
+    consecutive plays came to apply exactly 0.5.
+    """
+    try:
+        from superlocalmemory.learning.reward_from_outcomes import GRACE_SEC
+    except Exception:  # pragma: no cover — defensive
+        return float(_MAX_AGE_SEC)
+    try:
+        shown = play["shown_fact_ids"]
+    except (IndexError, KeyError):
+        return float(_MAX_AGE_SEC)
+    return max(float(_MAX_AGE_SEC), GRACE_SEC) if shown else float(_MAX_AGE_SEC)
+
+
 def settle_stale_plays(
     profile_id: str,
     db_path: Path | str,
@@ -315,7 +387,12 @@ def settle_stale_plays(
             if age < _MIN_AGE_SEC:
                 continue  # not yet settleable
 
-            top3 = _top3_fact_ids(learning_conn, row["query_id"])
+            # The play's own record first; the signals table only as a
+            # fallback for rows written before M044.
+            top3 = (
+                _shown_fact_ids(learning_conn, row["play_id"])
+                or _top3_fact_ids(learning_conn, row["query_id"])
+            )
             reward: float | None = None
             kind = "default"
             if memory_conn is not None and _tool_event_hit(
@@ -328,8 +405,8 @@ def settle_stale_plays(
             ):
                 reward = 0.0
                 kind = "proxy_requery"
-            elif age > _MAX_AGE_SEC:
-                # P1: uncertain default after 120 s window closes.
+            elif age > _default_deadline(learning_conn, row):
+                # P1: uncertain default once the window closes.
                 reward = 0.5
                 kind = "default"
             else:

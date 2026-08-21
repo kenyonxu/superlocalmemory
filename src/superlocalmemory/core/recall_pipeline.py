@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+from dataclasses import replace
 import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -253,6 +254,8 @@ def _behavioral_entities(results: list[Any], limit: int = 20) -> list[str]:
 _RANKING_MODES: frozenset[str] = frozenset({"off", "v1", "v2", "v2-ensemble"})
 
 
+from superlocalmemory.learning.signal_kinds import FEEDBACK_ONLY_SQL
+
 class _ReadOnlyLearningView:
     """Minimal learning-model reader that cannot initialise or mutate a DB."""
 
@@ -271,11 +274,19 @@ class _ReadOnlyLearningView:
         return connection
 
     def count_signals(self, profile_id: str) -> int:
+        """Count FEEDBACK rows only — an exposure is not feedback.
+
+        Must agree with ``LearningDatabase.count_signals``: a phase resolved
+        from one of these is compared against a threshold resolved from the
+        other, so a difference between them is a phase that flickers. Both
+        share ``FEEDBACK_ONLY_SQL``; a test asserts neither carries its own
+        copy of the predicate.
+        """
         connection = self._connection()
         try:
             row = connection.execute(
                 "SELECT COUNT(*) AS count FROM learning_signals "
-                "WHERE profile_id = ?",
+                f"WHERE profile_id = ?{FEEDBACK_ONLY_SQL}",
                 (profile_id,),
             ).fetchone()
             return int(row["count"]) if row else 0
@@ -348,6 +359,7 @@ def apply_ranking(
     config: Any = None,
     pipeline_version: str = "v2-ensemble",
     record_signals: bool = False,
+    record_plays: bool = True,
 ) -> "RecallResponse":
     """Run the ranking pipeline at the requested version.
 
@@ -383,6 +395,7 @@ def apply_ranking(
         response = apply_v2_bandit_ensemble(
             response, query, profile_id, query_id,
             record_signals=record_signals,
+            record_plays=record_plays,
         )
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("apply_ranking ensemble step skipped: %s", exc)
@@ -605,6 +618,76 @@ def apply_v2_adaptive_ranking(
 # ---------------------------------------------------------------------------
 
 
+def _apply_outcome_bonus(results: list, profile_id: str) -> list:
+    """Nudge ranking by whether each memory has demonstrably helped before.
+
+    Bounded to ``pcos.MAX_BONUS`` (0.15) and weighted by how often the fact has
+    actually settled, so history breaks ties between similar-looking memories
+    and cannot drag a poor match to the top.
+
+    Order is recomputed here rather than left to the caller: a bonus that does
+    not reorder anything is a number nobody reads, which is the failure mode
+    this whole wave exists to fix.
+
+    Never raises. On a store where M045 has not run, ``fetch_scores`` returns
+    ``{}`` and this is the identity function.
+    """
+    if not results:
+        return results
+    try:
+        import sqlite3 as _sq
+
+        from superlocalmemory.infra.data_root import state_path
+        from superlocalmemory.learning.pcos import (
+            RECENT_TOPS,
+            bonus_for,
+            fetch_scores,
+        )
+
+        ids = [r.fact.fact_id for r in results if getattr(r, "fact", None)]
+        if not ids:
+            return results
+        conn = _sq.connect(
+            f"file:{state_path('memory.db')}?mode=ro", uri=True, timeout=0.5,
+        )
+        try:
+            scores = fetch_scores(conn, profile_id, ids)
+        finally:
+            conn.close()
+        if not scores:
+            return results
+
+        adjusted = []
+        for r in results:
+            entry = scores.get(r.fact.fact_id)
+            if not entry:
+                adjusted.append(r)
+                continue
+            # A fact that has been winning first place lately stops EARNING the
+            # bonus. It keeps everything retrieval gave it — the alternative in
+            # the alternative was a 10x demotion, which would bury a memory whose only
+            # offence is having been useful.
+            if RECENT_TOPS.capped(profile_id, r.fact.fact_id):
+                adjusted.append(r)
+                continue
+            delta = bonus_for(*entry)
+            if delta == 0.0:
+                adjusted.append(r)
+                continue
+            adjusted.append(replace(
+                r, ranking_score=float(r.ranking_score or r.score) + delta,
+            ))
+        adjusted.sort(
+            key=lambda r: (-(r.ranking_score or 0.0), r.fact.fact_id),
+        )
+        if adjusted:
+            RECENT_TOPS.record_top(profile_id, adjusted[0].fact.fact_id)
+        return adjusted
+    except Exception as exc:  # pragma: no cover — advisory, never fatal
+        logger.debug("outcome bonus skipped: %s", exc)
+        return results
+
+
 def apply_v2_bandit_ensemble(
     response: RecallResponse,
     query: str,
@@ -613,8 +696,31 @@ def apply_v2_bandit_ensemble(
     *,
     learning_db_path: Any = None,
     record_signals: bool = False,
+    record_plays: bool = True,
 ) -> RecallResponse:
-    """Apply contextual bandit + optional LGBM ensemble rerank. Safe on error."""
+    """Apply contextual bandit + optional LGBM ensemble rerank. Safe on error.
+
+    ``record_signals`` and ``record_plays`` are separate because they are
+    separate things, and conflating them is what stopped the bandit learning.
+
+    * A **play** is "the bandit chose arm X for this query". It carries no
+      reward — ``bandit_plays.reward`` stays NULL until an authenticated
+      outcome settles it. One INSERT.
+    * A **signal** is an exposure row per displayed fact, twenty per query. Those
+      are what inflated the ranking-phase counter 2,675x, and the enqueue also
+      writes canonical/learning state, which is the contention the comment
+      below describes.
+
+    ``record_signals=False`` was hardcoded at the only caller on 2026-07-27
+    (commit ``cbf7929f``, release 3.8.6). That is the same day
+    ``MAX(bandit_arms.last_played_at)`` stops. It took the play recording down
+    with the exposure enqueue, so nothing was ever written for the reward proxy
+    to settle, and 165 arms have sat at alpha == beta ever since.
+
+    Recording a play is not feedback. It is the ticket the settlement path
+    later resolves against evidence, and without it there is no learning loop
+    at all.
+    """
     import os as _os
 
     if _os.environ.get("SLM_BANDIT_DISABLED", "0") == "1":
@@ -651,9 +757,13 @@ def apply_v2_bandit_ensemble(
             "query_type": response.query_type,
             "entity_count": entity_count,
         }
+        # Record the play unless explicitly told not to. ``choose_readonly``
+        # samples the same arm from a read-only snapshot and returns
+        # ``play_id=None``, so taking that branch means this query can never be
+        # settled and the arm can never move off its prior.
         choice = (
             bandit.choose(context, query_id)
-            if record_signals
+            if record_plays
             else bandit.choose_readonly(context)
         )
 
@@ -688,10 +798,35 @@ def apply_v2_bandit_ensemble(
             logger.debug("v2 bandit ensemble_rerank skipped: %s", exc)
             final_results = weighted
 
+        # --- 4b. outcome bonus -------------------------------------------
+        # Applied AFTER the model score, never as a model feature. The wave
+        # plan proposed adding "outcome_score" to FEATURE_NAMES for inference
+        # and excluding it from training; that is a shape mismatch —
+        # booster.predict needs the columns the model was trained on, and
+        # features.py asserts len(FEATURE_NAMES) == FEATURE_DIM == 20 against a
+        # live 20-feature model. Applying it here also makes it
+        # true by construction: the model cannot learn from a signal it
+        # never sees, so there is no self-reinforcing loop to exclude.
+        final_results = _apply_outcome_bonus(final_results, profile_id)
+
+        # Give the play its evidence: which memories this query actually
+        # surfaced, so the reward proxy can settle it from a downstream
+        # reference instead of falling through to the neutral default. Written
+        # after the rerank because that is when the shown order is final.
+        if choice.play_id:
+            try:
+                bandit.record_shown(
+                    choice.play_id, [r.fact.fact_id for r in final_results[:5]],
+                )
+            except Exception as exc:  # pragma: no cover — never break a recall
+                logger.debug("v2 bandit record_shown skipped: %s", exc)
+
         # Recall is a query.  Implicit learning signals are deliberately
         # disabled on this path: even a non-blocking enqueue eventually writes
         # canonical/learning state and turns dashboard polling into contention.
         # An explicit feedback command owns durable learning signals instead.
+        # NOTE: this gates the twenty-row exposure enqueue ONLY. The play above
+        # is recorded regardless — see this function's docstring.
         if record_signals:
             try:
                 top20 = final_results[:20]

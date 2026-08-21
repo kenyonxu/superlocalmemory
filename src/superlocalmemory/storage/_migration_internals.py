@@ -156,6 +156,12 @@ from superlocalmemory.storage.migrations import (
 from superlocalmemory.storage.migrations import (
     M043_quarantine_display_summaries as _M043,
 )
+from superlocalmemory.storage.migrations import (
+    M044_play_carries_its_own_evidence as _M044,
+)
+from superlocalmemory.storage.migrations import (
+    M045_fact_outcome_score as _M045,
+)
 
 # Emit under the runner's logger name so operational log filters that key on
 # "superlocalmemory.storage.migration_runner" keep matching after this split.
@@ -207,6 +213,8 @@ _MODULES = {
     _M041.NAME: _M041,
     _M042.NAME: _M042,
     _M043.NAME: _M043,
+    _M044.NAME: _M044,
+    _M045.NAME: _M045,
 }
 
 # Exact historical DDL fingerprints whose resulting schema is intentionally

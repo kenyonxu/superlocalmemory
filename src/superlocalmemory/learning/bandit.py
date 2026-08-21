@@ -22,6 +22,7 @@ All SQL is parameterised — grep guard in CI ensures no f-string SQL here.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -30,6 +31,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 from superlocalmemory.learning.arm_catalog import ARM_CATALOG
@@ -39,6 +41,11 @@ from superlocalmemory.learning.bandit_cache import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: How many shown fact_ids a play records. The settler reads the top 3; the
+#: extra two are headroom for a reranker that reorders after the play is
+#: written, and a bound so this cannot become an unread blob on a hot path.
+_SHOWN_FACT_LIMIT = 5
 
 _FALLBACK_ARM_ID = "fallback_default"
 
@@ -401,6 +408,42 @@ class ContextualBandit:
         except Exception:  # pragma: no cover — defensive
             pass
         return True
+
+    def record_shown(self, play_id: int, fact_ids: Sequence[str]) -> bool:
+        """Record which memories this play surfaced, for later settlement.
+
+        A play is settled from evidence — did anything downstream reference a
+        memory this query returned? The settler used to answer "which memories"
+        by reading ``learning_signals`` for the same ``query_id``, and those
+        rows are written by an enqueue that is deliberately off (it costs twenty
+        rows per query and inflated the ranking-phase counter 2,675x). With no
+        evidence to look for, every settlement fell through to the 120-second
+        neutral default of 0.5, which is why 165 arms all read alpha == beta.
+
+        So the play carries its own evidence. Best-effort by design: the reward
+        is a nicety and a recall is not. A failure here means this one play
+        settles as ``default``, exactly as before.
+
+        Bounded to the first few ids because the settler only ever reads the
+        top of the list, and an unbounded JSON blob on the recall path is a
+        write cost with no reader.
+        """
+        if not play_id:
+            return False
+        ids = [str(f) for f in list(fact_ids)[:_SHOWN_FACT_LIMIT] if f]
+        if not ids:
+            return False
+        try:
+            conn = _conn_for(self._db_path)
+            conn.execute(
+                "UPDATE bandit_plays SET shown_fact_ids = ? WHERE play_id = ?",
+                (json.dumps(ids), int(play_id)),
+            )
+            return True
+        except sqlite3.Error as exc:
+            # Includes "no such column" on a store where M044 has not run.
+            logger.debug("bandit.record_shown: %s", exc)
+            return False
 
     # ------------------------------------------------------------------
     # snapshot (for dashboard — LLD-04 consumer)

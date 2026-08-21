@@ -54,6 +54,65 @@ def tokenize(text: str) -> list[str]:
     return [t for t in tokens if t not in _STOPWORDS]
 
 
+#: Saturation constant for the BM25 -> [0,1) transform. Chosen from measurement,
+#: not taste: raw scores on a live store run ~2.5 to ~15 across query
+#: lengths, so k = 5 puts an ordinary match near 0.4 and a strong one near 0.7,
+#: leaving headroom at both ends rather than pinning everything to one corner.
+_BM25_SATURATION = 5.0
+
+
+def _to_unit_scale(scored: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """Map BM25 scores into [0, 1) without disturbing order or magnitude.
+
+    WHY ANY OF THIS. ``engine.apply_channel_weights`` re-scores a candidate as
+    ``sum(channel_scores[ch] * weights[ch])`` — a SUM of raw channel scores.
+    Every other channel is bounded: semantic cosine and Fisher-Rao are [0, 1],
+    the temporal proximity score is Gaussian on [0, 1]. BM25 is not. Measured on
+    a live store, one query at a time::
+
+        "slm release"                                    max  2.845
+        "memory"                                         max  3.865
+        "the release ships once both audits are clean"    max 10.150
+
+    So the sum was decided by a scale rather than by evidence, and any weight
+    the bandit converged on was a correction for that scale — wrong the moment
+    the query length changed.
+
+    WHY NOT DIVIDE BY THE BATCH MAXIMUM. That was the first implementation here
+    and it is wrong, which an existing test caught before it shipped:
+    ``test_real_fts5_exact_hit_keeps_bounded_slot`` exists to prove *"a real
+    sub-1.0 FTS5 hit remains visible under semantic pressure"*. Dividing by the
+    batch maximum makes the best result exactly 1.0 **whatever it scored**, so a
+    query with one weak lexical match reports full confidence and outranks a
+    semantic channel it should lose to. Batch-relative scaling manufactures
+    confidence out of an empty batch, and it also makes a fact's score depend on
+    which other facts happened to come back — the same query returning a
+    different number on a different day, which HARD-RULES RULE 6 puts above
+    speed.
+
+    A saturating transform has neither problem: ``s / (s + k)`` is strictly
+    increasing, so order is untouched; it is bounded below 1.0, so nothing is
+    ever certain; and it depends only on the score itself, so it is repeatable.
+    Applied to the measurements above: 2.676 -> 0.35, 2.845 -> 0.36,
+    3.865 -> 0.44, 10.150 -> 0.67.
+
+    FUSION IS UNAFFECTED, verified by reading ``fusion.weighted_rrf`` rather
+    than assuming: it computes ``fused += w / (k + rank)`` and keeps the score
+    only for reporting. Rescaling a value nothing divides by cannot move a
+    fused rank.
+
+    Non-positive scores map to 0.0. FTS5's ``bm25()`` is <= 0 and is negated
+    here, so a value at or below zero means "no lexical evidence", and that is
+    what it should contribute to a sum.
+    """
+    if not scored:
+        return scored
+    return [
+        (fid, (s / (s + _BM25_SATURATION)) if s > 0.0 else 0.0)
+        for fid, s in scored
+    ]
+
+
 class BM25Channel:
     """Persistent BM25Plus index for keyword retrieval.
 
@@ -300,10 +359,10 @@ class BM25Channel:
         # Falls back to rank_bm25 ONLY if the FTS5 table is genuinely
         # unavailable (raises) — e.g. a pre-FTS legacy DB.
         try:
-            return self._fts5_search(
+            return _to_unit_scale(self._fts5_search(
                 query, profile_id, top_k,
                 include_global=include_global, include_shared=include_shared,
-            )
+            ))
         except Exception as exc:  # pragma: no cover — legacy/missing FTS table
             logger.debug(
                 "BM25 FTS5 path unavailable, using rank_bm25 fallback: %s", exc,
@@ -338,7 +397,9 @@ class BM25Channel:
                 scored.append((self._fact_ids[i], bonus))
 
         scored.sort(key=lambda x: (-x[1], x[0]))
-        return scored[:top_k]
+        # Same rescale as the FTS5 path. This fallback applies a 1.5x exact
+        # phrase bonus, so its raw ceiling is higher still.
+        return _to_unit_scale(scored[:top_k])
 
     def update_fact(self, fact_id: str, new_content: str, profile_id: str) -> None:
         """Replace a fact's representation in the live index and persist new tokens.

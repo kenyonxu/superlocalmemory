@@ -139,7 +139,11 @@ _EXPECTED_SCHEMA_VERSION: int = 42
 #: for them — the behaviour the owner downgraded away from — but that is what
 #: downgrading means. Bumping the ceiling would instead make the older build
 #: refuse the store outright and strand anyone who needed to go back.
-_EXPECTED_MIGRATION_COUNT: int = 42
+# 44 as of 4.1.0: +M044_play_carries_its_own_evidence (learning.db,
+# bandit_plays.shown_fact_ids) and +M045_fact_outcome_score (memory.db, the
+# per-fact outcome score). Both additive columns/tables; neither rewrites an
+# existing row, so 4.0.5 forward-compat is unaffected.
+_EXPECTED_MIGRATION_COUNT: int = 44
 
 #: Path to an installed reference package's migrations directory, if one exists.
 #:
