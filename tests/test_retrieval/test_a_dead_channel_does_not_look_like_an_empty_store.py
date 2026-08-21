@@ -280,3 +280,75 @@ def test_a_response_without_the_field_still_serialises():
 
     meta = recall_response_metadata(_Legacy())
     assert meta["channel_status"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Statuses that must not be confused with each other
+# ---------------------------------------------------------------------------
+
+def test_an_ablated_profile_channel_is_reported_as_ablated(engine_with_mock_deps):
+    """Switching a channel off must not read as the channel finding nothing.
+
+    The profile channel ignored the ablation flag entirely: it still searched,
+    still doubled its own weight on a hit, and reported `ok` or `empty`. An
+    operator comparing that against their own configuration would be told their
+    setting had no effect — and could not tell it from a live channel that had
+    nothing to say.
+    """
+    from tests.conftest import force_sync_enrichment
+
+    engine = force_sync_enrichment(engine_with_mock_deps)
+    engine.store("The build cache lives on the Frankfurt runner.")
+
+    retrieval = engine._retrieval_engine
+    retrieval._config.disabled_channels = list(
+        retrieval._config.disabled_channels) + ["profile"]
+    try:
+        response = engine.recall("build cache")
+    finally:
+        retrieval._config.disabled_channels = [
+            c for c in retrieval._config.disabled_channels if c != "profile"
+        ]
+
+    assert response.channel_status.get("profile") == chstat.DISABLED
+    assert not chstat.is_fault(response.channel_status["profile"])
+    assert "profile" not in (response.channel_weights or {}) or \
+        response.channel_weights.get("profile") != 2.0, (
+            "an ablated channel still had its weight doubled"
+        )
+
+
+def test_a_channel_with_nothing_to_score_did_not_find_nothing():
+    """"empty" claims a search happened. Some channels never search.
+
+    The graph channel re-scores what the other channels found. With nothing
+    fused it never ran — and if the reason nothing fused is that the others
+    failed, reporting this one as having searched and come back empty hides the
+    actual fault behind a status that `is_fault` calls fine.
+    """
+    assert chstat.NO_CANDIDATES in chstat.ALL_STATUSES
+    assert chstat.NO_CANDIDATES != chstat.EMPTY
+    assert not chstat.is_fault(chstat.NO_CANDIDATES)
+
+
+def test_every_reportable_channel_has_a_status_not_just_the_producers(
+    engine_with_mock_deps,
+):
+    """The earlier version checked only the five dispatched producers.
+
+    `profile` and `entity_graph` are recorded elsewhere in `recall`, so a
+    missing key for either slipped through a check that iterated the producers,
+    and through one that intersected with `channel_weights`.
+    """
+    from tests.conftest import force_sync_enrichment
+
+    engine = force_sync_enrichment(engine_with_mock_deps)
+    engine.store("The build cache lives on the Frankfurt runner.")
+    response = engine.recall("build cache")
+
+    for name in ("profile", "entity_graph"):
+        assert name in response.channel_status, (
+            f"{name} reported no status at all; it is in CHANNEL_NAMES, so a "
+            f"consumer reading the report sees a gap rather than an answer"
+        )
+        assert response.channel_status[name] in chstat.ALL_STATUSES

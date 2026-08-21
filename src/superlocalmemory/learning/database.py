@@ -672,6 +672,19 @@ class LearningDatabase:
                     RECENT_TOPS.forget(profile_id or "")
                 except Exception:  # pragma: no cover — advisory
                     pass
+                # The per-session working set is this profile's data too.
+                # Cleared here as well as in the compliance path, because this
+                # is reached directly — by the transaction owners and by tests —
+                # and a residue left behind goes on biasing any later session
+                # that reuses one of the erased profile's session ids.
+                try:
+                    from superlocalmemory.core.working_memory import (
+                        discard_profile,
+                    )
+
+                    discard_profile(profile_id or "")
+                except Exception:  # pragma: no cover — never block an erasure
+                    pass
                 logger.info(
                     "Learning data reset%s",
                     f" for profile {profile_id}" if profile_id else " (all)",

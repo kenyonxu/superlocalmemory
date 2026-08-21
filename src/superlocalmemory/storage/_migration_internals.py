@@ -255,9 +255,24 @@ def _ddl_hash(ddl: str) -> str:
     return hashlib.sha256(ddl.encode("utf-8")).hexdigest()
 
 
+#: How long a migration waits for a database another process is holding.
+#:
+#: Without this, SQLite raises SQLITE_BUSY the instant a write lock is taken,
+#: and a migration that runs while the daemon happens to be writing is recorded
+#: as failed rather than retried. A migration that rebuilds a table takes an
+#: exclusive lock, so it is exactly the one most likely to collide — and its
+#: failure leaves an upgrade wedged until someone notices.
+#:
+#: Fifteen seconds is longer than any single write this codebase performs and
+#: short enough that a genuinely stuck lock still surfaces as a failure rather
+#: than a hang.
+_MIGRATION_BUSY_TIMEOUT_MS = 15_000
+
+
 def _connect(db_path: Path) -> sqlite3.Connection:
     # isolation_level=None → we manage transactions explicitly via DDL.
     conn = sqlite3.connect(db_path, isolation_level=None)
+    conn.execute(f"PRAGMA busy_timeout = {_MIGRATION_BUSY_TIMEOUT_MS};")
     conn.execute("PRAGMA foreign_keys = OFF;")
     return conn
 

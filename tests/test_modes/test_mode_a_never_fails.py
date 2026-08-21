@@ -48,13 +48,31 @@ def severed_network(monkeypatch):
 
 
 @pytest.fixture
-def mode_a_engine(tmp_path: Path):
+def mode_a_engine(tmp_path: Path, monkeypatch):
+    """Mode A with no model available at all.
+
+    The promise is "no network, no key, NO MODEL", and the last clause is the
+    one worth testing: with an embedder the answer leans on meaning, and the
+    interesting question is what happens when it cannot.
+
+    The embedder is forced absent rather than left to fail on its own, for two
+    reasons. It makes the test deterministic — otherwise the result depends on
+    whether a 2 GB model happens to be cached on the machine running it. And it
+    makes the test fast: loading that model takes minutes by this codebase's own
+    account, which is why an earlier version of this file timed out and looked
+    like a hang in Mode A rather than a slow model load.
+    """
     from superlocalmemory.core.engine import MemoryEngine
 
+    monkeypatch.setattr(
+        "superlocalmemory.core.engine_wiring.init_embedder",
+        lambda config: None,
+    )
     config = SLMConfig.for_mode(Mode.A, base_dir=tmp_path)
     config.retrieval.use_cross_encoder = False
     engine = MemoryEngine(config)
     engine.initialize()
+    assert engine._embedder is None, "the fixture did not remove the embedder"
     yield engine
     engine.close()
 

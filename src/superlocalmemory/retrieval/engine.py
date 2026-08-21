@@ -253,8 +253,19 @@ class RetrievalEngine:
         # each other's report.
         channel_status: dict[str, str] = {}
 
-        # Profile shortcut (runs before channel search)
-        if self._profile_channel is not None:
+        # Profile shortcut (runs before channel search).
+        #
+        # The ablation flag is honoured here too. It was not, so an operator who
+        # switched this channel off still had it searched, still had its weight
+        # doubled on a hit, and read a status of "ok" or "empty" — which reports
+        # their own configuration as a live channel's finding.
+        _profile_disabled = "profile" in set(self._config.disabled_channels) | set(
+            extra_disabled_channels or (),
+        )
+        if _profile_disabled:
+            profile_hits = []
+            channel_status["profile"] = chstat.DISABLED
+        elif self._profile_channel is not None:
             try:
                 profile_hits = self._profile_channel.search(
                     query, profile_id, top_k=10,
@@ -411,9 +422,13 @@ class RetrievalEngine:
         elif "entity_graph" in set(self._config.disabled_channels):
             channel_status["entity_graph"] = chstat.DISABLED
         elif not fused:
-            # Nothing to re-score. Not a fault: this channel scores other
-            # channels' candidates rather than producing its own.
-            channel_status["entity_graph"] = chstat.EMPTY
+            # It did not run, and saying "found nothing" would be a different
+            # claim. This channel re-scores other channels' candidates rather
+            # than producing its own, so with nothing fused there is nothing for
+            # it to do — and if the reason nothing fused is that the other five
+            # failed, reporting this one as having searched and come back empty
+            # hides that.
+            channel_status["entity_graph"] = chstat.NO_CANDIDATES
         else:
             # One chain, evaluated once. Repeating the three conditions to guard
             # the work separately is how a status starts describing a decision

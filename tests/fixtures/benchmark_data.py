@@ -20,7 +20,7 @@ from superlocalmemory.storage.models import (
 )
 
 
-_FACT_TYPES = [FactType.SEMANTIC, FactType.EPISODIC, FactType.OPINION, FactType.TEMPORAL]
+_FACT_TYPES = [FactType.SEMANTIC, FactType.EPISODIC, FactType.OPINION, FactType.PROSPECTIVE]
 
 
 def generate_synthetic_facts(

@@ -174,6 +174,7 @@ from superlocalmemory.storage._schema_version import (
     SchemaVersionError,
     check_version_or_raise as _check_version_or_raise,
     ensure_schema_version_table as _ensure_schema_version_table,
+    read_schema_version as _read_schema_version,
     write_schema_version as _write_schema_version,
 )
 from superlocalmemory.storage._migration_internals import (
@@ -618,6 +619,60 @@ def _deferred_already_applied(conn: sqlite3.Connection, name: str) -> bool:
         return False
 
 
+def _breaking_floor(learning_db: Path, memory_db: Path) -> int:
+    """Highest floor declared by a migration that is recorded complete.
+
+    A migration declares ``BREAKING_VERSION`` when a store it has touched must
+    not be opened by an older build. Only completed ones count: a migration that
+    failed has not changed anything an older build would trip over.
+    """
+    from superlocalmemory.storage._migration_internals import _MODULES
+
+    logs = {"learning": _read_log(learning_db), "memory": _read_log(memory_db)}
+    floor = 0
+    for migration in (*MIGRATIONS, *DEFERRED_MIGRATIONS):
+        module = _MODULES.get(migration.name)
+        declared = getattr(module, "BREAKING_VERSION", 0) if module else 0
+        if not declared:
+            continue
+        if logs.get(migration.db_target, {}).get(migration.name) == "complete":
+            floor = max(floor, int(declared))
+    return floor
+
+
+def _stamp_breaking_floor(
+    learning_db: Path, memory_db: Path, details: dict[str, str],
+) -> None:
+    """Raise the recorded version to the highest completed breaking floor.
+
+    Monotonic: never lowers a stored version, so it cannot undo the completion
+    certificate on an already-current store. Never fatal — a store that cannot
+    be stamped is reported, because failing the whole run here would block an
+    upgrade over a guard that only matters to older builds.
+    """
+    floor = _breaking_floor(learning_db, memory_db)
+    if floor <= 0:
+        return
+    for db_path in (learning_db, memory_db):
+        try:
+            current = _read_schema_version(db_path)
+            if current >= floor:
+                continue
+            conn = _connect(db_path)
+            try:
+                _ensure_schema_version_table(conn)
+                _write_schema_version(conn, floor)
+            finally:
+                try:
+                    conn.close()
+                except sqlite3.Error:  # pragma: no cover
+                    pass
+        except sqlite3.Error as exc:  # pragma: no cover — reported, not fatal
+            details["schema_version_floor"] = (
+                f"cannot raise the floor on {db_path}: {exc}"
+            )
+
+
 def apply_deferred(
     learning_db: Path,
     memory_db: Path,
@@ -721,6 +776,20 @@ def apply_deferred(
                 conn.close()
             except sqlite3.Error:  # pragma: no cover
                 pass
+
+    # A migration that makes the store unusable by an older build declares a
+    # floor, and that floor is written as soon as the migration is recorded
+    # complete — BEFORE and independent of the completion certificate below.
+    #
+    # The certificate is all-or-nothing across both databases by design. That is
+    # right for "is this store fully migrated" and wrong for "may an older build
+    # write to it": an unrelated failure on the other database would otherwise
+    # leave a rebuilt table guarded by the old ceiling, and the first planned
+    # event an older build stored would be rejected by the new constraint and
+    # lost. Raising the floor turns that into a refusal to start, which is what
+    # the ceiling is for.
+    if not dry_run:
+        _stamp_breaking_floor(learning_db, memory_db, details)
 
     # The version ceiling is a completion certificate, not an intent marker.
     # M039 is deferred until engine-owned tables exist, so apply_all must not

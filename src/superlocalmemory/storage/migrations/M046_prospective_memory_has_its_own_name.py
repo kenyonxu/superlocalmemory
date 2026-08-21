@@ -71,6 +71,22 @@ logger = logging.getLogger(__name__)
 NAME = "M046_prospective_memory_has_its_own_name"
 DB_TARGET = "memory"
 
+#: A store this migration has touched must not be opened by a build whose
+#: ceiling is below this.
+#:
+#: Declared per-migration rather than left to the runner's end-of-run stamp,
+#: because that stamp is a completion certificate: it is written only when EVERY
+#: migration on BOTH databases is recorded complete. So an unrelated failure
+#: elsewhere — a deferred migration on the learning database, say — leaves this
+#: rebuild applied and the ceiling still at the old value. An older build then
+#: passes the guard, opens the store, and its first planned event is rejected by
+#: the new constraint and lost. That is the exact outcome the ceiling exists to
+#: convert into a refusal to start.
+#:
+#: Additive and monotonic: the runner raises the stored version to at least this
+#: and never lowers it.
+BREAKING_VERSION = 46
+
 _TABLE = "atomic_facts"
 _OLD_VALUE = "temporal"
 _NEW_VALUE = "prospective"
@@ -149,6 +165,55 @@ def _dependents(conn: sqlite3.Connection) -> list[str]:
         if sql:
             out.append(str(sql))
     return out
+
+
+def _has_rowid(conn: sqlite3.Connection) -> bool:
+    """Whether this table has a rowid to preserve.
+
+    A ``WITHOUT ROWID`` table has none, and naming it in the copy fails with
+    "no column named rowid" — which rolls back and leaves the migration retrying
+    forever. Asked by trying, for the same reason the constraint is: the answer
+    is a property of the table, not of how its definition was written.
+
+    The shipped schema has a rowid and needs it preserved, because the search
+    index is keyed on it. A store that does not have one cannot have that index
+    either, so there is nothing to keep.
+    """
+    try:
+        conn.execute(f"SELECT rowid FROM {_TABLE} LIMIT 1").fetchone()
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def _fts_exists(conn: sqlite3.Connection) -> bool:
+    try:
+        return conn.execute(
+            "SELECT name FROM sqlite_master WHERE name=?", (_FTS,),
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def _fts_triggers_present(conn: sqlite3.Connection) -> bool:
+    """Whether the table still has triggers feeding the search index.
+
+    The rebuild drops every trigger and replays it. Without them the table and
+    the index drift apart from the next write onwards, which no row count and no
+    constraint check would notice.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='trigger' AND tbl_name=? AND sql LIKE ?",
+            (_TABLE, f"%{_FTS}%"),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if rows is None:
+        return False
+    count = next(iter(rows.values())) if isinstance(rows, dict) else rows[0]
+    return int(count) > 0
 
 
 def _accepts(conn: sqlite3.Connection, value: str) -> bool | None:
@@ -259,6 +324,15 @@ def verify(conn: sqlite3.Connection) -> bool:
     # stops an older writer.
     if _ddl_mentions_old_value(conn):
         return False
+
+    # The triggers that keep the search index in step with the table. Checked
+    # because the rebuild drops and replays them, and a store that ended up
+    # without them is not migrated — it is a store that has silently stopped
+    # indexing anything written since. Only asserted when the index exists at
+    # all: a store without it never had the triggers either.
+    if _fts_exists(conn) and not _fts_triggers_present(conn):
+        return False
+
     accepts_new = _accepts(conn, _NEW_VALUE)
     # None means there was no row to probe with, which on an empty table leaves
     # the definition check above as the whole answer.
@@ -333,6 +407,12 @@ def _rebuild(conn: sqlite3.Connection) -> None:
     if not columns:  # pragma: no cover — defensive
         raise sqlite3.OperationalError(f"M046: {_TABLE} reports no columns")
 
+    # Generated columns are deliberately absent from this list: PRAGMA
+    # table_info does not return them (they appear only in table_xinfo, flagged
+    # hidden), and inserting into one is an error. So a store that has added one
+    # copies correctly without special handling — verified rather than assumed.
+    carries_rowid = _has_rowid(conn)
+
     dependents = _dependents(conn)
     before = _count(conn, f"SELECT COUNT(*) FROM {_TABLE}")
     if before < 0:  # pragma: no cover — defensive
@@ -366,13 +446,21 @@ def _rebuild(conn: sqlite3.Connection) -> None:
         conn.execute(f'DROP TABLE IF EXISTS "{_TABLE}_m046_new"')
         conn.execute(staged)
 
-        # rowid is named on both sides. See the module docstring: the FTS index
-        # is keyed on it and the primary key is TEXT, so letting SQLite assign
-        # fresh ones silently repoints every index entry.
-        conn.execute(
-            f'INSERT INTO "{_TABLE}_m046_new" (rowid, {insert_list}) '
-            f"SELECT rowid, {select_list} FROM {_TABLE}"
-        )
+        # rowid is named on both sides where there is one. See the module
+        # docstring: the FTS index is keyed on it and the primary key is TEXT,
+        # so letting SQLite assign fresh ones silently repoints every index
+        # entry. A WITHOUT ROWID table has none to name, and naming it there
+        # fails the whole rebuild.
+        if carries_rowid:
+            conn.execute(
+                f'INSERT INTO "{_TABLE}_m046_new" (rowid, {insert_list}) '
+                f"SELECT rowid, {select_list} FROM {_TABLE}"
+            )
+        else:
+            conn.execute(
+                f'INSERT INTO "{_TABLE}_m046_new" ({insert_list}) '
+                f"SELECT {select_list} FROM {_TABLE}"
+            )
 
         after = _count(conn, f'SELECT COUNT(*) FROM "{_TABLE}_m046_new"')
         if after != before:
@@ -397,13 +485,18 @@ def _rebuild(conn: sqlite3.Connection) -> None:
         conn.execute(f'ALTER TABLE "{_TABLE}_m046_new" RENAME TO {_TABLE}')
 
         for ddl in dependents:
-            try:
-                conn.execute(ddl)
-            except sqlite3.Error as exc:
-                # An index or trigger that will not rebuild is a real problem,
-                # but it is recoverable by re-running the schema bootstrap; the
-                # converted rows are not recoverable if this rolls back.
-                logger.warning("M046: could not restore %r: %s", ddl[:60], exc)
+            # Fatal, which reverses an earlier judgement here. That judgement
+            # was that losing the converted rows to a rollback would be worse
+            # than a missing index — and it was simply wrong: a rollback loses
+            # NOTHING, because the original table is still sitting there and the
+            # migration will be retried.
+            #
+            # Committing without these is what costs something. Two of the three
+            # replayed statements are the triggers that keep the search index in
+            # step with the table, so a store that commits without them stops
+            # indexing every memory saved from then on. Lexical search quietly
+            # goes blind to new writes, and nothing reports it.
+            conn.execute(ddl)
 
         _rebuild_fts(conn)
         conn.execute("COMMIT")

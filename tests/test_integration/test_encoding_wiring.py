@@ -129,7 +129,12 @@ class TestFactExtractionWiring:
         engine.store("Alice is a software engineer at Google.", session_id="s1")
         rows = _query(engine, "SELECT fact_type FROM atomic_facts WHERE profile_id = 'default'")
         for r in rows:
-            assert r["fact_type"] in ("episodic", "semantic", "opinion", "temporal")
+            # "temporal" was the old name for a planned event and is no longer
+            # written. It stays accepted here because a store migrated mid-run
+            # can still hold rows spelled that way until M046 converts them.
+            assert r["fact_type"] in (
+                "episodic", "semantic", "opinion", "prospective", "temporal",
+            )
 
     def test_embedding_stored(self, engine: MemoryEngine) -> None:
         engine.store("Alice is a software engineer at Google.", session_id="s1")

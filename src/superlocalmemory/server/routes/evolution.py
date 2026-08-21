@@ -404,18 +404,37 @@ def evolution_approve(request: Request, body: ApproveSkillRequest):
             }
 
         actor = "dashboard"
-        activation = SkillActivator().activate(
-            record.skill_name, record.quarantine_dir_name, actor_id=actor,
-        )
 
-        # Both transitions are recorded, not just the end state. "It became
-        # active" and "a person approved it and then it became active" are
-        # different histories, and only the second can be audited.
+        # Approval is recorded BEFORE the file moves, activation after. The
+        # order matters in both directions:
+        #
+        # * recording both afterwards means a successful activation whose log
+        #   write fails leaves the skill live and the record saying it is not —
+        #   so the next approval attempt is allowed, and activating twice
+        #   overwrites the backup that rollback restores from.
+        # * recording both beforehand would claim a mutation is live when the
+        #   file move failed.
+        #
+        # Approved-then-nothing is a state a person can act on. Live-but-unknown
+        # is not.
         store.append_transition(
             body.record_id, profile_id,
             EvolutionStatus(current), EvolutionStatus.APPROVED,
             actor_id=actor, reason="approved by request",
         )
+        try:
+            activation = SkillActivator().activate(
+                record.skill_name, record.quarantine_dir_name, actor_id=actor,
+            )
+        except Exception as exc:
+            # The approval stands and the mutation did not go live. Recorded as
+            # such rather than left dangling.
+            store.append_transition(
+                body.record_id, profile_id,
+                EvolutionStatus.APPROVED, EvolutionStatus.REJECTED,
+                actor_id=actor, reason=f"activation failed: {exc}",
+            )
+            raise
         store.append_transition(
             body.record_id, profile_id,
             EvolutionStatus.APPROVED, EvolutionStatus.ACTIVE,
@@ -443,6 +462,10 @@ def evolution_approve(request: Request, body: ApproveSkillRequest):
 
 class RollbackSkillRequest(BaseModel):
     skill_name: str
+    #: Optional, so the reversal can be recorded against the candidate it
+    #: reverses. Without it the file is restored and the log still says active,
+    #: which reads as "this mutation is live" forever.
+    record_id: str = ""
 
 
 @router.post("/api/evolution/rollback")
@@ -455,9 +478,31 @@ def evolution_rollback(request: Request, body: RollbackSkillRequest):
     """
     _require_manage(request)
     try:
+        from superlocalmemory.evolution.evolution_store import EvolutionStore
         from superlocalmemory.evolution.skill_activator import SkillActivator
+        from superlocalmemory.evolution.types import EvolutionStatus
 
-        return {"success": True, **SkillActivator().rollback(body.skill_name)}
+        result = SkillActivator().rollback(body.skill_name)
+
+        # Record the reversal. A restored file with the log still reading
+        # "active" says the mutation is live when it is not, and that is the
+        # record an audit would read.
+        if body.record_id:
+            try:
+                store = EvolutionStore(str(MEMORY_DIR / "memory.db"))
+                pid = get_active_profile()
+                latest = store.get_latest_status(body.record_id, pid)
+                store.append_transition(
+                    body.record_id, pid,
+                    latest or EvolutionStatus.ACTIVE,
+                    EvolutionStatus.ROLLED_BACK,
+                    actor_id="dashboard", reason="rolled back by request",
+                )
+            except Exception as exc:  # pragma: no cover — the file is restored
+                logger.warning("rollback recorded no transition: %s", exc)
+                result["transition_recorded"] = False
+
+        return {"success": True, **result}
     except FileNotFoundError as exc:
         return {"success": False, "error": f"No backup to restore: {exc}"}
     except Exception:

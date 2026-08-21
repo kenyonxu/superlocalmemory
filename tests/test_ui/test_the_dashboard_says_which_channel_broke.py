@@ -66,8 +66,19 @@ def _render(statuses: dict) -> dict:
     return json.loads(proc.stdout)
 
 
-def test_the_file_exists() -> None:
+def test_the_pane_actually_contains_the_renderer() -> None:
+    """"The file exists" is true of an empty file.
+
+    The assertion that matters is that the thing under test is in it, so that
+    deleting the renderer fails here rather than in whichever test happens to
+    call it next.
+    """
     assert _JS.exists(), f"missing UI JS file: {_JS}"
+    src = _JS.read_text()
+    assert len(src) > 500, f"{_JS} is {len(src)} bytes; that is not the pane"
+    assert "buildChannelHealth" in src, (
+        "the channel-health renderer is gone from the pane"
+    )
 
 
 @_needs_node

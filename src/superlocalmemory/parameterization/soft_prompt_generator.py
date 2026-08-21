@@ -111,77 +111,61 @@ class SoftPromptTemplate:
 # SoftPromptGenerator class
 # ---------------------------------------------------------------------------
 
-#: The technologies a "preferred technology stack" claim is allowed to name.
-#: Assembled from the vocabularies already used to detect them elsewhere, so
-#: there is one list to extend rather than two that drift.
-def _known_technologies() -> frozenset[str]:
-    names: set[str] = set()
+def _empty_words() -> frozenset[str]:
+    """Words that say nothing about a person when listed as a preference.
+
+    Read from the list the miner already filters on, so there is one definition
+    to extend rather than two that drift.
+    """
     try:
-        from superlocalmemory.learning.cross_project import TECH_CATEGORIES
+        from superlocalmemory.learning.pattern_miner_constants import STOPWORDS
 
-        for group in TECH_CATEGORIES.values():
-            names.update(n.lower() for n in group)
-    except Exception:  # pragma: no cover — vocabulary is additive
-        pass
-    try:
-        from superlocalmemory.parameterization.pattern_extractor import (
-            _TECH_KEYWORDS,
-        )
-
-        # The generic members ("tool", "api", "framework") are what let ordinary
-        # prose be classified as a technology preference in the first place, so
-        # they do not count as evidence that a claim names one.
-        generic = {
-            "framework", "library", "language", "database", "tool", "sdk",
-            "api", "node", "go", "java",
-        }
-        names.update(k.lower() for k in _TECH_KEYWORDS if k.lower() not in generic)
-    except Exception:  # pragma: no cover
-        pass
-    return frozenset(names)
+        return frozenset(STOPWORDS)
+    except Exception:  # pragma: no cover — the check degrades to "keep it"
+        return frozenset()
 
 
-_KNOWN_TECHNOLOGIES = _known_technologies()
-
-#: Below this, a value is a fragment rather than a statement.
-_MIN_VALUE_CHARS = 6
+_EMPTY_WORDS = _empty_words()
 
 
 def _is_substantive(category: str, values: dict[str, str]) -> bool:
-    """Whether a rendered prompt actually says something about the user.
+    """Whether a rendered prompt says anything at all about the user.
 
-    Judged on the substituted values, not the finished string: the template
-    supplies most of the words, so a prompt built entirely from junk still reads
-    as fluent prose and looks fine in a log.
+    Deliberately weak, and it got that way by being wrong in the other
+    direction first. The original version required a ``tech_preference`` claim to
+    name something from a fixed vocabulary of technologies — which discarded
+    ``Node.js``, ``Git``, ``pip``, ``npm``, ``zig`` and every stack the list did
+    not happen to enumerate. Those were the GENUINE rows on a live store. A
+    filter that silently drops real preferences to catch fake ones is a worse
+    failure than the one it was added for, because nothing reports it.
 
-    A stopword list was tried first and does not work. The live failing case is
-    "test, gate, practices, compliance, projects, while, their, processing,
-    data" — and "compliance" is a perfectly ordinary word that is simply not a
-    technology. No list of words-to-exclude separates it from "postgres"; only a
-    list of what a technology IS does.
+    What it was actually added for no longer arrives here. The live nonsense —
+    "preferred technology stack includes: test, gate, practices, compliance,
+    projects, while, their, processing, data" — came from word-frequency topics
+    being mapped onto this category, and they are now their own category, where
+    the same words form a true statement. This is the remaining floor: a prompt
+    built entirely out of words that appear in most English sentences says
+    nothing, whatever category it lands in.
 
-    So ``tech_preference`` is checked against the known-technology vocabulary,
-    and everything else against a length floor. The trade is deliberate: a user
-    whose stack is genuinely unlisted loses that one prompt until the vocabulary
-    is extended, which is a smaller cost than asserting nine wrong things about
-    them on every single turn.
+    Length is checked per TERM and only against that word list, never as a
+    minimum: "CTO", "AWS", "npm" and "R" are all shorter than a threshold would
+    allow and all mean something.
     """
-    filled = [v for v in values.values() if isinstance(v, str) and v.strip()]
+    filled = [
+        v.strip() for v in values.values()
+        if isinstance(v, str) and v.strip()
+    ]
     if not filled:
         return False
-
-    if category == "tech_preference":
-        for value in filled:
-            terms = {
-                t.strip().lower()
-                for t in value.replace(";", ",").split(",")
-                if t.strip()
-            }
-            if terms & _KNOWN_TECHNOLOGIES:
-                return True
+    terms = [
+        t.strip().lower()
+        for value in filled
+        for t in value.replace(";", ",").split(",")
+        if t.strip()
+    ]
+    if not terms:
         return False
-
-    return any(len(v.strip()) >= _MIN_VALUE_CHARS for v in filled)
+    return any(term not in _EMPTY_WORDS for term in terms)
 
 
 def _fix_stutter(content: str) -> str:

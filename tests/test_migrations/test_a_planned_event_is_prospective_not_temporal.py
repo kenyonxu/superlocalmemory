@@ -480,3 +480,297 @@ def test_the_probe_leaves_no_trace(tmp_path):
         assert not conn.in_transaction, "the probe left a transaction open"
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# The rowid trap, made reproducible
+#
+# The tests above pass even if the copy stops naming `rowid`, because the
+# fixture only ever inserts: SQLite hands out 1..N either way, so "preserved"
+# and "reassigned" are the same numbers. And the index rebuild at the end
+# repairs a wrong index before anything looks at it.
+#
+# A store that has ever deleted a memory has gaps. That is where reassignment
+# shows, and where a failed rebuild leaves searches pointing at the wrong facts
+# with nothing raised and verify() reporting success.
+# ---------------------------------------------------------------------------
+
+_GAPPED = [
+    ("g1", "m1", "default", "alpha unique-aaa", "semantic", None, 1.0),
+    ("g2", "m1", "default", "beta unique-bbb", "semantic", None, 1.0),
+    ("g3", "m1", "default", "gamma deadline unique-ccc", "temporal", "2026-09-04", 1.0),
+    ("g4", "m1", "default", "delta unique-ddd", "semantic", None, 1.0),
+    ("g5", "m1", "default", "epsilon unique-eee", "semantic", None, 1.0),
+]
+
+
+@pytest.fixture
+def gapped_store(tmp_path):
+    """A store whose rowids have holes, as any real store's do."""
+    conn = sqlite3.connect(str(tmp_path / "gapped.db"))
+    conn.executescript(_CREATE)
+    conn.executemany(
+        "INSERT INTO atomic_facts (fact_id, memory_id, profile_id, content, "
+        "fact_type, referenced_date, confidence) VALUES (?,?,?,?,?,?,?)",
+        _GAPPED,
+    )
+    # Two memories forgotten, which is what makes the rowids non-contiguous.
+    conn.execute("DELETE FROM atomic_facts WHERE fact_id IN ('g1','g2')")
+    conn.commit()
+    yield conn
+    conn.close()
+
+
+def test_the_gapped_fixture_really_is_gapped(gapped_store):
+    """Guard the guard: if the holes vanish, the tests below go vacuous again."""
+    rowids = [r[0] for r in gapped_store.execute(
+        "SELECT rowid FROM atomic_facts ORDER BY rowid")]
+    assert rowids == [3, 4, 5], f"expected holes at 1-2, got {rowids}"
+
+
+def test_rowids_survive_the_rebuild_when_there_are_holes(gapped_store):
+    before = dict(gapped_store.execute("SELECT fact_id, rowid FROM atomic_facts"))
+    M046.apply(gapped_store)
+    after = dict(gapped_store.execute("SELECT fact_id, rowid FROM atomic_facts"))
+    assert after == before, (
+        f"rowids were reassigned: {before} became {after}. The search index is "
+        f"keyed on these, so every entry now points at a different fact."
+    )
+
+
+def test_search_finds_the_right_fact_even_if_the_index_rebuild_fails(
+    gapped_store, monkeypatch,
+):
+    """The failure the module docstring describes, actually constructed.
+
+    The index rebuild is deliberately non-fatal — losing the converted rows to a
+    rollback over it would be the worse trade. That makes preserving rowid the
+    only thing standing between a store with deletions and a search that
+    silently returns the wrong memory. So this disables the rebuild and checks
+    the copy alone got it right.
+    """
+    monkeypatch.setattr(M046, "_rebuild_fts", lambda conn: None)
+
+    M046.apply(gapped_store)
+
+    hits = gapped_store.execute(
+        "SELECT af.fact_id, af.content FROM atomic_facts_fts fts "
+        "JOIN atomic_facts af ON af.rowid = fts.rowid "
+        "WHERE atomic_facts_fts MATCH 'deadline'"
+    ).fetchall()
+    assert hits, "the search index found nothing at all"
+    for fact_id, content in hits:
+        assert fact_id == "g3", (
+            f"searching 'deadline' returned {fact_id} ({content!r}); the only "
+            f"fact containing it is g3. Rowids were reassigned and the index "
+            f"now points at the wrong memories."
+        )
+
+
+def test_a_copy_that_drops_rowid_is_caught(gapped_store, monkeypatch):
+    """Prove these tests would fail if the fix were removed.
+
+    Without this, "rowid is preserved" rests on the current code happening to
+    say so. Here the rowid is deliberately left out of the copy — exactly the
+    edit a future refactor might make — and the assertion above must fail.
+    """
+    real_rebuild = M046._rebuild
+    monkeypatch.setattr(M046, "_rebuild_fts", lambda conn: None)
+
+    import re as _re
+
+    def rebuild_without_rowid(conn):
+        # Reproduce _rebuild, minus naming rowid on either side.
+        original = M046._table_sql(conn, "atomic_facts")
+        staged = original.replace("'temporal'", "'prospective'").replace(
+            "atomic_facts", "atomic_facts_m046_new", 1)
+        cols = [c for c in M046._columns(conn, "atomic_facts")]
+        sel = ", ".join(
+            "CASE WHEN fact_type='temporal' THEN 'prospective' ELSE fact_type END"
+            if c == "fact_type" else f'"{c}"' for c in cols)
+        ins = ", ".join(f'"{c}"' for c in cols)
+        for kind, name in M046._trigger_and_index_names(conn):
+            conn.execute(f'DROP {kind} IF EXISTS "{name}"')
+        conn.execute(staged)
+        conn.execute(
+            f'INSERT INTO "atomic_facts_m046_new" ({ins}) '
+            f"SELECT {sel} FROM atomic_facts")
+        conn.execute("DROP TABLE atomic_facts")
+        conn.execute('ALTER TABLE "atomic_facts_m046_new" RENAME TO atomic_facts')
+        conn.commit()
+
+    rebuild_without_rowid(gapped_store)
+
+    hits = gapped_store.execute(
+        "SELECT af.fact_id FROM atomic_facts_fts fts "
+        "JOIN atomic_facts af ON af.rowid = fts.rowid "
+        "WHERE atomic_facts_fts MATCH 'deadline'"
+    ).fetchall()
+    wrong = [f for (f,) in hits if f != "g3"]
+    assert wrong or not hits, (
+        "dropping rowid from the copy did NOT corrupt the index, so the tests "
+        "asserting it is preserved cannot fail and prove nothing"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Table shapes the shipped schema does not use, but a store might
+# ---------------------------------------------------------------------------
+
+def test_a_table_without_a_rowid_still_migrates(tmp_path):
+    """Naming rowid in the copy fails outright on such a table.
+
+    The failure is a rollback, so no data is lost — but the migration is then
+    marked failed and retried on every start, forever, which is the same
+    permanently-stuck state a previous release shipped.
+
+    Such a table cannot carry the external-content search index either, so there
+    is no rowid to preserve and nothing is given up by not naming it.
+    """
+    conn = sqlite3.connect(str(tmp_path / "norowid.db"))
+    try:
+        conn.execute(
+            "CREATE TABLE atomic_facts ("
+            " fact_id TEXT PRIMARY KEY, memory_id TEXT, content TEXT,"
+            " fact_type TEXT NOT NULL DEFAULT 'episodic'"
+            "   CHECK (fact_type IN ('episodic','semantic','opinion','temporal'))"
+            ") WITHOUT ROWID"
+        )
+        conn.execute(
+            "INSERT INTO atomic_facts VALUES ('f1','m1','renew passport','temporal')")
+        conn.commit()
+
+        M046.apply(conn)
+
+        assert M046.verify(conn)
+        assert _count(
+            conn, "SELECT COUNT(*) FROM atomic_facts WHERE fact_type='prospective'"
+        ) == 1
+    finally:
+        conn.close()
+
+
+def test_a_generated_column_does_not_break_the_copy(tmp_path):
+    """Inserting into a generated column is an error, so this looked dangerous.
+
+    It is not, and the reason is worth pinning: ``PRAGMA table_info`` does not
+    return generated columns at all — they appear only in ``table_xinfo``,
+    flagged hidden — so the column list the copy is built from never includes
+    one. If that ever changes, this fails rather than a user's upgrade.
+    """
+    conn = sqlite3.connect(str(tmp_path / "generated.db"))
+    try:
+        conn.execute(
+            "CREATE TABLE atomic_facts ("
+            " fact_id TEXT PRIMARY KEY, memory_id TEXT, content TEXT,"
+            " fact_type TEXT NOT NULL DEFAULT 'episodic'"
+            "   CHECK (fact_type IN ('episodic','semantic','opinion','temporal')))"
+        )
+        conn.execute(
+            "ALTER TABLE atomic_facts ADD COLUMN search_key TEXT "
+            "GENERATED ALWAYS AS (lower(content)) VIRTUAL")
+        conn.execute(
+            "INSERT INTO atomic_facts (fact_id, memory_id, content, fact_type) "
+            "VALUES ('f1','m1','Renew Passport','temporal')")
+        conn.commit()
+
+        assert "search_key" not in M046._columns(conn, "atomic_facts"), (
+            "table_info now returns generated columns; the copy will try to "
+            "insert into one and every upgrade on such a store will fail"
+        )
+
+        M046.apply(conn)
+
+        assert M046.verify(conn)
+        assert conn.execute(
+            "SELECT search_key FROM atomic_facts").fetchone()[0] == "renew passport"
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# A rebuild that cannot put the triggers back must not commit
+# ---------------------------------------------------------------------------
+
+def test_a_failed_trigger_replay_rolls_the_whole_rebuild_back(store, monkeypatch):
+    """Reverses an earlier judgement in this module, which was wrong.
+
+    That judgement was that a missing index is recoverable while the converted
+    rows are not, so a failed replay should warn and commit. But a rollback
+    loses nothing — the original table is still there and the migration is
+    retried. Committing is what costs something: two of the three replayed
+    statements are the triggers that keep the search index in step with the
+    table, so a store that commits without them stops indexing every memory
+    written from then on, and lexical search goes quietly blind to new writes.
+
+    The failure is injected by corrupting the captured DDL rather than by
+    patching the connection: ``sqlite3.Connection`` is a C type, and replacing
+    its ``execute`` crashes the interpreter outright.
+    """
+    real_dependents = M046._dependents
+
+    def one_broken_trigger(conn):
+        captured = real_dependents(conn)
+        assert captured, "nothing to replay, so this test proves nothing"
+        return captured[:-1] + ["CREATE TRIGGER not_valid_sql BEGIN SELECT"]
+
+    monkeypatch.setattr(M046, "_dependents", one_broken_trigger)
+
+    with pytest.raises(sqlite3.Error):
+        M046.apply(store)
+    monkeypatch.undo()
+
+    # Nothing was committed: the original table, its rows and its triggers are
+    # all still there, and the migration will be retried.
+    assert _count(store, "SELECT COUNT(*) FROM atomic_facts") == len(_ROWS)
+    assert _count(
+        store, "SELECT COUNT(*) FROM atomic_facts WHERE fact_type='temporal'") == 3
+    triggers = {r[0] for r in store.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger' "
+        "AND tbl_name='atomic_facts'")}
+    assert "atomic_facts_fts_insert" in triggers
+    assert not M046.verify(store)
+
+
+def test_verify_refuses_a_store_whose_index_triggers_are_gone(store):
+    """The end state includes being able to keep the search index current.
+
+    A store with the rows converted and the triggers missing satisfies every
+    other condition — no old values, constraint correct — while silently not
+    indexing anything new. That is not migrated.
+    """
+    M046.apply(store)
+    assert M046.verify(store)
+
+    store.execute("DROP TRIGGER atomic_facts_fts_insert")
+    store.execute("DROP TRIGGER atomic_facts_fts_delete")
+    store.commit()
+
+    assert not M046.verify(store), (
+        "verify() blessed a store that has stopped feeding its search index"
+    )
+
+
+def test_the_runner_waits_for_a_busy_database(tmp_path):
+    """A rebuild takes an exclusive lock, so it collides with a live daemon.
+
+    Without a busy timeout SQLite raises immediately, the runner records the
+    migration failed, and the upgrade is wedged until someone notices. The
+    timeout turns a collision into a wait.
+    """
+    from superlocalmemory.storage._migration_internals import (
+        _MIGRATION_BUSY_TIMEOUT_MS,
+        _connect,
+    )
+
+    db = tmp_path / "busy.db"
+    conn = _connect(db)
+    try:
+        timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert timeout == _MIGRATION_BUSY_TIMEOUT_MS, (
+            f"the runner's connection waits {timeout}ms for a locked database; "
+            f"expected {_MIGRATION_BUSY_TIMEOUT_MS}ms"
+        )
+        assert timeout > 0
+    finally:
+        conn.close()

@@ -36,6 +36,27 @@ class FactType(str, Enum):
     # SignalType.TEMPORAL below are also unrelated and deliberately unchanged.
     PROSPECTIVE = "prospective"
 
+    @classmethod
+    def _missing_(cls, value: object) -> "FactType | None":
+        """Read the old name for a planned event as the current one.
+
+        Renaming the type left every existing row spelled the old way until the
+        migration converts it, and a migration is allowed to have not run yet:
+        deferred migrations are applied after engine init and a failure there is
+        recorded, not raised. Without this, hydrating one of those rows raised
+        ``ValueError`` from the constructor and took the whole recall with it —
+        every channel, not just the fact. A store holding planned events lost
+        the ability to recall anything, which is precisely the population the
+        rename was for.
+
+        Reading the old spelling is therefore not a courtesy, it is what makes
+        the conversion safe to defer. Writing it is still impossible: a write
+        goes through the member, whose value is the new name.
+        """
+        if isinstance(value, str) and value.strip().lower() == "temporal":
+            return cls.PROSPECTIVE
+        return None
+
 
 class EdgeType(str, Enum):
     """Knowledge graph edge types."""

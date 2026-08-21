@@ -627,6 +627,25 @@ class GDPRCompliance:
                 "Backup snapshots may still contain the erased profile's data."
             )
 
+        # In-process residue. The erased profile's recently-shown memories are
+        # held in a per-session working set that biases ranking; those are the
+        # subject's data too, and a later session reusing one of their session
+        # ids would otherwise inherit the bias.
+        #
+        # Runs after every DB delete — an in-memory dict cannot participate in a
+        # rollback, so clearing it earlier would be unrecoverable if the wipe
+        # then failed — but BEFORE the completeness verdict below, and counted by
+        # it. Computing the verdict first would let this fail while the API
+        # reported a complete erasure, which is the one thing an Art.17 receipt
+        # must never do.
+        try:
+            from superlocalmemory.core.working_memory import discard_profile
+
+            counts["working_sets"] = discard_profile(profile_id)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("GDPR erase: working-set discard failed: %s", exc)
+            counts["working_sets_failed"] = 1
+
         counts["erasure_complete"] = (
             1
             if (
@@ -641,23 +660,10 @@ class GDPRCompliance:
                 and not counts.get("backup_obligations_pending")
                 and not counts.get("backup_scan_failed")
                 and not counts.get("fts_residue_rows")
+                and not counts.get("working_sets_failed")
             )
             else 0
         )
-
-        # In-process residue. The erased profile's recently-shown memories are
-        # held in a per-session working set that biases ranking; those are the
-        # subject's data too, and a later session reusing one of their session
-        # ids would otherwise inherit the bias. Runs after the deletes rather
-        # than inside them: an in-memory dict cannot participate in a rollback,
-        # so clearing it early would be unrecoverable if the wipe then failed.
-        try:
-            from superlocalmemory.core.working_memory import discard_profile
-
-            counts["working_sets"] = discard_profile(profile_id)
-        except Exception as exc:  # pragma: no cover — defensive
-            logger.warning("GDPR erase: working-set discard failed: %s", exc)
-            counts["working_sets_failed"] = 1
 
         try:
             from superlocalmemory.compliance.audit import AuditChain

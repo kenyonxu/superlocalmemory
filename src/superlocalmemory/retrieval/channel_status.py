@@ -49,6 +49,7 @@ __all__ = [
     "EMPTY",
     "ERROR",
     "NOT_CONFIGURED",
+    "NO_CANDIDATES",
     "NO_EMBEDDING",
     "OK",
     "TIMEOUT",
@@ -63,6 +64,7 @@ ChannelStatus = Literal[
     "disabled",
     "not_configured",
     "no_embedding",
+    "no_candidates",
 ]
 
 #: Ran and contributed candidates.
@@ -80,9 +82,15 @@ NOT_CONFIGURED: ChannelStatus = "not_configured"
 #: Needed the query embedding, which was unavailable. Several channels fail
 #: together this way, and none of them individually did anything wrong.
 NO_EMBEDDING: ChannelStatus = "no_embedding"
+#: Had nothing to work on. Distinct from ``empty``, which claims a search
+#: happened: a channel that re-scores other channels' candidates never searched
+#: at all when there were none, and if the reason there were none is that the
+#: others failed, calling this "found nothing" hides the actual fault.
+NO_CANDIDATES: ChannelStatus = "no_candidates"
 
 ALL_STATUSES: frozenset[str] = frozenset({
     OK, EMPTY, ERROR, TIMEOUT, DISABLED, NOT_CONFIGURED, NO_EMBEDDING,
+    NO_CANDIDATES,
 })
 
 #: Every channel a recall can report on, so a caller can tell "this channel had
