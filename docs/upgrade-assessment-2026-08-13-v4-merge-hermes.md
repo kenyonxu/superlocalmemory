@@ -313,3 +313,18 @@ provider 增加 daemon-first 路由层,daemon 不可达时回退进程内引擎:
 - 前置:确认 daemon 侧 embed 能力端点形态(现有 `/recall` 是完整召回,不是纯 embed;WorkerPool IPC 是否可复用待调研)
 - 预估:中工作量(daemon 端点 + EmbeddingService 路由分支 + 并发测试)
 
+
+---
+
+## 10. 二次 merge:4.0.2–4.0.9(2026-08-21 完成)
+
+- **merge-base**:`186b93b3`(v4.0.1+3);**incoming**:65 提交(4.0.2–4.0.9);**merge commit**:`a40c0439`
+- **执行方式**:subagent-driven,计划见 `docs/superpowers/plans/2026-08-21-merge-upstream-4.0.9.md`,全程 ledger 见 `.superpowers/sdd/2026-08-21-merge-upstream-4.0.9/progress.md`(gitignored)
+- **冲突处置**:53 冲突 — 39 ours(品牌/version churn)/ 11 manual(上游实质内容 + fork 品牌)/ 2 theirs(`database.py` 取上游 PR #118 演进超集 + release_package_surface 测试)/ 1 regenerated(uv.lock)
+- **关键修正**:计划前提"上游 pyproject 仅 version 变化"被评审证伪 — 补入 `jsonschema==4.26.0` + `contracts/schemas/*.json` package-data(incoming `contracts/v402.py` 硬依赖)
+- **剔除**:上游误提交的 `dist_407/` 二进制(7.5MB,4.0.8 误提交);`.gitignore` 追加 `dist_*/`
+- **存活核查 7/7**:embeddings proxy 补丁、engine_wiring 透传、config ollama 保留块、hermes 目录、`/recall`+`/remember` 端点形态全部存活;`_is_remote_embedder` 实证已补入 `docs/research-2026-08-21-embeddingservice-daemon-routing.md` §7.1
+- **测试门**:9758 passed / 0 failed(基线 9002);hermes 92/92;版本一致性 19/19。20 个 merge 带入失败的归因:13 环境(venv 缺 socksio × 机器 ALL_PROXY)、2 上游测试缺陷候选(`test_enrich_new_facts_now` 缺 skip 守卫,已 deselect)、5 正当 fork 适配(dead-modules allowlist / README host-upgrades 压缩移植 / copilot 重生成)
+- **冒烟**:doctor 18 pass 含嵌入 worker 冷启动;daemon 起停干净,4.0.8 pre-migration 快照正常;hermes daemon 路由全通道零警告;生产 daemon 全程未动(隔离数据目录 + 端口 8876)
+- **上游 CLI 变更**:`slm daemon` → `slm serve`(fork 4.2.0 已先行采用,无 alias 问题)
+- **最终评审**:APPROVED(0 Critical/0 Important);deferred:docs sweep(README V4.0.1 引用、MCP 工具计数、plugin footer)+ `test_enrich_new_facts_now` 上游 bug 报告候选
