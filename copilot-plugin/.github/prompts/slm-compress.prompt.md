@@ -1,7 +1,7 @@
 ---
 name: slm-compress
 description: Compress large text, tool output, or transcripts to reduce context-window usage while keeping the full 1M window intact — call slm_compress(content, mode, reversible, ttl_seconds) to shrink content; if the result is lossy a ccr_id is returned so you can call slm_retrieve(ccr_id) later to recover the exact original; always fail-open (ok:false → continue with the original).
-version: "4.0.9"
+version: "4.0.10"
 agent: agent
 tools:
   - slm_compress

@@ -1,7 +1,7 @@
 ---
 name: slm-scope
 description: Controls memory visibility across profiles — personal (private, default), shared (selected profiles), or global (all profiles on this machine). Default is always personal. Only change scope when the user explicitly asks to share a memory across workspaces. Works with both remember (write scope) and recall (read scope flags).
-version: "4.0.9"
+version: "4.0.10"
 agent: agent
 tools:
   - remember

@@ -227,4 +227,4 @@ explicitly and call `recall` with `include_global`/`include_shared` after
 
 ---
 
-*SuperLocalMemory v4.0.9 · Qualixar · AGPL-3.0-or-later*
+*SuperLocalMemory v4.0.10 · Qualixar · AGPL-3.0-or-later*

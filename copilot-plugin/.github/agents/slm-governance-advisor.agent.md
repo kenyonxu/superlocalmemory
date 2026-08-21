@@ -9,7 +9,7 @@ description: >
 tools: recall, search, remember, update_memory, list_recent, Read, Bash
 model: inherit
 target: vscode
-version: "4.0.9"
+version: "4.0.10"
 ---
 
 # Role
