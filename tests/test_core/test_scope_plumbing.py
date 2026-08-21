@@ -184,29 +184,25 @@ class TestConcurrentRecallScopeIsolation:
         obs_lock = threading.Lock()
         orig = re._run_channels
 
-        def _spy(
-            query, profile_id, strat,
-            *,
-            extra_disabled_channels=None,
-            include_global=False,
-            include_shared=False,
-            as_of=None,
-        ):
+        def _spy(query, profile_id, strat, **kwargs):
             # v3.7.9: flags now travel as explicit kwargs rather than being set
             # as attributes on shared channel instances. Capture the kwargs
             # directly; no need to inspect channel attributes.
-            # v3.4.64: extra_disabled_channels also travels as an explicit kwarg —
-            # accept it so the spy does not break when fast=True callers pass it.
+            #
+            # Everything except the two flags under test is forwarded blind, on
+            # purpose. This spy previously enumerated every keyword and so had
+            # to be edited each time _run_channels gained one — it broke on
+            # extra_disabled_channels, then again on dropped_channels — and each
+            # break looked like a scope-isolation failure in a concurrency test,
+            # which is an expensive way to learn that a signature changed.
             import time as _t
             _t.sleep(0.002)  # widen the interleaving window
             with obs_lock:
-                observations.append((include_global, include_shared))
-            return orig(
-                query, profile_id, strat,
-                extra_disabled_channels=extra_disabled_channels,
-                include_global=include_global, include_shared=include_shared,
-                as_of=as_of,
-            )
+                observations.append((
+                    kwargs.get("include_global", False),
+                    kwargs.get("include_shared", False),
+                ))
+            return orig(query, profile_id, strat, **kwargs)
 
         re._run_channels = _spy
         try:

@@ -26,6 +26,8 @@ License: AGPL-3.0-or-later
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import functools
 import hashlib
 import json
 import logging
@@ -65,6 +67,126 @@ from superlocalmemory.infra.data_root import (
     canonical_data_root,
     state_path,
 )
+
+
+def _notify_migration_applied(
+    applied: list,
+    elapsed: float,
+    backup_dir: "Path | None" = None,
+) -> None:
+    """Print a one-line confirmation after migrations complete successfully.
+
+    Written to stdout so it is visible in daemon.log and in interactive runs.
+    """
+    count = len(applied)
+    if count == 0:
+        return
+    parts = [f"[SLM] {count} migration(s) applied in {elapsed:.1f}s."]
+    if backup_dir is not None:
+        parts.append(f"Backup: {backup_dir}")
+    print(" ".join(parts), flush=True)
+
+
+def _write_migration_error_log(
+    failed: list,
+    backup_dir: "Path | None",
+    slm_home: "Path | None" = None,
+    applied: "list | None" = None,
+) -> "Path":
+    """Write a migration-error-{timestamp}.log to the SLM home directory.
+
+    Returns the Path of the written log file.
+    """
+    import datetime
+
+    if slm_home is None:
+        slm_home = canonical_data_root()
+
+    slm_home.mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = slm_home / f"migration-error-{ts}.log"
+
+    lines = [
+        f"Migration error — {ts}",
+        f"Failed: {', '.join(str(f) for f in failed)}",
+    ]
+    # An upgrade is applied step by step and is deliberately non-fatal: some
+    # steps can succeed while a later one fails. Saying "your data was not
+    # modified" whenever a snapshot exists was therefore untrue in exactly the
+    # case that matters — and a user who believes nothing changed may delete the
+    # snapshot to reclaim space.
+    if applied:
+        lines.append(f"Applied before the failure: {', '.join(str(a) for a in applied)}")
+        lines.append(
+            "YOUR DATABASE WAS PARTIALLY CHANGED. The steps listed above "
+            "completed; the ones under 'Failed' did not."
+        )
+    elif applied is not None:
+        lines.append("No steps completed, so your database was not changed.")
+    if backup_dir is not None:
+        lines.append(f"Snapshot of the state before the upgrade: {backup_dir}")
+        lines.append(
+            "That snapshot is intact and can be restored. Keep it until you are "
+            "satisfied your data is correct."
+        )
+    else:
+        lines.append(
+            "NO SNAPSHOT WAS TAKEN for this attempt — do not assume a recovery "
+            "copy exists. Check for earlier snapshots before changing anything."
+        )
+    lines.append("")
+    lines.append("To diagnose, run: slm doctor")
+
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return log_path
+
+
+def _notify_windows_user(message: str) -> None:
+    """Best-effort notification on Windows.  Silent no-op on other platforms."""
+    import sys
+
+    if sys.platform != "win32":
+        return
+
+    # Attempt 1 — Windows MessageBox via PowerShell
+    try:
+        import subprocess
+
+        safe_msg = message.replace("'", "").replace('"', "")
+        subprocess.run(
+            [
+                "powershell",
+                "-Command",
+                "[System.Reflection.Assembly]::LoadWithPartialName"
+                "('System.Windows.Forms') | Out-Null; "
+                f"[System.Windows.Forms.MessageBox]::Show('{safe_msg}', "
+                "'SuperLocalMemory')",
+            ],
+            check=False,
+            timeout=5,
+        )
+        return
+    except Exception:
+        pass
+
+    # Attempt 2 — Windows Application EventLog
+    try:
+        import subprocess
+
+        subprocess.run(
+            [
+                "eventcreate",
+                "/T", "INFORMATION",
+                "/ID", "1001",
+                "/L", "APPLICATION",
+                "/SO", "SuperLocalMemory",
+                "/D", message[:512],
+            ],
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        pass  # best-effort only
 
 
 def _learning_db_for_config(config) -> Path:
@@ -115,11 +237,142 @@ _SOURCE_QUALITY_MAX_BATCH_SIZE = 250
 _SOURCE_QUALITY_PROFILE_REFRESH_SECONDS = 60.0
 _FACT_ENTITY_REPAIR_MIN_RETRY_SECONDS = 0.05
 _FACT_ENTITY_REPAIR_MAX_RETRY_SECONDS = 30.0
-# ``wait=true`` is a compatibility affordance, never permission to hold the
-# ASGI event loop hostage to a local LLM.  Normal clients omit it and receive
-# an immediate durable/queryable receipt; explicit waiters get this small
-# completion window, then the M018 materializer continues in the background.
-_REMEMBER_ENRICHMENT_WAIT_SECONDS = 0.75
+# How long a write may spend making itself findable by meaning before the
+# receipt goes out. Storing a memory has a 1.5 s ceiling, and this is a ceiling
+# rather than a target: the cost of coming in under it is a memory that can only
+# be found by quoting its own wording, which is not how anyone asks. So the
+# window is most of the budget, not a token amount of it. ``wait=true`` is still
+# never permission to hold the event loop open indefinitely — past this the
+# background pass finishes the job.
+# The ceiling for a whole store request, shared by the durable write and the
+# window that makes the memory findable by meaning. Both are sequential, so the
+# second gets what the first left rather than a fresh grant.
+_REMEMBER_TOTAL_CEILING_SECONDS = 1.5
+_REMEMBER_ENRICHMENT_WAIT_SECONDS = 1.2
+
+# Enrichment runs off the event loop, but NOT on the loop's default executor.
+# `asyncio.to_thread` uses that default pool, so N simultaneous writers really did
+# create N threads — and every other handler that borrows the same pool queued
+# behind them. One shared, small pool bounds the cost of a burst: past its width
+# the extra callers miss their deadline and defer, which is the intended
+# degradation, instead of multiplying threads.
+_ENRICHMENT_WORKERS = 2
+_enrichment_pool: "concurrent.futures.ThreadPoolExecutor | None" = None
+_enrichment_pool_lock = threading.Lock()
+
+# Bounds how much enrichment may be in flight at once. A ThreadPoolExecutor
+# queues without limit, so bounding the pool's WIDTH does not bound what can be
+# handed to it: a burst of writers all submit, the first two run, and the rest sit
+# in a queue nobody is waiting for any more — then wake up and write to the
+# database after their callers have already been answered. A permit is taken
+# before submitting and released by the worker when it has really finished, so at
+# most `_ENRICHMENT_WORKERS` pieces of work exist at once and a caller that
+# cannot get one is told immediately instead of being queued.
+_enrichment_semaphore = threading.Semaphore(_ENRICHMENT_WORKERS)
+
+# Set once the pool has been shut down, and never cleared. Without it, a caller
+# that passed the unlocked check below arrives after shutdown, finds None, and
+# builds a replacement pool that the completed shutdown will never reach.
+_enrichment_pool_closed = False
+
+
+class _EnrichmentAtCapacity(Exception):
+    """No permit was free, so nothing was submitted.
+
+    Its own type, so that "we chose not to start" is never reported through the
+    same path as "it started and then failed" — those are different events and
+    only one of them is worth a warning about degradation.
+    """
+
+
+def _enrichment_executor():
+    """The one pool inline enrichment may use. Created on first need.
+
+    Raises ``RuntimeError`` once the pool has been shut down. It deliberately
+    does not return ``None`` on that path: ``run_in_executor(None, ...)`` means
+    *the event loop's default executor*, which is the unbounded-thread behaviour
+    this pool exists to replace, so a None here would silently reintroduce it at
+    exactly the moment the process is trying to stop.
+    """
+    global _enrichment_pool
+    # Everything happens under the lock, including the read that is returned. An
+    # earlier version checked the closed flag only on the create branch and then
+    # returned the global, so a caller that found a live pool, lost the CPU, and
+    # resumed after shutdown returned None — and None means the event loop's own
+    # default executor, unbounded and shared with every other handler. That is
+    # the precise failure this function exists to prevent, reintroduced at the
+    # one moment it matters.
+    with _enrichment_pool_lock:
+        if _enrichment_pool_closed:
+            raise RuntimeError("enrichment pool is shut down")
+        if _enrichment_pool is None:
+            _enrichment_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=_ENRICHMENT_WORKERS,
+                thread_name_prefix="slm-enrich",
+            )
+        pool = _enrichment_pool
+    if pool is None:  # pragma: no cover — belt and braces around the invariant
+        raise RuntimeError("enrichment pool is unavailable")
+    return pool
+
+
+def _open_enrichment_pool() -> None:
+    """Allow the pool to be created again, for a fresh run in this process.
+
+    The closed flag has to survive shutdown — that is its whole purpose — so
+    something has to clear it when a new run legitimately begins. Without this a
+    second startup in one process (a restart, or a test that builds the app more
+    than once) would find enrichment permanently refused and every write would
+    come back findable by wording only, with nothing in the logs to explain it.
+    """
+    global _enrichment_pool_closed, _enrichment_semaphore
+    with _enrichment_pool_lock:
+        _enrichment_pool_closed = False
+        # A fresh run starts with its full capacity. Shutdown cancels work that
+        # was queued and never started, and a task that never starts never runs
+        # the release in its finally — so permits taken by cancelled work are
+        # gone. Without this reset the next run in the same process would run at
+        # reduced capacity, or none at all, and the only symptom would be every
+        # write coming back findable by wording with nothing in the log.
+        _enrichment_semaphore = threading.Semaphore(_ENRICHMENT_WORKERS)
+
+
+def _enrich_and_release(engine, fact_ids: list[str], budget: float) -> int:
+    """Run inline enrichment, releasing the permit only when it is really done.
+
+    The permit has to be released here rather than by the caller. A caller that
+    stops waiting at its own deadline has not finished the work — the worker is
+    still holding a pool thread — so releasing on the caller's timeout would let
+    the next request submit into a pool that is still fully occupied, which is
+    the unbounded queueing this permit exists to prevent.
+    """
+    try:
+        return engine.enrich_new_facts_now(fact_ids, timeout_s=budget)
+    finally:
+        _enrichment_semaphore.release()
+
+
+def _shutdown_enrichment_pool_if_created() -> None:
+    """Shut down the enrichment pool if it was ever created.
+
+    Safe to call when the pool was never created (no-op) and safe to call
+    twice (second call is a no-op because the pool is set to None under the
+    lock before shutdown is called).
+
+    cancel_futures=True drops any work that is still queued but has not yet
+    started.  Workers already inside embed() will finish their current call
+    and then stop; they do not block the caller because wait=False.
+    """
+    global _enrichment_pool, _enrichment_pool_closed
+    with _enrichment_pool_lock:
+        # Marked closed under the same lock that guards creation, so a caller
+        # already past the unlocked check cannot build a replacement pool that
+        # this shutdown has already walked past.
+        _enrichment_pool_closed = True
+        pool = _enrichment_pool
+        _enrichment_pool = None
+    if pool is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
 _SENSITIVE_READ_PREFIXES = (
     "/api/memories", "/api/facts", "/api/clusters", "/api/graph",
     "/api/v3/associations", "/api/v3/core-memory",
@@ -418,6 +671,10 @@ class EngineRecallAdapter:
             memory_map={k: _sanitize_json_text(v) for k, v in memory_map.items()},
             per_fact_max=getattr(_rc, "recall_per_fact_max_chars", 2400),
             total_max=getattr(_rc, "recall_total_max_chars", 12000),
+            # Option B: markers only on session-bearing recalls. A marker can
+            # only buy a learning signal when a pending_outcomes row exists
+            # to settle, and those exist only when session_id is present.
+            include_marker=bool(session_id),
         )
         for _r in results:
             _r["content"] = _sanitize_json_text(_r.get("content", ""))
@@ -858,6 +1115,86 @@ def _start_idle_watchdog(timeout_sec: int) -> None:
 
     t = threading.Thread(target=_watch, daemon=True, name="idle-watchdog")
     t.start()
+
+
+# ---------------------------------------------------------------------------
+# Periodic full consolidation (4.0.8)
+# ---------------------------------------------------------------------------
+#
+# Steps 8-11 of ConsolidationEngine — behavioural assertions, soft prompts,
+# skill performance, skill evolution — had no automatic trigger at all. The
+# session-end hook is the fast path; this timer is the guarantee, because a hook
+# that does not fire is indistinguishable from a feature that does not exist.
+#
+# Two constraints shape the schedule:
+#
+#   1. Remember and recall latency must not move. So the pass only starts when
+#      the daemon has served nothing for _CONSOLIDATION_IDLE_SEC. Consolidation
+#      is catch-up work; there is never a reason for it to compete with a live
+#      request. If the machine is busy every time we look, we simply skip and
+#      check again next tick.
+#   2. It must not pile up. run_full_consolidation() holds a lock and skips
+#      rather than queues, so a slow pass cannot be overlapped by the next tick
+#      or by the session-end hook.
+
+#: How often to consider running. Not how often it runs.
+_CONSOLIDATION_CHECK_SEC = int(os.environ.get("SLM_CONSOLIDATION_CHECK_SEC", 900))
+
+#: Minimum quiet period before a scheduled pass may start.
+_CONSOLIDATION_IDLE_SEC = int(os.environ.get("SLM_CONSOLIDATION_IDLE_SEC", 300))
+
+#: Minimum gap between two scheduled passes.
+_CONSOLIDATION_MIN_GAP_SEC = int(
+    os.environ.get("SLM_CONSOLIDATION_MIN_GAP_SEC", 6 * 3600)
+)
+
+#: Delay before the first check, so daemon startup is never slowed by it.
+_CONSOLIDATION_FIRST_DELAY_SEC = int(
+    os.environ.get("SLM_CONSOLIDATION_FIRST_DELAY_SEC", 120)
+)
+
+
+async def _consolidation_timer_loop(application: FastAPI) -> None:
+    """Run full consolidation on a schedule, but only while the daemon is idle."""
+    from superlocalmemory.server.consolidation_runner import run_full_consolidation
+
+    await asyncio.sleep(_CONSOLIDATION_FIRST_DELAY_SEC)
+    last_run = 0.0
+
+    while True:
+        try:
+            await asyncio.sleep(_CONSOLIDATION_CHECK_SEC)
+
+            now = time.monotonic()
+            if last_run and (now - last_run) < _CONSOLIDATION_MIN_GAP_SEC:
+                continue
+            if (now - _last_activity) < _CONSOLIDATION_IDLE_SEC:
+                continue  # busy — try again next tick
+
+            # get_engine_lazy, not state.engine directly: a mode switch nulls
+            # state.engine, and reading it raw would silently disable scheduled
+            # consolidation until the next daemon restart.
+            from superlocalmemory.server.routes.helpers import get_engine_lazy
+
+            engine = get_engine_lazy(application.state)
+            profile_id = getattr(engine, "profile_id", None) if engine else None
+            if not profile_id:
+                continue
+
+            result = await run_full_consolidation(
+                application.state, profile_id, trigger="timer",
+            )
+            # Only a pass that actually ran resets the clock; a skip must not
+            # buy another six hours of silence.
+            if not result.get("skipped"):
+                last_run = time.monotonic()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Never let a bad pass kill the loop — that would silently disable
+            # consolidation for the life of the daemon, which is the failure
+            # mode this timer exists to end. Log loudly and try again.
+            logger.exception("scheduled consolidation failed; will retry")
 
 
 # ---------------------------------------------------------------------------
@@ -1416,6 +1753,11 @@ async def lifespan(application: FastAPI):
     """Initialize engine, workers, and optional services on startup."""
     global _last_activity
 
+    # A previous run in this process left the enrichment pool closed so that a
+    # write racing its shutdown could not resurrect it. This run is entitled to
+    # one.
+    _open_enrichment_pool()
+
     engine = None
     config = None
     deployment = None
@@ -1508,6 +1850,7 @@ async def lifespan(application: FastAPI):
         _path_config = None
 
     try:
+        from superlocalmemory.storage.backup import InsufficientDiskSpaceError
         from superlocalmemory.storage.migration_runner import apply_all
         if _path_config is None:
             # Catastrophic early-load failure: still one root via Mode-A default
@@ -1518,13 +1861,56 @@ async def lifespan(application: FastAPI):
             _path_config = _SLMFallback.for_mode(_ModeFallback.A)
         _learning_db = _learning_db_for_config(_path_config)
         _memory_db = _memory_db_for_config(_path_config)
+        import time as _time_mod
+        _t0 = _time_mod.monotonic()
         _result = apply_all(_learning_db, _memory_db)
+        _elapsed = _time_mod.monotonic() - _t0
         _applied = _result.get("applied", [])
         _failed = _result.get("failed", [])
+        _backup_dir = _result.get("details", {}).get("_backup")
+        _backup_path = Path(_backup_dir) if _backup_dir else None
         if _applied:
             logger.info("migrations applied: %s", _applied)
+            _notify_migration_applied(_applied, _elapsed, _backup_path)
+            _notify_windows_user(
+                f"SuperLocalMemory: {len(_applied)} database migration(s) applied."
+            )
         if _failed:
             logger.warning("migrations failed (non-fatal): %s", _failed)
+            try:
+                _err_log = _write_migration_error_log(
+                    _failed, _backup_path,
+                    slm_home=_memory_db.parent if _memory_db else None,
+                    applied=_applied,
+                )
+                import sys as _sys
+                # "Data is safe" is only true when NOTHING was applied. Migrations
+                # are non-fatal and applied in order, so a later failure can leave
+                # earlier ones committed — a partially changed store. Saying the
+                # data is untouched then tells the user to ignore the one copy
+                # that still holds the original.
+                if _applied:
+                    _headline = (
+                        f"[SLM] Migration incomplete. YOUR DATABASE WAS PARTIALLY "
+                        f"CHANGED — {len(_applied)} step(s) applied, "
+                        f"{len(_failed)} failed. The pre-change copy is at "
+                        f"{_backup_path} — keep it until this is resolved."
+                    )
+                else:
+                    _headline = (
+                        f"[SLM] Migration failed before any change was made. Your "
+                        f"data is as it was; a copy is also at {_backup_path}."
+                    )
+                print(
+                    f"{_headline} See {_err_log}. Run: slm doctor",
+                    file=_sys.stderr,
+                    flush=True,
+                )
+                _notify_windows_user(
+                    f"SuperLocalMemory migration failed. Run slm doctor. Log: {_err_log}"
+                )
+            except Exception:
+                pass  # notification failures are non-fatal
         application.state.migration_result = _result
         # S9-SKEP-15: only commit the new `.last_version` AFTER migrations
         # complete with zero failures. A partial upgrade (schema didn't
@@ -1542,6 +1928,35 @@ async def lifespan(application: FastAPI):
                 _version_marker.write_text(_slm_version, encoding="utf-8")
             except OSError:
                 pass  # non-fatal
+    except InsufficientDiskSpaceError as _disk_exc:
+        # This is not a crash and it must not be reported as "non-fatal". The
+        # migration deliberately refused to start because there was not enough
+        # room to keep a recoverable copy first. The store is intact and
+        # unmigrated; the generic handler below would have logged a warning and
+        # left the daemon serving as though nothing had happened.
+        logger.error(
+            "MIGRATION NOT RUN — not enough free disk to keep a recoverable "
+            "copy first. Your data has NOT been modified. Need %s bytes, have "
+            "%s free. Free some space and restart; run `slm doctor` for details.",
+            f"{_disk_exc.needed_bytes:,}", f"{_disk_exc.free_bytes:,}",
+        )
+        try:
+            _log_path = _write_migration_error_log(
+                ["_insufficient_disk_space"], None,
+                slm_home=locals().get("_memory_db").parent if locals().get("_memory_db") else None,
+                applied=[],
+            )
+            logger.error("Details written to %s", _log_path)
+        except OSError:
+            pass
+        application.state.migration_result = {
+            "applied": [], "skipped": [], "failed": ["_insufficient_disk_space"],
+            "details": {
+                "_needed_bytes": _disk_exc.needed_bytes,
+                "_free_bytes": _disk_exc.free_bytes,
+                "_store_modified": False,
+            },
+        }
     except Exception as _exc:
         logger.warning("migration runner crashed (non-fatal): %s", _exc)
         application.state.migration_result = {
@@ -2462,6 +2877,15 @@ async def lifespan(application: FastAPI):
     except Exception as e:
         logger.warning("optimize module not available: %s", e)
 
+    # 4.0.8: periodic full consolidation. Idle-gated and lock-guarded — see
+    # _consolidation_timer_loop. Started here rather than at import so a daemon
+    # that never completes startup never schedules work.
+    _consol_task = getattr(application.state, "_consolidation_task", None)
+    if _consol_task is None or _consol_task.done():
+        application.state._consolidation_task = asyncio.create_task(
+            _consolidation_timer_loop(application)
+        )
+
     # v3.6.7: Start MCP Streamable-HTTP session manager (GOTCHA #1).
     # streamable_http_app() carries its own Starlette lifespan that initialises
     # an anyio task group inside the session manager. Without entering that
@@ -2534,6 +2958,16 @@ async def lifespan(application: FastAPI):
                 await _sync_task
             except asyncio.CancelledError:
                 pass
+    except Exception:  # pragma: no cover — defensive
+        pass
+
+    # Cancel the periodic consolidation loop. Not awaited to completion — a pass
+    # can take minutes and shutdown must not block on it; the lock and the
+    # engine's own transaction boundaries make an interrupted pass safe to redo.
+    try:
+        _consol = getattr(application.state, "_consolidation_task", None)
+        if _consol is not None and not _consol.done():
+            _consol.cancel()
     except Exception:  # pragma: no cover — defensive
         pass
 
@@ -2718,6 +3152,19 @@ async def lifespan(application: FastAPI):
             _perf_log_flush_fn()
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning("perf_log flush failed: %s", exc)
+
+    # Shut down the enrichment pool before engine.close() so that any worker
+    # still inside embed() receives cancellation before the embed pool is torn
+    # down.  shutdown(wait=False, cancel_futures=True) is non-blocking: queued
+    # futures are dropped and running futures complete their current call on
+    # their own.  This prevents Python's atexit handler from calling
+    # shutdown(wait=True) on a live embed worker, which would push the daemon
+    # past the graceful-shutdown budget and cause the service manager to
+    # SIGKILL the process.
+    try:
+        _shutdown_enrichment_pool_if_created()
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("enrichment pool shutdown failed (non-fatal): %s", exc)
 
     materializer_stopped = _stop_pending_materializer()
     canonical_writer_stopped = _release_canonical_remember_runtime(application)
@@ -3729,6 +4176,9 @@ def _register_daemon_routes(application: FastAPI) -> None:
         include_shared: bool | None = None,
         window: str = "",
         as_of: str = "",
+        known_as_of: str = "",
+        valid_at: str = "",
+        include_unknown: bool = False,
     ):
         _update_activity()
         search_query = q or query  # Accept both ?q= and ?query= for compatibility
@@ -3754,6 +4204,25 @@ def _register_daemon_routes(application: FastAPI) -> None:
             as_of = _as_of_norm
         else:
             as_of = ""
+        def _normalize_temporal_query(value: str, error_code: str):
+            raw = value.strip() if value else ""
+            if not raw:
+                return ""
+            from superlocalmemory.retrieval.temporal_utils import normalize_as_of
+            normalized = normalize_as_of(raw)
+            if normalized is None:
+                from starlette.responses import JSONResponse
+                return JSONResponse(
+                    {"error": error_code, "message": f"Cannot parse {error_code}: {raw!r}"},
+                    status_code=400,
+                )
+            return normalized
+        known_as_of = _normalize_temporal_query(known_as_of, "invalid_known_as_of")
+        if not isinstance(known_as_of, str):
+            return known_as_of
+        valid_at = _normalize_temporal_query(valid_at, "invalid_valid_at")
+        if not isinstance(valid_at, str):
+            return valid_at
         # v3.8.2: resolve the client-driven-agentic default now so the concrete
         # bool drives BOTH the full-recall semaphore below and engine.recall().
         from superlocalmemory.core.recall_pipeline import resolve_hot_path_fast
@@ -3813,6 +4282,9 @@ def _register_daemon_routes(application: FastAPI) -> None:
                     include_shared=include_shared,
                     window=window or None,
                     as_of=as_of or None,
+                    known_as_of=known_as_of or None,
+                    valid_at=valid_at or None,
+                    include_unknown=include_unknown,
                 ),
             )
             _budget = _recall_budget_s()
@@ -3854,6 +4326,10 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 memory_map={k: _sanitize_json_text(v) for k, v in memory_map.items()},
                 per_fact_max=getattr(_rc, "recall_per_fact_max_chars", 2400),
                 total_max=getattr(_rc, "recall_total_max_chars", 12000),
+                # Option B: markers only on session-bearing recalls. A marker can
+                # only buy a learning signal when a pending_outcomes row exists
+                # to settle, and those exist only when session_id is present.
+                include_marker=bool(session_id),
                 full=full,
                 include_source=include_source,
             )
@@ -4043,6 +4519,10 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 allowed_profiles=frozenset({engine._profile_id}),
                 allowed_scopes=frozenset({scope}),
             )
+            # The whole request has a 1.5 s ceiling, and the two phases below
+            # are sequential, so the ceiling has to be shared between them
+            # rather than granted twice. Measured from here.
+            _store_started = time.monotonic()
             receipt = await asyncio.to_thread(
                 runtime.remember,
                 admission,
@@ -4051,10 +4531,105 @@ def _register_daemon_routes(application: FastAPI) -> None:
             )
             payload = dict(receipt.payload)
             fact_ids = list(payload.get("fact_ids") or [])
+
+            # The durable receipt is already committed above; nothing below can
+            # fail this write. What remains is the window in which the memory can
+            # only be found by quoting its own wording — a fact with no vector is
+            # invisible to the semantic channel, so the memory describing what is
+            # happening right now is the hardest one to find.
+            #
+            # Every entry point — command line, tool interface, dashboard —
+            # arrives here, so closing the window here closes it for all of them
+            # rather than for whichever door happened to be used.
+            #
+            # Strictly bounded, because this daemon serves many sessions at once:
+            # the work runs off the event loop, on a two-worker pool, and yields
+            # to any recall in flight. Past the deadline the caller gets exactly
+            # the previous behaviour and the background materializer finishes the
+            # job.
+            # A caller that did not ask to wait still gets a real attempt, not a
+            # token one. Almost no client passes wait=true, so a small budget
+            # here meant almost every memory in practice was returned findable by
+            # wording only — the default path deciding the product's behaviour.
+            #
+            # But it gets what is LEFT of the ceiling, not a second full budget.
+            # The durable write above can legitimately consume most of the 1.5 s
+            # under contention, and granting the full enrichment window on top of
+            # that produced receipts well past 3 s — over a ceiling the changelog
+            # states. A caller that asked to wait may exceed the shared ceiling,
+            # because that is what asking to wait means; nobody else may.
+            _elapsed = time.monotonic() - _store_started
+            _remaining = _REMEMBER_TOTAL_CEILING_SECONDS - _elapsed
+            if wait:
+                enrich_budget = _REMEMBER_ENRICHMENT_WAIT_SECONDS
+            else:
+                enrich_budget = min(
+                    1.0, _REMEMBER_ENRICHMENT_WAIT_SECONDS, max(0.0, _remaining),
+                )
+            if enrich_budget <= 0.0:
+                logger.warning(
+                    "the durable write used the whole %.1fs budget (%.2fs) — this "
+                    "memory is findable by its wording and the background pass "
+                    "will attach its vector",
+                    _REMEMBER_TOTAL_CEILING_SECONDS, _elapsed,
+                )
+            enriched = 0
+            # Taken before submitting, released by the worker. If none is free
+            # the pool is already saturated, and queueing behind it would mean
+            # writing to the database after this response has been sent — so the
+            # write is simply reported as findable by wording and the background
+            # pass picks it up, which is the intended degradation.
+            _permit = _enrichment_semaphore.acquire(blocking=False)
+            if not _permit:
+                logger.warning(
+                    "inline enrichment at capacity for %d fact(s) — deferred to "
+                    "the background pass", len(fact_ids),
+                )
+            try:
+                if not _permit:
+                    raise _EnrichmentAtCapacity
+                loop = asyncio.get_running_loop()
+                try:
+                    _pending = loop.run_in_executor(
+                        _enrichment_executor(),
+                        functools.partial(
+                            _enrich_and_release,
+                            engine, fact_ids, enrich_budget,
+                        ),
+                    )
+                except BaseException:
+                    # Never handed to a worker, so nothing will release it.
+                    _enrichment_semaphore.release()
+                    raise
+                enriched = await asyncio.wait_for(
+                    _pending, timeout=enrich_budget + 0.25,
+                )
+            except _EnrichmentAtCapacity:
+                pass
+            except (TimeoutError, asyncio.TimeoutError):
+                # Worth seeing. Sustained timeouts mean writes are coming back
+                # findable by wording only, which is a real degradation and was
+                # previously visible at debug level alone.
+                logger.warning(
+                    "inline enrichment exceeded its budget for %d fact(s) — "
+                    "deferred to the background pass", len(fact_ids),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "inline enrichment unavailable (%s: %s) — deferred to the "
+                    "background pass", type(exc).__name__, exc,
+                )
+
+            searchable = "meaning" if enriched == len(fact_ids) and fact_ids else "wording"
             return {
                 "ok": True,
                 "fact_ids": fact_ids,
                 "count": len(fact_ids),
+                # Storing a memory and being able to find it again are different
+                # things, and reporting only the first is how a caller ends up
+                # believing a memory is retrievable when it is not yet.
+                "searchable_by": searchable,
+                "enriched_now": enriched,
                 "operation_id": payload["operation_id"],
                 # One-release compatibility alias. The durable operation ID is
                 # opaque and replaces the integer pending.db row identifier.
@@ -4062,8 +4637,17 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 "status": "queryable",
                 "materialization_state": payload["materialization_state"],
                 "commit_sequence": payload.get("commit_sequence"),
-                "note": "queryable now; canonical enrichment continues in the background",
-                "wait_ignored": bool(wait),
+                "note": (
+                    "stored and searchable by meaning"
+                    if searchable == "meaning"
+                    else "stored and searchable by wording; "
+                         "searchable by meaning shortly"
+                ),
+                # Retained for callers that already read it. It used to be
+                # unconditionally true, because `wait` bought nothing. It now
+                # buys a larger best-effort enrichment budget — still never a
+                # guarantee, and still never a block on durability.
+                "wait_ignored": False if wait else True,
             }
         except Exception as exc:
             from superlocalmemory.core.remember_admission import AdmissionRejected

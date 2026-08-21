@@ -104,10 +104,48 @@ _DDL_STATEMENTS: tuple[str, ...] = (
         confidence      REAL NOT NULL DEFAULT 0.8 CHECK (confidence >= 0.0 AND confidence <= 1.0),
         created_at      TEXT NOT NULL DEFAULT (datetime('now')),
         last_verified   TEXT,
-        is_stale        INTEGER NOT NULL DEFAULT 0
+        is_stale        INTEGER NOT NULL DEFAULT 0,
+        enriched_description TEXT
     )
     """,
 )
+
+#: Columns added to existing tables after their first release.
+#:
+#: This file's DDL is all ``CREATE TABLE IF NOT EXISTS`` and code_graph.db has
+#: no migration framework, so appending a column to a _DDL_STATEMENTS block
+#: reaches NEW databases only — every database created by an earlier version
+#: skips the statement entirely and never gains the column. That silent
+#: divergence is what this list exists to close.
+#:
+#: ADDITIVE ONLY: ``ALTER TABLE ... ADD COLUMN`` with no NOT NULL and no
+#: default, so it cannot fail on a populated table and cannot rewrite a row.
+#: Never put a DROP, a RENAME, or a type change here.
+_ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    # (table, column, type) — enrichment text for a code↔memory link. Lives
+    # here rather than in memory.db so the user's own fact wording is never
+    # overwritten, and so recall (which never opens code_graph.db) is unaffected.
+    ("code_memory_links", "enriched_description", "TEXT"),
+)
+
+
+def _apply_additive_columns(cursor: sqlite3.Cursor) -> None:
+    """Add any missing column from _ADDITIVE_COLUMNS. Idempotent."""
+    for table, column, coltype in _ADDITIVE_COLUMNS:
+        try:
+            existing = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.Error as exc:  # table absent on a partial database
+            logger.debug("additive column probe skipped for %s: %s", table, exc)
+            continue
+        if not existing or column in existing:
+            continue
+        try:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+            logger.info("code_graph schema: added %s.%s", table, column)
+        except sqlite3.OperationalError as exc:
+            # Concurrent initialiser won the race, or the column appeared
+            # between the probe and the ALTER. Both are benign.
+            logger.debug("additive column %s.%s not applied: %s", table, column, exc)
 
 # Indexes (separate from tables for clarity)
 _INDEX_STATEMENTS: tuple[str, ...] = (
@@ -193,6 +231,11 @@ def create_all_tables(conn: sqlite3.Connection) -> None:
     # Core tables
     for ddl in _DDL_STATEMENTS:
         cursor.execute(ddl)
+
+    # Columns added after a table's first release. Must run AFTER the CREATEs
+    # (so a fresh database already has them and this is a no-op) and BEFORE the
+    # indexes (in case one is ever declared on an added column).
+    _apply_additive_columns(cursor)
 
     # Indexes
     for idx in _INDEX_STATEMENTS:

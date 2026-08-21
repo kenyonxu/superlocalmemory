@@ -26,7 +26,7 @@ Potential function:
     - Old / unused:       gamma term raises potential -> drift to boundary
     - Important memories: delta term lowers potential -> retain near origin
 
-V1 bugs fixed in Innovation Wave 4:
+V1 bugs fixed in v3.5:
     1. Positions were computed per-recall then DISCARDED.  Now ``step()``
        and ``batch_step()`` return new positions for the caller to persist.
     2. Weight range was [0.7, 1.0] --- too narrow to change rankings.

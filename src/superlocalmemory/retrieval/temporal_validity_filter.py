@@ -49,8 +49,12 @@ All demotions are non-destructive (P5-INT-01): facts stay in the candidate
 list but rank below valid facts. A factor of 0.0 restores the legacy hide
 behaviour (a score of zero is gated out by the evidence floor).
 
-Both lookups are bounded (candidate ids only), chunked, indexed, and
-fail-open: a DB error returns results unchanged.
+All correction-admission lookups are bounded (candidate ids only), chunked,
+and indexed.  Admission is deliberately **fail-closed**: if SLM cannot prove
+which candidates are invalidated, it returns no candidates rather than let an
+approved stale fact re-enter recall.  The legacy score-demotion filter follows
+the same rule for its system-invalidated lookup.  Event-time demotion remains a
+best-effort ranking signal; it is not the correction authority.
 
 Integrates with ChannelRegistry.register_filter() using the FilterFn signature:
     (all_channel_results, profile_id, context) -> filtered_results
@@ -62,6 +66,7 @@ License: AGPL-3.0-or-later
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -77,6 +82,255 @@ logger = logging.getLogger(__name__)
 # factor (0.25) because event-time expiry is a softer signal — the boundary may
 # be approximate or the fact may still be conceptually relevant.
 _EVENT_TIME_DEMOTION_FACTOR: float = 0.5
+
+
+@dataclass
+class CorrectionAdmissionCache:
+    """Per-recall lifecycle admission cache.
+
+    The retrieval engine performs a mandatory second admission after bridge or
+    scene expansion.  Facts already checked before fusion do not need a second
+    database read in the *same* recall, while any newly expanded id is checked
+    immediately.  The cache never crosses requests, profiles, or DB writes.
+    """
+
+    checked_fact_ids: set[str] = field(default_factory=set)
+    inadmissible_fact_ids: set[str] = field(default_factory=set)
+    unavailable: bool = False
+
+
+def _normalized_as_of(as_of: str | None) -> str | None:
+    """Normalize an optional transaction-time boundary at one boundary.
+
+    The MCP/HTTP adapters already reject invalid non-blank values.  Engine
+    callers are also public, however, so an invalid direct value must degrade
+    to current recall rather than turn a read into an exception.
+    """
+    if as_of is None:
+        return None
+    from superlocalmemory.retrieval.temporal_utils import normalize_as_of
+    return normalize_as_of(as_of)
+
+
+def _invalidated_candidate_ids(
+    db: DatabaseManager,
+    fact_ids: set[str],
+    profile_id: str,
+    *,
+    as_of: str | None = None,
+    include_global: bool = False,
+    include_shared: bool = False,
+    lifecycle_cache: CorrectionAdmissionCache | None = None,
+) -> set[str] | None:
+    """Return correction failures, or ``None`` when admission is unprovable.
+
+    ``None`` is intentionally distinct from an empty set.  Callers MUST turn
+    it into an abstention (an empty candidate path), never treat it as "nothing
+    invalidated".  Treating an unavailable lifecycle read as an empty set is a
+    fail-open path through which an approved stale fact can be re-admitted.
+    """
+    if not fact_ids:
+        return set()
+    if lifecycle_cache is not None and lifecycle_cache.unavailable:
+        return None
+    unchecked = (
+        fact_ids - lifecycle_cache.checked_fact_ids
+        if lifecycle_cache is not None
+        else fact_ids
+    )
+    if not unchecked:
+        return (
+            lifecycle_cache.inadmissible_fact_ids & fact_ids
+            if lifecycle_cache is not None
+            else set()
+        )
+    try:
+        kwargs: dict[str, Any] = {"as_of": _normalized_as_of(as_of)}
+        if include_global:
+            kwargs["include_global"] = True
+        if include_shared:
+            kwargs["include_shared"] = True
+        # Do not infer support from a permissive mock's dynamic attributes.
+        # The concrete storage manager owns this optimized contract; older
+        # adapters continue through the two focused public queries below.
+        combined = getattr(type(db), "get_correction_inadmissible_fact_ids", None)
+        if callable(combined):
+            invalid = db.get_correction_inadmissible_fact_ids(
+                list(unchecked), profile_id, **kwargs,
+            )
+        else:
+            invalid = db.get_invalidated_fact_ids(list(unchecked), profile_id, **kwargs)
+            pending_successors = db.get_nonapplied_correction_successor_ids(
+                list(unchecked),
+                profile_id,
+                include_global=include_global,
+                include_shared=include_shared,
+            )
+            if not isinstance(pending_successors, set):
+                return None
+            invalid |= pending_successors
+    except Exception as exc:
+        logger.warning("Correction admission lookup failed: %s", exc)
+        if lifecycle_cache is not None:
+            lifecycle_cache.unavailable = True
+        return None
+    if not isinstance(invalid, set):
+        if lifecycle_cache is not None:
+            lifecycle_cache.unavailable = True
+        return None
+    if lifecycle_cache is not None:
+        lifecycle_cache.checked_fact_ids.update(unchecked)
+        lifecycle_cache.inadmissible_fact_ids.update(invalid)
+        return lifecycle_cache.inadmissible_fact_ids & fact_ids
+    return invalid
+
+
+def _strict_temporal_candidate_ids(
+    db: DatabaseManager,
+    fact_ids: set[str],
+    profile_id: str,
+    *,
+    known_as_of: str | None = None,
+    valid_at: str | None = None,
+    include_unknown: bool = False,
+    include_global: bool = False,
+    include_shared: bool = False,
+) -> set[str] | None:
+    """Return strict two-clock failures, or ``None`` when admission is unprovable."""
+    if not fact_ids or (known_as_of is None and valid_at is None):
+        return set()
+    try:
+        invalid = db.get_strict_temporal_inadmissible_fact_ids(
+            list(fact_ids), profile_id,
+            known_as_of=_normalized_as_of(known_as_of),
+            valid_at=_normalized_as_of(valid_at),
+            include_unknown=include_unknown,
+            include_global=include_global,
+            include_shared=include_shared,
+        )
+    except Exception as exc:
+        logger.warning("Strict temporal admission lookup failed: %s", exc)
+        return None
+    return invalid if isinstance(invalid, set) else None
+
+
+def _abstain_candidates(
+    all_results: dict[str, list[tuple[str, float]]],
+    *,
+    stage: str,
+) -> dict[str, list[tuple[str, float]]]:
+    """Fail closed without changing the retrieval filter public contract.
+
+    ``ChannelRegistry`` and the retrieval engine both expect the original
+    channel-result shape.  Returning the same channel names with empty lists
+    is an explicit candidate-level abstention: downstream fusion naturally
+    produces no materializable facts, while callers keep their stable response
+    schema and can report ``no_confident_match``.
+    """
+    logger.error(
+        "Temporal correction admission unavailable at %s; abstaining from recall candidates",
+        stage,
+    )
+    return {channel_name: [] for channel_name in all_results}
+
+
+def admit_correction_candidates(
+    all_results: dict[str, list[tuple[str, float]]],
+    profile_id: str,
+    db: DatabaseManager,
+    *,
+    as_of: str | None = None,
+    known_as_of: str | None = None,
+    valid_at: str | None = None,
+    include_unknown: bool = False,
+    include_global: bool = False,
+    include_shared: bool = False,
+    lifecycle_cache: CorrectionAdmissionCache | None = None,
+) -> dict[str, list[tuple[str, float]]]:
+    """Hard-exclude system-superseded facts before candidate fusion.
+
+    This is the SLM 4.0.2 Brain Core admission invariant.  Ranking is unable to
+    enforce a correction because a high-scoring stale fact can still win.  The
+    historical ``as_of`` boundary preserves facts that had not yet been
+    superseded at that point, so current corrections do not rewrite history.
+    """
+    fact_ids = {
+        fact_id
+        for channel_results in all_results.values()
+        for fact_id, _ in channel_results
+    }
+    invalid = _invalidated_candidate_ids(
+        db, fact_ids, profile_id, as_of=as_of,
+        include_global=include_global, include_shared=include_shared,
+        lifecycle_cache=lifecycle_cache,
+    )
+    if invalid is None:
+        return _abstain_candidates(all_results, stage="pre_fusion.lifecycle")
+    strict = _strict_temporal_candidate_ids(
+        db, fact_ids, profile_id,
+        known_as_of=known_as_of, valid_at=valid_at,
+        include_unknown=include_unknown,
+        include_global=include_global, include_shared=include_shared,
+    )
+    if strict is None:
+        return _abstain_candidates(all_results, stage="pre_fusion.strict_temporal")
+    if strict:
+        invalid |= strict
+    if not invalid:
+        return all_results
+    return {
+        channel_name: [
+            (fact_id, score)
+            for fact_id, score in channel_results
+            if fact_id not in invalid
+        ]
+        for channel_name, channel_results in all_results.items()
+    }
+
+
+def admit_correction_fusion_results(
+    fused_results: list[Any],
+    profile_id: str,
+    db: DatabaseManager,
+    *,
+    as_of: str | None = None,
+    known_as_of: str | None = None,
+    valid_at: str | None = None,
+    include_unknown: bool = False,
+    include_global: bool = False,
+    include_shared: bool = False,
+    lifecycle_cache: CorrectionAdmissionCache | None = None,
+) -> list[Any]:
+    """Re-apply correction admission after graph/scene candidate expansion."""
+    fact_ids = {result.fact_id for result in fused_results}
+    invalid = _invalidated_candidate_ids(
+        db, fact_ids, profile_id, as_of=as_of,
+        include_global=include_global, include_shared=include_shared,
+        lifecycle_cache=lifecycle_cache,
+    )
+    if invalid is None:
+        logger.error(
+            "Temporal correction admission unavailable at post_fusion.lifecycle; "
+            "abstaining from recall candidates",
+        )
+        return []
+    strict = _strict_temporal_candidate_ids(
+        db, fact_ids, profile_id,
+        known_as_of=known_as_of, valid_at=valid_at,
+        include_unknown=include_unknown,
+        include_global=include_global, include_shared=include_shared,
+    )
+    if strict is None:
+        logger.error(
+            "Temporal correction admission unavailable at post_fusion.strict_temporal; "
+            "abstaining from recall candidates",
+        )
+        return []
+    if strict:
+        invalid |= strict
+    if not invalid:
+        return fused_results
+    return [result for result in fused_results if result.fact_id not in invalid]
 
 
 class TemporalValidityFilter:
@@ -160,14 +414,11 @@ class TemporalValidityFilter:
         # When as_of is set: only supersessions that occurred AT OR BEFORE
         # as_of contribute (Phase 4b bi-temporal fix). Supersessions after
         # as_of are invisible — the fact was still valid at the query point.
-        try:
-            invalid = self._db.get_invalidated_fact_ids(
-                list(all_fact_ids), profile_id, as_of=as_of,
-            )
-        except Exception as exc:
-            # Fail-open: a validity-lookup error must never break retrieval.
-            logger.warning("Temporal validity lookup failed: %s", exc)
-            return all_results
+        invalid = _invalidated_candidate_ids(
+            self._db, all_fact_ids, profile_id, as_of=as_of,
+        )
+        if invalid is None:
+            return _abstain_candidates(all_results, stage="legacy_filter.lifecycle")
 
         # --- Axis 2: Event-time expiry (Phase 4 T1b) ---
         # Guard: skip event-time demotion when the caller signals it wants
@@ -209,7 +460,7 @@ class TemporalValidityFilter:
             ]
             # Re-sort descending so demoted facts fall below currently-valid
             # facts in this channel's rank order.
-            new_list.sort(key=lambda pair: pair[1], reverse=True)
+            new_list.sort(key=lambda pair: (-pair[1], pair[0]))
             demoted[channel_name] = new_list
         return demoted
 

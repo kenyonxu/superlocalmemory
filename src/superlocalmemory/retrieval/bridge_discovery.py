@@ -160,7 +160,7 @@ class BridgeDiscovery:
             if len(bridges) >= max_bridges:
                 break
 
-        bridges.sort(key=lambda x: x[1], reverse=True)
+        bridges.sort(key=lambda x: (-x[1], x[0]))
         return filter_authorized_results(
             self._db,
             bridges,
@@ -243,7 +243,7 @@ class BridgeDiscovery:
             for fid, score in activations.items()
             if fid not in set(seed_ids) and score > 0.01
         ]
-        results.sort(key=lambda x: x[1], reverse=True)
+        results.sort(key=lambda x: (-x[1], x[0]))
         return filter_authorized_results(
             self._db,
             results,

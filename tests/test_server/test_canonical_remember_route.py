@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 
 from fastapi.testclient import TestClient
@@ -13,6 +14,9 @@ from superlocalmemory.server.unified_daemon import create_app
 from superlocalmemory.storage.migrations import (
     M018_ingestion_operations,
     M032_write_coordinator_admission,
+    M033_projection_transactions,
+    M034_obligation_integrity,
+    M042_correction_case_ledger,
 )
 
 
@@ -24,6 +28,9 @@ def _client(engine):
     with engine._db.raw_connection() as conn:
         M018_ingestion_operations.apply(conn)
         M032_write_coordinator_admission.apply(conn)
+        M033_projection_transactions.apply(conn)
+        M034_obligation_integrity.apply(conn)
+        M042_correction_case_ledger.apply(conn)
     app = create_app()
     app.state.engine = engine
     runtime = CanonicalRememberRuntime.for_engine(engine)
@@ -155,7 +162,10 @@ def test_wait_remember_completes_same_canonical_operation(
     payload = response.json()
     assert payload["materialization_state"] == "queryable"
     assert payload["fact_ids"]
-    assert payload["wait_ignored"] is True
+    assert payload["wait_ignored"] is False, (
+        "wait now buys a larger best-effort enrichment budget; it is no "
+        "longer discarded"
+    )
     operation = engine_with_mock_deps._db.execute(
         "SELECT state, session_id FROM ingestion_operations "
         "WHERE operation_id=?",
@@ -182,7 +192,10 @@ def test_wait_remember_never_runs_inline_materialization(engine_with_mock_deps) 
     payload = response.json()
     assert payload["status"] == "queryable"
     assert payload["materialization_state"] == "queryable"
-    assert payload["wait_ignored"] is True
+    assert payload["wait_ignored"] is False, (
+        "wait now buys a larger best-effort enrichment budget; it is no "
+        "longer discarded"
+    )
 
 
 def test_trust_rejection_occurs_before_journal_or_canonical_write(
@@ -240,32 +253,39 @@ def test_dashboard_delete_and_update_use_canonical_mutation_receipts(
             },
         )
         fact_id = stored.json()["fact_ids"][0]
+        deletable = client.post(
+            "/remember",
+            json={
+                "content": "A distinct dashboard delete witness remains removable.",
+                "idempotency_key": "dashboard-delete-source",
+            },
+        ).json()["fact_ids"][0]
         update = client.patch(
             f"/api/memories/{fact_id}",
             json={"content": "Dashboard mutation receipts remain durable after edit."},
             headers={"X-Idempotency-Key": "dashboard-update-retry"},
         )
         first_delete = client.delete(
-            f"/api/memories/{fact_id}",
+            f"/api/memories/{deletable}",
             headers={"X-Idempotency-Key": "dashboard-delete-retry"},
         )
         second_delete = client.delete(
-            f"/api/memories/{fact_id}",
+            f"/api/memories/{deletable}",
             headers={"X-Idempotency-Key": "dashboard-delete-retry"},
         )
 
-    assert update.status_code == 200, update.text
+    assert update.status_code == 202, update.text
     assert first_delete.status_code == 200, first_delete.text
     assert second_delete.status_code == 200, second_delete.text
     assert engine_with_mock_deps._db.execute(
-        "SELECT fact_id FROM atomic_facts WHERE fact_id = ?", (fact_id,)
+        "SELECT fact_id FROM atomic_facts WHERE fact_id = ?", (deletable,)
     ) == []
     kinds = engine_with_mock_deps._db.execute(
         "SELECT command_kind FROM write_commits "
         "WHERE command_kind IN (?, ?) ORDER BY command_kind",
-        ("update_fact", "delete_fact"),
+        ("propose_correction", "delete_fact"),
     )
-    assert [row["command_kind"] for row in kinds] == ["delete_fact", "update_fact"]
+    assert [row["command_kind"] for row in kinds] == ["delete_fact", "propose_correction"]
 
 
 def test_dashboard_archive_merge_and_scope_use_canonical_mutation_commands(
@@ -344,5 +364,115 @@ def test_dashboard_mutation_rejects_invalid_or_drifted_idempotency_key(
         )
 
     assert invalid.status_code == 422
-    assert first.status_code == 200
+    assert first.status_code == 202
     assert conflict.status_code == 409
+
+
+def test_authenticated_http_correction_lifecycle_is_review_gated_and_immutable(
+    engine_with_mock_deps,
+) -> None:
+    """HTTP proposes first; an authenticated reviewer alone applies truth."""
+    with _client(engine_with_mock_deps) as client:
+        predecessor = client.post(
+            "/remember",
+            json={
+                "content": "The original synthetic release decision remains traceable.",
+                "idempotency_key": "http-correction-source",
+            },
+        ).json()["fact_ids"][0]
+        proposed = client.patch(
+            f"/api/memories/{predecessor}",
+            json={"content": "The reviewed synthetic release decision supersedes the prior one."},
+            headers={"X-Idempotency-Key": "http-correction-propose"},
+        )
+        assert proposed.status_code == 202, proposed.text
+        proposal = proposed.json()
+        case = proposal["correction_case"]
+        successor = proposal["successor_fact_id"]
+
+        listed = client.get("/api/corrections")
+        fetched = client.get(f"/api/corrections/{case['case_id']}")
+        protected_delete = client.delete(f"/api/memories/{predecessor}")
+        applied = client.post(
+            f"/api/corrections/{case['case_id']}/apply",
+            json={"expected_version": case["version"]},
+            headers={"X-Idempotency-Key": "http-correction-apply"},
+        )
+        protected_successor_delete = client.delete(f"/api/memories/{successor}")
+
+    assert listed.status_code == 200, listed.text
+    assert fetched.status_code == 200, fetched.text
+    assert protected_delete.status_code == 409, protected_delete.text
+    assert applied.status_code == 200, applied.text
+    assert protected_successor_delete.status_code == 409, protected_successor_delete.text
+    assert listed.json()["corrections"][0]["status"] == "proposed"
+    assert "content" not in fetched.json()["correction"]
+    assert applied.json()["correction_case"]["status"] == "applied"
+    assert engine_with_mock_deps._db.get_fact(predecessor).content == (
+        "The original synthetic release decision remains traceable."
+    )
+    assert engine_with_mock_deps._db.get_fact(successor).content == (
+        "The reviewed synthetic release decision supersedes the prior one."
+    )
+    assert engine_with_mock_deps._db.get_invalidated_fact_ids(
+        [predecessor], "default"
+    ) == {predecessor}
+    assert engine_with_mock_deps._db.get_nonapplied_correction_successor_ids(
+        [successor], "default"
+    ) == set()
+
+
+def test_authenticated_mcp_correction_lifecycle_uses_the_same_resident_daemon(
+    engine_with_mock_deps,
+    monkeypatch,
+) -> None:
+    """MCP is a transport adapter, never a second correction writer."""
+    from superlocalmemory.mcp.tools_core import register_core_tools
+
+    class _McpServer:
+        def __init__(self) -> None:
+            self.tools: dict[str, object] = {}
+
+        def tool(self, *args, **kwargs):
+            def register(function):
+                self.tools[function.__name__] = function
+                return function
+
+            return register
+
+    with _client(engine_with_mock_deps) as client:
+        predecessor = client.post(
+            "/remember",
+            json={
+                "content": "The MCP lifecycle source remains independently traceable.",
+                "idempotency_key": "mcp-correction-source",
+            },
+        ).json()["fact_ids"][0]
+
+        def daemon_request(method: str, path: str, payload=None):
+            response = client.request(method, path, json=payload)
+            content_type = response.headers.get("content-type", "")
+            return response.json() if content_type.startswith("application/json") else None
+
+        monkeypatch.setattr("superlocalmemory.cli.daemon.is_daemon_running", lambda: True)
+        monkeypatch.setattr("superlocalmemory.cli.daemon.daemon_request", daemon_request)
+        server = _McpServer()
+        register_core_tools(server, lambda: engine_with_mock_deps)
+
+        proposed = asyncio.run(
+            server.tools["update_memory"](
+                predecessor,
+                "The MCP lifecycle successor is review-gated before it becomes current.",
+                "codex",
+            )
+        )
+        case_id = proposed["correction_case"]["case_id"]
+        listed = asyncio.run(server.tools["list_corrections"]())
+        applied = asyncio.run(server.tools["review_correction"](case_id, "apply", 0))
+
+    assert proposed["success"] is True
+    assert proposed["review_required"] is True
+    assert listed["success"] is True
+    assert [item["case_id"] for item in listed["corrections"]] == [case_id]
+    assert applied["success"] is True
+    assert applied["correction_case"]["status"] == "applied"

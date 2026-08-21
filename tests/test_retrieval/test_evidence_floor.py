@@ -39,6 +39,22 @@ def _mock_db(facts: list[AtomicFact] | None = None) -> MagicMock:
         f for f in _facts if f.fact_id in ids
     ]
     db.get_scenes_for_facts_batch.return_value = {}
+    # Correction-admission contract (4.0.2 Brain Core / M042).
+    #
+    # temporal_validity_filter fails CLOSED: when the correction-lifecycle read
+    # is unprovable it returns None and recall abstains, yielding zero
+    # candidates. That is correct product behaviour — treating an unavailable
+    # lifecycle read as "nothing invalidated" would let an approved-stale fact
+    # back in — and the code deliberately refuses to infer support from a
+    # permissive mock (it probes type(db), not the instance).
+    #
+    # These fixtures predate that feature, so every recall here abstained and
+    # the evidence-floor assertions silently tested nothing. Returning real
+    # empty sets makes admission PROVABLE and empty, which is what these tests
+    # mean: no corrections in play. Do not replace with MagicMock defaults.
+    db.get_invalidated_fact_ids.return_value = set()
+    db.get_nonapplied_correction_successor_ids.return_value = set()
+    db.get_strict_temporal_excluded_fact_ids.return_value = set()
     return db
 
 

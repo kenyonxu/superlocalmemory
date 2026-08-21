@@ -30,6 +30,7 @@ from .learning_telemetry import (
     sqlite_status as _sqlite_status,
 )
 from superlocalmemory.storage.memory_write import memory_read
+from superlocalmemory.learning.engagement import derive_engagement_from_dbs
 
 logger = logging.getLogger("superlocalmemory.routes.learning")
 router = APIRouter()
@@ -338,31 +339,18 @@ def learning_status(request: Request):
             "signals": signal_count,
         }
 
-        # Engagement — v3.4.8: Fixed method name (was get_engagement_stats, actual is get_stats)
-        engagement = _get_engagement()
-        if engagement:
-            try:
-                stats = engagement.get_stats(active_profile)
-                health = engagement.get_health(active_profile)
-                active_days = stats.get("active_days", 0)
-                total_events = stats.get("total_events", 0)
-                memories_per_day = (
-                    round(total_events / active_days, 1) if active_days > 0 else 0
-                )
-                result["engagement"] = {
-                    "health_status": health.upper(),
-                    "days_active": active_days,
-                    "memories_per_day": memories_per_day,
-                    "total_events": total_events,
-                    "recall_count": stats.get("recall_count", 0),
-                    "store_count": stats.get("store_count", 0),
-                    "session_count": stats.get("session_count", 0),
-                    "engagement_score": stats.get("engagement_score", 0),
-                }
-            except Exception as exc:
-                logger.debug("engagement stats: %s", exc)
-                result["engagement"] = None
-        else:
+        # Engagement — v3.4.9: derive-on-read from existing tables (zero writes,
+        # satisfies I1 recall/remember latency, I3 no unbounded growth, I6 provenance).
+        # memory.db:atomic_facts drives store_count/days_active/health.
+        # learning.db:learning_signals drives recall_count (proxy: distinct queries).
+        try:
+            result["engagement"] = derive_engagement_from_dbs(
+                memory_db_path=MEMORY_DIR / "memory.db",
+                learning_db_path=LEARNING_DB,
+                profile_id=active_profile,
+            )
+        except Exception as exc:
+            logger.debug("derive_engagement_from_dbs: %s", exc)
             result["engagement"] = None
 
         # Tech preferences + workflow patterns from V3.1 behavioral store

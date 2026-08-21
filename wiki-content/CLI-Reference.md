@@ -1,8 +1,8 @@
-# CLI Reference — V4.0.0
+# CLI Reference — V4.0.5
 
 The installed CLI is the command source of truth. Use `slm --help` and
 `slm <command> --help`; commands that advertise `--json` provide structured
-output. This page describes **V4.0.0**; the installed `--help` wins if prose drifts.
+output. This page describes **V4.0.5**; the installed `--help` wins if prose drifts.
 
 ## Setup & Status
 
@@ -319,7 +319,7 @@ SuperLocalMemory exposes both MCP and CLI surfaces:
 
 | Need | Use | Example |
 |------|-----|---------|
-| IDE integration | MCP (87 whole / 42 full default) | Run `slm connect --list`, then configure a listed client |
+| IDE integration | MCP (91 whole / 46 full) | Run `slm connect --list`, then configure a listed client |
 | Shell scripts | CLI + `--json` | `slm recall "auth" --json \| jq '.data.results'` |
 | CI/CD pipelines | CLI + `--json` | `slm remember "deployed v2.1" --json` |
 | Agent frameworks | CLI + `--json` + adapters | [[Framework Adapters]] — 9 adapters |

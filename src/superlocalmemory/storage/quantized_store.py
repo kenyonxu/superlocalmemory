@@ -214,8 +214,10 @@ class QuantizedEmbeddingStore:
 
             results.append((qe.fact_id, sim))
 
-        # Sort descending by similarity
-        results.sort(key=lambda x: x[1], reverse=True)
+        # Sort by descending similarity; use fact_id as the tie-break so that
+        # two facts with identical approximate similarity always return in the
+        # same order regardless of SQLite storage layout or insertion sequence.
+        results.sort(key=lambda x: (-x[1], x[0]))
         return results[:top_k]
 
     # -- Compression helpers -----------------------------------------------

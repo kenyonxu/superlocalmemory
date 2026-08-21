@@ -63,6 +63,10 @@ def _handle_recall(
     query: str, limit: int, session_id: str = "", fast: bool = False,
     include_global: bool | None = None, include_shared: bool | None = None,
     window: str | None = None,
+    as_of: str | None = None,
+    known_as_of: str | None = None,
+    valid_at: str | None = None,
+    include_unknown: bool = False,
 ) -> dict:
     engine = _get_engine()
     # v3.6.15 multi-scope: None flags let engine.recall resolve the configured
@@ -72,6 +76,10 @@ def _handle_recall(
         query, limit=limit, session_id=session_id or None, fast=bool(fast),
         include_global=include_global, include_shared=include_shared,
         window=window or None,
+        as_of=as_of or None,
+        known_as_of=known_as_of or None,
+        valid_at=valid_at or None,
+        include_unknown=include_unknown,
     )
 
     # Batch-fetch original memory text for all results. Retrieval already
@@ -98,6 +106,10 @@ def _handle_recall(
         memory_map=memory_map,
         per_fact_max=getattr(_rc, "recall_per_fact_max_chars", 2400),
         total_max=getattr(_rc, "recall_total_max_chars", 12000),
+        # Option B: markers only on session-bearing recalls. A marker can
+        # only buy a learning signal when a pending_outcomes row exists
+        # to settle, and those exist only when session_id is present.
+        include_marker=bool(session_id),
     )
     return {
         "ok": True,
@@ -230,18 +242,39 @@ def _handle_update_memory(
     content: str,
     source_agent_id: str = "system",
 ) -> dict:
-    """Update a fact after capability-derived authorization."""
-    engine = _get_engine()
-    from superlocalmemory.core.engine_ingestion import local_trusted_actor_id
-    from superlocalmemory.core.mutations import update_fact_authorized
+    """Update a fact after capability-derived authorization.
 
-    return update_fact_authorized(
-        engine,
-        fact_id,
-        content,
-        trusted_actor_id=local_trusted_actor_id("recall-worker"),
-        source_agent_id=source_agent_id,
-    )
+    CORRECTIONS CANNOT BE PERFORMED FROM THIS WORKER, AND THAT IS BY DESIGN.
+
+    Since corrections became a review-gated lifecycle (M042) rather than an
+    in-place edit, update_fact_authorized() requires a canonical correction
+    writer. That writer is the daemon's single-writer mutation boundary
+    (CanonicalRememberRuntime, owned by unified_daemon and handed to the HTTP
+    route). A worker subprocess cannot own it: CanonicalRememberRuntime.ready
+    requires a live worker of its own, so constructing one here would nest
+    worker processes and hand a second writer the ownership context that is
+    supposed to be exclusive.
+
+    Previously this called through anyway, and mutations.py answered
+    "canonical correction writer is temporarily unavailable" with
+    retryable=True. Nothing about it was temporary — with the daemon down that
+    path can NEVER succeed, so a caller could retry forever. This is the
+    honest, non-retryable answer with the actual remedy: the daemon-backed
+    route (used automatically whenever the daemon is running) does support
+    corrections.
+    """
+    return {
+        "ok": False,
+        "retryable": False,
+        "error": (
+            "Corrections are review-gated and require the SuperLocalMemory "
+            "daemon, which owns the single correction writer. Start it with "
+            "`slm serve start` and retry — updates route through the daemon "
+            "automatically when it is running."
+        ),
+        "remedy": "slm serve start",
+        "fact_id": fact_id,
+    }
 
 
 def _handle_summarize(texts: list[str], mode: str) -> dict:
@@ -322,6 +355,10 @@ def _worker_main() -> None:
                     include_global=req.get("include_global"),
                     include_shared=req.get("include_shared"),
                     window=req.get("window"),
+                    as_of=req.get("as_of"),
+                    known_as_of=req.get("known_as_of"),
+                    valid_at=req.get("valid_at"),
+                    include_unknown=bool(req.get("include_unknown", False)),
                 )
                 _respond(result)
             elif cmd == "store":

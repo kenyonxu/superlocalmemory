@@ -4,8 +4,6 @@
 
 """Contextual Thompson-sampling bandit over discrete channel-weight arms.
 
-LLD reference: ``.backup/active-brain/lld/LLD-03-contextual-bandit-and-ensemble.md``
-Sections 3 (algorithm), 5.3 (file spec), 8 (hard rules).
 
 Schema: ``bandit_arms`` + ``bandit_plays`` live in ``learning.db``, created by
 LLD-07 M005. This module NEVER defines DDL — it only READs / WRITEs.

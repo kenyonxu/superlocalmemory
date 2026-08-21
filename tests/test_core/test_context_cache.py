@@ -95,6 +95,38 @@ def test_upsert_replaces_existing(home: Path, cache: "cc.ContextCache") -> None:
     assert got.content == "second"
 
 
+def test_current_admission_rejects_a_cache_entry_with_a_pending_successor(
+    home: Path, cache: "cc.ContextCache"
+) -> None:
+    """The hook cache cannot inject a correction successor before review."""
+    entry = _make_entry(fact_ids=["pending-successor"])
+    cache.upsert(entry)
+    memory = sqlite3.connect(home / "memory.db")
+    try:
+        memory.executescript(
+            """
+            CREATE TABLE atomic_facts (fact_id TEXT PRIMARY KEY, profile_id TEXT);
+            CREATE TABLE fact_temporal_validity (
+                fact_id TEXT, profile_id TEXT, system_expired_at TEXT
+            );
+            CREATE TABLE correction_cases (successor_fact_id TEXT, status TEXT);
+            INSERT INTO atomic_facts VALUES ('pending-successor', 'default');
+            INSERT INTO correction_cases VALUES ('pending-successor', 'proposed');
+            """
+        )
+        memory.commit()
+    finally:
+        memory.close()
+
+    assert cc.read_entry_fast(
+        entry.session_id,
+        entry.topic_sig,
+        db_path=home / "active_brain_cache.db",
+        home_dir=home,
+        require_current_admission=True,
+    ) is None
+
+
 # ---------------------------------------------------------------------------
 # TTL
 # ---------------------------------------------------------------------------
@@ -314,6 +346,49 @@ def test_read_entry_fast_under_budget(home: Path,
     # Wall clock is noisy in CI; use a generous bound. The fast-path budget
     # is <10 ms p95 but we allow 50 ms in the test to avoid flakiness.
     assert avg < 0.05, f"avg {avg*1000:.2f} ms"
+
+
+def test_current_admission_cache_backstop_stays_under_hot_path_budget(
+    home: Path, cache: "cc.ContextCache"
+) -> None:
+    """Correction safety adds one tiny RO lookup only on a cache hit."""
+    cache.upsert(_make_entry(fact_ids=["f1"]))
+    memory = sqlite3.connect(home / "memory.db")
+    try:
+        memory.executescript(
+            """
+            CREATE TABLE atomic_facts (fact_id TEXT PRIMARY KEY, profile_id TEXT);
+            CREATE TABLE fact_temporal_validity (
+                fact_id TEXT, profile_id TEXT, system_expired_at TEXT
+            );
+            INSERT INTO atomic_facts VALUES ('f1', 'default');
+            """
+        )
+        memory.commit()
+    finally:
+        memory.close()
+
+    for _ in range(5):
+        assert cc.read_entry_fast(
+            "sess-1",
+            "abcd1234deadbeef",
+            db_path=home / "active_brain_cache.db",
+            home_dir=home,
+            require_current_admission=True,
+        ) is not None
+    timings: list[float] = []
+    for _ in range(25):
+        started = time.perf_counter()
+        assert cc.read_entry_fast(
+            "sess-1",
+            "abcd1234deadbeef",
+            db_path=home / "active_brain_cache.db",
+            home_dir=home,
+            require_current_admission=True,
+        ) is not None
+        timings.append(time.perf_counter() - started)
+    p95 = sorted(timings)[int(len(timings) * 0.95) - 1]
+    assert p95 < 0.05, f"current-admission cache p95 {p95 * 1000:.2f} ms"
 
 
 # ---------------------------------------------------------------------------

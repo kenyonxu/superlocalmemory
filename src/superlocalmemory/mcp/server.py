@@ -77,13 +77,13 @@ def reset_engine():
 
 # Register tools and resources -------------------------------------------------
 #
-# Essential-only default: 34 base tools + 8 mesh tools = 42 registered
+# Essential-only default: 41 base tools + 8 mesh tools = 49 registered.
 # when mesh is enabled. Set ``SLM_MCP_ALL_TOOLS=1`` to expose the full
 # toolset. Rationale: IDEs cap at 50-100 tools total (Cursor,
 # Antigravity, Windsurf) and a maximal SLM registration crowds out
 # other MCP servers the user may have installed.
 # Admin/diagnostics tools remain available via CLI (`slm <command>`).
-# Set SLM_MCP_ALL_TOOLS=1 to enable all 87 tools (power users).
+# Set SLM_MCP_ALL_TOOLS=1 to enable all 94 tools (power users).
 
 import os as _os_reg
 
@@ -97,13 +97,24 @@ _ESSENTIAL_TOOLS: set[str] = {
     # Feedback / learning signals — reachable Dash-Core path for
     # thumbs-up / pin / drift signals.
     "report_feedback",
+    # v4.0.2 portable Brain evidence: profile-scoped receipt reads/writes.
+    "get_brain_evidence_status", "record_agent_experience",
+    "record_cognitive_turn", "finalize_cognitive_turn",
+    # v4.0.4: explicit, optional observation from the separately installed
+    # Bounded Loops MCP producer. It never participates in recall/ranking.
+    "observe_bounded_loop_evidence",
+    # Update, review, and list form one core correction lifecycle.
+    "review_correction", "list_corrections",
+    # v4.0.8 (#113): readable summaries. Present here as well as in the named
+    # profiles because this set is the FALLBACK surface — it must mirror
+    # ``full``, and a tool that ships in the smallest profile ("core") cannot be
+    # missing from the fallback without a client silently losing it.
+    "get_memory_summary",
     # Memory management (2)
     "forget", "run_maintenance",
     # NOTE: prestage_context IS registered (see register_prestage_tool below)
-    # but is deliberately absent from the default surface. _ESSENTIAL_TOOLS must
-    # stay at 42 to match the full42 profile: the profile names are a
-    # user-facing config contract and the published tool-count table depends on
-    # them. New tools reach users via the `whole` profile until a rename ships.
+    # but is deliberately absent from the default surface. Brain evidence is
+    # intentionally present: it is the portable contract for installed agents.
     # Infinite memory + learning (4)
     "consolidate_cognitive", "get_soft_prompts",
     "set_mode", "report_outcome",
@@ -148,7 +159,7 @@ _all_tools = _os_reg.environ.get("SLM_MCP_ALL_TOOLS") == "1"
 _user_allowlist_str = _os_reg.environ.get("SLM_MCP_TOOLS", "").strip()
 
 # ---------------------------------------------------------------------------
-# v3.6.14 WP-01: Named profile definitions
+# Named profile definitions (introduced in v3.6.14)
 # Extracted to mcp/profiles.py (v3.8.0) — pure data, no side effects.
 # All names re-exported here for backward compatibility with existing tests
 # and any code that imports them from this module.
@@ -272,6 +283,10 @@ from superlocalmemory.mcp.tools_loops import register_loop_tools
 register_loop_tools(_target, get_engine)  # v3.8.0: bounded-loop tools (CLI+command+MCP)
 from superlocalmemory.mcp.tools_ops import register_ops_tools
 register_ops_tools(_target, get_engine)  # Wave-3: operational recovery & admin remediation
+from superlocalmemory.mcp.tools_brain import register_brain_tools
+register_brain_tools(_target, get_engine)  # v4.0.2 portable Brain receipts
+from superlocalmemory.mcp.tools_summaries import register_summary_tools
+register_summary_tools(_target, get_engine)  # v4.0.8 issue #113 summary reads
 from superlocalmemory.mcp.tools_context import register_prestage_tool
 
 

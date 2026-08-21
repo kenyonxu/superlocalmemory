@@ -2,7 +2,7 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3
 
-"""Temporal Intelligence -- contradiction detection and fact invalidation.
+"""Temporal Intelligence -- contradiction detection and reviewable proposals.
 
 Implements full bi-temporal validity tracking with 4 timestamps (L8 fix).
 Contradiction detection via sheaf cohomology (Mode A: pure math) or
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 class TemporalValidator:
-    """Validates temporal consistency and manages fact invalidation.
+    """Validates temporal consistency and proposes fact corrections.
 
     Components received via __init__ (NOT the engine -- Rule 06):
     - db: DatabaseManager
@@ -75,15 +75,20 @@ class TemporalValidator:
         new_fact: AtomicFact,
         profile_id: str,
     ) -> list[dict]:
-        """Check new fact for contradictions and invalidate old facts.
+        """Check new fact for contradictions without mutating old facts.
 
         Algorithm:
         1. Detect contradictions (sheaf or LLM).
-        2. For each contradiction: invalidate old fact (set valid_until + system_expired_at).
-        3. Apply trust penalty to invalidated facts.
-        4. Return list of invalidation actions.
+        2. Exclude valid historical progressions using explicit event anchors.
+        3. Return review-required correction candidates.
 
-        Returns list of dicts: {old_fact_id, new_fact_id, reason, severity}
+        This legacy method name is intentionally retained for API compatibility.
+        It no longer expires facts, changes trust, or changes retrieval state.
+        The reviewed-correction owner is the only layer permitted to apply a
+        candidate to bi-temporal validity.
+
+        Returns list of dicts: {old_fact_id, new_fact_id, reason, severity,
+        status="proposed"}.
         """
         contradictions = self.detect_contradiction(new_fact, profile_id)
 
@@ -108,25 +113,16 @@ class TemporalValidator:
                 )
                 continue
 
-            # Step 1: Invalidate the old fact (bi-temporal)
-            self.invalidate_fact(
-                fact_id=old_fact_id,
-                invalidated_by=new_fact.fact_id,
-                reason=reason,
-            )
-
-            # Step 2: Apply trust penalty
-            self._apply_trust_penalty(old_fact_id, profile_id)
-
             actions.append({
                 "old_fact_id": old_fact_id,
                 "new_fact_id": new_fact.fact_id,
                 "reason": reason,
                 "severity": severity,
+                "status": "proposed",
             })
 
         logger.info(
-            "Temporal: invalidated %d facts due to new fact %s",
+            "Temporal: proposed %d correction(s) due to new fact %s",
             len(actions), new_fact.fact_id,
         )
         return actions

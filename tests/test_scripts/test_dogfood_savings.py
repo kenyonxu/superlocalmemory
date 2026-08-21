@@ -2,7 +2,7 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
-"""WP-14 TDD — tests written FIRST (RED phase).
+"""Metered-pipeline cost-savings TDD — tests written FIRST (RED phase).
 
 Tests cover:
   - compute_savings_usd: zero, known fixture, compress component

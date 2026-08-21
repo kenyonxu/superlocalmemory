@@ -33,7 +33,7 @@ const path = require('path');
 
 // ------------------------------------------------------------------------
 // IDE id list — kept in sync with portable_kit.py IDE_MATRIX.
-// claude-code is intentionally excluded: it uses the WP-06 plugin, not a
+// claude-code is intentionally excluded: it uses the plugin installer, not a
 // direct MCP config write (connect_ide short-circuits it).
 // ------------------------------------------------------------------------
 

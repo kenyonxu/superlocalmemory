@@ -61,7 +61,7 @@ If `cache_kv_hits` is 0 after repeated work, verify key naming consistency (the 
 slm status [--json] [--verbose]
 ```
 
-Reports system-level state — not optimization counters. Canonical fields (WP-02):
+Reports system-level state — not optimization counters. Canonical fields:
 
 - **mode** — active operation mode (e.g. `local`)
 - **profile** — current memory profile name
@@ -101,7 +101,7 @@ Do not rely on the human-readable format for parsing — always use `--json` whe
 slm doctor [--json] [--quick]
 ```
 
-Preflight check covering dependencies, embedding worker, daemon connectivity, and Surface B health. The **"Optimize (Surface B)"** line (WP-03) confirms whether the compression and cache subsystem initialised correctly.
+Preflight check covering dependencies, embedding worker, daemon connectivity, and Surface B health. The **"Optimize (Surface B)"** line confirms whether the compression and cache subsystem initialised correctly.
 
 `--quick` skips the daemon and embedding probes — runs only dependency and config checks; faster but incomplete.
 
@@ -163,4 +163,4 @@ multi-profile setup. To switch the active profile, see `slm-profile`.
 
 ---
 
-SuperLocalMemory v4.0.0 · Qualixar · AGPL-3.0-or-later
+SuperLocalMemory v4.0.4 · Qualixar · AGPL-3.0-or-later

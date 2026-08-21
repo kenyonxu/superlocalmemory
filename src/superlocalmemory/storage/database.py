@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import platform
 import sqlite3
 import threading
 import time
@@ -39,6 +40,7 @@ from superlocalmemory.storage.models import (
     TemporalEvent,
     TrustScore,
 )
+from superlocalmemory.storage.embedding_codec import decode_embedding, encode_embedding
 from superlocalmemory.storage.write_lock import get_write_lock
 
 logger = logging.getLogger(__name__)
@@ -84,6 +86,10 @@ def _env_float(name: str, default: float) -> float:
 _BUSY_TIMEOUT_MS = _env_int("SLM_DB_BUSY_TIMEOUT_MS", 10_000)   # wait for writers
 _MAX_RETRIES = _env_int("SLM_DB_MAX_RETRIES", 5)                # retry on SQLITE_BUSY
 _RETRY_BASE_DELAY = _env_float("SLM_DB_RETRY_BASE_DELAY", 0.1)  # backoff base (s)
+
+# Warn once per process, not once per connection, when the WAL close-path
+# deadlock guard cannot be installed (Python < 3.12).
+_NO_CKPT_WARNED = False
 
 
 def _unbounded_facts_ceiling() -> int:
@@ -231,18 +237,37 @@ class DatabaseManager:
         conn.row_factory = sqlite3.Row
         conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA foreign_keys=ON")
+        # wal_autocheckpoint is a PER-CONNECTION pragma and is NOT persisted in
+        # the database file (unlike journal_mode=WAL).  Setting it only on the
+        # short-lived initialisation connection left every working connection
+        # on SQLite's default of 1000 frames.  With checkpoint-on-close
+        # disabled below, autocheckpoint is the ONLY remaining checkpoint path,
+        # so the intended value must be set where the writes actually happen.
+        conn.execute("PRAGMA wal_autocheckpoint=400")
         # Deadlock hardening (postmortem 2026-08-13, Option B): WAL close
         # triggers a checkpoint that can wait indefinitely on reader marks
         # pinned by another process/thread — while holding SQLite's
         # process-global VFS mutex, which convoys every later connect().
         # busy_timeout does NOT apply to the close path. NO_CKPT_ON_CLOSE
         # makes close() checkpoint-free so it can never block; normal
-        # checkpointing continues via wal_autocheckpoint=400 on write paths.
+        # checkpointing continues via the wal_autocheckpoint set above.
         # Available since Python 3.12 / SQLite 3.31; guarded for portability.
         try:
             conn.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1)  # type: ignore[attr-defined]
         except (AttributeError, sqlite3.OperationalError):
-            pass
+            # Silent degradation would hide an inactive deadlock guard on a
+            # supported interpreter (requires-python allows 3.11, which
+            # predates Connection.setconfig).  Warn once, not per connection.
+            global _NO_CKPT_WARNED
+            if not _NO_CKPT_WARNED:
+                _NO_CKPT_WARNED = True
+                logger.warning(
+                    "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE unavailable (Python %s, "
+                    "SQLite %s); WAL close-path deadlock hardening is INACTIVE. "
+                    "Python 3.12+ is required for this protection.",
+                    platform.python_version(),
+                    sqlite3.sqlite_version,
+                )
         return conn
 
     @contextmanager
@@ -501,11 +526,19 @@ class DatabaseManager:
                 # writes target the canonical fact (idempotent), not an
                 # orphaned id that was never inserted.
                 fact.fact_id = canonical_id
+                # Repair the only recoverable interrupted-write state from an
+                # early 4.0.2 attempt: a durable fact without its mandatory
+                # knowledge-time anchor. Do not manufacture a historical
+                # timestamp from ``created_at``; this retry is the earliest
+                # trustworthy observation that the anchor was missing.
+                if self.get_temporal_validity(canonical_id, fact.profile_id) is None:
+                    self.store_temporal_validity(canonical_id, fact.profile_id)
                 return canonical_id
         _scope = getattr(fact, 'scope', None) or 'personal'
         _shared = _jd(getattr(fact, 'shared_with', None))
-        self.execute(
-            """INSERT OR REPLACE INTO atomic_facts
+        def _insert_with_knowledge_anchor() -> None:
+            self.execute(
+                """INSERT OR REPLACE INTO atomic_facts
                (fact_id, memory_id, profile_id, content, fact_type,
                 entities_json, canonical_entities_json,
                 observation_date, referenced_date, interval_start, interval_end,
@@ -516,18 +549,30 @@ class DatabaseManager:
                 emotional_valence, emotional_arousal, signal_type, created_at,
                 scope, shared_with)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (fact.fact_id, fact.memory_id, fact.profile_id, fact.content,
-             fact.fact_type.value,
-             json.dumps(fact.entities), json.dumps(fact.canonical_entities),
-             fact.observation_date, fact.referenced_date,
-             fact.interval_start, fact.interval_end,
-             fact.confidence, fact.importance, fact.evidence_count, fact.access_count,
-             json.dumps(fact.source_turn_ids), fact.session_id,
-             _jd(fact.embedding), _jd(fact.fisher_mean), _jd(fact.fisher_variance),
-             fact.lifecycle.value, _jd(fact.langevin_position),
-             fact.emotional_valence, fact.emotional_arousal,
-             fact.signal_type.value, fact.created_at, _scope, _shared),
-        )
+                (fact.fact_id, fact.memory_id, fact.profile_id, fact.content,
+                 fact.fact_type.value,
+                 json.dumps(fact.entities), json.dumps(fact.canonical_entities),
+                 fact.observation_date, fact.referenced_date,
+                 fact.interval_start, fact.interval_end,
+                 fact.confidence, fact.importance, fact.evidence_count, fact.access_count,
+                 json.dumps(fact.source_turn_ids), fact.session_id,
+                 encode_embedding(fact.embedding), _jd(fact.fisher_mean), _jd(fact.fisher_variance),
+                 fact.lifecycle.value, _jd(fact.langevin_position),
+                 fact.emotional_valence, fact.emotional_arousal,
+                 fact.signal_type.value, fact.created_at, _scope, _shared),
+            )
+            # Every fact written after 4.0.2 has an explicit transaction-time
+            # anchor. Absence deliberately represents pre-4.0.2
+            # ``legacy_unknown``; never backfill it from ``created_at``.
+            self.store_temporal_validity(fact.fact_id, fact.profile_id)
+
+        # The fact and its transaction-time anchor are one logical write. Do
+        # not open a nested transaction when an owner already holds one.
+        if getattr(self._txn_state, "conn", None) is not None:
+            _insert_with_knowledge_anchor()
+        else:
+            with self.transaction():
+                _insert_with_knowledge_anchor()
         return fact.fact_id
 
     def _row_to_fact(self, row: sqlite3.Row) -> AtomicFact:
@@ -547,7 +592,7 @@ class DatabaseManager:
             evidence_count=d["evidence_count"], access_count=d["access_count"],
             source_turn_ids=_jl(d.get("source_turn_ids_json")),
             session_id=d.get("session_id", ""),
-            embedding=_jl(d.get("embedding"), None),
+            embedding=decode_embedding(d.get("embedding"), fact_id=d.get("fact_id", "<unknown>")),
             fisher_mean=_jl(d.get("fisher_mean"), None),
             fisher_variance=_jl(d.get("fisher_variance"), None),
             lifecycle=MemoryLifecycle(d["lifecycle"]) if d.get("lifecycle") else MemoryLifecycle.ACTIVE,
@@ -561,6 +606,62 @@ class DatabaseManager:
             created_at=d["created_at"],
         )
 
+    def insert_fact_immutable(self, fact: AtomicFact) -> str:
+        """Insert one known-new fact without content deduplication or replacement.
+
+        Reviewed correction successors require a caller-chosen immutable
+        identity.  Unlike normal remember ingestion, equal content must not
+        reinforce an existing row, and an occupied ID must abort the enclosing
+        transaction rather than overwrite history.
+        """
+        scope = getattr(fact, "scope", None) or "personal"
+        shared = _jd(getattr(fact, "shared_with", None))
+        self.execute(
+            """INSERT INTO atomic_facts
+           (fact_id, memory_id, profile_id, content, fact_type,
+            entities_json, canonical_entities_json,
+            observation_date, referenced_date, interval_start, interval_end,
+            confidence, importance, evidence_count, access_count,
+            source_turn_ids_json, session_id,
+            embedding, fisher_mean, fisher_variance,
+            lifecycle, langevin_position,
+            emotional_valence, emotional_arousal, signal_type, created_at,
+            scope, shared_with)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                fact.fact_id,
+                fact.memory_id,
+                fact.profile_id,
+                fact.content,
+                fact.fact_type.value,
+                json.dumps(fact.entities),
+                json.dumps(fact.canonical_entities),
+                fact.observation_date,
+                fact.referenced_date,
+                fact.interval_start,
+                fact.interval_end,
+                fact.confidence,
+                fact.importance,
+                fact.evidence_count,
+                fact.access_count,
+                json.dumps(fact.source_turn_ids),
+                fact.session_id,
+                encode_embedding(fact.embedding),
+                _jd(fact.fisher_mean),
+                _jd(fact.fisher_variance),
+                fact.lifecycle.value,
+                _jd(fact.langevin_position),
+                fact.emotional_valence,
+                fact.emotional_arousal,
+                fact.signal_type.value,
+                fact.created_at,
+                scope,
+                shared,
+            ),
+        )
+        self.store_temporal_validity(fact.fact_id, fact.profile_id)
+        return fact.fact_id
+
     def set_pinned(self, fact_id: str, pinned: bool) -> None:
         """Set or clear the pinned flag on a fact (v3.4.65 core-memory)."""
         self.execute(
@@ -573,18 +674,46 @@ class DatabaseManager:
         include_global: bool = False,
         include_shared: bool = False,
     ) -> list[AtomicFact]:
-        """Return all pinned facts for a profile, highest-importance first."""
+        """Return currently admissible pinned facts, highest-importance first.
+
+        Pins are injection priority, not an override for a later correction.
+        A system-invalidated fact remains durable and historically queryable,
+        but it must not be inserted into the current session context.
+        """
         where, params = _scope_where(
             profile_id,
             include_global=include_global,
             include_shared=include_shared,
+            prefix="f",
         )
         rows = self.execute(
-            f"SELECT * FROM atomic_facts WHERE {where} AND pinned = 1 "
+            f"SELECT f.* FROM atomic_facts f WHERE {where} AND f.pinned = 1 "
+            "AND NOT EXISTS ("
+            "    SELECT 1 FROM fact_temporal_validity tv "
+            "    WHERE tv.fact_id = f.fact_id "
+            "      AND tv.profile_id = f.profile_id "
+            "      AND tv.system_expired_at IS NOT NULL"
+            ") "
             "ORDER BY importance DESC",
             (*params,),
         )
-        return [self._row_to_fact(r) for r in rows]
+        facts = [self._row_to_fact(r) for r in rows]
+        if not facts:
+            return facts
+        try:
+            blocked = self.get_nonapplied_correction_successor_ids(
+                [fact.fact_id for fact in facts],
+                profile_id,
+                include_global=include_global,
+                include_shared=include_shared,
+            )
+        except Exception as exc:
+            logger.warning("Pinned correction admission lookup failed: %s", exc)
+            return []
+        if not isinstance(blocked, set):
+            logger.warning("Pinned correction admission returned malformed data")
+            return []
+        return [fact for fact in facts if fact.fact_id not in blocked]
 
     def _has_archive_status(self) -> bool:
         """Whether atomic_facts carries the M011 ``archive_status`` column.
@@ -745,7 +874,13 @@ class DatabaseManager:
             raise ValueError(f"Disallowed column(s): {bad_keys}")
         clean: dict[str, Any] = {}
         for k, v in updates.items():
-            if isinstance(v, (list, dict)):
+            if k == "embedding":
+                # Embeddings are stored in the canonical binary form. Falling
+                # through to json.dumps here would write a text row back into a
+                # converted store, one fact at a time, undoing the conversion
+                # wherever a fact is updated.
+                clean[k] = encode_embedding(v) if v is not None else None
+            elif isinstance(v, (list, dict)):
                 clean[k] = json.dumps(v)
             elif isinstance(v, (MemoryLifecycle, FactType, SignalType)):
                 clean[k] = v.value
@@ -1578,13 +1713,29 @@ class DatabaseManager:
         valid_from: str | None = None,
         valid_until: str | None = None,
     ) -> None:
-        """Create temporal validity record for a fact."""
+        """Create or enrich the temporal record for a fact.
+
+        The 4.0.2 fact writer creates the record immediately to anchor
+        transaction time. A later temporal extraction may add event-time bounds;
+        it must not be discarded merely because the anchor already exists.
+        """
+        from datetime import UTC
+        from datetime import datetime as _dt
+        system_created_at = _dt.now(UTC).isoformat()
         self.execute(
             "INSERT OR IGNORE INTO fact_temporal_validity "
-            "(fact_id, profile_id, valid_from, valid_until) "
-            "VALUES (?, ?, ?, ?)",
-            (fact_id, profile_id, valid_from, valid_until),
+            "(fact_id, profile_id, valid_from, valid_until, system_created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (fact_id, profile_id, valid_from, valid_until, system_created_at),
         )
+        if valid_from is not None or valid_until is not None:
+            self.execute(
+                "UPDATE fact_temporal_validity "
+                "SET valid_from = COALESCE(?, valid_from), "
+                "    valid_until = COALESCE(?, valid_until) "
+                "WHERE fact_id = ? AND profile_id = ?",
+                (valid_from, valid_until, fact_id, profile_id),
+            )
 
     def get_temporal_validity(self, fact_id: str, profile_id: str | None = None) -> dict | None:
         """Get temporal validity record for a fact (C4: optionally tenant-scoped)."""
@@ -1611,12 +1762,14 @@ class DatabaseManager:
     def invalidate_fact_temporal(
         self, fact_id: str, invalidated_by: str,
         invalidation_reason: str,
+        *,
+        event_valid_until: str | None = None,
     ) -> None:
         """Mark a fact as invalidated, preserving bi-temporal independence.
 
-        - valid_until (event-time): when the fact ceased to be true in the
-          real world.  Sourced from the fact's referenced_date so the
-          real-world boundary is preserved, not overwritten with wall-clock time.
+        - valid_until (event-time): changed only when a reviewer supplies an
+          independently validated real-world boundary.  Review time, source
+          timestamps, and a detector's conclusion are not a valid substitute.
         - system_expired_at (transaction-time): when the system learned the
           fact was invalid — always set to now.
 
@@ -1630,29 +1783,12 @@ class DatabaseManager:
         from datetime import datetime as _dt
         now = _dt.now(UTC).isoformat()
 
-        # Resolve the event-time boundary from the fact's referenced_date.
-        # Falls back to the current valid_until (which may already be set),
-        # and ultimately to now if neither is available.
-        fact_rows = self.execute(
-            "SELECT referenced_date FROM atomic_facts WHERE fact_id = ?",
-            (fact_id,),
-        )
-        referenced_date = dict(fact_rows[0]).get("referenced_date") if fact_rows else None
-
-        tv_rows = self.execute(
-            "SELECT valid_until FROM fact_temporal_validity WHERE fact_id = ?",
-            (fact_id,),
-        )
-        existing_valid_until = dict(tv_rows[0]).get("valid_until") if tv_rows else None
-
-        valid_until = referenced_date or existing_valid_until or now
-
         self.execute(
             "UPDATE fact_temporal_validity "
-            "SET valid_until = ?, system_expired_at = ?, "
+            "SET valid_until = COALESCE(?, valid_until), system_expired_at = ?, "
             "    invalidated_by = ?, invalidation_reason = ? "
-            "WHERE fact_id = ?",
-            (valid_until, now, invalidated_by, invalidation_reason, fact_id),
+            "WHERE fact_id = ? AND system_expired_at IS NULL",
+            (event_valid_until, now, invalidated_by, invalidation_reason, fact_id),
         )
 
     def get_valid_facts(self, profile_id: str) -> list[str]:
@@ -1686,6 +1822,9 @@ class DatabaseManager:
         fact_ids: list[str],
         profile_id: str,
         as_of: str | None = None,
+        *,
+        include_global: bool = False,
+        include_shared: bool = False,
     ) -> set[str]:
         """Return the subset of ``fact_ids`` that are system-invalidated.
 
@@ -1712,9 +1851,12 @@ class DatabaseManager:
         Bounded + indexed: only the supplied candidate ids are queried (never a
         full-table scan), keyed on the ``fact_id`` PK with the
         ``idx_temporal_system_expired`` index covering the predicate. Chunked to
-        stay well under SQLite's ~999 bound-parameter limit. Facts with no
-        temporal record — or a record whose ``system_expired_at`` is NULL — are
-        NOT returned (treated as valid), so existing DBs need no backfill.
+        stay well under SQLite's ~999 bound-parameter limit. The visibility
+        predicate is evaluated on the fact owner's row, so an opted-in global or
+        shared fact is checked against *its owner's* temporal record rather than
+        incorrectly against the requesting profile. Facts with no temporal
+        record — or a record whose ``system_expired_at`` is NULL — are NOT
+        returned (treated as valid), so existing DBs need no backfill.
 
         Event-time expiry (``valid_until`` in the past) is intentionally NOT
         applied here: it is query-scoped (historical queries legitimately want
@@ -1724,6 +1866,12 @@ class DatabaseManager:
         if not fact_ids:
             return set()
         invalid: set[str] = set()
+        scope_where, scope_params = _scope_where(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+            prefix="f",
+        )
         chunk = 900
         for start in range(0, len(fact_ids), chunk):
             batch = fact_ids[start:start + chunk]
@@ -1733,24 +1881,232 @@ class DatabaseManager:
                 # occurred AT OR BEFORE as_of contribute to invalidation.
                 # Supersessions after as_of are invisible at this query point.
                 rows = self.execute(
-                    f"SELECT fact_id FROM fact_temporal_validity "
-                    f"WHERE fact_id IN ({placeholders}) "
-                    f"  AND profile_id = ? "
-                    f"  AND system_expired_at IS NOT NULL "
-                    f"  AND system_expired_at <= ?",
-                    (*batch, profile_id, as_of),
+                    f"SELECT tv.fact_id FROM fact_temporal_validity tv "
+                    f"JOIN atomic_facts f ON f.fact_id = tv.fact_id "
+                    f"WHERE tv.fact_id IN ({placeholders}) "
+                    f"  AND {scope_where} "
+                    f"  AND tv.profile_id = f.profile_id "
+                    f"  AND tv.system_expired_at IS NOT NULL "
+                    f"  AND tv.system_expired_at <= ?",
+                    (*batch, *scope_params, as_of),
                 )
             else:
                 rows = self.execute(
-                    f"SELECT fact_id FROM fact_temporal_validity "
-                    f"WHERE fact_id IN ({placeholders}) "
-                    f"  AND profile_id = ? "
-                    f"  AND system_expired_at IS NOT NULL",
-                    (*batch, profile_id),
+                    f"SELECT tv.fact_id FROM fact_temporal_validity tv "
+                    f"JOIN atomic_facts f ON f.fact_id = tv.fact_id "
+                    f"WHERE tv.fact_id IN ({placeholders}) "
+                    f"  AND {scope_where} "
+                    f"  AND tv.profile_id = f.profile_id "
+                    f"  AND tv.system_expired_at IS NOT NULL",
+                    (*batch, *scope_params),
                 )
             for r in rows:
                 invalid.add(dict(r)["fact_id"])
         return invalid
+
+    def get_nonapplied_correction_successor_ids(
+        self,
+        fact_ids: list[str],
+        profile_id: str,
+        *,
+        include_global: bool = False,
+        include_shared: bool = False,
+    ) -> set[str]:
+        """Return candidate successors that are not current review truth.
+
+        M042 is optional for older databases.  Its absence is safe because
+        canonical proposal never commits a successor unless the same
+        transaction also writes M042.  Once present, a read failure must reach
+        the retrieval fail-closed boundary rather than be converted to empty.
+        """
+        if not fact_ids:
+            return set()
+        present = self.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='correction_cases'"
+        )
+        if not present:
+            return set()
+        scope_where, scope_params = _scope_where(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+            prefix="f",
+        )
+        inadmissible: set[str] = set()
+        for start in range(0, len(fact_ids), 900):
+            batch = fact_ids[start:start + 900]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.execute(
+                "SELECT c.successor_fact_id FROM correction_cases c "
+                "JOIN atomic_facts f ON f.fact_id=c.successor_fact_id "
+                f"WHERE c.successor_fact_id IN ({placeholders}) AND {scope_where} "
+                "AND c.profile_id=f.profile_id "
+                "AND c.status IN ('proposed', 'rejected', 'rolled_back')",
+                (*batch, *scope_params),
+            )
+            inadmissible.update(str(row["successor_fact_id"]) for row in rows)
+        return inadmissible
+
+    def get_correction_inadmissible_fact_ids(
+        self,
+        fact_ids: list[str],
+        profile_id: str,
+        as_of: str | None = None,
+        *,
+        include_global: bool = False,
+        include_shared: bool = False,
+    ) -> set[str]:
+        """Return current-lifecycle exclusions with one bounded SQLite read.
+
+        Recall needs both sides of reviewed correction truth: an expired
+        predecessor and a successor whose case is not applied.  The older
+        public helpers preserve their focused contracts, but invoking them
+        consecutively opened two SQLite connections on every candidate stage.
+        This read-model helper uses one connection and one UNION query while
+        retaining the same profile/scope and historical ``as_of`` semantics.
+        It is intentionally read-only and does not cache lifecycle state.
+        """
+        if not fact_ids:
+            return set()
+        scope_where, scope_params = _scope_where(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+            prefix="f",
+        )
+        inadmissible: set[str] = set()
+        with self.raw_connection() as conn:
+            correction_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='correction_cases'"
+            ).fetchone()
+            for start in range(0, len(fact_ids), 900):
+                batch = fact_ids[start:start + 900]
+                placeholders = ",".join("?" for _ in batch)
+                temporal_conditions = (
+                    "AND tv.system_expired_at IS NOT NULL "
+                    + ("AND tv.system_expired_at <= ?" if as_of is not None else "")
+                )
+                temporal_sql = (
+                    "SELECT tv.fact_id AS fact_id "
+                    "FROM fact_temporal_validity tv "
+                    "JOIN atomic_facts f ON f.fact_id=tv.fact_id "
+                    f"WHERE tv.fact_id IN ({placeholders}) AND {scope_where} "
+                    "AND tv.profile_id=f.profile_id "
+                    f"{temporal_conditions}"
+                )
+                temporal_params: tuple[Any, ...] = (
+                    *batch,
+                    *scope_params,
+                    *((as_of,) if as_of is not None else ()),
+                )
+                if correction_table is None:
+                    rows = conn.execute(temporal_sql, temporal_params).fetchall()
+                else:
+                    correction_sql = (
+                        "SELECT c.successor_fact_id AS fact_id "
+                        "FROM correction_cases c "
+                        "JOIN atomic_facts f ON f.fact_id=c.successor_fact_id "
+                        f"WHERE c.successor_fact_id IN ({placeholders}) AND {scope_where} "
+                        "AND c.profile_id=f.profile_id "
+                        "AND c.status IN ('proposed', 'rejected', 'rolled_back')"
+                    )
+                    rows = conn.execute(
+                        f"{temporal_sql} UNION {correction_sql}",
+                        (*temporal_params, *batch, *scope_params),
+                    ).fetchall()
+                inadmissible.update(str(row["fact_id"]) for row in rows)
+        return inadmissible
+
+    def get_strict_temporal_inadmissible_fact_ids(
+        self,
+        fact_ids: list[str],
+        profile_id: str,
+        *,
+        known_as_of: str | None = None,
+        valid_at: str | None = None,
+        include_unknown: bool = False,
+        include_global: bool = False,
+        include_shared: bool = False,
+    ) -> set[str]:
+        """Return candidates excluded by an explicit two-clock query.
+
+        ``known_as_of`` is transaction time: it asks what this SLM instance had
+        learned by a timestamp. ``valid_at`` is event time: it asks what was
+        true at a timestamp according to the requested knowledge state. The
+        axes are independent and may be supplied separately or together.
+
+        A fact with no temporal row predates the 4.0.2 write invariant and is
+        ``legacy_unknown``. Strict time-travel excludes it unless the caller
+        explicitly asks to include unknown history. This is intentionally
+        bounded to the already-retrieved candidate pool.
+        """
+        if not fact_ids or (known_as_of is None and valid_at is None):
+            return set()
+        from datetime import datetime as _dt
+        from superlocalmemory.retrieval.temporal_utils import normalize_as_of
+
+        def _parse_timestamp(value: object) -> _dt | None:
+            normalized = normalize_as_of(value)
+            return _dt.fromisoformat(normalized) if normalized is not None else None
+
+        known_boundary = _parse_timestamp(known_as_of) if known_as_of is not None else None
+        valid_boundary = _parse_timestamp(valid_at) if valid_at is not None else None
+        inadmissible: set[str] = set()
+        scope_where, scope_params = _scope_where(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+            prefix="f",
+        )
+        chunk = 900
+        for start in range(0, len(fact_ids), chunk):
+            batch = fact_ids[start:start + chunk]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.execute(
+                f"SELECT f.fact_id, tv.fact_id AS temporal_fact_id, "
+                f"tv.system_created_at, tv.system_expired_at, "
+                f"tv.valid_from, tv.valid_until FROM atomic_facts f "
+                f"LEFT JOIN fact_temporal_validity tv "
+                f"  ON tv.fact_id = f.fact_id AND tv.profile_id = f.profile_id "
+                f"WHERE f.fact_id IN ({placeholders}) "
+                f"  AND {scope_where}",
+                (*batch, *scope_params),
+            )
+            for row in rows:
+                values = dict(row)
+                has_temporal_record = values["temporal_fact_id"] is not None
+                if not has_temporal_record:
+                    if not include_unknown:
+                        inadmissible.add(values["fact_id"])
+                    continue
+                unknown = False
+                if known_boundary is not None:
+                    created = _parse_timestamp(values["system_created_at"])
+                    expired = _parse_timestamp(values["system_expired_at"])
+                    if created is None:
+                        unknown = True
+                    elif created > known_boundary:
+                        inadmissible.add(values["fact_id"])
+                        continue
+                    elif expired is not None and expired <= known_boundary:
+                        inadmissible.add(values["fact_id"])
+                        continue
+                if valid_boundary is not None:
+                    valid_from = _parse_timestamp(values["valid_from"])
+                    valid_until = _parse_timestamp(values["valid_until"])
+                    if values["valid_from"] is not None and valid_from is None:
+                        unknown = True
+                    elif valid_from is not None and valid_from > valid_boundary:
+                        inadmissible.add(values["fact_id"])
+                        continue
+                    if values["valid_until"] is not None and valid_until is None:
+                        unknown = True
+                    elif valid_until is not None and valid_until <= valid_boundary:
+                        inadmissible.add(values["fact_id"])
+                        continue
+                if unknown and not include_unknown:
+                    inadmissible.add(values["fact_id"])
+        return inadmissible
 
     def get_event_time_expired_fact_ids(
         self,

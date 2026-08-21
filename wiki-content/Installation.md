@@ -1,11 +1,11 @@
-# Installation — V4.0.0
+# Installation — V4.0.5
 
 SuperLocalMemory V4 has two primary paths: an npm global CLI with a
 package-owned Python environment, and a Python CLI + SDK inside an activated
 virtual environment. Repository-clone installers share the same release
 identity but have different ownership and verification contracts.
 
-> **Current release:** **V4.0.0** (`2026-08-01`, see [CHANGELOG](https://github.com/qualixar/superlocalmemory/blob/main/CHANGELOG.md)). All commands below describe the installed V4.0.0 artifact.
+> **Current release:** **V4.0.5** (`2026-08-16`, see [CHANGELOG](https://github.com/qualixar/superlocalmemory/blob/main/CHANGELOG.md)). All commands below describe the installed V4.0.5 artifact.
 
 ## Prerequisites
 
@@ -39,6 +39,22 @@ slm doctor    # Verify the installed runtime and configuration
 ```
 
 Hooks remain opt-in through `slm setup` or `slm hooks install`.
+
+### Upgrade existing host integrations
+
+Package installation updates the SLM executable, but deliberately does not
+rewrite agent configuration, hooks, or plugins. Inspect the existing
+integrations first, then explicitly approve an upgrade:
+
+```bash
+slm upgrade-hosts
+slm upgrade-hosts --host codex --apply
+# or, after reviewing the preview:
+slm upgrade-hosts --all-detected --apply
+```
+
+See [Host Integration Upgrades](Host-Upgrades) for Claude Code, Codex, and
+portable MCP-host behavior.
 
 ### Verify
 
@@ -175,7 +191,11 @@ slm connect        # Configure all detected IDEs
 slm connect --list # See which IDEs are configured
 ```
 
-See [IDE Setup](IDE-Setup) for per-IDE instructions. MCP tool counts in V4: `core` 14 / `code` 24 / `full` 42 / `power` 54 / `mesh` 8 / **`whole` 87** (see [MCP Tools](MCP-Tools)).
+See [IDE Setup](IDE-Setup) for per-IDE instructions. MCP tool counts in V4.0.5: `core` 16 / `code` 31 / `full` 49 / `power` 61 / `mesh` 8 / **`whole` 94** (see [MCP Tools](MCP-Tools)).
+
+> **V4.0.5 ranking migration:** adaptive ranking is now opt-in. Leave it off
+> for the governed default, or set `SLM_RANKING=v1`, `v2`, or `v2-ensemble`
+> deliberately. Normal memory retrieval remains enabled either way.
 
 ---
 
@@ -237,7 +257,7 @@ See [Migration from V2](Migration-from-V2) for the full V2→V3 guide.
 - [Quick Start Tutorial](Quick-Start-Tutorial) — Your first memory in 2 minutes
 - [Modes Explained](Modes-Explained) — Choose between A (zero-cloud), B (local Ollama), C (full power)
 - [CLI Reference](CLI-Reference) — Current command guidance and installed-help contract (`slm --help` is the source of truth)
-- [MCP Tools](MCP-Tools) — V4 profile counts and the whole 87 distinction
+- [MCP Tools](MCP-Tools) — V4.0.5 profile counts and the whole 94 distinction
 
 ---
 *Part of [Qualixar](https://qualixar.com) | Created by [Varun Pratap Bhardwaj](https://varunpratap.com)*

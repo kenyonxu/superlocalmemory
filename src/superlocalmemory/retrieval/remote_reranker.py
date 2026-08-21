@@ -110,12 +110,30 @@ def is_remote_cross_encoder_backend(backend: str) -> bool:
     return (backend or "").strip().lower() in REMOTE_CROSS_ENCODER_BACKENDS
 
 
-def validate_remote_reranker_config(backend: str, endpoint: str) -> str | None:
+def validate_remote_reranker_config(
+    backend: str,
+    endpoint: str,
+    trust_plain_http_lan: bool = True,
+) -> str | None:
     """Return an actionable error string, or None when the pair is coherent.
 
     Covers the issue-#103 leftover directly: an endpoint configured against a
     LOCAL backend used to be dropped on the floor by ``SLMConfig.load``. It now
     produces a named error naming both keys and the exact edit to make.
+
+    Args:
+        backend:            Value of ``retrieval.cross_encoder_backend``.
+        endpoint:           Value of ``retrieval.cross_encoder_endpoint``.
+        trust_plain_http_lan: When True (the default), numeric RFC1918/ULA/
+            link-local addresses may use plain HTTP — the same security posture
+            as the local reranker, where memory text only crosses loopback.
+            Set to False in hardened deployments (zero-trust networks, shared
+            colocation) to require HTTPS for all non-loopback hosts.
+
+    Threat model note: trusting a private-LAN address does NOT prevent a
+    MITM attack by an adversary on the same physical LAN (e.g. via ARP
+    spoofing). This flag means "the LAN is under my control and I accept that
+    risk." It is not a claim that RFC1918 traffic is cryptographically secure.
     """
     backend = (backend or "").strip()
     endpoint = (endpoint or "").strip()
@@ -139,11 +157,23 @@ def validate_remote_reranker_config(backend: str, endpoint: str) -> str | None:
         )
     if not remote:
         return None
-    return _validate_endpoint_url(endpoint)
+    return _validate_endpoint_url(endpoint, trust_plain_http_lan=trust_plain_http_lan)
 
 
-def _validate_endpoint_url(endpoint: str) -> str | None:
-    """Scheme/host allow-listing for the operator-supplied rerank URL."""
+def _validate_endpoint_url(
+    endpoint: str,
+    trust_plain_http_lan: bool = True,
+) -> str | None:
+    """Scheme/host allow-listing for the operator-supplied rerank URL.
+
+    Plain-HTTP allowances (most-to-least trusted):
+      1. Loopback (127.x, ::1, localhost) — always allowed.
+      2. Numeric RFC1918/ULA/link-local addresses — allowed when
+         ``trust_plain_http_lan`` is True (the default).  Only numeric
+         addresses qualify; bare hostnames are never trusted because DNS is
+         mutable and not a trust boundary.
+      3. Everything else (public IPs, bare hostnames) — always requires HTTPS.
+    """
     try:
         parsed = urlparse(endpoint)
     except ValueError as exc:
@@ -177,11 +207,39 @@ def _validate_endpoint_url(endpoint: str) -> str | None:
             "retrieval.cross_encoder_api_key; it is sent as a Bearer header "
             "and never logged."
         )
-    if parsed.scheme == "http" and not _is_loopback_host(parsed.hostname):
+    if parsed.scheme == "http":
+        hostname = parsed.hostname
+        if _is_loopback_host(hostname):
+            return None  # loopback always allowed regardless of trust flag
+        if trust_plain_http_lan and _is_private_lan_host(hostname):
+            # Numeric private address on an operator-trusted LAN. Threat model:
+            # an attacker on the same physical LAN can still MITM plain HTTP
+            # (ARP spoofing). This is allowed because the LAN is assumed to be
+            # under the operator's control. Set trust_plain_http_lan=False in
+            # hardened/zero-trust environments.
+            return None
+        if not _is_private_lan_host(hostname):
+            # Public IP, CGNAT, or a bare hostname (DNS not trusted as a
+            # proof of locality). Bare hostnames that happen to resolve to
+            # private IPs are NOT trusted: DNS can be poisoned or changed,
+            # so only provably-private numeric addresses are accepted.
+            return (
+                "retrieval.cross_encoder_endpoint must use HTTPS for this "
+                "host. Plain HTTP is allowed only for loopback "
+                "(127.x/::1/localhost) and numeric private-LAN addresses "
+                "(RFC1918: 10.x, 172.16-31.x, 192.168.x; IPv6 ULA fc00::/7; "
+                "link-local 169.254.x/fe80::). "
+                "Bare hostnames are not trusted even if they resolve to a "
+                "private IP — use a numeric address or configure HTTPS."
+            )
+        # Private-LAN address but trust_plain_http_lan is False (hardened mode)
         return (
-            "retrieval.cross_encoder_endpoint must use HTTPS for non-loopback "
-            "hosts because recall queries and candidate memory text cross this "
-            "connection. Plain HTTP is allowed only for localhost/loopback."
+            "retrieval.cross_encoder_endpoint uses plain HTTP to a "
+            "private-LAN address. HTTPS is required because "
+            "retrieval.trust_plain_http_lan is set to false. "
+            "Either configure a TLS-terminating proxy on the reranker, or "
+            "set retrieval.trust_plain_http_lan=true to permit plain HTTP "
+            "within your private network (default for new installs)."
         )
     return None
 
@@ -195,6 +253,42 @@ def _is_loopback_host(hostname: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _is_private_lan_host(hostname: str) -> bool:
+    """True only for numeric private-range addresses (RFC1918, ULA, link-local).
+
+    Deliberate non-DNS: bare hostnames (e.g. ``my-reranker.lan``) return False
+    even if they currently resolve to a private IP. DNS is mutable and not a
+    trust boundary — an adversary who can influence DNS resolution can redirect
+    the endpoint to a public host, defeating the locality check. Only numeric
+    addresses are provably bound to a private range at configuration time.
+
+    Accepted ranges (Python 3.11+ ``ipaddress.is_private``):
+      IPv4  RFC1918: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+      IPv4  link-local: 169.254.0.0/16
+      IPv6  ULA: fc00::/7 (includes fd00::/8)
+      IPv6  link-local: fe80::/10
+
+    Excluded ranges (not accepted for plain HTTP):
+      CGNAT 100.64.0.0/10 — ISP-shared address space, not operator-controlled
+      172.15.0.0/8 and 172.32.0.0/8 — outside the 172.16.0.0/12 boundary
+      Public unicast addresses
+
+    IPv4-mapped IPv6 addresses (``::ffff:192.168.1.1``) are unwrapped to their
+    IPv4 equivalent before the range check, so they are handled consistently.
+    """
+    host = (hostname or "").rstrip(".").lower()
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        # Not a numeric address — bare hostname, not provably private
+        return False
+    # Unwrap IPv4-mapped IPv6 (::ffff:192.168.1.1 → 192.168.1.1) so the
+    # RFC1918 check applies to the IPv4 portion.
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return addr.is_private
 
 
 def normalize_rerank_endpoint(endpoint: str) -> str:
@@ -370,8 +464,11 @@ class RemoteReranker:
         api_key: str = "",
         backend: str = "openai",
         timeout_seconds: float = _DEFAULT_READ_TIMEOUT_S,
+        trust_plain_http_lan: bool = True,
     ) -> None:
-        error = validate_remote_reranker_config(backend, endpoint)
+        error = validate_remote_reranker_config(
+            backend, endpoint, trust_plain_http_lan=trust_plain_http_lan,
+        )
         if error:
             raise RemoteRerankerConfigError(error)
 
@@ -499,7 +596,7 @@ class RemoteReranker:
             (fact, float(score))
             for (fact, _), score in zip(ranked, scores)
         ]
-        scored.sort(key=lambda pair: pair[1], reverse=True)
+        scored.sort(key=lambda pair: (-pair[1], pair[0].fact_id))
         return scored[:top_k], True, "applied"
 
     def score_pair(self, query: str, document: str) -> float:
@@ -638,7 +735,7 @@ class RemoteReranker:
     def _fusion_order(
         candidates: list[tuple[AtomicFact, float]],
     ) -> list[tuple[AtomicFact, float]]:
-        return sorted(candidates, key=lambda pair: pair[1], reverse=True)
+        return sorted(candidates, key=lambda pair: (-pair[1], pair[0].fact_id))
 
 
 class _RetryableRemoteError(RemoteRerankerError):

@@ -790,7 +790,7 @@ class TestAuditEmission:
 
 
 # ---------------------------------------------------------------------------
-# Group 7: Audit remediations (Grok-4.5 + Opus-4.8 audit, delivery-lead fixes)
+# Group 7: Review remediations
 # ---------------------------------------------------------------------------
 
 class TestAuditRemediations:

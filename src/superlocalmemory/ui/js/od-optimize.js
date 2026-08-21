@@ -195,6 +195,18 @@
           '</button>' +
         '</div>' +
 
+        // Shown only while every counter is zero — see renderSavings(). Without
+        // it, "enabled" toggles above four zeros reads as a broken feature
+        // rather than an unused one.
+        '<div id="od-opt-unused-note" style="display:none;margin-bottom:14px;' +
+          'padding:12px 14px;border:1px dashed var(--border);border-radius:var(--r-md);' +
+          'font-size:13px;color:var(--fg-2);line-height:1.6">' +
+          '<strong style="color:var(--fg)">Enabled, but nothing has used it yet.</strong> ' +
+          'Caching and compression are opt-in: your AI assistant has to ask for ' +
+          'them. Turning them on here does not make savings happen by itself — ' +
+          'the numbers below stay at zero until an assistant calls them.' +
+        '</div>' +
+
         // KPI strip — 4 cards using .kpi-strip + .card.kpi classes
         '<section class="kpi-strip" style="margin-bottom:16px">' +
 
@@ -204,7 +216,11 @@
               '<span data-ic="bolt"></span> Tokens saved' +
             '</div>' +
             '<div class="value num" id="od-opt-tokens-saved">—</div>' +
-            '<div class="delta up" id="od-opt-tokens-delta">▲ this month</div>' +
+            // Was a hardcoded "▲ this month" delta — an upward trend indicator
+            // that no code ever set from data, on a counter that is cumulative
+            // since install and not monthly at all. Both halves of that label
+            // were wrong. State what the number actually is.
+            '<div class="delta" id="od-opt-tokens-delta">since install</div>' +
           '</div>' +
 
           // Cache hit rate + sparkline
@@ -420,15 +436,26 @@
     setText('od-opt-usd-saved',   fmtUSD(data.cost_saved && data.cost_saved.usd));
     setText('od-opt-inr-saved',   fmtINR(data.cost_saved && data.cost_saved.inr));
 
-    // Hit-rate sparkline
+    // The hit-rate sparkline used to be drawn from
+    //   [rate*0.7, rate*0.78, rate*0.83, rate*0.88, rate*0.93, rate]
+    // — six points invented by scaling the CURRENT value, rendering a tidy
+    // upward trend that no measurement supports. There is no history to plot:
+    // llmcache_metrics is a single cumulative row (id=1) and nothing anywhere
+    // stores a time series. A chart that fabricates its own past is worse than
+    // no chart, especially in a product that asks users to trust its numbers.
+    //
+    // Removed rather than replaced. When a real series exists, plot that.
     var sparkEl = document.getElementById('od-opt-hit-rate-spark');
-    if (sparkEl && typeof window.slmSpark === 'function') {
-      var rate = (data.hit_rate || 0) * 100;
-      var pts  = [
-        Math.round(rate * 0.7), Math.round(rate * 0.78), Math.round(rate * 0.83),
-        Math.round(rate * 0.88), Math.round(rate * 0.93), Math.round(rate)
-      ];
-      sparkEl.innerHTML = window.slmSpark(pts, { color: 'var(--cyan)', w: 96, h: 34 });
+    if (sparkEl) sparkEl.innerHTML = '';
+
+    // Everything reads zero while the toggles read ON, which looks broken. It
+    // is not: caching and compression are opt-in tools an agent has to call.
+    // Say so, rather than leaving the user to guess.
+    var noteEl = document.getElementById('od-opt-unused-note');
+    if (noteEl) {
+      var used = (data.hit_rate || 0) > 0 || tok > 0 ||
+                 (data.compress_ratio || 0) > 0;
+      noteEl.style.display = used ? 'none' : '';
     }
 
     // Provider table footnote removed in v2.1 (od-opt-prov-total element no longer exists).

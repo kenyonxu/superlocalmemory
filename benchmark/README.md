@@ -77,8 +77,8 @@ results are reproducible by a reviewer with nothing but the published package.
 
 ```bash
 # From the product checkout, using the project venv (Python 3.13):
-cd .backup/v4-production-audit/paper-and-research/experiments
-../../../../.venv/bin/python run_all.py 200      # 200 trials per guarantee
+cd experiments
+../../../.venv/bin/python run_all.py 200      # 200 trials per guarantee
 ```
 
 Outputs land in `results/`: one JSON per experiment plus `SUMMARY.md`. The

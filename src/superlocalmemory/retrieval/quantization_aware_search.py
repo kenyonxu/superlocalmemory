@@ -88,7 +88,7 @@ class QuantizationAwareSearch:
                 seen[fid] = score
 
         # Sort by score descending
-        merged = sorted(seen.items(), key=lambda x: x[1], reverse=True)
+        merged = sorted(seen.items(), key=lambda x: (-x[1], x[0]))
         return merged[:top_k]
 
     # -- Tier helpers (encapsulate error handling) -------------------------

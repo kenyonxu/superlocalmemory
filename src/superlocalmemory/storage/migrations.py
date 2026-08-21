@@ -16,6 +16,7 @@ import json
 import logging
 import shutil
 import sqlite3
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -75,7 +76,20 @@ def is_v1_database(db_path: Path) -> bool:
 
 
 def backup_database(db_path: Path) -> Path:
-    """Create timestamped backup before migration."""
+    """Create a timestamped copy of db_path alongside the source file.
+
+    .. deprecated::
+        Use the pre-migration backup in ``superlocalmemory.storage.backup``
+        instead, which produces a WAL-consistent snapshot via the SQLite
+        backup API rather than a raw filesystem copy.
+    """
+    warnings.warn(
+        "backup_database() uses shutil.copy2 which cannot produce a "
+        "consistent snapshot of a live WAL database. "
+        "Use superlocalmemory.storage.backup._pre_migration_backup() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     backup_path = db_path.with_suffix(f".backup_{timestamp}.db")
     shutil.copy2(str(db_path), str(backup_path))

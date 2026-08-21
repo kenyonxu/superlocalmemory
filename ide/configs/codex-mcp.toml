@@ -1,4 +1,4 @@
-# SuperLocalMemory V3 - Codex CLI MCP Configuration
+# SuperLocalMemory V4.0.5 - Codex CLI MCP Configuration
 # Copyright (c) 2026 Varun Pratap Bhardwaj
 # Licensed under AGPL-3.0-or-later
 #
@@ -8,4 +8,4 @@
 [mcp_servers.superlocalmemory]
 command = "slm"
 args = ["mcp"]
-
+env = { SLM_MCP_PROFILE = "code", SLM_AGENT_ID = "codex" }

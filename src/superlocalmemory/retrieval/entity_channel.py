@@ -651,7 +651,7 @@ class EntityGraphChannel:
         max_score = max(sc for _, sc in results)
         if max_score > 0:
             results = [(fid, sc / max_score) for fid, sc in results]
-        results.sort(key=lambda x: x[1], reverse=True)
+        results.sort(key=lambda x: (-x[1], x[0]))
         return filter_authorized_results(
             self._db,
             results,

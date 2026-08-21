@@ -172,6 +172,25 @@ else:
 - `worker_pool.py` 仅新增时序召回参数(as_of 等),与本方案无关。
 - 上游已发 4.0.7/4.0.8/4.0.9,我方落后三个 release;实施前需要先 merge upstream(注意 engine.py 有 444 行 diff,`_warm_guard_embed` 与 store 快路径是合并时的语义重点)。
 
+**`_is_remote_embedder` 实际判定逻辑(merge 4.0.9 后实测,engine.py:56-77)**:
+
+```python
+def _is_remote_embedder(embedder: object) -> bool:
+    cfg = getattr(embedder, "_config", None)
+    if cfg is None:
+        return False  # OllamaEmbedder — local
+    return bool(
+        getattr(cfg, "is_cloud", False)
+        or getattr(cfg, "is_openai_compatible", False)
+    )
+```
+
+实测确认(2026-08-21,merge/upstream-4.0.9 worktree):
+
+- 判据是 embedder 实例上是否有 `_config` 属性:无 `_config`(如 OllamaEmbedder,localhost HTTP ~73ms)一律视为 **local**;有 `_config`(EmbeddingService)则查 `is_cloud` / `is_openai_compatible` 两个 property,任一为 True 即 **remote**。
+- `_warm_guard_embed`(engine.py:573-578)的同步内联嵌入前置条件为:`_embedder is not None` 且 `getattr(_embedder, "_available", None) is True` 且 **not** `_is_remote_embedder(_embedder)`——与上文核查一致。
+- 对方案 B 的含义:fallback 代理对象若**不**携带 `_config` 属性,会被 `_is_remote_embedder` 判为 local(错误地获得同步内联资格,HTTP 往返会进写路径);若携带 `_config` 且其 `is_cloud`/`is_openai_compatible` 为 True,则自动被判 remote 走异步补全。因此 fallback 形态只需"暴露一个 `is_cloud=True` 的 `_config` 替身"即可免费获得方案 2 行为,或按倾向方案 1 让 `_available` 报 True 并接受同步 HTTP 延迟。判定不读 `_available`、不做网络探测,纯属性检查。
+
 ---
 
 ## 8. 工作量与里程碑

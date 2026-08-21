@@ -4,15 +4,15 @@
 
 """CI guard: no stray <MagicMock *> files in the repo root.
 
-WP-16 identified that tests/test_core/test_engine_recall_path.py::
+A past bug identified that tests/test_core/test_engine_recall_path.py::
 TestRecallAdaptiveRanking::test_recall_phase1_no_reranking was leaking
 artifact files named "<MagicMock id='...'>" into the repo root. The
 root cause was patch("pathlib.Path.home") without pinning all path
 attributes to real tmp_path locations, causing os.open(str(mock)) to
 create files in the current working directory.
 
-AC-1 (WP-16): git status --porcelain --ignored | grep '<MagicMock' = ZERO.
-AC-2 (WP-16): this guard PASSES post-fix, would have FAILED pre-fix.
+AC-1: git status --porcelain --ignored | grep '<MagicMock' = ZERO.
+AC-2: this guard PASSES post-fix, would have FAILED pre-fix.
 
 Uses Path.glob (sees gitignored files) + --ignored flag because
 <MagicMock*> is in .gitignore; bare git status omits gitignored files.
@@ -38,7 +38,7 @@ def test_no_magicmock_files_tracked_or_untracked() -> None:
     str()-coerced path, writing into the working directory.
 
     Pre-fix: would find artifacts from test_recall_phase1_no_reranking.
-    Post-fix (WP-16): the test uses a real tmp_path/fake_home, so all
+    Post-fix: the test uses a real tmp_path/fake_home, so all
     path operations go to a real temp directory.
     """
     # Path.glob sees gitignored files; ** recurse is limited to root-level
@@ -63,7 +63,7 @@ def test_no_magicmock_files_tracked_or_untracked() -> None:
         "str()-coerced mock — via os.open (file shape '<MagicMock id=...>') "
         "or mkdir (directory shape 'MagicMock/mock/<id>'). "
         "Fix: use a real tmp_path/fake_home in the patch so writes go to "
-        "a temp directory (see WP-16 fix in test_engine_recall_path.py)."
+        "a temp directory (the test_engine_recall_path.py test was updated to use real paths)."
     )
 
     # Also check git's ignored-file status (belt + suspenders).

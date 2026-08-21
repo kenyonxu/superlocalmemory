@@ -1,9 +1,9 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
-"""Audit-hardening tests for 3.8.4 stability release.
+"""Hardening tests for the 3.8.4 stability release.
 
-Covers the 5 fixes from the iron-pattern Stage 8/9 audit:
+Covers five stability fixes:
   FIX-1  (H-1)  — /health handler NameError on _TEST_ISOLATION_ALLOWED
   FIX-2  (C1)   — warm-embed pool TOCTOU race on concurrent first-store_fast()
   FIX-3  (H2+stats) — prune_events() bounded batches + correct non-zero stats

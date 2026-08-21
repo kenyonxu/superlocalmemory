@@ -80,12 +80,13 @@ When the SLM MCP server is unavailable, use these CLI equivalents:
 
 ---
 
-## Tool reference (core profile — 14 tools)
+## Tool reference (core profile — 16 tools)
 
-> The MCP config ships `SLM_MCP_PROFILE=code` (24 tools): the 14 core memory tools below
-> **plus** 6 code-graph tools (`build_code_graph`, `get_blast_radius`, `query_graph`,
-> `semantic_search_code`, `get_review_context`, `detect_changes`) and `switch_profile`.
-> Use `full` (42 tools) to add mesh coordination. Use `power` (54 tools) for governance
+> The MCP config ships `SLM_MCP_PROFILE=code` and `SLM_AGENT_ID=claude_code` (31 tools):
+> the 16 core memory and correction-review tools below **plus** 6 code-graph tools
+> (`build_code_graph`, `get_blast_radius`, `query_graph`, `semantic_search_code`,
+> `get_review_context`, `detect_changes`) and `switch_profile`.
+> Use `full` (49 tools) to add mesh coordination. Use `power` (61 tools) for governance
 > and audit tools. See slm-profile for profile switching.
 
 | Tool               | Signature (key params)                                                                       | Notes                                  |

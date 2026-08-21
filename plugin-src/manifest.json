@@ -3,20 +3,62 @@
   "pluginName": "superlocalmemory",
   "displayName": "SuperLocalMemory",
   "repository": "https://github.com/qualixar/superlocalmemory",
-  "keywords": ["memory", "mcp", "agents", "local-first", "context-compression"],
+  "keywords": [
+    "memory",
+    "mcp",
+    "agents",
+    "local-first",
+    "context-compression"
+  ],
   "skills": [
-    { "name": "slm-cache", "hasReadme": false },
-    { "name": "slm-compress", "hasReadme": false },
-    { "name": "slm-governance", "hasReadme": false },
-    { "name": "slm-graph", "hasReadme": false },
-    { "name": "slm-loop", "hasReadme": false },
-    { "name": "slm-mesh", "hasReadme": false },
-    { "name": "slm-profile", "hasReadme": false },
-    { "name": "slm-recall", "hasReadme": false },
-    { "name": "slm-remember", "hasReadme": false },
-    { "name": "slm-scope", "hasReadme": false },
-    { "name": "slm-session", "hasReadme": false },
-    { "name": "slm-status", "hasReadme": false }
+    {
+      "name": "slm-cache",
+      "hasReadme": false
+    },
+    {
+      "name": "slm-compress",
+      "hasReadme": false
+    },
+    {
+      "name": "slm-governance",
+      "hasReadme": false
+    },
+    {
+      "name": "slm-graph",
+      "hasReadme": false
+    },
+    {
+      "name": "slm-loop",
+      "hasReadme": false
+    },
+    {
+      "name": "slm-mesh",
+      "hasReadme": false
+    },
+    {
+      "name": "slm-profile",
+      "hasReadme": false
+    },
+    {
+      "name": "slm-recall",
+      "hasReadme": false
+    },
+    {
+      "name": "slm-remember",
+      "hasReadme": false
+    },
+    {
+      "name": "slm-scope",
+      "hasReadme": false
+    },
+    {
+      "name": "slm-session",
+      "hasReadme": false
+    },
+    {
+      "name": "slm-status",
+      "hasReadme": false
+    }
   ],
   "targets": {
     "plugin": "plugin/.claude-plugin/plugin.json"

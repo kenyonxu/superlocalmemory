@@ -606,3 +606,197 @@ class TestBinaryQuantization:
         vs.upsert("f1", "p1", _vec(1, 0, 0, 0))
         vs.upsert("f2", "p1", _vec(0, 1, 0, 0))
         assert vs.needs_binary_quantization("p1") is True
+
+
+# ---------------------------------------------------------------------------
+# _serialize_f32 must delegate to the shared embedding codec so that
+# a future format change requires one edit, not one per site.
+# ---------------------------------------------------------------------------
+
+class TestSerializationRoutesThroughCodec:
+    """_serialize_f32 must produce bytes identical to encode_embedding and must
+    delegate to that function rather than maintaining its own implementation.
+
+    Two implementations of one binary format mean a future format change
+    silently corrupts one of them.  Routing through the shared codec closes
+    that gap: a single change in embedding_codec.py propagates everywhere.
+
+    RED: before the fix, patching encode_embedding has no effect on
+         _serialize_f32 because each has its own implementation.
+    GREEN: after the fix, _serialize_f32 calls encode_embedding, so the
+           patch intercepts it.
+    """
+
+    def test_serialize_f32_delegates_to_encode_embedding(self) -> None:
+        """Patching encode_embedding must affect _serialize_f32 output.
+
+        If _serialize_f32 maintains its own implementation it will not call
+        the patched function, so the sentinel will never be returned and
+        the assertion fails — confirming two diverged implementations.
+        """
+        from unittest.mock import patch as _patch
+        from superlocalmemory.retrieval.vector_store import VectorStore
+        import superlocalmemory.retrieval.vector_store as vs_mod
+
+        sentinel = b"sentinel-bytes-from-codec"
+        vec = [0.1] * DIM
+
+        with _patch.object(vs_mod, "encode_embedding", return_value=sentinel) as mock_enc:
+            result = VectorStore._serialize_f32(vec)
+
+        assert mock_enc.called, (
+            "_serialize_f32 did not call encode_embedding. "
+            "It has its own private implementation that will silently diverge "
+            "from the shared codec on any future format change."
+        )
+        assert result == sentinel, (
+            f"_serialize_f32 returned {result!r} instead of the codec sentinel. "
+            "It bypassed encode_embedding."
+        )
+
+    def test_serialize_f32_byte_output_matches_codec(self) -> None:
+        """Byte-level identity check: both paths must produce the same bytes.
+
+        This verifies the correctness pre-condition before the route-through
+        change: if the two implementations already diverge, the change is
+        not safe to make and that divergence is itself the finding.
+        """
+        from superlocalmemory.storage.embedding_codec import encode_embedding
+        from superlocalmemory.retrieval.vector_store import VectorStore
+        import numpy as np
+
+        rng = np.random.default_rng(42)
+        vec = rng.standard_normal(DIM).astype(np.float32).tolist()
+
+        codec_bytes = encode_embedding(vec)
+        private_bytes = VectorStore._serialize_f32(vec)
+
+        assert codec_bytes is not None
+        assert codec_bytes == private_bytes, (
+            "encode_embedding and _serialize_f32 produce different bytes — "
+            "the two implementations have already diverged and the route-through "
+            "change would alter the format.  Report this rather than papering "
+            "over it."
+        )
+
+
+# ---------------------------------------------------------------------------
+# is_searchable_by_meaning: must mirror search()'s join, not raw_vector_present
+# ---------------------------------------------------------------------------
+
+class TestIsSearchableByMeaning:
+    """is_searchable_by_meaning answers: would search() be able to return this?
+
+    raw_vector_present() checks vector_row_map + fact_embeddings.  A fact can
+    satisfy that check yet still be unreachable by search() because it has no
+    embedding_metadata row — the table search() joins through.
+
+    This test proves the distinction matters: a fact with no embedding_metadata
+    row returns True from raw_vector_present but must return False from
+    is_searchable_by_meaning.
+    """
+
+    def test_method_exists(self) -> None:
+        """is_searchable_by_meaning must be present on VectorStore."""
+        assert hasattr(VectorStore, "is_searchable_by_meaning") and callable(
+            VectorStore.is_searchable_by_meaning
+        ), (
+            "VectorStore.is_searchable_by_meaning is missing. "
+            "engine.py already calls it via getattr(...) with a None fallback; "
+            "until this method exists every enriched fact is re-upserted."
+        )
+
+    def test_returns_false_when_store_unavailable(self) -> None:
+        """Fail-closed: unavailable store → False, never True."""
+        from pathlib import Path
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "m.db"
+            cfg = VectorStoreConfig(dimension=DIM, enabled=False)
+            vs = VectorStore(db_path, cfg)
+            assert vs.is_searchable_by_meaning("any-fact", "p1") is False
+
+    @_needs_sqlite_vec
+    def test_fact_with_metadata_is_searchable(self, tmp_path: Path) -> None:
+        """A properly upserted fact — with both fact_embeddings and
+        embedding_metadata rows — must be reported as searchable."""
+        db_path = _make_db(tmp_path)
+        cfg = VectorStoreConfig(dimension=DIM, enabled=True)
+        vs = VectorStore(db_path, cfg)
+        vs.upsert("f1", "p1", _vec(1, 0, 0, 0))
+        assert vs.is_searchable_by_meaning("f1", "p1") is True
+
+    @_needs_sqlite_vec
+    def test_fact_without_metadata_row_is_not_searchable(
+        self, tmp_path: Path
+    ) -> None:
+        """A fact whose embedding_metadata row was removed is not searchable,
+        even though raw_vector_present would report it as present.
+
+        This is the gap that is_searchable_by_meaning closes:
+        raw_vector_present joins through vector_row_map + fact_embeddings;
+        search() joins through fact_embeddings + embedding_metadata.
+        A missing embedding_metadata row makes a fact invisible to search.
+        """
+        import sqlite3
+
+        db_path = _make_db(tmp_path)
+        cfg = VectorStoreConfig(dimension=DIM, enabled=True)
+        vs = VectorStore(db_path, cfg)
+        vs.upsert("f2", "p1", _vec(0, 1, 0, 0))
+
+        # Verify the fact is searchable before the surgery.
+        assert vs.is_searchable_by_meaning("f2", "p1") is True
+
+        # Delete only the embedding_metadata row, leaving fact_embeddings
+        # and vector_row_map intact so raw_vector_present returns True.
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("DELETE FROM embedding_metadata WHERE fact_id = 'f2'")
+        conn.commit()
+        conn.close()
+
+        # raw_vector_present: True (uses vector_row_map + fact_embeddings)
+        assert vs.raw_vector_present("f2") is True, (
+            "raw_vector_present returned False — the test precondition failed"
+        )
+
+        # is_searchable_by_meaning: False (mirrors search's join)
+        assert vs.is_searchable_by_meaning("f2", "p1") is False, (
+            "is_searchable_by_meaning returned True for a fact with no "
+            "embedding_metadata row.  search() joins through embedding_metadata "
+            "so this fact is not reachable by a meaning-based search."
+        )
+
+    @_needs_sqlite_vec
+    def test_fact_absent_entirely_is_not_searchable(self, tmp_path: Path) -> None:
+        """A fact that was never stored returns False."""
+        db_path = _make_db(tmp_path)
+        cfg = VectorStoreConfig(dimension=DIM, enabled=True)
+        vs = VectorStore(db_path, cfg)
+        assert vs.is_searchable_by_meaning("nonexistent", "p1") is False
+
+    @_needs_sqlite_vec
+    def test_profile_isolation(self, tmp_path: Path) -> None:
+        """Fact stored under p1 is not searchable under p2."""
+        db_path = _make_db(tmp_path)
+        cfg = VectorStoreConfig(dimension=DIM, enabled=True)
+        vs = VectorStore(db_path, cfg)
+        vs.upsert("f3", "p1", _vec(1, 0, 0, 0))
+        assert vs.is_searchable_by_meaning("f3", "p1") is True
+        assert vs.is_searchable_by_meaning("f3", "p2") is False
+
+    def test_returns_false_on_error_not_raises(self, tmp_path: Path) -> None:
+        """Any exception from the DB must be caught — fail-closed, not crash."""
+        from unittest.mock import patch as _patch, MagicMock
+
+        db_path = _make_db(tmp_path)
+        cfg = VectorStoreConfig(dimension=DIM, enabled=True)
+        vs = VectorStore(db_path, cfg)
+        # Force an exception by making _managed_connection raise.
+        with _patch.object(vs, "_managed_connection", side_effect=RuntimeError("boom")):
+            result = vs.is_searchable_by_meaning("f1", "p1")
+        assert result is False, (
+            "is_searchable_by_meaning must return False on any exception, "
+            f"but returned {result!r}"
+        )

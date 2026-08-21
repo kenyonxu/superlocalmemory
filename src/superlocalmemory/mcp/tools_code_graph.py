@@ -75,11 +75,36 @@ def _graph_not_built_error() -> dict[str, Any]:
     }
 
 
+def _bridge_is_enabled() -> bool:
+    """Whether the code↔memory bridge is switched on in the saved settings."""
+    try:
+        cfg = _get_service()
+        if cfg is not None and getattr(cfg.config, "bridge_enabled", False):
+            return True
+        # No live service yet (e.g. a tool called before any build): read the
+        # saved settings directly rather than reporting "off" by default.
+        from superlocalmemory.code_graph.config import CodeGraphConfig
+        return bool(CodeGraphConfig.load().bridge_enabled)
+    except Exception:
+        return False
+
+
 def _bridge_not_enabled_error() -> dict[str, Any]:
-    """Standard error when bridge is not enabled."""
+    """Standard error when the code↔memory bridge is not enabled.
+
+    The remediation text used to name ``code_graph.bridge.enabled``, which is not
+    a key that exists anywhere. The real field is ``bridge_enabled`` in
+    ``code_graph_config.json``, so anyone who followed this message edited
+    nothing that mattered. This helper was also never called from any tool, so
+    the message could not appear even when it was correct.
+    """
     return {
         "success": False,
-        "error": "Bridge not enabled. Set code_graph.bridge.enabled = true in config.",
+        "error": (
+            'Code↔memory bridge not enabled. Set "bridge_enabled": true in '
+            "~/.superlocalmemory/code_graph_config.json, then run "
+            "build_code_graph. Links are created during background maintenance."
+        ),
     }
 
 
@@ -167,7 +192,13 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                     p.strip() for p in exclude_patterns.split(",") if p.strip()
                 )
 
-            config = CodeGraphConfig(**config_kwargs)
+            # Start from the user's saved settings, then apply this call's
+            # arguments. Previously this constructed CodeGraphConfig(**kwargs)
+            # from scratch, so every field the caller did not name reverted to a
+            # class default — including bridge_enabled, which the setup wizard
+            # writes to code_graph_config.json. A user who enabled the code graph
+            # during setup therefore had the flag on disk and off in every build.
+            config = CodeGraphConfig.load(**config_kwargs)
             global _service
             _service = CodeGraphService(config)
 
@@ -204,8 +235,12 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                 if fp in file_groups:
                     file_groups[fp][1].append(e)
 
-            for fp, (ns, es, fr) in file_groups.items():
-                store.store_file_nodes_edges(fp, ns, es, fr)
+            # Two-phase commit: all nodes first, then edges.
+            # This makes storage order-independent so cross-file CALLS edges
+            # (e.g., a.py calls bar() defined in b.py) are never silently
+            # dropped because of the file iteration order.
+            batch = [(fp, ns, es, fr) for fp, (ns, es, fr) in file_groups.items()]
+            store.commit_build_batch(batch)
 
             # Build in-memory graph
             engine = GraphEngine(store)
@@ -357,11 +392,14 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                     continue
                 try:
                     source = full.read_bytes()
-                    file_nodes, file_edges = parser.parse_file(
+                    file_nodes, file_edges, file_import_map = parser.parse_file(
                         Path(fp), source, lang
                     )
                     import hashlib
                     from superlocalmemory.code_graph.models import FileRecord
+                    from superlocalmemory.code_graph.parser import (
+                        _clean_and_resolve_edges,
+                    )
                     fr = FileRecord(
                         file_path=fp,
                         content_hash=hashlib.sha256(source).hexdigest(),
@@ -371,7 +409,27 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                         edge_count=len(file_edges),
                         last_indexed=time.time(),
                     )
-                    store.store_file_nodes_edges(fp, file_nodes, file_edges, fr)
+                    # Wire the resolver for the incremental path.
+                    # parse_all has _clean_and_resolve_edges built in, but
+                    # update_code_graph goes through parse_file which emits raw
+                    # placeholder targets (__call__<name>).  Without resolution,
+                    # Fix B (defensive filter) drops ALL CALLS edges — silent
+                    # data loss on every incremental update.
+                    #
+                    # Load the full DB node set as the resolution universe so
+                    # Strategy 3 (global heuristic) can match cross-file calls.
+                    db_nodes, _ = store.get_all_nodes_and_edges()
+                    resolution_universe = list(file_nodes) + [
+                        n for n in db_nodes if n.file_path != fp
+                    ]
+                    resolved_edges = _clean_and_resolve_edges(
+                        resolution_universe,
+                        list(file_edges),
+                        {fp: file_import_map},
+                        repo,
+                        config,
+                    )
+                    store.store_file_nodes_edges(fp, file_nodes, resolved_edges, fr)
                 except Exception as exc:
                     logger.warning("Failed to update %s: %s", fp, exc)
 
@@ -700,6 +758,11 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                 "total_edges": stats.get("edges", 0),
                 "total_code_memory_links": total_links,
                 "stale_links": stale_links,
+                # Without this, total_code_memory_links == 0 is ambiguous: it
+                # means either "no memory mentions your code" or "the feature
+                # that creates links is switched off". Those call for opposite
+                # actions, so the reader has to be told which one it is.
+                "bridge_enabled": _bridge_is_enabled(),
                 "built": stats.get("built", False),
                 "db_path": stats.get("db_path", ""),
             }
@@ -1486,6 +1549,14 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
             err = _check_graph_exists()
             if err is not None:
                 return err
+
+            # Every answer this tool can give comes from code_memory_links, and
+            # only the bridge populates that table. With the bridge off the query
+            # returns an empty list, which reads as "nothing is stale" — the
+            # strongest possible reassurance, produced by a feature that never
+            # ran. Say so instead.
+            if not _bridge_is_enabled():
+                return _bridge_not_enabled_error()
 
             db = _get_db()
 

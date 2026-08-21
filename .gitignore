@@ -7,6 +7,7 @@ memory.db
 *.db
 !demo-memory.db
 backups/
+pre-migration-snapshots/
 profiles/
 
 # ==== BENCHMARKS (Internal — code, data, results) ====
@@ -214,6 +215,8 @@ graphify-out/
 
 # Internal-only intelligence audits (never publish)
 docs/SLM-INTELLIGENCE-AUDIT-*.md
+# Session working notes — internal paths and in-flight state, never shipped.
+HANDOFF-*.md
 
 # Internal development plans and fixplans (never publish)
 V3.6.10-PLAN.md
@@ -235,3 +238,4 @@ scratchpad/
 # self-documented non-compliance (F-11). Public record of shipped work = CHANGELOG.md.
 docs/audits/
 .slm-venv/
+dist_*/

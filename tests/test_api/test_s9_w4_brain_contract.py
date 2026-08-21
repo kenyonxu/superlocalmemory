@@ -40,6 +40,13 @@ _EXPECTED_TOP_LEVEL_KEYS = frozenset({
     "evolution_cost_preview",
     # S9-DASH-02: producer-side telemetry for closed-loop visibility.
     "outcome_queue",
+    # V4.0.2: truthful, observation-only Living Brain evidence.
+    "living_brain",
+    # V4.0.6: Connected-clients detection for Codex and Bounded Loops. The key
+    # was added to the response without updating this set, so the contract test
+    # this file exists to enforce had been red ever since — exactly the drift it
+    # was written to catch. Documented in the 4.0.6 changelog.
+    "bounded_loops",
 })
 
 

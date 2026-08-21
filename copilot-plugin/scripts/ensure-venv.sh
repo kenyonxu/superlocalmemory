@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ensure-venv.sh — WP-06 SuperLocalMemory plugin venv bootstrap
+# ensure-venv.sh — SuperLocalMemory plugin venv bootstrap
 #
 # Called by Claude Code SessionStart hook. Idempotent: fast-path exits in <100ms
 # on repeat invocations when requirements.txt is unchanged.

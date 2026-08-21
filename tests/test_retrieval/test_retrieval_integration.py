@@ -61,6 +61,10 @@ def _mock_db(facts: list[AtomicFact] | None = None) -> MagicMock:
     db.get_facts_by_ids.side_effect = (
         lambda ids, pid, **kwargs: [f for f in _facts if f.fact_id in ids]
     )
+    # The correction admission contract is fail-closed. Ordinary synthetic
+    # fixtures explicitly model a healthy ledger with no pending successors.
+    db.get_invalidated_fact_ids.return_value = set()
+    db.get_nonapplied_correction_successor_ids.return_value = set()
     db.get_scenes_for_fact.return_value = []
     return db
 
@@ -491,19 +495,117 @@ class TestTemporalValidityWiring:
         assert "f_valid" in ids
         assert "f_superseded" not in ids
 
-    def test_without_filter_superseded_fact_present(self) -> None:
-        # Control: without the filter, both facts surface — proving the filter
-        # (not some other pipeline stage) is what removes the superseded one.
+    def test_core_admission_excludes_superseded_fact_without_legacy_filter(self) -> None:
+        """Hard admission is independent from the legacy score-demotion filter."""
         facts = self._facts()
         db = _mock_db(facts)
+        db.get_invalidated_fact_ids.side_effect = (
+            lambda ids, _pid, as_of=None: {"f_superseded"} & set(ids)
+        )
         engine = _build_engine(
             db=db,
             semantic_results=[("f_valid", 0.9), ("f_superseded", 0.85)],
         )
-        response = engine.recall("where does Alice live?", "default")
+        try:
+            response = engine.recall("where does Alice live?", "default")
+        finally:
+            engine.close()
         ids = {r.fact.fact_id for r in response.results}
         assert "f_valid" in ids
-        assert "f_superseded" in ids
+        assert "f_superseded" not in ids
+
+    def test_profile_hits_are_admitted_before_they_seed_bridge_discovery(self) -> None:
+        """The profile shortcut cannot leak a stale seed into graph expansion."""
+        facts = self._facts()
+        db = _mock_db(facts)
+        db.get_invalidated_fact_ids.side_effect = (
+            lambda ids, _pid, as_of=None: {"f_superseded"} & set(ids)
+        )
+        profile_channel = MagicMock()
+        profile_channel.search.return_value = [
+            ("f_superseded", 0.99), ("f_valid", 0.9),
+        ]
+        bridge = MagicMock()
+        bridge.discover.return_value = []
+        engine = RetrievalEngine(
+            db=db,
+            config=RetrievalConfig(),
+            channels={"bm25": _mock_channel([("f_valid", 0.8)])},
+            profile_channel=profile_channel,
+            bridge_discovery=bridge,
+        )
+        try:
+            response = engine.recall("Where does Alice live?", "default")
+        finally:
+            engine.close()
+
+        bridge.discover.assert_called_once()
+        assert "f_superseded" not in bridge.discover.call_args.args[0]
+        assert {result.fact.fact_id for result in response.results} == {"f_valid"}
+
+    def test_lifecycle_failure_abstains_before_profile_shortcut_can_surface(self) -> None:
+        """A failed lifecycle read closes every pre-fusion admission path.
+
+        The profile shortcut is deliberately injected after ordinary channels,
+        so this exercises both hard-admission sites.  It must not turn a DB
+        outage into a special path that materializes a possibly stale fact.
+        """
+        facts = self._facts()
+        db = _mock_db(facts)
+        db.get_invalidated_fact_ids.side_effect = RuntimeError("database busy")
+        profile_channel = MagicMock()
+        profile_channel.search.return_value = [("f_superseded", 0.99)]
+        engine = RetrievalEngine(
+            db=db,
+            config=RetrievalConfig(),
+            channels={"bm25": _mock_channel([("f_valid", 0.8)])},
+            profile_channel=profile_channel,
+        )
+        try:
+            response = engine.recall("Where does Alice live?", "default")
+        finally:
+            engine.close()
+
+        assert response.results == []
+        db.get_facts_by_ids.assert_not_called()
+
+    def test_post_expansion_admission_blocks_bridge_and_scene_bypasses(self) -> None:
+        """Facts added after channel admission still cannot reach materialization."""
+        facts = [
+            _make_fact(
+                "f_live", "Alice currently lives in Mumbai with her family and works there",
+            ),
+            _make_fact(
+                "f_bridge_stale", "Alice currently lives in Delhi according to an old record",
+            ),
+            _make_fact(
+                "f_scene_stale", "Alice currently lives in Pune according to another old record",
+            ),
+        ]
+        db = _mock_db(facts)
+        db.get_invalidated_fact_ids.side_effect = (
+            lambda ids, _pid, as_of=None: {"f_bridge_stale", "f_scene_stale"} & set(ids)
+        )
+        db.get_scenes_for_facts_batch.return_value = {
+            "f_live": [MagicMock(fact_ids=["f_scene_stale"])],
+        }
+        bridge = MagicMock()
+        bridge.discover.return_value = [("f_bridge_stale", 0.99)]
+        engine = RetrievalEngine(
+            db=db,
+            config=RetrievalConfig(),
+            channels={"semantic": _mock_channel([("f_live", 0.9)])},
+            embedder=_mock_embedder(),
+            bridge_discovery=bridge,
+        )
+        try:
+            response = engine.recall("Where does Alice live?", "default")
+        finally:
+            engine.close()
+
+        bridge.discover.assert_called_once()
+        db.get_scenes_for_facts_batch.assert_called_once()
+        assert {result.fact.fact_id for result in response.results} == {"f_live"}
 
 
 # ---------------------------------------------------------------------------

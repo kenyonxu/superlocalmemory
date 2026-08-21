@@ -105,7 +105,7 @@ class DaemonAlreadyServing(RuntimeError):
     """
 
 
-class CanonicalMutationConflict(ValueError):
+class CanonicalMutationConflict(WriteCoordinatorError, ValueError):
     """A mutation retry key was reused for different immutable input."""
 
 
@@ -337,6 +337,12 @@ class CanonicalRememberRuntime:
             self.coordinator.register_handler(CommandKind.ADMISSION, self._handle_admission)
             self.coordinator.register_handler(CommandKind.DELETE_FACT, self._handle_mutation)
             self.coordinator.register_handler(CommandKind.UPDATE_FACT, self._handle_mutation)
+            self.coordinator.register_handler(CommandKind.PROPOSE_CORRECTION, self._handle_mutation)
+            self.coordinator.register_handler(CommandKind.APPLY_CORRECTION, self._handle_mutation)
+            self.coordinator.register_handler(CommandKind.REJECT_CORRECTION, self._handle_mutation)
+            self.coordinator.register_handler(
+                CommandKind.ROLLBACK_CORRECTION, self._handle_mutation,
+            )
             self.coordinator.register_handler(CommandKind.ARCHIVE_FACT, self._handle_mutation)
             self.coordinator.register_handler(CommandKind.MERGE_FACT, self._handle_mutation)
             self.coordinator.register_handler(CommandKind.SET_FACT_SCOPE, self._handle_mutation)
@@ -484,6 +490,66 @@ class CanonicalRememberRuntime:
             idempotency_key=idempotency_key,
         )
 
+    def create_correction_successor(
+        self,
+        profile_id: str,
+        fact_id: str,
+        successor_fact_id: str,
+        content: str,
+        *,
+        embedding: list[float] | None = None,
+        fisher_mean: list[float] | None = None,
+        fisher_variance: list[float] | None = None,
+        trusted_actor_id: str = "canonical-runtime",
+        idempotency_key: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Atomically create an immutable, review-required successor case."""
+        return self._submit_mutation(
+            CommandKind.PROPOSE_CORRECTION,
+            profile_id,
+            {
+                "fact_id": fact_id,
+                "successor_fact_id": successor_fact_id,
+                "content": content,
+                "embedding": _json_roundtrip({"value": embedding})["value"],
+                "fisher_mean": _json_roundtrip({"value": fisher_mean})["value"],
+                "fisher_variance": _json_roundtrip({"value": fisher_variance})["value"],
+                "trusted_actor_id": trusted_actor_id,
+            },
+            idempotency_key=idempotency_key,
+        )
+
+    def transition_correction(
+        self,
+        profile_id: str,
+        case_id: str,
+        *,
+        action: str,
+        expected_version: int,
+        actor_id: str,
+        event_valid_until: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Apply, reject, or roll back one server-authorized correction case."""
+        command = {
+            "apply": CommandKind.APPLY_CORRECTION,
+            "reject": CommandKind.REJECT_CORRECTION,
+            "rollback": CommandKind.ROLLBACK_CORRECTION,
+        }.get(action)
+        if command is None:
+            raise ValueError("correction action must be apply, reject, or rollback")
+        return self._submit_mutation(
+            command,
+            profile_id,
+            {
+                "case_id": case_id,
+                "expected_version": expected_version,
+                "trusted_actor_id": actor_id,
+                "event_valid_until": event_valid_until,
+            },
+            idempotency_key=idempotency_key,
+        )
+
     def archive_fact(
         self, profile_id: str, fact_id: str, *, idempotency_key: str | None = None,
     ) -> Mapping[str, Any]:
@@ -569,6 +635,10 @@ class CanonicalRememberRuntime:
         )
         try:
             return dict(self.coordinator.submit(command, timeout=2.0).receipt)
+        except CanonicalMutationConflict:
+            # A deterministic lifecycle conflict is not a writer outage.  Let
+            # HTTP/CLI/MCP report the actionable 409/validation result.
+            raise
         except CommandConflictError as exc:
             raise CanonicalMutationConflict(
                 "idempotency key belongs to a different mutation request"
@@ -686,7 +756,9 @@ class CanonicalRememberRuntime:
             if profile_id != self._profile_id:
                 raise ValueError("mutation command targets a different profile")
             with self._db._bind_coordinator_connection(conn, capability):
-                receipt = _execute_mutation(self._db, command.kind, profile_id, payload)
+                receipt = _execute_mutation(
+                    self._db, command.kind, profile_id, payload, connection=conn
+                )
         receipt["operation_id"] = f"mutation:{command.kind.value}:{command.command_id}"
         return WriteResult.from_receipt(command, receipt)
 
@@ -730,8 +802,18 @@ def _execute_mutation(
     kind: CommandKind,
     profile_id: str,
     payload: Mapping[str, Any],
+    *,
+    connection: Any,
 ) -> dict[str, Any]:
     """Dispatch the finite mutation set; no policy, hooks, models, or I/O."""
+    if kind is CommandKind.PROPOSE_CORRECTION:
+        return _propose_correction_successor(db, profile_id, payload, connection=connection)
+    if kind in {
+        CommandKind.APPLY_CORRECTION,
+        CommandKind.REJECT_CORRECTION,
+        CommandKind.ROLLBACK_CORRECTION,
+    }:
+        return _transition_correction(db, kind, profile_id, payload, connection=connection)
     fact_id = _payload_text(payload, "fact_id")
     if kind is CommandKind.DELETE_FACT:
         return _delete_fact(db, fact_id, profile_id)
@@ -750,6 +832,26 @@ def _delete_fact(db: DatabaseManager, fact_id: str, profile_id: str) -> dict[str
     row = _fact_row(db, fact_id, profile_id)
     if row is None:
         return {"ok": False, "operation_id": f"delete:{fact_id}", "fact_id": fact_id}
+    # M042 deliberately retains immutable predecessor/successor history.
+    # SQLite's FK would reject a direct delete, but exposing that as a generic
+    # writer outage turns a real lifecycle conflict into a misleading 503.
+    # A dedicated erasure workflow owns ledger removal; ordinary forget never
+    # deletes a fact that is part of immutable correction history.
+    try:
+        protected = db.execute(
+            "SELECT 1 FROM correction_cases "
+            "WHERE profile_id=? AND (predecessor_fact_id=? OR successor_fact_id=?) LIMIT 1",
+            (profile_id, fact_id, fact_id),
+        )
+    except Exception as exc:
+        if "no such table" in str(exc).lower():
+            protected = []
+        else:
+            raise
+    if protected:
+        raise CanonicalMutationConflict(
+            "fact is protected by correction history; resolve the correction before forgetting it"
+        )
     db.delete_fact(fact_id, profile_id=profile_id)
     return {
         "ok": True,
@@ -779,6 +881,173 @@ def _update_fact(
         "ok": True,
         "operation_id": f"update:{fact_id}",
         "fact_id": fact_id,
+    }
+
+
+def _propose_correction_successor(
+    db: DatabaseManager,
+    profile_id: str,
+    payload: Mapping[str, Any],
+    *,
+    connection: Any,
+) -> dict[str, Any]:
+    """Create successor and M042 proposal in one canonical writer transaction.
+
+    System time is represented by the new fact's ``created_at`` and temporal
+    knowledge anchor.  Event-time fields are copied exactly from the
+    predecessor because an edit payload has no trustworthy event-time claim.
+    """
+    fact_id = _payload_text(payload, "fact_id")
+    source = _fact_row(db, fact_id, profile_id)
+    if source is None:
+        return {"ok": False, "operation_id": f"correction:{fact_id}", "fact_id": fact_id}
+    successor_id = _payload_text(payload, "successor_fact_id")
+    content = _payload_text(payload, "content").strip()
+    if not content:
+        raise ValueError("correction successor content cannot be empty")
+    if successor_id == fact_id:
+        raise ValueError("correction successor must differ from predecessor")
+
+    from superlocalmemory.storage.models import AtomicFact, FactType, MemoryLifecycle, SignalType
+
+    def _list_payload(key: str) -> list[float] | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, (list, tuple)) or not all(
+            isinstance(v, (int, float)) for v in value
+        ):
+            raise ValueError(f"correction successor {key} must be numeric or null")
+        return [float(v) for v in value]
+
+    now = datetime.now(timezone.utc).isoformat()
+    successor = AtomicFact(
+        fact_id=successor_id,
+        memory_id=str(source.get("memory_id") or ""),
+        profile_id=profile_id,
+        scope=str(source.get("scope") or "personal"),
+        shared_with=json.loads(source["shared_with"]) if source.get("shared_with") else None,
+        content=content,
+        fact_type=FactType(str(source.get("fact_type") or "semantic")),
+        entities=json.loads(source["entities_json"]) if source.get("entities_json") else [],
+        canonical_entities=(
+            json.loads(source["canonical_entities_json"])
+            if source.get("canonical_entities_json") else []
+        ),
+        observation_date=source.get("observation_date"),
+        referenced_date=source.get("referenced_date"),
+        interval_start=source.get("interval_start"),
+        interval_end=source.get("interval_end"),
+        confidence=float(source.get("confidence") or 0.0),
+        importance=float(source.get("importance") or 0.0),
+        evidence_count=1,
+        access_count=0,
+        source_turn_ids=(
+            json.loads(source["source_turn_ids_json"])
+            if source.get("source_turn_ids_json") else []
+        ),
+        session_id=str(source.get("session_id") or ""),
+        embedding=_list_payload("embedding"),
+        fisher_mean=_list_payload("fisher_mean"),
+        fisher_variance=_list_payload("fisher_variance"),
+        lifecycle=MemoryLifecycle.ACTIVE,
+        langevin_position=None,
+        emotional_valence=float(source.get("emotional_valence") or 0.0),
+        emotional_arousal=float(source.get("emotional_arousal") or 0.0),
+        signal_type=SignalType(str(source.get("signal_type") or "factual")),
+        created_at=now,
+    )
+    persisted_id = db.insert_fact_immutable(successor)
+    from superlocalmemory.storage.correction_cases import (
+        CorrectionActor,
+        propose_on_connection,
+    )
+
+    trusted_actor_id = _payload_text(payload, "trusted_actor_id")
+    actor = CorrectionActor(
+        actor_id=trusted_actor_id,
+        actor_kind="host_authenticated",
+        trust_tier="trusted",
+    )
+    case_id = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"slm-correction:{profile_id}:{fact_id}:{persisted_id}",
+    ).hex
+    case = propose_on_connection(
+        connection,
+        case_id=case_id,
+        profile_id=profile_id,
+        scope=str(source.get("scope") or "personal"),
+        predecessor_fact_id=fact_id,
+        successor_fact_id=persisted_id,
+        reason_code="direct_content_correction",
+        actor=actor,
+        idempotency_key=_payload_text(payload, "idempotency_key"),
+        is_profile_active=lambda candidate: candidate == profile_id,
+        is_actor_trusted=lambda candidate: candidate == actor,
+    )
+    return {
+        "ok": True,
+        "operation_id": f"correction:{fact_id}:{persisted_id}",
+        "predecessor_fact_id": fact_id,
+        "successor_fact_id": persisted_id,
+        "case_id": case.case_id,
+        "status": case.status,
+        "version": case.version,
+        "created_at": now,
+    }
+
+
+def _transition_correction(
+    db: DatabaseManager,
+    kind: CommandKind,
+    profile_id: str,
+    payload: Mapping[str, Any],
+    *,
+    connection: Any,
+) -> dict[str, Any]:
+    """Advance one correction case under the same receipt transaction."""
+    from superlocalmemory.storage.correction_cases import (
+        CorrectionActor,
+        transition_on_connection,
+    )
+
+    case_id = _payload_text(payload, "case_id")
+    version = payload.get("expected_version")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 0:
+        raise ValueError("correction expected_version must be a non-negative integer")
+    actor = CorrectionActor(
+        actor_id=_payload_text(payload, "trusted_actor_id"),
+        actor_kind="host_authenticated",
+        trust_tier="trusted",
+    )
+    transitions = {
+        CommandKind.APPLY_CORRECTION: ("proposed", "applied", True),
+        CommandKind.REJECT_CORRECTION: ("proposed", "rejected", False),
+        CommandKind.ROLLBACK_CORRECTION: ("applied", "rolled_back", True),
+    }
+    from_status, to_status, mutate_temporal = transitions[kind]
+    case = transition_on_connection(
+        connection,
+        case_id=case_id,
+        expected_version=version,
+        actor=actor,
+        operation_id=_payload_text(payload, "idempotency_key"),
+        from_status=from_status,
+        to_status=to_status,
+        mutate_temporal=mutate_temporal,
+        event_valid_until=payload.get("event_valid_until"),
+        is_profile_active=lambda candidate: candidate == profile_id,
+        is_actor_trusted=lambda candidate: candidate == actor,
+    )
+    return {
+        "ok": True,
+        "operation_id": f"correction:{to_status}:{case.case_id}",
+        "case_id": case.case_id,
+        "predecessor_fact_id": case.predecessor_fact_id,
+        "successor_fact_id": case.successor_fact_id,
+        "status": case.status,
+        "version": case.version,
     }
 
 

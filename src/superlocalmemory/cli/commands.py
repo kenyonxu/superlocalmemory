@@ -276,6 +276,18 @@ def _cmd_ops(args: Namespace) -> None:
     cmd_ops(args)
 
 
+def _cmd_gdpr_dispatch(args: Namespace) -> None:
+    """V4.0.6: GDPR subject-rights CLI (Art.15/17/20)."""
+    from superlocalmemory.cli.gdpr_cmd import cmd_gdpr
+    cmd_gdpr(args)
+
+
+def _cmd_summary_dispatch(args: Namespace) -> None:
+    """V4.0.7: readable session/day/project summaries (issue #113)."""
+    from superlocalmemory.cli.summary_cmd import cmd_summary
+    cmd_summary(args)
+
+
 # ---- end SLM v3.6 Optimize dispatch functions ----
 
 
@@ -321,25 +333,22 @@ def cmd_session(args: Namespace) -> None:
         print("Session close failed (daemon unreachable?)")
 
 
+def _cmd_upgrade_hosts(args: Namespace) -> None:
+    """Run the consented host-integration refresh command."""
+    from superlocalmemory.cli.host_upgrades import cmd_upgrade_hosts
+
+    cmd_upgrade_hosts(args)
+
+
 def dispatch(args: Namespace) -> None:
     """Route CLI command to the appropriate handler."""
-    # Auto-install/upgrade hooks on version change (single file read, ~0.1ms)
-    if (
-        args.command not in ("hooks", "codex", "init", "mcp")
-        and not getattr(args, "dry_run", False)
-    ):
-        try:
-            from superlocalmemory.hooks.claude_code_hooks import auto_install_if_needed
-            auto_install_if_needed()
-        except Exception:
-            pass
-
     handlers = {
         "init": cmd_init,
         "setup": cmd_setup,
         "mode": cmd_mode,
         "provider": cmd_provider,
         "connect": cmd_connect,
+        "upgrade-hosts": _cmd_upgrade_hosts,
         "migrate": cmd_migrate,
         "list": cmd_list,
         "remember": cmd_remember,
@@ -348,7 +357,9 @@ def dispatch(args: Namespace) -> None:
         "forget": cmd_forget,
         "delete": cmd_delete,
         "update": cmd_update,
+        "review-correction": cmd_review_correction,
         "status": cmd_status,
+        "brain": cmd_brain,
         "health": cmd_health,
         "doctor": cmd_doctor,
         "trace": cmd_trace,
@@ -407,6 +418,9 @@ def dispatch(args: Namespace) -> None:
         "help": cmd_help,
         # Wave-3: operational recovery & admin remediation
         "ops": _cmd_ops,
+        # V4.0.6: GDPR subject-rights CLI (Art.15/17/20)
+        "gdpr": _cmd_gdpr_dispatch,
+        "summary": _cmd_summary_dispatch,
     }
     handler = handlers.get(args.command)
     if handler:
@@ -1133,7 +1147,7 @@ def _cmd_context_dispatch(args: Namespace) -> None:
 
 
 def _agents_md_source_factory():
-    """Return a callable that reads the WP-05 AGENTS.md content, or None on failure.
+    """Return a callable that reads the bundled AGENTS.md content, or None on failure.
 
     Source: plugin-src/rules/AGENTS.md (relative to package root).
     Gracefully skips if absent — never fails the MCP write.
@@ -1154,7 +1168,7 @@ def _agents_md_source_factory():
             if candidate.exists():
                 return candidate.read_text(encoding="utf-8")
         logger.warning(
-            "WP-05 AGENTS.md is not bundled — skipping AGENTS.md write"
+            "AGENTS.md is not bundled in this distribution — skipping AGENTS.md write"
         )
         return None
 
@@ -1164,15 +1178,15 @@ def _agents_md_source_factory():
 def cmd_connect(args: Namespace) -> None:
     """Configure IDE integrations.
 
-    Dispatch priority (WP-08):
+    Dispatch priority:
     1. ``slm connect <ide>`` where ide ∈ IDE_MATRIX → portable_kit.connect_ide
-       (MCP-wiring + AGENTS.md; includes claude-code short-circuit to WP-06).
+       (MCP-wiring + AGENTS.md; claude-code short-circuits to the plugin pointer).
     2. ``--cross-platform`` / ``--disable`` → LLD-05 CrossPlatformConnector.
     3. Bare ``slm connect`` / ``--list`` → legacy IDEConnector (markdown-rules).
     """
     ide_arg = getattr(args, "ide", None)
 
-    # WP-08: intercept known IDE_MATRIX ids before legacy branches (CRIT-1)
+    # Intercept known IDE_MATRIX ids before legacy branches (critical: must run first)
     if ide_arg is not None:
         from superlocalmemory.hooks.portable_kit import (
             IDE_MATRIX,
@@ -1486,10 +1500,27 @@ def cmd_recall(args: Namespace) -> None:
                     _sys.exit(1)
                 _as_of = _as_of_norm
             as_of_qs = f"&as_of={quote(_as_of)}" if _as_of else ""
+            def _strict_time_qs(attr: str, parameter: str) -> str:
+                raw = getattr(args, attr, "") or ""
+                if not raw:
+                    return ""
+                from superlocalmemory.retrieval.temporal_utils import normalize_as_of
+                normalized = normalize_as_of(raw)
+                if normalized is None:
+                    import sys as _sys
+                    _sys.stderr.write(
+                        f"Error: invalid --{attr.replace('_', '-')} value: {raw!r}\n"
+                    )
+                    _sys.exit(1)
+                return f"&{parameter}={quote(normalized)}"
+            known_as_of_qs = _strict_time_qs("known_as_of", "known_as_of")
+            valid_at_qs = _strict_time_qs("valid_at", "valid_at")
+            unknown_qs = "&include_unknown=true" if getattr(args, "include_unknown", False) else ""
             result = daemon_request(
                 "GET",
                 f"/recall?q={quote(args.query)}&limit={args.limit}"
-                f"&session_id={quote(session_id)}{fast_qs}{scope_qs}{window_qs}{as_of_qs}",
+                f"&session_id={quote(session_id)}{fast_qs}{scope_qs}{window_qs}{as_of_qs}"
+                f"{known_as_of_qs}{valid_at_qs}{unknown_qs}",
             )
             if result and "results" in result:
                 # Format daemon response same as engine response
@@ -1784,19 +1815,62 @@ def cmd_update(args: Namespace) -> None:
         if use_json:
             from superlocalmemory.cli.json_output import json_print
             json_print("update", data={
-                "fact_id": fact_id,
-                "new_content": new_content[:120],
+                "predecessor_fact_id": result.get("predecessor_fact_id", fact_id),
+                "successor_fact_id": result.get("successor_fact_id"),
+                "correction_case": result.get("correction_case"),
+                "review_required": bool(result.get("review_required", False)),
             }, next_actions=[
                 {
-                    "command": "slm list --json",
-                    "description": "List recent memories",
+                    "command": "slm brain --json",
+                    "description": "Inspect the observation-only brain status",
                 },
             ])
         else:
-            print(f"New: {new_content[:100]}")
-            print(f"Updated: {fact_id}")
+            if result.get("review_required"):
+                case = result.get("correction_case", {})
+                print(f"Correction proposed: {case.get('case_id', 'unknown')}")
+                print(f"Predecessor remains current until review: {fact_id}")
+            else:
+                print(f"Unchanged: {fact_id}")
         return
     _daemon_unavailable("update", use_json)
+
+
+def cmd_review_correction(args: Namespace) -> None:
+    """Apply, reject, or roll back an explicitly reviewed correction case."""
+    from superlocalmemory.core.admission import gate_cli_mutation
+    from superlocalmemory.core.operation_request import OperationKind
+
+    gate_cli_mutation(OperationKind.CORRECT)
+    import urllib.parse
+
+    from superlocalmemory.cli.daemon import daemon_request, ensure_daemon, is_daemon_running
+
+    use_json = getattr(args, "json", False)
+    action = str(args.action).strip().lower()
+    if action not in {"apply", "reject", "rollback"}:
+        raise ValueError("action must be apply, reject, or rollback")
+    if not isinstance(args.expected_version, int) or args.expected_version < 0:
+        raise ValueError("expected_version must be a non-negative integer")
+    if not (is_daemon_running() or ensure_daemon()):
+        _daemon_unavailable("correction review", use_json)
+        return
+    payload: dict[str, object] = {"expected_version": args.expected_version}
+    if getattr(args, "event_valid_until", None):
+        payload["event_valid_until"] = args.event_valid_until
+    path = "/api/corrections/" + urllib.parse.quote(args.case_id, safe="") + "/" + action
+    result = daemon_request("POST", path, payload)
+    if not isinstance(result, dict) or not result.get("success"):
+        _daemon_unavailable("correction review", use_json)
+        return
+    if use_json:
+        from superlocalmemory.cli.json_output import json_print
+
+        json_print("review-correction", data=result)
+    else:
+        case = result.get("correction_case", {})
+        print(f"Correction {action}: {case.get('case_id', args.case_id)}")
+        print(f"State: {case.get('status', 'unknown')}")
 
 
 # -- Diagnostics (all support --json) -------------------------------------
@@ -1848,7 +1922,7 @@ def cmd_status(args: Namespace) -> None:
             ])
             return
 
-        # WP-02 D8: canonical key set — db_size_mb always present (0.0 if absent).
+        # canonical key set — db_size_mb always present (0.0 if absent).
         db_size_mb = 0.0
         if config.db_path.exists():
             db_size_mb = round(config.db_path.stat().st_size / 1024 / 1024, 2)
@@ -2133,6 +2207,7 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("mode", "Switch memory mode: a (local) / b (Ollama) / c (cloud)"),
         ("provider", "Configure the cloud LLM provider + API key (Mode C)"),
         ("connect", "Auto-configure detected IDEs (Cursor, VS Code, …)"),
+        ("upgrade-hosts", "Preview or explicitly refresh existing SLM host integrations"),
         ("hooks", "Install/inspect Claude Code hooks"),
         ("codex", "Configure the Codex / OpenAI integration"),
     ]),
@@ -2141,11 +2216,19 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("recall", "Semantic + keyword search across memories"),
         ("search", "Exact keyword / full-text search"),
         ("list", "Show recent memories (-n N)"),
-        ("update", "Correct an existing memory by id"),
+        ("update", "Propose an immutable correction by id"),
+        ("review-correction", "Apply, reject, or roll back a correction case"),
         ("delete", "Delete a memory by id"),
         ("forget", "Run the decay cycle (preview first)"),
         ("trace", "Recall with a per-channel score breakdown"),
         ("ingest", "Ingest external observations / documents"),
+        ("summary", "Readable summaries: session, day, or project"),
+    ]),
+    ("Privacy & compliance", [
+        # gdpr shipped in 4.0.6 but was never listed here, so `slm help` did not
+        # mention it at all. The drift test caught it; the omission is the thing
+        # that test exists to prevent.
+        ("gdpr", "Subject rights: status, export, erase, verify"),
     ]),
     ("Run SLM (daemon & dashboard)", [
         ("serve", "Start/stop the background daemon"),
@@ -2188,6 +2271,7 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ("Learning & maintenance", [
         ("evolve", "Skill-evolution controls"),
         ("observe", "External observation / telemetry ingestion"),
+        ("brain", "Show profile-scoped Living Brain evidence"),
         ("decay", "Run a forgetting/decay pass"),
         ("consolidate", "Merge/consolidate related memories"),
         ("quantize", "Quantize embeddings to save space"),
@@ -2211,9 +2295,12 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
 _HELP_TOPICS: dict[str, str] = {
     "modes": """\
 Operating modes
-  a  Local Guardian — no model-provider call in the core memory path.
-  b  Smart Local    — uses a local Ollama LLM (auto-detected at setup).
-  c  Full Power     — uses a cloud LLM (OpenAI/Anthropic/…), needs a key.
+  a  On-device only  — no AI language model runs; all data stays on this
+                       device. Fastest and most private. (EU AI Act: full)
+  b  On-device + AI  — uses a local Ollama model to improve recall quality;
+                       all data stays on this device. Requires Ollama running.
+  c  Cloud AI        — uses a cloud provider (OpenAI, Anthropic, …) for best
+                       recall quality; queries leave this device. Needs a key.
 
   Switch any time:  slm mode a   (or b / c)
 """,
@@ -2287,6 +2374,52 @@ def cmd_help(args: Namespace) -> None:
     print("Topics:              slm help modes | slm help config | "
           "slm help self-heal")
     print("Docs:                https://superlocalmemory.com")
+
+
+def _migration_error_logs() -> list:
+    """Return a sorted list of migration-error log files in the SLM home dir.
+
+    Returns an empty list when none exist or when the directory is not readable.
+    """
+    try:
+        from superlocalmemory.core.config import SLMConfig
+        from superlocalmemory.infra.data_root import canonical_data_root
+        from superlocalmemory.storage.models import Mode
+
+        # The daemon writes this log beside the memory database it was actually
+        # configured with, which is not necessarily the canonical data root —
+        # any of SLM_DATA_DIR / SL_MEMORY_PATH / SLM_HOME can move it. Globbing
+        # only the canonical root reported "clean" while the log sat unread in
+        # the real directory. Search both, de-duplicated.
+        roots = {canonical_data_root()}
+        try:
+            cfg = SLMConfig.for_mode(Mode.A)
+            db = getattr(cfg, "memory_db_path", None) or getattr(cfg, "db_path", None)
+            if db:
+                roots.add(pathlib.Path(db).parent)
+        except Exception:
+            pass
+
+        found: list = []
+        for root in roots:
+            try:
+                found.extend(root.glob("migration-error-*.log"))
+            except OSError:
+                continue
+        return sorted(set(found))
+    except Exception:
+        return []
+
+
+def _detect_all_installs() -> list:
+    """Thin shim so cmd_doctor can be tested without importing install_detector."""
+    try:
+        from superlocalmemory.core.install_detector import (
+            _detect_all_installs as _real,
+        )
+        return _real()
+    except Exception:
+        return []
 
 
 def cmd_doctor(args: Namespace) -> None:
@@ -2641,7 +2774,7 @@ def cmd_doctor(args: Namespace) -> None:
     else:
         _check("Database", "PASS", "not yet created (will initialize on first use)")
 
-    # 11. PEP 668 advisory — WP-07: detect EXTERNALLY-MANAGED marker and
+    # 11. PEP 668 advisory: detect EXTERNALLY-MANAGED marker and
     #     recommend pipx when the system Python is managed by the OS package
     #     manager (e.g. Homebrew, Debian/Ubuntu, Fedora 38+).
     try:
@@ -2694,6 +2827,70 @@ def cmd_doctor(args: Namespace) -> None:
             _check(f"Component: {_c.label}", _status, _detail, _c.fix_cmd)
     except Exception as _cr_exc:
         _check("Component registry", "WARN", f"probe failed: {_cr_exc}")
+
+    # 13. Install version convergence — detect all copies of SLM on this machine
+    #     and warn when they are at different versions. Silent divergence is the
+    #     most common source of unexpected behaviour after an upgrade.
+    try:
+        _installs = _detect_all_installs()  # shim defined above cmd_doctor
+        _versions = {i["version"] for i in _installs}
+        if not _installs:
+            _check(
+                "install_versions",
+                "PASS",
+                "No additional SLM installs detected on this machine",
+            )
+        elif len(_versions) > 1:
+            _detail = "Version divergence: " + ", ".join(
+                f"{i['type']}={i['version']}" for i in _installs
+            )
+            _check(
+                "install_versions",
+                "WARN",
+                _detail,
+                fix="Upgrade all installs: "
+                    "pipx upgrade superlocalmemory  |  "
+                    "pip install -U superlocalmemory (in ~/.slm-venv)  |  "
+                    "npm install -g superlocalmemory@latest",
+            )
+        else:
+            _unified = next(iter(_versions))
+            _types = ", ".join(i["type"] for i in _installs)
+            _check(
+                "install_versions",
+                "PASS",
+                f"All installs at {_unified} ({_types})",
+            )
+    except Exception as _inst_exc:  # noqa: BLE001 — never break doctor
+        _check("install_versions", "WARN", f"could not probe installs: {_inst_exc}")
+
+    # 14. Migration error logs — surface any unresolved failure from a previous
+    #     upgrade attempt. The daemon writes these and they persist until the
+    #     user takes action; doctor is the right place to surface them.
+    try:
+        _err_logs = _migration_error_logs()
+        if _err_logs:
+            _latest = _err_logs[-1]
+            _check(
+                "migration_errors",
+                "FAIL",
+                f"Unresolved migration failure: {_latest.name}",
+                # `--fix` heals models, sqlite-vec and stale locks. It does NOT
+                # re-run a migration or restore a snapshot, so pointing here at
+                # `--fix` sent the user round a loop that could never clear this
+                # check. The log itself carries the restore command.
+                fix=(
+                    f"Read {_latest} — it names what failed and, if a snapshot "
+                    f"was taken, the exact command to restore it. Restart the "
+                    f"daemon to retry the upgrade. Delete the log once resolved."
+                ),
+            )
+        else:
+            # Reporting nothing when clean made "no failures" and "the check
+            # never ran" look identical in the output.
+            _check("migration_errors", "PASS", "no unresolved migration failures")
+    except Exception as _mel_exc:  # noqa: BLE001 — never break doctor
+        _check("migration_errors", "WARN", f"could not check error logs: {_mel_exc}")
 
     # 12. Optimize (Surface B) — reads daemon-persisted metrics (≤60s stale).
     info = _gather_optimize_surface_b()
@@ -2948,14 +3145,6 @@ def cmd_mcp(_args: Namespace) -> None:
             logger.info("MCP server version note: %s", _vi.detail)
     except Exception:
         pass  # A diagnostic must never prevent the server from starting.
-
-    # Auto-install hooks on MCP startup (fast path: ~0.1ms if already current)
-    # CRITICAL: No stdout — MCP uses stdio transport, any print corrupts protocol
-    try:
-        from superlocalmemory.hooks.claude_code_hooks import auto_install_if_needed
-        auto_install_if_needed()
-    except Exception:
-        pass
 
     from superlocalmemory.mcp.server import server
 
@@ -3253,7 +3442,7 @@ def _cmd_init_auto(
     config_exists: bool,
     force: bool,
 ) -> None:
-    """WP-07: non-interactive --auto branch for slm init.
+    """Non-interactive --auto branch for slm init.
 
     Best-effort at every step; only exits non-zero when config save fails.
     No TTY required.  Does NOT run IDE connect (AC6).
@@ -3315,7 +3504,7 @@ def cmd_init(args: Namespace) -> None:
     slm_data_dir = slm_home()
     config_exists = (slm_data_dir / "config.json").exists()
 
-    # WP-07: --auto branch — fully non-interactive, no TTY required (AC6).
+    # --auto branch — fully non-interactive, no TTY required.
     if auto:
         os.environ["SLM_NON_INTERACTIVE"] = "1"
         _cmd_init_auto(args, slm_data_dir, config_exists, force)
@@ -3678,6 +3867,59 @@ def cmd_session_context(args: Namespace) -> None:
 
     except Exception as exc:
         logger.debug("session-context (fast) failed: %s", exc)
+
+
+def cmd_brain(args: Namespace) -> None:
+    """Read the portable, profile-scoped Living Brain truth snapshot.
+
+    This command deliberately opens no memory engine and starts no daemon.
+    BrainTruth uses short read-only connections to keep the status view out of
+    recall and writer domains.
+    """
+    from superlocalmemory.brain.truth import BrainTruthService
+    from superlocalmemory.core.config import SLMConfig
+    from superlocalmemory.infra.data_root import state_path
+
+    config = SLMConfig.load()
+    profile_id = config.active_profile
+    data = BrainTruthService(
+        memory_db_path=state_path("memory.db"),
+        learning_db_path=state_path("learning.db"),
+    ).snapshot(profile_id)
+    if getattr(args, "json", False):
+        from superlocalmemory.cli.json_output import json_print
+
+        json_print("brain", data=data, next_actions=[
+            {"command": "slm dashboard", "description": "Open the Living Brain dashboard"},
+        ])
+        return
+    memory = data["memory_activity"]
+    feedback = data["feedback"]
+    evidence = data["agent_experience"]
+    external = data["external_evidence"]
+    corrections = data["correction_quality"]
+    print("SuperLocalMemory Living Brain")
+    print(f"  Profile: {profile_id}")
+    print(f"  Stored facts: {memory['facts_total']}")
+    print(f"  Feedback signals: {feedback['signals_total']}")
+    print(f"  Claimed agent experiences: {evidence['claimed_experiences_total']}")
+    print(
+        "  Independently verified experiences: "
+        f"{evidence['independently_verified_experiences_total']}"
+    )
+    print(f"  Cognitive turns: {evidence['cognitive_turns_total']}")
+    if evidence["cognitive_turns_by_state"]:
+        states = ", ".join(
+            f"{state}: {count}"
+            for state, count in sorted(evidence["cognitive_turns_by_state"].items())
+        )
+        print(f"  Turn states: {states}")
+    print(f"  Bounded Loop observations: {external['receipts_total']}")
+    print(f"  Correction cases: {corrections['cases_total']}")
+    print(
+        "  Retrieval control: observation only; does not change recall, "
+        "ranking, or model routing"
+    )
 
 
 def cmd_observe(args: Namespace) -> None:

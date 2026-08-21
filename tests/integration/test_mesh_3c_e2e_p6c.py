@@ -239,7 +239,7 @@ def test_state_merge_ignores_non_dict_entries(tmp_path):
 
 
 def test_lock_resolve_ignores_non_dict_entries(tmp_path):
-    """Audit P2 (Grok lock): non-dict remote lock entries must not crash resolve."""
+    """P2: non-dict remote lock entries must not crash resolve."""
     a = _make_node(tmp_path, "a")
     a.lock_action("f.py", "agentA", "acquire", _PROFILE)
     result = LockCoordinator(a).resolve(_PROFILE, [None, "x", {"no_file_path": 1}])

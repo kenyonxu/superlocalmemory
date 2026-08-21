@@ -57,12 +57,23 @@ class BridgeEventListeners:
         return self._started
 
     def start(self, event_bus: Any) -> None:
-        """Register all listeners on the event bus.
+        """Register code-graph listeners on the event bus.
 
         Registers:
-        - on_memory_stored: listens to "memory.stored"
         - on_code_node_deleted: listens to "code_graph.node_deleted"
         - on_code_node_changed: listens to "code_graph.node_changed"
+
+        DELIBERATELY NOT REGISTERED: ``on_memory_stored``.
+        ``EventBus._notify_listeners`` invokes every listener synchronously on
+        the emitting thread, so subscribing to ``memory.stored`` would run entity
+        resolution, enrichment and Hebbian linking inside each ``remember`` —
+        putting all three on the write path. That work now runs in background
+        maintenance instead; see ``code_graph.bridge.maintenance``.
+
+        ``on_memory_stored`` is kept as a callable so a caller that genuinely
+        wants synchronous linking for one fact can invoke it directly, but
+        nothing subscribes it to the bus. ``tests/test_code_graph/
+        test_bridge_off_write_path.py`` fails if that changes.
         """
         if self._started:
             logger.warning("BridgeEventListeners already started")
@@ -70,8 +81,8 @@ class BridgeEventListeners:
 
         self._event_bus = event_bus
 
+        # Both events are emitted by code-graph builds, never by memory writes.
         listeners: list[tuple[str, Callable[..., Any]]] = [
-            ("memory.stored", self.on_memory_stored),
             ("code_graph.node_deleted", self.on_code_node_deleted),
             ("code_graph.node_changed", self.on_code_node_changed),
         ]

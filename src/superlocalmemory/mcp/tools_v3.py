@@ -55,9 +55,12 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     async def set_mode(mode: str) -> dict:
         """Switch operating mode (a, b, or c).
 
-        Mode A: Local Guardian (zero LLM, local embeddings only).
-        Mode B: Smart Local (local Ollama LLM, on-device inference).
-        Mode C: Full Power (configured cloud LLM provider, best accuracy).
+        Mode A (Local Guardian): Nothing leaves this device. No AI language
+                model runs. Fastest and most private.
+        Mode B: All data stays on this device. Uses a local Ollama AI model
+                to improve recall quality. Requires Ollama installed.
+        Mode C: Uses a cloud AI provider (OpenAI, Anthropic, …) for best
+                recall quality. Queries leave this device; API key required.
 
         Resets the engine to apply the new mode configuration.
 
@@ -286,6 +289,9 @@ def register_v3_tools(server, get_engine: Callable) -> None:
         query: str,
         limit: int = 10,
         as_of: str | None = None,
+        known_as_of: str | None = None,
+        valid_at: str | None = None,
+        include_unknown: bool = False,
     ) -> dict:
         """Recall with per-channel score breakdown.
 
@@ -301,7 +307,9 @@ def register_v3_tools(server, get_engine: Callable) -> None:
         try:
             import asyncio
             from superlocalmemory.mcp._daemon_proxy import choose_pool
-            from superlocalmemory.retrieval.temporal_utils import normalize_as_of
+            from superlocalmemory.retrieval.temporal_utils import (
+                normalize_as_of, normalize_strict_boundary,
+            )
 
             # Normalize at MCP boundary before forwarding.
             _as_of: str | None = None
@@ -309,11 +317,20 @@ def register_v3_tools(server, get_engine: Callable) -> None:
                 _as_of = normalize_as_of(as_of)
                 if _as_of is None:
                     return {"success": False, "error": "invalid_as_of"}
+            try:
+                _known_as_of = normalize_strict_boundary(known_as_of, "known_as_of")
+                _valid_at = normalize_strict_boundary(valid_at, "valid_at")
+            except ValueError as exc:
+                return {"success": False, "error": str(exc)}
 
             # choose_pool().recall uses blocking urllib; run off the event loop
             # so recall_trace doesn't stall the MCP server for other tools.
             raw = await asyncio.to_thread(
-                lambda: choose_pool().recall(query=query, limit=limit, as_of=_as_of)
+                lambda: choose_pool().recall(
+                    query=query, limit=limit, as_of=_as_of,
+                    known_as_of=_known_as_of, valid_at=_valid_at,
+                    include_unknown=include_unknown,
+                )
             )
             items = raw.get("results", []) if isinstance(raw, dict) else []
             results = []
@@ -363,8 +380,19 @@ def register_v3_tools(server, get_engine: Callable) -> None:
 def _mode_description(mode: str) -> str:
     """Human-readable capability description for a mode (never a legal claim)."""
     descriptions = {
-        "a": "Local Guardian: zero LLM, local embeddings only",
-        "b": "Smart Local: local Ollama LLM, on-device inference",
-        "c": "Full Power: configured cloud LLM provider, best accuracy",
+        "a": (
+            "Local Guardian — on-device only: no AI language model runs and "
+            "nothing leaves this device. Fastest and most private."
+        ),
+        "b": (
+            "Smart Local — on-device plus a local Ollama model: better recall "
+            "quality, and nothing leaves this device. Requires Ollama to be "
+            "installed and running."
+        ),
+        "c": (
+            "Full Power — uses a cloud AI provider (OpenAI, Anthropic, …) for "
+            "the best recall quality. Your queries leave this device and an "
+            "API key is required."
+        ),
     }
     return descriptions.get(mode, "Unknown mode")

@@ -383,6 +383,13 @@ Full docs: [docs/multi-machine.md](docs/multi-machine.md) · [docs/distributed-d
 
 After any install path: `slm setup` → `slm doctor` → `slm warmup` (optional, pre-downloads ~500MB embedding model).
 
+### Upgrading an existing installation
+
+An npm, pip, or repository update upgrades the SLM runtime only — IDE configuration, hooks,
+and plugin state are never silently rewritten. Review with `slm upgrade-hosts`, then apply
+the hosts you approve explicitly. Full safety contract: [Host Integration Upgrades](docs/host-upgrades.md).
+
+
 | Component | Size | When |
 |:----------|:-----|:-----|
 | Core libraries (numpy, scipy, networkx) | ~50MB | During install |

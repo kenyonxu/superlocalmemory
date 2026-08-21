@@ -135,6 +135,12 @@ a:hover { text-decoration: underline; }
 button { font-family: inherit; }
 ::selection { background: var(--violet-soft); }
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+/* Monospace values are usually paths, ids or hashes — reference data, not
+   prose. Left unbounded they set the width of whatever contains them:
+   #dashboard-basedir alone rendered 219px and pushed the Dashboard pane past
+   its own right edge. Clip instead of overflowing; the full value stays
+   available via the title attribute wherever these are rendered. */
+.mono { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .num  { font-variant-numeric: tabular-nums; }
 .muted { color: var(--fg-2); }
 .dim   { color: var(--fg-3); }
@@ -424,7 +430,15 @@ button { font-family: inherit; }
 /* ============================================================
    TABLES / LISTS
    ============================================================ */
-.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+/* A wide table scrolls INSIDE its own card at any width, not only on phones.
+   The ≤768px block already did exactly this; the rule was simply never applied
+   above that breakpoint, so between roughly 800px and 1200px a six-column
+   table (Memories renders 783px of columns) overflowed its pane instead. The
+   pane does technically scroll, but an inner scroll region with no visible
+   affordance reads as "the page is cut off on the right" — which is precisely
+   how it was reported. Keeping the scroll inside the card makes the clipped
+   edge belong to the table, where a horizontal scrollbar is expected. */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13px; display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
 .tbl th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--fg-3); font-weight: 600; padding: 10px 14px; border-bottom: 1px solid var(--border); }
 .tbl td { padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 .tbl tr:last-child td { border-bottom: 0; }
@@ -613,6 +627,67 @@ button { font-family: inherit; }
 
 @media (max-width: 400px) {
   .kpi-strip { grid-template-columns: 1fr !important; }
+}
+
+/* ---- Knowledge-graph panel toggle (≤1100px only) -------------------------
+   #odg-panel-toggle: "Details & Chat ↓" floats at centre-bottom of the
+   graph stage. Tells the user the stacked inspector / Ask-your-memory panel
+   exists and scrolls it into view on click.
+   .odg-back-btn: companion at the top of the stacked inspector; scrolls back
+   to the graph stage.
+   Both are hidden by default. Only revealed at ≤1100px where the inspector
+   stacks below the stage instead of sitting beside it in the two-column grid.
+   The existing @media (max-width:1100px) block above is NOT modified —
+   these are additive rules for the new elements only. --------------------  */
+#odg-panel-toggle,
+.odg-back-btn { display: none; }
+
+@media (max-width: 1100px) {
+  /* Floating affordance pinned to centre-bottom of the graph stage overlay */
+  #odg-panel-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    height: 36px;
+    padding: 0 20px;
+    border-radius: var(--r-pill);
+    border: 1px solid var(--border-strong);
+    background: var(--card);
+    color: var(--fg);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: var(--sh-md);
+    white-space: nowrap;
+    transition: background .15s, color .15s, border-color .15s;
+  }
+  #odg-panel-toggle:hover { background: var(--violet); color: var(--violet-fg); border-color: transparent; }
+  #odg-panel-toggle:focus-visible { outline: 2px solid var(--violet); outline-offset: 3px; }
+
+  /* Companion button at top of stacked inspector */
+  .odg-back-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 100%;
+    padding: 9px 16px;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--card-2);
+    color: var(--fg-2);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  .odg-back-btn:hover { background: var(--violet-soft); color: var(--violet); }
+  .odg-back-btn:focus-visible { outline: 2px solid var(--violet); outline-offset: -2px; }
 }
 
 /* reduced motion */

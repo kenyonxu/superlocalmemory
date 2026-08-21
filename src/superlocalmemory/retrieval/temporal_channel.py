@@ -81,6 +81,7 @@ class TemporalChannel:
         top_k: int = 30,
         include_global: bool | None = None,
         include_shared: bool | None = None,
+        query_type: str = "general",
     ) -> list[tuple[str, float]]:
         """Search for temporally relevant facts.
 
@@ -117,11 +118,41 @@ class TemporalChannel:
         )
 
         # Strategy 2: Date proximity search
-        if query_dt is None and not entity_results:
-            return []
+        if query_dt is None:
+            recent: list[tuple[str, float]] = []
+            # For a question that IS about the present ("what am I working on"),
+            # recency is the answer, and it runs regardless of what else matched.
+            # It used to sit inside a guard that also required the entity search
+            # to be empty — inherited from the case where there is simply nothing
+            # to do — so on a real store, where something almost always matches,
+            # it effectively never ran.
+            #
+            # For a merely time-FLAVOURED question ("what is the latest
+            # authentication design"), recency is a last resort, not the answer:
+            # this channel returns up to 50 newest facts with no regard for topic,
+            # and at temporal's weight of 2.0 that buries the very subject the
+            # user named. So there it runs only when nothing else matched at all.
+            if query_type == "recency" or (
+                query_type == "temporal" and not entity_results
+            ):
+                recent = self._recency_fallback(
+                    profile_id,
+                    include_global=include_global,
+                    include_shared=include_shared,
+                )
+            if not entity_results:
+                return recent
+            if recent:
+                # Both signals are real: an entity the question named, and the
+                # fact that the question is about now. Recency leads because
+                # that is what this channel was asked about; entity matches
+                # follow, and anything already present keeps its better place.
+                seen = {fid for fid, _ in recent}
+                return recent + [(f, s) for f, s in entity_results if f not in seen]
 
         events = self._load_events(
             profile_id, include_global=include_global, include_shared=include_shared,
+            near_date=query_dt.date().isoformat() if query_dt is not None else None,
         )
         scored: dict[str, float] = {}
 
@@ -155,7 +186,7 @@ class TemporalChannel:
                     fid = ev["fact_id"]
                     scored[fid] = max(scored.get(fid, 0.0), best)
 
-        results = sorted(scored.items(), key=lambda x: x[1], reverse=True)
+        results = sorted(scored.items(), key=lambda x: (-x[1], x[0]))
         return results[:top_k]
 
     def _entity_temporal_search(
@@ -208,7 +239,13 @@ class TemporalChannel:
                 "SELECT te.fact_id FROM temporal_events AS te "
                 "JOIN canonical_entities AS ce ON ce.entity_id = te.entity_id "
                 "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
-                f"WHERE {where} AND LOWER(ce.canonical_name) = LOWER(?)",
+                f"WHERE {where} AND LOWER(ce.canonical_name) = LOWER(?) "
+                # The score below is derived from each row's POSITION in this
+                # result. Position must reflect temporal order so that the comment
+                # "first events more likely relevant" holds: oldest fact first,
+                # tie-broken by fact_id so two facts created in the same instant
+                # produce the same score on two runs.
+                "ORDER BY af.created_at ASC, te.fact_id ASC",
                 (*params, name),
             )
             for row in rows:
@@ -227,7 +264,102 @@ class TemporalChannel:
         profile_id: str,
         include_global: bool | None = None,
         include_shared: bool | None = None,
+        near_date: str | None = None,
     ) -> list[dict]:
+        """Load a bounded slice of temporal events.
+
+        ``near_date`` decides WHICH slice. Without it the newest events are
+        taken, which suits "what is recent". With it the events closest to that
+        date are taken, which is the only slice that can answer a question about
+        a particular time — the newest-first bound silently excluded anything
+        old, so a question about last year returned nothing rather than slowly.
+        """
+        if include_global is None:
+            include_global = bool(getattr(self, "include_global", False))
+        if include_shared is None:
+            include_shared = bool(getattr(self, "include_shared", False))
+        where, params = _scope_where(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+            prefix="af",
+        )
+        # The bound has to match what the caller is looking for. Taking the
+        # newest 5,000 rows is right when the question is "what is recent", and
+        # wrong when it is "what happened in March 2024" — those events carry old
+        # rowids and were simply never loaded, so the answer was missing rather
+        # than slow. When a target date is known, bound by proximity to THAT date
+        # instead; the scan stays bounded either way.
+        if near_date is not None:
+            # Include events that carry only interval_start/interval_end with no
+            # referenced_date or observation_date. The original filter required
+            # at least one of the point-date columns to be non-NULL, which
+            # excluded duration events ("during March 2024") entirely. The
+            # ORDER BY now uses the best available date column so that duration
+            # events are ranked by their interval_start when no point date exists.
+            rows = self._db.execute(
+                "SELECT te.fact_id, te.observation_date, te.referenced_date, "
+                "te.interval_start, te.interval_end, af.created_at "
+                "FROM temporal_events AS te "
+                "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
+                f"WHERE {where} "
+                "  AND (te.referenced_date IS NOT NULL "
+                "       OR te.observation_date IS NOT NULL "
+                "       OR te.interval_start IS NOT NULL) "
+                # Thousands of events can tie on the proximity expression when
+                # they share a date, and a tie with no secondary key is broken by
+                # storage order. That decides which of them survive the LIMIT.
+                "ORDER BY ABS(julianday(COALESCE(te.referenced_date, "
+                "                               te.observation_date, "
+                "                               te.interval_start)) "
+                "             - julianday(?)) ASC, te.fact_id ASC "
+                "LIMIT 5000",
+                (*params, near_date),
+            )
+        else:
+            rows = self._db.execute(
+                "SELECT te.fact_id, te.observation_date, te.referenced_date, "
+                "te.interval_start, te.interval_end, af.created_at "
+                "FROM temporal_events AS te "
+                "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
+                f"WHERE {where} "
+                "ORDER BY te.rowid DESC LIMIT 5000",
+                (*params,),
+            )
+        return [dict(r) for r in rows]
+
+    def _recency_fallback(
+        self,
+        profile_id: str,
+        include_global: bool | None,
+        include_shared: bool | None,
+    ) -> list[tuple[str, float]]:
+        """Return recently created facts with Gaussian age-decay scoring.
+
+        Called when the query carries no date and the caller has said the
+        question is about the present. It deliberately does not depend on the
+        entity search being empty — requiring that made this unreachable on any
+        store where something matches, which is most of them.
+
+        One entry per fact. Facts scored here compete in fusion against semantic
+        and BM25 results, and fusion ranks facts, so repeating a fact spends
+        ranks without adding candidates.
+
+        Scoring: Gaussian with sigma=7 days. Facts older than 90 days score
+        below 0.01 and are excluded. Returns at most 50 (fact_id, score) pairs,
+        ordered highest-score first.
+
+        Source table: atomic_facts, not temporal_events. The materializer
+        populates temporal_events asynchronously and only for facts with both
+        canonical entities and resolved dates. A plain note written moments ago
+        never receives a temporal_events row until that background pass runs, so
+        a join against temporal_events makes newly written facts structurally
+        invisible here — exactly when the caller needs them most.
+        """
+        _SIGMA = 7.0          # days — tighter than _proximity_score's 30d
+        _MAX_AGE_DAYS = 90.0  # cut-off: exp(-(90^2)/(2*7^2)) ≈ 0.0
+        now_dt = datetime.now(tz=timezone.utc)
+
         if include_global is None:
             include_global = bool(getattr(self, "include_global", False))
         if include_shared is None:
@@ -239,14 +371,39 @@ class TemporalChannel:
             prefix="af",
         )
         rows = self._db.execute(
-            "SELECT te.fact_id, te.observation_date, te.referenced_date, "
-            "te.interval_start, te.interval_end "
-            "FROM temporal_events AS te "
-            "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
-            f"WHERE {where}",
+            "SELECT af.fact_id, af.created_at "
+            "FROM atomic_facts AS af "
+            f"WHERE {where} "
+            "  AND af.created_at >= datetime('now', '-90 days') "
+            "ORDER BY af.created_at DESC, af.fact_id ASC "
+            "LIMIT 50",
             (*params,),
         )
-        return [dict(r) for r in rows]
+
+        best: dict[str, float] = {}
+        for row in rows:
+            d = dict(row)
+            fid = d.get("fact_id")
+            if not fid:
+                continue
+            created = _parse_iso(d.get("created_at"))
+            if created is None:
+                continue
+            utc_created = _as_utc(created)
+            if utc_created is None:
+                continue
+            age_days = max(
+                0.0,
+                (now_dt - utc_created).total_seconds() / 86400.0,
+            )
+            if age_days > _MAX_AGE_DAYS:
+                continue
+            score = math.exp(-(age_days ** 2) / (2.0 * _SIGMA * _SIGMA))
+            if score > 0.01 and score > best.get(fid, 0.0):
+                best[fid] = score
+
+        out = sorted(best.items(), key=lambda kv: (-kv[1], kv[0]))
+        return out[:50]
 
     @staticmethod
     def _try_parse(text: str) -> datetime | None:

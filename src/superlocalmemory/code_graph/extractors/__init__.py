@@ -76,3 +76,20 @@ class BaseExtractor(ABC):
         import_edges, import_map = self.extract_imports()
         call_edges = self.extract_calls(import_map)
         return (classes + functions, import_edges + call_edges)
+
+    def extract_with_import_map(
+        self,
+    ) -> tuple[list[GraphNode], list[GraphEdge], dict[str, tuple[str, str]]]:
+        """Like extract() but also returns the per-file import map.
+
+        The import map has the form {local_name: (module_path, imported_name)}
+        and is needed by ImportResolver.resolve_call_targets (Strategy 1).
+
+        Returns:
+            (nodes, edges, import_map)
+        """
+        classes = self.extract_classes()
+        functions = self.extract_functions()
+        import_edges, import_map = self.extract_imports()
+        call_edges = self.extract_calls(import_map)
+        return (classes + functions, import_edges + call_edges, import_map)

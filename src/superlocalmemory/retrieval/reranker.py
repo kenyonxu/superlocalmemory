@@ -599,7 +599,7 @@ class CrossEncoderReranker:
         if not self._model_loaded:
             if not self._shutdown_event.is_set() and not self._worker_loading:
                 self._start_background_warmup()
-            sorted_cands = sorted(candidates, key=lambda x: x[1], reverse=True)
+            sorted_cands = sorted(candidates, key=lambda x: (-x[1], x[0].fact_id))
             return sorted_cands[:top_k], False, "fallback_not_ready"
 
         documents = [fact.content for fact, _ in candidates]
@@ -617,7 +617,7 @@ class CrossEncoderReranker:
 
         if resp is None or not resp.get("ok"):
             # Fallback: return by existing score
-            sorted_cands = sorted(candidates, key=lambda x: x[1], reverse=True)
+            sorted_cands = sorted(candidates, key=lambda x: (-x[1], x[0].fact_id))
             return sorted_cands[:top_k], False, "fallback_busy_or_unavailable"
 
         scores = resp["scores"]
@@ -625,7 +625,7 @@ class CrossEncoderReranker:
             (fact, float(score))
             for (fact, _), score in zip(candidates, scores)
         ]
-        scored.sort(key=lambda x: x[1], reverse=True)
+        scored.sort(key=lambda x: (-x[1], x[0].fact_id))
         return scored[:top_k], True, "applied"
 
     def score_pair(self, query: str, document: str) -> float:

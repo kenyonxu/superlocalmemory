@@ -637,11 +637,103 @@ def run_maintenance(
     except Exception as exc:
         logger.warning("Entity summary consolidation failed: %s", exc)
 
+    # 4. Fact consolidation (v3.8.4 concurrency-safe path via DatabaseManager).
+    # Merges clusters of warm/cold atomic facts about the same entity into a
+    # single consolidated fact, archives the originals (NEVER deletes them),
+    # and records provenance in fact_consolidations.
+    #
+    # Uses the DatabaseManager path so LLM calls happen OUTSIDE the write lock:
+    #   - Discover clusters in a short memory_read() (no write lock held).
+    #   - Generate summary OUTSIDE any lock (Ollama/Cloud may take 30s).
+    #   - Write per-cluster inside a short memory_write() (lock held for SQL only).
+    #
+    # NOT on the recall/store hot path.  Runs as part of background maintenance.
+    counts["facts_consolidated"] = 0
+    try:
+        from superlocalmemory.core.fact_consolidator import consolidate_facts
+
+        fc_stats = consolidate_facts(
+            db,
+            profile_id=profile_id,
+            max_clusters=getattr(config, "max_consolidation_clusters", 20),
+            dry_run=False,
+            config=config,
+        )
+        counts["facts_consolidated"] = fc_stats.get("consolidated", 0)
+        if fc_stats.get("consolidated", 0) > 0:
+            logger.info(
+                "Fact consolidation: %d clusters merged, %d facts archived",
+                fc_stats.get("consolidated", 0),
+                fc_stats.get("facts_archived", 0),
+            )
+    except Exception as exc:
+        # WARNING, not debug, and a distinguishable count. Leaving this at debug
+        # with facts_consolidated=0 made a failing consolidation report exactly
+        # the same numbers as a healthy run with nothing to merge, so a step that
+        # never worked would look like a step with no work to do — and nobody
+        # would ever see it in normal logs.
+        counts["facts_consolidated"] = -1
+        logger.warning(
+            "Fact consolidation FAILED during maintenance (reported as -1, "
+            "which is distinct from 0 = nothing to merge): %s", exc,
+        )
+
+    # 5. Code↔memory bridge (4.0.7).
+    # Resolves code entity mentions in new facts against the code graph and
+    # stores the links, plus derived enrichment text, in code_graph.db.
+    #
+    # RUNS HERE, NOT ON THE WRITE PATH. The bridge was authored to fire from
+    # BridgeEventListeners.on_memory_stored, and EventBus._notify_listeners
+    # dispatches synchronously on the emitting thread — which would have put
+    # entity resolution and enrichment inside every remember. The owner's
+    # constraint for 4.0.7 is that remember/recall timing must not move, so the
+    # memory-stored subscription is gone and the work happens in this pass.
+    # tests/test_code_graph/test_bridge_off_write_path.py fails if it comes back.
+    #
+    # Writes only code_graph.db, which no recall path opens, so this step cannot
+    # affect recall latency or results. Hebbian edges are the one exception and
+    # are NOT run here — they land in association_edges, which spreading
+    # activation reads; they are generated on explicit request instead.
+    counts["bridge_links"] = 0
+    counts["bridge_enriched"] = 0
+    try:
+        from superlocalmemory.code_graph.config import CodeGraphConfig
+
+        cg_cfg = CodeGraphConfig.load()
+        if cg_cfg.enabled and cg_cfg.bridge_enabled:
+            from superlocalmemory.code_graph.bridge.maintenance import run_bridge_pass
+            from superlocalmemory.code_graph.database import CodeGraphDatabase
+
+            cg_path = cg_cfg.get_db_path()
+            if cg_path.exists():
+                bridge_stats = run_bridge_pass(
+                    db, CodeGraphDatabase(cg_path), profile_id,
+                )
+                counts["bridge_links"] = bridge_stats.get("links_created", 0)
+                counts["bridge_enriched"] = bridge_stats.get("enriched", 0)
+    except Exception as exc:
+            # -1 rather than 0, for the same reason fact consolidation uses it:
+            # a step that never worked must not report the same numbers as a
+            # healthy step with no work to do.
+            counts["bridge_links"] = -1
+            logger.warning(
+                "Code bridge pass FAILED during maintenance (reported as -1, "
+                "which is distinct from 0 = nothing to link): %s", exc,
+            )
+
     logger.info(
         "Maintenance complete: %d backfilled, %d Langevin, %d Fisher-coupled, "
-        "%d Sheaf, %d entity-summaries",
+        "%d Sheaf, %d entity-summaries, %d facts-consolidated, %d code-links",
         counts["langevin_backfilled"], counts["langevin_updated"],
         counts["fisher_coupled"], counts["sheaf_checked"],
         counts["entity_summaries_consolidated"],
+        counts["facts_consolidated"],
+        counts["bridge_links"],
     )
     return counts
+
+
+# The bridge gate reads code_graph_config.json via CodeGraphConfig.load(), not
+# SLMConfig: SLMConfig has no code_graph block, so there is nothing to read
+# there. cli/setup_wizard.py writes that file; before 4.0.7 no loader existed
+# and every call site hardcoded CodeGraphConfig(enabled=True) instead.

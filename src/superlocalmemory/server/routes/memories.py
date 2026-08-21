@@ -747,6 +747,159 @@ async def search_memories(request: Request, body: SearchRequest):
         end_recall()
 
 
+@router.get("/api/summary")
+async def get_summary(request: Request, kind: str = "day", target: str = ""):
+    """Readable summary of memories: a day, a project, or one session (#113).
+
+    The dashboard surface for the summary layer. 4.0.6 shipped the generators
+    with no caller, 4.0.7 added the CLI, 4.0.8 adds this and the MCP tool — the
+    "no command, tool or endpoint" gap, closed at the third point.
+
+    Always returns ``coverage`` and ``source_fact_ids``: a summary that hides how
+    much it covered is the opaque generic summary issue #113 warned against.
+    Reads memory.db directly; never runs during remember or recall.
+    """
+    from datetime import date as _date, timedelta as _timedelta
+
+    kind = (kind or "day").strip().lower()
+    if kind not in ("day", "project", "session"):
+        raise HTTPException(status_code=400, detail=f"unknown summary kind '{kind}'")
+
+    profile = get_active_profile()
+    from superlocalmemory.infra.data_root import state_path
+    db_path = state_path("memory.db")
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail="no memory database")
+
+    # Pass the loaded config so Mode B/C write the summary. Omitting it silently
+    # forces the extractive path for every caller regardless of mode.
+    try:
+        from superlocalmemory.core.config import SLMConfig
+        cfg = SLMConfig.load()
+    except Exception:
+        cfg = None
+
+    try:
+        if kind == "day":
+            from superlocalmemory.summaries import generate_daily_reflection
+            day = (target or "").strip() or _date.today().isoformat()
+            if day == "today":
+                day = _date.today().isoformat()
+            elif day == "yesterday":
+                day = (_date.today() - _timedelta(days=1)).isoformat()
+            result = generate_daily_reflection(db_path, day, profile, cfg)
+        elif kind == "project":
+            if not (target or "").strip():
+                raise HTTPException(status_code=400, detail="project requires target")
+            from superlocalmemory.summaries import generate_project_work_log
+            result = generate_project_work_log(db_path, target.strip(), profile, cfg)
+        else:
+            if not (target or "").strip():
+                raise HTTPException(status_code=400, detail="session requires target")
+            from superlocalmemory.summaries import generate_session_summary
+            result = generate_session_summary(db_path, target.strip(), profile, cfg)
+    except HTTPException:
+        raise
+    except Exception:
+        raise _internal_error("Summary generation error")
+
+    return {
+        "kind": result.kind,
+        "profile_id": result.profile_id,
+        "summary": result.content,
+        "coverage": result.coverage,
+        "generated_by": result.generated_by,
+        "source_fact_ids": result.source_fact_ids,
+        "source_count": len(result.source_fact_ids),
+        "metadata": result.metadata,
+    }
+
+
+@router.get("/api/summary/projects")
+async def get_summary_projects(request: Request):
+    """Projects SuperLocalMemory has actually observed, for the summary picker.
+
+    WHY THIS EXISTS
+    ---------------
+    SLM is installed globally and the dashboard is a browser tab — it has no
+    working directory, so there is no such thing as "this project" from the
+    server's point of view. 4.0.8 shipped a "This project" button that sent an
+    empty target and produced "project requires target" every time. A button
+    that cannot know its own answer is the wrong control; a list of the projects
+    we have seen is the right one.
+
+    Scope comes from ``tool_events.project_path`` — the directory an agent was
+    working in when it called SLM. Deliberately NOT ``entity_profiles.
+    project_name``, which has exactly one distinct value on a real store (see
+    the note at the top of summaries/project_work_log.py).
+
+    ``tool_events`` is a bounded ring buffer, so this lists recently active
+    projects rather than every project in history. ``truncated`` says so
+    honestly instead of implying the list is exhaustive.
+    """
+    profile = get_active_profile()
+    try:
+        conn = get_db_connection()
+        # get_db_connection() hands back a SHARED read connection, and other
+        # handlers set row_factory on it. Never index these rows positionally —
+        # whichever handler ran last decides whether r[0] is a column or a
+        # KeyError. Name the columns and read them by name.
+        conn.row_factory = dict_factory
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT project_path AS path, COUNT(*) AS events
+              FROM tool_events
+             WHERE project_path IS NOT NULL AND project_path != ''
+               AND profile_id = ?
+             GROUP BY project_path
+             ORDER BY events DESC
+             LIMIT 50
+            """,
+            (profile,),
+        )
+        rows = cursor.fetchall()
+        total = cursor.execute(
+            "SELECT COUNT(*) AS n FROM tool_events"
+        ).fetchone()["n"]
+    except Exception:
+        raise _internal_error("Project list error")
+
+    projects = [
+        {
+            "path": r["path"],
+            "events": r["events"],
+            "label": _project_label(r["path"]),
+        }
+        for r in rows
+    ]
+    return {
+        "projects": projects,
+        "profile_id": profile,
+        # Surfaced so the UI can explain an unexpectedly short list rather than
+        # leaving the user to assume their project was never recorded.
+        "truncated": total >= _TOOL_EVENT_RING_SIZE,
+        "event_rows": total,
+    }
+
+
+#: tool_events is capped; at the cap the project list is a recent window, not history.
+_TOOL_EVENT_RING_SIZE = 2000
+
+
+def _project_label(path: str) -> str:
+    """Short, human label for a project path.
+
+    Full paths are long and share prefixes ("/Users/x/Documents/official/..."),
+    so a dropdown of raw paths is unreadable. Last two segments keep sibling
+    projects distinguishable without the noise.
+    """
+    parts = [p for p in str(path).replace("\\", "/").split("/") if p]
+    if not parts:
+        return str(path)
+    return "/".join(parts[-2:]) if len(parts) > 1 else parts[-1]
+
+
 @router.get("/api/clusters")
 async def get_clusters(request: Request):
     """Get cluster information with member counts and statistics."""
@@ -1061,11 +1214,72 @@ async def get_fact_detail(request: Request, fact_id: str):
             )
         except Exception:
             row["canonical_entities"] = []
+        row["code_links"] = _code_links_for_fact(fact_id)
         return row
     except HTTPException:
         raise
     except Exception:
         raise _internal_error("Fact detail error")
+
+
+def _code_links_for_fact(fact_id: str) -> list[dict]:
+    """Code entities this fact mentions, from the code graph.
+
+    Fail-open by design: this is a display extra on a detail popup. No code graph
+    built, bridge switched off, or database missing all mean "no section shown",
+    never an error on the fact itself. A user who has never touched the code
+    graph must not see a failure because of a feature they do not use.
+
+    Reads code_graph.db, which is a separate database from memory.db and is never
+    opened by the recall path — so nothing here can affect recall.
+    """
+    try:
+        from superlocalmemory.code_graph.config import CodeGraphConfig
+
+        cfg = CodeGraphConfig.load()
+        if not (cfg.enabled and cfg.bridge_enabled):
+            return []
+        db_path = cfg.get_db_path()
+        if not db_path.exists():
+            return []
+
+        import sqlite3
+
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            conn.row_factory = dict_factory
+            rows = conn.execute(
+                "SELECT cml.link_type, cml.confidence, cml.is_stale, "
+                "       cml.enriched_description, "
+                "       gn.name, gn.qualified_name, gn.kind, gn.file_path "
+                "FROM code_memory_links cml "
+                "LEFT JOIN graph_nodes gn ON gn.node_id = cml.code_node_id "
+                "WHERE cml.slm_fact_id = ? "
+                "ORDER BY cml.confidence DESC, gn.qualified_name",
+                (fact_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        return [
+            {
+                "name": r.get("name") or "",
+                "qualified_name": r.get("qualified_name") or "",
+                "kind": r.get("kind") or "",
+                "file_path": r.get("file_path") or "",
+                "link_type": r.get("link_type") or "mentions",
+                "confidence": r.get("confidence"),
+                "is_stale": bool(r.get("is_stale")),
+                "description": r.get("enriched_description") or "",
+            }
+            for r in rows
+            # A link whose node is gone (LEFT JOIN produced no row) is a stale
+            # pointer, not something to render as a blank entry.
+            if r.get("qualified_name")
+        ]
+    except Exception:
+        logger.debug("code links unavailable for %s", fact_id, exc_info=True)
+        return []
 
 
 @router.delete("/api/memories/{fact_id}")
@@ -1182,9 +1396,9 @@ async def merge_memory(request: Request, fact_id: str):
         raise _canonical_mutation_error(exc, "Merge error")
 
 
-@router.patch("/api/memories/{fact_id}")
+@router.patch("/api/memories/{fact_id}", status_code=202)
 async def edit_memory(request: Request, fact_id: str):
-    """Edit the content of a specific memory (atomic fact)."""
+    """Propose an immutable, review-required correction for one memory."""
     try:
         body = await request.json()
         new_content = (body.get("content") or "").strip()
@@ -1210,11 +1424,137 @@ async def edit_memory(request: Request, fact_id: str):
         )
         if not result.get("ok"):
             raise HTTPException(status_code=404, detail="Memory not found")
-        return {"success": True, "fact_id": fact_id, "content": new_content}
+        if result.get("unchanged"):
+            return {"success": True, "fact_id": fact_id, "content": new_content, "unchanged": True}
+        correction = result["correction_case"]
+        return {
+            "success": True,
+            "fact_id": fact_id,
+            "predecessor_fact_id": result["predecessor_fact_id"],
+            "successor_fact_id": result["successor_fact_id"],
+            "correction_case": correction,
+            "review_required": True,
+            "status": "proposed",
+        }
     except HTTPException:
         raise
     except Exception as exc:
         raise _canonical_mutation_error(exc, "Edit error")
+
+
+@router.post("/api/corrections/{case_id}/{action}")
+async def review_correction(request: Request, case_id: str, action: str):
+    """Apply, reject, or roll back an active-profile correction case.
+
+    The caller authenticates through the daemon boundary.  It cannot select a
+    profile, fact scope, or trust tier; the canonical writer rechecks all of
+    those fields in its one SQLite transaction.
+    """
+    try:
+        body = await request.json()
+        if action not in {"apply", "reject", "rollback"}:
+            raise HTTPException(422, detail="action must be apply, reject, or rollback")
+        expected_version = body.get("expected_version") if isinstance(body, dict) else None
+        if not isinstance(expected_version, int) or isinstance(expected_version, bool):
+            raise HTTPException(422, detail="expected_version must be a non-negative integer")
+        if expected_version < 0:
+            raise HTTPException(422, detail="expected_version must be a non-negative integer")
+        event_valid_until = body.get("event_valid_until") if isinstance(body, dict) else None
+        if event_valid_until is not None and not isinstance(event_valid_until, str):
+            raise HTTPException(422, detail="event_valid_until must be an RFC3339 timestamp")
+        if event_valid_until is not None and action != "apply":
+            raise HTTPException(422, detail="event_valid_until is permitted only for apply")
+        engine, active_profile, hook_context = _authorize_memory_mutation(
+            request, "update", case_id, run_pre_hook=False
+        )
+        result = _canonical_mutation_runtime(request).transition_correction(
+            active_profile,
+            case_id,
+            action=action,
+            expected_version=expected_version,
+            actor_id=hook_context["agent_id"],
+            event_valid_until=event_valid_until,
+            idempotency_key=_mutation_idempotency_key(request),
+        )
+        if not result.get("ok"):
+            raise HTTPException(404, detail="Correction case not found")
+        if action in {"apply", "rollback"}:
+            from superlocalmemory.core.mutations import purge_profile_context_cache
+
+            purge_profile_context_cache(engine, active_profile)
+        engine._hooks.run_post("update", hook_context)
+        return {"success": True, "correction_case": result}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _canonical_mutation_error(exc, "Correction review error")
+
+
+def _correction_case_response(case) -> dict[str, object]:
+    """Return review metadata only; correction ledgers never contain fact text."""
+    return {
+        "case_id": case.case_id,
+        "profile_id": case.profile_id,
+        "scope": case.scope,
+        "predecessor_fact_id": case.predecessor_fact_id,
+        "successor_fact_id": case.successor_fact_id,
+        "reason_code": case.reason_code,
+        "status": case.status,
+        "version": case.version,
+        "created_at": case.created_at,
+        "updated_at": case.updated_at,
+        "reviewed_at": case.reviewed_at,
+        "applied_at": case.applied_at,
+        "system_effective_at": case.system_effective_at,
+        "event_valid_from": case.event_valid_from,
+        "event_valid_until": case.event_valid_until,
+    }
+
+
+def _correction_store_for(engine, active_profile: str):
+    from superlocalmemory.storage.correction_cases import CorrectionCaseStore
+
+    return CorrectionCaseStore(
+        engine._db.db_path,
+        is_profile_active=lambda candidate: candidate == active_profile,
+        # Read operations never invoke this callback; writes use the daemon's
+        # canonical runtime, which derives the authenticated actor separately.
+        is_actor_trusted=lambda _actor: False,
+    )
+
+
+@router.get("/api/corrections")
+async def list_corrections(request: Request, limit: int = 100):
+    """List bounded review metadata for the active owning profile."""
+    try:
+        engine, active_profile, _context = _authorize_memory_mutation(
+            request, "update", "correction-list", run_pre_hook=False
+        )
+        cases = _correction_store_for(engine, active_profile).list_cases(active_profile, limit=limit)
+        return {"success": True, "corrections": [_correction_case_response(case) for case in cases]}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _canonical_mutation_error(exc, "Correction list error")
+
+
+@router.get("/api/corrections/{case_id}")
+async def get_correction(request: Request, case_id: str):
+    """Get one active-profile correction case without exposing raw memory text."""
+    try:
+        engine, active_profile, _context = _authorize_memory_mutation(
+            request, "update", case_id, run_pre_hook=False
+        )
+        case = _correction_store_for(engine, active_profile).get_case(case_id)
+        return {"success": True, "correction": _correction_case_response(case)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        from superlocalmemory.storage.correction_cases import CorrectionNotFoundError
+
+        if isinstance(exc, CorrectionNotFoundError):
+            raise HTTPException(404, detail="Correction case not found") from exc
+        raise _canonical_mutation_error(exc, "Correction lookup error")
 
 
 _VALID_SCOPES = ("personal", "shared", "global")

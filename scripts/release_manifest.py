@@ -4,8 +4,6 @@
 
 """Generate the release ``manifest.json`` for ``slm-hook`` binaries.
 
-LLD reference: ``.backup/active-brain/lld/LLD-06-windows-binary-and-legacy-migration.md``
-Section 6.1 (Release manifest).
 
 Shape (per LLD-06 §6.1):
 

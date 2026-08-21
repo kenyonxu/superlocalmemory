@@ -332,7 +332,7 @@ class SemanticChannel:
             for fact_id, score in external_scores:
                 combined[fact_id] = max(combined.get(fact_id, 0.0), score)
             knn_results = sorted(
-                combined.items(), key=lambda item: item[1], reverse=True,
+                combined.items(), key=lambda item: (-item[1], item[0]),
             )[:top_k * 2]
         if not knn_results:
             return []  # Caller falls through to full scan
@@ -401,7 +401,7 @@ class SemanticChannel:
             if sim > 0.05:
                 scored.append((fact.fact_id, sim))
 
-        scored.sort(key=lambda x: x[1], reverse=True)
+        scored.sort(key=lambda x: (-x[1], x[0]))
         return scored[:top_k]
 
     def _search_full_scan(
@@ -463,7 +463,7 @@ class SemanticChannel:
             if sim > 0.05:
                 scored.append((fact.fact_id, sim))
 
-        scored.sort(key=lambda x: x[1], reverse=True)
+        scored.sort(key=lambda x: (-x[1], x[0]))
         return scored[:top_k]
 
     @staticmethod

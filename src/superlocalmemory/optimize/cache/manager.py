@@ -223,7 +223,7 @@ class CacheManager:
             tenant_id = _hashlib.sha256(tenant_id.encode()).hexdigest()
 
         if isinstance(req, ProxyRequest) and req.provider == "vertex":
-            # CRIT-2 (WP-11, LOCKED): Vertex bodies have NO model/messages/system.
+            # LOCKED: Vertex bodies have NO model/messages/system.
             # Model is in the PATH; prompts are under 'contents'; system under
             # 'systemInstruction'. Without this branch ALL Vertex requests hash to
             # ONE key → first response poisons every subsequent prompt.
@@ -701,7 +701,7 @@ def json_dumps_bytes(d: dict) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Vertex helpers (WP-11 / CRIT-2)
+# Vertex helpers
 # ---------------------------------------------------------------------------
 
 def _vertex_project_location_from_path(path: str) -> tuple[str, str]:

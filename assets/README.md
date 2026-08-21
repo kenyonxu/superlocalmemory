@@ -121,7 +121,7 @@ import dashboardImg from '../assets/screenshots/dashboard/dashboard-01-home.png'
 
 ## Maintenance
 
-- **Outdated images:** Move to `.backup/assets/` if no longer relevant
+- **Outdated images:** Archive or delete image files that are no longer relevant
 - **Superseded versions:** Update alt-text in docs, link to new screenshots
 - **File size control:** Use tools like TinyPNG for PNG compression
 - **Consistency:** Keep aspect ratios and styling consistent across screenshots

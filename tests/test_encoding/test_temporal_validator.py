@@ -17,8 +17,6 @@ Covers:
 
 from __future__ import annotations
 
-import time
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -29,7 +27,6 @@ from superlocalmemory.encoding.temporal_validator import TemporalValidator
 from superlocalmemory.storage import schema as real_schema
 from superlocalmemory.storage.database import DatabaseManager
 from superlocalmemory.storage.models import AtomicFact, MemoryRecord
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -143,17 +140,32 @@ class TestTemporalValidity:
         assert tv is not None
         assert tv["system_expired_at"] is None
 
-    def test_invalidation_sets_both_timestamps(
+    def test_invalidation_sets_system_time_without_inventing_event_time(
         self, db: DatabaseManager, _seed_facts: tuple[str, str, str],
     ) -> None:
-        """invalidate_fact_temporal() sets BOTH valid_until AND system_expired_at.
-        BI-TEMPORAL INTEGRITY: both set in same operation."""
+        """Review time must not be presented as the real-world boundary."""
         fid = _seed_facts[0]
         db.store_temporal_validity(fid, "default")
         db.invalidate_fact_temporal(fid, "new-fact-123", "contradiction detected")
         tv = db.get_temporal_validity(fid)
         assert tv is not None
-        assert tv["valid_until"] is not None
+        assert tv["valid_until"] is None
+        assert tv["system_expired_at"] is not None
+
+    def test_invalidation_applies_event_time_only_when_reviewer_supplies_it(
+        self, db: DatabaseManager, _seed_facts: tuple[str, str, str],
+    ) -> None:
+        fid = _seed_facts[0]
+        db.store_temporal_validity(fid, "default")
+        db.invalidate_fact_temporal(
+            fid,
+            "new-fact-123",
+            "reviewed correction",
+            event_valid_until="2026-08-16T00:00:00+00:00",
+        )
+        tv = db.get_temporal_validity(fid)
+        assert tv is not None
+        assert tv["valid_until"] == "2026-08-16T00:00:00+00:00"
         assert tv["system_expired_at"] is not None
 
     def test_invalidation_records_invalidated_by(
@@ -397,12 +409,12 @@ class TestContradictionDetection:
 
 
 class TestContradictionInvalidation:
-    """End-to-end: detect contradiction -> invalidate old fact."""
+    """End-to-end: detect contradiction -> propose reviewed correction."""
 
     def test_contradiction_invalidates_old_fact(
         self, db: DatabaseManager, _seed_facts: tuple[str, str, str],
     ) -> None:
-        """New fact contradicting old fact sets old fact's valid_until."""
+        """New fact contradicting old fact leaves predecessor unchanged."""
         fid0 = _seed_facts[0]  # old fact
         db.store_temporal_validity(fid0, "default")
 
@@ -428,16 +440,18 @@ class TestContradictionInvalidation:
         assert len(actions) == 1
         assert actions[0]["old_fact_id"] == fid0
 
-        # Verify bi-temporal integrity
+        # Automatic detection is proposal-only.  The reviewed-correction
+        # service, not this detector, owns bi-temporal mutation.
         record = db.get_temporal_validity(fid0)
         assert record is not None
-        assert record["valid_until"] is not None
-        assert record["system_expired_at"] is not None
+        assert actions[0]["status"] == "proposed"
+        assert record["valid_until"] is None
+        assert record["system_expired_at"] is None
 
     def test_contradiction_applies_trust_penalty(
         self, db: DatabaseManager, _seed_facts: tuple[str, str, str],
     ) -> None:
-        """Invalidated fact gets trust penalty via update_on_contradiction()."""
+        """A proposal cannot change predecessor trust before review."""
         fid0 = _seed_facts[0]
         db.store_temporal_validity(fid0, "default")
 
@@ -465,11 +479,7 @@ class TestContradictionInvalidation:
         )
         tv.validate_and_invalidate(new_fact, "default")
 
-        trust_scorer.update_on_contradiction.assert_called_once_with(
-            target_type="fact",
-            target_id=fid0,
-            profile_id="default",
-        )
+        trust_scorer.update_on_contradiction.assert_not_called()
 
     def test_new_fact_remains_valid(
         self, db: DatabaseManager, _seed_facts: tuple[str, str, str],
@@ -508,7 +518,7 @@ class TestContradictionInvalidation:
     def test_invalidation_reason_recorded(
         self, db: DatabaseManager, _seed_facts: tuple[str, str, str],
     ) -> None:
-        """Invalidation reason contains sheaf description."""
+        """Proposal reason is returned but not written to temporal state."""
         fid0 = _seed_facts[0]
         db.store_temporal_validity(fid0, "default")
 
@@ -532,7 +542,7 @@ class TestContradictionInvalidation:
 
         record = db.get_temporal_validity(fid0)
         assert record is not None
-        assert record["invalidation_reason"] == "Sheaf severity 0.750"
+        assert record["invalidation_reason"] is None
 
 
 class TestTemporalAnchorGuard:
@@ -582,7 +592,7 @@ class TestTemporalAnchorGuard:
         # T1 keeps the historical fact recallable.
         assert db.get_invalidated_fact_ids([old_fid], "default") == set()
 
-    def test_same_day_anchor_still_supersedes(self, db: DatabaseManager) -> None:
+    def test_same_day_anchor_still_proposes_correction(self, db: DatabaseManager) -> None:
         old_fid = self._store(db, "status A", "2024-06-01")
         tv = self._validator(db, old_fid)
         new_fact = AtomicFact(
@@ -590,8 +600,9 @@ class TestTemporalAnchorGuard:
             content="status B", referenced_date="2024-06-01",
         )
         actions = tv.validate_and_invalidate(new_fact, "default")
-        assert len(actions) == 1  # same day => genuine contradiction
-        assert db.get_temporal_validity(old_fid)["system_expired_at"] is not None
+        assert len(actions) == 1  # same day => genuine correction candidate
+        assert actions[0]["status"] == "proposed"
+        assert db.get_temporal_validity(old_fid)["system_expired_at"] is None
 
     def test_undated_new_fact_still_supersedes(self, db: DatabaseManager) -> None:
         old_fid = self._store(db, "old dated fact", "2020-01-01")
@@ -604,7 +615,7 @@ class TestTemporalAnchorGuard:
 
 
 class TestT2T1ClosedLoop:
-    """T2 supersession -> T1 exclusion, end to end."""
+    """Detector proposals do not change T1 until reviewed application."""
 
     def test_supersession_excludes_from_t1(
         self, db: DatabaseManager, _seed_facts: tuple[str, str, str],
@@ -622,5 +633,5 @@ class TestT2T1ClosedLoop:
         )
         new_fact = AtomicFact(profile_id="default", memory_id="m1", content="new")
         tv.validate_and_invalidate(new_fact, "default")
-        # T2 set system_expired_at; T1's admission filter must now exclude it.
-        assert db.get_invalidated_fact_ids([old_fid], "default") == {old_fid}
+        # T2 only proposes. T1 remains unchanged until reviewed application.
+        assert db.get_invalidated_fact_ids([old_fid], "default") == set()

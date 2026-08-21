@@ -140,9 +140,24 @@ class SkillEvolver:
         # automatically. Tests inject their own.
         if budget is None:
             slm_home = canonical_data_root()
+            # ``learning_db`` must be learning.db: migration M010 creates
+            # evolution_llm_cost_log there. Every production caller
+            # (consolidation_engine, routes/evolution, MCP, CLI) passes
+            # memory.db as db_path, so handing db_path straight to the budget
+            # pointed it at a database where that table does not exist. Every
+            # evolution cycle then died with "no such table:
+            # evolution_llm_cost_log" — swallowed at debug level in
+            # consolidation step 11, so skill evolution silently never ran.
+            #
+            # Redirect only for the exact production filename. Tests pass
+            # ":memory:" or their own tmp file and must keep the old behaviour,
+            # rather than having a learning.db invented beside them.
+            learning_db = Path(self._db_path)
+            if learning_db.name == "memory.db":
+                learning_db = learning_db.parent / "learning.db"
             budget = EvolutionBudget(
                 profile_id=profile_id,
-                learning_db=Path(self._db_path),
+                learning_db=learning_db,
                 lock_dir=slm_home,
             )
         self._budget = budget

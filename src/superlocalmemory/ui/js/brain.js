@@ -825,7 +825,11 @@
   function cardCrossPlatform(cp) {
     const data = cp || {};
     const wrap = EL('section', {className: 'brain-section'});
-    wrap.appendChild(EL('h4', {text: 'Connected clients'}));
+    wrap.appendChild(EL('h4', {text: 'Configured integrations'}));
+    wrap.appendChild(EL('p', {
+      className: 'brain-help',
+      text: 'Installation and sync availability. Recent client activity is shown separately in Living Brain.',
+    }));
 
     const grid = EL('div', {className: 'brain-adapter-grid'});
     const order = [
@@ -1096,6 +1100,7 @@
   function renderAll(brain, behavioral) {
     const b = brain || {};
     const nodes = [
+      cardLivingBrain(b.living_brain),
       cardLearning(b.learning),
     ];
     // Only shows when there are legacy rows pending migration; hidden
@@ -1123,6 +1128,93 @@
     nodes.push(cardEvolution(b.evolution_preview));
     nodes.push(cardDangerZone());
     return nodes;
+  }
+
+  // --------------------------------------------------------------------
+  // Card: Living Brain — portable evidence, never an automatic control
+  // --------------------------------------------------------------------
+  function cardLivingBrain(snapshot) {
+    const data = snapshot || {};
+    // v4.0.5: BrainTruth is the canonical, unavailable-aware read model.
+    // Keep legacy fields below as fallbacks while old daemon versions remain
+    // in use during a rolling local upgrade.
+    const truth = data.brain_truth || {};
+    const memoryActivity = truth.memory_activity || {};
+    const feedback = truth.feedback || data.feedback || {};
+    const experience = truth.agent_experience || {};
+    const externalEvidence = truth.external_evidence || {};
+    const correctionQuality = truth.correction_quality || {};
+    const clients = (data.connected_clients || {}).clients || [];
+    const quality = data.source_quality || {};
+    const graph = data.graph || {};
+    const wrap = EL('section', {className: 'brain-section'});
+    wrap.appendChild(EL('h4', {text: 'Living Brain'}));
+    wrap.appendChild(EL('p', {
+      className: 'brain-help',
+      text: 'A local evidence view of memory activity, feedback, and reviewed quality. Evidence and observations do not change recall, ranking, or model routing.',
+    }));
+
+    function countOrUnavailable(section, key, label) {
+      if (!section || section.availability === 'unavailable') {
+        const reason = section && section.reason ? ': ' + section.reason : '';
+        return 'Unavailable' + reason;
+      }
+      const value = section[key];
+      return value == null ? 'No data yet' : String(value) + (label ? ' ' + label : '');
+    }
+
+    const clientText = clients.length
+      ? clients.map((client) => {
+        const seconds = Number(client.last_seen_seconds_ago || 0);
+        return String(client.kind || 'other') + ' active ' + seconds + 's ago';
+      }).join(' · ')
+      : 'No client activity in the last 5 minutes';
+    const grid = EL('div', {className: 'brain-stat-grid'});
+    grid.appendChild(statRow(
+      'Control plane',
+      truth.control_plane === 'observation_only' ? 'Observation only' : 'Legacy view',
+    ));
+    grid.appendChild(statRow('Recent clients', clientText));
+    grid.appendChild(statRow('Memory activity', countOrUnavailable(
+      memoryActivity, 'facts_total', 'facts',
+    )));
+    grid.appendChild(statRow('Feedback signals', countOrUnavailable(
+      feedback, 'signals_total', 'signals',
+    )));
+    grid.appendChild(statRow('Claimed evidence', countOrUnavailable(
+      experience, 'claimed_experiences_total', 'receipts',
+    )));
+    grid.appendChild(statRow('Independently verified evidence', countOrUnavailable(
+      experience, 'independently_verified_experiences_total', 'receipts',
+    )));
+    grid.appendChild(statRow('External observations', countOrUnavailable(
+      externalEvidence, 'receipts_total', 'receipts',
+    )));
+    grid.appendChild(statRow('Correction quality', countOrUnavailable(
+      correctionQuality, 'cases_total', 'review cases',
+    )));
+    grid.appendChild(statRow(
+      'Observed source quality',
+      quality.mean_quality == null ? 'No evidence yet' : Number(quality.mean_quality).toFixed(3),
+    ));
+    grid.appendChild(statRow('Sources with evidence', quality.observed_sources || 0));
+    grid.appendChild(statRow('Memory graph nodes', graph.fact_nodes || 0));
+    grid.appendChild(statRow('Memory graph edges', graph.association_edges || 0));
+    wrap.appendChild(grid);
+
+    const byType = feedback.signals_by_type || {};
+    const signalKinds = Object.keys(byType).sort();
+    wrap.appendChild(EL('p', {
+      className: 'brain-help',
+      text: signalKinds.length
+        ? 'Signals: ' + signalKinds.map((kind) => kind + ' (' + Number(byType[kind] || 0) + ')').join(', ')
+        : 'No feedback signals recorded yet. Report outcomes or use memory feedback to start the loop.',
+    }));
+    wrap.appendChild(badge(
+      truth.contract ? 'real' : (data.is_real ? 'real' : 'stub'),
+      truth.contract || data.source || 'local evidence',
+    ));
+    return wrap;
   }
 
   // --------------------------------------------------------------------

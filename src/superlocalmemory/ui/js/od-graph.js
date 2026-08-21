@@ -15,7 +15,7 @@
 
   var GRAPH_URL = '/api/graph';
   var RECALL_URL = '/api/search';   /* POST {query, limit} -> {results:[...]} */
-  var MAX_NODES = 120;              /* default budget; slider range 20-2000 */
+  var MAX_NODES = 50;               /* default budget; owner-set to 50; slider range 20-2000 */
   /* Keep force-layout work bounded even when a user asks to render "All". */
   var PHYSICS_MAX_NODES = 160;
   var PRE_SETTLE_TICKS = 24;
@@ -45,12 +45,17 @@
   /* settle-freeze: stop the rAF loop once kinetic energy drops below SETTLE_KE */
   var frames = 0, _ke = 0;
   var SETTLE_MIN = 30, SETTLE_KE = 0.2, SETTLE_MAX_FRAMES = 180;
+  /* Bounded wait for layout when the stage reports 0x0. ~3s at 60fps:
+     long enough for a cold load whose pane is laid out a beat after
+     mount, short enough that a hidden pane cannot hold the rAF loop
+     open indefinitely. */
+  var blindFrames = 0, BLIND_MAX_FRAMES = 180;
   var NODES = [], LINKS = [], idx = {};
   var tierVisible = { 1: true, 2: true, 3: true };  /* independent tier toggles */
   var scale = 1, ox = 0, oy = 0, dpr = Math.max(1, window.devicePixelRatio || 1);
   var W = 0, H = 0, selected = null, hover = null;
   var dragNode = null, panning = false, last = null;
-  var PAL = {}, themeObs = null;
+  var PAL = {}, themeObs = null, sizeObs = null;
 
   /* bound handlers kept so re-render can detach them */
   var onMove = null, onUp = null;
@@ -74,7 +79,12 @@
             '</div>' +
             '<label class="chip" style="gap:8px" title="How many nodes to show">' +
               '<span data-ic="filter"></span> Nodes ' +
-              '<input id="odg-budget" type="range" min="20" max="2000" step="20" value="' + MAX_NODES + '" style="width:96px;accent-color:var(--violet)">' +
+              /* step=10, not 20: the default budget is 50, and a step-20 grid
+                 starting at min=20 only permits 20/40/60/... so the browser
+                 silently snapped the control to 60 while the label beside it
+                 printed MAX_NODES as 50 — the control and its own label
+                 disagreed on first paint. */
+              '<input id="odg-budget" type="range" min="20" max="2000" step="10" value="' + MAX_NODES + '" style="width:96px;accent-color:var(--violet)">' +
               '<span class="cnt" id="odg-budgetv">' + MAX_NODES + '</span>' +
             '</label>' +
             '<button id="odg-showall" class="chip" style="padding:2px 10px;font-size:12px;cursor:pointer" title="Show all nodes (up to 2000)">All</button>' +
@@ -86,9 +96,32 @@
             '<button id="odg-zout" aria-label="Zoom out">-</button>' +
             '<button id="odg-zfit" aria-label="Fit" title="Fit to view">&#10562;</button>' +
           '</div>' +
+          /* odg-panel-toggle: below 1100 px the graph-shell collapses to a single
+             column and the inspector / Ask-your-memory / Quick Insights stack below
+             the 60vh stage — out of view with nothing indicating they are there.
+             This button floats at centre-bottom of the stage overlay, tells the
+             user the panel exists, and scrolls it into view on click or Enter.
+             CSS hides it at >1100px where the panel is already beside the stage
+             in the two-column grid (a permanent toggle there is clutter). */
+          '<button id="odg-panel-toggle" ' +
+            'aria-label="Show inspector and Ask your memory panel">' +
+            'Details &amp; Chat &#x2193;' +
+          '</button>' +
         '</div>' +
       '</div>' +
-      '<aside class="inspector">' +
+      /* tabindex="-1" makes the inspector programmatically focusable so the
+         odg-panel-toggle onclick can re-anchor keyboard focus here after the
+         scroll, preventing the "focus is off-screen" accessibility gap.
+         tabindex="-1" is NOT a tab stop — it keeps the element out of the
+         natural tab order while allowing focus() from code only. */
+      '<aside class="inspector" tabindex="-1">' +
+        /* odg-back-btn: companion to #odg-panel-toggle. Visible only at ≤1100px
+           (same breakpoint). Appears at the very top of the stacked inspector so
+           keyboard users can return to the graph stage without tabbing through all
+           inspector content first. CSS hides it at >1100px. */
+        '<button class="odg-back-btn" aria-label="Back to graph canvas">' +
+          '&#x2191; Graph' +
+        '</button>' +
         '<div class="inspector-scroll" id="odg-insp">' +
           '<div class="inspector-empty"><div style="font-size:34px;margin-bottom:8px">&#9671;</div>' +
           'Loading your knowledge graph…</div>' +
@@ -242,7 +275,17 @@
 
   function resize() {
     if (!stage || !cv) return;
-    W = stage.clientWidth; H = stage.clientHeight;
+    /* Read into locals and only COMMIT to W/H once they are real.
+       A stage that reports 0x0 is not yet laid out (hidden tab, off-screen
+       pane). Drawing into a zero-sized canvas produces the blank-on-cold-load
+       failure the owner reported. Equally important: writing 0 into W/H before
+       bailing would POISON the last-known-good size — a window resize while the
+       graph pane is hidden would zero them, and loop() would then have no valid
+       dimensions to work with. Keep the previous good values instead; the
+       ResizeObserver re-calls resize() the moment the stage has real pixels. */
+    var w = stage.clientWidth, h = stage.clientHeight;
+    if (!w || !h) return;
+    W = w; H = h;
     cv.width = W * dpr; cv.height = H * dpr; cv.style.width = W + 'px'; cv.style.height = H + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
@@ -316,6 +359,27 @@
 
   function loop() {
     if (!running) return;
+    /* Blind frame: the stage has no size yet. Two failure modes to avoid, and
+       they pull in opposite directions —
+         (a) Spending the settle budget while blind. fit() derives scale/ox/oy
+             from W/H, so frames rendered at 0x0 park the camera off-screen:
+             measured 16,362 arc() calls, every one at x ~= -2,300, canvas
+             visually empty. That was the original "blank until I move the node
+             slider" bug.
+         (b) Idling forever. Re-scheduling rAF unconditionally kept a 60fps
+             callback alive on a hidden pane — the graph stays mounted after you
+             navigate away, so one window resize while hidden burned CPU
+             indefinitely.
+       So: retry for a BOUNDED window, then park. The retry covers a cold load
+       where layout lands a beat after mount (parking immediately there left the
+       first visit blank while re-visits worked). The bound means a hidden pane
+       can never hold the loop open — after ~3s it stops, and the ResizeObserver
+       calls wake() if the stage ever gains size. */
+    if (!W || !H) {
+      if (blindFrames++ < BLIND_MAX_FRAMES) { raf = requestAnimationFrame(loop); return; }
+      running = false; raf = null; blindFrames = 0; return;
+    }
+    blindFrames = 0;
     tick();
     if (fitFrames < 90) { fit(); fitFrames++; }   /* keep settling cloud in view */
     draw();
@@ -328,6 +392,11 @@
 
   /* wake: restart physics after a perturbation (drag, toggle, budget change) */
   function wake() { frames = 0; if (!running) { running = true; loop(); } }
+  /* Window resize: resize() wipes the canvas, so re-fit and repaint after it.
+     Named (not an inline closure) so teardown() can actually remove it — the
+     previous inline `resize` binding was re-added on every mount and never
+     removed, so listeners accumulated one per pane visit. */
+  function onWinResize() { resize(); fitFrames = 0; wake(); }
   /* redraw: single repaint when sim is frozen (pan/zoom/hover) */
   function redraw() { if (!running) draw(); }
 
@@ -486,6 +555,37 @@
   function wireControls() {
     stage = q('#odg-stage'); cv = q('#odg-cv'); ctx = cv.getContext('2d');
 
+    /* On a cold tab load the graph pane is inside a CSS-hidden tab; the browser
+       reports clientWidth/clientHeight = 0 until the tab is actually shown.
+       resize() now refuses to commit to a 0×0 canvas (the root cause of the
+       "blank on first load, paints after slider drag" bug).  ResizeObserver is
+       the platform-correct remedy: it fires exactly once when the stage first
+       acquires real pixel dimensions, without polling and without a fixed
+       setTimeout that cannot be proved race-free. */
+    sizeObs = new ResizeObserver(function (entries) {
+      var entry = entries[0];
+      if (!entry) return;
+      var rect = entry.contentRect;
+      if (rect.width > 0 && rect.height > 0) {
+        /* ALWAYS re-fit and repaint after a size change — never conditionally.
+           resize() assigns cv.width, and assigning a canvas's width WIPES it,
+           even when the value is unchanged.  So any call to resize() that is
+           not followed by a repaint leaves a blank canvas on screen.
+           An earlier version of this handler only repainted when the canvas
+           had previously been blind.  Returning to the pane then hit the other
+           branch: W/H were stale-but-non-zero, resize() wiped the canvas, and
+           nothing redrew it — measured as 53,083 painted pixels on the first
+           visit and exactly 0 on the second, with no draw calls issued at all.
+           Re-fitting also matters because the pane can come back at a
+           different size, and a camera fitted to the old bounds frames the
+           wrong region. The settle budget is bounded, so waking here is cheap. */
+        resize();
+        fitFrames = 0; frames = 0;
+        wake();
+      }
+    });
+    sizeObs.observe(stage);
+
     /* tier buttons -- independent toggles: each click flips visibility + re-renders */
     mount.querySelectorAll('#odg-tier button').forEach(function (b) {
       b.onclick = function () {
@@ -526,6 +626,30 @@
     q('#odg-zfit').onclick = function () { fit(); redraw(); };
     q('#odg-send').onclick = sendAsk;
     q('#odg-ask').addEventListener('keydown', function (e) { if (e.key === 'Enter') sendAsk(); });
+
+    /* odg-panel-toggle / odg-back-btn — narrow-viewport affordances (≤1100px).
+       Both buttons are display:none at >1100px (CSS), so clicks can never fire
+       on a wide desktop. scrollIntoView does NOT call resize() and does NOT assign
+       cv.width — the canvas is never wiped, the render loop is undisturbed. */
+    var panelToggle = q('#odg-panel-toggle');
+    var inspector   = q('.inspector');
+    var backBtn     = q('.odg-back-btn');
+    if (panelToggle && inspector) {
+      panelToggle.onclick = function () {
+        inspector.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        /* Re-anchor keyboard focus to the inspector so users are not left with
+           focus on an off-screen button after the scroll animation completes. */
+        inspector.focus({ preventScroll: true });
+      };
+    }
+    if (backBtn) {
+      backBtn.onclick = function () {
+        var st = q('#odg-stage');
+        if (st) st.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        /* Return focus to the panel toggle so the user can re-invoke it. */
+        if (panelToggle) panelToggle.focus({ preventScroll: true });
+      };
+    }
 
     // Quick Insight Actions — delegated on mount so buttons survive od-graph.js re-renders.
     // quick-actions.js:fetchInsight() is global (non-IIFE); it writes into #insight-results
@@ -614,7 +738,21 @@
     if (onMove) { window.removeEventListener('mousemove', onMove); onMove = null; }
     if (onUp) { window.removeEventListener('mouseup', onUp); onUp = null; }
     if (themeObs) { themeObs.disconnect(); themeObs = null; }
+    if (sizeObs) { sizeObs.disconnect(); sizeObs = null; }
+    window.removeEventListener('resize', onWinResize);
   }
+
+  /* Legacy compatibility — js/knowledge-graph.js was retired in 4.0.6 and it
+     owned window.loadGraph (it assigned loadGraphSigma). Several live callers
+     still invoke it, and two of them do so WITHOUT a typeof guard:
+         core.js:552                 loadGraph()            on every page init
+         event-delegation.js:42      'load-graph' action
+     (core.js:498, od-shell.js:481 and ng-shell.js:345 are guarded and would
+     have degraded quietly.) Without this shim those two would throw
+     ReferenceError on first paint. Re-fetching when the pane is mounted is the
+     honest equivalent of what the old function did; when nothing is mounted the
+     pane renders on activation via odRenderGraph, so there is nothing to do. */
+  window.loadGraph = function () { if (mount) load(); };
 
   /* ---------------- public entry ---------------- */
   window.odRenderGraph = function (container) {
@@ -627,7 +765,10 @@
     readPalette();
     wireControls();
     resize();
-    window.addEventListener('resize', resize);
+    /* Same hazard as the ResizeObserver above: resize() wipes the canvas, so a
+       bare `resize` listener leaves the graph blank after a window resize until
+       something else happens to repaint. Re-fit and wake instead. */
+    window.addEventListener('resize', onWinResize);
     themeObs = new MutationObserver(readPalette);
     themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     load();

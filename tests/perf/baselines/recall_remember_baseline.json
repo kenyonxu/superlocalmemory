@@ -1,0 +1,36 @@
+{
+  "config": {
+    "corpus_facts": 192,
+    "gate_metric": "p50",
+    "recall_n": 150,
+    "recall_warmup": 20,
+    "regression_threshold_pct": 20.0,
+    "remember_baseline_passes": 5,
+    "remember_n": 50,
+    "remember_warmup": 5
+  },
+  "contract": "slm.dev/recall-remember-baseline/v1",
+  "hardware": {
+    "fingerprint": "Darwin-arm64-3.13.5",
+    "machine": "arm64",
+    "python": "3.13.5",
+    "release": "25.4.0",
+    "system": "Darwin"
+  },
+  "recall": {
+    "n": 150.0,
+    "p50_ms": 5.123541981447488,
+    "p95_ms": 5.815541022457182,
+    "p99_ms": 6.624582980293781,
+    "passes": 5.0
+  },
+  "remember": {
+    "ceiling_p95_ms": 13.215625018347055,
+    "n": 50.0,
+    "p50_ms": 6.417708995286375,
+    "p95_ms": 10.394832992460579,
+    "p99_ms": 10.629208001773804,
+    "passes": 5.0
+  },
+  "slm_version": "4.0.5"
+}

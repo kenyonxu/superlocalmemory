@@ -81,6 +81,13 @@
     { g: 'Integrations', items: [
       { k: 'mcp-pane',       t: 'MCP & Tools', i: 'plug',     crumb: 'Integrations' },
       { k: 'mesh-pane',      t: 'Mesh Peers',  i: 'mesh',     crumb: 'Integrations' },
+      // 4.0.8: was a tab inside Governance. Every other Governance tab governs
+      // SLM's OWN data — lifecycle, access, trust, compliance, ingestion.
+      // Bounded Loops governs none of it: it is a separate product SLM
+      // optionally observes over a published contract, which is exactly what
+      // Integrations already means. "Not installed" is also an unremarkable
+      // answer here, where in a plane of its own an empty pane reads as broken.
+      { k: 'loops-pane',     t: 'Bounded Loops', i: 'shield', crumb: 'Integrations' },
     ]},
     { g: 'Config', items: [
       { k: 'settings-pane',  t: 'Settings',      i: 'settings', crumb: 'Config' },
@@ -516,6 +523,9 @@
       case 'mesh-pane':
         if (od('odRenderMesh')) return true;
         if (typeof loadMeshPeers === 'function') loadMeshPeers();
+        return true;
+      case 'loops-pane':
+        od('odRenderLoops');
         return true;
       case 'settings-pane':
         if (od('odRenderSettings')) return true;

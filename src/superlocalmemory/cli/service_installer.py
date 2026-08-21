@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import logging
 import os
-import plistlib
 import subprocess
 import sys
 from pathlib import Path
@@ -56,6 +55,8 @@ def _macos_plist_path() -> Path:
 
 
 def _macos_plist_content() -> str:
+    import plistlib  # macOS-only stdlib module; deferred so non-macOS platforms can import this module safely
+
     python = get_python_path()
     log = get_log_path()
     err_log = get_error_log_path()

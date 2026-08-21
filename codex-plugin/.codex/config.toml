@@ -24,7 +24,7 @@
 #
 #   command = "/absolute/path/to/superlocalmemory/codex-plugin/scripts/slm-launch"
 #   args = []
-#   env = { SLM_MCP_PROFILE = "code", SLM_DATA_DIR = "~/.superlocalmemory" }
+#   env = { SLM_MCP_PROFILE = "code", SLM_AGENT_ID = "codex", SLM_DATA_DIR = "~/.superlocalmemory" }
 #
 # The slm-launch script resolves the venv binary from SLM_DATA_DIR (default:
 # ~/.superlocalmemory) and falls back to the PATH `slm` binary automatically.
@@ -32,4 +32,4 @@
 [mcp_servers.superlocalmemory]
 command = "slm"
 args = ["mcp"]
-env = { SLM_MCP_PROFILE = "code", SLM_DATA_DIR = "~/.superlocalmemory" }
+env = { SLM_MCP_PROFILE = "code", SLM_AGENT_ID = "codex", SLM_DATA_DIR = "~/.superlocalmemory" }

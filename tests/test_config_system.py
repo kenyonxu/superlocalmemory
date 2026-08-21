@@ -13,7 +13,7 @@ def test_default_is_mode_a():
 
 
 def test_default_base_dir(monkeypatch):
-    # WP-07: SLMConfig.default() now resolves via slm_home() which honours
+    # SLMConfig.default() now resolves via slm_home() which honours
     # SLM_DATA_DIR. When SLM_DATA_DIR is absent the fallback is ~/.superlocalmemory.
     monkeypatch.delenv("SLM_DATA_DIR", raising=False)
     monkeypatch.delenv("SL_MEMORY_PATH", raising=False)

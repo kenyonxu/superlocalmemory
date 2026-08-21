@@ -4,8 +4,6 @@
 
 """Integer-label mapping for LightGBM ``lambdarank`` training.
 
-LLD reference: ``.backup/active-brain/lld/LLD-02-signal-pipeline-and-lightgbm.md``
-Section 4.7 — single source of truth for outcome-reward / position → int label.
 
 Rules:
     - Labels are integers in ``[0, 4]`` (5 relevance tiers).

@@ -924,65 +924,135 @@ class TestHookStop:
 # ───────────────────────────────────────────────────────────────────
 
 class TestMaybeConsolidate:
-    """_maybe_consolidate: run consolidation if >24h since last."""
+    """_maybe_consolidate: ask the daemon for a FULL consolidation, >24h apart.
 
-    @patch("superlocalmemory.hooks.hook_handlers.subprocess.Popen")
-    def test_runs_if_no_last_consolidation_file(self, mock_popen, tmp_path, monkeypatch):
+    Rewritten in 4.0.8. The previous tests pinned three behaviours that were
+    each defects:
+
+    * ``Popen(["slm", "consolidate", "--cognitive"])`` — that command runs
+      ``CognitiveConsolidator``, which does NOT contain the behavioural half of
+      consolidation (assertion mining, soft prompts, skill performance, skill
+      evolution). Those are steps 8-11 of ``ConsolidationEngine.consolidate``,
+      and nothing automatic ever reached them.
+    * ``test_updates_timestamp_before_popen`` asserted that the 24h marker is
+      written BEFORE the work is attempted — so a run that failed instantly
+      still bought a full day of silence.
+    * stdout and stderr went to DEVNULL inside a bare ``except: pass``, so no
+      failure could ever surface.
+    """
+
+    def test_asks_the_daemon_when_no_marker_exists(self, tmp_path, monkeypatch):
         last_file = str(tmp_path / ".last-consolidation")
         monkeypatch.setattr(
             "superlocalmemory.hooks.hook_handlers._LAST_CONSOLIDATION", last_file,
         )
+        calls = []
+
+        def fake_post(path, body, timeout=3.0):
+            calls.append((path, body))
+            return True
+
+        monkeypatch.setattr(
+            "superlocalmemory.hooks.hook_handlers._daemon_post", fake_post,
+        )
 
         _maybe_consolidate()
 
-        mock_popen.assert_called_once()
-        args = mock_popen.call_args[0][0]
-        assert args == ["slm", "consolidate", "--cognitive"]
-        # Verify timestamp was written
+        assert len(calls) == 1
+        path, body = calls[0]
+        assert path == "/api/v3/consolidation/trigger"
+        # lightweight=False is the whole point: it is the only path that runs
+        # steps 8-11.
+        assert body["lightweight"] is False
+        # background so session end is not held up by a run taking minutes.
+        assert body["background"] is True
         assert os.path.exists(last_file)
 
-    @patch("superlocalmemory.hooks.hook_handlers.subprocess.Popen")
-    def test_skips_if_within_24h(self, mock_popen, tmp_path, monkeypatch):
+    def test_skips_within_24h(self, tmp_path, monkeypatch):
         last_file = str(tmp_path / ".last-consolidation")
         monkeypatch.setattr(
             "superlocalmemory.hooks.hook_handlers._LAST_CONSOLIDATION", last_file,
         )
-        recent_ts = int(time.time()) - 3600  # 1 hour ago
         with open(last_file, "w") as f:
-            f.write(str(recent_ts))
+            f.write(str(int(time.time()) - 3600))
+        calls = []
+        monkeypatch.setattr(
+            "superlocalmemory.hooks.hook_handlers._daemon_post",
+            lambda *a, **k: calls.append(a) or True,
+        )
 
         _maybe_consolidate()
 
-        mock_popen.assert_not_called()
+        assert calls == []
 
-    @patch("superlocalmemory.hooks.hook_handlers.subprocess.Popen")
-    def test_runs_if_over_24h(self, mock_popen, tmp_path, monkeypatch):
+    def test_asks_again_after_24h(self, tmp_path, monkeypatch):
         last_file = str(tmp_path / ".last-consolidation")
         monkeypatch.setattr(
             "superlocalmemory.hooks.hook_handlers._LAST_CONSOLIDATION", last_file,
         )
-        old_ts = int(time.time()) - 100000  # well over 24h
         with open(last_file, "w") as f:
-            f.write(str(old_ts))
+            f.write(str(int(time.time()) - 100_000))
+        calls = []
+        monkeypatch.setattr(
+            "superlocalmemory.hooks.hook_handlers._daemon_post",
+            lambda *a, **k: calls.append(a) or True,
+        )
 
         _maybe_consolidate()
 
-        mock_popen.assert_called_once()
+        assert len(calls) == 1
 
-    @patch("superlocalmemory.hooks.hook_handlers.subprocess.Popen")
-    def test_updates_timestamp_before_popen(self, mock_popen, tmp_path, monkeypatch):
+    def test_marker_is_written_only_after_the_daemon_accepts(
+        self, tmp_path, monkeypatch,
+    ):
+        """The original bug, inverted into a guard: a refused request must NOT
+        record success, so the next session end retries."""
+        last_file = str(tmp_path / ".last-consolidation")
+        monkeypatch.setattr(
+            "superlocalmemory.hooks.hook_handlers._LAST_CONSOLIDATION", last_file,
+        )
+        monkeypatch.setattr(
+            "superlocalmemory.hooks.hook_handlers._daemon_post",
+            lambda *a, **k: False,          # daemon unreachable
+        )
+
+        _maybe_consolidate()
+
+        assert not os.path.exists(last_file), (
+            "a failed consolidation recorded success and suppressed retries "
+            "for 24 hours"
+        )
+
+    def test_failure_is_reported_not_swallowed(self, tmp_path, monkeypatch, capsys):
+        last_file = str(tmp_path / ".last-consolidation")
+        monkeypatch.setattr(
+            "superlocalmemory.hooks.hook_handlers._LAST_CONSOLIDATION", last_file,
+        )
+        monkeypatch.setattr(
+            "superlocalmemory.hooks.hook_handlers._daemon_post",
+            lambda *a, **k: False,
+        )
+
+        _maybe_consolidate()
+
+        assert "consolidation" in capsys.readouterr().err.lower()
+
+    def test_never_raises_even_if_the_post_explodes(self, tmp_path, monkeypatch):
+        """A hook that raises breaks the user's session end."""
         last_file = str(tmp_path / ".last-consolidation")
         monkeypatch.setattr(
             "superlocalmemory.hooks.hook_handlers._LAST_CONSOLIDATION", last_file,
         )
 
-        before = int(time.time())
-        _maybe_consolidate()
-        after = int(time.time())
+        def boom(*a, **k):
+            raise RuntimeError("network gone")
 
-        with open(last_file) as f:
-            ts = int(f.read().strip())
-        assert before <= ts <= after
+        monkeypatch.setattr(
+            "superlocalmemory.hooks.hook_handlers._daemon_post", boom,
+        )
+
+        _maybe_consolidate()          # must not raise
+        assert not os.path.exists(last_file)
 
 
 # ───────────────────────────────────────────────────────────────────

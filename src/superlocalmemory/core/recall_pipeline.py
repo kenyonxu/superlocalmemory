@@ -327,20 +327,16 @@ class _ReadOnlyLearningView:
 def _resolve_ranking_mode(env: "dict[str, str] | os._Environ[str]") -> str:
     """Map the ``SLM_RANKING`` env var to a canonical mode.
 
-    Legacy ``SLM_V2_PIPELINE_DISABLED=1`` and ``SLM_BANDIT_DISABLED=1``
-    are honoured for one-release back-compat. Explicit ``SLM_RANKING``
-    wins if both are set.
+    ``SLM_RANKING`` is an explicit operator policy.  In 4.0.5 the absence of
+    that policy is deliberately ``off``: old learning signals must not begin
+    altering recall merely because a user upgrades.  The legacy disable flags
+    remain harmless compatibility inputs, but cannot implicitly enable a
+    ranking mode.
     """
     raw = (env.get("SLM_RANKING", "") or "").strip().lower()
     if raw in _RANKING_MODES:
         return raw
-    if (env.get("SLM_V2_PIPELINE_DISABLED", "0") or "0").strip() == "1":
-        # v2 disabled → fall back to v1 adaptive only.
-        return "v1"
-    if (env.get("SLM_BANDIT_DISABLED", "0") or "0").strip() == "1":
-        # Bandit disabled → v2 without ensemble.
-        return "v2"
-    return "v2-ensemble"
+    return "off"
 
 
 def apply_ranking(
@@ -787,6 +783,9 @@ def run_recall(
     include_shared: bool = False,
     window: str | tuple[str, str] | None = None,
     as_of: str | None = None,
+    known_as_of: str | None = None,
+    valid_at: str | None = None,
+    include_unknown: bool = False,
 ) -> RecallResponse:
     """Recall relevant facts for a query.
 
@@ -836,6 +835,9 @@ def run_recall(
         include_shared=include_shared,
         window=window,
         as_of=as_of,
+        known_as_of=known_as_of,
+        valid_at=valid_at,
+        include_unknown=include_unknown,
     )
     _mark("retrieval(chan+rerank)")
 

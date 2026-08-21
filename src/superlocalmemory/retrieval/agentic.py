@@ -163,7 +163,7 @@ class AgenticRetriever:
                 RetrievalRound(2, rq, len(rn), _avg(rn), True),
             )
 
-        merged = sorted(pool.values(), key=lambda x: x[1], reverse=True)
+        merged = sorted(pool.values(), key=lambda x: (-x[1], x[0].fact_id))
         return [f for f, _ in merged[:top_k]]
 
     # -- Sufficiency check ---------------------------------------------------

@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import sqlite3
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -49,6 +50,72 @@ def _ingestion_effect_id(operation_id: str, *parts: object) -> str:
         return uuid.uuid4().hex
     payload = "\0".join((operation_id, *(str(part) for part in parts)))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def _record_correction_candidate(
+    db: DatabaseManager,
+    *,
+    operation_id: str,
+    profile_id: str,
+    scope: str,
+    predecessor_fact_id: str,
+    successor_fact_id: str,
+    reason_code: str,
+    trusted_actor_id: str,
+) -> None:
+    """Append a review candidate through the current canonical transaction.
+
+    This intentionally carries identifiers and a controlled reason code only.
+    It must not use detector prose because that can contain user memory text.
+    If the current path is bound to the canonical coordinator,
+    ``raw_connection`` yields its already-open transaction; otherwise the
+    database manager owns the short transaction. Either path is atomic.
+    """
+    if not trusted_actor_id or not predecessor_fact_id or not successor_fact_id:
+        return
+    if predecessor_fact_id == successor_fact_id:
+        return
+    from superlocalmemory.storage.correction_cases import (
+        CorrectionActor,
+        CorrectionCaseError,
+        propose_on_connection,
+    )
+
+    case_id = _ingestion_effect_id(
+        operation_id, "correction-case", profile_id, predecessor_fact_id,
+        successor_fact_id, reason_code,
+    )
+    idempotency_key = _ingestion_effect_id(
+        operation_id, "correction-proposal", profile_id, predecessor_fact_id,
+        successor_fact_id, reason_code,
+    )
+    actor = CorrectionActor(
+        actor_id=trusted_actor_id,
+        actor_kind="host_attested",
+        trust_tier="canonical_writer",
+    )
+    try:
+        with db.raw_connection() as conn:
+            propose_on_connection(
+                conn,
+                case_id=case_id,
+                profile_id=profile_id,
+                scope=scope,
+                predecessor_fact_id=predecessor_fact_id,
+                successor_fact_id=successor_fact_id,
+                reason_code=reason_code,
+                actor=actor,
+                idempotency_key=idempotency_key,
+                # Candidate detection observes a possible correction. It does
+                # not claim an event-time boundary from heuristic evidence.
+                is_profile_active=lambda candidate_profile: candidate_profile == profile_id,
+                is_actor_trusted=lambda candidate_actor: candidate_actor == actor,
+            )
+    except (CorrectionCaseError, sqlite3.Error, ValueError) as exc:
+        # A missing/hot-upgrading M042 ledger must not make memory ingestion
+        # unavailable. The candidate is advisory and has no retrieval effect;
+        # the warning is the operational signal that an operator must inspect.
+        logger.warning("Correction candidate not recorded for %s: %s", successor_fact_id, exc)
 
 
 def _record_fact_entity_association(
@@ -244,8 +311,13 @@ def enrich_fact(
 # Vector dual-write helper (P1-2 / embeddings-vector-01)
 # ---------------------------------------------------------------------------
 
-def _upsert_fact_vectors(fact, profile_id, ann_index, vector_store, embedder=None):
-    """Dual-write a fact's embedding to the ANN index + sqlite-vec store.
+def _upsert_fact_vectors(fact, profile_id, ann_index, vector_store, embedder=None) -> bool:
+    """Dual-write a fact's embedding to the sqlite-vec projection and the ANN index.
+
+    Write order mirrors _attach_vector: the sqlite-vec projection is attempted
+    first because that is what a meaning-based search reads.  The ANN index is
+    updated only when the projection accepts the vector.  Returns True when the
+    fact is now findable by meaning (the projection accepted the vector).
 
     Embeds on-demand when the fact has no embedding (e.g. consolidated
     summary facts created without one), so UPDATE/SUPERSEDE and consolidated
@@ -258,18 +330,44 @@ def _upsert_fact_vectors(fact, profile_id, ann_index, vector_store, embedder=Non
         except Exception as _emb_exc:  # pragma: no cover - defensive
             _reraise_materialization_deferral(_emb_exc)
             logger.debug("on-demand embed failed for %s: %s", fact.fact_id, _emb_exc)
-            return
+            return False
     if not getattr(fact, "embedding", None):
-        return
-    if ann_index:
-        ann_index.add(fact.fact_id, fact.embedding)
-    # V3.2: VectorStore upsert (sqlite-vec) -- dual-write (Rule 12)
+        return False
+
+    projected = False
+    # Projection first: what a meaning-based search reads.
     if vector_store and getattr(vector_store, "available", False):
-        vector_store.upsert(
-            fact_id=fact.fact_id,
-            profile_id=profile_id,
-            embedding=fact.embedding,
-        )
+        try:
+            projected = bool(vector_store.upsert(
+                fact_id=fact.fact_id,
+                profile_id=profile_id,
+                embedding=fact.embedding,
+            ))
+            if not projected:
+                logger.warning(
+                    "vector projection refused for %s — stored but not "
+                    "findable by meaning", fact.fact_id[:12],
+                )
+        except Exception as _vs_exc:
+            logger.warning(
+                "vector projection failed for %s (%s: %s) — stored but not "
+                "findable by meaning",
+                fact.fact_id[:12], type(_vs_exc).__name__, _vs_exc,
+            )
+
+    # ANN index only when the projection accepted the vector so both
+    # representations stay consistent.  Writing ANN without a vector-store
+    # entry creates a ghost that disappears on restart (ANN is rebuilt from
+    # the vector store at startup).
+    if projected and ann_index:
+        try:
+            ann_index.add(fact.fact_id, fact.embedding)
+        except Exception:
+            logger.warning(
+                "in-memory index rejected %s", fact.fact_id[:12], exc_info=True,
+            )
+
+    return projected
 
 
 class _TombstoneReadError(Exception):
@@ -674,6 +772,15 @@ def run_store(
             materialization_progress["relational_started"] = True
 
         is_queryable_promotion = fact.fact_id in queryable_ids
+        # When a promoted fact is being materialised the embedding column is
+        # written in a separate step AFTER the projection attempt so that the
+        # two representations stay in the correct order: projection first,
+        # canonical column second (mirroring _attach_vector's invariant).
+        # Writing the column before the projection and then failing the
+        # projection leaves the fact with embedding IS NOT NULL but no entry
+        # in fact_embeddings — invisible to meaning-search and invisible to
+        # every repair pass that selects WHERE embedding IS NULL.
+        _deferred_canonical_embedding = None  # set below if promotion path taken
         if is_queryable_promotion:
             db.update_fact(fact.fact_id, {
                 "content": fact.content,
@@ -690,15 +797,22 @@ def run_store(
                 "access_count": fact.access_count,
                 "source_turn_ids_json": fact.source_turn_ids,
                 "session_id": fact.session_id,
-                "embedding": fact.embedding,
-                "fisher_mean": fact.fisher_mean,
-                "fisher_variance": fact.fisher_variance,
+                # embedding / fisher fields omitted here — written after
+                # the projection attempt below so canonical is never ahead
+                # of the projection.
                 "lifecycle": fact.lifecycle,
                 "langevin_position": fact.langevin_position,
                 "emotional_valence": fact.emotional_valence,
                 "emotional_arousal": fact.emotional_arousal,
                 "signal_type": fact.signal_type,
             })
+            if fact.embedding:
+                _deferred_canonical_embedding = (
+                    fact.fact_id,
+                    fact.embedding,
+                    fact.fisher_mean,
+                    fact.fisher_variance,
+                )
         if consolidator:
             try:
                 action = consolidator.consolidate(
@@ -726,52 +840,38 @@ def run_store(
                     target_id = action.existing_fact_id
                     if is_queryable_promotion and target_id:
                         db.delete_fact(fact.fact_id)
+                        # The original promoted fact was deleted; its deferred
+                        # canonical embedding write must not happen.
+                        _deferred_canonical_embedding = None
                     existing_fact = db.get_fact(target_id) if target_id else None
                     if existing_fact is None:
                         continue
                     fact = existing_fact
 
-                # Opinion confidence tracking: reinforce or decay
-                if fact.fact_type == FactType.OPINION and action.action_type.value == "update":
-                    try:
-                        existing = db.get_fact(
-                            action.existing_fact_id or action.new_fact_id
-                        )
-                        if existing and existing.fact_type == FactType.OPINION:
-                            new_conf = min(1.0, existing.confidence + 0.1)
-                            db.update_fact(existing.fact_id, {"confidence": new_conf})
-                    except Exception:
-                        pass
-                elif fact.fact_type == FactType.OPINION and action.action_type.value == "supersede":
-                    try:
-                        old_id = getattr(action, "old_fact_id", None)
-                        if old_id:
-                            old_fact = db.get_fact(old_id)
-                            if old_fact:
-                                new_conf = max(0.0, old_fact.confidence - 0.2)
-                                db.update_fact(old_id, {"confidence": new_conf})
-                    except Exception:
-                        pass
-
                 if action.action_type.value in ("update", "supersede"):
-                    target_id = (
-                        (action.existing_fact_id or action.new_fact_id)
-                        if action.action_type.value == "update"
-                        else action.new_fact_id
-                    )
-                    if is_queryable_promotion and target_id != fact.fact_id:
-                        db.delete_fact(fact.fact_id)
-                    updated_fact = db.get_fact(target_id)
-                    if updated_fact is None:
+                    # A consolidator UPDATE/SUPERSEDE is a review-required
+                    # proposal.  It persists the incoming successor and does
+                    # not mutate, delete, archive, or change trust on the
+                    # matched predecessor.  Continue materializing the
+                    # incoming fact through the common projection pipeline.
+                    proposed_fact = db.get_fact(action.new_fact_id)
+                    if proposed_fact is None:
                         raise RuntimeError(
-                            f"consolidation {action.action_type.value} produced "
-                            f"missing fact {target_id}"
+                            f"consolidation {action.action_type.value} proposal produced "
+                            f"missing fact {action.new_fact_id}"
                         )
-                    # Continue through the shared index/graph/temporal/
-                    # provenance stages.  The previous early continue made
-                    # UPDATE/SUPERSEDE facts look stored while skipping half of
-                    # canonical materialization.
-                    fact = updated_fact
+                    fact = proposed_fact
+                    if action.existing_fact_id:
+                        _record_correction_candidate(
+                            db,
+                            operation_id=ingestion_operation_id,
+                            profile_id=profile_id,
+                            scope=scope,
+                            predecessor_fact_id=action.existing_fact_id,
+                            successor_fact_id=action.new_fact_id,
+                            reason_code=f"consolidation_{action.action_type.value}",
+                            trusted_actor_id=trusted_actor_id,
+                        )
                 # ADD case: consolidator already stored the fact (F8 fix)
                 # Fall through to post-processing below
             else:
@@ -788,9 +888,31 @@ def run_store(
             if materialization_progress is not None:
                 materialization_progress["fact_ids"] = tuple(stored_ids)
 
-        # Dual-write embedding to ANN index + vector store (embed on-demand if
-        # a consolidated ADD fact arrived without one). See _upsert_fact_vectors.
+        # Projection first (vector store then ANN index, on-demand embed for
+        # consolidated facts that arrived without one).
         _upsert_fact_vectors(fact, profile_id, ann_index, vector_store, embedder)
+
+        # Canonical embedding write: deferred to here from the queryable-
+        # promotion block above so the projection is always attempted first.
+        # The column is written regardless of whether the projection accepted
+        # the vector (the vector is real data; withholding it would force
+        # every repair pass to re-compute a model call that the same
+        # installation condition would refuse again anyway).
+        if _deferred_canonical_embedding is not None:
+            _dc_fid, _dc_emb, _dc_fmean, _dc_fvar = _deferred_canonical_embedding
+            try:
+                db.update_fact(_dc_fid, {
+                    "embedding": _dc_emb,
+                    "fisher_mean": _dc_fmean,
+                    "fisher_variance": _dc_fvar,
+                })
+            except Exception as _dc_exc:
+                logger.warning(
+                    "canonical embedding write failed for %s: %s",
+                    _dc_fid[:12], _dc_exc,
+                )
+            _deferred_canonical_embedding = None
+
         # Phase 2: Generate contextual description (after consolidator, before graph_builder)
         if context_generator:
             try:
@@ -860,6 +982,18 @@ def run_store(
                         "Temporal: %d facts invalidated by new fact %s",
                         len(invalidations), fact.fact_id,
                     )
+                    for candidate in invalidations:
+                        predecessor_fact_id = str(candidate.get("old_fact_id") or "")
+                        _record_correction_candidate(
+                            db,
+                            operation_id=ingestion_operation_id,
+                            profile_id=profile_id,
+                            scope=scope,
+                            predecessor_fact_id=predecessor_fact_id,
+                            successor_fact_id=fact.fact_id,
+                            reason_code="temporal_contradiction",
+                            trusted_actor_id=trusted_actor_id,
+                        )
             except Exception as exc:
                 temporal_complete = False
                 logger.debug(
@@ -1077,15 +1211,11 @@ def run_store_fact_direct(
         )
         fact.canonical_entities = list(canonical.values())
     db.store_fact(fact)
-    if fact.embedding and ann_index:
-        ann_index.add(fact.fact_id, fact.embedding)
-    # V3.2: VectorStore upsert (dual-write)
-    if fact.embedding and vector_store and vector_store.available:
-        vector_store.upsert(
-            fact_id=fact.fact_id,
-            profile_id=profile_id,
-            embedding=fact.embedding,
-        )
+    # Projection first (vector store), ANN only on success — matching
+    # _attach_vector's invariant.  The return value (projected) is not used
+    # here because run_store_fact_direct is a fire-and-forget path with no
+    # receipt to update; the caller is responsible for any enrichment status.
+    _upsert_fact_vectors(fact, profile_id, ann_index, vector_store)
     if graph_builder:
         graph_builder.build_edges(fact, profile_id)
     # The graph projection must run after GraphBuilder: syncing immediately

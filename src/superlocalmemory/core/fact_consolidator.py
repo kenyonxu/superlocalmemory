@@ -159,7 +159,30 @@ def consolidate_facts(
             stats["error_detail"] = str(exc)
         return stats
 
-    # Backward-compat: str | Path — open own connection.
+    # Backward-compat: str | Path — open our own connection.
+    #
+    # Type-checked, not assumed. This branch used to run for ANYTHING that was
+    # not a DatabaseManager, stringify it, and hand the result to
+    # sqlite3.connect — which creates whatever filename it is given. A test
+    # passing a MagicMock therefore had a real 4 KB SQLite file named
+    # "<MagicMock id='4422448000'>" written into the repository root, one per
+    # test. 42 of them had accumulated, and tests/test_ci_guards/
+    # test_no_magicmock_artifacts.py failed after any full-suite run.
+    #
+    # 4.0.6 is where this started firing: it wired consolidate_facts into
+    # run_maintenance, so every caller with a mock config reached this line.
+    #
+    # Refusing an unusable argument is also right beyond the test symptom —
+    # silently creating a database at a nonsense path cannot be what any caller
+    # wanted, and it hides the real bug (the caller passed the wrong thing).
+    if not isinstance(db_or_path, (str, Path)):
+        raise TypeError(
+            "consolidate_facts() expects a DatabaseManager, or a str/Path to "
+            f"memory.db for backward compatibility; got {type(db_or_path).__name__}. "
+            "Passing anything else previously created a database file named after "
+            "the object's repr."
+        )
+
     logger.warning(
         "consolidate_facts: passing a db_path is deprecated — pass a "
         "DatabaseManager instead (Fix A backward-compat shim active)"

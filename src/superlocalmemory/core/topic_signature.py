@@ -4,8 +4,6 @@
 
 """Topic signature — deterministic, Unicode-safe, ReDoS-resistant 16-char hex.
 
-LLD reference: `.backup/active-brain/lld/LLD-01-context-cache-and-hot-path-hooks.md`
-Section 4.2.
 
 Hot-path contract:
   - stdlib-only imports (no third-party packages).

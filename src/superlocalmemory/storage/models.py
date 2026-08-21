@@ -73,11 +73,19 @@ class SignalType(str, Enum):
 
 
 class Mode(str, Enum):
-    """Operating modes — EU AI Act alignment."""
+    """Operating modes.
 
-    A = "a"  # Local Guardian: zero LLM, EU AI Act FULL
-    B = "b"  # Smart Local: local Ollama LLM, EU AI Act FULL
-    C = "c"  # Full Power: UNRESTRICTED, best models, 90%+ target
+    A — All data stays on this device. No AI language model runs anywhere.
+        Fastest and most private.
+    B — All data stays on this device. Uses a local Ollama AI model to
+        improve recall quality. Requires Ollama to be installed and running.
+    C — Uses a cloud AI provider (OpenAI, Anthropic, …) for the best recall
+        quality. Queries leave this device; an API key is required.
+    """
+
+    A = "a"  # Local Guardian — on-device only, no LLM
+    B = "b"  # Smart Local — on-device + local Ollama LLM, no cloud
+    C = "c"  # Cloud LLM — best accuracy, queries leave device, API key needed
 
 
 # ---------------------------------------------------------------------------
@@ -444,3 +452,10 @@ class RecallResponse:
     # fall into (thematic context). None unless results cluster into one
     # community above threshold. Additive — backward compatible.
     community_context: dict | None = None
+    # Channels abandoned at the hang guard, so they contributed no candidates
+    # to this answer. Non-empty means the result is INCOMPLETE, not merely
+    # slow: asking the same question again on an idle machine can legitimately
+    # return something better. Empty is the normal case and the only one in
+    # which two runs of one query are expected to agree. Sorted, so the field
+    # is itself repeatable. Additive — backward compatible.
+    incomplete_channels: tuple[str, ...] = ()

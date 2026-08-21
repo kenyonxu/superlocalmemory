@@ -13,6 +13,7 @@ import pytest
 from superlocalmemory.storage.migrations import (
     M018_ingestion_operations,
     M032_write_coordinator_admission,
+    M042_correction_case_ledger,
 )
 
 _FUNCTIONAL_DEADLINE_MS = 1_500
@@ -28,6 +29,7 @@ def test_delete_command_is_idempotent_and_preserves_immutable_receipt(
     with engine_with_mock_deps._db.raw_connection() as conn:
         M018_ingestion_operations.apply(conn)
         M032_write_coordinator_admission.apply(conn)
+        M042_correction_case_ledger.apply(conn)
     runtime = CanonicalRememberRuntime.for_engine(engine_with_mock_deps)
     runtime.start()
     try:
@@ -115,6 +117,105 @@ def test_concurrent_delete_retries_share_one_canonical_receipt(
         ("delete_fact",),
     )
     assert commits[0]["count"] == 1
+
+
+def test_correction_successor_command_preserves_predecessor_and_replays(
+    engine_with_mock_deps,
+) -> None:
+    """The sole writer creates a new successor; it never edits the source."""
+    from superlocalmemory.core.remember_runtime import CanonicalRememberRuntime
+    from superlocalmemory.storage.admission_journal import Actor, RememberRequest
+
+    with engine_with_mock_deps._db.raw_connection() as conn:
+        M018_ingestion_operations.apply(conn)
+        M032_write_coordinator_admission.apply(conn)
+        M042_correction_case_ledger.apply(conn)
+    runtime = CanonicalRememberRuntime.for_engine(engine_with_mock_deps)
+    runtime.start()
+    try:
+        actor = Actor("daemon:test", frozenset({"default"}), frozenset({"personal"}))
+        predecessor = runtime.remember(
+            RememberRequest(
+                content="The predecessor remains immutable under direct correction.",
+                profile_id="default",
+                source_type="test",
+                idempotency_key="correction-successor-source",
+                trusted_actor_id="daemon:test",
+            ),
+            actor,
+            deadline_ms=_FUNCTIONAL_DEADLINE_MS,
+        ).payload["fact_ids"][0]
+        first = runtime.create_correction_successor(
+            "default",
+            predecessor,
+            "correction-successor-1",
+            "The successor is awaiting human correction review.",
+            embedding=[0.1, 0.2],
+            idempotency_key="correction-successor-retry",
+        )
+        second = runtime.create_correction_successor(
+            "default",
+            predecessor,
+            "correction-successor-1",
+            "The successor is awaiting human correction review.",
+            embedding=[0.1, 0.2],
+            idempotency_key="correction-successor-retry",
+        )
+        successor = first["successor_fact_id"]
+        assert engine_with_mock_deps._db.get_nonapplied_correction_successor_ids(
+            [successor], "default"
+        ) == {successor}
+        applied = runtime.transition_correction(
+            "default",
+            first["case_id"],
+            action="apply",
+            expected_version=0,
+            actor_id="daemon:reviewer",
+            idempotency_key="correction-apply-retry",
+        )
+        assert applied["status"] == "applied"
+        assert engine_with_mock_deps._db.get_invalidated_fact_ids(
+            [predecessor], "default"
+        ) == {predecessor}
+        assert engine_with_mock_deps._db.get_nonapplied_correction_successor_ids(
+            [successor], "default"
+        ) == set()
+        rolled_back = runtime.transition_correction(
+            "default",
+            first["case_id"],
+            action="rollback",
+            expected_version=1,
+            actor_id="daemon:reviewer",
+            idempotency_key="correction-rollback-retry",
+        )
+        assert rolled_back["status"] == "rolled_back"
+        assert engine_with_mock_deps._db.get_invalidated_fact_ids(
+            [predecessor], "default"
+        ) == set()
+        assert engine_with_mock_deps._db.get_nonapplied_correction_successor_ids(
+            [successor], "default"
+        ) == {successor}
+    finally:
+        runtime.stop()
+
+    assert first == second
+    assert first["predecessor_fact_id"] == predecessor
+    successor = first["successor_fact_id"]
+    assert engine_with_mock_deps._db.get_fact(predecessor).content == (
+        "The predecessor remains immutable under direct correction."
+    )
+    assert engine_with_mock_deps._db.get_fact(successor).content == (
+        "The successor is awaiting human correction review."
+    )
+    cases = engine_with_mock_deps._db.execute(
+        "SELECT predecessor_fact_id, successor_fact_id, status FROM correction_cases"
+    )
+    assert [tuple(case) for case in cases] == [(predecessor, successor, "rolled_back")]
+    commits = engine_with_mock_deps._db.execute(
+        "SELECT command_kind FROM write_commits WHERE command_kind=?",
+        ("propose_correction",),
+    )
+    assert len(commits) == 1
 
 
 def test_mutation_retry_key_is_endpoint_scoped_and_rejects_payload_drift(

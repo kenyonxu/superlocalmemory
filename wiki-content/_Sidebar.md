@@ -1,4 +1,4 @@
-**SuperLocalMemory V4.0.0**
+**SuperLocalMemory V4.0.5**
 
 * [Home](Home)
 
@@ -8,11 +8,12 @@
 * [Getting Started](Getting-Started)
 * [Modes Explained](Modes-Explained)
 * [IDE Setup](IDE-Setup)
+* [Host Integration Upgrades](Host-Upgrades)
 * [Migration from V2](Migration-from-V2)
 
 **Reference**
 * [CLI Commands](CLI-Reference)
-* [MCP Tools](MCP-Tools) — 87 whole / 54 power / 42 full / 24 code / 14 core
+* [MCP Tools](MCP-Tools) — 94 whole / 61 power / 49 full / 31 code / 16 core
 * [Retrieval Score Contract](Retrieval-Score-Contract)
 * [Auto-Memory](Auto-Memory)
 * [Active Memory (V3.1)](Active-Memory)

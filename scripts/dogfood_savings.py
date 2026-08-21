@@ -3,7 +3,7 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
-"""dogfood_savings.py — WP-14 metered-pipeline $-savings evidence script.
+"""dogfood_savings.py — metered-pipeline cost-savings evidence script.
 
 Drives a repeated-prompt workload through the production CacheManager +
 MetricsCollector, reads the MetricsSnapshot delta, and emits a Report
@@ -325,7 +325,7 @@ def _build_price_source(provider: str, price: float, source_key: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="WP-14: metered-pipeline $-savings dogfood evidence script.",
+        description="metered-pipeline cost-savings evidence script.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "RESEARCH INTEGRITY: Every $ number traces to tokens_saved × price.\n"
@@ -360,7 +360,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--out-json", type=Path, default=None,
-        help="Output path for JSON ledger (default: .backup/v3.6.14/evidence/wp14/raw-metrics-<mode>-<utc>.json)",
+        help="Output path for JSON ledger (default: raw-metrics-<mode>-<utc>.json in the current directory)",
     )
 
     args = parser.parse_args()

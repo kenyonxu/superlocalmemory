@@ -29,12 +29,14 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 
 from superlocalmemory.core.config import QuantizationConfig
+from superlocalmemory.storage.embedding_codec import decode_embedding
 
 if TYPE_CHECKING:
     from superlocalmemory.math.ebbinghaus import EbbinghausCurve
@@ -262,7 +264,13 @@ class EAPScheduler:
         Tries embedding_metadata -> fact_embeddings (vec0 table).
         Falls back to atomic_facts.embedding JSON column.
         """
-        # Try atomic_facts.embedding (JSON column)
+        # Try atomic_facts.embedding (TEXT JSON or BLOB float32).
+        # Two-stage error handling:
+        #   - DB query failures (any exception from execute) → log + return None.
+        #   - Format errors from decode_embedding (ValueError) → propagate.
+        #     A corrupt embedding must NOT be silently collapsed to None because
+        #     the caller cannot distinguish "embedding absent" from "data lost".
+        raw = None
         try:
             rows = self._db.execute(
                 "SELECT embedding FROM atomic_facts WHERE fact_id = ?",
@@ -270,14 +278,17 @@ class EAPScheduler:
             )
             if rows:
                 raw = dict(rows[0]).get("embedding")
-                if raw and raw != "null":
-                    data = json.loads(raw) if isinstance(raw, str) else raw
-                    if data:
-                        return np.array(data, dtype=np.float64)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — isolates DB failure from decode failure
             logger.debug(
                 "Could not load embedding from atomic_facts for %s: %s",
                 fact_id, exc,
             )
+            return None
+
+        if raw and raw != "null":
+            # ValueError from decode_embedding propagates intentionally.
+            vec = decode_embedding(raw, fact_id=fact_id)
+            if vec:
+                return np.array(vec, dtype=np.float64)
 
         return None

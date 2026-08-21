@@ -1,6 +1,11 @@
 /**
- * tests/ui/test_pane_error.mjs — WP-12 pane error-state tests.
- * Runner: node --test tests/ui/
+ * tests/ui/test_pane_error.mjs — pane error-state tests.
+ * Runner: npm test   (scripts/run-ui-tests.mjs)
+ *
+ * NOT `node --test tests/ui/`. Node 26 resolves a bare directory as a
+ * module and dies with MODULE_NOT_FOUND before running anything — a red
+ * result that says nothing about this file. The runner enumerates
+ * test_*.mjs and passes them individually, which works on every version.
  * Requires: jsdom (npm install --save-dev jsdom)
  *
  * AC coverage:

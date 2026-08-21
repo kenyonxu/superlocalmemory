@@ -91,7 +91,7 @@ class ProfileChannel:
                         seen.add(fid)
                         results.append((fid, 0.95))
 
-        results.sort(key=lambda x: x[1], reverse=True)
+        results.sort(key=lambda x: (-x[1], x[0]))
         return results[:top_k]
 
     @staticmethod

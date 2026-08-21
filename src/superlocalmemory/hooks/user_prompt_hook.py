@@ -4,8 +4,6 @@
 
 """UserPromptSubmit hook — Python fallback (compiled binary preferred).
 
-LLD reference: `.backup/active-brain/lld/LLD-01-context-cache-and-hot-path-hooks.md`
-Section 4.3.
 
 HARD RULES (enforced by tests):
   - stdlib-only imports at module load (SLM modules delayed-imported).
@@ -63,8 +61,15 @@ def main() -> int:
     # the MCP protocol doesn't thread the session_id through tool
     # arguments. Fail-soft — never raises on the hot path.
     try:
-        from superlocalmemory.hooks.session_registry import mark_active
-        mark_active(session_id, agent_type="claude")
+        from superlocalmemory.hooks.session_registry import (
+            mark_active,
+            resolve_active_profile,
+        )
+        mark_active(
+            session_id,
+            agent_type="claude",
+            profile_id=resolve_active_profile(),
+        )
     except Exception:
         pass
 
@@ -91,7 +96,7 @@ def main() -> int:
 
     try:
         topic_sig = compute_topic_signature(prompt, entity_hits=entity_hits)
-        entry = read_entry_fast(session_id, topic_sig)
+        entry = read_entry_fast(session_id, topic_sig, require_current_admission=True)
     except Exception:
         sys.stdout.write("{}")
         return 0

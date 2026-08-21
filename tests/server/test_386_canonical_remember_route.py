@@ -77,7 +77,10 @@ def test_remember_runs_trust_hook_before_journal_runtime_and_ignores_wait(
 
     assert sequence == ["hook", "journal-coordinator"]
     assert result["status"] == "queryable"
-    assert result["wait_ignored"] is True
+    assert result["wait_ignored"] is False, (
+        "wait now buys a larger best-effort enrichment budget; it is no "
+        "longer discarded"
+    )
     assert result["commit_sequence"] == 7
 
 

@@ -1,8 +1,8 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
-# Tests for WP-01: MCP Profile Selector
+# Tests for the MCP Profile Selector
 
-"""Tests for _PROFILE_DEFINITIONS and _resolve_profile_allowed (WP-01).
+"""Tests for _PROFILE_DEFINITIONS and _resolve_profile_allowed.
 
 RED-first per TDD contract. All tests import symbols directly from the
 module; no server side-effects are exercised.
@@ -48,13 +48,18 @@ def test_profile_definitions_keys_exact():
 
 
 # ---------------------------------------------------------------------------
-# RED-2: core == exactly the 14 names in LLD §5
+# RED-2: core == exactly the 17 names in the lifecycle contract
 # ---------------------------------------------------------------------------
 
 _EXPECTED_CORE = frozenset({
     "remember", "recall", "search", "fetch", "list_recent", "update_memory", "forget",
     "session_init", "close_session",
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
+    "review_correction", "list_corrections",
+    # v4.0.8 (#113): readable summaries. Read-only and off the hot path, so it
+    # belongs in the smallest profile — an agent asking "what did I do
+    # yesterday" should not need the full surface to get an answer.
+    "get_memory_summary",
 })
 
 
@@ -64,14 +69,17 @@ def test_profile_core_exact():
     assert core == _EXPECTED_CORE, (
         f"core diff — extra: {core - _EXPECTED_CORE}, missing: {_EXPECTED_CORE - core}"
     )
-    assert len(core) == 14, f"core must be 14 names, got {len(core)}"
+    assert len(core) == 17, f"core must be 17 names, got {len(core)}"
 
 
 # ---------------------------------------------------------------------------
-# RED-3: code == core | code-graph + switch_profile + 3 loop tools (==24)
+# RED-3: code == core | Brain + code-graph + switch_profile + loops (==32)
 # ---------------------------------------------------------------------------
 
 _CODE_EXTRA = frozenset({
+    "get_brain_evidence_status", "record_agent_experience",
+    "record_cognitive_turn", "finalize_cognitive_turn",
+    "observe_bounded_loop_evidence",
     "build_code_graph", "get_blast_radius", "query_graph",
     "semantic_search_code", "get_review_context", "detect_changes",
     # 3.8.0: plugin (code profile) can switch the active workspace over MCP.
@@ -88,11 +96,11 @@ def test_profile_code_exact():
     assert code == expected, (
         f"code diff — extra: {code - expected}, missing: {expected - code}"
     )
-    assert len(code) == 24, f"code must be 24 names, got {len(code)}"
+    assert len(code) == 32, f"code must be 32 names, got {len(code)}"
 
 
 # ---------------------------------------------------------------------------
-# RED-4: full == 42 and ⊇ core memory names; built from explicit 34+8 literal
+# RED-4: full == 50 and ⊇ core memory names; built from explicit 42+8 literal
 # ---------------------------------------------------------------------------
 
 _EXPECTED_FULL_MESH = frozenset({
@@ -106,13 +114,17 @@ _EXPECTED_FULL_BASE = frozenset({
     "report_feedback", "forget", "run_maintenance", "consolidate_cognitive",
     "get_soft_prompts", "set_mode", "report_outcome", "log_tool_event",
     "get_assertions", "reinforce_assertion", "contradict_assertion",
+    "get_brain_evidence_status", "record_agent_experience",
+    "record_cognitive_turn", "finalize_cognitive_turn",
+    "observe_bounded_loop_evidence",
+    "review_correction", "list_corrections",
     "evolve_skill", "skill_health", "skill_lineage", "switch_profile",
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
     # 3.8.0: bounded-loop tools (CLI + command + MCP).
     "slm_loop_run", "slm_loop_history", "slm_loop_show",
-    # v4: prestage_context is registered but intentionally NOT in full/power —
-    # the profile names encode the counts (full42/power54) and the published
-    # tool-count table depends on them. It reaches users via `whole`.
+    # 4.0.8 (#113): in core, therefore necessarily in full.
+    "get_memory_summary",
+    # prestage_context is registered but intentionally not in named profiles.
 })
 
 _EXPECTED_FULL = _EXPECTED_FULL_BASE | _EXPECTED_FULL_MESH
@@ -124,14 +136,14 @@ def test_profile_full_exact():
     assert full == _EXPECTED_FULL, (
         f"full diff — extra: {full - _EXPECTED_FULL}, missing: {_EXPECTED_FULL - full}"
     )
-    assert len(full) == 42, f"full must be 42 names, got {len(full)}"
+    assert len(full) == 50, f"full must be 50 names, got {len(full)}"
     # Must ⊇ core memory names
     core = mod._PROFILE_DEFINITIONS["core"]
     assert core <= full, f"full must be a superset of core; missing from full: {core - full}"
 
 
 # ---------------------------------------------------------------------------
-# RED-5: power == 55 and ⊇ full
+# RED-5: power == 62 and ⊇ full
 # ---------------------------------------------------------------------------
 
 _POWER_EXTRA = frozenset({
@@ -149,7 +161,7 @@ def test_profile_power_exact():
     assert power == _EXPECTED_POWER, (
         f"power diff — extra: {power - _EXPECTED_POWER}, missing: {_EXPECTED_POWER - power}"
     )
-    assert len(power) == 54, f"power must be 54 names, got {len(power)}"
+    assert len(power) == 62, f"power must be 62 names, got {len(power)}"
     full = mod._PROFILE_DEFINITIONS["full"]
     assert full <= power, f"power must be a superset of full; missing: {full - power}"
 
@@ -214,7 +226,9 @@ def test_every_profile_name_is_a_real_registered_tool():
     from superlocalmemory.mcp.tools_evolution import register_evolution_tools
     from superlocalmemory.mcp.tools_optimize import register_optimize_tools
     from superlocalmemory.mcp.tools_loops import register_loop_tools
+    from superlocalmemory.mcp.tools_brain import register_brain_tools
     from superlocalmemory.mcp.tools_context import register_prestage_tool
+    from superlocalmemory.mcp.tools_summaries import register_summary_tools
 
     collector = _NameCollector()
     get_engine_stub = lambda: None  # noqa: E731
@@ -230,7 +244,9 @@ def test_every_profile_name_is_a_real_registered_tool():
     register_evolution_tools(collector, get_engine_stub)
     register_optimize_tools(collector)
     register_loop_tools(collector, get_engine_stub)
+    register_brain_tools(collector, get_engine_stub)
     register_prestage_tool(collector, lambda *a, **k: [])
+    register_summary_tools(collector, get_engine_stub)
 
     mod = _get_module()
     all_profile_names: set[str] = set()
@@ -288,11 +304,13 @@ def test_resolve_profile_all_published_legacy_aliases():
     mod = _get_module()
     expected = {
         "core14": mod._PROFILE_DEFINITIONS["core"],
+        "core16": mod._PROFILE_DEFINITIONS["core"],
         "code20": mod._PROFILE_DEFINITIONS["code"],
         "mesh8": mod._PROFILE_DEFINITIONS["mesh"],
         "full38": mod._PROFILE_DEFINITIONS["full"],
         "power50": mod._PROFILE_DEFINITIONS["power"],
         "whole81": None,
+        "whole94": None,
     }
     for alias, allowed in expected.items():
         assert mod._resolve_profile_allowed(

@@ -31,9 +31,9 @@ project, a client engagement, a production vs staging environment.
 | Profile | Tools | When to use |
 |---------|-------|-------------|
 | `core` | 14 tools — remember, recall, search, session, optimize | Minimal footprint, no code tools |
-| `code` | 24 tools — core + 6 code-graph tools + switch_profile + 3 bounded-loop tools | Default for IDE/coding agents |
-| `full` | 42 tools — code + all memory ops + mesh + bounded loops | Multi-session, team workflows |
-| `power` | 54 tools — full + governance + behavioral tools | Enterprise, admin, audit use cases |
+| `code` | 29 tools — core + portable Brain evidence + code graph + profile switching + bounded loops | Default for IDE/coding agents |
+| `full` | 47 tools — code + all memory ops + mesh + bounded loops | Multi-session, team workflows |
+| `power` | 59 tools — full + governance + behavioral tools | Enterprise, admin, audit use cases |
 | `mesh` | 8 tools — mesh coordination only | Lightweight cross-session signalling |
 
 The profile is set at MCP server startup via `SLM_MCP_PROFILE` in the MCP config.
@@ -104,6 +104,7 @@ In your `.mcp.json` (Claude Code) or `.codex/config.toml` (Codex):
 ```json
 "env": {
   "SLM_MCP_PROFILE": "code",
+  "SLM_AGENT_ID": "claude_code",
   "SLM_DATA_DIR": "~/.superlocalmemory"
 }
 ```

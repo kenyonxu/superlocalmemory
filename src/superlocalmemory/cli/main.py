@@ -69,12 +69,14 @@ documentation:
 
 
 _NO_DAEMON_COMMANDS = {
-    "setup", "mode", "provider", "connect", "migrate", "mcp", "warmup", "hooks", "codex",
+    "setup", "mode", "provider", "connect", "upgrade-hosts", "migrate", "mcp", "warmup", "hooks", "codex",
     "config", "evolve", "db",
     # v3.4.22 escape hatches — never auto-start the daemon on these.
     "disable", "enable", "clear-cache", "reconfigure", "benchmark",
     "rotate-token",
     "evidence",
+    # v4.0.2 receipt summary is a direct read-only learning.db query.
+    "brain",
     "diagnostics",
     # LLD-06 — agents launched through wrap start the daemon on demand.
     "wrap",
@@ -86,6 +88,11 @@ _NO_DAEMON_COMMANDS = {
     "help",
     # Lifecycle orchestration must run before any global auto-start hook.
     "serve", "restart",
+    # V4.0.6: GDPR CLI accesses the DB directly; no daemon required.
+    "gdpr",
+    # V4.0.7: summaries read memory.db directly and are extractive by default,
+    # so they need neither the daemon nor a language model.
+    "summary",
 }
 
 
@@ -121,12 +128,17 @@ def main() -> None:
         and sys.argv[1] == "connect"
         and "--dry-run" in sys.argv[2:]
     )
+    _is_host_upgrade_preview = (
+        len(sys.argv) >= 2
+        and sys.argv[1] == "upgrade-hosts"
+        and "--apply" not in sys.argv[2:]
+    )
 
-    # WP-07: lazy first-run init — runs after hook/mcp fast-paths so stdout
+    # lazy first-run init — runs after hook/mcp fast-paths so stdout
     # is never polluted on those paths (CRIT-3, MCP JSON-RPC purity).
     # Guarded: any failure must not crash the CLI (AC4).
     _is_mcp_cmd = len(sys.argv) >= 2 and sys.argv[1] == "mcp"
-    if not _is_mcp_cmd and not _is_metadata_cmd and not _is_connect_dry_run:
+    if not _is_mcp_cmd and not _is_metadata_cmd and not _is_connect_dry_run and not _is_host_upgrade_preview:
         try:
             from superlocalmemory.cli._lazy_init import _ensure_initialized
             _ensure_initialized()
@@ -146,7 +158,7 @@ def main() -> None:
 
     # One-time post-upgrade banner — silent for fresh installs and
     # same-version runs. Guarded against I/O errors internally.
-    if not _is_mcp_stdio and not _is_metadata_cmd and not _is_connect_dry_run:
+    if not _is_mcp_stdio and not _is_metadata_cmd and not _is_connect_dry_run and not _is_host_upgrade_preview:
         from superlocalmemory.cli.version_banner import check_and_emit_upgrade_banner
         if check_and_emit_upgrade_banner(_ver):
             # First post-upgrade invocation: apply the data-dir migration if
@@ -157,7 +169,7 @@ def main() -> None:
                 from superlocalmemory.migrations.v3_4_25_to_v3_4_26 import (
                     migrate_if_safe as _migrate_if_safe,
                 )
-                # WP-07: route through slm_home() so all 3 env aliases are honoured.
+                # route through slm_home() so all 3 env aliases are honoured.
                 from superlocalmemory.cli._lazy_init import slm_home as _slm_home
                 _data = _slm_home()
                 _res = _migrate_if_safe(_data)
@@ -197,7 +209,7 @@ def main() -> None:
         "--gate", action="store_true",
         help="Enable PreToolUse gate (experimental — blocks tools until session_init)",
     )
-    # WP-07: non-interactive auto setup (pip post-install, CI, scripts).
+    # non-interactive auto setup (pip post-install, CI, scripts).
     init_p.add_argument(
         "--auto", action="store_true",
         help="Non-interactive setup: mode A + hooks (no TTY required, for CI/scripts)",
@@ -231,7 +243,7 @@ def main() -> None:
         "--list", action="store_true", help="List all supported IDEs",
     )
     connect_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
-    # WP-08 CRIT-1: declare missing flags so cmd_connect can read them without getattr fallback
+    # declare missing flags so cmd_connect can read them without getattr fallback
     connect_p.add_argument(
         "--here", action="store_true", default=False,
         help="Write config relative to current working directory (project scope)",
@@ -246,7 +258,7 @@ def main() -> None:
     )
     connect_p.add_argument(
         "--profile", metavar="PROFILE", default=None,
-        help="Inject SLM_MCP_PROFILE env var into the MCP server block (WP-01)",
+        help="Inject SLM_MCP_PROFILE env var into the MCP server block (named profile selection)",
     )
     connect_p.add_argument(
         "--dry-run", action="store_true", dest="dry_run", default=False,
@@ -281,6 +293,23 @@ def main() -> None:
             "After writing the config, probe the daemon health endpoint to confirm "
             "the transport is reachable (only meaningful for --transport http)"
         ),
+    )
+
+    upgrade_p = sub.add_parser(
+        "upgrade-hosts",
+        help="Preview or explicitly refresh installed SLM host integrations",
+    )
+    upgrade_p.add_argument(
+        "--host", action="append", dest="hosts", default=[],
+        help="Explicit host to refresh (repeatable; for example: codex, cursor)",
+    )
+    upgrade_p.add_argument(
+        "--all-detected", action="store_true", default=False,
+        help="Target only hosts that already contain an SLM integration",
+    )
+    upgrade_p.add_argument(
+        "--apply", action="store_true", default=False,
+        help="Apply the previewed changes; default is read-only preview",
     )
 
     migrate_p = sub.add_parser("migrate", help="Migrate data from V2 to V3 schema")
@@ -395,6 +424,18 @@ def main() -> None:
              "snapshot. Default: current-state recall.",
     )
     recall_p.add_argument(
+        "--known-as-of", dest="known_as_of", default="",
+        help="Strict transaction-time boundary: return only facts SLM knew by this ISO-8601 time.",
+    )
+    recall_p.add_argument(
+        "--valid-at", dest="valid_at", default="",
+        help="Strict event-time boundary: return only facts valid at this ISO-8601 time.",
+    )
+    recall_p.add_argument(
+        "--include-unknown", action="store_true",
+        help="Include pre-4.0.2 facts with unknown temporal provenance in strict time-travel.",
+    )
+    recall_p.add_argument(
         "--fast", action="store_true",
         help="Force-skip the internal agentic verification round (all six retrieval "
              "channels + reranker still run). This is already the default (client-driven "
@@ -447,6 +488,18 @@ def main() -> None:
     update_p.add_argument("fact_id", help="Exact fact ID to update")
     update_p.add_argument("content", help="New content for the memory")
     update_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
+
+    correction_p = sub.add_parser(
+        "review-correction", help="Apply, reject, or roll back a reviewed correction case"
+    )
+    correction_p.add_argument("case_id", help="Correction case ID returned by slm update")
+    correction_p.add_argument("action", choices=("apply", "reject", "rollback"))
+    correction_p.add_argument("expected_version", type=int, help="Current case version (CAS guard)")
+    correction_p.add_argument(
+        "--event-valid-until",
+        help="Optional reviewer-approved RFC3339 event-time boundary (apply only)",
+    )
+    correction_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     list_p = sub.add_parser("list", help="List recent memories chronologically (shows IDs for delete/update)")
     list_p.add_argument(
@@ -605,6 +658,15 @@ def main() -> None:
 
     obs_p = sub.add_parser("observe", help="Auto-capture content (pipe or argument)")
     obs_p.add_argument("content", nargs="?", default="", help="Content to evaluate")
+
+    brain_p = sub.add_parser(
+        "brain", help="Show the local, profile-scoped Living Brain evidence summary"
+    )
+    brain_p.add_argument(
+        "action", nargs="?", default="status", choices=["status"],
+        help="Read-only Brain action (default: status)",
+    )
+    brain_p.add_argument("--json", action="store_true", help="Output structured JSON")
 
     # -- V3.3 Commands -------------------------------------------------
     decay_p = sub.add_parser("decay", help="Run Ebbinghaus forgetting decay cycle")
@@ -909,6 +971,86 @@ def main() -> None:
         _sp.add_argument("--json", action="store_true",
                          help="Output structured JSON (agent-native)")
 
+    # V4.0.7: the readable summary layer from issue #113. The generators shipped
+    # in 4.0.6 with no caller; this is the surface that makes them reachable.
+    from superlocalmemory.cli.summary_cmd import register_summary_parser
+
+    register_summary_parser(sub)
+
+    # Wave-3 / V4.0.6: GDPR subject-rights CLI (Art.15/17/20)
+    gdpr_p = sub.add_parser(
+        "gdpr",
+        help="GDPR subject rights: status, export (Art.15/20), erase (Art.17), verify",
+    )
+    gdpr_sub = gdpr_p.add_subparsers(dest="gdpr_command", title="gdpr subcommands")
+
+    gdpr_status_p = gdpr_sub.add_parser(
+        "status",
+        help="Compliance posture: receipts, audit events, known gaps (read-only)",
+    )
+    gdpr_status_p.add_argument(
+        "--profile", default=None, metavar="PROFILE",
+        help="Scope to a specific profile (default: report all)",
+    )
+    gdpr_status_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON (agent-native)",
+    )
+
+    gdpr_export_p = gdpr_sub.add_parser(
+        "export",
+        help="Art.15/20 subject access / data portability export",
+    )
+    gdpr_export_p.add_argument(
+        "--profile", required=True, metavar="PROFILE",
+        help="Profile to export (required)",
+    )
+    gdpr_export_p.add_argument(
+        "--output", default=None, metavar="FILE",
+        help="Write export JSON to FILE (default: stdout)",
+    )
+    gdpr_export_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON envelope",
+    )
+
+    gdpr_erase_p = gdpr_sub.add_parser(
+        "erase",
+        help=(
+            "Art.17 right to erasure — IRREVERSIBLE. "
+            "Requires --profile PROFILE AND --yes."
+        ),
+    )
+    gdpr_erase_p.add_argument(
+        "--profile", default=None, metavar="PROFILE",
+        help="Profile to erase (required for live erasure)",
+    )
+    gdpr_erase_p.add_argument(
+        "--yes", action="store_true",
+        help="Confirm irreversible erasure (required together with --profile)",
+    )
+    gdpr_erase_p.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="Preview what would be erased without deleting anything",
+    )
+    gdpr_erase_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON",
+    )
+
+    gdpr_verify_p = gdpr_sub.add_parser(
+        "verify",
+        help="Verify HMAC integrity of an erasure receipt (exit 0=ok, 1=tampered, 2=not-found)",
+    )
+    gdpr_verify_p.add_argument(
+        "--receipt-id", dest="receipt_id", default=None, metavar="ID",
+        help="Erasure receipt ID to verify",
+    )
+    gdpr_verify_p.add_argument(
+        "--profile", default=None, metavar="PROFILE",
+        help="Scope receipt lookup to a specific profile",
+    )
+    gdpr_verify_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON",
+    )
+
     # Wave-3: operational recovery & admin remediation
     ops_p = sub.add_parser(
         "ops",
@@ -943,7 +1085,10 @@ def main() -> None:
         sys.exit(0)
 
     # V3.3.19: Auto-trigger setup wizard on first use
-    if not (args.command == "connect" and getattr(args, "dry_run", False)):
+    if not (
+        (args.command == "connect" and getattr(args, "dry_run", False))
+        or (args.command == "upgrade-hosts" and not getattr(args, "apply", False))
+    ):
         from superlocalmemory.cli.setup_wizard import check_first_use
         check_first_use(args.command)
 

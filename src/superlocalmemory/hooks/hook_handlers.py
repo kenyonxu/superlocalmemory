@@ -200,6 +200,22 @@ def _apply_codex_session(payload: dict) -> str:
         # Shared handlers use this neutral lifecycle identity despite its
         # historical environment-variable name.  It is never sent to a host.
         os.environ["CLAUDE_SESSION_ID"] = session_id
+        # Presence is separate from memory correctness and is deliberately
+        # fail-open.  It lets the portable Living Brain show that Codex is
+        # genuinely active, rather than pretending an installed hook is a
+        # connected client.
+        try:
+            from superlocalmemory.hooks.session_registry import (
+                mark_active,
+                resolve_active_profile,
+            )
+            mark_active(
+                session_id,
+                agent_type="codex",
+                profile_id=resolve_active_profile(),
+            )
+        except Exception:
+            pass
     return project_dir
 
 
@@ -752,7 +768,29 @@ def _run_quiet(cmd: list[str], timeout: int = 5, postprocess=None) -> str:
 
 
 def _maybe_consolidate() -> None:
-    """Run cognitive consolidation if last run was >24h ago. Non-blocking."""
+    """Ask the daemon for a full consolidation if the last one was >24h ago.
+
+    Three things were wrong here before 4.0.8, and together they meant the
+    behavioural half of consolidation never ran on a real install:
+
+    1. **It ran the wrong pipeline.** ``slm consolidate --cognitive`` invokes
+       ``CognitiveConsolidator.run_pipeline()``. Behavioural assertion mining,
+       soft prompts, skill performance and skill evolution are steps 8-11 of
+       ``ConsolidationEngine.consolidate()`` — a different class entirely. On a
+       store with thousands of tool events, ``behavioral_assertions`` stayed at
+       zero rows while the miner, run once by hand, produced 9 immediately.
+    2. **It marked success before trying.** The 24h timestamp was written
+       *before* the subprocess launched, so a run that failed instantly still
+       bought a full day of silence. The marker is now written only after the
+       daemon confirms it scheduled the work.
+    3. **It could not fail visibly.** stdout and stderr went to DEVNULL and the
+       handler ended in a bare ``except: pass``, so nothing anywhere recorded a
+       failure. Errors now surface on stderr, where the hook runner logs them.
+
+    Non-blocking: the daemon schedules the pass and returns immediately, so
+    session end is never held up by a run that takes minutes. The daemon's own
+    periodic timer is the backstop for sessions where this hook never fires.
+    """
     try:
         last_ts = 0
         last_consolidation = _last_consolidation_path()
@@ -764,16 +802,21 @@ def _maybe_consolidate() -> None:
         if (now - last_ts) < 86400:  # 24 hours
             return
 
-        # Update timestamp FIRST to prevent concurrent runs
+        started = _daemon_post(
+            "/api/v3/consolidation/trigger",
+            {"lightweight": False, "background": True},
+        )
+        if not started:
+            # No marker written — the next session end retries. The daemon's
+            # consolidation lock makes a duplicate request a cheap no-op.
+            print(
+                "slm: consolidation could not be scheduled (daemon unreachable)",
+                file=sys.stderr,
+            )
+            return
+
         os.makedirs(os.path.dirname(last_consolidation), exist_ok=True)
         with open(last_consolidation, "w") as f:
             f.write(str(now))
-
-        # Run consolidation in background (don't block session end)
-        subprocess.Popen(
-            ["slm", "consolidate", "--cognitive"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"slm: consolidation trigger failed: {exc}", file=sys.stderr)

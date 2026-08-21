@@ -25,6 +25,7 @@ from typing import Generator
 
 import numpy as np
 
+from superlocalmemory.storage.embedding_codec import encode_embedding
 from superlocalmemory.storage.write_lock import get_write_lock
 
 logger = logging.getLogger(__name__)
@@ -249,8 +250,19 @@ class VectorStore:
 
     @staticmethod
     def _serialize_f32(vector: list[float]) -> bytes:
-        """Serialize float list to raw bytes for sqlite-vec."""
-        return np.array(vector, dtype=np.float32).tobytes()
+        """Serialize float list to raw bytes for sqlite-vec.
+
+        Delegates to the shared embedding codec so that a format change in
+        that codec propagates here automatically.
+        """
+        result = encode_embedding(vector)
+        if result is None:
+            # encode_embedding returns None only for None input; _serialize_f32
+            # is never called with None, so this branch is unreachable in
+            # production.  Return empty bytes rather than raising so the caller
+            # sees an empty query result rather than an unhandled exception.
+            return b""
+        return result
 
     # -- CRUD Operations ----------------------------------------------------
 
@@ -478,14 +490,28 @@ class VectorStore:
                             (*base_params, search_k),
                         ).fetchall()
 
-            results: list[tuple[str, float]] = []
-            for row in rows[:top_k]:
-                fid = str(row["fact_id"])
-                similarity = max(0.0, 1.0 - row["distance"])
-                results.append((fid, similarity))
-
-            results.sort(key=lambda x: x[1], reverse=True)
-            return results
+            # Rank the whole candidate list, THEN cut it. The expansion above
+            # can leave `rows` longer than top_k, and the SQL has no ORDER BY —
+            # vec0 applies k, then a relational join emits the survivors in an
+            # order SQLite is free to choose. Cutting first therefore cut by
+            # position and only ranked what survived, which can drop a nearer
+            # fact in favour of a farther one.
+            #
+            # Measured on the 0.95 GB archive: 29 of 60 queries do take the
+            # expansion path (orphan vectors are common), and the produced set
+            # matched the true nearest-k in all 29 — the join does emit in
+            # distance order in practice. So this was latent, not active. It is
+            # fixed because "the planner happens to" is not a guarantee: add an
+            # index, change SQLite, or change the join and the answer moves.
+            #
+            # The tie-break on fact_id makes the cut total, so two facts at
+            # equal distance cannot swap across the top_k boundary between runs.
+            results: list[tuple[str, float]] = [
+                (str(row["fact_id"]), max(0.0, 1.0 - row["distance"]))
+                for row in rows
+            ]
+            results.sort(key=lambda x: (-x[1], x[0]))
+            return results[:top_k]
 
         except Exception as exc:
             logger.debug("search failed: %s", exc)
@@ -595,6 +621,58 @@ class VectorStore:
                     conn2.close()
             except Exception:
                 return False
+
+    def is_searchable_by_meaning(
+        self,
+        fact_id: str,
+        profile_id: str | None = None,
+    ) -> bool:
+        """Return True if search() would be able to return this fact.
+
+        The check mirrors search()'s own join:
+
+            FROM fact_embeddings AS fe
+            JOIN embedding_metadata AS em
+              ON em.vec_rowid = fe.rowid
+             AND em.profile_id = fe.profile_id
+
+        A fact that has a vector in fact_embeddings but no row in
+        embedding_metadata will NOT be returned by search(), so this method
+        returns False for it — even though raw_vector_present() would return
+        True.  Callers that need to decide whether a fact requires re-embedding
+        must use this method, not raw_vector_present().
+
+        Returns False on any error or when the store is unavailable (fail-
+        closed: never optimistic).
+        """
+        if not self._available:
+            return False
+        try:
+            with self._managed_connection() as conn:
+                if profile_id is not None:
+                    sql = (
+                        "SELECT 1 FROM fact_embeddings AS fe "
+                        "JOIN embedding_metadata AS em "
+                        "ON em.vec_rowid = fe.rowid "
+                        "AND em.profile_id = fe.profile_id "
+                        "WHERE em.fact_id = ? "
+                        "AND fe.profile_id = ? "
+                        "LIMIT 1"
+                    )
+                    row = conn.execute(sql, (fact_id, profile_id)).fetchone()
+                else:
+                    sql = (
+                        "SELECT 1 FROM fact_embeddings AS fe "
+                        "JOIN embedding_metadata AS em "
+                        "ON em.vec_rowid = fe.rowid "
+                        "AND em.profile_id = fe.profile_id "
+                        "WHERE em.fact_id = ? "
+                        "LIMIT 1"
+                    )
+                    row = conn.execute(sql, (fact_id,)).fetchone()
+                return row is not None
+        except Exception:
+            return False
 
     def count(self, profile_id: str | None = None) -> int:
         """Count complete metadata/vector pairs in the store.

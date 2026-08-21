@@ -1017,6 +1017,11 @@
                 <div id="skill-detail-panel" style="display:none;margin-top:24px"></div>
             </div>
 
+            <!-- Bounded Loops (v4.0.8) — moved out of Governance: it is a
+                 separate product SLM optionally observes, i.e. an integration.
+                 Rendered entirely by od-boundedloops.js (window.odRenderLoops). -->
+            <div class="tab-pane fade" id="loops-pane"></div>
+
             <!-- Mesh Peers (v3.4.3 — Neural Glass) -->
             <div class="tab-pane fade" id="mesh-pane">
                 <div class="ng-content-header">
@@ -1508,10 +1513,13 @@
 
     <!-- Cytoscape.js REMOVED in v3.4.1 — replaced by Sigma.js WebGL -->
 
-    <!-- Sigma.js v3 + graphology (vendored) -->
-    <script src="static/vendor/graphology.umd.min.js"></script>
-    <script src="static/vendor/graphology-library.min.js"></script>
-    <script src="static/vendor/sigma.min.js"></script>
+    <!-- Sigma.js + graphology RETIRED in 4.0.6 along with js/knowledge-graph.js.
+         The live knowledge graph (js/od-graph.js) is a canvas-2D renderer with
+         its own force simulation and never constructed a Sigma instance — on a
+         running daemon window.sigmaInstance and window.sigmaGraph were both
+         null while the graph was on screen. The remaining references to Sigma
+         helpers in graph-event-bus.js and memory-chat.js are all behind
+         `typeof … === 'function'` guards and degrade silently. -->
 
     <!-- Modular JS (v2.5 — split from monolith app.js) -->
     <script src="static/js/core.js"></script>
@@ -1524,8 +1532,14 @@
 
     <!-- v3.4.1: Event bus (must load before graph + chat) -->
     <script src="static/js/graph-event-bus.js"></script>
-    <!-- v3.4.1: Sigma.js Knowledge Graph (defines globals: filterState, loadGraph, renderGraph) -->
-    <script src="static/js/knowledge-graph.js"></script>
+    <!-- js/knowledge-graph.js RETIRED in 4.0.6. It rendered into #graph-tab,
+         which measured 0x0 with 0 children on a live daemon, and it logged
+         "[Sigma] Container hidden (0 dimensions), deferring render" on every
+         load without ever resuming — then reported "Graph already rendered".
+         The live renderer is js/od-graph.js, which owns #odg-stage.
+         It also defined window.loadGraph; od-graph.js now provides that shim
+         (core.js:552 calls it unguarded on init). filterState/renderGraph are
+         only consumed behind typeof guards in clusters.js and modal.js. -->
     <!-- Shared UI utilities (showLoadingSpinner, updateGraphStats, etc.) -->
     <script src="static/js/graph-ui.js"></script>
     <!-- Filter functions (filterByCluster, filterByEntity — used by clusters.js, modal.js) -->
@@ -1546,8 +1560,16 @@
     <script src="static/js/settings.js"></script>
     <script src="static/js/events.js"></script>
     <script src="static/js/agents.js"></script>
-    <!-- Brain tab (v3.4.21 — XSS-safe DOM, token-gated, strict CSP on /api/v3/brain) -->
-    <script src="static/js/brain.js?v=380" defer></script>
+    <!-- Brain tab: rendered by od-brain.js (loaded below).
+         js/brain.js (the v3.4.21 implementation) was RETIRED in 4.0.6. Both files
+         were being loaded and both rendered into the Brain pane — od-brain.js into
+         #brain-pane, brain.js into #brain-content nested inside it — so the pane's
+         copy came from whichever wrote last. od-brain.js already defines
+         window.loadBrain (see its "Legacy compatibility" shim) and, loading second,
+         already won that global; but brain.js also bound its own click handlers to
+         its internal closure, so it kept re-rendering the pane behind od-brain.js.
+         The file is retained on disk for one release in case a rollback is needed. -->
+
     <script src="static/js/feedback.js"></script>
     <script src="static/js/lifecycle.js"></script>
     <script src="static/js/compliance.js"></script>
@@ -1558,7 +1580,7 @@
     <script src="static/js/math-health.js"></script>
     <script src="static/js/auto-settings.js"></script>
     <script src="static/js/ide-status.js"></script>
-    <script src="static/js/fact-detail.js"></script>
+    <script src="static/js/fact-detail.js?v=e9076ee3"></script>
 
     <!-- Neural Glass shell (v3.4.21 restructured) -->
     <script src="static/js/ng-health.js?v=345"></script>
@@ -1574,21 +1596,22 @@
     <script src="static/js/event-delegation.js?v=379"></script>
     <!-- OD screen modules (v3.7.9): approved-design panes wired to live data.
          Load LAST so their window.load<Screen> overrides win over the legacy loaders. -->
-    <script src="static/js/od-brain.js?v=379"></script>
+    <script src="static/js/od-brain.js?v=4f233c96"></script>
     <script src="static/js/od-components.js?v=382"></script>
     <script src="static/js/od-health.js?v=382"></script>
     <script src="static/js/od-operations.js?v=380"></script>
     <script src="static/js/od-compliance-ext.js?v=100"></script>
     <script src="static/js/od-ops-health.js?v=400"></script>
     <script src="static/js/od-team.js?v=379"></script>
-    <script src="static/js/od-graph.js?v=379"></script>
-    <script src="static/js/od-memories.js?v=379"></script>
+    <script src="static/js/od-graph.js?v=6812bf6c"></script>
+    <script src="static/js/od-memories.js?v=022ff653"></script>
     <script src="static/js/od-entities.js?v=379"></script>
     <!-- Multi-Agent Memory pane (v3.8.0): visualises memory written by multiple agents -->
-    <script src="static/js/od-agents.js?v=380"></script>
+    <script src="static/js/od-agents.js?v=c75ff3c2"></script>
     <script src="static/js/od-skills.js?v=379"></script>
-    <script src="static/js/od-mesh.js?v=379"></script>
-    <script src="static/js/od-optimize.js?v=379"></script>
+    <script src="static/js/od-boundedloops.js?v=b4a014a1"></script>
+    <script src="static/js/od-mesh.js?v=a7bc694a"></script>
+    <script src="static/js/od-optimize.js?v=1f511698"></script>
     <script src="static/js/od-settings.js?v=386"></script>
     <script src="static/js/od-backup.js?v=379"></script>
     <!-- MCP & Integrations pane (v3.8.0): shows exposed MCP tool profile + counts -->

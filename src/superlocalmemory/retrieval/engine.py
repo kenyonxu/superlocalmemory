@@ -20,6 +20,7 @@ import concurrent.futures
 import functools
 import logging
 import math
+import os
 import re
 import threading
 import time
@@ -28,6 +29,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 from superlocalmemory.core.config import ChannelWeights, RetrievalConfig
 from superlocalmemory.retrieval.fusion import FusionResult, weighted_rrf
 from superlocalmemory.retrieval.strategy import QueryStrategy, QueryStrategyClassifier
+from superlocalmemory.retrieval.temporal_validity_filter import (
+    CorrectionAdmissionCache,
+    admit_correction_candidates,
+    admit_correction_fusion_results,
+)
 from superlocalmemory.retrieval.time_window import (
     in_window,
     infer_window_from_query,
@@ -50,6 +56,46 @@ if TYPE_CHECKING:
     from superlocalmemory.trust.scorer import TrustScorer
 
 logger = logging.getLogger(__name__)
+
+
+# How long the parallel channel phase may run before a channel is abandoned.
+#
+# This is a guard against a genuinely wedged channel, NOT a speed cutoff, and
+# the distinction is the whole point. A channel that misses this limit is
+# cancelled and contributes NOTHING to fusion: its candidates are not reordered,
+# they are absent. So whenever this limit binds, the answer is decided partly by
+# what else the machine happened to be doing — the same question returns a
+# different answer under load, which is a correctness failure, not a slow one.
+#
+# It replaced a 1.4 s cutoff that was chosen to keep the recall p95 low. Six
+# runs of identical code against the same 0.95 GB store logged 0, 0, 25, 2, 0
+# and 0 abandoned channels; in the third run `hopfield` was cut off on 13 of
+# 140 queries and `temporal` on 9, while the first run lost nothing on those
+# same queries. That spread was the last remaining source of unrepeatable
+# recall, and it is why fixing tie-breaks everywhere else moved top-10 churn
+# from 40.7% to 22.9% and left rank-1 disagreement sitting at ~15%: a
+# tie-break cannot repair a missing input.
+#
+# The value comes from the measured cost of the channels themselves, on that
+# same store, 140 queries, with the limit raised out of the way so nothing was
+# truncated (p95 / max, ms):
+#
+#     temporal  580 / 1983      hopfield  492 / 945      bm25  230 / 1093
+#     semantic  264 /  662      spreading_activation  238 / 571
+#
+# The slowest channel's p95 is 580 ms and its worst single run was 1,983 ms, so
+# 8 s is roughly four times the worst observed cost — it should never bind on a
+# machine that is merely busy. It also stays well inside the daemon's own
+# last-resort recall budget (25 s, `_recall_budget_s`), which is the layer that
+# exists to catch a true hang and which already tells the caller when it fires
+# (`retrieval_mode=degraded_lexical`). Before this change the inner 1.4 s cutoff
+# silently overrode that outer promise of "quality recall under load".
+#
+# Lowering this to improve a latency percentile means buying that percentile
+# with missing answers. Per HARD-RULES RULE 6 the ordering is Correct, then
+# Complete, then Repeatable, and only then Fast — so if this needs to move,
+# measure what it costs in answer quality first and record the number.
+CHANNEL_HANG_GUARD_SECONDS = 8.0
 
 
 class CrossEncoderProtocol(Protocol):
@@ -98,7 +144,7 @@ class RetrievalEngine:
         self._spreading_activation = channels.get("spreading_activation")
         self._embedder = embedder
         self._reranker = reranker
-        self._strategy = strategy or QueryStrategyClassifier()
+        self._strategy = strategy or QueryStrategyClassifier(config=config)
         self._base_weights = (base_weights or ChannelWeights()).as_dict()
         self._profile_channel = profile_channel
         self._bridge = bridge_discovery
@@ -156,6 +202,9 @@ class RetrievalEngine:
         include_shared: bool = False,
         window: str | tuple[str, str] | None = None,
         as_of: str | None = None,
+        known_as_of: str | None = None,
+        valid_at: str | None = None,
+        include_unknown: bool = False,
     ) -> RecallResponse:
         """Full retrieval pipeline: strategy -> channels -> RRF -> rerank.
 
@@ -172,6 +221,9 @@ class RetrievalEngine:
         not-yet-valid and already-expired facts are demoted. Default ``None``
         leaves all existing behaviour unchanged.
         """
+        from superlocalmemory.retrieval.temporal_utils import normalize_strict_boundary
+        known_as_of = normalize_strict_boundary(known_as_of, "known_as_of")
+        valid_at = normalize_strict_boundary(valid_at, "valid_at")
         t0 = time.monotonic()
         # NOTE: extra_disabled_channels is passed as an explicit local argument
         # to _run_channels() — it is NOT stored on self.  Storing it as a shared
@@ -214,18 +266,37 @@ class RetrievalEngine:
         # 3. Run channels. Both scope flags AND extra_disabled_channels travel as
         # explicit call parameters so concurrent recalls with different flags
         # cannot corrupt each other.  No lock needed — no shared mutable state.
+        # Owned by this call, so concurrent recalls cannot report each other's
+        # losses.  Non-empty means this answer is incomplete, not just slow.
+        dropped_channels: set[str] = set()
         ch_results = self._run_channels(
             query, profile_id, strat,
             extra_disabled_channels=extra_disabled_channels,
             include_global=include_global, include_shared=include_shared,
-            as_of=as_of,
+            as_of=as_of, known_as_of=known_as_of, valid_at=valid_at,
+            include_unknown=include_unknown,
+            dropped_channels=dropped_channels,
         )
         _em("run_channels")
+        # One request may need admission before fusion and again after optional
+        # bridge/scene expansion.  Cache only the IDs checked during this one
+        # request; every newly expanded candidate remains a hard DB lookup.
+        correction_admission = CorrectionAdmissionCache()
         if profile_hits:
             ch_results["profile"] = profile_hits
+        # The profile shortcut bypasses _run_channels(), so it needs the same
+        # admission before it can influence fusion or seed graph expansion.
+        ch_results = admit_correction_candidates(
+            ch_results, profile_id, self._db, as_of=as_of,
+            known_as_of=known_as_of, valid_at=valid_at,
+            include_unknown=include_unknown,
+            include_global=include_global, include_shared=include_shared,
+            lifecycle_cache=correction_admission,
+        )
         total = sum(len(v) for v in ch_results.values())
 
         # 3. Single-pass RRF fusion
+        ch_results = self._semantic_rank_for_unenriched(ch_results)
         fused = weighted_rrf(ch_results, strat.weights, k=self._config.rrf_k)
         _em("rrf_fusion")
 
@@ -271,10 +342,29 @@ class RetrievalEngine:
             except Exception as exc:
                 logger.warning("Bridge discovery: %s", exc)
 
-        # Scene expansion (v3.5.0: batch + time-budgeted).
-        # Skip if channels already exceeded the per-recall time budget;
-        # the scene signal is nice-to-have, never worth delaying response.
-        if fused and (_time_e.monotonic() - _e0) < 0.8:
+        # Scene expansion (v3.5.0: batch).
+        #
+        # This used to be skipped when more than 0.8 s of the recall had already
+        # elapsed, on the reasoning that the scene signal is nice-to-have and
+        # never worth delaying a response. The reasoning was wrong, because the
+        # stage does not merely decorate the answer — it appends candidates that
+        # can outrank what fusion produced. Gating it on a stopwatch therefore
+        # made the ANSWER depend on how busy the machine was, and 0.8 s sits on
+        # top of recall's own median (~1,044 ms on the 0.95 GB archive), so it
+        # was not a rare safety valve: measured over two runs of 60 queries, the
+        # two clock gates flipped their decision on 22 of 60, and of the 19
+        # queries whose answer changed, every one had a flipped gate.
+        #
+        # Removing both gates moved rank-1 disagreement between two runs from
+        # 20.0% to 3.3% and top-10 from 31.7% to 10.0%, for about 100-180 ms of
+        # p95 (1,191-1,230 ms -> 1,256-1,375 ms, ceiling 2,000 ms). Per
+        # HARD-RULES RULE 6 that is the correct direction: Correct, Complete,
+        # Repeatable, and only then Fast.
+        #
+        # So do not reintroduce a time condition here. If this stage ever needs
+        # bounding, bound it by DATA — a candidate count, a scene cap — so the
+        # same input always takes the same path.
+        if fused:
             try:
                 top_ids = [fr.fact_id for fr in fused[:20]]
                 scenes_map = self._db.get_scenes_for_facts_batch(top_ids, profile_id)
@@ -298,10 +388,14 @@ class RetrievalEngine:
         # Instead of competing as independent channel, entity_graph SCORES
         # the candidates from other channels by graph proximity to query entities.
         # Research: Microsoft GraphRAG DRIFT, Pistis-RAG cascaded architecture.
+        # The 0.9 s clock gate that used to guard this stage is gone for the
+        # reason given above the scene expansion, and it mattered more here:
+        # this stage re-scores every fused candidate and then re-sorts them, so
+        # whether it ran decided the top answer outright rather than adding to
+        # it. Bound by data if it ever needs bounding, never by elapsed time.
         if (self._entity is not None
                 and "entity_graph" not in set(self._config.disabled_channels)
-                and fused
-                and (_time_e.monotonic() - _e0) < 0.9):
+                and fused):
             try:
                 candidate_ids = [fr.fact_id for fr in fused[:100]]
                 eg_scores = self._entity.score_candidates(
@@ -326,9 +420,20 @@ class RetrievalEngine:
                             ))
                         else:
                             boosted.append(fr)
-                    fused = sorted(boosted, key=lambda r: r.fused_score, reverse=True)
+                    fused = sorted(boosted, key=lambda r: (-r.fused_score, r.fact_id))
             except Exception as exc:
                 logger.warning("Entity graph signal enhancement: %s", exc)
+
+        # Brain Core S402: bridge and scene expansion append candidates after
+        # the channel boundary. Reapply the same hard correction-admission rule
+        # immediately before any candidate can be materialized or reranked.
+        fused = admit_correction_fusion_results(
+            fused, profile_id, self._db, as_of=as_of,
+            known_as_of=known_as_of, valid_at=valid_at,
+            include_unknown=include_unknown,
+            include_global=include_global, include_shared=include_shared,
+            lifecycle_cache=correction_admission,
+        )
 
         _em("expand+entity_enh")
 
@@ -372,7 +477,35 @@ class RetrievalEngine:
         if strat.query_type == "aggregation" and facts:
             top = self._enforce_session_diversity(top, facts, min_sessions=3, top_k=20)
 
-        # 5. Cross-encoder rerank (optional)
+        # v3.6.6: Evidence floor — gate on per-channel scores (NOT fused/RRF score).
+        # Nonsense queries fuse at 0.75-0.78 because RRF is rank-derived and
+        # uncalibrated. The discriminator is EARNED CHANNEL EVIDENCE:
+        #   semantic >= min_semantic_evidence (0.60) OR bm25 > 0
+        #   OR entity_graph > 0 OR temporal > 0 OR fact is pinned.
+        # spreading_activation and hopfield do NOT count — they are associative
+        # amplifiers that fabricated the nonsense results in calibration tests.
+        # Kill-switch: SLM_RECALL_NO_FLOOR=1 bypasses the floor.
+        # Runs BEFORE the cross-encoder so the CE batch contains only
+        # evidence-qualified candidates. The floor gates on channel_scores
+        # (semantic, bm25, entity_graph, temporal) which are assigned during
+        # channel execution and are not affected by CE reranking. Moving the
+        # floor here does not change which queries abstain; it reduces the CE
+        # batch from ~180 candidates to the qualified subset (~30–60).
+        import os as _os_floor
+        floor_enabled = (
+            getattr(self._config, "evidence_floor_enabled", True)
+            and _os_floor.environ.get("SLM_RECALL_NO_FLOOR", "0") != "1"
+        )
+        if floor_enabled:
+            min_sem = getattr(self._config, "min_semantic_evidence", 0.60)
+            # Qualify the rerank pool BEFORE applying the caller's limit.  RRF
+            # can rank associative-only hits above an exact BM25 match; slicing
+            # first allowed those hits to occupy every output slot and then be
+            # removed by the floor, producing a false abstention even though a
+            # qualified candidate was immediately below the slice.
+            top = self._apply_evidence_floor(top, facts, min_sem)
+
+        # 5. Cross-encoder rerank (optional, on the evidence-qualified pool)
         # Bug 4 fix: reduced alpha for multi-hop/temporal to preserve diversity
         # V3.3.21: Skip reranker if worker isn't ready yet (cold start).
         # Returns results without CE reranking (~5-10pp lower quality) but instant
@@ -394,28 +527,6 @@ class RetrievalEngine:
         elif reranker_ready:
             reranker_status = "no_candidates"
         _em(f"rerank(ready={reranker_ready})")
-
-        # v3.6.6: Evidence floor — gate on per-channel scores (NOT fused/RRF score).
-        # Nonsense queries fuse at 0.75-0.78 because RRF is rank-derived and
-        # uncalibrated. The discriminator is EARNED CHANNEL EVIDENCE:
-        #   semantic >= min_semantic_evidence (0.60) OR bm25 > 0
-        #   OR entity_graph > 0 OR temporal > 0 OR fact is pinned.
-        # spreading_activation and hopfield do NOT count — they are associative
-        # amplifiers that fabricated the nonsense results in calibration tests.
-        # Kill-switch: SLM_RECALL_NO_FLOOR=1 bypasses the floor.
-        import os as _os_floor
-        floor_enabled = (
-            getattr(self._config, "evidence_floor_enabled", True)
-            and _os_floor.environ.get("SLM_RECALL_NO_FLOOR", "0") != "1"
-        )
-        if floor_enabled:
-            min_sem = getattr(self._config, "min_semantic_evidence", 0.60)
-            # Qualify the rerank pool BEFORE applying the caller's limit.  RRF
-            # can rank associative-only hits above an exact BM25 match; slicing
-            # first allowed those hits to occupy every output slot and then be
-            # removed by the floor, producing a false abstention even though a
-            # qualified candidate was immediately below the slice.
-            top = self._apply_evidence_floor(top, facts, min_sem)
 
         # V3.4.11: Channel diversity — guarantee entity_graph results appear in
         # the final output. Applied AFTER reranking and evidence qualification
@@ -453,6 +564,7 @@ class RetrievalEngine:
             # Q2b: thematic context when the top results cluster in one
             # community. Precomputed summary lookup only — no per-query LLM.
             community_context=self._community_context(results, profile_id),
+            incomplete_channels=tuple(sorted(dropped_channels)),
         )
 
     # -- Community context (Wave Q2b) --------------------------------------
@@ -626,7 +738,7 @@ class RetrievalEngine:
                 channel_ranks=fr.channel_ranks,
                 channel_scores=fr.channel_scores,
             ))
-        boosted.sort(key=lambda r: r.fused_score, reverse=True)
+        boosted.sort(key=lambda r: (-r.fused_score, r.fact_id))
         return boosted
 
     # -- Session diversity enforcement ----------------------------------------
@@ -763,6 +875,94 @@ class RetrievalEngine:
         self._query_embedding_cache[query] = emb
         return emb
 
+    def _semantic_rank_for_unenriched(
+        self, ch_results: dict[str, list[tuple[str, float]]],
+    ) -> dict[str, list[tuple[str, float]]]:
+        """Give a candidate whose vector does not exist yet a fair semantic rank.
+
+        Fusion here is rank-based, so a fact the semantic channel did not return
+        forfeits that channel's entire contribution — the most heavily weighted
+        one. When the reason for that absence is simply that the vector has not
+        been computed yet, the absence describes the ingest pipeline and says
+        nothing about the fact. Left alone, a memory written seconds ago is the
+        hardest thing in the store to find, which is the worst possible failure
+        for this product.
+
+        Such candidates are placed at the MEDIAN of the semantic ranking, never
+        near the top: enough to compete on their other evidence, not enough to
+        win on freshness alone. A candidate that HAS a vector and still was not
+        returned is left exactly as it is — that absence is real evidence of
+        irrelevance, and the two must not be confused.
+
+        Returns a new mapping; the input is not modified.
+        """
+        sem = ch_results.get("semantic") or []
+        if not sem:
+            return ch_results
+        if not getattr(self._config, "write_recency_floor_enabled", True):
+            return ch_results
+        if os.environ.get("SLM_WRITE_RECENCY_NO_FLOOR", "0") == "1":
+            return ch_results
+
+        have = {fid for fid, _ in sem}
+        elsewhere = {
+            fid
+            for name, rows in ch_results.items()
+            if name != "semantic"
+            for fid, _ in rows
+        }
+        candidates = sorted(elsewhere - have)
+        if not candidates:
+            return ch_results
+
+        from datetime import UTC, datetime, timedelta
+
+        minutes = float(getattr(self._config, "write_recency_floor_minutes", 60.0))
+        cutoff = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
+        placeholders = ",".join("?" for _ in candidates)
+        try:
+            # A missing embedding_metadata row means no vector projection exists,
+            # which is what makes the semantic channel's silence uninformative.
+            unenriched = [
+                dict(r)["fact_id"]
+                for r in self._db.execute(
+                    f"SELECT af.fact_id FROM atomic_facts AS af "
+                    f"LEFT JOIN embedding_metadata AS em ON em.fact_id = af.fact_id "
+                    f"WHERE af.fact_id IN ({placeholders}) "
+                    f"  AND em.fact_id IS NULL "
+                    f"  AND af.created_at >= ?",
+                    (*candidates, cutoff),
+                )
+            ]
+        except (NameError, AttributeError, TypeError):
+            # These mean this code is wrong, not that the data is unusual. A bare
+            # `except Exception` here hid a missing import and left the whole
+            # feature silently inert while every test still passed.
+            raise
+        except Exception as exc:
+            # A store without this table, or a locked database: ranking must still
+            # return. Logged at warning, because "silently did nothing" is the
+            # failure mode this task exists to fix.
+            logger.warning("recent-unenriched admission skipped: %s: %s",
+                           type(exc).__name__, exc)
+            return ch_results
+        if not unenriched:
+            return ch_results
+
+        scores = sorted(s for _, s in sem)
+        mid = len(scores) // 2
+        median = (
+            scores[mid] if len(scores) % 2 == 1
+            else (scores[mid - 1] + scores[mid]) / 2.0
+        )
+        insert_at = len(sem) // 2
+        merged = list(sem[:insert_at]) + [(fid, median) for fid in unenriched] + list(sem[insert_at:])
+        logger.debug(
+            "admitted %d recent un-enriched candidate(s) at semantic rank %d of %d",
+            len(unenriched), insert_at + 1, len(merged),
+        )
+        return {**ch_results, "semantic": merged}
+
     def _run_channels(
         self,
         query: str,
@@ -773,6 +973,10 @@ class RetrievalEngine:
         include_global: bool = False,
         include_shared: bool = False,
         as_of: str | None = None,
+        known_as_of: str | None = None,
+        valid_at: str | None = None,
+        include_unknown: bool = False,
+        dropped_channels: set[str] | None = None,
     ) -> dict[str, list[tuple[str, float]]]:
         """Run active retrieval channels.
 
@@ -783,6 +987,13 @@ class RetrievalEngine:
         enabled and healthy, parallel dispatch generally bounds the producer
         phase by the slowest submitted producer, plus serial embedding and
         result-collection overhead.
+
+        ``dropped_channels``, when given, receives the name of every channel
+        abandoned at ``CHANNEL_HANG_GUARD_SECONDS``. Those channels contributed
+        nothing, so the caller needs to know the answer is incomplete rather
+        than merely late. It is a caller-owned set passed down per recall and
+        deliberately not an attribute of self — two concurrent recalls sharing
+        one would report each other's losses (the v3.4.64 race).
         """
         import os as _os_e
         import time as _time_e
@@ -855,6 +1066,7 @@ class RetrievalEngine:
                 functools.partial(
                     self._temporal.search,
                     include_global=include_global, include_shared=include_shared,
+                    query_type=strat.query_type,
                 ),
                 query, profile_id, self._config.bm25_top_k,
             )
@@ -881,22 +1093,25 @@ class RetrievalEngine:
                 q_emb, profile_id, self._config.bm25_top_k,
             )
 
-        # Each local channel gets a strict latency budget.  A slow graph walk
-        # must not make an interactive recall wait 30 seconds; completed
-        # channels still participate in fusion and the timeout is observable.
-        channel_timeout_seconds = 1.0
-        # One shared deadline keeps parallel dispatch genuinely bounded.  A
+        # One shared limit keeps parallel dispatch genuinely bounded.  A
         # per-future timeout here would serialise the wait and turn five slow
         # channels into five seconds of UI latency.
         done, pending = concurrent.futures.wait(
-            futures.values(), timeout=channel_timeout_seconds,
+            futures.values(), timeout=CHANNEL_HANG_GUARD_SECONDS,
         )
         for name, fut in futures.items():
             if fut in pending:
-                logger.warning(
-                    "Channel %s exceeded %.1fs latency budget",
-                    name, channel_timeout_seconds,
+                # Not a latency notice: this answer is missing whatever this
+                # channel alone could see, so it is logged at the level that
+                # says so and recorded for the caller.
+                logger.error(
+                    "Channel %s did not finish within %.1fs; this recall is "
+                    "answering without it",
+                    name, CHANNEL_HANG_GUARD_SECONDS,
                 )
+                if dropped_channels is not None:
+                    dropped_channels.add(name)
+                fut.cancel()  # no-op if already running; prevents queued jobs from starting
                 continue
             try:
                 ch_name, result = fut.result()
@@ -1027,6 +1242,27 @@ class RetrievalEngine:
         if not applied:
             return fused, False, status
 
+        # The worker can report applied=True while returning scores=null — the
+        # subprocess answers, so the call "succeeded", but there is nothing to
+        # score with.  Iterating None here raised TypeError from OUTSIDE the
+        # try/except above (which only wraps the rerank call itself), so the
+        # error escaped into the recall path rather than degrading to the fused
+        # ordering.  Fail soft: reranking is a quality improvement on top of a
+        # correct result set, never a correctness requirement.
+        # `not scored` covers None AND an empty sequence. An empty list is the
+        # same defect wearing different clothes: the worker says applied=True but
+        # supplied nothing to rank with. Guarding only None would let [] through
+        # to build an empty score_map, and every candidate would then be scored
+        # against a degenerate min/max — silently shrinking the fused component
+        # by (1 - alpha) while still reporting the rerank as applied.
+        if not scored:
+            logger.warning(
+                "Cross-encoder worker reported applied=True with %s scores; "
+                "falling back to fused ranking for this query.",
+                "null" if scored is None else "empty",
+            )
+            return fused, False, "worker_null_scores"
+
         score_map = {fact.fact_id: score for fact, score in scored}
 
         # Min-max normalize CE scores to [0, 1] within the batch instead of
@@ -1053,7 +1289,7 @@ class RetrievalEngine:
             )
             for fr in fused
         ]
-        updated.sort(key=lambda r: r.fused_score, reverse=True)
+        updated.sort(key=lambda r: (-r.fused_score, r.fact_id))
         return updated, True, "applied"
 
     # -- Agentic adapter -----------------------------------
@@ -1112,7 +1348,9 @@ class RetrievalEngine:
                 continue
             evidence = [
                 f"{ch}(rank={rk}, score={fr.channel_scores.get(ch, 0.0):.4f})"
-                for ch, rk in sorted(fr.channel_ranks.items(), key=lambda x: x[1])
+                # Channel name breaks a tie, so the evidence string a caller
+                # sees is the same on two runs when two channels agree on rank.
+                for ch, rk in sorted(fr.channel_ranks.items(), key=lambda x: (x[1], x[0]))
                 if rk < 1000
             ]
             # Recency decay: Ebbinghaus exponential + FSRS stability strengthening (v3.4.51).
@@ -1128,10 +1366,12 @@ class RetrievalEngine:
             #   0d, 0acc → 1.10×   45d, 0acc → 0.91×   90d, 0acc → 0.84×
             #   45d, 5acc → 0.95×  90d, 10acc → 0.90×  (frequently used memories stay relevant)
             age_days = 0.0
+            age_known = False
             if fact.created_at:
                 try:
                     created = datetime.fromisoformat(fact.created_at.replace("Z", "+00:00"))
                     age_days = max(0.0, (now - created).total_seconds() / 86400.0)
+                    age_known = True
                 except (ValueError, TypeError):
                     pass
             _access = max(0, getattr(fact, "access_count", 0) or 0)
@@ -1153,6 +1393,48 @@ class RetrievalEngine:
             trust_weight, raw_trust = self._get_trust_weight(fact, profile_id)
 
             boosted_score = fr.fused_score * recency_boost * quality * trust_weight
+
+            # Query-type-conditioned recency amplifier.
+            # Applied only to "recency" and "temporal" queries; factual, entity,
+            # and all other types receive a factor of exactly 1.0 (no change).
+            # The amplitude scalar is read from RetrievalConfig so it can be tuned
+            # or zeroed at runtime.  strength=0.0 is a strict no-op — the if-guard
+            # ensures the previous ranking is reproduced byte-for-byte.
+            #
+            # recency  — 7-day half-life, 1.5× maximum (present-activity queries)
+            # temporal — 30-day half-life, 1.2× maximum (past-event queries)
+            #
+            # Hook for the follow-on embedding-lag adjustment (task 2.6): that
+            # adjustment also multiplies boosted_score and belongs immediately after
+            # this block, conditioned on channel_scores["semantic"] == 0.0 AND
+            # age_days < 1.0. Add it as an independent if-block here so the two
+            # factors compose cleanly without restructuring what is above or below.
+            _prior_strength = getattr(self._config, "recency_prior_strength", 0.5)
+            # age_known matters here: the fallback above leaves age_days at 0.0
+            # when a fact carries no usable timestamp, which reads as "written
+            # moments ago" and would hand an undated fact the largest possible
+            # boost for being new. Not knowing when something was written is not
+            # evidence that it is fresh.
+            if (_prior_strength > 0.0 and age_known
+                    and strat.query_type in ("recency", "temporal")):
+                _half_life = 7.0 if strat.query_type == "recency" else 30.0
+                # Both query types use max_amp=1.5 so the decay is visible.
+                # With max_amp=1.2 and half_life=30, the raw value at age 0d
+                # is 1.5 and at age 30d is 1.25 — both clamp to 1.2. The prior
+                # was inert over the first ~39 days, which is the range it was
+                # built to discriminate. Raising the cap to 1.5 lets the
+                # formula vary from 1.5 (fresh) through 1.25 (30d) toward 1.0
+                # (old). This changes ranking: facts from 2 days ago and 30
+                # days ago now receive different boosts. The change is a
+                # correction to a clamp that made the prior inert, not a
+                # measured gain.
+                _max_amp = 1.5
+                _cond_boost = 1.0 + _prior_strength * math.exp(
+                    -(math.log(2) / _half_life) * age_days
+                )
+                _cond_boost = min(_cond_boost, _max_amp)
+                boosted_score = boosted_score * _cond_boost
+
             # v3.5.0 (M2): soft-normalize to [0,1]. RRF weights + scene/entity
             # boosts push raw scores well above 1 (observed: 27.97). A sigmoid
             # preserves rank (monotonic) while giving users a readable 0-1 range.
@@ -1167,6 +1449,13 @@ class RetrievalEngine:
                 evidence_chain=evidence,
                 trust_score=raw_trust,
             ))
+        # ranking_score incorporates every modifier computed in this loop
+        # (Ebbinghaus decay, quality, trust, and the query-type-conditioned
+        # recency amplifier). Sort here so RecallResponse.results[0] is
+        # always the highest-ranked fact — callers that rely on the returned
+        # order get the amplified ranking, not the pre-amplifier fused order.
+        # Tie-break on fact_id keeps two runs over an unchanged store stable.
+        results.sort(key=lambda r: (-(r.ranking_score or 0.0), r.fact.fact_id))
         return results
 
 

@@ -44,23 +44,31 @@ Design notes (LLD-04 §7 hard rules):
 
 from __future__ import annotations
 
+import json as _json
 import logging
+import shutil
 import sqlite3
+import subprocess
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from superlocalmemory import __version__
 
+from superlocalmemory import __version__
+from superlocalmemory.brain import BrainTruthService
 from superlocalmemory.core.security_primitives import (
     redact_secrets,
     verify_install_token,
 )
+from superlocalmemory.infra.data_root import canonical_data_root
 from superlocalmemory.learning.database import LearningDatabase
 from superlocalmemory.learning.features import FEATURE_DIM
-from superlocalmemory.infra.data_root import canonical_data_root
+from superlocalmemory.storage.agent_experience import get_profile_receipt_summary
 from superlocalmemory.storage.read_connection import ReadConnectionFactory
+
 from .helpers import get_active_profile
 
 logger = logging.getLogger("superlocalmemory.routes.brain")
@@ -81,6 +89,17 @@ _VERSION: str = __version__
 # the source-level test asserts we don't accidentally reintroduce them.
 # NOTE: do NOT add the literal forbidden-key strings here — the U4 grep
 # guard runs over this file.
+
+# ---------------------------------------------------------------------------
+# Bounded-loops detection — TTL-cached subprocess probe.
+# The binary lives in a pipx venv; importlib.util.find_spec('bounded_loops')
+# will NOT find it from our venv.  Detect via PATH / filesystem instead.
+# ---------------------------------------------------------------------------
+
+_BL_PROBE: dict[str, object] = {}
+_BL_PROBE_LOCK = threading.Lock()
+_BL_PROBE_TTL = 60.0          # seconds between re-probes
+
 
 # Memory directory (home-dir based). Always resolved at call time so that
 # tests can override via monkeypatch on ``_learning_db_path``.
@@ -317,6 +336,20 @@ def _compute_learning_status(profile_id: str,
         "model_trained_at": model_trained_at,
         "model_sha256_present": model_sha256_present,
         "is_real": True,
+    }
+
+
+def _compute_agent_experience(profile_id: str) -> dict:
+    """Honest, profile-scoped receipt evidence for the Living Brain.
+
+    Receipt rows record observation and verification evidence only; this read
+    model never alters retrieval, ranking, or model routing.
+    """
+    from superlocalmemory.storage.external_evidence import get_profile_external_evidence_summary
+    path = _learning_db_path()
+    return {
+        **get_profile_receipt_summary(path, profile_id),
+        "external_graph_evidence": get_profile_external_evidence_summary(path, profile_id),
     }
 
 
@@ -580,7 +613,8 @@ def _adapter_last_sync_ago(adapter_name: str) -> int | None:
     honest empty rather than a fabricated number.
     """
     try:
-        from datetime import datetime as _dt, timezone as _tz
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
         memory_db = _memory_dir() / "memory.db"
         if not memory_db.exists():
             return None
@@ -604,6 +638,166 @@ def _adapter_last_sync_ago(adapter_name: str) -> int | None:
         return None
 
 
+def _detect_codex_config() -> dict:
+    """Detect Codex integration from ``~/.codex/config.toml``.
+
+    Evidence tier: CONFIGURED — the config file contains
+    ``[mcp_servers.superlocalmemory]``, which proves Codex is wired to use
+    SLM as an MCP server.  This is the same tier as Claude Code's install-
+    token check: file presence, not live traffic.
+
+    What we deliberately do NOT claim: that Codex is currently running, or
+    that the MCP connection has been used recently.  For live-traffic
+    evidence the correct signal is ``tool_events`` rows attributed to
+    ``SLM_AGENT_ID='codex'`` — a check not performed here because
+    ``tool_events`` has no ``agent_id`` column.
+    """
+    try:
+        codex_config = Path.home() / ".codex" / "config.toml"
+        if not codex_config.exists():
+            return {"active": False, "reason": "codex_config_absent"}
+        try:
+            content = codex_config.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return {"active": False, "reason": "codex_config_unreadable"}
+        if "[mcp_servers.superlocalmemory]" not in content:
+            return {"active": False, "reason": "no_slm_mcp_block"}
+        return {
+            "active": True,
+            "evidence_tier": "configured",
+            "evidence": "~/.codex/config.toml#[mcp_servers.superlocalmemory]",
+        }
+    except Exception:  # pragma: no cover — defensive
+        return {"active": False, "reason": "detection_error"}
+
+
+def _bounded_loops_probe_fresh() -> dict:
+    """Probe bounded-loops installation — may spawn one short subprocess.
+
+    Detection approach: ``shutil.which("bounded-loops-mcp")`` (PATH scan,
+    no subprocess), then ``bl --version`` with a 1.5 s timeout (see the note at the call
+    site: 300 ms sat too close to the measured ~226 ms and flickered).
+
+    Evidence tier: INSTALLED — the ``bounded-loops-mcp`` binary is on the
+    resolved PATH, meaning the pipx package is present.
+
+    What we do NOT claim: that the bridge contract ``bounded-loops.dev/
+    slm-bridge/v1`` is live or that any run has been observed.  A full
+    capability handshake requires an async MCP round-trip; that is outside
+    the scope of this synchronous probe.
+
+    Trap: do NOT use ``importlib.util.find_spec('bounded_loops')`` — the
+    package lives in its own pipx venv and is not importable from this one.
+    """
+    bl_mcp_path = shutil.which("bounded-loops-mcp")
+    if bl_mcp_path is None:
+        # Cross-check: ~/.bounded-loops data dir (pipx installs leave this).
+        bl_data = Path.home() / ".bounded-loops"
+        if bl_data.is_dir():
+            return {
+                "installed": True,
+                "version": None,
+                "bridge_contract": "bounded-loops.dev/slm-bridge/v1",
+                "evidence_tier": "data_dir",
+                "evidence": "~/.bounded-loops exists",
+                "note": "mcp binary not on PATH; data dir detected",
+                "is_real": True,
+                "source": "filesystem",
+            }
+        return {
+            "installed": False,
+            "reason": "bounded_loops_mcp_not_in_path",
+            "is_real": True,
+            "source": "shutil.which",
+        }
+
+    version: str | None = None
+    bl_path = shutil.which("bl")
+    if bl_path:
+        try:
+            # 1.5s, not 0.3s. Measured on this machine: a cold
+            # _compute_bounded_loops() takes ~226 ms end to end, most of it this
+            # subprocess — a 300 ms budget leaves ~74 ms of headroom, so under
+            # any load the probe times out and the card silently reports
+            # "Version: unknown" while `bl --version` prints "bl 0.6.4" from a
+            # shell. A version string that flickers with machine load is worse
+            # than no version string, because it looks like a real finding.
+            # The cost of widening is bounded: this runs in a worker thread via
+            # asyncio.to_thread and is TTL-cached for 60s, so the worst case is
+            # one 1.5s thread once a minute, never on the recall/remember path.
+            proc = subprocess.run(
+                [bl_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+            )
+            raw = (proc.stdout.strip() or proc.stderr.strip())
+            if raw.startswith("bl "):
+                version = raw[3:].strip()
+        except Exception:  # pragma: no cover — timeout or missing binary
+            pass
+
+    return {
+        "installed": True,
+        "version": version,
+        "bridge_contract": "bounded-loops.dev/slm-bridge/v1",
+        "evidence_tier": "path",
+        "evidence": "shutil.which(bounded-loops-mcp)",
+        "note": "bridge capability requires a runtime MCP handshake; not probed here",
+        "is_real": True,
+        "source": "shutil.which + bl --version",
+    }
+
+
+def _compute_bounded_loops() -> dict:
+    """Section ``bounded_loops`` — installation/presence status.
+
+    Wraps ``_bounded_loops_probe_fresh`` in a 60-second TTL cache so the
+    subprocess call is never inline on every Brain request.  First call may
+    take up to 1.5 s (subprocess timeout); subsequent calls within the TTL
+    window return immediately from the cache. The probe is single-flight, so
+    concurrent callers share one subprocess rather than spawning one each.
+    """
+    with _BL_PROBE_LOCK:
+        cached = _BL_PROBE.get("result")
+        cached_at = float(_BL_PROBE.get("cached_at", 0.0))
+        if cached is not None and (time.monotonic() - cached_at) < _BL_PROBE_TTL:
+            return cached  # type: ignore[return-value]
+
+        # SINGLE-FLIGHT: run the probe while STILL HOLDING the lock.
+        # The previous shape released the lock between the check and the probe,
+        # so every concurrent caller that arrived after a TTL expiry spawned its
+        # own `bl --version` subprocess — N dashboard requests meant N processes,
+        # each up to 1.5s. Holding the lock makes the 2nd..Nth caller wait for
+        # the first result instead. Blocking here is safe: this whole function
+        # runs in a worker thread via asyncio.to_thread, so the event loop is
+        # never held, and it is off the recall/remember path entirely.
+        try:
+            fresh = _bounded_loops_probe_fresh()
+            fresh["section_enabled"] = bool(fresh.get("installed", False))
+        except Exception as exc:  # probe itself blew up
+            # Cache the FAILURE too, and label it as a failure rather than as a
+            # clean "not installed". Without caching it, every request would
+            # retry a broken probe forever; without labelling it, a broken probe
+            # is indistinguishable from Bounded Loops genuinely being absent —
+            # the silent-failure class this release exists to remove.
+            logger.warning("bounded-loops probe failed: %s", exc)
+            fresh = {
+                "installed": None,
+                "is_real": False,
+                "probe_failed": True,
+                "reason": f"probe_error:{type(exc).__name__}",
+                "section_enabled": False,
+                "source": "probe raised",
+            }
+
+        # Timestamp AFTER the probe so the TTL measures time since completion,
+        # not time since the request arrived.
+        _BL_PROBE["result"] = fresh
+        _BL_PROBE["cached_at"] = time.monotonic()
+        return fresh
+
+
 def _compute_cross_platform() -> dict:
     """Section ``cross_platform`` — live status per injection target.
 
@@ -612,7 +806,7 @@ def _compute_cross_platform() -> dict:
     ``memory.db`` (LLD-07 M004). On any adapter error, that adapter
     reports ``active: false`` with ``reason: error:<ExcName>`` rather
     than crashing the whole Brain endpoint (LLD-04 §2 — "honest, never
-    fake"). An unimportable adapter means the install is missing Wave 2C
+    fake"). An unimportable adapter means the install is missing the
     components, which is legitimate for an older 3.4.20 → 3.4.22 upgrade
     mid-migration.
     """
@@ -684,7 +878,229 @@ def _compute_cross_platform() -> dict:
     out["mcp"] = {"active": True, "tool": "mcp__slm"}
     # CLI is trivially active on any install.
     out["cli"] = {"active": True}
+    # Codex: detect from ~/.codex/config.toml.
+    # evidence_tier="configured" — config proves SLM is wired; it does not
+    # prove recent MCP traffic (tool_events has no agent_id column).
+    out["codex"] = _detect_codex_config()
     return out
+
+
+def _registry_staleness() -> tuple[str, int | None]:
+    """Return (registry_status, newest_entry_seconds_ago).
+
+    Reads the raw session registry file to determine whether the registry
+    has been written to recently, regardless of profile matching.  This
+    distinguishes three silent-but-different states:
+
+    ``live``    — newest entry is within 2× the presence window (10 min)
+    ``stale``   — file exists, entries exist, but all are older than 10 min
+                  → TELEMETRY GAP: hooks exist but are not firing
+    ``empty``   — file exists but has no entries
+    ``absent``  — file does not exist (first-run or cleaned up)
+    ``unknown`` — file could not be read
+
+    IMPORTANT: the window is NOT widened here.  We report the gap honestly
+    rather than hiding it by using a larger cutoff on the query.
+    """
+    try:
+        from superlocalmemory.infra.data_root import state_path
+        registry_path = state_path(".active_sessions.json")
+        if not registry_path.exists():
+            return "absent", None
+        try:
+            raw = registry_path.read_text(encoding="utf-8")
+            data = _json.loads(raw)
+        except Exception:
+            return "unknown", None
+        if not isinstance(data, dict) or not data:
+            return "empty", None
+        now_ns = time.time_ns()
+        ts_vals = [
+            int(row.get("ts_ns", 0))
+            for row in data.values()
+            if isinstance(row, dict) and int(row.get("ts_ns", 0)) > 0
+        ]
+        if not ts_vals:
+            return "empty", None
+        newest_ns = max(ts_vals)
+        seconds_ago = max(0, int((now_ns - newest_ns) / 1_000_000_000))
+        # 2× the 300 s presence window = 600 s sane boundary.
+        if seconds_ago <= 600:
+            return "live", seconds_ago
+        return "stale", seconds_ago
+    except Exception:  # pragma: no cover — defensive
+        return "unknown", None
+
+
+def _compute_active_clients(profile_id: str) -> dict:
+    """Return recent host presence with honest telemetry-gap detection.
+
+    ``cross_platform`` describes configured integration targets.  This
+    separate read-model answers a different question: which host clients
+    have recently interacted with this brain?
+
+    Three distinct states are surfaced instead of a silent empty list:
+    ``NO_ACTIVITY``     — registry is live; no clients in the 5-min window
+    ``TELEMETRY_GAP``   — registry's newest entry is > 10 min old; hooks
+                          may be installed but are not writing presence
+    ``REGISTRY_ERROR``  — exception accessing the registry; reported as
+                          ``is_real: False`` rather than an empty success
+    """
+    reg_status, newest_ago = _registry_staleness()
+
+    clients: list[dict] = []
+    registry_ok = True
+    try:
+        from superlocalmemory.hooks.session_registry import active_client_summary
+        clients = active_client_summary(profile_id, within_seconds=300)
+    except Exception as exc:  # distinguish failure from emptiness (important: these are different states)
+        registry_ok = False
+        reg_status = "error"
+        logger.debug("active_clients: registry error: %s", exc)
+
+    return {
+        "is_real": registry_ok,
+        "scope": "profile",
+        "window_seconds": 300,
+        "clients": clients,
+        "registry_status": reg_status,
+        "newest_entry_seconds_ago": newest_ago,
+        "source": "session_registry (ephemeral, profile-scoped)",
+    }
+
+
+def _compute_feedback_loop(profile_id: str, lrn_db: LearningDatabase) -> dict:
+    """Expose only durable feedback evidence that already drives learning."""
+    empty = {
+        "is_real": True,
+        "signals_by_type": {},
+        "explicit_signals": 0,
+        "implicit_signals": 0,
+        "settled_outcomes": 0,
+        "mean_settled_reward": None,
+        "source": "learning_signals + memory.db:action_outcomes",
+    }
+    signal_rows: list[sqlite3.Row] = []
+    try:
+        learning_conn = lrn_db.ro_connection()
+        try:
+            signal_rows = learning_conn.execute(
+                "SELECT signal_type, COUNT(*) AS count FROM learning_signals "
+                "WHERE profile_id = ? GROUP BY signal_type ORDER BY signal_type",
+                (profile_id,),
+            ).fetchall()
+        finally:
+            learning_conn.close()
+    except sqlite3.Error:
+        return empty
+    by_type = {
+        str(row["signal_type"]): int(row["count"] or 0)
+        for row in signal_rows
+    }
+    explicit_types = {
+        "user_positive", "user_negative", "user_correction", "user_pin",
+        "legacy_feedback",
+    }
+    explicit = sum(count for kind, count in by_type.items() if kind in explicit_types)
+    implicit = sum(count for kind, count in by_type.items() if kind not in explicit_types)
+    settled, mean_reward = 0, None
+    db_path = _memory_db_path()
+    if db_path.exists():
+        try:
+            memory_conn = ReadConnectionFactory(db_path).open()
+            try:
+                row = memory_conn.execute(
+                    "SELECT COUNT(*) AS count, AVG(reward) AS mean_reward "
+                    "FROM action_outcomes WHERE profile_id = ? AND settled = 1 "
+                    "AND reward IS NOT NULL",
+                    (profile_id,),
+                ).fetchone()
+                if row:
+                    settled = int(row["count"] or 0)
+                    mean_reward = (
+                        float(row["mean_reward"])
+                        if row["mean_reward"] is not None else None
+                    )
+            finally:
+                memory_conn.close()
+        except sqlite3.Error:
+            pass
+    return {
+        **empty,
+        "signals_by_type": by_type,
+        "explicit_signals": explicit,
+        "implicit_signals": implicit,
+        "settled_outcomes": settled,
+        "mean_settled_reward": mean_reward,
+    }
+
+
+def _compute_source_quality(profile_id: str) -> dict:
+    """Summarize observed provenance quality; neutral priors are not evidence."""
+    empty = {
+        "is_real": True,
+        "observed_sources": 0,
+        "mean_quality": None,
+        "source": "learning.db:source_quality_observations",
+    }
+    db_path = _learning_db_path()
+    if not db_path.exists():
+        return empty
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT source_id) AS sources, AVG(reward) AS mean_quality "
+                "FROM source_quality_observations WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return empty
+        return {
+            **empty,
+            "observed_sources": int(row["sources"] or 0),
+            "mean_quality": float(row["mean_quality"]) if row["mean_quality"] is not None else None,
+        }
+    except sqlite3.Error:
+        return empty
+
+
+def _compute_graph_summary(profile_id: str) -> dict:
+    """Return graph evidence counts, never a decorative graph surrogate."""
+    empty = {
+        "is_real": True,
+        "fact_nodes": 0,
+        "association_edges": 0,
+        "source": "memory.db:atomic_facts + association_edges",
+    }
+    db_path = _memory_db_path()
+    if not db_path.exists():
+        return empty
+    try:
+        conn = ReadConnectionFactory(db_path).open()
+        try:
+            facts = conn.execute(
+                "SELECT COUNT(*) AS count FROM atomic_facts "
+                "WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchone()
+            edges = conn.execute(
+                "SELECT COUNT(*) AS count FROM association_edges "
+                "WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return {
+            **empty,
+            "fact_nodes": int(facts["count"] or 0) if facts else 0,
+            "association_edges": int(edges["count"] or 0) if edges else 0,
+        }
+    except sqlite3.Error:
+        return empty
 
 
 def _meta_now() -> dict:
@@ -960,10 +1376,16 @@ async def get_brain(request: Request, profile_id: str | None = None) -> dict:
     # "default" — the Brain must reflect whichever profile is active.
     profile_id = _authorized_profile(request, profile_id)
     lrn_db = LearningDatabase(_learning_db_path())
+    truth_service = BrainTruthService(
+        memory_db_path=_memory_dir() / "memory.db",
+        learning_db_path=_learning_db_path(),
+    )
 
     (
         preferences, learning, usage, bandit_snap, cache,
-        cross_platform, outcomes_preview, evolution,
+        cross_platform, outcomes_preview, evolution, active_clients,
+        feedback_loop, source_quality, graph_summary, agent_experience,
+        brain_truth, bounded_loops,
     ) = await asyncio.gather(
         asyncio.to_thread(_compute_preferences, profile_id),
         asyncio.to_thread(_compute_learning_status, profile_id, lrn_db),
@@ -976,6 +1398,13 @@ async def get_brain(request: Request, profile_id: str | None = None) -> dict:
             _compute_evolution_timeseries, profile_id, lrn_db,
             days=_EVOLUTION_DEFAULT_DAYS,
         ),
+        asyncio.to_thread(_compute_active_clients, profile_id),
+        asyncio.to_thread(_compute_feedback_loop, profile_id, lrn_db),
+        asyncio.to_thread(_compute_source_quality, profile_id),
+        asyncio.to_thread(_compute_graph_summary, profile_id),
+        asyncio.to_thread(_compute_agent_experience, profile_id),
+        asyncio.to_thread(truth_service.snapshot, profile_id),
+        asyncio.to_thread(_compute_bounded_loops),
         return_exceptions=True,
     )
 
@@ -985,6 +1414,32 @@ async def get_brain(request: Request, profile_id: str | None = None) -> dict:
         if isinstance(value, Exception):
             return fallback
         return value
+
+    active_clients = _ok(active_clients, {
+        "is_real": False,
+        "scope": "profile",
+        "clients": [],
+        "window_seconds": 300,
+        "registry_status": "error",
+        "newest_entry_seconds_ago": None,
+        "source": "session_registry unavailable",
+    })
+    feedback_loop = _ok(feedback_loop, {"is_real": True, "signals_by_type": {},
+                                         "explicit_signals": 0, "implicit_signals": 0,
+                                         "settled_outcomes": 0, "mean_settled_reward": None,
+                                         "source": "feedback data unavailable"})
+    source_quality = _ok(source_quality, {"is_real": True, "observed_sources": 0,
+                                           "mean_quality": None,
+                                           "source": "source-quality data unavailable"})
+    graph_summary = _ok(graph_summary, {"is_real": True, "fact_nodes": 0,
+                                         "association_edges": 0,
+                                         "source": "graph data unavailable"})
+    agent_experience = _ok(agent_experience, {
+        "is_real": False, "availability": "unavailable",
+        "experiences_total": 0, "turns_total": 0,
+        "turns_by_state": {}, "claimed_evidence_experiences": 0,
+        "source": "receipt data unavailable",
+    })
 
     return {
         "profile_id": profile_id,
@@ -1005,6 +1460,28 @@ async def get_brain(request: Request, profile_id: str | None = None) -> dict:
                                         "db_size_bytes": 0,
                                         "entry_count": 0}),
         "cross_platform":   _ok(cross_platform, {}),
+        # One canonical, transport-neutral read model for the non-technical
+        # Living Brain.  Existing top-level sections stay intact for the CLI,
+        # MCP and older dashboard clients.  This is observation only: it never
+        # changes retrieval or model routing.
+        "living_brain": {
+            "is_real": True,
+            "control_plane": "observation_only",
+            "connected_clients": active_clients,
+            "feedback": feedback_loop,
+            "source_quality": source_quality,
+            "graph": graph_summary,
+            "agent_experience": agent_experience,
+            # Additive v4.0.5 contract.  Keep the preceding legacy keys for
+            # existing dashboard/API clients; new clients should render this
+            # one shared, unavailable-aware snapshot.
+            "brain_truth": _ok(brain_truth, {
+                "availability": "unavailable",
+                "source": "BrainTruth service unavailable",
+                "control_plane": "observation_only",
+            }),
+            "source": "local durable stores + ephemeral session registry",
+        },
         "evolution_preview": _ok(evolution, {
             "is_real": True, "source": "learning_signals",
             "days": _EVOLUTION_DEFAULT_DAYS, "total_signals": 0, "points": [],
@@ -1023,6 +1500,21 @@ async def get_brain(request: Request, profile_id: str | None = None) -> dict:
         "shadow_preview": _compute_shadow_preview(profile_id),
         "evolution_cost_preview": _compute_evolution_cost_preview(profile_id),
         "outcome_queue": _compute_outcome_queue_stats(profile_id),
+        # ``bounded_loops`` — lazy-probed, TTL-cached installation status.
+        # ``section_enabled`` drives the UI panel on/off decision.
+        # Evidence tier: path-based (shutil.which); bridge capability not probed.
+        # is_real=False and installed=None, NOT installed=False. If the probe
+        # task raised, we do not know whether Bounded Loops is installed — and
+        # saying "installed: False, is_real: True" asserts absence we never
+        # established. That reads to the UI, and to any API consumer, exactly
+        # like a machine with Bounded Loops genuinely not present.
+        "bounded_loops": _ok(bounded_loops, {
+            "is_real": False,
+            "installed": None,
+            "probe_failed": True,
+            "section_enabled": False,
+            "source": "bounded_loops_probe unavailable",
+        }),
         "meta": _meta_now(),
     }
 
@@ -1036,7 +1528,8 @@ def _compute_outcome_queue_stats(profile_id: str) -> dict:
     """
     try:
         from superlocalmemory.learning.outcome_queue import (
-            get_counters, queue_size,
+            get_counters,
+            queue_size,
         )
         counters = get_counters()
         qsz = queue_size()
@@ -1269,6 +1762,114 @@ async def patterns_deprecated(
         "use_instead": "/api/v3/brain",
         "preferences": _compute_preferences(profile_id),
     }
+
+
+@router.get("/bounded-loops/evidence",
+            dependencies=[Depends(require_install_token)])
+async def bounded_loops_evidence(
+    request: Request, profile_id: str | None = None, limit: int = 20,
+) -> dict:
+    """Terminal Bounded Loops runs this profile has observed.
+
+    Bounded Loops is a SEPARATE PRODUCT. SLM is one optional consumer of a
+    document any MCP client can request over the published contract
+    ``bounded-loops.dev/slm-bridge/v1``; neither product depends on the other,
+    and installing either alone is complete.
+
+    What travels is deliberately narrow, and the pane must not imply otherwise:
+
+    * **Observation, not authorization.** ``eligible_for_learning`` is a hard
+      field in the contract and is always ``False`` in v1. A SUCCEEDED run is
+      not permission to retrain, re-rank or route on it. Nothing in SLM treats
+      it as such, and this endpoint returns the flag so the UI can say so.
+    * **Digests, not paths.** ``workspace_id`` is a hash precisely so a client's
+      directory name never reaches a memory system. Gate reasons, artifact
+      contents, commands and environment values are excluded at the source.
+    * **``local_hash_chain_only``.** The receipt log is an append-only hash
+      chain on local disk: tampering is detectable by anyone holding an earlier
+      head. That is NOT authentication, notarization or independent audit, and
+      calling it "verified" would claim a guarantee no part of the system
+      provides.
+    * **``demonstration``** separates real execution from a scripted replay. A
+      demo run proves the wiring works and proves nothing about the work.
+
+    Read-only, off the hot path, and empty is a normal answer — most installs
+    have no Bounded Loops at all.
+    """
+    profile_id = _authorized_profile(request, profile_id)
+    limit = max(1, min(int(limit or 20), 100))
+
+    out: dict[str, Any] = {
+        "contract": "bounded-loops.dev/slm-bridge/v1",
+        "control_plane": "observation_only",
+        "runs": [],
+        "total": 0,
+        "demonstration_count": 0,
+        "installed": None,
+    }
+
+    try:
+        out["installed"] = bool(_compute_bounded_loops().get("installed"))
+    except Exception:  # pragma: no cover — presence probe must never 500
+        out["installed"] = None
+
+    db_path = _learning_db_path()
+    if not db_path.exists():
+        return out
+
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT run_id, run_ref, outcome, run_state, demonstration,"
+                " eligible_for_learning, terminal_at, observed_at,"
+                " receipt_sequence, receipt_trust, workspace_id, contract_id"
+                " FROM external_evidence_receipts WHERE profile_id=?"
+                " ORDER BY observed_at DESC LIMIT ?",
+                (profile_id, limit),
+            ).fetchall()
+            total = conn.execute(
+                "SELECT COUNT(*) AS n FROM external_evidence_receipts"
+                " WHERE profile_id=?", (profile_id,),
+            ).fetchone()["n"]
+            demos = conn.execute(
+                "SELECT COUNT(*) AS n FROM external_evidence_receipts"
+                " WHERE profile_id=? AND demonstration=1", (profile_id,),
+            ).fetchone()["n"]
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        # The table only exists once the bridge has been used. Absent is a
+        # normal state, not an error, and must not surface as a failed pane.
+        logger.debug("bounded-loops evidence unavailable: %s", exc)
+        return out
+
+    out["total"] = total
+    out["demonstration_count"] = demos
+    out["runs"] = [
+        {
+            "run_id": r["run_id"],
+            "run_ref": r["run_ref"],
+            "outcome": r["outcome"],
+            # Both, because the mapping to three buckets loses information: a
+            # HALTED run (budget/policy stop) and a FAILED run (work the gate
+            # rejected) are different events.
+            "run_state": r["run_state"],
+            "demonstration": bool(r["demonstration"]),
+            "eligible_for_learning": bool(r["eligible_for_learning"]),
+            "terminal_at": r["terminal_at"],
+            "observed_at": r["observed_at"],
+            "receipt_sequence": r["receipt_sequence"],
+            "trust": r["receipt_trust"],
+            "workspace_id": r["workspace_id"],
+            "contract": r["contract_id"],
+        }
+        for r in rows
+    ]
+    return out
 
 
 @router.get("/behavioral",

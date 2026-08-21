@@ -170,6 +170,7 @@ def serialize_recall_response(
     total_max: int = 12000,
     full: bool = False,
     include_source: bool = False,
+    include_marker: bool = False,
 ) -> tuple[list[dict], bool]:
     """Convert a RecallResponse into budgeted, source-disciplined dicts.
 
@@ -185,10 +186,33 @@ def serialize_recall_response(
         total_max:      Total content char budget before stubs (config-driven).
         full:           Bypass clamping/stubs (additive escape hatch).
         include_source: Return full source_content (else ≤280-char preview).
+        include_marker: Emit each result's HMAC usage marker. See below.
 
     Returns:
         (results, no_confident_match) — results is a list of dicts; the bool
         is the evidence-floor signal lifted from the response (additive).
+
+    THE MARKER, AND WHY IT WAS MISSING
+    ----------------------------------
+    ``run_recall`` sets ``result.marker`` on every result — an HMAC of the
+    fact id, computed on the hot path already. Until 4.0.8 **no serialiser
+    ever read it**, so the value was computed and discarded on every recall.
+
+    That one omission broke the entire closed learning loop. The
+    ``post_tool_outcome`` hook settles an outcome by finding a validated
+    ``slm:fact:<id>:<hmac8>`` marker in a later tool response; with markers
+    never reaching the agent it found nothing, every outcome settled at the
+    formula's 0.5 base, and the consequences were visible all the way out to
+    the dashboard: 162 outcomes at the default label, all 294 source-quality
+    observations at exactly 0.5, therefore ``alpha == beta`` for all 18
+    sources and "no quality signal has settled", and 165 bandit arms with 4
+    plays between them.
+
+    Off by default, and gated by the caller on ``session_id``. A marker costs
+    roughly 33 characters of the agent's context per result, and it can only
+    buy a signal when a ``pending_outcomes`` row exists to settle — which
+    happens only for session-bearing recalls. Spending context on an ad-hoc
+    recall that could never learn from it is pure waste.
     """
     memory_map = memory_map or {}
     # T-inject: one shared "now" so every result's age label is consistent.
@@ -200,7 +224,7 @@ def serialize_recall_response(
         _created = getattr(fact, "created_at", "") or ""
         fact_type = getattr(fact, "fact_type", None)
         lifecycle = getattr(fact, "lifecycle", None)
-        raw.append({
+        entry = {
             "fact_id": fact.fact_id,
             "memory_id": fact.memory_id,
             "content": fact.content or "",
@@ -235,7 +259,15 @@ def serialize_recall_response(
             # weigh recency without doing date math. "" when undated.
             "age_label": relative_age(_created, _now),
             "evidence_chain": list(getattr(r, "evidence_chain", []) or []),
-        })
+        }
+        # Only when asked, and only when the engine actually produced one —
+        # an empty key would be indistinguishable from a marker that failed
+        # to compute, and the hook validates before trusting anything anyway.
+        if include_marker:
+            marker = getattr(r, "marker", "") or ""
+            if marker:
+                entry["marker"] = marker
+        raw.append(entry)
 
     # F-3 source discipline, then F-2 budget — order matters (discipline first
     # so the template firewall runs before any preview slicing).
@@ -266,4 +298,14 @@ def recall_response_metadata(response: Any) -> dict:
         # Q2b: thematic community summary (pure pass-through; computed upstream
         # in the engine where DB access is available). None on most recalls.
         "thematic_context": getattr(response, "community_context", None),
+        # Channels abandoned at the hang guard, so their candidates are absent
+        # from this answer. Empty on a healthy recall, which is the normal case.
+        # Non-empty is the one situation in which asking the same question twice
+        # may legitimately give different answers, so it has to travel with the
+        # response rather than living only in a server log — otherwise a caller
+        # comparing two runs has no way to tell an incomplete answer from a
+        # changed one. A list, because JSON has no tuple.
+        "incomplete_channels": list(
+            getattr(response, "incomplete_channels", ()) or ()
+        ),
     }

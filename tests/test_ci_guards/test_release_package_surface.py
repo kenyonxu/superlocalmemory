@@ -111,10 +111,9 @@ def test_one_workflow_coordinates_both_registries_and_supports_recovery() -> Non
     assert "pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b" in source
     assert "check-release-registries" in source
     assert "verify-release-registries" in source
-    # Upstream workflow runs pytest via RELEASE_TEST_ARGS array
-    # ("tests/ -q ..." expanded through "${RELEASE_TEST_ARGS[@]}"), so the
-    # literal "python -m pytest tests/ -q" never appears in source.
-    assert "python -m pytest" in source and "tests/ -q" in source
+    assert "RELEASE_TEST_ARGS=(" in source
+    assert "tests/ -q --tb=short -x" in source
+    assert 'uv run python -m pytest "${RELEASE_TEST_ARGS[@]}"' in source
     assert "SLM_RELEASE_PYTHON_DIST" in source
     assert "scripts/release_evidence.py" in source
     assert "steps.registry.outputs.pypi_exists != 'true'" in source
@@ -155,6 +154,34 @@ def test_registry_guard_checks_both_immutable_package_versions(tmp_path: Path) -
     assert len(checked) == 2
     assert any("pypi.org/pypi/superlocalmemory/3.7.0/json" in url for url in checked)
     assert any("registry.npmjs.org/superlocalmemory/3.7.0" in url for url in checked)
+
+
+def test_registry_guard_ignores_pypi_publisher_sidecars(tmp_path: Path) -> None:
+    pypi_dist = tmp_path / "python"
+    pypi_dist.mkdir()
+    wheel = pypi_dist / "superlocalmemory-3.7.0-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    (pypi_dist / ".gitignore").write_text("*\n", encoding="utf-8")
+    (pypi_dist / f"{wheel.name}.publish.attestation").write_bytes(b"attestation")
+    tarball = tmp_path / "superlocalmemory-3.7.0.tgz"
+    tarball.write_bytes(b"npm")
+
+    def fetcher(url: str) -> dict | None:
+        if "pypi.org" in url:
+            return {
+                "info": {"version": "3.7.0"},
+                "urls": [
+                    {
+                        "filename": wheel.name,
+                        "digests": {"sha256": registry_guard._sha256(wheel)},
+                    }
+                ],
+            }
+        return None
+
+    assert registry_guard.registry_state(
+        "3.7.0", pypi_dist=pypi_dist, npm_tarball=tarball, fetcher=fetcher
+    ) == registry_guard.RegistryState(pypi_exists=True, npm_exists=False)
 
 
 def test_registry_guard_writes_idempotent_recovery_outputs(tmp_path: Path) -> None:

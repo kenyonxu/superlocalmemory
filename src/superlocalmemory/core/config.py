@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Canonical limits (WP-02 — single source of truth across all surfaces)
+# Canonical limits — single source of truth across all surfaces
 # ---------------------------------------------------------------------------
 
 #: Default number of results returned by recall across MCP, CLI, daemon, and
@@ -93,7 +93,18 @@ class EmbeddingConfig:
 
 @dataclass(frozen=True)
 class LLMConfig:
-    """LLM provider configuration per mode."""
+    """LLM provider configuration per mode.
+
+    Frozen (restored in 4.0.6). ``frozen=True`` also generates ``__hash__``;
+    dropping it makes every LLMConfig unhashable, which breaks any set/dict-key
+    or cache use at runtime without necessarily failing a test. Updates build a
+    NEW instance via ``dataclasses.replace`` and assign it to the mutable
+    SLMConfig — see ``v3_api.apply_settings_update`` — so immutability here
+    costs nothing.
+
+    All production code creates new instances via LLMConfig(...) or
+    dataclasses.replace().
+    """
 
     provider: str = ""             # "" = no LLM, "ollama", "azure", "openai", "anthropic"
     model: str = ""                # Model name/deployment
@@ -292,6 +303,19 @@ class RetrievalConfig:
     # than holding the recall open.
     cross_encoder_timeout_seconds: float = 15.0
 
+    # v3.9.x (issue #112): plain-HTTP trust for private-LAN reranker endpoints.
+    # When True (the default), numeric RFC1918/ULA/link-local addresses may use
+    # plain HTTP — the same security model as the local reranker, where memory
+    # text only crosses the loopback. Set to False in hardened deployments
+    # (zero-trust networks, shared colocation) to require HTTPS for all
+    # non-loopback hosts, including private-LAN addresses.
+    #
+    # THREAT MODEL: setting this True does NOT prevent a MITM attack by an
+    # adversary on the same physical LAN (e.g. ARP spoofing). This flag means
+    # "my LAN is under my control and I accept that residual risk." It is not
+    # a claim that private-LAN traffic is cryptographically secure.
+    trust_plain_http_lan: bool = True
+
     @property
     def is_remote_cross_encoder(self) -> bool:
         """True when reranking is served by a remote HTTP endpoint."""
@@ -362,6 +386,21 @@ class RetrievalConfig:
     # the top results cluster in one community. Read-only lookup, gated, and
     # fail-open — never a per-query LLM call. Kill-switch for tuning.
     enable_community_context: bool = True
+
+    # Recency query strategy.
+    # When False, queries matching present-activity phrases fall through to
+    # factual routing — one-line rollback without touching strategy.py.
+    enable_recency_strategy: bool = True
+    # Strength of the recency prior applied during final-score fusion.
+    # 0.0 = no recency bias (restores previous ranking exactly).
+    # Consumed by a separate ranking stage; this field makes the knob
+    # configurable without further edits to this class.
+    recency_prior_strength: float = 0.5
+    # A fact written moments ago has no embedding yet, so it scores zero on the
+    # semantic channel — the same score a genuinely unrelated fact gets. Inside
+    # this window that zero is read as "not computed yet", not as "unrelated".
+    write_recency_floor_enabled: bool = True
+    write_recency_floor_minutes: float = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +579,26 @@ class HopfieldConfig:
     max_iterations: int = 1
     convergence_epsilon: float = 1e-6
     prefilter_threshold: int = 10_000
-    prefilter_candidates: int = 1000
+    # How many candidates the index hands to this stage. This stage decides final
+    # membership, so a fact ranked past this number by the index never reaches it
+    # and can never be returned — the size of this pool is a direct limit on which
+    # memories are reachable at all.
+    #
+    #
+    # Chosen by measurement against the 2 s recall ceiling, on a 517 MB store:
+    #   150 -> p95   998 ms, 0 channel timeouts
+    #   300 -> p95 1054 ms, 0
+    #   500 -> p95 1140 ms, 0      <- here: 3.3x the reachability of 150 for +142 ms
+    #   750 -> p95 1278 ms, 0
+    #  1000 -> p95 1947-2737 ms, 2-25 timeouts
+    #
+    # 1000 is excluded twice over: it breaches the ceiling, and a channel that
+    # misses its deadline contributes nothing to fusion — so whether it lands
+    # varies with machine load and the same question stops returning the same
+    # answer. 500 keeps ~860 ms of headroom, which is several times the observed
+    # run-to-run variance, and stays clear of the region where the cost curve
+    # turned non-linear for reasons that were never explained.
+    prefilter_candidates: int = 500
     skip_threshold: int = 100_000
     cache_ttl_seconds: float = 60.0
 
@@ -1132,6 +1190,17 @@ class SLMConfig:
     # enterprise deployment preset requests PII redaction.
     pii_redaction: bool = False
 
+    # GDPR / compliance: data-retention window in days.
+    # Default 90 days (owner decision: "configurable through the UI, and
+    # 90 days by default").  Units: days.  Value of 0 means no automatic
+    # expiry.  Consumed by the backup/erasure obligation tracker and any
+    # future retention scheduler.  Configurable via config.json (key
+    # "retention_window_days") or the UI settings panel.
+    # NOTE: this field is intentionally separate from
+    # DeploymentConfig.retention_enabled — the enabled flag gates the
+    # scheduler, while this window controls the duration.
+    retention_window_days: int = 90
+
     def __post_init__(self) -> None:
         if self.db_path is None:
             self.db_path = self.base_dir / DEFAULT_DB_NAME
@@ -1353,6 +1422,12 @@ class SLMConfig:
             "entity_compilation_retrieval_boost", 1.0,
         )
         config.mesh_enabled = data.get("mesh_enabled", True)
+
+        # v4.0.6: GDPR retention window (additive — defaults to 90 if absent)
+        try:
+            config.retention_window_days = int(data.get("retention_window_days", 90))
+        except (TypeError, ValueError):
+            config.retention_window_days = 90
 
         # V3.4.10: Evolution config
         evo = data.get("evolution", {})
@@ -1580,6 +1655,8 @@ class SLMConfig:
         data["entity_compilation_enabled"] = self.entity_compilation_enabled
         data["entity_compilation_retrieval_boost"] = self.entity_compilation_retrieval_boost
         data["mesh_enabled"] = self.mesh_enabled
+        # v4.0.6: GDPR retention window — always written so load→save is lossless.
+        data["retention_window_days"] = self.retention_window_days
 
         # Typed in-memory config sections.  Preserve any on-disk subkeys this
         # version does not model (forward-compat or externally-tuned fields such
@@ -1698,7 +1775,7 @@ class SLMConfig:
         embedding_dimension: int = 0,
     ) -> SLMConfig:
         """Create config with mode-appropriate defaults."""
-        # WP-07: resolve base dir via slm_home() at call time when not explicit.
+        # resolve base dir via slm_home() at call time when base_dir is not explicit.
         if base_dir is None:
             try:
                 from superlocalmemory.cli._lazy_init import slm_home as _slm_home
@@ -1866,7 +1943,7 @@ class SLMConfig:
 
         Returns ``\"b\"`` (the default) if the file doesn't exist.
         """
-        # WP-07: resolve via slm_home() at call time when base_dir not explicit.
+        # resolve via slm_home() at call time when base_dir is not explicit.
         if base_dir is None:
             try:
                 from superlocalmemory.cli._lazy_init import slm_home as _slm_home
@@ -1884,7 +1961,7 @@ class SLMConfig:
     @staticmethod
     def write_current_mode(mode: str, base_dir: Path | None = None) -> None:
         """Write the current mode letter to ``current_mode``."""
-        # WP-07: resolve via slm_home() at call time when base_dir not explicit.
+        # resolve via slm_home() at call time when base_dir is not explicit.
         if base_dir is None:
             try:
                 from superlocalmemory.cli._lazy_init import slm_home as _slm_home
@@ -1927,7 +2004,7 @@ class SLMConfig:
         import dataclasses
 
         from superlocalmemory.storage.models import Mode as _M
-        # WP-07: resolve via slm_home() at call time when base_dir not explicit.
+        # resolve via slm_home() at call time when base_dir is not explicit.
         if base_dir is None:
             try:
                 from superlocalmemory.cli._lazy_init import slm_home as _slm_home
@@ -2002,7 +2079,7 @@ class SLMConfig:
         Called on daemon boot. Idempotent — if ``current_mode`` already
         exists, this is a no-op. Returns True if migration was performed.
         """
-        # WP-07: resolve via slm_home() at call time when base_dir not explicit.
+        # resolve via slm_home() at call time when base_dir is not explicit.
         if base_dir is None:
             try:
                 from superlocalmemory.cli._lazy_init import slm_home as _slm_home

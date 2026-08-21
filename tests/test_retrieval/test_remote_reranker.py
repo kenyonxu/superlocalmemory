@@ -195,11 +195,31 @@ class TestConfigValidation:
     def test_plain_http_is_loopback_only(self, url: str) -> None:
         assert validate_remote_reranker_config("openai", url) is None
 
-    def test_plain_http_off_host_is_rejected(self) -> None:
+    def test_plain_http_public_host_is_rejected(self) -> None:
+        """Public IPs always require HTTPS regardless of trust_plain_http_lan.
+
+        Uses a globally-routable DNS resolver address. RFC 5737 documentation
+        addresses (203.0.113.x, 198.51.100.x) are classified is_private=True
+        in Python 3.11+ so they cannot be used here.
+        """
         error = validate_remote_reranker_config(
-            "openai", "http://192.168.50.140:8041/v1/rerank",
+            "openai", "http://8.8.8.8:8041/v1/rerank",  # Google DNS, globally routable
         )
         assert error and "HTTPS" in error
+
+    def test_plain_http_private_lan_is_allowed_by_default(self) -> None:
+        """RFC1918 addresses are trusted for plain HTTP by default (issue #112)."""
+        assert validate_remote_reranker_config(
+            "openai", "http://192.168.50.140:8041/v1/rerank",
+        ) is None
+
+    def test_plain_http_private_lan_rejected_when_trust_disabled(self) -> None:
+        """trust_plain_http_lan=False makes private LAN require HTTPS too."""
+        error = validate_remote_reranker_config(
+            "openai", "http://192.168.50.140:8041/v1/rerank",
+            trust_plain_http_lan=False,
+        )
+        assert error and "trust_plain_http_lan" in error
 
     def test_query_strings_and_fragments_are_rejected(self) -> None:
         for suffix in ("?api_key=secret", "#secret"):

@@ -68,6 +68,12 @@ This installs the `slm` command globally.
 slm setup
 ```
 
+For an existing installation that was updated through npm, pip, or a repository
+checkout, use `slm upgrade-hosts` first. It previews existing SLM integrations
+without changing host configuration; apply only reviewed targets with
+`slm upgrade-hosts --host <host> --apply`. See [Host Integration
+Upgrades](host-upgrades.md).
+
 The wizard walks you through three choices:
 
 1. **Pick your mode**

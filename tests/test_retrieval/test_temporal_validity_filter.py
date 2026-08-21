@@ -6,21 +6,26 @@
 
 Covers: superseded-fact DEMOTION across channels (P5-INT-01 non-destructive
 supersession — facts stay recallable but ranked below valid ones),
-valid/no-record passthrough, fail-open on DB error, empty results, and register
-gating.
+valid/no-record passthrough, fail-closed correction admission on DB error,
+empty results, and register gating.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from superlocalmemory.core.config import TemporalValidatorConfig
 from superlocalmemory.retrieval.temporal_validity_filter import (
+    CorrectionAdmissionCache,
     TemporalValidityFilter,
+    admit_correction_candidates,
+    admit_correction_fusion_results,
     register_temporal_validity_filter,
 )
+from superlocalmemory.storage.database import DatabaseManager
 
 
 @pytest.fixture
@@ -51,6 +56,8 @@ def _make_mock_db(invalid_ids: set[str]) -> MagicMock:
         return {fid for fid in fact_ids if fid in invalid_ids}
 
     db.get_invalidated_fact_ids = MagicMock(side_effect=get_invalidated_fact_ids)
+    db.get_nonapplied_correction_successor_ids = MagicMock(return_value=set())
+    db.get_correction_inadmissible_fact_ids = MagicMock(side_effect=get_invalidated_fact_ids)
     return db
 
 
@@ -73,6 +80,28 @@ def test_filter_demotes_superseded() -> None:
     # Re-sorted so the valid fact outranks the demoted superseded one.
     assert filtered["semantic"][0][0] == "fact_valid"
     assert filtered["semantic"][1][0] == "fact_superseded"
+
+
+def test_per_recall_cache_rechecks_only_candidates_added_after_fusion(tmp_path: Path) -> None:
+    """Bridge/scene additions stay safe without re-reading already checked IDs."""
+    db = DatabaseManager(tmp_path / "admission-cache.db")
+    db.get_correction_inadmissible_fact_ids = MagicMock(  # type: ignore[method-assign]
+        side_effect=[{"stale"}, {"new-stale"}],
+    )
+    cache = CorrectionAdmissionCache()
+    channels = {"bm25": [("live", 0.9), ("stale", 0.8)]}
+
+    admitted = admit_correction_candidates(channels, "default", db, lifecycle_cache=cache)
+    fused = [MagicMock(fact_id="live"), MagicMock(fact_id="new-stale")]
+    post = admit_correction_fusion_results(fused, "default", db, lifecycle_cache=cache)
+
+    assert admitted == {"bm25": [("live", 0.9)]}
+    assert [result.fact_id for result in post] == ["live"]
+    assert db.get_correction_inadmissible_fact_ids.call_count == 2
+    assert set(db.get_correction_inadmissible_fact_ids.call_args_list[0].args[0]) == {
+        "live", "stale"
+    }
+    assert db.get_correction_inadmissible_fact_ids.call_args_list[1].args[0] == ["new-stale"]
 
 
 # ---- T1-2: demotion applies across every channel ----
@@ -145,17 +174,18 @@ def test_filter_empty_results() -> None:
     db.get_invalidated_fact_ids.assert_not_called()
 
 
-# ---- T1-6: fail-open when the validity lookup raises ----
+# ---- T1-6: lifecycle failure must fail closed ----
 
-def test_filter_fail_open_on_db_error() -> None:
+def test_filter_abstains_on_lifecycle_lookup_error() -> None:
     db = MagicMock()
     db.get_invalidated_fact_ids = MagicMock(side_effect=RuntimeError("boom"))
     filt = TemporalValidityFilter(db)
 
     all_results = {"semantic": [("a", 0.9), ("b", 0.7)]}
     filtered = filt.filter(all_results, "default", None)
-    # Retrieval must never break because validity lookup failed.
-    assert filtered == all_results
+    # Never re-admit a potentially approved-stale fact when lifecycle state is
+    # unavailable.  Empty channels preserve the registry's stable result shape.
+    assert filtered == {"semantic": []}
 
 
 # ---- T1-7: inputs are not mutated (immutability) ----
@@ -168,6 +198,108 @@ def test_filter_does_not_mutate_input() -> None:
     snapshot = {"semantic": [("keep", 0.9), ("gone", 0.8)]}
     filt.filter(original, "default", None)
     assert original == snapshot  # original untouched
+
+
+# ---- SLM 4.0.2 Brain Core: correction admission is a hard gate ----
+
+def test_correction_admission_removes_superseded_facts_from_every_channel() -> None:
+    """A corrected-away fact is not merely reranked; it cannot reach fusion."""
+    db = _make_mock_db({"stale"})
+    original = {
+        "semantic": [("live", 0.9), ("stale", 0.99)],
+        "bm25": [("stale", 0.95)],
+    }
+
+    admitted = admit_correction_candidates(original, "default", db)
+
+    assert admitted == {"semantic": [("live", 0.9)], "bm25": []}
+    assert original["semantic"][-1] == ("stale", 0.99)  # immutable input
+
+
+def test_correction_admission_keeps_fact_before_its_supersession() -> None:
+    """Historical recall must not let a later correction rewrite its past."""
+    db = MagicMock()
+
+    def invalidated(ids: list[str], _profile: str, *, as_of: str | None = None) -> set[str]:
+        return {"stale"} if as_of and as_of >= "2026-01-01T00:00:00+00:00" else set()
+
+    db.get_invalidated_fact_ids.side_effect = invalidated
+    db.get_nonapplied_correction_successor_ids.return_value = set()
+    original = {"semantic": [("stale", 0.9)]}
+
+    admitted = admit_correction_candidates(
+        original, "default", db, as_of="2024-01-01T00:00:00Z",
+    )
+
+    assert admitted == original
+
+
+def test_correction_admission_excludes_future_knowledge_in_strict_mode() -> None:
+    db = MagicMock()
+    db.get_invalidated_fact_ids.return_value = set()
+    db.get_nonapplied_correction_successor_ids.return_value = set()
+    db.get_strict_temporal_inadmissible_fact_ids.return_value = {"future"}
+    original = {"semantic": [("future", 0.9), ("known", 0.8)]}
+
+    admitted = admit_correction_candidates(
+        original, "default", db,
+        known_as_of="2026-01-01T00:00:00+00:00",
+    )
+
+    assert admitted == {"semantic": [("known", 0.8)]}
+    assert db.get_strict_temporal_inadmissible_fact_ids.call_args.kwargs["known_as_of"] == (
+        "2026-01-01T00:00:00+00:00"
+    )
+
+
+def test_correction_admission_abstains_when_lifecycle_lookup_fails() -> None:
+    """A lifecycle outage cannot turn approved stale facts back into candidates."""
+    db = MagicMock()
+    db.get_invalidated_fact_ids.side_effect = RuntimeError("database busy")
+    original = {
+        "semantic": [("possibly_stale", 0.99)],
+        "profile": [("possibly_stale", 0.98)],
+    }
+
+    admitted = admit_correction_candidates(original, "default", db)
+
+    assert admitted == {"semantic": [], "profile": []}
+    db.get_strict_temporal_inadmissible_fact_ids.assert_not_called()
+
+
+def test_correction_admission_abstains_on_malformed_lifecycle_result() -> None:
+    """A bad adapter return is no safer than a raised lifecycle read."""
+    db = MagicMock()
+    db.get_invalidated_fact_ids.return_value = ["possibly_stale"]
+    original = {"semantic": [("possibly_stale", 0.99)]}
+
+    assert admit_correction_candidates(original, "default", db) == {"semantic": []}
+
+
+def test_correction_admission_abstains_when_strict_lookup_fails() -> None:
+    """Explicit time-travel must not fail open when its second clock is unavailable."""
+    db = MagicMock()
+    db.get_invalidated_fact_ids.return_value = set()
+    db.get_strict_temporal_inadmissible_fact_ids.side_effect = RuntimeError("database busy")
+    original = {"semantic": [("possibly_future", 0.99)]}
+
+    admitted = admit_correction_candidates(
+        original,
+        "default",
+        db,
+        known_as_of="2026-01-01T00:00:00+00:00",
+    )
+
+    assert admitted == {"semantic": []}
+
+
+def test_post_fusion_admission_abstains_when_lifecycle_lookup_fails() -> None:
+    """Bridge/scene candidates cannot bypass a failed lifecycle read."""
+    db = MagicMock()
+    db.get_invalidated_fact_ids.side_effect = RuntimeError("database busy")
+    expanded = [MagicMock(fact_id="bridge_or_scene_candidate")]
+
+    assert admit_correction_fusion_results(expanded, "default", db) == []
 
 
 # ---- T1-8: register gating ----

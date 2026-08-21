@@ -178,8 +178,15 @@ class ANNIndex:
             if k <= 0:
                 return []
 
-            top_indices = np.argpartition(scores, -k)[-k:]
-            top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
+            # Full sort with a secondary key on fact_id so that equal cosine
+            # scores are broken deterministically.  argpartition cannot
+            # guarantee which facts reach the top-k when scores tie at the
+            # boundary — the selection follows array layout (insertion order)
+            # and changes between restarts.  lexsort picks the same k facts
+            # in the same order regardless of how the index was loaded.
+            id_arr = np.array(self._ids, dtype=object)
+            order = np.lexsort((id_arr, -scores))  # primary: -score, secondary: fact_id
+            top_indices = order[:k]
 
             return [
                 (self._ids[i], float(scores[i]))

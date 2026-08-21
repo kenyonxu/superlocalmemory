@@ -4,10 +4,10 @@
 
 """POST /internal/prewarm — populates the context cache for a session.
 
-S8-SK-02 fix: Wave 2A shipped ``hooks/prewarm_auth.authorize`` (gates
-loopback → origin → install-token → body-size) and unit-tested it, but
-no FastAPI route mounted it. The hot-path ``post_tool_async_hook`` POSTs
-to ``/internal/prewarm`` after every tool call to refresh the
+Bug fix: ``hooks/prewarm_auth.authorize`` (which gates loopback →
+origin → install-token → body-size) was implemented and unit-tested,
+but no FastAPI route mounted it. The hot-path ``post_tool_async_hook``
+POSTs to ``/internal/prewarm`` after every tool call to refresh the
 ``active_brain_cache`` row for the current session/topic. Without a
 route registered here, those POSTs 404'd silently, the cache never
 populated, and every ``UserPromptSubmit`` ended up a structural miss.

@@ -96,7 +96,8 @@
 
   var _st = {
     rootId:    null,
-    activeTab: 'all',
+    // Must match the pane carrying `active` in _scaffold(). Recall Lab leads.
+    activeTab: 'recall',
     category:  null,   // null = all; string = filtered category
     sort:      'created',
     page:      0,
@@ -119,8 +120,11 @@
     if (!container) return;
     _injectCSS();
     var id = 'od-mem-' + Math.random().toString(36).slice(2, 8);
+    // activeTab is reset explicitly: _scaffold always emits the Recall pane as the
+    // active one, so leaving a stale value here (from a tab click before the user
+    // navigated away and back) would desync state from what is actually on screen.
     _st = Object.assign({}, _st, {
-      rootId: id, page: 0, category: null, sort: 'created',
+      rootId: id, page: 0, category: null, sort: 'created', activeTab: 'recall',
       memories: [], catCounts: {}, cluLoaded: false, searchQ: null, requestSeq: 0,
     });
     // Clear per-id timeline cache for this render instance
@@ -141,31 +145,65 @@
           '<h2>Everything you\'ve remembered</h2>' +
           '<p id="' + id + '-sub" style="color:var(--fg-2);margin-top:5px">Loading…</p>' +
         '</div>' +
+        // Tab order is deliberate (owner request, 4.0.8): the two tabs that ANSWER
+        // a question come first, the three that BROWSE data come after. Someone who
+        // opens this page usually wants "what do you know about X" or "what did I do
+        // today" — not a 3,600-row table sorted by insert time.
         '<div class="tabs" id="' + id + '-tabs">' +
-          '<button class="tab active" data-od-act="tab" data-tab="all">' +
+          // Recall Lab — recall-lab.js is loaded in index.html and uses document-level
+          // click/keydown delegation keyed on the IDs below, so it survives re-renders.
+          '<button class="tab active" data-od-act="tab" data-tab="recall">Recall Lab</button>' +
+          '<button class="tab" data-od-act="tab" data-tab="summary">Summaries</button>' +
+          '<button class="tab" data-od-act="tab" data-tab="all">' +
             'All memories <span class="cnt" id="' + id + '-cnt-all">…</span></button>' +
           '<button class="tab" data-od-act="tab" data-tab="timeline">Creation timeline</button>' +
           '<button class="tab" data-od-act="tab" data-tab="clusters">' +
             'Knowledge clusters <span class="cnt" id="' + id + '-cnt-clusters">…</span></button>' +
-          // Recall Lab tab — restored: recall-lab.js is already loaded in index.html and uses
-          // document-level click/keydown delegation keyed on IDs below, so it survives re-renders.
-          '<button class="tab" data-od-act="tab" data-tab="recall">Recall Lab</button>' +
         '</div>' +
-        '<div class="tabpane active" id="' + id + '-pane-all">' + _allScaffold(id) + '</div>' +
+        '<div class="tabpane" id="' + id + '-pane-all">' + _allScaffold(id) + '</div>' +
         '<div class="tabpane" id="' + id + '-pane-timeline">' + _tlScaffold(id) + '</div>' +
         '<div class="tabpane" id="' + id + '-pane-clusters">' +
           '<div class="launch-grid" id="' + id + '-clu-grid">' +
             _loading('Loading clusters…') +
           '</div>' +
         '</div>' +
+        '<div class="tabpane" id="' + id + '-pane-summary" style="padding-top:12px">' +
+          '<p style="font-size:13px;color:var(--fg-2);margin-bottom:12px">'+
+            'A readable view of what you recorded. Every summary states how much '+
+            'of the underlying data it could actually cover.' +
+          '</p>' +
+          // "This project" used to be a button sending an empty target, which the
+          // API rejected every single time with "project requires target". It could
+          // not have worked: SLM runs as one global daemon and this is a browser
+          // tab — there is no current working directory to mean "this". The server
+          // lists the projects it has actually seen and the user picks one.
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px">' +
+            '<button class="tab" data-od-act="sum" data-kind="day" data-target="today">Today</button>' +
+            '<button class="tab" data-od-act="sum" data-kind="day" data-target="yesterday">Yesterday</button>' +
+            '<select id="' + id + '-sum-proj" data-od-act="sum-proj" ' +
+              'title="Projects SuperLocalMemory has recorded activity in" ' +
+              'style="padding:7px 10px;border:1px solid var(--border);' +
+                'border-radius:var(--r-md);background:var(--card-2);color:var(--fg);' +
+                'font-size:13px;max-width:340px">' +
+              '<option value="">Loading projects…</option>' +
+            '</select>' +
+          '</div>' +
+          '<div id="' + id + '-sum-out" style="font-size:13px;color:var(--fg-2)">Pick a summary above.</div>' +
+        '</div>' +
         // Recall Lab pane — exact IDs required by recall-lab.js:
         //   #recall-lab-query (input), #recall-lab-search (button — click check),
         //   #recall-lab-per-page (select, optional), #recall-lab-meta, #recall-lab-results.
         // Backend: POST /api/v3/recall/trace
-        '<div class="tabpane" id="' + id + '-pane-recall" style="padding-top:12px">' +
+        //
+        // This is now the landing pane, so it has to explain itself to someone who
+        // has never heard the word "recall" in this sense. An empty search box as a
+        // first impression tells a non-technical user nothing about what SLM does.
+        '<div class="tabpane active" id="' + id + '-pane-recall" style="padding-top:12px">' +
           '<div style="margin-bottom:14px">' +
             '<p style="font-size:13px;color:var(--fg-2);margin-bottom:10px">' +
-              'Trace how a recall query is resolved — matching algorithm, scoring, and final result set.' +
+              'Ask your memory a question and watch it answer. This shows you the ' +
+              'same result an AI assistant gets — plus <em>why</em> each memory was ' +
+              'chosen, how strongly it matched, and how long the lookup took.' +
             '</p>' +
             '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
               '<input id="recall-lab-query" placeholder="Enter recall query…" autocomplete="off" ' +
@@ -189,8 +227,11 @@
           // #recall-lab-meta — written by recall-lab.js before results (timing, count, etc.)
           '<div id="recall-lab-meta" ' +
             'style="font-size:12px;color:var(--fg-2);margin-bottom:8px"></div>' +
-          // #recall-lab-results — written by recall-lab.js (result cards, pagination)
-          '<div id="recall-lab-results"></div>' +
+          // #recall-lab-results — written by recall-lab.js (result cards, pagination).
+          // Seeded with a starter state because this pane loads first: a bare box
+          // gives a first-time user no idea what to type. recall-lab.js replaces
+          // the whole node on the first search, so this costs nothing afterwards.
+          '<div id="recall-lab-results">' + _recallStarter() + '</div>' +
         '</div>' +
       '</div>'
     );
@@ -271,6 +312,43 @@
       _esc(msg) + '</div>';
   }
 
+  /* Starter state for Recall Lab.
+   *
+   * Recall Lab is the landing pane, so this is the first thing most people see in
+   * the dashboard. It has to answer "what is this and what do I type" without
+   * assuming the reader knows what a recall trace is.
+   *
+   * The examples are deliberately static. Seeding them from real memories was the
+   * first idea and it is worse: stored content is things like
+   * "[claude][SLM 4.0.8 CHECKPOINT] RELEASE STATE: local", which teaches exactly
+   * the wrong query shape. These teach the shape; the store answers.
+   */
+  var RECALL_EGS = [
+    'what did I decide about the database',
+    'what am I working on',
+    'what problems have I hit before',
+  ];
+
+  function _recallStarter() {
+    var chips = RECALL_EGS.map(function (q) {
+      return '<button class="tab" data-od-act="recall-eg" data-q="' + _esc(q) + '">' +
+        _esc(q) + '</button>';
+    }).join('');
+    return (
+      '<div id="od-recall-starter" style="border:1px dashed var(--border);' +
+        'border-radius:var(--r-md);padding:22px;color:var(--fg-2);font-size:13px">' +
+        '<div style="font-weight:600;color:var(--fg);margin-bottom:6px">' +
+          'Ask a question above to search your memory</div>' +
+        '<p style="margin:0 0 14px;line-height:1.55">' +
+          'It searches by meaning, not keywords — asking “what database are we using” ' +
+          'can surface a memory that says “switched to Postgres”, even though the two ' +
+          'share no words. Try one:' +
+        '</p>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap">' + chips + '</div>' +
+      '</div>'
+    );
+  }
+
   // ── Tab switching ────────────────────────────────────────────────────────────
 
   function _switchTab(id, tab) {
@@ -285,6 +363,139 @@
     if (pane) pane.classList.add('active');
     if (tab === 'timeline') _loadTimeline(id);
     if (tab === 'clusters')  _loadClusters(id);
+    if (tab === 'summary')   _loadProjectOptions(id);
+  }
+
+  /* Populate the project picker from projects SLM has actually recorded.
+   *
+   * Loaded lazily on first visit to Summaries rather than at render time — the
+   * Memories page opens on Recall Lab, and most visits never reach this tab.
+   */
+  function _loadProjectOptions(id) {
+    var sel = document.getElementById(id + '-sum-proj');
+    if (!sel) return;
+    // Guard on the element, not a module flag. A module-level "already loaded"
+    // boolean outlives the DOM it described: navigate away and back, the pane
+    // re-renders with a fresh <select> still reading "Loading projects…", and the
+    // stale flag suppresses the fetch that would fill it. Caught in review by
+    // exactly that sequence.
+    if (sel.dataset.loaded === '1' || sel.dataset.loading === '1') return;
+    sel.dataset.loading = '1';
+    fetch('/api/summary/projects')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var list = (d && d.projects) || [];
+        sel.dataset.loaded = '1';
+        delete sel.dataset.loading;
+        if (!list.length) {
+          sel.innerHTML = '<option value="">No projects recorded yet</option>';
+          sel.disabled = true;
+          return;
+        }
+        sel.innerHTML =
+          '<option value="">Summarise a project…</option>' +
+          list.map(function (p) {
+            return '<option value="' + _esc(p.path) + '" title="' + _esc(p.path) + '">' +
+              _esc(p.label) + ' (' + p.events + ')</option>';
+          }).join('');
+      })
+      .catch(function () {
+        // Fail visibly but harmlessly: a silent empty dropdown reads as "you have
+        // no projects", which is a different and wrong statement. Clearing the
+        // in-flight marker leaves the next tab visit free to retry.
+        delete sel.dataset.loading;
+        sel.innerHTML = '<option value="">Could not load projects — retry</option>';
+      });
+  }
+
+  /* Summaries pane (4.0.8, issue #113).
+   *
+   * Reads GET /api/summary. The generators shipped in 4.0.6 with no caller at
+   * all; 4.0.7 added the CLI; this is the surface for someone who is already
+   * looking at the dashboard rather than a terminal.
+   *
+   * Coverage is rendered on every result, never only on bad ones — a summary
+   * that hides how much of the data it saw is the failure mode #113 named.
+   */
+  function _loadSummary(id, kind, target) {
+    var out = document.getElementById(id + '-sum-out');
+    if (!out) return;
+    out.textContent = 'Building summary…';
+
+    var q = '/api/summary?kind=' + encodeURIComponent(kind);
+    // The daemon resolves an empty target for "day" (defaults to today) but not
+    // for project or session, which need an explicit one from the picker.
+    if (target) q += '&target=' + encodeURIComponent(target);
+
+    fetch(q)
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (e) { throw new Error(e.detail || r.status); });
+        return r.json();
+      })
+      .then(function (d) {
+        out.textContent = '';
+
+        var body = document.createElement('pre');
+        body.style.cssText = 'white-space:pre-wrap;font-family:inherit;font-size:13px;' +
+          'line-height:1.65;color:var(--fg);background:var(--card-2);border:1px solid var(--border);' +
+          'border-radius:var(--r-md);padding:14px;margin:0';
+        body.textContent = d.summary || '(nothing recorded)';
+        out.appendChild(body);
+
+        var meta = document.createElement('div');
+        meta.style.cssText = 'margin-top:10px;font-size:12px;color:var(--fg-3);line-height:1.6';
+        meta.textContent = _summaryProvenance(d);
+        out.appendChild(meta);
+      })
+      .catch(function (e) {
+        out.textContent = 'Could not build summary: ' + (e && e.message ? e.message : 'error');
+      });
+  }
+
+  /* Plain-English provenance line under a summary.
+   *
+   * The old line read "Built from 0 memories · coverage: full · method: llm_b".
+   * Three problems in one string: it contradicted itself (nothing, covered
+   * fully), and "coverage" and "llm_b" are internal vocabulary. Someone who has
+   * not read the source cannot tell whether that summary is trustworthy — which
+   * is the entire job of a provenance line.
+   */
+  var _COVERAGE_TEXT = {
+    full:         'Covers everything recorded for this period.',
+    partial:      'Partial view — some of what was recorded is not reflected here.',
+    insufficient: 'Too little was recorded to summarise properly.',
+    no_session:   'That session has no memories attached to it.',
+    unavailable:  'The underlying data could not be read.',
+  };
+
+  var _METHOD_TEXT = {
+    extractive: 'Assembled directly from your own notes — no AI involved.',
+    llm_b:      'Written by the AI model running locally on this machine.',
+    llm_c:      'Written by your configured cloud AI model.',
+  };
+
+  function _summaryProvenance(d) {
+    var n = d.source_count || 0;
+    var md = d.metadata || {};
+    var parts = [];
+
+    if (n > 0) {
+      parts.push('Based on ' + n + ' memor' + (n === 1 ? 'y' : 'ies') + '.');
+    } else if (md.event_count) {
+      // A project can have plenty of recorded activity and no stored facts. Saying
+      // "0 memories" and stopping makes that look like an error rather than a
+      // description of what actually happened.
+      parts.push('Based on ' + md.event_count + ' recorded actions; no facts were ' +
+                 'saved for this project.');
+    } else {
+      parts.push('No stored memories matched.');
+    }
+
+    parts.push(_COVERAGE_TEXT[d.coverage] || 'Coverage unknown.');
+    if (d.generated_by && _METHOD_TEXT[d.generated_by]) {
+      parts.push(_METHOD_TEXT[d.generated_by]);
+    }
+    return parts.join(' ');
   }
 
   // ── Category counts (pre-fetch real totals) ──────────────────────────────────
@@ -752,6 +963,7 @@
       '</div>' +
       '<h3 style="font-size:13px;margin:20px 0 8px">Atomic facts</h3>' +
       '<div id="od-drawer-facts" style="color:var(--fg-3);font-size:13px">Loading facts…</div>' +
+      '<div id="od-drawer-code"></div>' +
       '<div style="display:flex;gap:8px;margin-top:20px;padding-top:12px;border-top:1px solid var(--border)">' +
         '<button data-od-act="edit-mem" data-mid="' + _esc(mem.id) + '" style="padding:6px 14px;border:1px solid var(--border);border-radius:6px;background:var(--card-2);color:var(--fg);cursor:pointer;font-size:13px">Edit</button>' +
         '<button data-od-act="del-mem" data-mid="' + _esc(mem.id) + '" style="padding:6px 14px;border:1px solid var(--danger);border-radius:6px;background:transparent;color:var(--danger);cursor:pointer;font-size:13px">Delete</button>' +
@@ -759,7 +971,28 @@
 
     drawer.classList.add('open');
     scrim.classList.add('on');
-    if (mem.id) _loadFacts(mem.id);
+    // A row in this pane is an ATOMIC FACT, not a source memory: /api/memories
+    // reports total 3603 on a store holding 830 memories and 3603 facts, and
+    // every row id resolves through /api/facts/{id}. The row carries its parent
+    // separately as memory_id.
+    //
+    // "Atomic facts" therefore needs the PARENT id — it lists the other facts
+    // extracted from the same source memory. Passing mem.id asked
+    // /api/memories/{fact_id}/facts, which has no children to return, so this
+    // section read "No atomic facts recorded for this memory" for every memory
+    // on every store. Not an empty state: the wrong identifier.
+    if (mem.memory_id) {
+      _loadFacts(mem.memory_id);
+    } else {
+      // No parent row: this record was stored directly as a fact rather than
+      // extracted from a longer memory (198 of 3,608 on a real store). Saying
+      // "no atomic facts recorded" there is wrong in a way that matters — it
+      // reads as data missing, when the fact IS the record.
+      var fx = document.getElementById('od-drawer-facts');
+      if (fx) fx.textContent = 'Stored directly — this record is itself the atomic fact.';
+    }
+    // Code links hang off the FACT, so this one takes the row id.
+    if (mem.id) _loadCodeLinks(mem.id);
   }
 
   function _closeDrawer() {
@@ -792,6 +1025,81 @@
       .catch(function () { if (el) el.textContent = 'Could not load facts.'; });
   }
 
+  /* Code this memory refers to (4.0.8).
+   *
+   * Renders into the memory drawer — the panel actually used to inspect a
+   * memory. 4.0.7 put this in js/fact-detail.js, which only binds to
+   * `.fact-result-item` rows in the search-results view, so the feature was
+   * invisible to anyone browsing Memories.
+   *
+   * KEYED ON THE ROW'S OWN ID, which is an ATOMIC FACT id. The Memories pane
+   * lists atomic facts — /api/memories returns total 3603 on a store with 830
+   * memories and 3603 facts, and each row id resolves through /api/facts/{id}.
+   * (That mismatch is also why the drawer's "Atomic facts" block always reads
+   * "No atomic facts recorded": it asks /api/memories/{fact_id}/facts, which
+   * has no children to return. Left alone here — separate defect, separate fix.)
+   *
+   * Reads /api/facts/{id}, which serves links from code_graph.db. Recall never
+   * opens that database, so nothing here can affect retrieval.
+   *
+   * textContent throughout: every value is a qualified name or path read out of
+   * an indexed repository, i.e. untrusted input as far as this panel goes.
+   */
+  function _loadCodeLinks(factId) {
+    var host = document.getElementById('od-drawer-code');
+    if (!host || !factId) return;
+    fetch('/api/facts/' + encodeURIComponent(factId))
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        var links = (d && d.code_links) || [];
+        if (!links.length) return;   // silent when there is nothing to show
+
+        var wrap = document.createElement('div');
+        wrap.style.cssText = 'margin-top:6px;padding-top:6px;border-top:1px dashed var(--border)';
+
+        var label = document.createElement('div');
+        label.style.cssText = 'font-size:11px;color:var(--fg-3);margin-bottom:4px';
+        label.textContent = 'Code referenced (' + links.length + ')';
+        wrap.appendChild(label);
+
+        links.slice(0, 6).forEach(function (l) {
+          var row = document.createElement('div');
+          row.style.cssText = 'font-size:12px;line-height:1.5';
+
+          var code = document.createElement('code');
+          code.style.cssText = 'color:var(--violet)';
+          code.textContent = l.qualified_name || l.name || '?';
+          row.appendChild(code);
+
+          if (l.kind) {
+            var kind = document.createElement('span');
+            kind.style.cssText = 'color:var(--fg-3);font-size:10px;margin-left:6px';
+            kind.textContent = l.kind;
+            row.appendChild(kind);
+          }
+          // A stale link points at code that has moved or gone. Saying so is the
+          // entire value of tracking staleness.
+          if (l.is_stale) {
+            var stale = document.createElement('span');
+            stale.className = 'badge';
+            stale.style.cssText = 'font-size:9px;margin-left:6px';
+            stale.textContent = 'code changed';
+            row.appendChild(stale);
+          }
+          wrap.appendChild(row);
+        });
+
+        if (links.length > 6) {
+          var more = document.createElement('div');
+          more.style.cssText = 'font-size:11px;color:var(--fg-3);margin-top:2px';
+          more.textContent = '… and ' + (links.length - 6) + ' more';
+          wrap.appendChild(more);
+        }
+        host.appendChild(wrap);
+      })
+      .catch(function () { /* display extra: never surface an error here */ });
+  }
+
   function _startEdit(mid) { // show inline edit form in drawer
     var m = _st.memories.filter(function (x) { return x.id === mid; })[0];
     var el = document.getElementById('od-mem-act'); if (!el || !m) return;
@@ -809,6 +1117,20 @@
       if (!el) return;
       var act = el.dataset.odAct;
 
+      if (act === 'sum') {
+        _loadSummary(id, el.dataset.kind, el.dataset.target || '');
+        return;
+      }
+      // Example query chip in the Recall Lab starter state. recall-lab.js owns the
+      // search itself and listens on #recall-lab-search, so fill the box and let it
+      // run — duplicating its fetch here would be a second, divergent code path.
+      if (act === 'recall-eg') {
+        var qBox = document.getElementById('recall-lab-query');
+        var qBtn = document.getElementById('recall-lab-search');
+        if (qBox) qBox.value = el.dataset.q || '';
+        if (qBtn) qBtn.click();
+        return;
+      }
       if (act === 'tab') {
         _switchTab(id, el.dataset.tab);
         return;
@@ -892,6 +1214,9 @@
         _st = Object.assign({}, _st, { window: e.target.value || '' });
         var wq = (_st.searchQ || '').trim();
         if (wq) _doSearch(id, wq);   // re-run active search with the new window
+      }
+      if (e.target.dataset.odAct === 'sum-proj' && e.target.value) {
+        _loadSummary(id, 'project', e.target.value);
       }
     });
     container.addEventListener('input', function (e) {

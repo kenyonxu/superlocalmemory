@@ -260,6 +260,131 @@ async def set_mode(request: Request):
         return _internal_error()
 
 
+def apply_settings_update(config: "SLMConfig", payload: dict) -> "SLMConfig":
+    """Credential-safe LLM config update for the settings dashboard (fixes #119).
+
+    This is the SINGLE authoritative place where incoming dashboard save payloads
+    are merged onto the stored config.  The POST /api/v3/mode/set handler calls
+    this function after its HTTP-layer concerns (SSRF guard, auth) are settled,
+    so the acceptance gate (test_wave2_acceptance.py::P3) tests real product
+    behaviour — not a reimplementation.
+
+    SEC-L-01 PRESERVED:
+      The GET /mode route returns only ``urlparse(api_base).netloc`` (the host),
+      never the full URL.  When the UI echoes that value back on save,
+      apply_settings_update detects the scheme-less netloc and silently restores
+      the stored full URL (scheme + path).  This means the server-side logic
+      internally reads the stored URL but NEVER returns it to callers — viewer
+      users remain unable to discover the full endpoint topology.
+
+    Credential semantics:
+      api_key  blank/omitted   →  UNCHANGED  (browsers never repopulate pw fields)
+      api_key  non-blank       →  applied
+      clear_api_key = True     →  explicit "" (deliberate wipe — only way to clear)
+
+      endpoint  absent/empty   →  UNCHANGED
+      endpoint  == stored netloc (no scheme "://")  →  UNCHANGED (redacted echo)
+      endpoint  with "://"     →  applied
+      clear_base_url = True    →  explicit "" (deliberate wipe)
+
+    Security rule:  if the destination provider or endpoint genuinely changes AND
+    no new key was supplied, the stored key is cleared to prevent accidental
+    credential reuse across providers.  An explicit clear_api_key=True is
+    always honoured regardless.
+
+    NEVER logs api_key.
+    """
+    import dataclasses as _dc
+    from urllib.parse import urlparse, urlsplit, urlunsplit
+
+    stored = config.llm
+    stored_key: str = stored.api_key
+    stored_base: str = stored.api_base or ""
+
+    # ── endpoint ─────────────────────────────────────────────────────────────
+    raw_endpoint: str = (payload.get("endpoint") or payload.get("base_url") or "").strip()
+    clear_endpoint: bool = payload.get("clear_base_url") is True
+
+    if clear_endpoint:
+        new_base = ""
+        endpoint_changed = bool(stored_base)
+    elif not raw_endpoint:
+        # Nothing supplied — keep stored URL intact.
+        new_base = stored_base
+        endpoint_changed = False
+    else:
+        # Detect the SEC-L-01 redacted echo: GET /mode returns
+        # urlparse(api_base).netloc (host only, no scheme, no path).  If the
+        # client sent that exact string back, it did NOT change the endpoint —
+        # restore the full stored URL.  We compare the raw string directly to
+        # stored_netloc so that hosts with ports ("api.host.com:443") also match.
+        stored_netloc: str = urlparse(stored_base).netloc if stored_base else ""
+        is_redacted_echo: bool = bool(stored_netloc) and (raw_endpoint == stored_netloc)
+
+        if is_redacted_echo:
+            new_base = stored_base
+            endpoint_changed = False
+        else:
+            new_base = raw_endpoint
+            # Canonical comparison (strip trailing slash, normalise scheme/host
+            # case) so a harmless trailing-slash difference does not clear the key.
+            def _canonical(u: str) -> str:
+                p = urlsplit(u)
+                return urlunsplit((
+                    p.scheme.lower(), p.netloc.lower(),
+                    p.path.rstrip("/"), p.query, "",
+                ))
+            endpoint_changed = _canonical(new_base) != _canonical(stored_base)
+
+    # ── provider ─────────────────────────────────────────────────────────────
+    raw_provider: str = (payload.get("provider") or "").strip()
+    if raw_provider == "none":
+        new_provider = ""      # "none" sentinel means "clear provider"
+    elif raw_provider:
+        new_provider = raw_provider
+    else:
+        new_provider = stored.provider or ""
+
+    provider_changed: bool = new_provider != (stored.provider or "")
+
+    # ── api_key ───────────────────────────────────────────────────────────────
+    # Evaluated AFTER endpoint/provider so we know whether the destination changed.
+    raw_key: str = (payload.get("api_key") or "").strip()
+    clear_key: bool = payload.get("clear_api_key") is True
+    destination_changed: bool = provider_changed or endpoint_changed
+
+    if clear_key:
+        new_key = ""           # explicit user wipe
+    elif raw_key:
+        new_key = raw_key      # user supplied a replacement key
+    elif destination_changed:
+        # Security: destination changed but no new key → clear to prevent
+        # the stored credential from being silently redirected to a new
+        # provider or endpoint the user may not own.
+        new_key = ""
+    else:
+        # Blank key + same destination = browser did not repopulate the
+        # password field.  Preserve the stored key verbatim.
+        new_key = stored_key
+
+    # ── model ────────────────────────────────────────────────────────────────
+    raw_model: str = (payload.get("model") or "").strip()
+    new_model: str = raw_model if raw_model else (stored.model or "")
+
+    # ── apply ─────────────────────────────────────────────────────────────────
+    # dataclasses.replace preserves temperature / max_tokens / timeout_seconds.
+    # Assigning to config.llm works because SLMConfig is not frozen.
+    # NEVER include new_key in any log call.
+    config.llm = _dc.replace(
+        stored,
+        provider=new_provider,
+        model=new_model,
+        api_key=new_key,
+        api_base=new_base,
+    )
+    return config
+
+
 @router.post("/mode/set")
 async def set_full_config(request: Request):
     """Save mode + provider + model + API key together.
@@ -271,35 +396,99 @@ async def set_full_config(request: Request):
     require_manage(request)
     try:
         body = await request.json()
-        new_mode = body.get("mode", "a").lower()
-        provider = body.get("provider", "none")
-        model = body.get("model", "")
-        api_key = body.get("api_key", "")
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "Request body must be a JSON object"}, status_code=400)
+        from superlocalmemory.core.config import SLMConfig, EmbeddingConfig
+        from superlocalmemory.storage.models import Mode
+        from superlocalmemory.server.routes.helpers import log_mode_change
+
+        config = SLMConfig.load()
+        old_mode = config.mode.value
+
+        def _nonblank(name: str) -> str | None:
+            value = body.get(name)
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                raise ValueError(f"{name} must be a string")
+            return value.strip() or None
+
+        new_mode = (_nonblank("mode") or config.mode.value).lower()
+        provider_input = _nonblank("provider")
+        model_input = _nonblank("model")
+        api_key_input = _nonblank("api_key")
+        base_url_input = _nonblank("base_url")
+        endpoint_input = _nonblank("endpoint")
+        clear_api_key = body.get("clear_api_key") is True
+        clear_base_url = body.get("clear_base_url") is True
+
+        if clear_api_key and api_key_input:
+            return JSONResponse(
+                {"error": "api_key cannot be replaced and cleared together"},
+                status_code=400,
+            )
+        if clear_base_url and (base_url_input or endpoint_input):
+            return JSONResponse(
+                {"error": "base_url cannot be replaced and cleared together"},
+                status_code=400,
+            )
+        if base_url_input and endpoint_input and base_url_input != endpoint_input:
+            return JSONResponse(
+                {"error": "base_url and endpoint must match when both are supplied"},
+                status_code=400,
+            )
 
         if new_mode not in ("a", "b", "c"):
             return JSONResponse({"error": "Invalid mode"}, status_code=400)
 
-        from superlocalmemory.core.config import SLMConfig, EmbeddingConfig, LLMConfig
-        from superlocalmemory.storage.models import Mode
-        from superlocalmemory.server.routes.helpers import log_mode_change
-        config = SLMConfig.load()
-        old_mode = config.mode.value
+        # Resolve the effective endpoint value before SSRF validation.
+        # Only the Ollama default injection happens here; the fallback to the
+        # stored URL (and redacted-echo detection) live inside
+        # apply_settings_update so that the P3 acceptance gate exercises
+        # the same code path as the HTTP handler — not a reimplementation.
+        _raw_ep: str = "" if clear_base_url else (base_url_input or endpoint_input or "")
+        if (
+            not _raw_ep
+            and provider_input == "ollama"
+            and config.llm.provider != "ollama"
+            and not clear_base_url
+        ):
+            _raw_ep = "http://localhost:11434"
 
-        # v3.6.12 (settings-2): honor a custom endpoint for ANY provider.
-        _endpoint = (body.get("base_url", "") or body.get("endpoint", "")).strip()
-        if not _endpoint and provider == "ollama":
-            _endpoint = "http://localhost:11434"
+        # SSRF guard — fires only for genuinely new egress destinations.
+        # Redacted echoes (the netloc-only string GET /mode returns per
+        # SEC-L-01) are NOT outbound targets; they will be silently replaced
+        # with the stored full URL by apply_settings_update.
+        if _raw_ep and (base_url_input is not None or endpoint_input is not None):
+            from urllib.parse import urlparse as _up
+            _stored_nl: str = _up(config.llm.api_base or "").netloc
+            _is_redacted_echo: bool = bool(_stored_nl) and (_raw_ep == _stored_nl)
+            if not _is_redacted_echo:
+                client = getattr(request, "client", None)
+                endpoint_error = _validate_provider_url(
+                    _raw_ep, getattr(client, "host", "") if client else ""
+                )
+                if endpoint_error:
+                    return JSONResponse({"error": endpoint_error}, status_code=400)
 
-        # Mutate only the fields the dashboard sent — all other config blocks
-        # (forgetting, injection, retrieval, math, consolidation, scope, …) are
-        # preserved because we loaded the full existing config above.
+        # Build the normalised body for apply_settings_update.  Inject the
+        # resolved endpoint (Ollama default when applicable) so that the
+        # credential-safe logic sees the approved value.  Consolidate
+        # base_url → endpoint to keep apply_settings_update's lookup simple.
+        _apply_body: dict = dict(body)
+        if _raw_ep or clear_base_url:
+            _apply_body["endpoint"] = _raw_ep
+            _apply_body.pop("base_url", None)
+
+        # Credential-safe LLM update.  All field presence, preservation, and
+        # security-clearing rules live here.  Other config blocks (forgetting,
+        # injection, retrieval, math, consolidation, scope, …) are preserved
+        # because we loaded the full existing config at the top of this handler.
+        config = apply_settings_update(config, _apply_body)
+
+        # Mode switch — happens after LLM update so the correct provider/key
+        # is already in place when the runtime engine is reconfigured.
         config.mode = Mode(new_mode)
-        config.llm = LLMConfig(
-            provider=provider if provider != "none" else "",
-            model=model,
-            api_key=api_key,
-            api_base=_endpoint,
-        )
 
         # Update embedding only when the dashboard explicitly sent those fields;
         # absence means "leave it alone" (AIDEV-86 / broader fix).
@@ -345,12 +534,14 @@ async def set_full_config(request: Request):
         return {
             "success": True,
             "mode": new_mode,
-            "provider": provider,
-            "model": model,
+            "provider": config.llm.provider or "none",
+            "model": config.llm.model,
             "embedding_provider": config.embedding.provider,
             "embedding_model": config.embedding.model_name,
             "embedding_dimension": config.embedding.dimension,
         }
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception as e:
         return _internal_error()
 
@@ -830,6 +1021,17 @@ async def recall_trace(request: Request):
         limit = body.get("limit", 10)
         window = body.get("window", "") or ""
         as_of_raw = (body.get("as_of", "") or "").strip()
+        raw_known_as_of = body.get("known_as_of", "")
+        raw_valid_at = body.get("valid_at", "")
+        if raw_known_as_of is not None and not isinstance(raw_known_as_of, str):
+            return JSONResponse({"error": "invalid_known_as_of"}, status_code=400)
+        if raw_valid_at is not None and not isinstance(raw_valid_at, str):
+            return JSONResponse({"error": "invalid_valid_at"}, status_code=400)
+        known_as_of_raw = (raw_known_as_of or "").strip()
+        valid_at_raw = (raw_valid_at or "").strip()
+        include_unknown = body.get("include_unknown", False)
+        if not isinstance(include_unknown, bool):
+            return JSONResponse({"error": "invalid_include_unknown"}, status_code=400)
 
         # Normalize as_of at HTTP boundary. Invalid → 400.
         _as_of: str | None = None
@@ -840,6 +1042,20 @@ async def recall_trace(request: Request):
                 return JSONResponse(
                     {"error": "invalid_as_of", "raw": as_of_raw}, status_code=400
                 )
+        def _normalize_named_time(raw: str, error: str) -> str | None | JSONResponse:
+            if not raw:
+                return None
+            from superlocalmemory.retrieval.temporal_utils import normalize_as_of
+            normalized = normalize_as_of(raw)
+            if normalized is None:
+                return JSONResponse({"error": error, "raw": raw}, status_code=400)
+            return normalized
+        _known_as_of = _normalize_named_time(known_as_of_raw, "invalid_known_as_of")
+        if isinstance(_known_as_of, JSONResponse):
+            return _known_as_of
+        _valid_at = _normalize_named_time(valid_at_raw, "invalid_valid_at")
+        if isinstance(_valid_at, JSONResponse):
+            return _valid_at
 
         # Use daemon engine — already loaded, shares warm page cache.
         # run_in_executor keeps event loop alive so browser doesn't abort.
@@ -855,6 +1071,8 @@ async def recall_trace(request: Request):
             lambda: engine.recall(
                 query, limit=limit, fast=False,
                 window=window or None, as_of=_as_of,
+                known_as_of=_known_as_of, valid_at=_valid_at,
+                include_unknown=include_unknown,
             ),
         )
         elapsed_ms = round((_time.monotonic() - t0) * 1000, 1)
@@ -1714,55 +1932,33 @@ async def trigger_consolidation(request: Request):
             profile_id=pid,
         )
 
-        # v3.7.8 SEC-M-01: the prior "WorkerPool" fast path called
-        # ``pool.send_command(...)``, a method that does not exist on
-        # WorkerPool — every call raised AttributeError, was silently
-        # swallowed by the bare ``except``, and fell through to this direct
-        # path unconditionally. That dead branch is removed; consolidation
-        # always runs directly against a lease-protected DB connection so a
-        # concurrent profile switch cannot commit mid-consolidation.
-        #
-        # v3.4.64: ConsolidationEngine.consolidate() is CPU/IO bound (seconds
-        # to minutes). Calling it directly in an async route blocks the ASGI
-        # event loop.  Moved into asyncio.to_thread() so the event loop stays
-        # live.  The runtime.operation() lease is acquired INSIDE the thread —
-        # blocking a thread is fine; blocking the event loop is not.
-        import asyncio as _asyncio
-        from superlocalmemory.core.config import SLMConfig
-        from superlocalmemory.storage.database import DatabaseManager
-        from superlocalmemory.storage import schema as _schema
-        from superlocalmemory.core.consolidation_engine import ConsolidationEngine
-        from superlocalmemory.server.profile_runtime import get_profile_runtime
+        # 4.0.8: the body of this handler moved to server/consolidation_runner
+        # so the periodic daemon trigger and this endpoint run the SAME code
+        # under the SAME lock. Two copies would be two definitions of
+        # "consolidated", and only one of them would get maintained.
+        from superlocalmemory.server.consolidation_runner import (
+            run_full_consolidation,
+        )
 
-        _app_state = request.app.state
+        # background=true returns as soon as the pass is scheduled. The
+        # session-end hook needs this: a full consolidation runs for seconds to
+        # minutes, and a hook that waits for it either blocks the user's shell
+        # or times out and wrongly concludes the run failed.
+        if body.get("background"):
+            import asyncio as _asyncio
 
-        def _run_consolidation() -> dict:
-            runtime = get_profile_runtime(_app_state)
-            with runtime.operation():
-                config = SLMConfig.load()
-                db = DatabaseManager(config.db_path)
-                db.initialize(_schema)
-                engine = ConsolidationEngine(
-                    db=db, config=config.consolidation, slm_config=config,
+            _app_state = request.app.state
+            _asyncio.create_task(
+                run_full_consolidation(
+                    _app_state, pid, lightweight=lightweight, trigger="hook",
                 )
-                res = engine.consolidate(profile_id=pid, lightweight=lightweight)
-                # v3.4.1: Auto-trigger behavioral pattern mining after consolidation
-                try:
-                    from superlocalmemory.learning.consolidation_worker import (
-                        ConsolidationWorker,
-                    )
-                    learning_db = config.base_dir / "learning.db"
-                    cw = ConsolidationWorker(str(config.db_path), str(learning_db))
-                    pattern_count = cw._generate_patterns(pid, False)
-                    res["patterns_mined"] = pattern_count
-                    logger.info(
-                        "Auto-mined %d patterns after consolidation", pattern_count
-                    )
-                except Exception as exc:
-                    logger.debug("Pattern mining after consolidation failed: %s", exc)
-            return res
+            )
+            authorization.complete()
+            return {"success": True, "started": True, "background": True}
 
-        result = await _asyncio.to_thread(_run_consolidation)
+        result = await run_full_consolidation(
+            request.app.state, pid, lightweight=lightweight, trigger="http",
+        )
         authorization.complete()
         return {"success": True, **result}
     except HTTPException:

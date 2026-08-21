@@ -4,8 +4,6 @@
 
 """Active-model cache + integrity verification.
 
-LLD reference: ``.backup/active-brain/lld/LLD-02-signal-pipeline-and-lightgbm.md``
-Section 4.4 — every model load goes through here.
 
 Hard rules enforced:
     M1 — ``pickle.loads`` is FORBIDDEN on ``state_bytes``.

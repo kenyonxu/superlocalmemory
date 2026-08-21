@@ -4,8 +4,6 @@
 
 """Proxy settlement for bandit plays (v3.4.22 only).
 
-LLD reference: ``.backup/active-brain/lld/LLD-03-contextual-bandit-and-ensemble.md``
-Section 3.5 and 5.6.
 
 Replaced in v3.4.22 by ``reward_from_outcomes.py`` — DO NOT extend this
 module beyond the proxy window contract.

@@ -52,7 +52,14 @@ def test_user_prompt_hook_enriches_topic_signature(monkeypatch):
     class _StubEntry:
         content = "test"
 
-    def _fake_read_entry_fast(session_id: str, topic_sig: str):
+    def _fake_read_entry_fast(session_id: str, topic_sig: str, **kwargs):
+        # **kwargs is load-bearing. The hook calls
+        #   read_entry_fast(session_id, topic_sig, require_current_admission=True)
+        # and that third argument arrived with the 4.0.2 current-truth admission
+        # work. A two-parameter stub raises TypeError during argument binding —
+        # before the body runs — so ``captured`` stayed empty and the assertion
+        # failed with a bare "None is not None" that named nothing. Accepting
+        # extra keywords keeps the stub tolerant of the real signature.
         captured["sig"] = topic_sig
         return None  # miss
 
@@ -138,6 +145,36 @@ def test_user_prompt_hook_budget_unchanged(monkeypatch):
     timings.sort()
     p95 = timings[int(N * 0.95)]
     assert p95 < 50.0, f"hook p95 {p95:.2f} ms exceeds 50 ms I1 budget"
+
+
+def test_user_prompt_hook_records_the_canonical_active_profile(monkeypatch):
+    """Profile-scoped presence must not depend on a host environment value."""
+    from superlocalmemory.core import context_cache as cc
+    from superlocalmemory.hooks import session_registry
+
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(cc, "read_entry_fast", lambda _session, _topic: None)
+    monkeypatch.setattr(session_registry, "resolve_active_profile", lambda: "research")
+    monkeypatch.setattr(
+        session_registry,
+        "mark_active",
+        lambda session_id, agent_type, profile_id: captured.update({
+            "session_id": session_id,
+            "agent_type": agent_type,
+            "profile_id": profile_id,
+        }),
+    )
+
+    _invoke_hook(
+        monkeypatch,
+        {"session_id": "sess-profile", "prompt": "profile scoped recall"},
+    )
+
+    assert captured == {
+        "session_id": "sess-profile",
+        "agent_type": "claude",
+        "profile_id": "research",
+    }
 
 
 # --------------------------------------------------------------------------

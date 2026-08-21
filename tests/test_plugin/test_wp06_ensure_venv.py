@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later — see LICENSE file
-"""WP-06 ensure-venv.sh tests — subprocess + tmp.
+"""ensure-venv.sh tests — subprocess + tmp.
 
 Requirements pin a TINY pure-Python package for CI speed (NOT numpy/scipy).
 We use 'iniconfig==2.0.0' (no deps, pure Python, ~10 KB wheel).
