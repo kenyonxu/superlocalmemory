@@ -7,7 +7,62 @@ var recallLabState = {
     perPage: 10,
     query: '',
     synthesis: '',
+    channelStatus: {},
 };
+
+// How each channel status reads to someone looking at a thin result set.
+// 'empty', 'disabled' and 'not_configured' are muted on purpose: the first is a
+// valid finding and the other two are the operator's own configuration. Only a
+// genuine degradation is coloured as a problem.
+var CHANNEL_STATUS_STYLE = {
+    ok:             {cls: 'bg-success',   label: 'ok'},
+    empty:          {cls: 'bg-secondary', label: 'no hits'},
+    disabled:       {cls: 'bg-secondary', label: 'off'},
+    not_configured: {cls: 'bg-secondary', label: 'n/a'},
+    error:          {cls: 'bg-danger',    label: 'failed'},
+    timeout:        {cls: 'bg-warning',   label: 'timed out'},
+    no_embedding:   {cls: 'bg-danger',    label: 'no embedding'},
+};
+
+var CHANNEL_FAULTS = ['error', 'timeout', 'no_embedding'];
+
+// Built with createElement and textContent throughout — the status strings come
+// from the server, and this pane has no reason to be an injection sink.
+function buildChannelHealth(statuses) {
+    var names = Object.keys(statuses || {});
+    if (names.length === 0) return null;
+    names.sort();
+
+    var wrap = document.createElement('div');
+    wrap.className = 'mt-2 d-flex flex-wrap align-items-center gap-1';
+
+    var degraded = names.filter(function(n) {
+        return CHANNEL_FAULTS.indexOf(statuses[n]) !== -1;
+    });
+
+    var lead = document.createElement('span');
+    lead.className = degraded.length ? 'me-1 text-danger fw-semibold' : 'me-1 text-muted';
+    lead.style.fontSize = '0.75rem';
+    // Said plainly, because the reason this strip exists is that a partly-broken
+    // retrieval path and a store with nothing to say produced the same answer.
+    lead.textContent = degraded.length
+        ? 'Retrieval degraded — this answer is missing what ' +
+          degraded.length + ' channel' + (degraded.length === 1 ? '' : 's') + ' would have found:'
+        : 'Channels:';
+    wrap.appendChild(lead);
+
+    names.forEach(function(name) {
+        var status = statuses[name];
+        var style = CHANNEL_STATUS_STYLE[status] || {cls: 'bg-dark', label: String(status)};
+        var badge = document.createElement('span');
+        badge.className = 'badge ' + style.cls;
+        badge.style.fontSize = '0.68rem';
+        badge.textContent = name + ' \u00b7 ' + style.label;
+        wrap.appendChild(badge);
+    });
+
+    return wrap;
+}
 
 // Delegation handles the case where the recall-lab tab pane is injected after parse time.
 document.addEventListener('click', function(e) {
@@ -54,6 +109,14 @@ document.addEventListener('click', function(e) {
 
         recallLabState.allResults = data.results || [];
         recallLabState.synthesis = data.synthesis || '';
+        recallLabState.channelStatus = data.channel_status || {};
+
+        // Rendered BEFORE the no-results branch below, and that ordering is the
+        // whole point: every channel failing produces exactly zero results, so
+        // the case most in need of an explanation is the one that would
+        // otherwise show a bare 'No results found'.
+        var health = buildChannelHealth(recallLabState.channelStatus);
+        if (health) metaDiv.appendChild(health);
 
         if (recallLabState.allResults.length === 0) {
             resultsDiv.textContent = '';
@@ -118,9 +181,21 @@ function renderRecallPage() {
         numLabel.textContent = '#' + (globalIndex + 1);
         scoreRow.appendChild(numLabel);
         var scoreBadges = document.createElement('div');
-        scoreBadges.innerHTML = '<span class="badge bg-primary me-1">Score: ' + r.score + '</span>' +
-            '<span class="badge bg-secondary me-1">Trust: ' + r.trust_score + '</span>' +
-            '<span class="badge bg-outline-info" style="border:1px solid #0dcaf0;color:#0dcaf0;">Conf: ' + r.confidence + '</span>';
+        // Built element by element rather than as an HTML string. The values are
+        // server-supplied, and this file's sibling panes are held to the same
+        // rule: this pane renders DOM, it does not parse markup.
+        [
+            ['badge bg-primary me-1', 'Score: ' + r.score, ''],
+            ['badge bg-secondary me-1', 'Trust: ' + r.trust_score, ''],
+            ['badge bg-outline-info', 'Conf: ' + r.confidence,
+             'border:1px solid #0dcaf0;color:#0dcaf0;'],
+        ].forEach(function(spec) {
+            var badge = document.createElement('span');
+            badge.className = spec[0];
+            badge.textContent = spec[1];
+            if (spec[2]) badge.style.cssText = spec[2];
+            scoreBadges.appendChild(badge);
+        });
         scoreRow.appendChild(scoreBadges);
         item.appendChild(scoreRow);
 

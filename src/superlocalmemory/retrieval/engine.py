@@ -27,6 +27,7 @@ import time
 from typing import TYPE_CHECKING, Any, Protocol
 
 from superlocalmemory.core.config import ChannelWeights, RetrievalConfig
+from superlocalmemory.retrieval import channel_status as chstat
 from superlocalmemory.retrieval.fusion import FusionResult, weighted_rrf
 from superlocalmemory.retrieval.strategy import QueryStrategy, QueryStrategyClassifier
 from superlocalmemory.retrieval.temporal_validity_filter import (
@@ -246,19 +247,30 @@ class RetrievalEngine:
         strat = self._strategy.classify(query, self._base_weights)
         _em("classify")
 
+        # What each channel did, so the caller can tell an answer apart from
+        # an outage. Owned by this call for the same reason the dropped set is:
+        # a dict on the engine would have two concurrent recalls overwriting
+        # each other's report.
+        channel_status: dict[str, str] = {}
+
         # Profile shortcut (runs before channel search)
         if self._profile_channel is not None:
             try:
                 profile_hits = self._profile_channel.search(
                     query, profile_id, top_k=10,
                 )
+                channel_status["profile"] = (
+                    chstat.OK if profile_hits else chstat.EMPTY
+                )
                 if profile_hits:
                     strat.weights["profile"] = 2.0
             except Exception as exc:
                 logger.warning("Profile channel: %s", exc)
                 profile_hits = []
+                channel_status["profile"] = chstat.ERROR
         else:
             profile_hits = []
+            channel_status["profile"] = chstat.NOT_CONFIGURED
 
         # Dynamic top-k for aggregation queries
         effective_limit = 100 if strat.query_type == "aggregation" else limit
@@ -276,6 +288,7 @@ class RetrievalEngine:
             as_of=as_of, known_as_of=known_as_of, valid_at=valid_at,
             include_unknown=include_unknown,
             dropped_channels=dropped_channels,
+            channel_status=channel_status,
         )
         _em("run_channels")
         # One request may need admission before fusion and again after optional
@@ -393,9 +406,18 @@ class RetrievalEngine:
         # this stage re-scores every fused candidate and then re-sorts them, so
         # whether it ran decided the top answer outright rather than adding to
         # it. Bound by data if it ever needs bounding, never by elapsed time.
-        if (self._entity is not None
-                and "entity_graph" not in set(self._config.disabled_channels)
-                and fused):
+        if self._entity is None:
+            channel_status["entity_graph"] = chstat.NOT_CONFIGURED
+        elif "entity_graph" in set(self._config.disabled_channels):
+            channel_status["entity_graph"] = chstat.DISABLED
+        elif not fused:
+            # Nothing to re-score. Not a fault: this channel scores other
+            # channels' candidates rather than producing its own.
+            channel_status["entity_graph"] = chstat.EMPTY
+        else:
+            # One chain, evaluated once. Repeating the three conditions to guard
+            # the work separately is how a status starts describing a decision
+            # the code no longer makes.
             try:
                 candidate_ids = [fr.fact_id for fr in fused[:100]]
                 eg_scores = self._entity.score_candidates(
@@ -404,6 +426,9 @@ class RetrievalEngine:
                     profile_id,
                     include_global=include_global,
                     include_shared=include_shared,
+                )
+                channel_status["entity_graph"] = (
+                    chstat.OK if eg_scores else chstat.EMPTY
                 )
                 if eg_scores:
                     boosted = []
@@ -423,6 +448,7 @@ class RetrievalEngine:
                     fused = sorted(boosted, key=lambda r: (-r.fused_score, r.fact_id))
             except Exception as exc:
                 logger.warning("Entity graph signal enhancement: %s", exc)
+                channel_status["entity_graph"] = chstat.ERROR
 
         # Brain Core S402: bridge and scene expansion append candidates after
         # the channel boundary. Reapply the same hard correction-admission rule
@@ -565,6 +591,7 @@ class RetrievalEngine:
             # community. Precomputed summary lookup only — no per-query LLM.
             community_context=self._community_context(results, profile_id),
             incomplete_channels=tuple(sorted(dropped_channels)),
+            channel_status=dict(channel_status),
         )
 
     # -- Community context (Wave Q2b) --------------------------------------
@@ -977,6 +1004,7 @@ class RetrievalEngine:
         valid_at: str | None = None,
         include_unknown: bool = False,
         dropped_channels: set[str] | None = None,
+        channel_status: dict[str, str] | None = None,
     ) -> dict[str, list[tuple[str, float]]]:
         """Run active retrieval channels.
 
@@ -994,6 +1022,12 @@ class RetrievalEngine:
         than merely late. It is a caller-owned set passed down per recall and
         deliberately not an attribute of self — two concurrent recalls sharing
         one would report each other's losses (the v3.4.64 race).
+
+        ``channel_status``, likewise caller-owned, receives one entry per
+        channel saying what became of it. Every channel gets exactly one:
+        those that cannot run are recorded before dispatch with the reason, and
+        every dispatched channel is recorded by the collection loop below —
+        which iterates the futures, so it cannot skip one.
         """
         import os as _os_e
         import time as _time_e
@@ -1023,23 +1057,50 @@ class RetrievalEngine:
             except Exception as exc:
                 logger.warning("Query embedding failed: %s", exc)
 
+        # Why a channel will not run, recorded BEFORE dispatch. An embedding
+        # failure silently takes three of the five channels down together, and
+        # the answer never said so: it looked exactly like a store with nothing
+        # relevant in it. Configuration and ablation are recorded too, so an
+        # operator reading a list of absent channels can tell their own choices
+        # apart from a fault.
+        if channel_status is not None:
+            for _name, _obj, _needs_emb in (
+                ("semantic", self._semantic, True),
+                ("bm25", self._bm25, False),
+                ("temporal", self._temporal, False),
+                ("hopfield", self._hopfield, True),
+                ("spreading_activation", self._spreading_activation, True),
+            ):
+                if _obj is None:
+                    channel_status[_name] = chstat.NOT_CONFIGURED
+                elif _name in disabled:
+                    channel_status[_name] = chstat.DISABLED
+                elif _needs_emb and q_emb is None:
+                    channel_status[_name] = chstat.NO_EMBEDDING
+
         # v3.4.53: collect channel callables and run in parallel.
         # Each channel is a standalone search — no shared mutable state,
         # no ordering dependencies. SQLite WAL mode permits concurrent reads.
         futures: dict[str, concurrent.futures.Future] = {}
 
         def _safe_channel(name: str, fn, *args):
-            """Run a single channel, returning (name, result_or_None)."""
+            """Run a single channel, returning (name, result_or_None, status).
+
+            Returning the status alongside the result is what separates "found
+            nothing" from "raised": both used to come back as ``None``.
+            """
             _cs = _time_e.monotonic() if _et else 0.0
             try:
                 res = fn(*args)
                 if _et:
                     logger.warning("[RECALL-TIMING]     channel.%-16s %.0f ms",
                                    name, (_time_e.monotonic() - _cs) * 1000.0)
-                return (name, res if res else None)
+                if res:
+                    return (name, res, chstat.OK)
+                return (name, None, chstat.EMPTY)
             except Exception as exc:
                 logger.warning("%s channel: %s", name, exc)
-                return (name, None)
+                return (name, None, chstat.ERROR)
 
         executor = self._channel_executor
         if self._semantic is not None and q_emb is not None and "semantic" not in disabled:
@@ -1111,14 +1172,22 @@ class RetrievalEngine:
                 )
                 if dropped_channels is not None:
                     dropped_channels.add(name)
+                # Same branch as the dropped set on purpose: two writes in one
+                # place cannot disagree about which channels timed out.
+                if channel_status is not None:
+                    channel_status[name] = chstat.TIMEOUT
                 fut.cancel()  # no-op if already running; prevents queued jobs from starting
                 continue
             try:
-                ch_name, result = fut.result()
+                ch_name, result, status = fut.result()
+                if channel_status is not None:
+                    channel_status[ch_name] = status
                 if result:
                     out[ch_name] = result
             except Exception as exc:
                 logger.warning("Channel %s failed: %s", name, exc)
+                if channel_status is not None:
+                    channel_status[name] = chstat.ERROR
 
         # Apply registered post-retrieval filters (forgetting filter, etc.).
         # Pass as_of in context dict when set so the bi-temporal validity filter

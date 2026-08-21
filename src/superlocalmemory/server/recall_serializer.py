@@ -308,4 +308,9 @@ def recall_response_metadata(response: Any) -> dict:
         "incomplete_channels": list(
             getattr(response, "incomplete_channels", ()) or ()
         ),
+        # What became of every channel. Travels with the answer for the same
+        # reason as the field above: a caller comparing two runs, or an
+        # operator looking at a thin result set, otherwise cannot tell a store
+        # with nothing to say from a retrieval path that is partly down.
+        "channel_status": dict(getattr(response, "channel_status", {}) or {}),
     }

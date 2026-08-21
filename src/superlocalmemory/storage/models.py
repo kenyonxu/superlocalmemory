@@ -459,3 +459,12 @@ class RecallResponse:
     # which two runs of one query are expected to agree. Sorted, so the field
     # is itself repeatable. Additive — backward compatible.
     incomplete_channels: tuple[str, ...] = ()
+    # What happened to each retrieval channel on this recall: ok / empty /
+    # error / timeout / disabled / not_configured / no_embedding. Absence and
+    # failure used to look identical from here — a channel that raises on every
+    # query and a channel that correctly found nothing both simply had no
+    # candidates, and the only trace was a log line. Keyed by channel name;
+    # ``retrieval.channel_status.CHANNEL_NAMES`` is the full set, so a missing
+    # key is a reporting gap and ``empty`` is an answer. Additive — backward
+    # compatible.
+    channel_status: dict[str, str] = field(default_factory=dict)
