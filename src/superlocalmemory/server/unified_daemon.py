@@ -4072,12 +4072,26 @@ def _register_dashboard_routes(application: FastAPI) -> None:
         # 4.0.10: asset ?v= strings are now derived from file content instead of
         # being hand-written literals that tracked nothing. See
         # server/asset_versions.py — including what that does and does not fix.
-        from superlocalmemory.server.asset_versions import render_index
+        # Asset versioning is cosmetic. It must never be why this page 500s.
+        #
+        # The import is deferred (house style, keeps startup lean), which means
+        # it resolves at REQUEST time — so when `pip install -e .` replaced the
+        # installed package underneath a running daemon, this route began
+        # answering "Internal Server Error" on the dashboard while every other
+        # endpoint was fine. A stale hand-written version string is a trifle; a
+        # blank page is not. Fall back to the file as written.
+        try:
+            from superlocalmemory.server.asset_versions import render_index
 
-        return render_index(
-            index_path, UI_DIR,
-            substitutions={"__SLM_VERSION__": _SLM_VERSION},
-        )
+            return render_index(
+                index_path, UI_DIR, substitutions={"__SLM_SLM_VERSIONSION__": _SLM_VERSION},
+            )
+        except Exception as exc:  # noqa: BLE001 — serve the page regardless
+            logger.warning(
+                "asset version rewrite unavailable, serving index.html as "
+                "written: %s: %s", type(exc).__name__, exc,
+            )
+            return index_path.read_text().replace("__SLM_SLM_VERSIONSION__", _SLM_VERSION)
 
     @application.get("/favicon.ico", include_in_schema=False)
     async def favicon():

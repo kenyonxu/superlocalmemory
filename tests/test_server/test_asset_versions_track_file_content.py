@@ -244,8 +244,55 @@ class TestEveryServerUsesIt:
             f"server/{module}.py serves index.html without deriving asset "
             "versions, so its pages carry the hand-written literals"
         )
-        assert 'return index_path.read_text()' not in src, (
-            f"server/{module}.py still returns the raw file"
+        # And it must degrade rather than fail. This assertion used to forbid
+        # `index_path.read_text()` outright, which was wrong: reading the file
+        # as written is precisely the right fallback, and forbidding it is what
+        # left the route with nowhere to go when the import failed.
+        assert "return index_path.read_text().replace" in src, (
+            f"server/{module}.py has no fallback, so a failure in asset "
+            "versioning — a cosmetic feature — returns 500 for the whole page"
+        )
+
+
+class TestACosmeticFeatureCannotTakeThePageDown:
+    """The dashboard 500'd in production for two minutes because of this.
+
+    ``pip install -e .`` replaced the installed package underneath a running
+    daemon. The import of ``asset_versions`` sits inside the route handler, so
+    it resolves at REQUEST time — and the main page began answering "Internal
+    Server Error" while every other endpoint was healthy.
+
+    A stale version string is a trifle. A blank dashboard is not.
+    """
+
+    @pytest.mark.parametrize("module", ["api", "ui", "unified_daemon"])
+    def test_the_fallback_is_reachable_from_the_failure(self, module: str) -> None:
+        import importlib
+        import inspect
+
+        mod = importlib.import_module(f"superlocalmemory.server.{module}")
+        src = inspect.getsource(mod)
+        # The render must sit inside a try whose except returns the plain file.
+        assert "except Exception as exc:  # noqa: BLE001 — serve the page regardless" in src
+        assert "asset version rewrite unavailable" in src, (
+            "the fallback is silent; an operator cannot tell that versions "
+            "stopped being derived"
+        )
+
+    def test_the_fallback_produces_a_whole_page(self) -> None:
+        """Not just that it returns — that what it returns is usable."""
+        import pathlib as _pl
+
+        import superlocalmemory
+
+        ui = _pl.Path(superlocalmemory.__file__).parent / "ui"
+        html = (ui / "index.html").read_text().replace(
+            "__SLM_VERSION__", superlocalmemory.__version__,
+        )
+        assert "<html" in html.lower()
+        assert "__SLM_VERSION__" not in html
+        assert len(_ANY_REF.findall(html)) >= 60, (
+            "the fallback page lost its asset references"
         )
 
 
