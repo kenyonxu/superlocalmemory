@@ -272,25 +272,37 @@ def test_a_store_with_no_planned_events_migrates_cleanly(tmp_path):
         conn.close()
 
 
-def test_a_failed_rewrite_refuses_rather_than_dropping_the_table(store, monkeypatch):
+def test_a_rewrite_that_does_not_take_refuses_rather_than_dropping_the_table(tmp_path):
     """The catastrophic path, forced.
 
-    If the constraint rewrite silently does not take, the staging table carries
-    the ORIGINAL constraint and the real table is then dropped — every planned
-    event lost to a rejected copy. The migration must stop instead.
+    If the constraint rewrite silently produces the ORIGINAL constraint, the
+    staging table carries it and the real table is then dropped — every planned
+    event lost to a copy that rejects them. The rebuild must stop instead.
+
+    Forced by calling ``_rebuild`` on a table whose definition contains no
+    occurrence of the old value, so the rename cannot produce the new one. That
+    is the exact condition the guard exists for.
     """
-    import re as _re
+    conn = sqlite3.connect(str(tmp_path / "norewrite.db"))
+    try:
+        conn.execute(
+            "CREATE TABLE atomic_facts ("
+            " fact_id TEXT PRIMARY KEY, memory_id TEXT, content TEXT,"
+            " fact_type TEXT NOT NULL DEFAULT 'episodic')"
+        )
+        conn.execute("INSERT INTO atomic_facts VALUES ('f1','m1','a note','episodic')")
+        conn.commit()
 
-    # A pattern that matches nothing, so the substitution is a no-op.
-    monkeypatch.setattr(M046, "_CHECK_RE", _re.compile(r"(ZZZ)(ZZZ)(ZZZ)"))
+        with pytest.raises(sqlite3.Error, match="could not rewrite"):
+            M046._rebuild(conn)
 
-    with pytest.raises(sqlite3.Error):
-        M046._rebuild(store)
-
-    # The original table and every row are still there.
-    assert _count(store, "SELECT COUNT(*) FROM atomic_facts") == len(_ROWS)
-    assert _count(
-        store, "SELECT COUNT(*) FROM atomic_facts WHERE fact_type='temporal'") == 3
+        # The original table and its row are untouched.
+        assert _count(conn, "SELECT COUNT(*) FROM atomic_facts") == 1
+        assert conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='atomic_facts'"
+        ).fetchone() is not None
+    finally:
+        conn.close()
 
 
 def test_a_short_copy_rolls_back_rather_than_committing(store, monkeypatch):
@@ -347,3 +359,124 @@ def test_it_puts_the_connections_own_pragma_back(store):
         assert bool(store.execute("PRAGMA foreign_keys").fetchone()[0]) is original, (
             f"foreign_keys was {original} before the migration and is not after"
         )
+
+
+# ---------------------------------------------------------------------------
+# How the constraint is SPELLED must not change what the migration does
+# ---------------------------------------------------------------------------
+
+_CHECK_SPELLINGS = {
+    "bare": "CHECK (fact_type IN ('episodic','semantic','opinion','temporal'))",
+    "double_quoted": 'CHECK ("fact_type" IN (\'episodic\',\'semantic\',\'opinion\',\'temporal\'))',
+    "bracketed": "CHECK ([fact_type] IN ('episodic','semantic','opinion','temporal'))",
+    "backticked": "CHECK (`fact_type` IN ('episodic','semantic','opinion','temporal'))",
+    "collated": "CHECK (fact_type COLLATE NOCASE IN ('episodic','semantic','opinion','temporal'))",
+    "multiline": (
+        "CHECK (\n   fact_type   IN (\n 'episodic',\n 'semantic',\n"
+        " 'opinion',\n 'temporal'\n )\n)"
+    ),
+    "absent": "",
+    "already_migrated": "CHECK (fact_type IN ('episodic','semantic','opinion','prospective'))",
+}
+
+
+def _store_with_check(path, check: str, *, with_rows: bool) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE atomic_facts ("
+        " fact_id TEXT PRIMARY KEY, memory_id TEXT, content TEXT,"
+        f" fact_type TEXT NOT NULL DEFAULT 'episodic' {check})"
+    )
+    conn.execute("INSERT INTO atomic_facts VALUES ('s1','m1','a note','episodic')")
+    if with_rows and "prospective" not in check:
+        conn.execute(
+            "INSERT INTO atomic_facts VALUES ('f1','m1','renew passport','temporal')")
+    conn.commit()
+    return conn
+
+
+@pytest.mark.parametrize("spelling", sorted(_CHECK_SPELLINGS))
+@pytest.mark.parametrize("with_rows", [True, False], ids=["with_rows", "empty"])
+def test_the_constraints_spelling_does_not_change_the_outcome(
+    tmp_path, spelling, with_rows,
+):
+    """A quoted identifier used to make this migration corrupt the store.
+
+    The original code decided whether the constraint blocked the new value by
+    matching its DDL text with a pattern that required a bare ``fact_type``. On a
+    store written ``CHECK ("fact_type" IN (...))`` the pattern missed, and the
+    migration took the cheap UPDATE path. Two outcomes, both bad:
+
+    * with rows to convert, the UPDATE raised and the runner retried forever;
+    * with none, it committed and ``verify()`` reported success while the table
+      went on rejecting the new value — so every planned event stored afterwards
+      was lost, and nothing repaired it, because the pattern answered the same
+      way every run.
+
+    A constraint's behaviour is now asked of SQLite instead of read out of its
+    text, so the spelling cannot matter. This is the test that says so.
+    """
+    conn = _store_with_check(
+        tmp_path / f"{spelling}.db", _CHECK_SPELLINGS[spelling],
+        with_rows=with_rows,
+    )
+    try:
+        M046.apply(conn)
+
+        assert M046.verify(conn), f"verify() failed for a {spelling} constraint"
+        assert _count(
+            conn, "SELECT COUNT(*) FROM atomic_facts WHERE fact_type='temporal'"
+        ) == 0, "a planned event was left under the old name"
+
+        expected = 1 if (with_rows and "prospective" not in _CHECK_SPELLINGS[spelling]) else 0
+        assert _count(
+            conn, "SELECT COUNT(*) FROM atomic_facts WHERE fact_type='prospective'"
+        ) == expected
+
+        # The property that matters to the user: a planned event can be stored.
+        conn.execute(
+            "INSERT INTO atomic_facts VALUES ('p1','m1','book the flight','prospective')")
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("spelling", ["double_quoted", "bracketed", "collated"])
+def test_the_old_value_is_still_rejected_whatever_the_spelling(tmp_path, spelling):
+    """The rebuild has to reach constraints the old code could not even parse."""
+    conn = _store_with_check(
+        tmp_path / f"{spelling}-rej.db", _CHECK_SPELLINGS[spelling], with_rows=True,
+    )
+    try:
+        M046.apply(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO atomic_facts VALUES ('o1','m1','old','temporal')")
+    finally:
+        conn.close()
+
+
+def test_the_probe_leaves_no_trace(tmp_path):
+    """Asking "would this be accepted" must not change anything.
+
+    The question is answered by attempting a write inside a savepoint and rolling
+    it back. A savepoint that leaked would either hold a write lock or, worse,
+    commit the probe.
+    """
+    conn = _store_with_check(
+        tmp_path / "probe.db", _CHECK_SPELLINGS["bare"], with_rows=True,
+    )
+    try:
+        before = conn.execute(
+            "SELECT fact_id, fact_type FROM atomic_facts ORDER BY fact_id"
+        ).fetchall()
+
+        assert M046._accepts(conn, "prospective") is False  # blocked pre-migration
+        assert M046._accepts(conn, "episodic") is True
+
+        after = conn.execute(
+            "SELECT fact_id, fact_type FROM atomic_facts ORDER BY fact_id"
+        ).fetchall()
+        assert after == before, "the probe changed the data it was asking about"
+        assert not conn.in_transaction, "the probe left a transaction open"
+    finally:
+        conn.close()

@@ -64,7 +64,6 @@ for this migration rather than a nice-to-have.
 from __future__ import annotations
 
 import logging
-import re
 import sqlite3
 
 logger = logging.getLogger(__name__)
@@ -85,14 +84,6 @@ DDL = """
 -- Rebuild atomic_facts with fact_type CHECK accepting 'prospective',
 -- translating every existing 'temporal' row. See apply().
 """
-
-#: Matches the fact_type CHECK list in the table's own DDL, whatever whitespace
-#: the installed schema happens to use.
-_CHECK_RE = re.compile(
-    r"(CHECK\s*\(\s*fact_type\s+IN\s*\()([^)]*)(\)\s*\))",
-    re.IGNORECASE | re.DOTALL,
-)
-
 
 def _table_sql(conn: sqlite3.Connection, name: str) -> str | None:
     try:
@@ -160,15 +151,68 @@ def _dependents(conn: sqlite3.Connection) -> list[str]:
     return out
 
 
-def _check_blocks_new_value(conn: sqlite3.Connection) -> bool:
-    """Whether the table's CHECK constraint would reject ``prospective``."""
-    sql = _table_sql(conn, _TABLE)
-    if not sql:
+def _accepts(conn: sqlite3.Connection, value: str) -> bool | None:
+    """Whether the table will accept ``value`` in ``fact_type``. None if unknown.
+
+    Asked by attempting a write inside a savepoint and rolling it back, because
+    the constraint is what decides and its DDL text can be spelled several ways.
+
+    An earlier version read the answer out of the CREATE statement with a regex
+    that required a bare ``fact_type`` identifier. On a store whose constraint
+    was written ``CHECK ("fact_type" IN (...))`` the pattern did not match, the
+    migration concluded there was nothing blocking it, took the cheap UPDATE
+    path — and then either raised on the first converted row, or, on a store
+    with none, committed happily. In that second case ``verify()`` reported the
+    migration complete while the table went on rejecting the new value, so every
+    planned event stored afterwards was lost to a constraint failure. Nothing
+    would ever have repaired it, because the same regex answered the same way
+    every time.
+
+    Returns None when there is no row to probe with. The caller treats that as
+    "rebuild anyway": on an empty table a rebuild costs microseconds and makes
+    the constraint correct by construction, which is a better trade than
+    guessing from text.
+    """
+    try:
+        row = conn.execute(f"SELECT rowid FROM {_TABLE} LIMIT 1").fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    rowid = next(iter(row.values())) if isinstance(row, dict) else row[0]
+
+    try:
+        conn.execute("SAVEPOINT m046_probe")
+    except sqlite3.Error:
+        return None
+    try:
+        conn.execute(
+            f"UPDATE {_TABLE} SET fact_type=? WHERE rowid=?", (value, rowid),
+        )
+        return True
+    except sqlite3.IntegrityError:
         return False
-    match = _CHECK_RE.search(sql)
-    if match is None:
-        return False
-    return _NEW_VALUE not in match.group(2)
+    except sqlite3.Error:
+        return None
+    finally:
+        # Rolled back either way: this asks a question, it does not change data.
+        try:
+            conn.execute("ROLLBACK TO m046_probe")
+            conn.execute("RELEASE m046_probe")
+        except sqlite3.Error:  # pragma: no cover — best effort
+            pass
+
+
+def _ddl_mentions_old_value(conn: sqlite3.Connection) -> bool:
+    """Is the old value still written into the table definition?
+
+    The fallback for a table with no rows to probe. Deliberately looks for the
+    quoted literal rather than the word: the shipped schema carries a comment
+    reading "-- Temporal (3-date model)", which sqlite_master preserves, and
+    matching that would report every correctly-migrated store as unmigrated.
+    """
+    sql = _table_sql(conn, _TABLE) or ""
+    return f"'{_OLD_VALUE}'" in sql
 
 
 def _has_fact_type(conn: sqlite3.Connection) -> bool:
@@ -203,7 +247,22 @@ def verify(conn: sqlite3.Connection) -> bool:
     if _count(conn, f"SELECT COUNT(*) FROM {_TABLE} "
                     f"WHERE fact_type='{_OLD_VALUE}'") != 0:
         return False
-    return not _check_blocks_new_value(conn)
+
+    # Two things must hold: the definition no longer names the old value
+    # anywhere, and the table actually accepts the new one. The second is asked
+    # of SQLite rather than read out of the DDL, because a constraint's text can
+    # be spelled several ways and its behaviour cannot.
+    #
+    # Deliberately NOT asserted: that the old value is rejected. On a store whose
+    # table never had a CHECK, that is unachievable without inventing a
+    # constraint it never had, and the schema-version ceiling is what actually
+    # stops an older writer.
+    if _ddl_mentions_old_value(conn):
+        return False
+    accepts_new = _accepts(conn, _NEW_VALUE)
+    # None means there was no row to probe with, which on an empty table leaves
+    # the definition check above as the whole answer.
+    return accepts_new is not False
 
 
 def apply(conn: sqlite3.Connection) -> None:
@@ -215,10 +274,15 @@ def apply(conn: sqlite3.Connection) -> None:
         # The column this migration converts does not exist on this store yet.
         return
 
-    if not _check_blocks_new_value(conn):
-        # Either already migrated, or a schema variant with no CHECK to fight.
-        # A plain UPDATE is enough and touches no index: FTS is external-content
-        # over `content`, which this does not change.
+    # Rebuild only when the definition still names the old value. A store whose
+    # table never constrained fact_type at all has nothing to rewrite: its rows
+    # still need translating, but inventing a constraint it never had is not this
+    # migration's job — the version ceiling is what stops an older writer.
+    needs_rebuild = _ddl_mentions_old_value(conn)
+    if not needs_rebuild:
+        # The constraint is right; only the rows need translating. A plain UPDATE
+        # is enough and touches no index: FTS is external-content over
+        # `content`, which this does not change.
         conn.execute("BEGIN IMMEDIATE")
         try:
             conn.execute(
@@ -240,21 +304,22 @@ def _rebuild(conn: sqlite3.Connection) -> None:
     if not original:  # pragma: no cover — guarded by the caller
         raise sqlite3.OperationalError(f"M046: cannot read {_TABLE} definition")
 
-    # Rewrite only the CHECK list, leaving every column, default and constraint
-    # exactly as the installed schema declared it. Reconstructing the table from
-    # PRAGMA table_info would silently drop CHECK constraints and collations.
-    def _swap(match: re.Match[str]) -> str:
-        values = match.group(2)
-        return match.group(1) + values.replace(
-            f"'{_OLD_VALUE}'", f"'{_NEW_VALUE}'",
-        ) + match.group(3)
-
-    rebuilt = _CHECK_RE.sub(_swap, original, count=1)
+    # Rename the VALUE, not the column reference. Everything else about the
+    # table — every column, default, collation and constraint — is left exactly
+    # as the installed schema declared it, because reconstructing from
+    # PRAGMA table_info silently drops CHECK constraints and collations.
+    #
+    # Targeting the quoted literal is what makes this work on any spelling of
+    # the constraint. An earlier version matched the identifier, which required a
+    # bare `fact_type`; a store written `CHECK ("fact_type" IN (...))` did not
+    # match and could not be migrated at all. The value is always `'temporal'`
+    # regardless of how the column beside it is quoted.
+    rebuilt = original.replace(f"'{_OLD_VALUE}'", f"'{_NEW_VALUE}'")
 
     # A rewrite that did not take must stop the migration. Proceeding would
     # create a replacement table carrying the ORIGINAL constraint and then drop
     # the real one — the corrupting outcome this whole module exists to avoid.
-    if _NEW_VALUE not in rebuilt:
+    if f"'{_OLD_VALUE}'" in rebuilt or f"'{_NEW_VALUE}'" not in rebuilt:
         raise sqlite3.OperationalError(
             "M046: could not rewrite the fact_type constraint; "
             "refusing to rebuild the table"
