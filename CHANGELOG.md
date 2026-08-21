@@ -5,6 +5,81 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.10] — Your memories, not the summarizer's
+
+### Fixed
+- **A background pass had been writing its own summaries into your memory, and
+  they answered your questions.** SuperLocalMemory groups related memories and
+  writes a short summary of each group, meant for the dashboard. Since June
+  those summaries were being stored as memories, where they competed with your
+  own notes — and won, because each one carried the combined subjects of
+  everything it summarised and so looked more connected than any single note you
+  had written. Asked what you were working on, a store could answer with the
+  summarizer apologising for having nothing to say. Summaries now live
+  separately and are shown on the dashboard only. They are never returned as
+  answers, by any route: recall, search, the recent list, pinned context, an
+  export, or the memory count.
+- **Summarising a group set aside the memories in it.** That made sense while
+  the summary stood in for them in your answers. It does not now, so it has
+  stopped — and upgrading brings back the memories it had already set aside.
+  Where a store had been running long enough for those memories to have faded on
+  their own, they are restored to whatever standing their own history warrants,
+  not promoted.
+- **Upgrading repairs an affected store by itself.** No commands, no files to
+  edit. A verified backup is taken first, the repair is safe to interrupt and
+  safe to repeat, and it reports in plain language what it changed. It also
+  keeps checking: if the problem ever reappears, the next start handles it.
+- **The setting that turns summarising off did nothing.** It has been
+  documented and ignored since it was added.
+- **A summary that is a refusal is no longer stored as one.** When a group has
+  nothing in common, a model does not fail — it answers in prose, and that prose
+  was indistinguishable from a summary to anything that only checked whether
+  text came back. Model output is now cleaned of chat framing and rejected if it
+  turns out to be about the request rather than about your memories. A summary
+  assembled from your own sentences is exempt, so a note that happens to be
+  phrased like a chatbot is not thrown away.
+- **A summary of a group could pull real memories into a later grouping pass
+  and set them aside with it.**
+- **Summarising an unchanged group repeated its work indefinitely**, including
+  calling a language model to regenerate text it already had. It now recognises
+  that nothing has changed and stops.
+- **An exported backup carried the summaries**, and importing it would have
+  turned them back into memories on a machine where nothing was wrong.
+- **A memory can now be dated to when it happened**, not just to when it was
+  written. Everything was previously stamped with its ingestion date, so a note
+  written today about something from March filed itself under today. A date that
+  cannot be understood is refused rather than quietly dropped.
+- **A dated memory is now findable by its date even when nothing in it was
+  recognised as a name.** Roughly a quarter of a typical store was reachable
+  only by being recent, rather than by being about the right time.
+- **Stored memories now record which conversation they came from.** Reading
+  memories worked this out; writing them did not, so almost nothing carried it —
+  which left the feature that spreads an answer across different conversations
+  with nothing to work with.
+
+### Added
+- **`slm doctor` and the dashboard now tell you whether your memories can
+  actually be found**, with the counts behind the answer: how many you have, how
+  many are searchable by meaning, and how many are being held back and why. This
+  was previously unknowable without writing your own queries against the
+  database — one machine ran for months with 44% of its memory unreachable while
+  every status line said it was healthy.
+- **A Knowledge Overview on the Summaries tab.** What your memory knows, how
+  many memories each summary covers, and the stretch of time it spans. Summaries
+  that came back empty are counted rather than shown, and near-identical ones
+  are collapsed, so the page reflects what is there instead of padding itself.
+
+### Changed
+- **Searching by meaning no longer spends its results on held-back summaries.**
+  On a store with a lot of them, a question close to their subject matter could
+  come back with nothing usable at all while appearing to have answered.
+- **The startup repair no longer reports itself finished while memories remain
+  unsearchable.** It says how many are left, why, and that it will retry — and
+  it does retry, instead of recording success and never looking again.
+- **Dashboard files now carry a version taken from their own contents**, so a
+  changed script or stylesheet is always served as a new address. The version
+  numbers were maintained by hand and had stopped matching the files they named.
+
 ## [4.0.9] — Findable the moment you write it
 
 ### Fixed

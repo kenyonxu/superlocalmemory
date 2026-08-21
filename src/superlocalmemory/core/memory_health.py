@@ -184,10 +184,23 @@ def describe(health: MemoryHealth) -> list[str]:
         )
     elif health.live_facts:
         pct = 100.0 * health.reachability
-        if health.reachability >= 0.99:
+        if health.findable_by_meaning >= health.live_facts:
+            # "All" only when the counts actually agree. The threshold used to
+            # be reachability >= 0.99, which printed "All of them can be found
+            # by asking a question (5,199 indexed)" on a store of 5,205 — a
+            # claim of all, contradicted by the number beside it. This module
+            # exists to be believed; it cannot round in its own favour.
             lines.append(
-                f"All of them can be found by asking a question "
-                f"({health.findable_by_meaning:,} indexed)."
+                f"All {health.live_facts:,} of them can be found by asking a "
+                f"question."
+            )
+        elif health.reachability >= 0.99:
+            gap = health.live_facts - health.findable_by_meaning
+            lines.append(
+                f"{health.findable_by_meaning:,} of them can be found by asking "
+                f"a question. The other {gap:,} can only be found by matching "
+                f"words. That is a small enough share to be normal — a memory "
+                f"written moments ago, or one the model could not read."
             )
         else:
             gap = health.live_facts - health.findable_by_meaning
