@@ -143,14 +143,37 @@ def test_no_subsystem_reached_for_the_network_during_a_recall(
 # ---------------------------------------------------------------------------
 
 def test_session_summary_falls_back_to_extractive(mode_a_engine):
+    """Summarising must produce text with no model and no network.
+
+    The first version of this test called the function with the wave plan's
+    argument order, which is wrong: the first parameter is a DATABASE PATH, not
+    a session id. So it passed the string "s1" as a path, the call failed
+    internally, and the function's fail-soft contract returned a result object
+    anyway — which the assertion accepted. It also left an empty file named `s1`
+    in whatever directory the suite ran from.
+
+    A fail-soft function will absorb a wrong call and look like a pass. So the
+    assertion here is on the CONTENT, which only appears if the extractive path
+    actually ran.
+    """
     from superlocalmemory.summaries.session_summary import (
         generate_session_summary,
     )
 
-    facts = [type("F", (), {"content": t, "fact_id": f"f{i}"})()
-             for i, t in enumerate(_FACTS)]
-    result = generate_session_summary("s1", facts, len(facts), config=None)
+    session = "mode-a-summary"
+    for text in _FACTS:
+        mode_a_engine.store(text, session_id=session)
+
+    result = generate_session_summary(
+        mode_a_engine._config.db_path, session, "default", config=None,
+    )
+
     assert result is not None, "Mode A summary returned nothing"
+    content = getattr(result, "content", "") or ""
+    assert content.strip(), (
+        "the summary is empty; with no model the extractive path is all there "
+        "is, and it produced nothing"
+    )
 
 
 def test_close_session_works_with_no_network(mode_a_engine):
