@@ -258,6 +258,8 @@ class EmbeddingService:
             return bool(self._config.api_endpoint)
         if self._config.is_cloud:
             return bool(self._config.api_endpoint and self._config.api_key)
+        if self._available is False and self._daemon_fallback is not None:
+            return True
         return self._available
 
     @property
@@ -277,6 +279,11 @@ class EmbeddingService:
                 getattr(self, "_remote_ready", False)
                 and self.is_available
             )
+        if (
+            getattr(self, "_daemon_fallback", None) is not None
+            and getattr(self, "_fallback_served", 0) > 0
+        ):
+            return True
         proc = getattr(self, "_worker_proc", None)
         if proc is None or getattr(self, "_request_count", 0) <= 0:
             return False
@@ -284,6 +291,15 @@ class EmbeddingService:
             return proc.poll() is None
         except Exception:
             return False
+
+    @property
+    def embedder_mode(self) -> str:
+        """How embeddings are currently produced: local | daemon-fallback | unavailable."""
+        if self._daemon_fallback is not None:
+            return "daemon-fallback"
+        if self._available is False:
+            return "unavailable"
+        return "local"
 
     @property
     def dimension(self) -> int:
@@ -744,6 +760,16 @@ class EmbeddingService:
                 ValueError("daemon returned incomplete embeddings")
             )
             return None
+        # Dimension provenance: a wrong-dimension daemon response must name
+        # its source so callers can tell fallback vectors from local ones.
+        for vec in result:
+            if vec is not None:
+                try:
+                    self._validate_dimension(np.asarray(vec))
+                except DimensionMismatchError as exc:
+                    raise DimensionMismatchError(
+                        f"{exc} (via daemon fallback)"
+                    ) from exc
         self._fallback_served += 1
         self._fallback_read_timeouts = 0
         return result

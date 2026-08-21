@@ -176,3 +176,51 @@ class TestEdgeInputRobustness:
         assert svc._daemon_fallback is proxy
         assert svc._fallback_fail_count == 0
         assert svc._fallback_read_timeouts == 0
+
+
+class TestExternalSemantics:
+    def test_is_available_true_with_fallback(self) -> None:
+        svc = _svc()
+        svc._available = False
+        svc._daemon_fallback = MagicMock()
+        assert svc.is_available is True
+
+    def test_is_available_false_without_fallback(self) -> None:
+        svc = _svc()
+        svc._available = False
+        assert svc.is_available is False
+
+    def test_is_warm_after_fallback_served(self) -> None:
+        svc = _svc()
+        svc._available = False
+        proxy = MagicMock()
+        proxy.embed_batch.return_value = [[0.1] * 384]
+        svc._daemon_fallback = proxy
+        assert svc.is_warm is False
+        svc.embed("x")
+        assert svc.is_warm is True
+
+    def test_embedder_mode(self) -> None:
+        svc = _svc()
+        assert svc.embedder_mode == "local"
+        svc._available = False
+        assert svc.embedder_mode == "unavailable"
+        svc._daemon_fallback = MagicMock()
+        assert svc.embedder_mode == "daemon-fallback"
+
+    def test_dimension_mismatch_message_names_daemon_fallback(self) -> None:
+        from superlocalmemory.core.embeddings import DimensionMismatchError
+        svc = _svc()  # dimension=384
+        svc._available = False
+        proxy = MagicMock()
+        proxy.embed_batch.return_value = [[0.1] * 8]  # 错维度
+        svc._daemon_fallback = proxy
+        with pytest.raises(DimensionMismatchError, match="daemon fallback"):
+            svc.embed("x")
+
+    def test_unload_is_noop_for_fallback(self) -> None:
+        svc = _svc()
+        svc._available = False
+        svc._daemon_fallback = MagicMock()
+        assert svc.unload() in (True, False)  # 不抛异常即通过
+        assert svc._daemon_fallback is not None  # fallback 存活,不受影响
