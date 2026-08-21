@@ -146,6 +146,92 @@ def _scope_where(
     return where, params
 
 
+def _compose_visible_clause(
+    prefix: str,
+    *,
+    has_archive: bool,
+    has_quarantine: bool,
+    include_quarantined: bool = False,
+) -> str:
+    """Build the AND-clause from what the store actually has.
+
+    Split out from ``DatabaseManager.visible_fact_clause`` so that callers
+    holding a bare ``sqlite3.Connection`` produce a byte-identical predicate
+    rather than a second, drifting copy.
+    """
+    table = f"{prefix}." if prefix else ""
+    clause = ""
+    if has_archive:
+        clause += f" AND COALESCE({table}archive_status, 'live') != 'archived'"
+    if not include_quarantined and has_quarantine:
+        clause += f" AND COALESCE({table}quarantined, 0) = 0"
+    return clause
+
+
+def visible_fact_clause_for_connection(
+    conn: sqlite3.Connection,
+    prefix: str = "",
+    *,
+    include_quarantined: bool = False,
+) -> str:
+    """``visible_fact_clause`` for a caller that hand-rolls its SQL.
+
+    WHY THIS EXISTS. 4.0.10 put the withheld-row filter on every
+    ``DatabaseManager`` read path and every retrieval channel, and enumerated
+    them in a test. The enumeration was of *methods*, and two HTTP routes never
+    call one: ``/api/memories`` and ``/api/v3/timeline/`` build their own SQL
+    against ``atomic_facts``. Measured against the author's store on 4.0.10,
+    ``/api/memories?limit=50`` served **24 withheld rows on page one** and
+    reported a total of 5,218 against 3,919 real memories -- the release's
+    central claim, false on the dashboard's main list.
+
+    So the rule is not "read paths go through DatabaseManager"; plenty of
+    reasonable code will not. The rule is that anything answering "what does my
+    memory contain" resolves its predicate from here. Presence-guarded on the
+    passed connection, because a route may be pointed at a store the engine has
+    never opened, and filtering on an absent column would turn a cosmetic gap
+    into a 500 on every request.
+
+    Grep is not a sufficient test for this: ``mcp/tools_active.py`` also selects
+    from ``atomic_facts`` directly and was already clean, while these two routes
+    were not. The test that matters calls the surface and inspects what it
+    served -- tests/test_server/test_a_listed_memory_belongs_to_its_profile.py
+    """
+    def _column_name(row: object) -> str:
+        """PRAGMA row -> column name, whatever row_factory the caller set.
+
+        Not paranoia: ``server/routes/memories.py`` -- the first caller and the
+        route that was leaking -- sets ``row_factory = dict_factory``, so a
+        positional ``row[1]`` raises KeyError there, and the except below would
+        have swallowed it into "no such column" and silently dropped the filter.
+        That is the same shape of failure this function exists to close.
+        """
+        if isinstance(row, dict):
+            return str(row.get("name", ""))
+        try:
+            return str(row["name"])          # sqlite3.Row
+        except (TypeError, IndexError, KeyError):
+            pass
+        try:
+            return str(row[1])               # plain tuple
+        except (TypeError, IndexError, KeyError):
+            return ""
+
+    def _has(column: str) -> bool:
+        try:
+            rows = list(conn.execute("PRAGMA table_info(atomic_facts)"))
+        except sqlite3.Error:
+            return False
+        return any(_column_name(r) == column for r in rows)
+
+    return _compose_visible_clause(
+        prefix,
+        has_archive=_has("archive_status"),
+        has_quarantine=_has("quarantined"),
+        include_quarantined=include_quarantined,
+    )
+
+
 class DatabaseManager:
     """Concurrent-safe SQLite manager with WAL, profile isolation, and FTS5.
 
@@ -788,13 +874,12 @@ class DatabaseManager:
         ``include_quarantined=True`` is for repair, erasure and export — paths
         that must reach a withheld row to act on it.
         """
-        table = f"{prefix}." if prefix else ""
-        clause = ""
-        if self._has_archive_status():
-            clause += f" AND COALESCE({table}archive_status, 'live') != 'archived'"
-        if not include_quarantined and self._has_quarantine_column():
-            clause += f" AND COALESCE({table}quarantined, 0) = 0"
-        return clause
+        return _compose_visible_clause(
+            prefix,
+            has_archive=self._has_archive_status(),
+            has_quarantine=self._has_quarantine_column(),
+            include_quarantined=include_quarantined,
+        )
 
     def get_all_facts(
         self, profile_id: str, limit: int | None = None,

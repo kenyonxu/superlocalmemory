@@ -13,6 +13,10 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from superlocalmemory.storage.database import (
+    visible_fact_clause_for_connection,
+)
+
 from .helpers import (
     SearchRequest,
     dict_factory,
@@ -444,15 +448,24 @@ async def get_memories(
                 scope_where = "profile_id = ?"
                 scope_params = [active_profile]
 
+            # Withheld rows are excluded from BOTH the page and the total. On
+            # the author's store this list served 24 model-authored summaries
+            # in its first 50 rows and reported 5,218 memories against 3,919
+            # real ones -- the count a user reads, inflated by exactly the
+            # 1,299 rows 4.0.10 withheld.
+            visible = visible_fact_clause_for_connection(conn)
             query = (
                 "SELECT fact_id as id, memory_id, content, fact_type as category, "
                 "confidence as importance, access_count, "
                 "created_at, created_at as updated_at, "
                 "session_id as project_name, scope, shared_with "
-                f"FROM atomic_facts WHERE {scope_where}"
+                f"FROM atomic_facts WHERE {scope_where}{visible}"
             )
             params = list(scope_params)
-            count_base = f"SELECT COUNT(*) as total FROM atomic_facts WHERE {scope_where}"
+            count_base = (
+                "SELECT COUNT(*) as total FROM atomic_facts "
+                f"WHERE {scope_where}{visible}"
+            )
         else:
             query = """
                 SELECT id, content, summary, category, project_name, project_path,
