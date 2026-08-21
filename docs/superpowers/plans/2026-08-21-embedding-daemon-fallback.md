@@ -6,7 +6,7 @@
 
 **Architecture:** 扩展 `McpEmbedderProxy`(strict/timeout 参数)复用 v3.5.9 端点;`EmbeddingService` 新增 `_daemon_fallback` 属性与 attach/detach/失败计数逻辑;`_subprocess_embed()` 的 `_available is False` 短路处优先委托 proxy。engine.py、daemon 端点零改动。
 
-**Tech Stack:** Python 3.13、httpx、pytest、`/home/kai-remote/miniconda3/bin/python`(仓库无 .venv;所有 pytest 调用用 `env -u ALL_PROXY -u all_proxy /home/kai-remote/miniconda3/bin/python -m pytest`)。
+**Tech Stack:** Python 3.13、httpx、pytest、`~/miniconda3/bin/python`(仓库无 .venv;所有 pytest 调用用 `env -u ALL_PROXY -u all_proxy ~/miniconda3/bin/python -m pytest`)。
 
 **Spec:** `docs/superpowers/specs/2026-08-21-embedding-daemon-fallback-design.md`(四个已批准决策:无凭据 loopback / 双触发条件 / 对外报可用 / 默认开启+`SLM_EMBED_DAEMON_FALLBACK=0` 可关)
 
@@ -94,7 +94,7 @@ class TestStrictMode:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `env -u ALL_PROXY -u all_proxy /home/kai-remote/miniconda3/bin/python -m pytest tests/test_core/test_mcp_embedder_proxy.py -q`
+Run: `env -u ALL_PROXY -u all_proxy ~/miniconda3/bin/python -m pytest tests/test_core/test_mcp_embedder_proxy.py -q`
 Expected: FAIL(`_strict` 属性不存在 / strict 未重抛)
 
 - [ ] **Step 3: 实现(对 mcp_embedder_proxy.py 的三处修改)**
@@ -113,7 +113,7 @@ Expected: FAIL(`_strict` 属性不存在 / strict 未重抛)
 
 - [ ] **Step 4: 跑测试确认通过 + LIGHT 回归**
 
-Run: `env -u ALL_PROXY -u all_proxy /home/kai-remote/miniconda3/bin/python -m pytest tests/test_core/test_mcp_embedder_proxy.py tests/test_mcp/test_mcp_light_engine.py tests/test_core/test_engine_capabilities.py -q`
+Run: `env -u ALL_PROXY -u all_proxy ~/miniconda3/bin/python -m pytest tests/test_core/test_mcp_embedder_proxy.py tests/test_mcp/test_mcp_light_engine.py tests/test_core/test_engine_capabilities.py -q`
 Expected: 全 PASS(后两个文件是 v3.5.9 proxy 的既有消费方测试,验证零行为变化)
 
 - [ ] **Step 5: 提交**
@@ -261,7 +261,7 @@ class TestFailureCounting:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `env -u ALL_PROXY -u all_proxy /home/kai-remote/miniconda3/bin/python -m pytest tests/test_core/test_embedding_daemon_fallback.py -q`
+Run: `env -u ALL_PROXY -u all_proxy ~/miniconda3/bin/python -m pytest tests/test_core/test_embedding_daemon_fallback.py -q`
 Expected: FAIL(`_daemon_fallback` 属性不存在等)
 
 - [ ] **Step 3: 实现 — `__init__` 加四个属性**
@@ -348,12 +348,12 @@ Expected: FAIL(`_daemon_fallback` 属性不存在等)
 
 - [ ] **Step 6: 跑测试确认通过**
 
-Run: `env -u ALL_PROXY -u all_proxy /home/kai-remote/miniconda3/bin/python -m pytest tests/test_core/test_embedding_daemon_fallback.py -q`
+Run: `env -u ALL_PROXY -u all_proxy ~/miniconda3/bin/python -m pytest tests/test_core/test_embedding_daemon_fallback.py -q`
 Expected: 9 项全 PASS
 
 - [ ] **Step 7: 既有嵌入测试回归**
 
-Run: `env -u ALL_PROXY -u all_proxy /home/kai-remote/miniconda3/bin/python -m pytest tests/test_core/test_embedding_fallback.py tests/test_core/test_embedding_worker_spawn_lock.py tests/test_core/test_embedding_worker_backend_order.py -q`
+Run: `env -u ALL_PROXY -u all_proxy ~/miniconda3/bin/python -m pytest tests/test_core/test_embedding_fallback.py tests/test_core/test_embedding_worker_spawn_lock.py tests/test_core/test_embedding_worker_backend_order.py -q`
 Expected: 全 PASS(三态/锁行为零回归)
 
 - [ ] **Step 8: 提交**
@@ -428,7 +428,7 @@ class TestExternalSemantics:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `env -u ALL_PROXY -u all_proxy /home/kai-remote/miniconda3/bin/python -m pytest tests/test_core/test_embedding_daemon_fallback.py::TestExternalSemantics -q`
+Run: `env -u ALL_PROXY -u all_proxy ~/miniconda3/bin/python -m pytest tests/test_core/test_embedding_daemon_fallback.py::TestExternalSemantics -q`
 Expected: FAIL(`embedder_mode` 不存在等)
 
 - [ ] **Step 3: 实现 — 四处修改**
@@ -473,7 +473,7 @@ Expected: FAIL(`embedder_mode` 不存在等)
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `env -u ALL_PROXY -u all_proxy /home/kai-remote/miniconda3/bin/python -m pytest tests/test_core/test_embedding_daemon_fallback.py -q`
+Run: `env -u ALL_PROXY -u all_proxy ~/miniconda3/bin/python -m pytest tests/test_core/test_embedding_daemon_fallback.py -q`
 Expected: 15 项全 PASS
 
 - [ ] **Step 5: 提交**
@@ -610,7 +610,7 @@ def stub_daemon_port(monkeypatch):
 
 - [ ] **Step 2: 跑测试确认通过**
 
-Run: `env -u ALL_PROXY -u all_proxy /home/kai-remote/miniconda3/bin/python -m pytest tests/test_integration/test_embedding_fallback_two_process.py -q`
+Run: `env -u ALL_PROXY -u all_proxy ~/miniconda3/bin/python -m pytest tests/test_integration/test_embedding_fallback_two_process.py -q`
 Expected: PASS(真实 HTTP 往返 + 真实 flock/PID 单例)
 注意:本测试持有机器级嵌入锁,**不得**与其他使用嵌入 worker 的测试并行;单独运行。
 
@@ -634,13 +634,13 @@ git commit -m "test(embeddings): two-process daemon fallback integration proof"
 
 - [ ] **Step 1: 全量回归**
 
-Run: `env -u ALL_PROXY -u all_proxy /home/kai-remote/miniconda3/bin/python -m pytest tests/ -q --deselect tests/test_core/test_enrich_new_facts_now.py::test_enrich_new_facts_now --deselect tests/test_core/test_enrich_new_facts_now.py::test_store_then_search`
+Run: `env -u ALL_PROXY -u all_proxy ~/miniconda3/bin/python -m pytest tests/ -q --deselect tests/test_core/test_enrich_new_facts_now.py::test_enrich_new_facts_now --deselect tests/test_core/test_enrich_new_facts_now.py::test_store_then_search`
 (后台运行 + 定时轮询;两个 deselect 是 merge 时 controller 批准的既有环境缺陷,见 `.superpowers/sdd/2026-08-21-merge-upstream-4.0.9/progress.md`;若 node id 不匹配,先 `--collect-only` 查该文件实际 test id 再替换)
 Expected: 0 failed(基准 9758 passed + 本 feature 新增测试)
 
 - [ ] **Step 2: hermes 套件**
 
-Run: `env -u ALL_PROXY -u all_proxy /home/kai-remote/miniconda3/bin/python -m pytest src/superlocalmemory/integrations/hermes/tests -q`
+Run: `env -u ALL_PROXY -u all_proxy ~/miniconda3/bin/python -m pytest src/superlocalmemory/integrations/hermes/tests -q`
 Expected: 92 passed
 
 - [ ] **Step 3: gitnexus 变更核查(AGENTS.md 强制)**
