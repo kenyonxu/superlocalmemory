@@ -28,11 +28,22 @@ _DEFAULT_TIMEOUT = 5.0  # seconds — fast enough for inline store() calls
 
 
 class McpEmbedderProxy:
-    """Proxy embedder: MCP process → daemon's /api/embed over localhost HTTP."""
+    """Proxy embedder: MCP process → daemon's /api/embed over localhost HTTP.
 
-    def __init__(self, port: int = 8765, timeout: float = _DEFAULT_TIMEOUT) -> None:
+    strict=True re-raises the original exception (httpx errors, ValueError)
+    from embed()/embed_batch() instead of returning None placeholders —
+    used by callers that implement their own fallback (e.g. daemon→local).
+    """
+
+    def __init__(
+        self,
+        port: int = 8765,
+        timeout: float = _DEFAULT_TIMEOUT,
+        strict: bool = False,
+    ) -> None:
         self._base_url = f"http://127.0.0.1:{port}"
         self._timeout = timeout
+        self._strict = strict
         self._available: bool | None = None  # cached after first is_available() call
 
     def is_available(self) -> bool:
@@ -73,6 +84,8 @@ class McpEmbedderProxy:
                 embeddings.append(None)
             return embeddings
         except Exception as exc:
+            if self._strict:
+                raise
             logger.debug("McpEmbedderProxy.embed_batch failed: %s", exc)
             return [None] * len(texts)
 
