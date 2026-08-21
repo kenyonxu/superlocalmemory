@@ -129,8 +129,17 @@ import pytest
 _EXPECTED_SCHEMA_VERSION: int = 42
 
 #: Total migrations in the MIGRATIONS + DEFERRED_MIGRATIONS catalogue.
-#: M001–M042 with M008 absent = 41 total.
-_EXPECTED_MIGRATION_COUNT: int = 41
+#: M001–M043 with M008 absent = 42 total.
+#:
+#: _EXPECTED_SCHEMA_VERSION deliberately stays at 42 while this went to 42.
+#: The two are not the same thing: the version is a DOWNGRADE CEILING, and
+#: M043's changes are additive (one column with a default, one new table,
+#: plus data moved between them). An older build opening the store reads it
+#: fine. It would show the withheld summaries again, because it has no filter
+#: for them — the behaviour the owner downgraded away from — but that is what
+#: downgrading means. Bumping the ceiling would instead make the older build
+#: refuse the store outright and strand anyone who needed to go back.
+_EXPECTED_MIGRATION_COUNT: int = 42
 
 #: Path to an installed reference package's migrations directory, if one exists.
 #:

@@ -244,9 +244,21 @@ def test_embedding_probe_does_not_use_posix_select():
 # ---------------------------------------------------------------------------
 
 def test_existing_doctor_checks_unchanged():
-    """The pre-existing doctor checks must still be present by name, and
-    'Optimize (Surface B)' must be the LAST entry in checks[]."""
-    required_existing = {"Python", "Core deps", "Database"}
+    """The pre-existing doctor checks must still be present by name, and the
+    last entry in checks[] must be the one this test names.
+
+    The positional pin used to name 'Optimize (Surface B)'. Position is not a
+    contract -- doctor prints its checks in list order and which one is last has
+    no consequence for a reader -- but the pin does something worth keeping: it
+    forces anyone appending a check to come here and say so, rather than
+    growing the tail of doctor's output unnoticed. So the pin moves with the
+    tail instead of blocking it, and 'Optimize (Surface B)' keeps a
+    presence-only assertion.
+
+    Moved for 4.0.10's 'Memory answer-ability' check, which asks the only
+    question none of the others did: can the owner's memories be found?
+    """
+    required_existing = {"Python", "Core deps", "Database", "Optimize (Surface B)"}
 
     checks = _run_doctor_json()
 
@@ -256,7 +268,7 @@ def test_existing_doctor_checks_unchanged():
     missing = required_existing - names_set
     assert not missing, f"Pre-existing checks missing from doctor output: {missing}"
 
-    assert names[-1] == "Optimize (Surface B)", (
-        f"'Optimize (Surface B)' must be last check, but last is {names[-1]!r}. "
+    assert names[-1] == "Memory answer-ability", (
+        f"'Memory answer-ability' must be last check, but last is {names[-1]!r}. "
         f"All checks: {names}"
     )

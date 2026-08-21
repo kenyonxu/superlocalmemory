@@ -1,0 +1,245 @@
+# Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
+# Licensed under AGPL-3.0-or-later - see LICENSE file
+
+"""Tell the owner, in their own words, whether their memory works.
+
+Until now the only way to learn that 43.7% of a store could not be found by
+asking a question was to write the SQL yourself. One machine sat in exactly
+that state for months while every status line it showed said the system was
+healthy, because nothing measured reachability and nothing reported it.
+
+So this module answers four questions a non-engineer can act on:
+
+  * How many memories do I have?
+  * How many can actually be found by asking a question?
+  * How many were withheld because a model wrote them, not me?
+  * Is anything still being repaired?
+
+Read-only, and every query is bounded. Fail-soft by construction: a missing
+table or column yields ``None`` for that line rather than an exception, because
+a health report that crashes on an old store is worse than one that says "not
+known yet".
+
+Consumed by ``slm doctor``, ``GET /api/v3/memory-health``, and the dashboard.
+One implementation so the three cannot disagree with each other.
+"""
+
+from __future__ import annotations
+
+import logging
+import sqlite3
+from dataclasses import dataclass, field
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+__all__ = ["MemoryHealth", "measure", "describe"]
+
+
+@dataclass(frozen=True)
+class MemoryHealth:
+    """A store's answer-ability, counted rather than assumed."""
+
+    #: Memories that recall is allowed to return.
+    live_facts: int = 0
+    #: Of those, how many have a vector projection, i.e. can be found by
+    #: meaning rather than only by matching words.
+    findable_by_meaning: int = 0
+    #: Memories with no vector at all. These are reachable by keyword only.
+    missing_vector: int = 0
+    #: Machine-written summaries withheld from recall and kept for display.
+    withheld_summaries: int = 0
+    #: Summaries preserved in the display table.
+    display_summaries: int = 0
+    #: Memories hidden by the retention system, excluding the withheld ones.
+    hidden_by_forgetting: int = 0
+    #: Rows whose retention zone contradicts their retention score, i.e. hidden
+    #: while the maths says to keep them. Should be zero after repair.
+    inconsistently_hidden: int = 0
+    #: Present only when a table or column was absent.
+    unavailable: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def reachability(self) -> float:
+        """Share of live memories findable by meaning, 0.0-1.0."""
+        if self.live_facts <= 0:
+            return 1.0
+        return self.findable_by_meaning / self.live_facts
+
+    @property
+    def healthy(self) -> bool:
+        """Whether anything here warrants telling the owner about."""
+        return (
+            self.reachability >= 0.99
+            and self.missing_vector == 0
+            and self.inconsistently_hidden == 0
+        )
+
+
+def measure(db_path: str | Path) -> MemoryHealth:
+    """Count the store's answer-ability. Read-only; never raises."""
+    unavailable: list[str] = []
+    try:
+        conn = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        logger.debug("memory health: cannot open %s: %s", db_path, exc)
+        return MemoryHealth(unavailable=("database",))
+
+    try:
+        if not _table_exists(conn, "atomic_facts"):
+            return MemoryHealth(unavailable=("atomic_facts",))
+
+        # Quarantine came in 4.0.10. On an older store every fact is "live",
+        # which is the honest reading of a store that has no withheld rows.
+        has_q = _has_column(conn, "atomic_facts", "quarantined")
+        if not has_q:
+            unavailable.append("quarantined")
+        live_clause = "COALESCE(quarantined, 0) = 0" if has_q else "1=1"
+
+        live = _count(conn, f"SELECT COUNT(*) FROM atomic_facts WHERE {live_clause}")
+        withheld = (
+            _count(conn, "SELECT COUNT(*) FROM atomic_facts WHERE quarantined = 1")
+            if has_q else 0
+        )
+        missing_vec = _count(
+            conn,
+            f"SELECT COUNT(*) FROM atomic_facts "
+            f"WHERE embedding IS NULL AND {live_clause}",
+        )
+
+        if _table_exists(conn, "embedding_metadata"):
+            findable = _count(
+                conn,
+                "SELECT COUNT(*) FROM embedding_metadata em "
+                "JOIN atomic_facts af ON af.fact_id = em.fact_id "
+                f"WHERE {_prefixed(live_clause, 'af')}",
+            )
+        else:
+            unavailable.append("embedding_metadata")
+            findable = 0
+
+        display = (
+            _count(conn, "SELECT COUNT(*) FROM consolidated_summaries")
+            if _table_exists(conn, "consolidated_summaries") else 0
+        )
+        if not _table_exists(conn, "consolidated_summaries"):
+            unavailable.append("consolidated_summaries")
+
+        hidden = inconsistent = 0
+        if _table_exists(conn, "fact_retention"):
+            hidden = _count(
+                conn,
+                "SELECT COUNT(*) FROM fact_retention r "
+                "JOIN atomic_facts af ON af.fact_id = r.fact_id "
+                "WHERE r.lifecycle_zone IN ('archive', 'forgotten') "
+                f"  AND {_prefixed(live_clause, 'af')}",
+            )
+            # The contradiction M043 repairs: hidden, yet scored to keep.
+            inconsistent = _count(
+                conn,
+                "SELECT COUNT(*) FROM fact_retention r "
+                "JOIN atomic_facts af ON af.fact_id = r.fact_id "
+                "WHERE r.lifecycle_zone IN ('archive', 'forgotten') "
+                "  AND r.retention_score > 0.8 "
+                f"  AND {_prefixed(live_clause, 'af')}",
+            )
+        else:
+            unavailable.append("fact_retention")
+
+        return MemoryHealth(
+            live_facts=live,
+            findable_by_meaning=findable,
+            missing_vector=missing_vec,
+            withheld_summaries=withheld,
+            display_summaries=display,
+            hidden_by_forgetting=hidden,
+            inconsistently_hidden=inconsistent,
+            unavailable=tuple(unavailable),
+        )
+    except sqlite3.Error as exc:
+        logger.debug("memory health measurement failed: %s", exc)
+        return MemoryHealth(unavailable=(*unavailable, "query_failed"))
+    finally:
+        conn.close()
+
+
+def describe(health: MemoryHealth) -> list[str]:
+    """Plain-language lines for a reader who does not write SQL.
+
+    No percentages without the counts behind them, and no jargon: "findable by
+    asking a question" rather than "vector coverage", because the person who
+    needs this line is the one who would not know what a vector is.
+    """
+    lines: list[str] = []
+    if "atomic_facts" in health.unavailable or "database" in health.unavailable:
+        return ["Memory store not readable yet."]
+
+    lines.append(f"You have {health.live_facts:,} memories.")
+
+    if "embedding_metadata" in health.unavailable:
+        lines.append(
+            "Whether they can be found by asking a question is not known yet — "
+            "the search index has not been built."
+        )
+    elif health.live_facts:
+        pct = 100.0 * health.reachability
+        if health.reachability >= 0.99:
+            lines.append(
+                f"All of them can be found by asking a question "
+                f"({health.findable_by_meaning:,} indexed)."
+            )
+        else:
+            gap = health.live_facts - health.findable_by_meaning
+            lines.append(
+                f"{health.findable_by_meaning:,} of them ({pct:.0f}%) can be "
+                f"found by asking a question. The other {gap:,} can only be "
+                f"found by matching words, so a question phrased differently "
+                f"will miss them. This repairs itself as the service runs; if "
+                f"it does not, the embedding model is unavailable."
+            )
+
+    if health.withheld_summaries:
+        lines.append(
+            f"{health.withheld_summaries:,} machine-written summaries are kept "
+            f"out of your answers and shown on the dashboard instead. They were "
+            f"written by the summarizer, not by you, and they used to be "
+            f"returned as if they were your own notes."
+        )
+
+    if health.inconsistently_hidden:
+        lines.append(
+            f"{health.inconsistently_hidden:,} memories are hidden even though "
+            f"they are marked worth keeping. This is a fault and it is repaired "
+            f"automatically the next time the service starts."
+        )
+
+    if health.hidden_by_forgetting:
+        lines.append(
+            f"{health.hidden_by_forgetting:,} older memories are set aside by "
+            f"the forgetting curve. They are not deleted and a deep search "
+            f"still reaches them."
+        )
+
+    return lines
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,),
+    ).fetchone() is not None
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(
+        row[1] == column for row in conn.execute(f"PRAGMA table_info({table})")
+    )
+
+
+def _prefixed(clause: str, prefix: str) -> str:
+    """Qualify a bare column reference for use in a joined query."""
+    return clause.replace("quarantined", f"{prefix}.quarantined")
+
+
+def _count(conn: sqlite3.Connection, sql: str) -> int:
+    row = conn.execute(sql).fetchone()
+    return int(row[0]) if row else 0

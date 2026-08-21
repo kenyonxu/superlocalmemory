@@ -2949,6 +2949,48 @@ def cmd_doctor(args: Namespace) -> None:
                 f"enabled [{_surface_str}] {_stats}",
             )
 
+    # Memory answer-ability.
+    #
+    # Every other check here asks whether a component is installed. None of
+    # them asked the only question that matters to the owner: can my memories
+    # actually be found? One machine ran for months with 43.7% of its store
+    # unreachable while doctor reported everything green, because the reachable
+    # share was never counted.
+    memory_health_data: dict | None = None
+    try:
+        from superlocalmemory.core.config import SLMConfig as _HealthCfg
+        from superlocalmemory.core.memory_health import describe, measure
+        _h = measure(_HealthCfg.load().db_path)
+        memory_health_data = {
+            "live_facts": _h.live_facts,
+            "findable_by_meaning": _h.findable_by_meaning,
+            "missing_vector": _h.missing_vector,
+            "withheld_summaries": _h.withheld_summaries,
+            "display_summaries": _h.display_summaries,
+            "hidden_by_forgetting": _h.hidden_by_forgetting,
+            "inconsistently_hidden": _h.inconsistently_hidden,
+            "reachability": round(_h.reachability, 4),
+            "healthy": _h.healthy,
+            "unavailable": list(_h.unavailable),
+            "summary": describe(_h),
+        }
+        _detail = " ".join(describe(_h))
+        if _h.healthy:
+            _check("Memory answer-ability", "PASS", _detail)
+        elif _h.inconsistently_hidden or _h.reachability < 0.9:
+            _check(
+                "Memory answer-ability", "FAIL", _detail,
+                fix="slm restart",
+            )
+        else:
+            _check("Memory answer-ability", "WARN", _detail,
+                   fix="slm db reembed --missing-only")
+    except Exception as _mh_exc:  # noqa: BLE001 — a report must not break doctor
+        _check(
+            "Memory answer-ability", "WARN",
+            f"could not be measured: {_mh_exc}",
+        )
+
     # Summary
     if use_json:
         from superlocalmemory.cli.json_output import json_print
@@ -2959,6 +3001,7 @@ def cmd_doctor(args: Namespace) -> None:
         json_print("doctor", data={
             "checks": checks,
             "summary": {"passed": passed, "warned": warned, "failed": failed},
+            "memory_health": memory_health_data,
         }, next_actions=next_actions)
     else:
         print(f"\nSummary: {passed} passed, {warned} warnings, {failed} failed")

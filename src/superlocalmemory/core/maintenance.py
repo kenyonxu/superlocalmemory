@@ -31,6 +31,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+class _ConsolidationDisabled(Exception):
+    """Internal signal: consolidation is switched off, so skip its block.
+
+    A private exception rather than restructuring the surrounding try/except:
+    the block's job is to keep one optional maintenance step from taking the
+    whole pass down with it, and that guarantee should not be weakened to
+    express "deliberately skipped". Caught immediately below, never propagated.
+    """
+
 # Backfill constants
 _BACKFILL_BURN_IN_STEPS = 50
 _LANGEVIN_DIM = 8
@@ -638,9 +648,12 @@ def run_maintenance(
         logger.warning("Entity summary consolidation failed: %s", exc)
 
     # 4. Fact consolidation (v3.8.4 concurrency-safe path via DatabaseManager).
-    # Merges clusters of warm/cold atomic facts about the same entity into a
-    # single consolidated fact, archives the originals (NEVER deletes them),
-    # and records provenance in fact_consolidations.
+    # Groups warm/cold atomic facts that share an entity and writes ONE
+    # DISPLAY summary per cluster into consolidated_summaries, with provenance
+    # in fact_consolidations. It does not write to atomic_facts and does not
+    # archive the source facts — until 4.0.10 it did both, which put 1,195
+    # model-written rows into the retrieval corpus and left 528 genuine
+    # memories archived out of normal recall.
     #
     # Uses the DatabaseManager path so LLM calls happen OUTSIDE the write lock:
     #   - Discover clusters in a short memory_read() (no write lock held).
@@ -652,20 +665,45 @@ def run_maintenance(
     try:
         from superlocalmemory.core.fact_consolidator import consolidate_facts
 
+        # The documented off-switch has to actually switch something off.
+        # ConsolidationConfig.enabled has existed since Phase 5 and this call
+        # site never read it, so a user who ran `slm config` to turn
+        # consolidation off got consolidation anyway — for four months, on
+        # every maintenance pass. -2 is a third distinguishable value, kept
+        # apart from 0 (nothing to merge) and -1 (the step failed), so a
+        # deliberately disabled step is never mistaken for either.
+        _consolidation = getattr(config, "consolidation", None)
+        if _consolidation is not None and not getattr(_consolidation, "enabled", True):
+            counts["facts_consolidated"] = -2
+            logger.debug("Fact consolidation disabled by configuration")
+            raise _ConsolidationDisabled
+
         fc_stats = consolidate_facts(
             db,
             profile_id=profile_id,
-            max_clusters=getattr(config, "max_consolidation_clusters", 20),
+            # Read from ConsolidationConfig, with the old SLMConfig-level name
+            # as the fallback. `getattr(config, "max_consolidation_clusters")`
+            # alone never resolved — SLMConfig has no such attribute — so the
+            # default was the only value this had ever used.
+            max_clusters=int(
+                getattr(_consolidation, "max_consolidation_clusters", None)
+                or getattr(config, "max_consolidation_clusters", None)
+                or 20
+            ),
             dry_run=False,
             config=config,
         )
         counts["facts_consolidated"] = fc_stats.get("consolidated", 0)
         if fc_stats.get("consolidated", 0) > 0:
             logger.info(
-                "Fact consolidation: %d clusters merged, %d facts archived",
+                "Fact consolidation: %d display summaries over %d facts "
+                "(%d clusters refused)",
                 fc_stats.get("consolidated", 0),
-                fc_stats.get("facts_archived", 0),
+                fc_stats.get("facts_summarized", 0),
+                fc_stats.get("rejected", 0),
             )
+    except _ConsolidationDisabled:
+        pass
     except Exception as exc:
         # WARNING, not debug, and a distinguishable count. Leaving this at debug
         # with facts_consolidated=0 made a failing consolidation report exactly

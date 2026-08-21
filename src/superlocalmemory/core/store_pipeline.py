@@ -118,6 +118,54 @@ def _record_correction_candidate(
         logger.warning("Correction candidate not recorded for %s: %s", successor_fact_id, exc)
 
 
+#: Entity id pattern for the per-profile placeholder a dated fact with no
+#: resolved entity points its temporal event at. Per profile, not shared, so
+#: profile deletion cascades it away with everything else.
+_UNRESOLVED_ENTITY_PREFIX = "__slm_unresolved__:"
+
+
+def _ensure_unresolved_entity(db: Any, profile_id: str) -> str | None:
+    """Return the placeholder entity id for ``profile_id``, creating it once.
+
+    ``temporal_events.entity_id`` is NOT NULL with a foreign key to
+    ``canonical_entities``, so an event for a fact with no recognised entity
+    needs something real to reference. This is that something.
+
+    It is deliberately inert as an entity:
+
+      * Its ``canonical_name`` is empty, and the only query that resolves an
+        entity by name (``retrieval/temporal_channel.py``, the "events for
+        entity X" lookup) is driven by names extracted from the user's
+        question, which are never empty.
+      * Nothing derives entity links from ``temporal_events``. The entity
+        channel builds its map from ``atomic_facts.canonical_entities_json``,
+        which this does not touch — so the placeholder cannot become the kind
+        of entity that links a quarter of the store and flattens entity
+        proximity. That failure mode is real (on the author's store 'State'
+        links 1,388 facts) and this is specifically shaped not to add to it.
+      * ``fact_count`` stays 0. It is a hook for a foreign key, not a concept.
+
+    Returns None if the row cannot be created, in which case the caller skips
+    the temporal event rather than failing the write — a missing temporal row
+    is a degraded memory, an aborted remember is a lost one.
+    """
+    entity_id = f"{_UNRESOLVED_ENTITY_PREFIX}{profile_id}"
+    try:
+        db.execute(
+            "INSERT OR IGNORE INTO canonical_entities "
+            "(entity_id, profile_id, canonical_name, entity_type, fact_count) "
+            "VALUES (?, ?, '', 'unresolved', 0)",
+            (entity_id, profile_id),
+        )
+        return entity_id
+    except Exception as exc:  # noqa: BLE001 — never fail a write over this
+        logger.debug(
+            "temporal placeholder entity unavailable for %s: %s",
+            profile_id, exc,
+        )
+        return None
+
+
 def _record_fact_entity_association(
     db: DatabaseManager,
     *,
@@ -1031,12 +1079,39 @@ def run_store(
         if scene_builder:
             scene_builder.assign_to_scene(fact, profile_id)
 
-        # Populate temporal_events for temporal retrieval
+        # Populate temporal_events for temporal retrieval.
+        #
+        # A DATE IS A DATE WHETHER OR NOT AN ENTITY WAS RESOLVED. This used to
+        # read `if fact.canonical_entities and has_dates`, so a fact carrying a
+        # perfectly good date but no recognised entity got no temporal row at
+        # all. Measured on the author's store: 967 of 3,894 genuine facts have
+        # no canonical entity (24.8%), and 958 of those have no temporal event
+        # either — a quarter of the store that the temporal channel could only
+        # reach through its created_at recency fallback, i.e. by being recent
+        # rather than by being about the right time.
+        #
+        # The date-window query does not need the entity: it joins
+        # temporal_events to atomic_facts and nothing else
+        # (retrieval/temporal_channel.py). Only the "events for entity X"
+        # lookup joins canonical_entities, and that lookup is correctly
+        # uninterested in a fact with no entity.
+        #
+        # temporal_events.entity_id is NOT NULL with an FK to
+        # canonical_entities, so an entity-less event needs a row to point at.
+        # It gets a per-profile sentinel rather than a shared one, and the
+        # sentinel is invisible to ranking: the entity channel builds its map
+        # from atomic_facts.canonical_entities_json, which is untouched here, so
+        # this cannot create the kind of entity that links a quarter of the
+        # store and destroys entity proximity.
         has_dates = (fact.observation_date or fact.referenced_date
                      or fact.interval_start)
-        if fact.canonical_entities and has_dates:
+        if has_dates:
             from superlocalmemory.storage.models import TemporalEvent
-            for eid in fact.canonical_entities:
+            entity_ids = list(fact.canonical_entities)
+            if not entity_ids:
+                sentinel = _ensure_unresolved_entity(db, profile_id)
+                entity_ids = [sentinel] if sentinel else []
+            for eid in entity_ids:
                 event = TemporalEvent(
                     event_id=_ingestion_effect_id(
                         ingestion_operation_id,

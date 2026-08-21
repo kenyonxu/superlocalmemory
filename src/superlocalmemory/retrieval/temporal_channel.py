@@ -231,6 +231,14 @@ class TemporalChannel:
         )
 
         for name in names[:3]:  # Limit to first 3 entity mentions
+            # An empty name would match the placeholder entity that dated
+            # facts with no resolved entity attach their temporal events to
+            # (core/store_pipeline.py::_ensure_unresolved_entity, whose
+            # canonical_name is ''). Entity extraction does not produce an
+            # empty name, so this guard costs nothing and removes the one way
+            # the placeholder could ever surface as a real entity match.
+            if not name or not name.strip():
+                continue
             # Resolve the entity and event in one scope-filtered query. Looking
             # up the entity only in the requester's profile made global events
             # owned by another profile undiscoverable before authorization was

@@ -733,6 +733,27 @@ class DatabaseManager:
             self._archive_col_present = True
         return present
 
+    def _has_quarantine_column(self) -> bool:
+        """Whether atomic_facts carries the ``quarantined`` column.
+
+        Same shape as ``_has_archive_status``: cached once True (a column never
+        disappears), re-checked while absent so a later schema pass is picked
+        up. ``storage.schema.create_all_tables`` adds the column at every engine
+        init, so on any store the daemon has opened this is True — the guard
+        exists for a bare DatabaseManager pointed at a store that engine init
+        never touched, where filtering on the column would raise instead of
+        returning results.
+        """
+        if getattr(self, "_quarantine_col_present", False):
+            return True
+        present = any(
+            dict(row).get("name") == "quarantined"
+            for row in self.execute("PRAGMA table_info(atomic_facts)")
+        )
+        if present:
+            self._quarantine_col_present = True
+        return present
+
     def get_all_facts(
         self, profile_id: str, limit: int | None = None,
         *,
@@ -1292,8 +1313,36 @@ class DatabaseManager:
         self, fact_ids: list[str], profile_id: str,
         include_global: bool = False,
         include_shared: bool = False,
+        *,
+        include_quarantined: bool = False,
     ) -> list[AtomicFact]:
-        """Get multiple facts by their IDs, scoped to a profile."""
+        """Get multiple facts by their IDs, scoped to a profile.
+
+        THIS IS THE PLACE QUARANTINE IS ENFORCED, and the only one.
+
+        Every retrieval channel re-authorises its candidates through here
+        (``retrieval/scope_policy.py`` — "candidate generators may use caches,
+        approximate indexes, or graph stores that are not the authorization
+        source of truth"), and the engine hydrates the fused set from here too.
+        A fact this method does not return has no content to show, and
+        ``retrieval/engine.py`` drops it: ``if fact is None: continue``. So one
+        clause here covers bm25, semantic, temporal, entity, hopfield and
+        spreading activation, in normal and deep recall alike, whether or not
+        the forgetting filter is registered.
+
+        The alternatives were checked and rejected. ``_scope_where`` looks like
+        the natural home but is spliced against ``graph_edges``,
+        ``temporal_events``, ``memories``, ``bm25_tokens``,
+        ``fact_temporal_validity`` and ``correction_cases`` as well as
+        ``atomic_facts``, so a column reference there breaks eight call sites.
+        ``ForgettingFilter`` is optional (it no-ops when forgetting is
+        disabled) and excludes nothing in deep recall.
+
+        ``include_quarantined=True`` is for repair, export and erasure — paths
+        that must be able to see a withheld row in order to act on it. It is
+        keyword-only and greppable on purpose: every caller that opts in is
+        meant to be found in one search.
+        """
         if not fact_ids:
             return []
         where, params = _scope_where(
@@ -1306,10 +1355,16 @@ class DatabaseManager:
             if self._has_archive_status()
             else ""
         )
+        quarantine_clause = (
+            ""
+            if include_quarantined or not self._has_quarantine_column()
+            else " AND COALESCE(quarantined, 0) = 0"
+        )
         placeholders = ",".join("?" for _ in fact_ids)
         rows = self.execute(
             f"SELECT * FROM atomic_facts WHERE fact_id IN ({placeholders}) "
-            f"AND {where}{archive_clause} ORDER BY created_at DESC",
+            f"AND {where}{archive_clause}{quarantine_clause} "
+            "ORDER BY created_at DESC",
             (*fact_ids, *params),
         )
         return [self._row_to_fact(r) for r in rows]

@@ -124,24 +124,39 @@ def test_databasemanager_path_consolidates_cluster(dbmanager_db) -> None:
         "DatabaseManager path found clusters but consolidated 0 — "
         "the per-cluster write loop is broken"
     )
-    assert stats["facts_archived"] >= len(_CLUSTER), (
-        "source facts were not archived after consolidation"
+    assert stats["facts_summarized"] >= len(_CLUSTER), (
+        "the cluster's facts were not counted as summarized"
+    )
+    assert stats["facts_archived"] == 0, (
+        "this path archives nothing as of 4.0.10; a non-zero count means the "
+        "corpus write came back"
     )
     assert stats["errors"] == 0, f"consolidation errors: {stats['error_detail']}"
 
 
-def test_databasemanager_path_archives_originals(dbmanager_db) -> None:
-    """Original facts must survive as 'archived', never deleted."""
+def test_databasemanager_path_leaves_originals_untouched(dbmanager_db) -> None:
+    """Original facts must survive, and now also stay reachable.
+
+    "Never deleted" was the old bar and it is still met. 4.0.10 raises it:
+    the sources are not archived either, because the display summary that
+    replaced the corpus row does not stand in for them in recall.
+    """
     mgr = dbmanager_db
     for i, c in enumerate(_CLUSTER):
         _insert_warm_fact(mgr, f"da{i}", c)
 
     consolidate_facts(mgr, profile_id="default", config=None)
 
-    archived = _count_archived(mgr)
-    assert archived >= len(_CLUSTER), (
-        "source facts were deleted instead of archived — "
-        "CRITICAL RULE 1: NEVER delete original facts"
+    assert _count_archived(mgr) == 0, "a source fact was archived"
+    ids = [f"da{i}" for i in range(len(_CLUSTER))]
+    live = mgr.execute(
+        "SELECT COUNT(*) AS c FROM atomic_facts "
+        f"WHERE fact_id IN ({','.join('?' * len(ids))}) AND lifecycle='warm'",
+        tuple(ids),
+    )
+    assert dict(live[0])["c"] == len(_CLUSTER), (
+        "source facts are neither warm nor accounted for — they must remain "
+        "exactly as they were"
     )
 
 

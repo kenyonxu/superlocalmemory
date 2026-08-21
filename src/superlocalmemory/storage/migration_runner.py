@@ -159,6 +159,9 @@ from superlocalmemory.storage.migrations import (
 from superlocalmemory.storage.migrations import (
     M042_correction_case_ledger as _M042,
 )
+from superlocalmemory.storage.migrations import (
+    M043_quarantine_display_summaries as _M043,
+)
 from superlocalmemory.storage._schema_version import (
     SUPPORTED_SCHEMA_VERSION,
     SchemaVersionError,
@@ -312,6 +315,14 @@ DEFERRED_MIGRATIONS: list[Migration] = [
     # Main-line M034 is renumbered in V4. It must remain deferred because its
     # backfill joins engine-bootstrapped memory_scenes and atomic_facts.
     Migration(name=_M039.NAME, db_target="memory", ddl=_M039.DDL),
+    # M043 withholds model-written summaries from the retrieval corpus and
+    # un-hides the memories they displaced. Deferred because it reads and
+    # writes atomic_facts + fact_retention, both bootstrapped at engine init —
+    # the same reason M011/M013/M015/M016 are deferred. apply_deferred takes a
+    # verified snapshot before the first migration it actually applies, so the
+    # store is recoverable.
+    Migration(name=_M043.NAME, db_target="memory", ddl=_M043.DDL,
+              dependencies=(_M011.NAME,)),
 ]
 
 

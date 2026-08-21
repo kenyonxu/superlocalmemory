@@ -52,7 +52,7 @@ os.environ.setdefault("SLM_MCP_EMBEDDED", "1")
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
 from superlocalmemory.infra.daemon_identity import (
@@ -587,6 +587,43 @@ class RememberRequest(BaseModel):
     metadata: dict | None = None  # v3.4.26: pass-through from MCP pool_store
     idempotency_key: str | None = None
     session_id: str = ""
+    #: WHEN this memory is about, as distinct from when it was written.
+    #:
+    #: The internal admission record has carried this field all along and this
+    #: model never had it, so every memory arriving over HTTP — which is every
+    #: memory, from the CLI, the tool interface and the dashboard alike — was
+    #: stamped with its ingestion date. Measured on the author's store: 200 of
+    #: the 200 most recent facts have an observation_date, and 196 of them are
+    #: the day they were written. A store that cannot be told "this happened in
+    #: March" cannot answer a question about March.
+    #:
+    #: Empty means "today", the previous behaviour. Format is YYYY-MM-DD or a
+    #: full ISO 8601 timestamp.
+    session_date: str = ""
+
+    @field_validator("session_date")
+    @classmethod
+    def _session_date_is_a_date(cls, value: str) -> str:
+        """Reject a malformed date rather than ignore it.
+
+        Dropping it silently would leave the caller believing the date was
+        recorded while the memory quietly filed itself under today — which is
+        the exact failure this field exists to fix, reintroduced one layer up.
+        Rejecting is recoverable: the caller sees the error and resends.
+        """
+        if not value:
+            return value
+        from datetime import datetime as _dt
+
+        text = value.strip()
+        try:
+            _dt.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError(
+                "session_date must be YYYY-MM-DD or a full ISO 8601 timestamp; "
+                f"got {value!r}"
+            ) from None
+        return text
     # v3.6.15 multi-scope: visibility of the new memory. ``None`` scope means
     # "use the configured default_scope" (personal). shared_with is the list of
     # profile_ids for scope='shared'.
@@ -2399,6 +2436,10 @@ async def lifespan(application: FastAPI):
                 "state": "checking_components", "embeddings_backfilled": 0,
                 "expansion_backfilled": 0, "null_remaining": None,
                 "components": None,
+                # Declared here so /status carries the same keys whatever
+                # happens; a field that only appears on failure is a field
+                # nobody's dashboard renders.
+                "incomplete_reason": None,
                 "started_at": _t.time(), "finished_at": None,
             }
             # Step 0 (v3.8.2 "whole self-healer"): repair components that
@@ -2507,9 +2548,42 @@ async def lifespan(application: FastAPI):
                     _backfill_vector_store()
                 except Exception as exc:
                     logger.warning("Self-heal vector index failed (non-fatal): %s", exc)
-                _SELF_HEAL_STATUS["state"] = "complete"
+
+                # "complete" has to mean complete.
+                #
+                # This line used to set "complete" unconditionally, so a
+                # backfill that gave up after five no-progress attempts, or ran
+                # out its 500-iteration budget, reported success with facts
+                # still unembedded — and an unembedded fact cannot be found by
+                # meaning at all. That is how a machine sat at 56.3% of its
+                # memory reachable while its own status endpoint said the heal
+                # had finished. Nobody was going to look past a green light.
+                #
+                # Now the state is derived from the remaining count, and the
+                # gap is named in plain language for the dashboard, so an
+                # incomplete heal is visible and gets retried on next start
+                # instead of being declared done forever.
+                _remaining = _SELF_HEAL_STATUS.get("null_remaining")
                 _SELF_HEAL_STATUS["finished_at"] = _t.time()
-                logger.info("Self-heal complete: %s", _SELF_HEAL_STATUS)
+                if _remaining is None:
+                    _SELF_HEAL_STATUS["state"] = "complete"
+                elif int(_remaining) > 0:
+                    _SELF_HEAL_STATUS["state"] = "incomplete"
+                    _SELF_HEAL_STATUS["incomplete_reason"] = (
+                        f"{int(_remaining)} memories still have no meaning "
+                        f"vector, so they cannot be found by asking a question. "
+                        f"This retries automatically next time the service "
+                        f"starts. It usually means the embedding model was "
+                        f"unavailable."
+                    )
+                    logger.warning(
+                        "Self-heal INCOMPLETE: %d facts still unembedded and "
+                        "therefore unreachable by meaning; will retry on next "
+                        "start. %s", int(_remaining), _SELF_HEAL_STATUS,
+                    )
+                else:
+                    _SELF_HEAL_STATUS["state"] = "complete"
+                    logger.info("Self-heal complete: %s", _SELF_HEAL_STATUS)
             except Exception as exc:
                 _SELF_HEAL_STATUS["state"] = "error"
                 logger.warning("Self-heal failed (non-fatal): %s", exc)
@@ -4513,6 +4587,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 shared_with=tuple(shared_with or ()),
                 trusted_actor_id=trusted_actor_id,
                 session_id=req.session_id,
+                session_date=req.session_date,
             )
             actor = Actor(
                 principal_id=trusted_actor_id,
