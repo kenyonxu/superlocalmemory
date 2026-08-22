@@ -95,3 +95,40 @@ def test_the_switch_is_still_the_operator_s_to_turn_off(monkeypatch) -> None:
     orch._maybe_schedule_auto_promote()
 
     assert started == [], "auto-promotion ran with the setting turned off"
+
+
+# ---------------------------------------------------------------------------
+# The timer that the scheduler arms carries its own copy of the same rule.
+# Fixing one and not the other arms a timer whose callback refuses.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("state", ["local_core", "prepared", "verified"])
+def test_the_timer_callback_agrees_with_the_scheduler(state: str, monkeypatch) -> None:
+    counted: list[str] = []
+
+    orch = BackendOrchestrator.__new__(BackendOrchestrator)
+    orch._config = _Config(state)
+    # Reaching the edge count means the state gate let it through; stopping
+    # there keeps this a test of the gate rather than of promotion.
+    monkeypatch.setattr(
+        BackendOrchestrator, "_count_default_edges",
+        lambda self: counted.append(state) or 0,
+    )
+    orch._auto_promote_if_at_scale()
+
+    assert counted == [state], (
+        f"the timer fired for a store at {state!r} and its callback refused; "
+        f"the scheduler and the callback must apply the same rule"
+    )
+
+
+def test_the_timer_callback_leaves_a_finished_store_alone(monkeypatch) -> None:
+    counted: list[str] = []
+    orch = BackendOrchestrator.__new__(BackendOrchestrator)
+    orch._config = _Config("promoted")
+    monkeypatch.setattr(
+        BackendOrchestrator, "_count_default_edges",
+        lambda self: counted.append("counted") or 0,
+    )
+    orch._auto_promote_if_at_scale()
+    assert counted == [], "an already-promoted store was measured for promotion"

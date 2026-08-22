@@ -214,7 +214,10 @@ class BackendOrchestrator:
             import os
 
             cfg = self._config
-            if getattr(cfg, "scale_engine_state", "local_core") != "local_core":
+            # Same rule as the scheduler that armed this timer: only a store
+            # that has finished has nothing left to do. Fixing the scheduler
+            # alone would have armed a timer whose callback still refused.
+            if str(getattr(cfg, "scale_engine_state", "local_core")).lower() == "promoted":
                 return
             threshold = int(
                 os.environ.get("SLM_AUTO_PROMOTE_MIN_EDGES", "")
