@@ -296,23 +296,55 @@ class EntityGraphChannel:
         ):
             return
         adj: dict[str, list[tuple[str, float]]] = defaultdict(list)
+        # The graph projection, when there is one, answers this in 395 ms where
+        # SQLite takes 2,477 ms on the same 208k-edge store -- and this rebuild
+        # sits on the recall path, triggered by any edge-count change or a TTL
+        # expiry. It declines global and shared scope, because it stores one
+        # profile per edge and a short answer here would silently shrink the
+        # graph around a candidate. That decline is correct, not a degradation.
+        #
+        # This is the projection's only reader. Before it, the projection was
+        # maintained by the outbox, held at parity, purged on erasure, and
+        # queried by nothing.
+        triples: list[tuple[str, str, float]] | None = None
+        source_name = "sqlite"
         try:
-            where, params = _scope_where(
-                profile_id,
-                include_global=include_global,
-                include_shared=include_shared,
-            )
-            rows = self._db.execute(
-                f"SELECT source_id, target_id, weight FROM graph_edges WHERE {where}",
-                (*params,),
-            )
-        except Exception:
-            rows = []
-        for r in rows:
-            d = dict(r)
-            s, t, w = d["source_id"], d["target_id"], float(d["weight"])
-            adj[s].append((t, w))
-            adj[t].append((s, w))
+            from superlocalmemory.graph.cozo_adjacency import adjacency_source
+
+            projection = adjacency_source()
+            if projection is not None:
+                triples = projection.edges(
+                    profile_id,
+                    include_global=include_global,
+                    include_shared=include_shared,
+                )
+                if triples is not None:
+                    source_name = projection.name
+        except Exception:  # noqa: BLE001 -- SQLite answers this unconditionally
+            triples = None
+        if triples is None:
+            try:
+                where, params = _scope_where(
+                    profile_id,
+                    include_global=include_global,
+                    include_shared=include_shared,
+                )
+                rows = self._db.execute(
+                    f"SELECT source_id, target_id, weight FROM graph_edges WHERE {where}",
+                    (*params,),
+                )
+            except Exception:
+                rows = []
+            triples = []
+            for r in rows:
+                d = dict(r)
+                triples.append(
+                    (d["source_id"], d["target_id"], float(d["weight"])),
+                )
+        self._adjacency_source_name = source_name
+        for edge_source, edge_target, edge_weight in triples:
+            adj[edge_source].append((edge_target, edge_weight))
+            adj[edge_target].append((edge_source, edge_weight))
         # Also load entity maps (same staleness lifecycle)
         self._load_entity_maps(
             profile_id,
