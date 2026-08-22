@@ -33,7 +33,9 @@ so a second pass moves nothing.
 from __future__ import annotations
 
 import logging
+import contextlib
 import sqlite3
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +83,33 @@ def _resolve(content: str) -> str:
     return "semantic" if resolved == _PROSPECTIVE else resolved
 
 
-def apply(conn: sqlite3.Connection) -> None:
-    """Demote every wrongly-filed plan, in batches, resumably."""
-    existing = {r[1] for r in conn.execute(f"PRAGMA table_info({_TABLE})")}
+@contextlib.contextmanager
+def _held(conn: sqlite3.Connection):
+    """Yield the connection the caller already owns, and leave it open."""
+    yield conn
+
+
+def apply(
+    conn: sqlite3.Connection | None = None,
+    *,
+    open_connection: Any = None,
+) -> None:
+    """Demote every wrongly-filed plan, in batches, resumably.
+
+    Pass ``conn`` when the caller owns the connection for the whole pass -- the
+    migration runner at startup, where nothing else is writing. Pass
+    ``open_connection`` (a context manager factory, typically the database
+    manager's ``raw_connection``) on a running store: each batch then takes and
+    releases the process write lock, so a memory being saved waits one batch
+    rather than the whole pass. The batching below cannot do that on its own,
+    because holding the connection is what holds the lock.
+    """
+    if (conn is None) == (open_connection is None):
+        raise ValueError("pass exactly one of conn or open_connection")
+    acquire = (lambda: _held(conn)) if conn is not None else open_connection
+
+    with acquire() as probe:
+        existing = {r[1] for r in probe.execute(f"PRAGMA table_info({_TABLE})")}
     if "fact_type" not in existing or "content" not in existing:
         logger.info("M048: %s has no fact_type/content; nothing to re-read", _TABLE)
         return
@@ -92,45 +118,47 @@ def apply(conn: sqlite3.Connection) -> None:
     demoted = 0
     kept = 0
     while True:
-        batch = conn.execute(
-            f"SELECT rowid, fact_id, content FROM {_TABLE} "
-            f"WHERE rowid > ? AND fact_type = ? ORDER BY rowid LIMIT {_BATCH}",
-            (cursor, _PROSPECTIVE),
-        ).fetchall()
-        if not batch:
-            break
-        cursor = batch[-1][0]
+        with acquire() as active:
+            batch = active.execute(
+                f"SELECT rowid, fact_id, content FROM {_TABLE} "
+                f"WHERE rowid > ? AND fact_type = ? ORDER BY rowid LIMIT {_BATCH}",
+                (cursor, _PROSPECTIVE),
+            ).fetchall()
+            if not batch:
+                break
+            cursor = batch[-1][0]
 
-        moves: list[tuple[str, int]] = []
-        for rowid, _fact_id, content in batch:
-            resolved = _resolve(content)
-            if resolved == _PROSPECTIVE:
-                kept += 1
-                continue
-            moves.append((resolved, rowid))
+            moves: list[tuple[str, int]] = []
+            for rowid, _fact_id, content in batch:
+                resolved = _resolve(content)
+                if resolved == _PROSPECTIVE:
+                    kept += 1
+                    continue
+                moves.append((resolved, rowid))
 
-        if moves:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                # Conditional on the row still being what was read, so a
-                # concurrent write is not clobbered.
-                changed = 0
-                for new_type, rowid in moves:
-                    cur = conn.execute(
-                        f"UPDATE {_TABLE} SET fact_type = ? "
-                        f"WHERE rowid = ? AND fact_type = '{_PROSPECTIVE}'",
-                        (new_type, rowid),
-                    )
-                    # Count what the guard let through, not what was offered. A
-                    # concurrent write can change the row underneath, and a log
-                    # line that reports the intention as the outcome is how a
-                    # receipt comes to overstate what happened.
-                    changed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            demoted += changed
+            if moves:
+                active.execute("BEGIN IMMEDIATE")
+                try:
+                    # Conditional on the row still being what was read, so a
+                    # concurrent write is not clobbered.
+                    changed = 0
+                    for new_type, rowid in moves:
+                        cur = active.execute(
+                            f"UPDATE {_TABLE} SET fact_type = ? "
+                            f"WHERE rowid = ? AND fact_type = '{_PROSPECTIVE}'",
+                            (new_type, rowid),
+                        )
+                        # Count what the guard let through, not what was
+                        # offered. A concurrent write can change the row
+                        # underneath, and a log line that reports the intention
+                        # as the outcome is how a receipt comes to overstate
+                        # what happened.
+                        changed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+                    active.commit()
+                except Exception:
+                    active.rollback()
+                    raise
+                demoted += changed
 
     logger.info(
         "M048: re-read %d memories filed as plans; %d were, %d moved",

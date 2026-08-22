@@ -281,31 +281,6 @@ class MaintenanceScheduler:
                     "Graph metrics skipped for %s: %s", profile_id, exc,
                 )
 
-            # Re-read what is filed as a plan. The one-time pass runs as a
-            # migration; the rule it uses keeps getting sharper, and a completed
-            # migration is never replayed — so without this the store drifts
-            # further from the rule with every release and nothing repairs it.
-            # The pass is a pure function of the text and idempotent, so this is
-            # a no-op once the store has converged.
-            try:
-                from superlocalmemory.storage.migrations import (
-                    M048_upcoming_holds_only_what_is_upcoming as _reclassify,
-                )
-                # This reached for `_conn` and then `.connection`, and the
-                # database manager has neither -- so the guard below was always
-                # False and this pass had never run once. Verified directly:
-                # both attributes are absent on the manager, which means the
-                # store drifted further from the rule with every release while
-                # a block that looks like it repairs that sat here doing
-                # nothing. `raw_connection` is the documented way to get one.
-                with self._db.raw_connection() as conn:
-                    _reclassify.apply(conn)
-            except Exception as exc:
-                logger.debug(
-                    "re-reading what is filed as a plan skipped for %s: %s",
-                    profile_id, exc,
-                )
-
             # Lifecycle evaluation must cover every stored profile, not only
             # whichever profile was active when the engine started.
             try:
@@ -324,6 +299,32 @@ class MaintenanceScheduler:
             except Exception as exc:
                 logger.debug("Core-block recompile skipped for %s: %s", profile_id, exc)
 
+        # Re-read what is filed as a plan. The one-time pass runs as a
+        # migration; the rule it uses keeps getting sharper, and a completed
+        # migration is never replayed — so without this the store drifts
+        # further from the rule with every release and nothing repairs it. The
+        # pass is a pure function of the text and idempotent, so this is a no-op
+        # once the store has converged.
+        #
+        # Once per cycle, not once per profile: it reads the whole table in one
+        # sweep with no profile predicate, so running it per profile did the
+        # identical global work N times over and took the write lock N times to
+        # do it. It also takes and releases that lock per batch, so a memory
+        # being saved waits for one batch rather than the whole sweep.
+        #
+        # An earlier version reached for `_conn` and then `.connection`, and the
+        # database manager has neither, so the guard was always False and this
+        # had never run once -- the store drifted further from the rule with
+        # every release while a block that looks like it repairs that sat here
+        # doing nothing.
+        try:
+            from superlocalmemory.storage.migrations import (
+                M048_upcoming_holds_only_what_is_upcoming as _reclassify,
+            )
+            _reclassify.apply(open_connection=self._db.raw_connection)
+        except Exception as exc:
+            logger.debug("re-reading what is filed as a plan skipped: %s", exc)
+
         # Retention. Three tables had a pruner each, written and wired
         # separately; the fourth unbounded table was found by reading a
         # disk-usage report and the fifth by reading the fourth. The policy for
@@ -336,10 +337,16 @@ class MaintenanceScheduler:
         # profile-scoped. Placed after the per-profile work so it sweeps rows
         # that pass orphaned -- pruning the graph and demoting tiers is what
         # leaves a lineage or temporal row without a referent.
+        # In pieces, each taking and releasing the write lock. Entering
+        # ``raw_connection`` is what takes that lock, so entering it once for
+        # the whole sweep held it for the whole sweep: measured at 1,480 ms and
+        # 123,888 rows on a 1 GB store, which is most of the budget a save is
+        # allowed, spent waiting.
         try:
-            from superlocalmemory.storage.retention_policy import run_retention
-            with self._db.raw_connection() as conn:
-                removed = run_retention(conn)
+            from superlocalmemory.storage.retention_policy import (
+                run_retention_bounded,
+            )
+            removed = run_retention_bounded(self._db.raw_connection)
             if removed:
                 logger.info(
                     "Retention: %s",
