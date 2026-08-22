@@ -311,7 +311,9 @@ class EntityGraphChannel:
         try:
             from superlocalmemory.graph.cozo_adjacency import adjacency_source
 
-            projection = adjacency_source()
+            projection = (
+                adjacency_source() if self._projection_is_caught_up(profile_id) else None
+            )
             if projection is not None:
                 triples = projection.edges(
                     profile_id,
@@ -404,6 +406,42 @@ class EntityGraphChannel:
             len(self._entity_to_facts),
             profile_id,
         )
+
+    def _projection_is_caught_up(self, profile_id: str) -> bool:
+        """Whether the second graph store has seen every change SQLite has.
+
+        The graph lives in two stores and no transaction spans them, so the
+        durable record of "this fact still needs projecting" is a queue row
+        written in the same transaction as the change. A row outstanding for
+        this profile is that store telling us, in its own words, that it is
+        behind -- and reading a graph that is behind means walking a link the
+        store has already removed.
+
+        This is a primary-key count on a table whose steady state is empty and
+        whose size is bounded by the fact count, so it is microseconds. The
+        alternative -- comparing the two edge sets -- costs 1.9 s on the
+        author's store and 7.7 s on the larger one, which is the whole recall
+        budget spent proving a cache is warm.
+        """
+        try:
+            from superlocalmemory.storage import projection_outbox
+
+            if not projection_outbox.is_available(self._db):
+                return True
+            rows = self._db.execute(
+                "SELECT COUNT(*) AS cnt FROM projection_outbox WHERE profile_id = ?",
+                (profile_id,),
+            )
+            pending = int(dict(rows[0]).get("cnt", 0)) if rows else 0
+        except Exception:  # noqa: BLE001 -- an unreadable queue means read SQLite
+            return False
+        if pending:
+            logger.debug(
+                "adjacency: %d change(s) not yet in the graph projection for "
+                "profile %s; reading the store directly", pending, profile_id,
+            )
+            return False
+        return True
 
     def _get_edge_count(
         self,

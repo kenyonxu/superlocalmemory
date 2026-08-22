@@ -316,6 +316,34 @@ def _projection_usable(
     return True, f"projection within {drift:.2%}"
 
 
+def _projection_is_current(db: Any, profile_id: str) -> bool:
+    """Whether every change SQLite has recorded has reached the projection.
+
+    Two engines ranking two different graphs is worse than one engine ranking
+    the right one, because the difference is invisible in the output: both
+    return a full table of plausible scores. The queue is the only place that
+    records a change the projection has not seen yet, so an outstanding row
+    means the projection is a graph the store no longer has.
+
+    Absent queue means an older store that never had one; there is nothing to
+    be behind on, so the projection is as current as it can be.
+    """
+    try:
+        from superlocalmemory.storage import projection_outbox
+
+        if not projection_outbox.is_available(db):
+            return True
+        with _short_connection(db) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM projection_outbox WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchone()
+        return int(row[0] if row else 0) == 0
+    except Exception as exc:  # noqa: BLE001 -- unreadable means do not trust it
+        logger.debug("graph metrics: cannot check projection currency: %s", exc)
+        return False
+
+
 def compute_graph_metrics(
     db: Any,
     profile_id: str,
@@ -359,9 +387,18 @@ def compute_graph_metrics(
 
     usable, why = _projection_usable(backend, profile_id, len(edges))
     notes.append(why)
+    if usable and not _projection_is_current(db, profile_id):
+        usable = False
+        why = "projection has unapplied changes"
+        notes.append(why)
     engine = "cozo" if (usable and prefer == "cozo") else "networkx"
     try:
-        if usable:
+        # On ``engine``, not on ``usable``. Branching on ``usable`` ran the
+        # projection whenever one was available, whatever the caller asked for,
+        # and then reported the engine the caller had asked for -- so a store
+        # with a projection was ranked by it while every log line said
+        # otherwise, and the fallback below could never be reached.
+        if engine == "cozo":
             pagerank, communities = _cozo_metrics(backend, profile_id, damping)
         else:
             pagerank, communities = _networkx_metrics(edges, damping)
