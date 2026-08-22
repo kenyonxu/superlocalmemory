@@ -181,14 +181,54 @@ def get_storage_config():
     """
     try:
         data = _read_config()
+        declared_graph = data.get("graph_backend", "auto")
+        declared_vector = data.get("vector_backend", "auto")
+        active_graph, active_vector = _active_backends(declared_graph, declared_vector)
         return {
-            "graph_backend": data.get("graph_backend", "auto"),
-            "vector_backend": data.get("vector_backend", "auto"),
+            "graph_backend": declared_graph,
+            "vector_backend": declared_vector,
+            # What is actually answering queries. A store can be configured for
+            # a backend it never successfully promoted to, and then the setting
+            # describes an intention rather than the system.
+            "graph_backend_active": active_graph,
+            "vector_backend_active": active_vector,
+            "backend_matches_configuration": (
+                active_graph == declared_graph and active_vector == declared_vector
+            ),
             "base_dir": data.get("base_dir", str(MEMORY_DIR)),
         }
     except Exception:
         logger.exception("get_storage_config failed")
         return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+
+def _active_backends(declared_graph: str, declared_vector: str) -> tuple[str, str]:
+    """Which backends are really serving queries, not which were requested.
+
+    A promotion writes the chosen backend into the configuration before the
+    directory that holds it exists, and a promotion that never completed leaves
+    the setting saying ``cozo`` while every query is answered by SQLite. The
+    dashboard read the setting, so it agreed with the mistake.
+
+    Resolved from the two things that must both be true for a backend to serve:
+    its library imports, and its data directory is on disk.
+    """
+    def usable(module: str, directory: str) -> bool:
+        import importlib.util
+
+        if importlib.util.find_spec(module) is None:
+            return False
+        return (MEMORY_DIR / directory).is_dir()
+
+    graph = "sqlite"
+    if declared_graph in ("cozo", "auto") and usable("pycozo", "cozo"):
+        graph = "cozo"
+
+    vector = "sqlite-vec"
+    if declared_vector in ("lancedb", "auto") and usable("lancedb", "lance"):
+        vector = "lancedb"
+
+    return graph, vector
 
 
 # ---------------------------------------------------------------------------
