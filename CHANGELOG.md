@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   times the highest genuine one, so those memories took the largest ranking
   bonus available for no reason beyond having shared a subject with a few
   others. It has been removed; nothing depended on it.
+- **A note about which schema versions had been applied was stored thousands of
+  times over.** Seven versions were recorded as 3,496 rows on one store and
+  234,348 on another, because the six places that write it all assumed a
+  uniqueness rule the table did not have. The rule is now there, so those writes
+  do what they always intended, and the duplicates are collapsed to one row each
+  keeping the original date.
 - **A second workspace could take over a memory belonging to the first.** Where
   two workspaces on one store were handed the same identifier for a memory or a
   fact — an import keyed on an external record id, feeding one source into two
@@ -35,6 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is now refused, and says which workspace owns it.
 
 ### Changed
+- **Every table that only grows now has a stated limit, or states why it has
+  none.** Three of them had a cleanup routine, each written and wired
+  separately; the fourth was found by reading a disk-usage report and the fifth
+  by reading the fourth. All 45 are now declared in one place with the reasoning
+  attached, one pass enforces them, and a table added without a decision is
+  something the tests can see. On a real store the first pass removed 7,342 rows
+  in 0.4 s, and 123,918 on a larger one — the biggest single group being 83,623
+  records describing memories that had already been deleted.
+  Nothing that holds your memories, your corrections, an erasure record, or the
+  feedback that improves ranking is touched; each of those says so explicitly.
+  Two tables are recorded as growing faster than the store with no rule decided
+  yet, rather than being quietly given one.
 - **Recall assembles your knowledge graph from the graph store.** On a store with
   208,000 connections that assembly took 2.5 seconds and now takes 0.4. It runs
   whenever the graph changes, so it was on the path of a recall. The answers are

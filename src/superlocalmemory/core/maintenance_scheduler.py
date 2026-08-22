@@ -320,6 +320,32 @@ class MaintenanceScheduler:
             except Exception as exc:
                 logger.debug("Core-block recompile skipped for %s: %s", profile_id, exc)
 
+        # Retention. Three tables had a pruner each, written and wired
+        # separately; the fourth unbounded table was found by reading a
+        # disk-usage report and the fifth by reading the fourth. The policy for
+        # every append-shaped table now lives in one registry and this enforces
+        # all of them, so a table added without a policy is something the test
+        # suite can see rather than something a person has to remember.
+        #
+        # Once per cycle, not per profile: every rule is keyed either on a row's
+        # own age or on whether its referent still exists, and neither is
+        # profile-scoped. Placed after the per-profile work so it sweeps rows
+        # that pass orphaned -- pruning the graph and demoting tiers is what
+        # leaves a lineage or temporal row without a referent.
+        try:
+            from superlocalmemory.storage.retention_policy import run_retention
+            with self._db.raw_connection() as conn:
+                removed = run_retention(conn)
+            if removed:
+                logger.info(
+                    "Retention: %s",
+                    ", ".join(
+                        f"{table} -{count}" for table, count in sorted(removed.items())
+                    ),
+                )
+        except Exception as exc:
+            logger.warning("Retention pass skipped: %s", exc)
+
         # V3.4.10: Check if auto-backup is due
         try:
             from superlocalmemory.infra.backup import BackupManager

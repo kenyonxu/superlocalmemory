@@ -167,6 +167,7 @@ from superlocalmemory.storage.migrations import (
     M046_prospective_memory_has_its_own_name as _M046,
     M047_fisher_vectors_are_stored_like_every_other_vector as _M047,
     M048_upcoming_holds_only_what_is_upcoming as _M048,
+    M049_a_schema_version_marker_is_one_row as _M049,
 )
 from superlocalmemory.storage.migrations import (
     M043_quarantine_display_summaries as _M043,
@@ -367,6 +368,12 @@ DEFERRED_MIGRATIONS: list[Migration] = [
     # rows now carry a more confident name. Depends on M046 for the rename.
     Migration(name=_M048.NAME, db_target="memory", ddl=_M048.DDL,
               dependencies=(_M046.NAME,)),
+    # M049 gives schema_version the unique constraint its six writers all
+    # assumed it had. Every one uses INSERT OR IGNORE, which ignores nothing
+    # without a constraint, so each appended a duplicate per run: seven distinct
+    # versions held as 3,496 rows on one store and 234,348 on another. No
+    # dependency -- it touches a bookkeeping table no other migration reads.
+    Migration(name=_M049.NAME, db_target="memory", ddl=_M049.DDL),
 ]
 
 
