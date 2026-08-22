@@ -135,26 +135,63 @@ class GDPRCompliance:
         except Exception:
             pass
 
-    def _purge_fact_projections(self, fact_id: str, profile_id: str) -> None:
+    def _purge_graph_and_vector_projections(
+        self, profile_id: str,
+    ) -> tuple[int, int]:
+        """Remove a tenant's facts from CozoDB and LanceDB. Returns (purged, failed).
+
+        These projections live in their own storage engines — RocksDB under Cozo,
+        Lance files under the vector store — so nothing about deleting rows from
+        SQLite reaches them. A memory left in the graph after erasure is still
+        reachable by recall, which makes the erasure receipt a false statement.
+
+        A store with no projection open returns ``(0, 0)``: there is nothing to
+        purge, which is not a failure. A projection that is open and refuses to
+        delete IS a failure and is counted, so ``erasure_complete`` cannot come
+        back true while a tenant's facts are still in the graph.
+        """
         try:
-            self._db.delete_bm25_tokens_for_fact(fact_id)
+            from superlocalmemory.core.backend_orchestrator import get_orchestrator
         except Exception:
-            pass
-        engine = self._engine
-        if engine is None:
-            return
-        store = getattr(engine, "_vector_store", None)
-        ann = getattr(engine, "_ann_index", None)
-        if store is not None and getattr(store, "available", False):
-            try:
-                store.delete(fact_id)
-            except Exception:
-                pass
-        if ann is not None and hasattr(ann, "remove"):
-            try:
-                ann.remove(fact_id)
-            except Exception:
-                pass
+            return 0, 0
+        orchestrator = get_orchestrator()
+        if orchestrator is None:
+            return 0, 0
+        graph = orchestrator.get_graph_backend()
+        vector = orchestrator.get_vector_backend()
+        if graph is None and vector is None:
+            return 0, 0
+
+        try:
+            fact_ids = [
+                dict(r)["fact_id"]
+                for r in self._db.execute(
+                    "SELECT fact_id FROM atomic_facts WHERE profile_id = ?",
+                    (profile_id,),
+                )
+            ]
+        except Exception as exc:
+            logger.warning("GDPR erase: could not list facts to unproject: %s", exc)
+            return 0, 1
+
+        purged = failures = 0
+        for fact_id in fact_ids:
+            removed = True
+            for backend, method in ((graph, "remove_fact"), (vector, "remove_vector")):
+                if backend is None:
+                    continue
+                try:
+                    getattr(backend, method)(fact_id)
+                except Exception as exc:
+                    logger.warning(
+                        "GDPR erase: %s failed for %s: %s", method, fact_id[:12], exc,
+                    )
+                    removed = False
+            if removed:
+                purged += 1
+            else:
+                failures += 1
+        return purged, failures
 
     def _purge_vector_and_ann(self, profile_id: str) -> tuple[int, int]:
         engine = self._engine
@@ -437,6 +474,26 @@ class GDPRCompliance:
             logger.warning("GDPR erase: vector purge failed: %s", exc)
             counts["vector_store_failures"] = counts.get("vector_store_failures", 0) or 1
 
+        # The graph and vector projections are separate storage engines, so a
+        # profile wipe against SQLite does not reach them. They have to be
+        # purged here, before Pass 2: that sweep finds a tenant's tables by
+        # looking for a profile_id column, which includes projection_outbox — so
+        # it would delete the very rows that carry the queued removals, leaving
+        # the erased facts in the graph with nothing left to take them out.
+        try:
+            graph_purged, graph_failures = self._purge_graph_and_vector_projections(
+                profile_id
+            )
+            if graph_purged:
+                counts["graph_projection"] = graph_purged
+            if graph_failures:
+                counts["graph_projection_failures"] = graph_failures
+        except Exception as exc:
+            logger.warning("GDPR erase: graph projection purge failed: %s", exc)
+            counts["graph_projection_failures"] = (
+                counts.get("graph_projection_failures", 0) or 1
+            )
+
         # Erasure receipt (P1-5) — route the profile wipe through ErasureService
         # so the receipt captures real per-owner proofs (not proofs:[]).
         #
@@ -672,6 +729,9 @@ class GDPRCompliance:
                 and not counts.get("learning_db_failed")
                 and not counts.get("learning_db_skipped")
                 and not counts.get("vector_store_failures")
+                # A fact still in the graph is still recallable, so an erasure
+                # that could not reach the projection is not complete.
+                and not counts.get("graph_projection_failures")
                 and not counts.get("context_cache_failed")
                 and not counts.get("owner_erasure_incomplete")
                 and not counts.get("backup_obligations_pending")
