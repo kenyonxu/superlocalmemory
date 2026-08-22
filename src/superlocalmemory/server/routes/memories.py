@@ -136,10 +136,20 @@ def _admit_http_mutation(request: Request, operation: str) -> None:
         resolve_principal,
     )
 
+    from superlocalmemory.core.admission import _company_mode_active
+
+    # Both switches, the same rule the other entry points use. Reading
+    # config.toml alone left this path treating a workspace as personal after
+    # the dashboard toggle had turned per-user access on -- so a write refused
+    # everywhere else was admitted here.
     deployment = getattr(request.app.state, "deployment", None)
-    is_enterprise = bool(deployment and deployment.is_enterprise)
-    tier = "enterprise" if is_enterprise else "personal"
-    mode = "company" if is_enterprise else "local"
+    if deployment is None:
+        from superlocalmemory.core.admission import _resolve_deployment
+
+        deployment = _resolve_deployment()
+    company = _company_mode_active(deployment)
+    tier = "enterprise" if company else "personal"
+    mode = "company" if company else "local"
 
     principal_info = resolve_principal(request)
     principal = str(principal_info.get("user_id") or "")

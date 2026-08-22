@@ -27,6 +27,9 @@ from typing import Any
 from fastapi import HTTPException, Request
 
 from superlocalmemory.access.rbac import Permission, Role, permissions_for_role
+import logging
+
+logger = logging.getLogger(__name__)
 
 _SESSION_HEADER = "X-SLM-User-Session"
 _SESSION_COOKIE = "slm_session"
@@ -132,12 +135,29 @@ def resolve_actor_roles(request: Request, *, profile: str | None = None):
     if rbac is not None:
         try:
             role = rbac.get_role(principal["user_id"], profile or _active_profile())
-        except Exception:
-            # The caller already passed require_permission for this operation, so
-            # a transient role lookup must not surface as a 500. Fall back to the
-            # least-privileged write-capable role rather than deny an authorized
-            # write.
-            return frozenset({ActorRole.MEMBER})
+        except Exception as exc:  # noqa: BLE001
+            # A lookup that failed is not a lookup that said yes.
+            #
+            # This used to return MEMBER, on the reasoning that the caller had
+            # already passed a coarser permission check so a transient database
+            # error should not deny an authorised write. The effect was that any
+            # error in the role lookup -- a write-lock timeout, a checkpoint, a
+            # corrupt page -- promoted a viewer to a role that can write, at
+            # exactly the moment the store was under stress. A caller able to
+            # provoke lock contention could provoke the promotion.
+            #
+            # "Ask again in a moment" is the honest answer and the one the
+            # caller can act on. It is neither a denial nor a grant.
+            from fastapi import HTTPException
+
+            logger.warning(
+                "rbac: the role for this caller could not be read (%s); "
+                "answering 503 rather than assuming one", exc,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="the workspace's roles are temporarily unreadable; retry",
+            ) from exc
     mapped = {
         Role.ADMIN: ActorRole.ADMIN,
         Role.MEMBER: ActorRole.MEMBER,

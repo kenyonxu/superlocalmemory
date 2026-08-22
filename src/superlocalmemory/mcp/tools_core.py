@@ -473,6 +473,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @admits(OperationKind.RECALL)
     async def fetch(fact_ids: str) -> dict:
         """Fetch full details for specific fact IDs (comma-separated)."""
         try:
@@ -500,6 +501,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @admits(OperationKind.RECALL)
     async def list_recent(limit: int = CANONICAL_LIST_LIMIT) -> dict:
         """List most recently stored memories, newest first."""
         try:

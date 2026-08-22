@@ -312,6 +312,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
     # 1. session_init — Auto-recall project context at session start
     # ------------------------------------------------------------------
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @admits(OperationKind.RECALL)
     async def session_init(
         project_path: str = "",
         query: str = "",

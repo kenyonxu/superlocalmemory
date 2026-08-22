@@ -40,9 +40,33 @@ except ImportError:
     logger.info("V3 compliance engine not available")
 
 
+def _require_manage(request) -> None:
+    """Require MANAGE on the active workspace, where the workspace has roles.
+
+    A store with no roles configured has nobody to check against, and refusing
+    there would break every personal install; the loopback boundary is the
+    control in that case.
+    """
+    try:
+        from superlocalmemory.access.rbac import Permission
+        from superlocalmemory.server.rbac_enforce import require_permission
+
+        require_permission(request, Permission.MANAGE, profile=get_active_profile())
+    except ImportError:  # pragma: no cover -- roles are always present in-tree
+        return
+
+
 @router.get("/api/compliance/status")
-async def compliance_status():
+async def compliance_status(request: Request):
     """Get compliance engine status for active profile."""
+    # This returns which operations ran and what categories of memory exist.
+    # That is operational metadata about someone's store; it had no gate at all.
+    from superlocalmemory.server.write_identity import require_http_mutation_actor
+
+    require_http_mutation_actor(
+        request, getattr(request.app.state, "daemon_descriptor", None),
+        actor_kind="compliance-read",
+    )
     if not COMPLIANCE_AVAILABLE:
         return {"available": False, "message": "Compliance engine not available"}
 
@@ -168,7 +192,7 @@ def _erasure_succeeded(result: dict) -> bool:
 
 
 @router.post("/api/compliance/retention-policy")
-async def create_retention_policy(data: dict):
+async def create_retention_policy(request: Request, data: dict):
     """Create a compliance retention policy.
 
     Body: {
@@ -179,6 +203,17 @@ async def create_retention_policy(data: dict):
         applies_to: dict (optional)
     }
     """
+    # A retention rule decides what is kept and for how long, so changing one
+    # is a persistent configuration change on someone else's data. It is gated
+    # on the same loopback-trusted boundary the audit read uses, and on MANAGE
+    # in a workspace that has roles -- it had neither.
+    from superlocalmemory.server.write_identity import require_http_mutation_actor
+
+    require_http_mutation_actor(
+        request, getattr(request.app.state, "daemon_descriptor", None),
+        actor_kind="retention-policy",
+    )
+    _require_manage(request)
     if not COMPLIANCE_AVAILABLE:
         return {"success": False, "error": "Compliance engine not available"}
 
@@ -218,8 +253,19 @@ async def create_retention_policy(data: dict):
 
 
 @router.delete("/api/compliance/retention-policy")
-async def delete_retention_policy(name: str = Query(...)):
+async def delete_retention_policy(request: Request, name: str = Query(...)):
     """Delete a retention policy by name for the active profile."""
+    # A retention rule decides what is kept and for how long, so changing one
+    # is a persistent configuration change on someone else's data. It is gated
+    # on the same loopback-trusted boundary the audit read uses, and on MANAGE
+    # in a workspace that has roles -- it had neither.
+    from superlocalmemory.server.write_identity import require_http_mutation_actor
+
+    require_http_mutation_actor(
+        request, getattr(request.app.state, "daemon_descriptor", None),
+        actor_kind="retention-policy",
+    )
+    _require_manage(request)
     if not COMPLIANCE_AVAILABLE:
         return {"success": False, "error": "Compliance engine not available"}
     try:
@@ -237,12 +283,23 @@ async def delete_retention_policy(name: str = Query(...)):
 
 
 @router.post("/api/compliance/retention/enforce")
-async def enforce_retention():
+async def enforce_retention(request: Request):
     """Run all retention policies for the active profile now.
 
     Moves expired facts to their rule's terminal lifecycle zone (archive/
     tombstone) or counts them (notify). Soft-state only — never a raw delete.
     """
+    # A retention rule decides what is kept and for how long, so changing one
+    # is a persistent configuration change on someone else's data. It is gated
+    # on the same loopback-trusted boundary the audit read uses, and on MANAGE
+    # in a workspace that has roles -- it had neither.
+    from superlocalmemory.server.write_identity import require_http_mutation_actor
+
+    require_http_mutation_actor(
+        request, getattr(request.app.state, "daemon_descriptor", None),
+        actor_kind="retention-policy",
+    )
+    _require_manage(request)
     if not COMPLIANCE_AVAILABLE:
         return {"success": False, "error": "Compliance engine not available"}
     try:

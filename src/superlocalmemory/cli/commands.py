@@ -445,7 +445,21 @@ def dispatch(args: Namespace) -> None:
     }
     handler = handlers.get(args.command)
     if handler:
-        handler(args)
+        from superlocalmemory.cli.daemon import DaemonRefused
+
+        try:
+            handler(args)
+        except DaemonRefused as refusal:
+            # One place, because a command added next year will not remember to
+            # do this. A refusal is an answer: say so and stop, rather than
+            # printing a traceback or -- worse -- letting a command fall back to
+            # writing locally what the workspace has just declined.
+            print(
+                f"[slm] {refusal}. This workspace requires authentication; "
+                "set SLM_USER_SESSION or log in, then try again.",
+                flush=True,
+            )
+            sys.exit(1)
     else:
         print(f"Unknown command: {args.command}")
         sys.exit(1)
