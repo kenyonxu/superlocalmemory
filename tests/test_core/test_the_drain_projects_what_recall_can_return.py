@@ -186,34 +186,23 @@ class TestWhatGetsProjected:
 
 class TestWhatGetsTakenOut:
 
-    def test_a_withheld_fact_stops_being_offered(self, store) -> None:
-        """A quarantined memory is not shown by any read path, including this one."""
-        fact = _store_fact(store, "withheld pending review")
-        store.execute(
-            "UPDATE atomic_facts SET quarantined = 1 WHERE fact_id = ?",
-            (fact.fact_id,),
-        )
-        graph, vector = FakeGraph(), FakeVector()
+    def test_a_withheld_fact_leaves_the_projection_entirely(self, store) -> None:
+        """A withheld memory loses its bridge AND its edges.
 
-        result = _drain_for(store, graph, vector).drain_once()
+        Corrected 2026-08-22 after measuring what the SQLite channel actually
+        does. Its raw edge query filters on scope only, which reads like
+        "adjacency ignores visibility" — but it then prunes the result:
+        "Edge scope alone cannot authorize an endpoint. Prune both endpoints
+        against the visible fact corpus so denied facts cannot influence an
+        allowed candidate indirectly through propagation."
 
-        assert result.removed == 1
-        assert fact.fact_id not in graph.facts
-        assert fact.fact_id in vector.removed
-        assert fact.fact_id in graph.withdrawn, (
-            "a hidden fact was fully removed; that also deletes the edges its "
-            "visible neighbours are reached through"
-        )
-
-    def test_hiding_a_fact_leaves_its_neighbours_adjacency_intact(self, store) -> None:
-        """The defect this split exists for.
-
-        The SQLite edge walk has no visibility predicate — it traverses into
-        withheld facts and lets hydration drop them. So withdrawing a fact must
-        not shrink the graph around it, or the projected walk and the SQLite walk
-        return different candidates for every fact that neighboured a withheld
-        one. Measured on a real store before the fix: 32 visible facts affected,
-        every missing endpoint quarantined.
+        So the projected graph must not contain a withheld fact at all. An
+        earlier version of this file asserted the opposite, on the strength of
+        the raw query alone. Measured cost of getting it wrong: Cozo's bridge
+        held 1,257 unreturnable facts and its edges touched 805, and the Cozo
+        graph search diverged from SQLite on every query tried — one returned 9
+        results against SQLite's 20, because withheld facts had taken the top-k
+        budget on their pooled entity lists.
         """
         visible = _store_fact(store, "a memory that stays visible")
         withheld = _store_fact(store, "a memory about to be withheld")
@@ -234,11 +223,12 @@ class TestWhatGetsTakenOut:
         drain.drain_once()
 
         assert withheld.fact_id not in graph.facts, "it is still being offered"
-        assert any(
-            {e[0], e[1]} == {visible.fact_id, withheld.fact_id} for e in graph.edges
+        assert withheld.fact_id in vector.removed
+        assert not any(
+            withheld.fact_id in (e[0], e[1]) for e in graph.edges
         ), (
-            "withdrawing a fact deleted the edge a visible neighbour reaches it "
-            "through, so this graph now answers differently from SQLite's"
+            "a withheld fact is still reachable through an edge, so the "
+            "projected walk sees an adjacency the SQLite walk prunes away"
         )
 
     def test_a_deleted_fact_loses_its_edges_too(self, store) -> None:

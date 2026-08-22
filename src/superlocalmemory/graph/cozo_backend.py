@@ -370,9 +370,24 @@ class CozoDBGraphBackend:
 
         # Step 2: Export fact-to-canonical-entity mappings.  This relation is
         # what allows a canonical query seed to enter the fact graph.
-        facts_sql = """
+        #
+        # Withheld and archived facts are excluded, with the same predicate the
+        # SQLite entity map uses and for the reason it records: such a row
+        # carries its whole cluster's pooled entity list, so it out-ranks real
+        # memories, takes the top-k budget, and is then discarded at hydration.
+        # This export predated that fix. Measured on a copy of the author's
+        # store, it had put 1,257 unreturnable facts into the bridge, and the
+        # Cozo graph search diverged from SQLite on every query tried — one
+        # returned 9 results against SQLite's 20. The projection failed closed
+        # each time, so recall stayed correct and the projection was useless.
+        from superlocalmemory.storage.database import (
+            visible_fact_clause_for_connection,
+        )
+
+        facts_sql = f"""
             SELECT fact_id, canonical_entities_json
             FROM atomic_facts WHERE profile_id = ?
+            {visible_fact_clause_for_connection(conn)}
         """
         fact_entity_dicts: list[dict[str, str]] = []
         for fact_id, raw_entities in conn.execute(facts_sql, (profile_id,)).fetchall():
@@ -485,7 +500,16 @@ class CozoDBGraphBackend:
             return []
         maximum = max(score for _, score in results)
         results = [(fact_id, score / maximum) for fact_id, score in results]
-        return sorted(results, key=lambda item: item[1], reverse=True)[:top_k]
+        # Tie-break on fact_id, exactly as the SQLite channel does
+        # (``results.sort(key=lambda x: (-x[1], x[0]))``). Sorting on score
+        # alone left ties to dict insertion order, and an entity-seeded walk
+        # produces a large tie group at 1.0 — every fact directly linked to a
+        # query entity scores the same. Measured on a copy of the author's
+        # store: 12 of 20 results differed between the two paths, all at score
+        # 1.0, so the shadow comparison failed on every query and the projection
+        # was never used. Its contract is membership, and membership at the
+        # cut-off is decided by the tie-break, so the tie-break has to agree.
+        return sorted(results, key=lambda item: (-item[1], item[0]))[:top_k]
 
     # ------------------------------------------------------------------
     # Spreading Activation (Python BFS over CozoDB edges)
@@ -540,7 +564,8 @@ class CozoDBGraphBackend:
             current_frontier = next_frontier
 
         # Sort by score desc, return top_k
-        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        # Same deterministic tie-break as recall_facts and the SQLite channel.
+        ranked = sorted(scores.items(), key=lambda x: (-x[1], x[0]))
         return ranked[:top_k]
 
     # ------------------------------------------------------------------

@@ -269,7 +269,7 @@ class ProjectionDrain:
             # adjacency here than in SQLite, and the two graphs would answer
             # differently. Measured on a real store before this was split: 32
             # visible facts had lost edges, every missing endpoint quarantined.
-            self._withdraw_candidacy(fact_id, graph, vector)
+            self._remove(fact_id, graph, vector)
             return "removed"
 
         fact = self._db.get_fact(fact_id)
