@@ -109,6 +109,8 @@ DEFINITE_FUTURE = ANCHORED_FUTURE
 CIRCUMSTANTIAL_FUTURE = re.compile(
     r"\b(?:"
     r"on\s+" + _WEEKDAY + r"|"
+    r"(?:is|are)\s+(?:this\s+)?" + _WEEKDAY + r"|"
+    r"this\s+(?:week|" + _WEEKDAY + r")|"
     r"at\s+\d{1,2}:\d{2}|"
     r"in\s+\d+\s+(?:days?|weeks?|months?|years?)|"
     r"(?:starts?|begins?|resumes?|reopens?)\s+(?:on|at)|"
@@ -156,6 +158,7 @@ ALREADY_HAPPENED = re.compile(
     r"produced|caused|created|caught|found|"
     r"updated|changed|edited|modified|renamed|bumped|committed|"
     r"restarted|configured|installed|"
+    r"had|met|arrived|attended|ate|spoke|talked|visited|saw|"
     # deleted / removed / added are deliberately absent: each is both a simple
     # past AND the participle in a future passive, and "the worktrees will be
     # deleted" is a plan. The future-passive list in PLANNING_LANGUAGE is the
@@ -179,14 +182,17 @@ def looks_prospective(text: str) -> bool:
     """
     if not text:
         return False
-    if RECURRING.search(text):
-        return False
     behind = ALREADY_HAPPENED.search(text)
     if ANCHORED_FUTURE.search(text):
+        # Checked BEFORE the recurring veto. "The weekly review is next Tuesday"
+        # names one dated occurrence of a recurring thing, and that occurrence
+        # is coming up; "weekly" describes the series, not this instance.
         # A forward anchor beats the past only when the past word is what moved
         # the event. "Rescheduled to next Friday" is a plan; "discussed the
         # deadline for next month" is a record of a conversation.
         return not behind or bool(RESCHEDULING.search(text))
+    if RECURRING.search(text):
+        return False
     if PLANNING_LANGUAGE.search(text) or CIRCUMSTANTIAL_FUTURE.search(text):
         return not behind
     return False

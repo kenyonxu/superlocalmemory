@@ -21,7 +21,15 @@ from superlocalmemory.retrieval.channel_status import CHANNEL_NAMES
 from superlocalmemory.storage.models import FactType
 
 REPO = Path(__file__).resolve().parents[2]
-SKILLS = sorted((REPO / "plugin-src" / "skills").glob("*/SKILL.md"))
+# Every tree an agent could actually be reading, not just the source. A
+# generated copy can rot on its own — that is what the build scripts are for,
+# and what a check that only looks at the source cannot see.
+SKILLS = sorted(
+    list((REPO / "plugin-src" / "skills").glob("*/SKILL.md"))
+    + list((REPO / "plugin" / "skills").glob("*/SKILL.md"))
+    + list((REPO / "codex-plugin" / "skills").glob("*/SKILL.md"))
+    + list((REPO / "copilot-plugin" / ".github" / "prompts").glob("*.prompt.md"))
+)
 
 FACT_TYPES = {f.value for f in FactType}
 
@@ -49,7 +57,7 @@ def _walk(node, key: str):
             yield from _walk(item, key)
 
 
-@pytest.mark.parametrize("skill", SKILLS, ids=lambda p: p.parent.name)
+@pytest.mark.parametrize("skill", SKILLS, ids=lambda p: f"{p.parent.parent.name}/{p.parent.name}")
 def test_every_named_channel_exists(skill: Path) -> None:
     for block in _json_blocks(skill.read_text(encoding="utf-8")):
         for field in ("channel_scores", "channel_weights", "channel_status"):
@@ -58,17 +66,17 @@ def test_every_named_channel_exists(skill: Path) -> None:
                     continue
                 unknown = sorted(set(mapping) - set(CHANNEL_NAMES))
                 assert not unknown, (
-                    f"{skill.parent.name} shows {field} keys the engine never "
+                    f"{skill} shows {field} keys the engine never "
                     f"emits: {unknown}"
                 )
 
 
-@pytest.mark.parametrize("skill", SKILLS, ids=lambda p: p.parent.name)
+@pytest.mark.parametrize("skill", SKILLS, ids=lambda p: f"{p.parent.parent.name}/{p.parent.name}")
 def test_every_named_fact_type_exists(skill: Path) -> None:
     for block in _json_blocks(skill.read_text(encoding="utf-8")):
         for value in _walk(block, "fact_type"):
             assert value in FACT_TYPES, (
-                f"{skill.parent.name} shows fact_type {value!r}; the four are "
+                f"{skill} shows fact_type {value!r}; the four are "
                 f"{sorted(FACT_TYPES)}"
             )
 

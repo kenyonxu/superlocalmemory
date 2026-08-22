@@ -103,12 +103,37 @@ def generate_patterns(
 # ---------------------------------------------------------------------------
 
 
+#: Whole-word matchers for the technology keywords, built once.
+#:
+#: These used to be substring tests, and the short names are inside ordinary
+#: English: "going" contains "go", "reaction" contains "react", "digital"
+#: contains "git", "javascript" contains "java". One real sentence — "the
+#: digital transformation is going well, the reaction was mixed" — produced
+#: Git, Go and React. Those rows feed the soft prompt that tells an assistant
+#: "default to these when generating code", on every turn.
+#:
+#: A boundary is only added where the keyword actually ends in a word
+#: character, so "c++", ".net" and "node.js" still match.
+_TECH_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {}
+
+
+def _matcher(keyword: str) -> re.Pattern[str]:
+    left = r"(?<![A-Za-z0-9_])" if keyword[:1].isalnum() else ""
+    right = r"(?![A-Za-z0-9_])" if keyword[-1:].isalnum() else ""
+    return re.compile(left + re.escape(keyword) + right, re.IGNORECASE)
+
+
 def _mine_tech_preferences(store, facts, profile_id, dry_run) -> int:
+    if not _TECH_PATTERNS:
+        for keyword, label in _TECH_KEYWORDS.items():
+            _TECH_PATTERNS.setdefault(label, ())
+            _TECH_PATTERNS[label] += (_matcher(keyword),)
+
     tech_counts: Counter = Counter()
     for f in facts:
-        content = dict(f)["content"].lower()
-        for keyword, label in _TECH_KEYWORDS.items():
-            if keyword in content:
+        content = dict(f)["content"]
+        for label, patterns in _TECH_PATTERNS.items():
+            if any(p.search(content) for p in patterns):
                 tech_counts[label] += 1
 
     gen = 0

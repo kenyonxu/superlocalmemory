@@ -56,11 +56,29 @@ DDL = """
 """
 
 
-def _classify(content: str) -> str:
-    """The type this text supports, using the same rule new writes use."""
-    from superlocalmemory.encoding.fact_extractor import _classify_sentence
+def _resolve(content: str) -> str:
+    """The type this text supports — and the question asked in the right order.
 
-    return _classify_sentence(content or "").value
+    The full classifier answers "which of the four is this", and it asks about
+    opinion before it asks about plans. That is right for a new memory: "I think
+    we should ship next week" is an opinion. It is WRONG here, because this
+    migration is only deciding whether a row belongs under the plan type, and
+    "we should deploy next Tuesday" IS something coming up. Asking the full
+    classifier demoted real deadlines into opinions and they vanished from the
+    list of what is upcoming — which is the exact harm this exists to repair.
+
+    So: if it reads as a plan, it stays a plan. Only when it does not is the
+    full classifier asked where it should go instead, and its answer is taken
+    only if it is not "prospective".
+    """
+    from superlocalmemory.encoding.fact_extractor import _classify_sentence
+    from superlocalmemory.encoding.prospective_markers import looks_prospective
+
+    text = content or ""
+    if looks_prospective(text):
+        return _PROSPECTIVE
+    resolved = _classify_sentence(text).value
+    return "semantic" if resolved == _PROSPECTIVE else resolved
 
 
 def apply(conn: sqlite3.Connection) -> None:
@@ -85,7 +103,7 @@ def apply(conn: sqlite3.Connection) -> None:
 
         moves: list[tuple[str, int]] = []
         for rowid, _fact_id, content in batch:
-            resolved = _classify(content)
+            resolved = _resolve(content)
             if resolved == _PROSPECTIVE:
                 kept += 1
                 continue
@@ -131,7 +149,7 @@ def verify(conn: sqlite3.Connection) -> bool:
         (_PROSPECTIVE,),
     ).fetchall()
     for fact_id, content in rows:
-        if _classify(content) != _PROSPECTIVE:
+        if _resolve(content) != _PROSPECTIVE:
             logger.error(
                 "M048 verify: fact %s is still filed as a plan and does not "
                 "read as one", fact_id,

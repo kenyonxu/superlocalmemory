@@ -287,23 +287,42 @@ def test_rowids_do_not_move_even_with_holes(store) -> None:
     assert before == after, "a fact is now sitting at a different row position"
 
 
-def test_verify_catches_a_conversion_that_blanked_the_values(store) -> None:
+def test_verify_catches_a_conversion_that_blanked_every_value(store) -> None:
     """A well-formed buffer of zeroes is not a conversion.
 
-    Checking only that the bytes are a multiple of four and finite would
-    certify a run that wrote 768 zeroes over every vector, and the decay
-    dynamics would then read every memory as carrying no evidence at all.
+    Checking only that the bytes are a multiple of four and finite would certify
+    a run that wrote 768 zeroes over every vector, and the decay dynamics would
+    then read every memory as carrying no evidence at all.
     """
     _seed(store, 5)
     M047.apply(store)
     assert M047.verify(store) is True
 
+    blank = np.zeros(WIDTH, dtype=np.float32).tobytes()
+    store.execute("UPDATE atomic_facts SET fisher_mean = ?", (blank,))
+    store.commit()
+
+    assert M047.verify(store) is False, (
+        "verify certified a store whose vectors had all been blanked"
+    )
+
+
+def test_one_honestly_zero_vector_is_not_a_wipe(store) -> None:
+    """Refusing on a single zero marks the migration incomplete forever.
+
+    A store can legitimately hold a memory whose evidence really is zero.
+    Deferred migrations record a failure and continue, so a verify that refuses
+    on one such row would report this conversion unfinished on every future
+    start, with nothing left to do about it.
+    """
+    _seed(store, 5)
+    M047.apply(store)
     store.execute(
         "UPDATE atomic_facts SET fisher_mean = ? WHERE fact_id = 'f0'",
         (np.zeros(WIDTH, dtype=np.float32).tobytes(),),
     )
     store.commit()
 
-    assert M047.verify(store) is False, (
-        "verify certified a vector that had been blanked to zeroes"
+    assert M047.verify(store) is True, (
+        "one legitimately-zero vector was read as a blanket wipe"
     )

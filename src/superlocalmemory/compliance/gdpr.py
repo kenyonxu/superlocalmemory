@@ -811,6 +811,14 @@ class GDPRCompliance:
             if not receipt.all_erased:
                 counts["vector_store_failures"] = sum(1 for p in receipt.proofs if not p.erased)
 
+        # The same residue the profile wipe had: the search-expansion index is
+        # keyed on a fact, not a profile, and ``delete_fact`` does not touch it.
+        # Erasing an entity left the alternate keys of its memories behind, and
+        # a search could still match them.
+        self._erase_fact_keyed_tables_for(
+            [fid for fid, _mid in targets], counts,
+        )
+
         for fid, mid in targets:
             self._db.delete_fact(fid)
             if mid and not self._memory_has_siblings(mid, profile_id):
@@ -861,6 +869,50 @@ class GDPRCompliance:
     _FACT_KEYED_TABLES: tuple[tuple[str, str], ...] = (
         ("fact_expansion_fts", "fact_id"),
     )
+
+    def _erase_fact_keyed_tables_for(
+        self, fact_ids: list[str], counts: dict,
+    ) -> None:
+        """Erase fact-keyed rows for an explicit list of facts.
+
+        The profile wipe derives the list from a profile; a targeted entity
+        erasure already knows which facts it is removing. Both need the same
+        tables cleared, so they share the loop rather than one of them
+        forgetting — which is exactly what happened.
+        """
+        if not fact_ids:
+            return
+        for table, column in self._FACT_KEYED_TABLES:
+            try:
+                exists = self._db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name = ?", (table,)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GDPR erase: cannot look for %s: %s", table, exc)
+                counts[f"{table}_failed"] = 1
+                continue
+            if not exists:
+                continue
+            removed = 0
+            try:
+                for start in range(0, len(fact_ids), 500):
+                    chunk = fact_ids[start:start + 500]
+                    placeholders = ",".join("?" * len(chunk))
+                    present = self._db.execute(
+                        f"SELECT COUNT(*) AS c FROM {table} "
+                        f"WHERE {column} IN ({placeholders})",
+                        tuple(chunk),
+                    )
+                    removed += int(dict(present[0])["c"]) if present else 0
+                    self._db.execute(
+                        f"DELETE FROM {table} WHERE {column} IN ({placeholders})",
+                        tuple(chunk),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GDPR erase: delete from %s failed: %s", table, exc)
+                counts[f"{table}_failed"] = 1
+                continue
+            counts[table] = counts.get(table, 0) + removed
 
     def _erase_fact_keyed_tables(self, profile_id: str, counts: dict) -> None:
         """Delete rows that name this profile's facts but not the profile."""

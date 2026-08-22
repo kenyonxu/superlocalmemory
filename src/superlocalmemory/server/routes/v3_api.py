@@ -609,9 +609,13 @@ def _refuse_incompatible_embedding(config, old_emb, new_model, new_dim):
 
         measured = None
         if (getattr(old_emb, "provider", "") == "ollama"
-                or config.embedding.provider == "ollama"):
+                or getattr(config.embedding, "provider", "") == "ollama"):
+            # The model being SAVED, not the one already configured. Probing the
+            # old one always matched the stored width and therefore always
+            # allowed the change — the guard measured the thing it was not
+            # protecting against.
             probe = validate_ollama_model(
-                getattr(old_emb, "ollama_model", "") or new_model,
+                new_model or getattr(old_emb, "ollama_model", ""),
                 EMBEDDING,
                 base_url=getattr(old_emb, "ollama_base_url", "")
                 or "http://localhost:11434",
@@ -690,7 +694,14 @@ async def set_embedding_config(request: Request):
             provider=new_provider,
             api_endpoint=new_endpoint,
             api_key=new_key,
-            ollama_model=old_emb.ollama_model,
+            # In Ollama mode the embedder resolves its model from
+            # ``ollama_model``, so keeping the old value here made a rename a
+            # no-op that still answered "success". A caller naming a model gets
+            # that model.
+            ollama_model=(
+                new_model if new_provider == "ollama" and new_model
+                else old_emb.ollama_model
+            ),
             ollama_base_url=old_emb.ollama_base_url,
             api_version=old_emb.api_version,
             deployment_name=old_emb.deployment_name,

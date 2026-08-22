@@ -245,6 +245,7 @@ def verify(conn: sqlite3.Connection) -> bool:
             f"SELECT {column} FROM {_TABLE} "
             f"WHERE typeof({column}) = 'blob' LIMIT 50"
         ).fetchall()
+        nonzero = 0
         for (raw,) in sample:
             if raw is None:
                 continue
@@ -258,15 +259,18 @@ def verify(conn: sqlite3.Connection) -> bool:
             if not np.all(np.isfinite(values)):
                 logger.error("M047 verify: a %s buffer holds a non-finite value", column)
                 return False
-            if not np.any(values):
-                # A buffer of the right length full of zeroes passes every
-                # structural check and is not a conversion — it is a deletion
-                # wearing the right shape. The dynamics read an all-zero vector
-                # as "this memory carries no evidence", which is a different
-                # claim from the one the original text made.
-                logger.error(
-                    "M047 verify: a %s buffer is entirely zero, which is not a "
-                    "converted vector", column,
-                )
-                return False
+            if np.any(values):
+                nonzero += 1
+        if sample and nonzero == 0:
+            # EVERY sampled vector being zero is a blanket wipe wearing the
+            # right shape: the buffers are the correct length and finite, and
+            # the dynamics would read all of them as "this memory carries no
+            # evidence". One honestly-zero vector is not that, and refusing on
+            # a single one would mark the migration incomplete forever on a
+            # store that legitimately holds one.
+            logger.error(
+                "M047 verify: every sampled %s buffer is entirely zero, which "
+                "is a wipe rather than a conversion", column,
+            )
+            return False
     return True

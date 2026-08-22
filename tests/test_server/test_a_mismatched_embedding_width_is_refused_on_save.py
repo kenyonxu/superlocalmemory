@@ -93,3 +93,64 @@ def test_a_broken_check_does_not_block_a_save(tmp_path, monkeypatch) -> None:
     assert _refuse_incompatible_embedding(
         Exploding(), _Emb(), "anything", 1024,
     ) is None
+
+
+def test_the_ollama_probe_measures_the_model_being_saved(tmp_path, monkeypatch) -> None:
+    """It measured the model already configured, so it always matched.
+
+    Probing the current model returns the width the store already holds, which
+    equals the stored width by definition — so the guard passed every time and
+    protected nothing. These tests never set the Ollama provider, so the probe
+    path was never exercised at all.
+    """
+    _store_holding(tmp_path, 768)
+
+    asked: list[str] = []
+
+    class _Probe:
+        def __init__(self, dimension):
+            self.ok = True
+            self.dimension = dimension
+            self.message = ""
+
+    import superlocalmemory.core.ollama_validator as validator
+
+    def fake(model_name, role, *, base_url="", timeout=60.0):
+        asked.append(model_name)
+        return _Probe(4096 if model_name == "qwen3-embedding:8b" else 768)
+
+    monkeypatch.setattr(validator, "validate_ollama_model", fake)
+
+    old = _Emb(provider="ollama", ollama_model="nomic-embed-text")
+    result = _refuse_incompatible_embedding(
+        _Config(tmp_path, provider="ollama"), old, "qwen3-embedding:8b", 768,
+    )
+
+    assert asked == ["qwen3-embedding:8b"], (
+        f"the guard probed {asked} — it must ask about the model being saved"
+    )
+    assert result is not None, "a 4096-wide model was accepted into a 768 store"
+    assert result.status_code == 409
+
+
+def test_a_declared_width_cannot_talk_past_a_measurement(tmp_path, monkeypatch) -> None:
+    """A caller declaring 768 does not make a 4096-wide model safe."""
+    _store_holding(tmp_path, 768)
+
+    class _Probe:
+        ok = True
+        dimension = 4096
+        message = ""
+
+    import superlocalmemory.core.ollama_validator as validator
+    monkeypatch.setattr(
+        validator, "validate_ollama_model",
+        lambda *a, **k: _Probe(),
+    )
+
+    result = _refuse_incompatible_embedding(
+        _Config(tmp_path, provider="ollama"),
+        _Emb(provider="ollama", ollama_model="nomic-embed-text"),
+        "mxbai-embed-large", 768,
+    )
+    assert result is not None, "the declared width overrode the measured one"
