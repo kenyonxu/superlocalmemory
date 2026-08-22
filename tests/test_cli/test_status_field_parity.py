@@ -2,14 +2,16 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
-"""RED tests: CLI↔MCP status field parity.
+"""CLI↔MCP status field parity.
 
 Validates that cli/commands.py cmd_status --json and mcp/tools_core.py
 get_status return the same canonical KEY SET (not value-case).
 
-Canonical field set (LLD §5):
-    mode, provider, profile, base_dir, db_path, db_size_mb,
-    fact_count, entity_count, edge_count
+The canonical set is imported from the source rather than restated here. It
+used to be a second copy living in this file, which is how the HTTP dashboard
+came to omit five of these fields for several releases: nothing compared it to
+anything, because the definition it would have been compared against was a
+literal inside a test that never looked at HTTP.
 
 Envelope keys (success, next_actions) are excluded from the key-set test.
 v3.6.12 fields that must NOT be removed: the fields already present
@@ -31,21 +33,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # ---------------------------------------------------------------------------
-# Canonical definition (mirrors LLD §5)
+# Canonical definition — one copy, in the source, shared with the HTTP surface
 # ---------------------------------------------------------------------------
 
-CANONICAL_STATUS_FIELDS = frozenset({
-    "mode",
-    "provider",
-    "profile",
-    "base_dir",
-    "db_path",
-    "db_size_mb",
-    "fact_count",
-    "entity_count",
-    "edge_count",
-    "profile_generation",
-})
+from superlocalmemory.core.status_contract import (  # noqa: E402
+    CANONICAL_STATUS_FIELDS as _CANONICAL,
+)
+
+CANONICAL_STATUS_FIELDS = frozenset(_CANONICAL)
 
 # Fields that were present in v3.6.12 CLI json output — must never be removed.
 # db_size_mb was emitted (conditionally, when the db existed) in v3.6.12 and is

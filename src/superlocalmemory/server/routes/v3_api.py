@@ -13,6 +13,11 @@ import os
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
+from superlocalmemory.core.status_contract import (
+    COUNT_QUERIES,
+    counts_from_sqlite,
+    store_size_mb,
+)
 from superlocalmemory.server.routes.helpers import SLM_VERSION, get_read_connection
 from superlocalmemory.server.route_mutations import authorize_route_mutation
 
@@ -104,20 +109,13 @@ async def dashboard(request: Request):
 
         # Read stats directly from SQLite (dashboard doesn't load engine)
         memory_count = 0
-        fact_count = 0
+        counts = dict.fromkeys(COUNT_QUERIES, 0)
         db_path = config.base_dir / "memory.db"
         if db_path.exists():
             try:
                 conn = get_read_connection(db_path)
+                counts = counts_from_sqlite(conn, active_profile)
                 cursor = conn.cursor()
-                try:
-                    cursor.execute(
-                        "SELECT COUNT(*) FROM atomic_facts WHERE profile_id = ?",
-                        (active_profile,),
-                    )
-                    fact_count = cursor.fetchone()[0]
-                except Exception:
-                    pass
                 try:
                     try:
                         cursor.execute(
@@ -145,10 +143,18 @@ async def dashboard(request: Request):
             "provider": config.llm.provider or "none",
             "model": config.llm.model or "",
             "memory_count": memory_count,
-            "fact_count": fact_count,
             "profile": active_profile,
             "base_dir": str(config.base_dir),
             "version": SLM_VERSION,
+            # The counts and the store's own address were missing here while
+            # every other status surface carried them, so the one surface a
+            # person actually looks at could not answer "is the graph healthy".
+            "db_path": str(db_path),
+            "db_size_mb": store_size_mb(db_path),
+            "profile_generation": get_profile_runtime(
+                request.app.state,
+            ).snapshot.generation,
+            **counts,
         }
         payload.update(dashboard_mode_fields(config.mode))
         return payload

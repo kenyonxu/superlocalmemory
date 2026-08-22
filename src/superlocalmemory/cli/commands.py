@@ -1885,6 +1885,9 @@ def cmd_review_correction(args: Namespace) -> None:
 def cmd_status(args: Namespace) -> None:
     """Show system status."""
     from superlocalmemory.core.config import SLMConfig
+    # Same source the other two status surfaces read, so all three cannot
+    # disagree about which version answered.
+    from superlocalmemory.server.routes.helpers import SLM_VERSION
 
     config = SLMConfig.load()
     daemon_status = None
@@ -1909,7 +1912,10 @@ def cmd_status(args: Namespace) -> None:
 
         if daemon_status is not None:
             data = {
-                "mode": str(daemon_status.get("mode", "unknown")).upper(),
+                # Lowercase is what the daemon, the HTTP surface and MCP all
+                # report. Uppercasing it here made one field disagree across
+                # surfaces for anyone comparing the two answers.
+                "mode": str(daemon_status.get("mode", "unknown")),
                 "provider": daemon_status.get("provider", "none"),
                 "profile": daemon_status["profile"],
                 "base_dir": daemon_status.get("base_dir", str(config.base_dir)),
@@ -1921,6 +1927,7 @@ def cmd_status(args: Namespace) -> None:
                 "profile_generation": int(
                     daemon_status.get("profile_generation", 0)
                 ),
+                "version": SLM_VERSION,
             }
             json_print("status", data=data, next_actions=[
                 {"command": "slm health --json", "description": "Check math layer health"},
@@ -1971,7 +1978,7 @@ def cmd_status(args: Namespace) -> None:
                         pass
 
         data = {
-            "mode": config.mode.value.upper(),
+            "mode": config.mode.value,
             "provider": config.llm.provider or "none",
             "profile": config.active_profile,
             "base_dir": str(config.base_dir),
@@ -1981,6 +1988,7 @@ def cmd_status(args: Namespace) -> None:
             "entity_count": entity_count,
             "edge_count": edge_count,
             "profile_generation": 0,
+            "version": SLM_VERSION,
         }
         json_print("status", data=data, next_actions=[
             {"command": "slm health --json", "description": "Check math layer health"},
@@ -2074,7 +2082,7 @@ def cmd_health(args: Namespace) -> None:
             "total_facts": len(facts),
             "similarity_indexed": fisher_count,
             "lifecycle_positioned": langevin_count,
-            "mode": config.mode.value.upper(),
+            "mode": config.mode.value,
         }, next_actions=[
             {"command": "slm status --json", "description": "Check system status"},
             {"command": "slm recall '<query>' --json", "description": "Test retrieval"},
@@ -3907,7 +3915,7 @@ def cmd_session_context(args: Namespace) -> None:
                 json_print("session-context", data={
                     "context": context,
                     "memory_count": len(inj_mems),
-                    "mode": config.mode.value.upper(),
+                    "mode": config.mode.value,
                 }, next_actions=[
                     {"command": "slm recall --json <query>", "description": "Search memories"},
                 ])

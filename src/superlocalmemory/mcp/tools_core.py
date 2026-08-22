@@ -511,6 +511,10 @@ def register_core_tools(server, get_engine: Callable) -> None:
     async def get_status() -> dict:
         """Get memory system status: fact count, entity count, mode, profile, db size."""
         try:
+            # Same source the HTTP surface reads, imported here rather than at
+            # module scope: that module costs ~260ms and MCP starts over stdio.
+            from superlocalmemory.server.routes.helpers import SLM_VERSION
+
             import asyncio
             import os
 
@@ -540,6 +544,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
                         "profile_generation": int(
                             daemon_status.get("profile_generation", 0)
                         ),
+                        "version": SLM_VERSION,
                     }
 
             engine = get_engine()
@@ -576,6 +581,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 "entity_count": entity_count,
                 "edge_count": edge_count,
                 "profile_generation": 0,
+                "version": SLM_VERSION,
             }
         except Exception as exc:
             logger.exception("get_status failed")
