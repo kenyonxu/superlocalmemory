@@ -14,13 +14,27 @@ WHAT IT PROJECTS IS WHAT RECALL CAN RETURN
 ------------------------------------------
 Not "lifecycle in (active, warm)", which is what the inline sync used. That
 predicate was wrong twice over: it dropped ``cold``, which is a live tier that
-recall answers from, and it never removed a fact that had since been archived,
-leaving forgotten memories reachable through the graph.
+recall answers from, and it never withdrew a fact that had since been archived,
+leaving forgotten memories offered as candidates.
 
-The filter here is ``visible_fact_clause()`` — the same predicate every read
-path uses to decide whether a row may be shown as a memory at all. Deriving the
-projection from the same clause means the two cannot drift: if recall can return
-it, it is projected; the moment it cannot, it is removed.
+The filter is ``visible_fact_clause()`` — the same predicate every read path
+uses to decide whether a row may be shown as a memory at all. Deriving the
+projection from that clause means the two cannot drift.
+
+BUT VISIBILITY GOVERNS CANDIDACY, NOT ADJACENCY
+-----------------------------------------------
+The SQLite channel does not treat those as one thing, and neither may this. Its
+entity map filters on visibility — a withheld row must never enter it, because
+it carries its whole cluster's pooled entity list and out-ranks real memories.
+Its edge walk filters on scope alone, with no visibility predicate, so it
+traverses edges into withheld and archived facts and lets hydration drop them at
+the end.
+
+So a hidden fact loses its entity bridge and its vector and KEEPS its edges. An
+earlier version of this module deleted the edges too, and on a real store that
+left 32 visible facts with a smaller adjacency here than in SQLite — every
+missing endpoint quarantined. A graph that answers differently from the walk it
+replaces is not a projection of it.
 
 FAILURE IS LOUD
 ---------------
@@ -248,9 +262,14 @@ class ProjectionDrain:
             # is nothing to project and nothing to remove.
             return "skipped"
         if state == "hidden":
-            # Archived or withheld: recall cannot return it, so neither may the
-            # projection. This is the case the old inline sync never handled.
-            self._remove(fact_id, graph, vector)
+            # Archived or withheld. It must stop being offered as a candidate —
+            # but its EDGES stay. The SQLite entity map filters on visibility
+            # and its edge walk does not, so deleting a hidden fact's edges
+            # would leave every visible fact that neighboured it with a smaller
+            # adjacency here than in SQLite, and the two graphs would answer
+            # differently. Measured on a real store before this was split: 32
+            # visible facts had lost edges, every missing endpoint quarantined.
+            self._withdraw_candidacy(fact_id, graph, vector)
             return "removed"
 
         fact = self._db.get_fact(fact_id)
@@ -333,8 +352,29 @@ class ProjectionDrain:
         )
 
     def _remove(self, fact_id: str, graph: Any, vector: Any) -> None:
-        """Take one fact out of both projections."""
+        """Take one fact out of both projections entirely, edges included.
+
+        For a fact that is genuinely gone. Its edges go too, because a hard
+        delete cascades them out of SQLite as well, so keeping them here would
+        be the projection holding an adjacency the store no longer has.
+        """
         if graph is not None:
             graph.remove_fact(fact_id)
+        if vector is not None:
+            vector.remove_vector(fact_id)
+
+    def _withdraw_candidacy(self, fact_id: str, graph: Any, vector: Any) -> None:
+        """Stop offering a fact, without changing the graph's shape.
+
+        For a fact that still exists but may no longer be returned. It leaves
+        the entity bridge and the vector — the two things that put a fact into a
+        result set — and leaves its edges alone, because those are still in
+        ``graph_edges`` and the walk this projection replaces still follows them.
+        """
+        if graph is not None:
+            withdraw = getattr(graph, "remove_fact_candidacy", None)
+            # A backend without the narrower call is better served by the full
+            # removal than by silently leaving a withheld fact recallable.
+            (withdraw or graph.remove_fact)(fact_id)
         if vector is not None:
             vector.remove_vector(fact_id)

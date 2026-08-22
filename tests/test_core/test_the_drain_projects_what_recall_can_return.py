@@ -40,15 +40,22 @@ class FakeGraph:
 
     def __init__(self, fail_on: set[str] | None = None) -> None:
         self.removed: list[str] = []
+        self.withdrawn: list[str] = []
         self.facts: dict[str, list[str]] = {}
         self.entities: dict[str, str] = {}
         self.edges: list[tuple[str, str, str, float]] = []
         self._fail_on = fail_on or set()
 
     def remove_fact(self, fact_id: str) -> None:
+        """Full removal, edges included — mirrors CozoDBGraphBackend."""
         self.removed.append(fact_id)
         self.facts.pop(fact_id, None)
         self.edges = [e for e in self.edges if fact_id not in (e[0], e[1])]
+
+    def remove_fact_candidacy(self, fact_id: str) -> None:
+        """Bridge only. Edges survive, exactly as the real backend leaves them."""
+        self.withdrawn.append(fact_id)
+        self.facts.pop(fact_id, None)
 
     def add_entity(self, entity_id, name, entity_type, meta, profile_id) -> None:
         self.entities[entity_id] = name
@@ -179,7 +186,7 @@ class TestWhatGetsProjected:
 
 class TestWhatGetsTakenOut:
 
-    def test_a_withheld_fact_is_removed_not_projected(self, store) -> None:
+    def test_a_withheld_fact_stops_being_offered(self, store) -> None:
         """A quarantined memory is not shown by any read path, including this one."""
         fact = _store_fact(store, "withheld pending review")
         store.execute(
@@ -193,6 +200,66 @@ class TestWhatGetsTakenOut:
         assert result.removed == 1
         assert fact.fact_id not in graph.facts
         assert fact.fact_id in vector.removed
+        assert fact.fact_id in graph.withdrawn, (
+            "a hidden fact was fully removed; that also deletes the edges its "
+            "visible neighbours are reached through"
+        )
+
+    def test_hiding_a_fact_leaves_its_neighbours_adjacency_intact(self, store) -> None:
+        """The defect this split exists for.
+
+        The SQLite edge walk has no visibility predicate — it traverses into
+        withheld facts and lets hydration drop them. So withdrawing a fact must
+        not shrink the graph around it, or the projected walk and the SQLite walk
+        return different candidates for every fact that neighboured a withheld
+        one. Measured on a real store before the fix: 32 visible facts affected,
+        every missing endpoint quarantined.
+        """
+        visible = _store_fact(store, "a memory that stays visible")
+        withheld = _store_fact(store, "a memory about to be withheld")
+        store.store_edge(GraphEdge(
+            profile_id="default", source_id=visible.fact_id,
+            target_id=withheld.fact_id, edge_type=EdgeType.SEMANTIC, weight=0.9,
+        ))
+        graph, vector = FakeGraph(), FakeVector()
+        drain = _drain_for(store, graph, vector)
+        drain.drain_once()
+        assert graph.edges, "nothing was projected, so this proves nothing"
+
+        store.execute(
+            "UPDATE atomic_facts SET quarantined = 1 WHERE fact_id = ?",
+            (withheld.fact_id,),
+        )
+        projection_outbox.enqueue(store, withheld.fact_id, "default")
+        drain.drain_once()
+
+        assert withheld.fact_id not in graph.facts, "it is still being offered"
+        assert any(
+            {e[0], e[1]} == {visible.fact_id, withheld.fact_id} for e in graph.edges
+        ), (
+            "withdrawing a fact deleted the edge a visible neighbour reaches it "
+            "through, so this graph now answers differently from SQLite's"
+        )
+
+    def test_a_deleted_fact_loses_its_edges_too(self, store) -> None:
+        """Gone is different from hidden: a hard delete takes the edges out of
+        SQLite as well, so the projection must not keep an adjacency the store
+        no longer has."""
+        left = _store_fact(store, "survives")
+        gone = _store_fact(store, "about to be deleted outright")
+        store.store_edge(GraphEdge(
+            profile_id="default", source_id=left.fact_id,
+            target_id=gone.fact_id, edge_type=EdgeType.SEMANTIC, weight=0.9,
+        ))
+        graph, vector = FakeGraph(), FakeVector()
+        drain = _drain_for(store, graph, vector)
+        drain.drain_once()
+
+        store.delete_fact(gone.fact_id)
+        drain.drain_once()
+
+        assert gone.fact_id in graph.removed
+        assert not any(gone.fact_id in (e[0], e[1]) for e in graph.edges)
 
     def test_a_queued_delete_removes_from_both(self, store) -> None:
         fact = _store_fact(store, "about to be forgotten")

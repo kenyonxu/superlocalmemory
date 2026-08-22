@@ -277,6 +277,30 @@ class CozoDBGraphBackend:
             :rm edge {from_id, to_id, edge_type => weight, metadata, profile_id, created_at}
         """, {"fact_id": fact_id})
 
+    def remove_fact_candidacy(self, fact_id: str) -> None:
+        """Stop a fact being *offered* as a candidate, without touching the graph.
+
+        Removes only the ``fact_entity`` bridge. The fact's edges stay.
+
+        The two are not the same thing and the SQLite channel already treats them
+        differently. Its entity map filters on ``visible_fact_clause()`` — a
+        withheld row must never enter it, because it carries its whole cluster's
+        pooled entity list and out-ranks real memories. Its edge walk filters on
+        scope only, with no visibility predicate at all, so it traverses edges to
+        withheld and archived facts and lets hydration drop them at the end.
+
+        So a projection that deleted a hidden fact's edges would hold a smaller
+        adjacency than the walk it is meant to replace, and give different
+        answers for every fact that happened to neighbour a withheld one. Use
+        this for a fact that has become invisible; use ``remove_fact`` only for
+        one that is genuinely gone.
+        """
+        self._db.run("""
+            ?[fact_id, entity_id, profile_id] :=
+                *fact_entity{fact_id, entity_id, profile_id}, fact_id = $fact_id
+            :rm fact_entity {fact_id, entity_id => profile_id}
+        """, {"fact_id": fact_id})
+
     def record_shadow_comparison(
         self,
         *,
