@@ -22,7 +22,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Generator
+from typing import Any, Generator, NoReturn
 
 from superlocalmemory.storage.models import (
     AtomicFact,
@@ -52,6 +52,20 @@ from superlocalmemory.storage import projection_outbox
 logger = logging.getLogger(__name__)
 
 _MISSING = object()
+
+
+class ProfileOwnershipConflict(ValueError):
+    """A store tried to hand one profile's existing row to another profile.
+
+    ``memories.memory_id`` and ``atomic_facts.fact_id`` are bare
+    ``TEXT PRIMARY KEY`` — global, not per-profile — while every row carries a
+    ``profile_id``. So two profiles on one store can be handed the same
+    caller-chosen id (an importer keyed on an external record id syncing one
+    source into two workspaces does exactly this), and the upsert would
+    otherwise rewrite the owner and the content: the first profile's memory
+    silently became the second's.
+    """
+
 
 def _jl(raw: Any, default: Any = _MISSING) -> Any:
     """JSON-load a value, returning *default* on None/empty.
@@ -534,6 +548,49 @@ class DatabaseManager:
             # Read-only path: concurrent reads are safe in WAL mode.
             return self._execute_one(sql, params)
 
+    # The two tables whose primary key is global but whose rows are owned by a
+    # profile. Literal, internal, and closed — never built from caller input.
+    _OWNED_ROWS: dict[str, str] = {"memories": "memory_id", "atomic_facts": "fact_id"}
+
+    def _refuse_cross_profile_reown(
+        self, table: str, row_id: str, profile_id: str,
+    ) -> NoReturn:
+        """Raise ``ProfileOwnershipConflict``, naming the profile that owns it.
+
+        Called only when an upsert below returned no row. Both statements carry
+        ``WHERE <table>.profile_id = excluded.profile_id`` on their
+        ``DO UPDATE``, so SQLite skips a conflicting row owned by a different
+        profile and ``RETURNING`` yields nothing — which makes the ownership
+        check part of the write instead of a read in front of it. That costs no
+        extra query on the ordinary path and leaves no window between deciding
+        and writing. The lookup here runs only on the refusal, to say whose row
+        it is; a refusal nobody can read gets worked around.
+
+        Taking a row away from the profile that owns it is not last-write-wins,
+        it is a different tenant's write, so it is refused rather than merged.
+        Before this the outcome depended on something unrelated:
+        ``scene_fact_members`` carries a composite
+        ``(profile_id, fact_id) -> atomic_facts (profile_id, fact_id)`` foreign
+        key, so where a scene referenced the fact the ownership change orphaned
+        it and SQLite raised a bare ``FOREIGN KEY constraint failed`` — and
+        where no scene did, the identical write succeeded in silence and the
+        second profile kept the fact. Isolation cannot rest on whether a
+        projection happens to exist.
+        """
+        # Interpolated, not parameterised: SQLite takes no parameter in a table
+        # or column position. Both come from _OWNED_ROWS, a closed literal map,
+        # and the row id stays bound.
+        id_column = self._OWNED_ROWS[table]
+        rows = self.execute(
+            f"SELECT profile_id FROM {table} WHERE {id_column} = ?",
+            (row_id,),
+        )
+        owner = dict(rows[0])["profile_id"] if rows else "<unknown>"
+        raise ProfileOwnershipConflict(
+            f"{id_column} {row_id!r} in {table} belongs to profile {owner!r}; "
+            f"refusing to re-own it as {profile_id!r}"
+        )
+
     def store_memory(self, record: MemoryRecord) -> str:
         """Persist a raw memory record. Returns memory_id.
 
@@ -553,17 +610,20 @@ class DatabaseManager:
 
         ``created_at`` is deliberately not overwritten: the row's first
         observation is a historical fact, and a re-store is not a new one.
+        ``profile_id`` is not in the update list either, and a store that would
+        change it is refused outright — the ``DO UPDATE`` is conditioned on the
+        owner matching, so SQLite skips the row and ``RETURNING`` comes back
+        empty. See ``_refuse_cross_profile_reown``.
         """
         _scope = getattr(record, 'scope', None) or 'personal'
         _shared = _jd(getattr(record, 'shared_with', None))
-        self.execute(
+        written = self.execute(
             """INSERT INTO memories
                (memory_id, profile_id, content, session_id, speaker,
                 role, session_date, created_at, metadata_json,
                 scope, shared_with)
                VALUES (?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(memory_id) DO UPDATE SET
-                   profile_id    = excluded.profile_id,
                    content       = excluded.content,
                    session_id    = excluded.session_id,
                    speaker       = excluded.speaker,
@@ -571,12 +631,18 @@ class DatabaseManager:
                    session_date  = excluded.session_date,
                    metadata_json = excluded.metadata_json,
                    scope         = excluded.scope,
-                   shared_with   = excluded.shared_with""",
+                   shared_with   = excluded.shared_with
+               WHERE memories.profile_id = excluded.profile_id
+               RETURNING profile_id""",
             (record.memory_id, record.profile_id, record.content,
              record.session_id, record.speaker, record.role,
              record.session_date, record.created_at,
              json.dumps(record.metadata), _scope, _shared),
         )
+        if not written:
+            self._refuse_cross_profile_reown(
+                "memories", record.memory_id, record.profile_id,
+            )
         return record.memory_id
 
     def update_memory_summary(self, memory_id: str, summary: str) -> None:
@@ -659,7 +725,12 @@ class DatabaseManager:
         observation is a historical fact, and a re-store is not a new one.
         ``pinned`` is not in the column list at all, so the upsert now leaves it
         alone where the replace silently reset it to 0 — pinning is user intent,
-        not something a re-store gets to revoke.
+        not something a re-store gets to revoke. ``profile_id`` is out of the
+        update list for a stronger reason: a store that would change it is
+        refused rather than applied, because it is one profile taking another's
+        fact rather than a re-store at all. The refusal is a condition on the
+        ``DO UPDATE`` itself, so there is no window between checking the owner
+        and writing the row.
 
         ``insert_fact_immutable`` remains the right call for a known-new fact
         that must abort on a collision rather than win it.
@@ -706,7 +777,7 @@ class DatabaseManager:
         _scope = getattr(fact, 'scope', None) or 'personal'
         _shared = _jd(getattr(fact, 'shared_with', None))
         def _insert_with_knowledge_anchor() -> None:
-            self.execute(
+            written = self.execute(
                 """INSERT INTO atomic_facts
                (fact_id, memory_id, profile_id, content, fact_type,
                 entities_json, canonical_entities_json,
@@ -720,7 +791,6 @@ class DatabaseManager:
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(fact_id) DO UPDATE SET
                    memory_id               = excluded.memory_id,
-                   profile_id              = excluded.profile_id,
                    content                 = excluded.content,
                    fact_type               = excluded.fact_type,
                    entities_json           = excluded.entities_json,
@@ -744,7 +814,9 @@ class DatabaseManager:
                    emotional_arousal       = excluded.emotional_arousal,
                    signal_type             = excluded.signal_type,
                    scope                   = excluded.scope,
-                   shared_with             = excluded.shared_with""",
+                   shared_with             = excluded.shared_with
+               WHERE atomic_facts.profile_id = excluded.profile_id
+               RETURNING profile_id""",
                 (fact.fact_id, fact.memory_id, fact.profile_id, fact.content,
                  fact.fact_type.value,
                  json.dumps(fact.entities), json.dumps(fact.canonical_entities),
@@ -759,6 +831,10 @@ class DatabaseManager:
                  fact.emotional_valence, fact.emotional_arousal,
                  fact.signal_type.value, fact.created_at, _scope, _shared),
             )
+            if not written:
+                self._refuse_cross_profile_reown(
+                    "atomic_facts", fact.fact_id, fact.profile_id,
+                )
             # Every fact written after 4.0.2 has an explicit transaction-time
             # anchor. Absence deliberately represents pre-4.0.2
             # ``legacy_unknown``; never backfill it from ``created_at``.
@@ -1686,6 +1762,58 @@ class DatabaseManager:
             (*fact_ids, *params),
         )
         return [self._row_to_fact(r) for r in rows]
+
+    def visible_fact_ids(
+        self, fact_ids: list[str] | tuple[str, ...], profile_id: str,
+        include_global: bool = False,
+        include_shared: bool = False,
+        *,
+        include_quarantined: bool = False,
+    ) -> set[str]:
+        """Which of *fact_ids* this profile may see. Same rule, no hydration.
+
+        ``get_facts_by_ids`` is the authorization source of truth and every
+        retrieval channel re-authorises through it — but a channel deciding
+        *which* of its candidates are allowed does not need their content, and
+        paying for the content is most of what recall costs.
+
+        Measured on the author's store: the entity channel authorised 3,659
+        candidates to return 20, and that single call was **374 ms of a 430 ms
+        recall — 87%**. Not the graph walk, which is 3.8 ms. The cost is
+        ``_row_to_fact`` decoding a 768-float embedding and two 768-float Fisher
+        vectors per row: about 8.4 million floats deserialised to answer a
+        yes/no question about 3,659 ids. The same trap is recorded a few
+        hundred lines up, where loading full facts "turned one new fact into a
+        5-second recall stall".
+
+        The predicate is built by the same two calls as ``get_facts_by_ids``, in
+        the same order, so the two cannot answer differently. A test asserts
+        that on the same inputs. Batched because the id list is unbounded and a
+        single ``IN`` clause is not.
+        """
+        if not fact_ids:
+            return set()
+        where, params = _scope_where(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+        )
+        visible = self.visible_fact_clause(include_quarantined=include_quarantined)
+        unique = list(dict.fromkeys(fact_ids))
+        allowed: set[str] = set()
+        # Well inside SQLITE_MAX_VARIABLE_NUMBER once the scope parameters are
+        # added, on every build this ships against.
+        chunk = 800
+        for start in range(0, len(unique), chunk):
+            batch = unique[start:start + chunk]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.execute(
+                f"SELECT fact_id FROM atomic_facts WHERE fact_id IN ({placeholders}) "
+                f"AND {where}{visible}",
+                (*batch, *params),
+            )
+            allowed.update(dict(row)["fact_id"] for row in rows)
+        return allowed
 
     def store_entity_profile(self, ep: EntityProfile) -> str:
         """Persist an entity profile. Returns profile_entry_id."""

@@ -31,10 +31,9 @@ path; it fails on the unfixed code with the first profile's fact gone.
 
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
 
+from superlocalmemory.storage.database import ProfileOwnershipConflict
 from superlocalmemory.storage.models import AtomicFact, MemoryRecord
 
 # Four of the eight tables that cascade off atomic_facts.fact_id. Enough to
@@ -195,12 +194,22 @@ def test_a_second_profile_cannot_destroy_the_first_profiles_fact(
 
     On the unfixed code the second store won: the first profile's fact was
     replaced outright — new owner, new content — and its associations were
-    cascaded away, silently. What matters here is that the first profile's
-    data survives. It now does either way: where a scene references the fact,
-    ``scene_fact_members`` holds a composite
-    ``(profile_id, fact_id) -> atomic_facts(profile_id, fact_id)`` foreign key,
-    so re-owning the row is refused and the whole write rolls back rather than
-    cascading the memberships away as the replace did.
+    cascaded away, silently.
+
+    The upsert alone did not close this. It stopped the cascade, but it still
+    listed ``profile_id = excluded.profile_id``, so the second profile still
+    took the row. What happened next depended on something unrelated: where a
+    scene referenced the fact, ``scene_fact_members`` — a composite
+    ``(profile_id, fact_id) -> atomic_facts (profile_id, fact_id)`` foreign key
+    — was orphaned by the ownership change and SQLite refused the write with a
+    bare ``FOREIGN KEY constraint failed``; where no scene referenced it, the
+    identical write succeeded and the fact changed hands in silence. Tenant
+    isolation was resting on whether a projection happened to exist.
+
+    So the refusal is now the store's own, not the schema's by accident: the
+    owner is read before the row is touched and a mismatch raises
+    ``ProfileOwnershipConflict``, naming both profiles. Same outcome with or
+    without a scene, and legible when it fires.
     """
     engine = engine_with_mock_deps
     db = engine._db
@@ -218,15 +227,14 @@ def test_a_second_profile_cannot_destroy_the_first_profiles_fact(
         ("work", "work"),
     )
     engine.profile_id = "work"
-    try:
+    with pytest.raises(ProfileOwnershipConflict) as refusal:
         engine.store_fact_direct(AtomicFact(
             fact_id="external-record-42", profile_id="work",
             content="An unrelated fact in a different workspace",
         ))
-    except sqlite3.IntegrityError:
-        # Refused, which is the outcome we want. The assertions below still
-        # have to hold: a rejected write must leave nothing behind.
-        pass
+    # Both owners named: a refusal nobody can read gets worked around.
+    assert "default" in str(refusal.value)
+    assert "work" in str(refusal.value)
 
     assert _associations(db, "external-record-42") == before_associations, (
         "a store from a second profile deleted the first profile's "

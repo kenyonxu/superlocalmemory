@@ -32,6 +32,26 @@ def authorized_fact_ids(
     unique_ids = list(dict.fromkeys(fact_ids))
     if not unique_ids:
         return set()
+    # Ask for the ids, not the memories. The hydrating call below answers the
+    # same question by decoding a 768-float embedding and two Fisher vectors per
+    # candidate — measured at 374 ms of a 430 ms recall on the author's store,
+    # to authorise 3,659 candidates for a 20-result page. Both build their
+    # predicate from the same two calls, so they cannot disagree; a test asserts
+    # it. Kept as a probe rather than a hard requirement because the lightweight
+    # DB wrappers in maintenance paths do not implement every method.
+    id_only = getattr(db, "visible_fact_ids", None)
+    if callable(id_only):
+        try:
+            allowed = id_only(
+                unique_ids,
+                profile_id,
+                include_global=bool(include_global),
+                include_shared=bool(include_shared),
+            )
+            if isinstance(allowed, (set, frozenset)):
+                return set(allowed)
+        except Exception:
+            pass
     try:
         facts = db.get_facts_by_ids(
             unique_ids,

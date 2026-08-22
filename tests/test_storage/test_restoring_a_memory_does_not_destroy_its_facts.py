@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import pytest
 
+from superlocalmemory.storage.database import ProfileOwnershipConflict
 from superlocalmemory.storage.models import AtomicFact, MemoryRecord
 
 
@@ -99,3 +100,59 @@ def test_a_new_memory_id_still_inserts(db) -> None:
     assert db.execute(
         "SELECT 1 FROM memories WHERE memory_id = ?", ("m4",),
     )
+
+
+def test_a_second_profile_cannot_take_the_first_profiles_memory(db) -> None:
+    """``memories.memory_id`` is global; the row's owner is not.
+
+    ``store_memory`` carried the same hole as ``store_fact``: the upsert listed
+    ``profile_id = excluded.profile_id``, so a second profile handed the same
+    caller-chosen id took the row — new owner, new content, no error. Nothing
+    upstream stops it, because ``cognitive_consolidator`` supplies its own
+    ``block_id`` and two workspaces on one store can mint the same one.
+
+    Unlike the fact path there was no accidental backstop here: no composite
+    foreign key references ``memories (profile_id, memory_id)``, so the theft
+    was silent in every case rather than only some.
+    """
+    db.execute(
+        "INSERT OR IGNORE INTO profiles (profile_id, name) VALUES (?,?)",
+        ("work", "work"),
+    )
+    db.store_memory(MemoryRecord(
+        memory_id="shared-block-7", profile_id="default", content="the first turn",
+    ))
+
+    with pytest.raises(ProfileOwnershipConflict) as refusal:
+        db.store_memory(MemoryRecord(
+            memory_id="shared-block-7", profile_id="work",
+            content="a different workspace's turn",
+        ))
+    assert "default" in str(refusal.value)
+    assert "work" in str(refusal.value)
+
+    row = dict(db.execute(
+        "SELECT profile_id, content FROM memories WHERE memory_id = ?",
+        ("shared-block-7",),
+    )[0])
+    assert row["profile_id"] == "default", "a second profile took the memory"
+    assert row["content"] == "the first turn", "the refused write overwrote content"
+
+
+def test_re_storing_within_one_profile_is_untouched(db) -> None:
+    """The guard must not fire on the ordinary same-owner re-store."""
+    db.execute(
+        "INSERT OR IGNORE INTO profiles (profile_id, name) VALUES (?,?)",
+        ("work", "work"),
+    )
+    db.store_memory(MemoryRecord(
+        memory_id="m5", profile_id="work", content="first",
+    ))
+    db.store_memory(MemoryRecord(
+        memory_id="m5", profile_id="work", content="second",
+    ))
+
+    row = dict(db.execute(
+        "SELECT profile_id, content FROM memories WHERE memory_id = ?", ("m5",),
+    )[0])
+    assert row == {"profile_id": "work", "content": "second"}
