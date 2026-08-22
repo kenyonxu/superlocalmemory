@@ -94,9 +94,13 @@ class AdjacencySnapshot:
         At or above 1.0 the walk can amplify along a path, and a bounded
         iteration is then the only well-defined reading of it — which is what
         :mod:`spreading` implements, and why it does not matter that the
-        dict-based walk was order-dependent in that regime. Measured 0.84 on the
-        author's store (max PageRank 0.1, so the boost caps at 1.2 rather than
-        the allowed 2.0), so nothing there amplifies.
+        dict-based walk was order-dependent in that regime.
+
+        Measured across four real workspaces: 0.7056 and 0.7100 on the two
+        large ones, 0.8497 on a 24-fact one, and **1.1061 on a five-fact one**,
+        which amplifies. Small graphs concentrate rank by construction, so the
+        amplifying regime is not exotic — it is what every workspace looks like
+        on its first day.
         """
         if self.weights.size == 0:
             return 0.0

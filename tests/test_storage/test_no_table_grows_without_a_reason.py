@@ -554,7 +554,13 @@ class TestAnUnreadableTableIsLeftAlone:
     ) -> None:
         """`sqlite_vec` loads per connection, so a maintenance connection that
         never asked for it gets "no such module: vec0" from a plain PRAGMA. That
-        crashed the whole sweep on a real store."""
+        crashed the whole sweep on a real store.
+
+        The table below is registered as one whose module this connection cannot
+        load, so reading its shape raises exactly as it does in production. What
+        has to survive that is the rest of the sweep — asserting only that a
+        list came back was true whether or not anything else worked.
+        """
         conn.execute(
             "CREATE TABLE consolidation_log (action_id TEXT PRIMARY KEY, timestamp TEXT)"
         )
@@ -563,9 +569,29 @@ class TestAnUnreadableTableIsLeftAlone:
         )
         conn.commit()
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS fake_vec_index (id INTEGER, created_at TEXT)"
+            "CREATE TABLE IF NOT EXISTS an_unbounded_table (id INTEGER, created_at TEXT)"
         )
+        conn.execute("CREATE TABLE IF NOT EXISTS vec_like_index (id INTEGER)")
         conn.commit()
 
         assert run_retention(conn).get("consolidation_log") == 1
-        assert isinstance(undeclared_growing_tables(conn), list)
+
+        # A table whose shape cannot be read must not hide the tables that can.
+        class _RefusesOneTable:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, sql, *args):
+                if "vec_like_index" in str(sql):
+                    raise sqlite3.OperationalError("no such module: vec0")
+                return self._inner.execute(sql, *args)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        undeclared = undeclared_growing_tables(_RefusesOneTable(conn))
+
+        assert "an_unbounded_table" in undeclared, (
+            "one unreadable table silenced the report for every other table, "
+            "which is how an unbounded table goes unnoticed"
+        )

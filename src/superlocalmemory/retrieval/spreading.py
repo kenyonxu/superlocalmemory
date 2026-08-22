@@ -28,15 +28,27 @@ on set iteration order.
 
 That is benign exactly while ``decay * weight * pagerank_boost < 1`` everywhere,
 because then the max-product has a unique fixpoint and order only changes how
-fast it is reached. Measured on the author's store the largest factor is **0.84**
-(max PageRank 0.1, so the boost reaches 1.2 of its permitted 2.0) and none of
-261,994 directed pairs amplifies — which is why the old walk was in practice
-deterministic, verified across three ``PYTHONHASHSEED`` values.
+fast it is reached.
 
-It is not benign in general. The boost is capped at 2.0 and ``decay`` is 0.7, so
-a graph whose PageRank reached 0.215 would amplify, and the old walk's answer
-would then depend on dictionary ordering. A bounded synchronous iteration is
-well-defined either way, so this is the stricter reading and it costs nothing.
+**It is not benign in general, and it is not benign here.** The boost is capped
+at 2.0 and ``decay`` is 0.7, so any graph whose peak rank reaches 0.215
+amplifies. Measured across four real workspaces after the ranking was repaired:
+
+    workspace          facts    peak rank   peak factor
+    a large one       12,078     0.003984        0.7056
+    another one        4,038     0.007155        0.7100
+    a small one           24     0.106919        0.8497
+    a very small one       5     0.290068        1.1061   ← amplifies
+
+The last row is the point. A small graph concentrates rank by construction — a
+five-fact workspace on a first day of use is not a corner case, it is every
+workspace's first day — and there the old walk's answer depended on dictionary
+ordering. A bounded synchronous iteration is well-defined in both regimes.
+
+(These numbers replace an earlier note citing a peak of 0.1 and a factor of
+0.84. That reading came from a ranking table whose scores summed to 1.9999 and
+3.3150 on two real stores rather than to 1, so the peak it reported was an
+artefact of the table being wrong, not a property of any graph.)
 :meth:`AdjacencySnapshot.peak_propagation_factor` is how a caller can see which
 regime a store is in.
 

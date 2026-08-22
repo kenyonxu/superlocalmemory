@@ -304,3 +304,97 @@ class TestAMockIsNotAStore:
 
         assert not report.ok
         assert "no connection" in (report.error or "")
+
+
+class TestTheClaimHoldsUnderEitherEngine:
+    """Every test above computes with whichever engine the default picks, so
+    none of them can tell whether the other one leaves memories unplaced.
+
+    Which engine ran, and that the two agree on the same graph, is covered in
+    ``test_the_engine_that_ranks_is_the_engine_reported``. What belongs here is
+    this file's own claim: a memory gets a place whichever engine did the work.
+    """
+
+    def test_every_visible_memory_is_placed_by_the_graph_engine_too(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        pycozo = __import__("importlib.util", fromlist=["util"]).find_spec("pycozo")
+        if pycozo is None:
+            pytest.skip("the graph projection needs its engine installed")
+
+        import pathlib
+        import sqlite3
+
+        monkeypatch.setenv("SLM_DATA_DIR", str(tmp_path))
+        from superlocalmemory.core.config import SLMConfig
+        from superlocalmemory.core.graph_metrics import compute_graph_metrics
+        from superlocalmemory.graph.cozo_backend import CozoDBGraphBackend
+        from superlocalmemory.infra.data_root import state_path
+        from superlocalmemory.storage import schema
+        from superlocalmemory.storage.database import DatabaseManager
+        from superlocalmemory.storage.migration_runner import apply_all
+
+        config = SLMConfig.load()
+        db = DatabaseManager(config.db_path)
+        db.initialize(schema)
+        apply_all(pathlib.Path(state_path("learning.db")), pathlib.Path(config.db_path))
+
+        now = "2026-08-23T00:00:00Z"
+        with db.transaction():
+            for index in range(10):
+                fact_id = f"g{index:02d}"
+                db.execute(
+                    "INSERT INTO memories (memory_id, profile_id, scope, content, "
+                    "session_id, speaker, role, created_at, metadata_json) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (f"m-{fact_id}", "default", "personal", f"c {fact_id}", "s",
+                     "user", "user", now, "{}"),
+                )
+                db.execute(
+                    "INSERT INTO atomic_facts (fact_id, memory_id, profile_id, "
+                    "scope, content, fact_type, entities_json, "
+                    "canonical_entities_json, confidence, importance, "
+                    "evidence_count, access_count, pinned, source_turn_ids_json, "
+                    "session_id, fisher_last_applied_access, lifecycle, "
+                    "quarantined, emotional_valence, emotional_arousal, "
+                    "signal_type, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (fact_id, f"m-{fact_id}", "default", "personal", f"c {fact_id}",
+                     "semantic", "[]", "[]", 0.9, 0.5, 1, 0, 0, "[]", "s", 0,
+                     "active", 0, 0.0, 0.0, "factual", now),
+                )
+            # Only some of them are connected. The rest must still be placed.
+            for index in range(5):
+                db.execute(
+                    "INSERT INTO graph_edges (edge_id, profile_id, source_id, "
+                    "target_id, edge_type, weight, created_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (f"e{index}", "default", f"g{index:02d}",
+                     f"g{index + 1:02d}", "semantic", 0.8, now),
+                )
+
+        backend = CozoDBGraphBackend(str(tmp_path / "graph.cozo"))
+        source = sqlite3.connect(str(config.db_path))
+        source.row_factory = sqlite3.Row
+        backend.bulk_import_from_sqlite(source, "default")
+        source.close()
+        db.execute("DELETE FROM projection_outbox")
+
+        report = compute_graph_metrics(
+            db, "default", backend=backend, prefer="cozo",
+        )
+        assert report.engine == "cozo", f"the graph engine did not run: {report.notes}"
+
+        placed = {
+            dict(row)["fact_id"]: dict(row)["pagerank_score"]
+            for row in db.execute(
+                "SELECT fact_id, pagerank_score FROM fact_importance "
+                "WHERE profile_id = 'default'"
+            )
+        }
+        assert len(placed) == 10, (
+            f"{10 - len(placed)} memories have no place in the graph; a memory "
+            f"with no place is ranked during recall as though nothing links to it"
+        )
+        assert abs(sum(placed.values()) - 1.0) < 0.01
+        assert all(score > 0 for score in placed.values())

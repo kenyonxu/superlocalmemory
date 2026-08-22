@@ -195,3 +195,114 @@ class _StubDb:
     @staticmethod
     def visible_fact_clause(*_args, **_kwargs) -> str:
         return ""
+
+
+class TestTheTwoSourcesActuallyAgree:
+    """The tests above all substitute a stand-in for the projection, so none of
+    them can tell whether the real one returns the same graph the store holds.
+
+    This one builds both, reads both, and compares them. It is the assertion the
+    file is named after, and it was missing: the earlier version passed with the
+    projection's query asking for a constant weight of 1 instead of the stored
+    weight, which is a different graph and would have reordered every walk.
+    """
+
+    @pytest.fixture()
+    def both_sources(self, tmp_path, monkeypatch):
+        pycozo = __import__("importlib.util", fromlist=["util"]).find_spec("pycozo")
+        if pycozo is None:
+            pytest.skip("the graph projection needs its engine installed")
+
+        import pathlib
+        import sqlite3
+
+        monkeypatch.setenv("SLM_DATA_DIR", str(tmp_path))
+        from superlocalmemory.core.config import SLMConfig
+        from superlocalmemory.graph.cozo_backend import CozoDBGraphBackend
+        from superlocalmemory.infra.data_root import state_path
+        from superlocalmemory.storage import schema
+        from superlocalmemory.storage.database import DatabaseManager
+        from superlocalmemory.storage.logical_edges import iter_logical_edges
+        from superlocalmemory.storage.migration_runner import apply_all
+
+        config = SLMConfig.load()
+        db = DatabaseManager(config.db_path)
+        db.initialize(schema)
+        apply_all(pathlib.Path(state_path("learning.db")), pathlib.Path(config.db_path))
+
+        now = "2026-08-23T00:00:00Z"
+        weights = [0.11, 0.37, 0.5, 0.73, 0.99, 1.0, 0.25]
+        with db.transaction():
+            for index in range(8):
+                fact_id = f"f{index:02d}"
+                db.execute(
+                    "INSERT INTO memories (memory_id, profile_id, scope, content, "
+                    "session_id, speaker, role, created_at, metadata_json) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (f"m-{fact_id}", "default", "personal", f"c {fact_id}", "s",
+                     "user", "user", now, "{}"),
+                )
+                db.execute(
+                    "INSERT INTO atomic_facts (fact_id, memory_id, profile_id, "
+                    "scope, content, fact_type, entities_json, "
+                    "canonical_entities_json, confidence, importance, "
+                    "evidence_count, access_count, pinned, source_turn_ids_json, "
+                    "session_id, fisher_last_applied_access, lifecycle, "
+                    "quarantined, emotional_valence, emotional_arousal, "
+                    "signal_type, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (fact_id, f"m-{fact_id}", "default", "personal", f"c {fact_id}",
+                     "semantic", "[]", "[]", 0.9, 0.5, 1, 0, 0, "[]", "s", 0,
+                     "active", 0, 0.0, 0.0, "factual", now),
+                )
+            for index, weight in enumerate(weights):
+                db.execute(
+                    "INSERT INTO graph_edges (edge_id, profile_id, source_id, "
+                    "target_id, edge_type, weight, created_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (f"e{index}", "default", f"f{index:02d}", f"f{index + 1:02d}",
+                     "semantic", weight, now),
+                )
+
+        backend = CozoDBGraphBackend(str(tmp_path / "graph.cozo"))
+        source = sqlite3.connect(str(config.db_path))
+        source.row_factory = sqlite3.Row
+        backend.bulk_import_from_sqlite(source, "default")
+
+        stored = {
+            (str(a), str(b)): float(w)
+            for a, b, _type, w, _pid in iter_logical_edges(source, "default")
+        }
+        source.close()
+        return backend, stored
+
+    def test_the_projection_holds_the_same_edges_as_the_store(self, both_sources):
+        from superlocalmemory.graph.cozo_adjacency import CozoAdjacencySource
+
+        backend, stored = both_sources
+        projected = {
+            (a, b): w for a, b, w in CozoAdjacencySource(backend).edges("default")
+        }
+        assert set(projected) == set(stored), (
+            "the two sources hold different edges, so a walk over one is a walk "
+            "over a graph the other does not have"
+        )
+
+    def test_the_projection_holds_the_same_weights_as_the_store(self, both_sources):
+        """Distinct weights on purpose: a query that asked for a constant would
+        return the right edges and the wrong graph, and pass the test above."""
+        from superlocalmemory.graph.cozo_adjacency import CozoAdjacencySource
+
+        backend, stored = both_sources
+        projected = {
+            (a, b): w for a, b, w in CozoAdjacencySource(backend).edges("default")
+        }
+        assert len(set(stored.values())) > 1, (
+            "this test is only meaningful while the edges carry different "
+            "weights; with one weight a constant would be indistinguishable"
+        )
+        for edge, weight in stored.items():
+            assert abs(projected[edge] - weight) < 1e-9, (
+                f"edge {edge} is weighted {projected[edge]} in the projection "
+                f"and {weight} in the store"
+            )
