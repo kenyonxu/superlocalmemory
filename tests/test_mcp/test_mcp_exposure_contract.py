@@ -131,7 +131,7 @@ def _register_every_tool(target) -> None:
         # v4.0.8: get_memory_summary added to CORE — the summary layer's MCP
         # surface (issue #113). Counts bumped deliberately, which is what
         # this contract exists to force.
-        ("named-core", "core", 17),
+        ("named-core", "core", 18),
         ("whole", "whole", 95),
     ),
 )

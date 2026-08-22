@@ -60,6 +60,10 @@ _EXPECTED_CORE = frozenset({
     # belongs in the smallest profile — an agent asking "what did I do
     # yesterday" should not need the full surface to get an answer.
     "get_memory_summary",
+    # 4.1.0: memory operations are profile-scoped, so a surface that can read or
+    # write memory has to be able to name the profile it means. Without this the
+    # smallest surface can never leave the profile it started in.
+    "switch_profile",
 })
 
 
@@ -69,7 +73,7 @@ def test_profile_core_exact():
     assert core == _EXPECTED_CORE, (
         f"core diff — extra: {core - _EXPECTED_CORE}, missing: {_EXPECTED_CORE - core}"
     )
-    assert len(core) == 17, f"core must be 17 names, got {len(core)}"
+    assert len(core) == 18, f"core must be 18 names, got {len(core)}"
 
 
 # ---------------------------------------------------------------------------

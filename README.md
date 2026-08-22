@@ -386,7 +386,7 @@ Full docs: [docs/multi-machine.md](docs/multi-machine.md) · [docs/distributed-d
 | **Python CLI + SDK** (primary) | Activate a Python virtual environment, then `python -m pip install superlocalmemory` | Python 3.11+; the `slm` CLI and importable SDK stay inside that environment |
 | **Repository clone — macOS/Linux** | `./scripts/install.sh install` | Research/contributor path; delegates to an existing uv or pipx installation |
 | **Repository clone — Windows** | `.\scripts\install.ps1 -Action Install` | Research/contributor path; delegates to an existing uv or pipx installation |
-| **Claude Code Plugin** | `/plugin marketplace add qualixar/superlocalmemory` then `/plugin install superlocalmemory@qualixar` | Self-bootstraps venv, isolated SLM_DATA_DIR, additive — 16-tool core. Ships the skills/agents/hooks/commands |
+| **Claude Code Plugin** | `/plugin marketplace add qualixar/superlocalmemory` then `/plugin install superlocalmemory@qualixar` | Self-bootstraps venv, isolated SLM_DATA_DIR, additive — 34-tool code profile. Ships the skills/agents/hooks/commands |
 | **Portable / IDE connect** | `slm connect <ide> [--here]` | Wire any IDE without reinstalling; `slm connect claude-code` → plugin pointer |
 
 After any install path: `slm setup` → `slm doctor` → `slm warmup` (optional, pre-downloads ~500MB embedding model).
@@ -477,7 +477,7 @@ then install:
 ```
 
 - Self-bootstraps a Python venv, installs all deps in an isolated `SLM_DATA_DIR`
-- Registers the 16-tool core MCP surface (`core16` profile by default; `core14` remains a compatibility alias)
+- Registers the 34-tool `code` MCP surface — the 18-tool `core` memory surface plus code-graph, portable-evidence, bounded-loop and usefulness-report tools
 - Ships the SLM skills / agents / hooks / commands / rules
 - Additive — does not replace an existing SLM install
 - `slm connect claude-code` detects an existing plugin install and links them

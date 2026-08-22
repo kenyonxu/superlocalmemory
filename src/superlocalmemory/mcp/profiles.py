@@ -17,7 +17,7 @@ from __future__ import annotations
 # Named profile definitions (introduced in v3.6.14)
 # ---------------------------------------------------------------------------
 
-_PROFILE_CORE: frozenset[str] = frozenset({  # 17
+_PROFILE_CORE: frozenset[str] = frozenset({  # 18
     "remember", "recall", "search", "fetch", "list_recent", "update_memory", "forget",
     "session_init", "close_session",
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
@@ -28,6 +28,13 @@ _PROFILE_CORE: frozenset[str] = frozenset({  # 17
     # natural caller is the agent holding the conversation — an assistant
     # asked "what did I work on yesterday" should not need a power profile.
     "get_memory_summary",
+    # v4.1.0: every memory operation is scoped to a profile, so a surface that
+    # can read or write memory must also be able to say which profile it means.
+    # Without this, the smallest profile can store and recall but can never
+    # leave the profile it happened to start in, and a second workspace is
+    # unreachable from the surface most hosts ship. The route stays RBAC
+    # member-gated, so company-mode isolation is unaffected.
+    "switch_profile",
 })
 
 # Portable Brain evidence must reach the coding-host profile shipped by the

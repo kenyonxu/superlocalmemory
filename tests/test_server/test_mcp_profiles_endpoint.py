@@ -19,7 +19,7 @@ from superlocalmemory.server.unified_daemon import create_app
 _ENDPOINT = "/api/v3/mcp/profiles"
 
 _EXPECTED_COUNTS = {
-    "core": 17,   # v4.0.8: + get_memory_summary (#113)
+    "core": 18,   # v4.1.0: + switch_profile (memory is profile-scoped)
     "code": 34,   # v4.1.0: + the two usefulness reports the ranker reads
     "full": 50,   # v4.0.5: everyday memory, Brain, optimize, and mesh
     "power": 62,  # v4.0.5: full plus governance/lifecycle diagnostics

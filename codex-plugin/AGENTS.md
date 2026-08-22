@@ -80,12 +80,16 @@ When the SLM MCP server is unavailable, use these CLI equivalents:
 
 ---
 
-## Tool reference (core profile — 14 tools)
+## Tool reference (core profile — 18 tools)
 
-> The MCP config ships `SLM_MCP_PROFILE=code` (29 tools): the 14 core memory tools below
+> The MCP config ships `SLM_MCP_PROFILE=code` (34 tools): the 18 core tools below
 > **plus** 6 code-graph tools (`build_code_graph`, `get_blast_radius`, `query_graph`,
-> `semantic_search_code`, `get_review_context`, `detect_changes`) and `switch_profile`.
-> Use `full` (47 tools) to add mesh coordination. Use `power` (59 tools) for governance
+> `semantic_search_code`, `get_review_context`, `detect_changes`), 5 portable-evidence
+> tools (`get_brain_evidence_status`, `record_agent_experience`, `record_cognitive_turn`,
+> `finalize_cognitive_turn`, `observe_bounded_loop_evidence`), 3 bounded-loop tools
+> (`slm_loop_run`, `slm_loop_history`, `slm_loop_show`) and 2 usefulness reports
+> (`report_outcome`, `report_feedback`).
+> Use `full` (50 tools) to add mesh coordination. Use `power` (62 tools) for governance
 > and audit tools. See slm-profile for profile switching.
 
 | Tool               | Signature (key params)                                                                       | Notes                                  |
@@ -104,6 +108,10 @@ When the SLM MCP server is unavailable, use these CLI equivalents:
 | `slm_cache_set`    | `key, value, ttl_seconds=86400`                                                              | KV cache set                           |
 | `slm_cache_get`    | `key`                                                                                        | KV cache get; returns hit, value       |
 | `slm_optimize_stats` | `()`                                                                                       | Returns compress_runs, tokens_saved_compress, cache_kv_hits |
+| `review_correction` | `case_id, action, expected_version, event_valid_until=None`                                 | Apply, reject or roll back a review-gated correction |
+| `list_corrections` | `limit=100`                                                                                  | Correction cases awaiting review, active profile |
+| `get_memory_summary` | `kind="day", target=""`                                                                    | Readable summary of a day, project or session |
+| `switch_profile`   | `profile_id`                                                                                 | Change the active memory profile; every later call scopes to it |
 
 ## Skills
 
