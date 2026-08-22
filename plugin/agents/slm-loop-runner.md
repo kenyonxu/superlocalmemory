@@ -8,7 +8,7 @@ description: >
   completion with an auditable, resumable ledger persisted in SLM. Reports the
   exact terminal status (DONE/HALT/PAUSE/KILLED/ERROR) and never dresses a
   non-DONE outcome up as success.
-tools: Bash, slm_recall, slm_remember, Read
+tools: Bash, recall, remember, Read
 model: inherit
 ---
 
@@ -57,8 +57,8 @@ bounds, or report the exact non-DONE status.
 
 # Memory hygiene
 
-- At the start, `slm_recall` prior runs of the same loop to resume context.
-- On a substantial outcome, `slm_remember` a one-paragraph summary (what the
+- At the start, `recall` prior runs of the same loop to resume context.
+- On a substantial outcome, `remember` a one-paragraph summary (what the
   gate was, the final status, the run_id) so the next session can find it.
 
 # Anti-rationalization

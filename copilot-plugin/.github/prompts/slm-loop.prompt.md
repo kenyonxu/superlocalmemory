@@ -5,7 +5,7 @@ version: "4.0.10"
 agent: agent
 tools:
   - Bash
-  - slm_recall
+  - recall
 ---
 
 # slm-loop — Bounded, gate-verified agent loops
@@ -99,4 +99,4 @@ paused, name the approval needed; when errored, quote the short detail.
 
 ---
 
-SuperLocalMemory v4.0.4 · Qualixar · AGPL-3.0-or-later
+SuperLocalMemory v4.0.10 · Qualixar · AGPL-3.0-or-later

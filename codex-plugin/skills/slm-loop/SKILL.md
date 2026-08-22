@@ -2,7 +2,7 @@
 name: slm-loop
 description: Run gate-verified bounded loops with SuperLocalMemory as the durable ledger. Use when a task has a checkable acceptance condition (tests, schema, lint, reconciliation) and you must iterate until an INDEPENDENT gate passes — never stopping just because the agent believes it is done. `slm loop demo` runs a keyless convergence demo; `slm loop history` and `slm loop show <run_id>` inspect past runs whose every lap is persisted as queryable SLM memory (tag `loop:<name>`). Terminal statuses are DONE / HALT / PAUSE / KILLED / ERROR — report them exactly, never converting HALT/PAUSE/ERROR into success.
 when_to_use: "run a bounded loop, gate-verified task, iterate until tests pass, verify against an independent gate, don't trust the agent's own done claim, slm loop, convergence loop, loop until green, loop ledger, resume a loop"
-allowed-tools: Bash, slm_recall
+allowed-tools: Bash, recall
 ---
 
 # slm-loop — Bounded, gate-verified agent loops

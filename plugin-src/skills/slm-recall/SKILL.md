@@ -152,8 +152,10 @@ the registry and evict genuine conversations.
 ### 3. Fast mode
 
 `fast` controls **one** thing: whether the server runs its own internal LLM
-reformulation round. It does **not** disable any retrieval channel — all seven
-channels and the reranker run either way.
+reformulation round. It does **not** disable any retrieval channel — every
+channel and the reranker run either way. There are four always: meaning,
+keyword, entity graph and time. Spreading activation and Hopfield register as a
+fifth and sixth when their prerequisites are present, so a store sees up to six.
 
 Leave it unset. Unset resolves to "skip the internal round", because you are the
 reasoner: you refine the query yourself using the confidence signals above, and
@@ -321,4 +323,4 @@ before recalling, then switch back. See `slm-profile` for workspace switching.
 
 ---
 
-*SuperLocalMemory v4.0.4 · Qualixar · AGPL-3.0-or-later*
+*SuperLocalMemory v4.0.10 · Qualixar · AGPL-3.0-or-later*
