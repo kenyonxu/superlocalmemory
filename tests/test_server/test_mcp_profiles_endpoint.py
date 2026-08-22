@@ -20,7 +20,7 @@ _ENDPOINT = "/api/v3/mcp/profiles"
 
 _EXPECTED_COUNTS = {
     "core": 17,   # v4.0.8: + get_memory_summary (#113)
-    "code": 32,   # v4.0.5: review-gated corrections + code graph/loops
+    "code": 34,   # v4.1.0: + the two usefulness reports the ranker reads
     "full": 50,   # v4.0.5: everyday memory, Brain, optimize, and mesh
     "power": 62,  # v4.0.5: full plus governance/lifecycle diagnostics
     "mesh": 8,

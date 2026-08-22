@@ -48,6 +48,11 @@ _PROFILE_CODE: frozenset[str] = _PROFILE_CORE | _PROFILE_BRAIN | frozenset({  # 
     # v3.8.0: bounded loops on the MCP surface. Coding agents (the /slm-loop
     # command's audience) run gated, bounded loops and inspect the ledger.
     "slm_loop_run", "slm_loop_history", "slm_loop_show",
+    # Retrieval ranks a memory partly on whether it has actually helped, and
+    # the only evidence of that comes from the assistant that used it. The
+    # plugin ships SLM_MCP_PROFILE=code, so without these two the ranker has
+    # no input at all for the audience it exists to serve.
+    "report_outcome", "report_feedback",
 })
 
 _PROFILE_FULL_MESH: frozenset[str] = frozenset({  # 8

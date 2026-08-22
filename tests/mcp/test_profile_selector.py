@@ -73,7 +73,8 @@ def test_profile_core_exact():
 
 
 # ---------------------------------------------------------------------------
-# RED-3: code == core | Brain + code-graph + switch_profile + loops (==32)
+# RED-3: code == core | Brain + code-graph + switch_profile + loops
+# + the two usefulness reports (==34)
 # ---------------------------------------------------------------------------
 
 _CODE_EXTRA = frozenset({
@@ -86,6 +87,9 @@ _CODE_EXTRA = frozenset({
     "switch_profile",
     # 3.8.0: bounded-loop tools on the MCP surface (CLI + command + MCP).
     "slm_loop_run", "slm_loop_history", "slm_loop_show",
+    # 4.1.0: ranking reads whether a memory helped, and only the assistant
+    # that used it can say so. The plugin runs this profile.
+    "report_outcome", "report_feedback",
 })
 
 
@@ -96,7 +100,7 @@ def test_profile_code_exact():
     assert code == expected, (
         f"code diff — extra: {code - expected}, missing: {expected - code}"
     )
-    assert len(code) == 32, f"code must be 32 names, got {len(code)}"
+    assert len(code) == 34, f"code must be 34 names, got {len(code)}"
 
 
 # ---------------------------------------------------------------------------
