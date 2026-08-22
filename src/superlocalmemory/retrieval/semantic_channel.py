@@ -30,6 +30,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: How often the Lance projection is checked against the index it replaces: one
+#: in this many searches. A comparison costs a second full search, so checking
+#: every one doubled the channel, and a projection that has genuinely diverged is
+#: caught inside this many queries either way.
+SCALE_SHADOW_SAMPLE_EVERY = 50
+
 # Minimum variance floor to prevent division-by-zero in Fisher distance
 _VARIANCE_FLOOR: float = 1e-6
 
@@ -112,6 +118,8 @@ class SemanticChannel:
         self._scale_vector_backend: Any | None = None
         self._scale_shadow_checks = 0
         self._scale_shadow_mismatches = 0
+        self._scale_shadow_errors = 0
+        self._scale_searches = 0
         # V3.3.19: TurboQuant 3-tier search (stateless, optional)
         self._qas = quantization_aware_search
 
@@ -166,10 +174,37 @@ class SemanticChannel:
             and not include_global
             and not include_shared
         ):
-            projected = self._search_via_lance(
-                query_embedding, q_vec, profile_id, top_k,
-                include_global=include_global, include_shared=include_shared,
-            )
+            self._scale_searches += 1
+            # Shadowing SAMPLES rather than running on every query. Comparing
+            # means running both engines, and they cost the same -- 18.3 ms
+            # against 18.7 ms over 5,324 vectors -- so shadowing every search
+            # doubled this channel for an answer already known to match.
+            # Verified on a copy of the author's store: 18 checks, 0 mismatches.
+            #
+            # What guarantees the projection is not this comparison. It is the
+            # outbox, which commits the intent to project in the same SQLite
+            # transaction as the memory, plus a parity gate holding the
+            # projection to the index it stands in for. A per-query re-run of the
+            # canonical path is a development instrument, and leaving one in
+            # production is how a permanent 2x cost gets mistaken for safety.
+            sampled = (self._scale_searches % SCALE_SHADOW_SAMPLE_EVERY) == 1
+            try:
+                projected = self._search_via_lance(
+                    query_embedding, q_vec, profile_id, top_k,
+                    include_global=include_global, include_shared=include_shared,
+                )
+            except Exception as exc:
+                # The Cozo path this mirrors has always caught its failures; this
+                # one did not, so a Lance error propagated out of recall instead
+                # of degrading to the index that was still sitting there.
+                self._scale_shadow_errors += 1
+                logger.warning("Lance semantic projection failed, using SQLite: %s", exc)
+                return self._search_without_lance(
+                    query_embedding, q_vec, profile_id, top_k,
+                    include_global=include_global, include_shared=include_shared,
+                )
+            if not sampled:
+                return projected
             canonical = self._search_without_lance(
                 query_embedding, q_vec, profile_id, top_k,
                 include_global=include_global, include_shared=include_shared,
@@ -178,7 +213,11 @@ class SemanticChannel:
             if {fid for fid, _ in projected} == {fid for fid, _ in canonical}:
                 return projected
             self._scale_shadow_mismatches += 1
-            logger.warning("Lance semantic projection diverged from SQLite; using SQLite")
+            logger.warning(
+                "Lance semantic projection diverged from SQLite on sampled check "
+                "%d of %d searches; using SQLite",
+                self._scale_shadow_checks, self._scale_searches,
+            )
             return canonical
 
         # --- FAST PATH: sqlite-vec KNN ---
@@ -203,8 +242,11 @@ class SemanticChannel:
 
     def scale_projection_telemetry(self) -> dict[str, int]:
         return {
+            "searches": self._scale_searches,
             "shadow_checks": self._scale_shadow_checks,
             "shadow_mismatches": self._scale_shadow_mismatches,
+            "shadow_errors": self._scale_shadow_errors,
+            "sample_every": SCALE_SHADOW_SAMPLE_EVERY,
         }
 
     def _search_via_lance(

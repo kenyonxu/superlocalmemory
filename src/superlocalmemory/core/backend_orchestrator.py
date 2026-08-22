@@ -240,7 +240,7 @@ class BackendOrchestrator:
                 return
             threshold = int(
                 os.environ.get("SLM_AUTO_PROMOTE_MIN_EDGES", "")
-                or getattr(cfg, "scale_auto_promote_min_edges", 1_000_000)
+                or getattr(cfg, "scale_auto_promote_min_edges", 100_000)
             )
             edges = self._count_default_edges()
             if edges < threshold:

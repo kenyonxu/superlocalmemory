@@ -1165,14 +1165,26 @@ class SLMConfig:
     # stay on SQLite until a staged parity check promotes these projections.
     scale_engine_state: str = "local_core"  # local_core | prepared | verified | promoted
     # v3.8.5: auto-promote Cozo+LanceDB when a DB grows past the scale at which
-    # they actually help.  Below the threshold the well-indexed SQLite graph is
-    # faster (measured ~1.7ms/traversal at 208K edges), so normal installs stay
-    # on Local Core and never pay the projection/migration cost.  The threshold
-    # is deliberately high: the graph DB win appears at millions of edges, not
-    # hundreds of thousands.  Auto-promotion is background, uses the same staged
+    # they actually help.  Auto-promotion is background, uses the same staged
     # parity gate as the manual path, and falls back to SQLite on any failure.
+    #
+    # 100,000 (was 1,000,000, set by Varun 2026-08-22). The old value gated every
+    # store anyone actually has -- the author's is 140,000 edges -- so the
+    # projection was built for nobody and, being unexercised, was wrong: it
+    # carried 1,257 memories the store may not return and its graph search
+    # disagreed with SQLite on every query.  A threshold no real store crosses is
+    # not a safety margin, it is a feature nobody tests.
+    #
+    # What promotion now changes is narrow and measured.  The graph WALK does not
+    # move: SQLite loads 130k edges in 141 ms against CozoDB's 252 ms, so the
+    # adjacency read stays where it is fastest (retrieval/graph_adjacency.py
+    # holds the seam for the day that flips).  What promotion switches on is the
+    # LanceDB vector index, which is within noise of sqlite-vec at this size
+    # (18.3 ms against 18.7 ms over 5,324 vectors) and is the one built to keep
+    # going as the vector count grows.  So crossing this line is close to
+    # latency-neutral today and buys the projection real exercise.
     scale_auto_promote_enabled: bool = True
-    scale_auto_promote_min_edges: int = 1_000_000
+    scale_auto_promote_min_edges: int = 100_000
     evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
     health: HealthConfig = field(default_factory=HealthConfig)
     # v3.8.4-G: Graph thinning parameters (#84)
@@ -1317,10 +1329,10 @@ class SLMConfig:
         )
         try:
             config.scale_auto_promote_min_edges = int(
-                data.get("scale_auto_promote_min_edges", 1_000_000)
+                data.get("scale_auto_promote_min_edges", 100_000)
             )
         except (TypeError, ValueError):
-            config.scale_auto_promote_min_edges = 1_000_000
+            config.scale_auto_promote_min_edges = 100_000
 
         # V3.3 config fields (additive — defaults work if missing from JSON)
         fg = data.get("forgetting", {})
