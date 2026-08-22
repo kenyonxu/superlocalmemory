@@ -24,7 +24,10 @@ _os.environ.setdefault('TORCH_DEVICE', 'cpu')
 import argparse
 import sys
 
-from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
+from superlocalmemory.core.config import (
+    CANONICAL_LIST_LIMIT,
+    CANONICAL_RECALL_LIMIT,
+)
 
 _HELP_EPILOG = """\
 operating modes:
@@ -503,7 +506,8 @@ def main() -> None:
 
     list_p = sub.add_parser("list", help="List recent memories chronologically (shows IDs for delete/update)")
     list_p.add_argument(
-        "--limit", "-n", type=int, default=20, help="Number of entries (default 20)",
+        "--limit", "-n", type=int, default=CANONICAL_LIST_LIMIT,
+        help=f"Number of entries (default {CANONICAL_LIST_LIMIT})",
     )
     list_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 

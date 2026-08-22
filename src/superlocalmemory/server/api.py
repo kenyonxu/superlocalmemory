@@ -39,6 +39,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 import uvicorn
 
+from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
 from superlocalmemory.server.security_middleware import SecurityHeadersMiddleware
 from superlocalmemory.server.routes.helpers import SLM_VERSION
 from superlocalmemory.infra.data_root import DynamicStatePath
@@ -60,7 +61,7 @@ UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
 class SearchRequest(BaseModel):
     query: str
-    limit: int = 10
+    limit: int = CANONICAL_RECALL_LIMIT
     min_score: float = 0.3
 
 

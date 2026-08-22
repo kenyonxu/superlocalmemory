@@ -12,6 +12,7 @@ from pathlib import Path
 import os
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
 from superlocalmemory.server.routes.helpers import SLM_VERSION, get_read_connection
 from superlocalmemory.server.route_mutations import authorize_route_mutation
 
@@ -1152,7 +1153,7 @@ async def recall_trace(request: Request):
     try:
         body = await request.json()
         query = body.get("query", "")
-        limit = body.get("limit", 10)
+        limit = body.get("limit", CANONICAL_RECALL_LIMIT)
         window = body.get("window", "") or ""
         as_of_raw = (body.get("as_of", "") or "").strip()
         raw_known_as_of = body.get("known_as_of", "")

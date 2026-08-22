@@ -26,7 +26,11 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any, Protocol
 
-from superlocalmemory.core.config import ChannelWeights, RetrievalConfig
+from superlocalmemory.core.config import (
+    CANONICAL_RECALL_LIMIT,
+    ChannelWeights,
+    RetrievalConfig,
+)
 from superlocalmemory.retrieval import channel_status as chstat
 from superlocalmemory.retrieval.fusion import FusionResult, weighted_rrf
 from superlocalmemory.retrieval.strategy import QueryStrategy, QueryStrategyClassifier
@@ -196,7 +200,7 @@ class RetrievalEngine:
 
     def recall(
         self, query: str, profile_id: str,
-        mode: Mode = Mode.A, limit: int = 20,
+        mode: Mode = Mode.A, limit: int = CANONICAL_RECALL_LIMIT,
         *,
         extra_disabled_channels: set[str] | None = None,
         include_global: bool = False,

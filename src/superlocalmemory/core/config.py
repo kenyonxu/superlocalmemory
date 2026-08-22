@@ -28,8 +28,21 @@ logger = logging.getLogger(__name__)
 
 #: Default number of results returned by recall across MCP, CLI, daemon, and
 #: engine.  All surfaces bind their ``limit`` defaults to this constant so a
-#: single change is sufficient to keep the full stack in sync.
+#: single change is sufficient to keep the full stack in sync.  Search is a
+#: retrieval operation too and binds here: asking the same question through
+#: ``recall`` and through ``search`` must not return differently sized answers.
 CANONICAL_RECALL_LIMIT: int = 20
+
+#: Default number of rows returned when listing the newest memories rather than
+#: answering a question — MCP ``list_recent`` and ``slm list``.  Separate from
+#: the recall limit because the two can legitimately diverge; equal today.
+CANONICAL_LIST_LIMIT: int = 20
+
+#: Page size for the HTTP memory browser (``GET /api/memories``), which is a
+#: paged table rather than an answer.  Deliberately larger than the list limit:
+#: a person scrolling a table wants a fuller page than an agent asking what
+#: happened recently.  The ceiling on that endpoint is enforced separately.
+BROWSE_PAGE_SIZE: int = 50
 
 
 # ---------------------------------------------------------------------------

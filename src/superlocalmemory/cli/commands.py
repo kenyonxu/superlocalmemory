@@ -1345,7 +1345,7 @@ def cmd_migrate(args: Namespace) -> None:
 
 def cmd_list(args: Namespace) -> None:
     """List recent memories chronologically."""
-    from superlocalmemory.core.config import SLMConfig
+    from superlocalmemory.core.config import CANONICAL_LIST_LIMIT, SLMConfig
     from superlocalmemory.core.engine import MemoryEngine
 
     use_json = getattr(args, 'json', False)
@@ -1354,10 +1354,10 @@ def cmd_list(args: Namespace) -> None:
         engine = MemoryEngine(config)
         engine.initialize()
 
-        limit = getattr(args, "limit", 20)
-        facts = engine._db.get_all_facts(engine.profile_id)
-        facts.sort(key=lambda f: f.created_at or "", reverse=True)
-        facts = facts[:limit]
+        limit = getattr(args, "limit", CANONICAL_LIST_LIMIT)
+        # The query already returns newest-first; pushing the bound into SQL
+        # keeps this from deserializing the whole table to show twenty rows.
+        facts = engine._db.get_all_facts(engine.profile_id, limit=limit)
     except Exception as exc:
         if use_json:
             from superlocalmemory.cli.json_output import json_print

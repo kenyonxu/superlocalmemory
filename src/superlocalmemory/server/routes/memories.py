@@ -13,6 +13,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from superlocalmemory.core.config import BROWSE_PAGE_SIZE
 from superlocalmemory.storage.database import (
     visible_fact_clause_for_connection,
 )
@@ -392,7 +393,7 @@ async def get_memories(
     cluster_id: Optional[int] = None,
     min_importance: Optional[int] = None,
     tags: Optional[str] = None,
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(BROWSE_PAGE_SIZE, ge=1, le=200),
     offset: int = Query(0, ge=0),
     filter: Optional[str] = Query(
         None,
@@ -1005,7 +1006,7 @@ async def get_clusters(request: Request):
 async def get_cluster_detail(
     request: Request,
     cluster_id: str,
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(BROWSE_PAGE_SIZE, ge=1, le=200),
 ):
     """Get detailed view of a specific cluster (scene)."""
     try:

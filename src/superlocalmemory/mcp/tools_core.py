@@ -20,7 +20,7 @@ from typing import Callable
 from mcp.types import ToolAnnotations
 
 from superlocalmemory.core.admission import admits
-from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
+from superlocalmemory.core.config import CANONICAL_LIST_LIMIT, CANONICAL_RECALL_LIMIT
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.infra.data_root import state_path
 from superlocalmemory.mcp._daemon_proxy import daemon_unavailable_error
@@ -436,7 +436,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     @admits(OperationKind.RECALL)
-    async def search(query: str, limit: int = 10) -> dict:
+    async def search(query: str, limit: int = CANONICAL_RECALL_LIMIT) -> dict:
         """Full-text search across memories using FTS5 with BM25 ranking."""
         try:
             engine = get_engine()
@@ -484,7 +484,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def list_recent(limit: int = 20) -> dict:
+    async def list_recent(limit: int = CANONICAL_LIST_LIMIT) -> dict:
         """List most recently stored memories, newest first."""
         try:
             engine = get_engine()
