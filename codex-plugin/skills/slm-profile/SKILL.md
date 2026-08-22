@@ -104,6 +104,7 @@ In your `.mcp.json` (Claude Code) or `.codex/config.toml` (Codex):
 ```json
 "env": {
   "SLM_MCP_PROFILE": "code",
+  "SLM_AGENT_ID": "codex",
   "SLM_DATA_DIR": "~/.superlocalmemory"
 }
 ```
@@ -145,4 +146,4 @@ Name them differently in your MCP config (e.g. `superlocalmemory-personal` and
 
 ---
 
-*SuperLocalMemory v4.0.4 · Qualixar · AGPL-3.0-or-later*
+*SuperLocalMemory v4.0.10 · Qualixar · AGPL-3.0-or-later*

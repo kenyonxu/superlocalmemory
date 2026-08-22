@@ -12,7 +12,7 @@ Layout verified:
     scripts/slm-launch.bat      (Windows launcher)
     scripts/ensure-venv.sh      (POSIX venv bootstrap, +x)
     scripts/ensure-venv.bat     (Windows venv bootstrap)
-    skills/<7>/SKILL.md         (identical to Claude Code plugin skills)
+    skills/<12>/SKILL.md        (from plugin-src/skills, retargeted to this host)
 
 Tests verify:
   - All expected files exist
@@ -27,6 +27,7 @@ Tests verify:
 from __future__ import annotations
 
 import json
+import re
 import os
 import stat
 import sys
@@ -488,3 +489,56 @@ class TestBackwardCompat:
             f"build-plugin.mjs --check failed (codex-plugin must be additive-only):\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
+
+
+class TestCodexPluginStaysInSyncWithItsSource:
+    """Everything derivable is derived, so it cannot quietly go stale.
+
+    This directory was maintained by hand and carried a v4.0.4 footer across six
+    releases. Two of its twelve skills had also drifted, because a Claude-only
+    line was deleted locally instead of the build being taught about Codex.
+    """
+
+    def test_the_committed_tree_matches_a_fresh_build(self) -> None:
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not available")
+        repo = Path(__file__).resolve().parents[2]
+        result = subprocess.run(
+            [node, "scripts/build-codex-plugin.mjs", "--check"],
+            cwd=repo, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            f"codex-plugin drift: {result.stderr or result.stdout}"
+        )
+
+    def test_every_source_skill_reaches_codex(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        source = {p.name for p in (repo / "plugin-src" / "skills").iterdir() if p.is_dir()}
+        shipped = {p.name for p in (repo / "codex-plugin" / "skills").iterdir() if p.is_dir()}
+        assert source <= shipped, f"missing from codex-plugin: {sorted(source - shipped)}"
+
+    def test_memories_are_attributed_to_this_host(self) -> None:
+        """A Codex session should not record its memories as Claude Code's."""
+        repo = Path(__file__).resolve().parents[2]
+        for skill in (repo / "codex-plugin" / "skills").glob("*/SKILL.md"):
+            text = skill.read_text("utf-8")
+            assert "claude_code" not in text, (
+                f"{skill.relative_to(repo)} still identifies the host as Claude Code"
+            )
+
+    def test_the_version_matches_the_manifest(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        version = json.loads(
+            (repo / "plugin-src" / "manifest.json").read_text("utf-8")
+        )["version"]
+        for rel in ("AGENTS.md", "README.md", "_GENERATED.md",
+                    "skills/slm-recall/SKILL.md"):
+            text = (repo / "codex-plugin" / rel).read_text("utf-8")
+            stale = re.findall(r"SuperLocalMemory v(\d+\.\d+\.\d+)", text)
+            assert all(v == version for v in stale), (
+                f"{rel} states {sorted(set(stale))}, manifest says {version}"
+            )

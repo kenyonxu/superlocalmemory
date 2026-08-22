@@ -121,7 +121,14 @@ remember(content="...", session_id=session_id, tags="auth,decision", project="my
 ```
 
 This attribution is what allows the ranker to learn which recalls led to useful
-outcomes for this project.
+outcomes for this project. It also gives the session a small working set, so
+successive recalls in one conversation build on what the earlier ones surfaced
+instead of each starting cold.
+
+**Do not synthesise a session id.** An id beginning `http:`, `mcp:`, `cli:` or
+`probe:` is read as a synthetic per-request label rather than a conversation and
+is deliberately excluded from that working set. Use the one `session_init`
+returned, unchanged, for the whole session.
 
 ---
 
@@ -177,6 +184,23 @@ never attributed to a project or agent. Over many sessions this compounds:
 projects where lifecycle is respected have measurably better retrieval quality
 than projects where session_init is skipped.
 
+Within a single session it compounds faster. The session's working set holds the
+memories its recalls have already surfaced, and later recalls rank those higher,
+so a long conversation converges on the material it is actually about.
+
+### Closing the loop explicitly
+
+Engagement signals say a memory was *shown*. `report_outcome` says it was
+*right*:
+
+```
+report_outcome(memory_ids="<ids you actually used>", outcome="success")
+```
+
+Send it when a recalled memory changed what you did, and send `failure` when a
+confidently-returned memory turned out to be wrong — that is the only signal
+that stops a stale memory from being promoted. See the `slm-recall` skill.
+
 ---
 
 ## CLI fallback (when MCP is unavailable)
@@ -198,7 +222,9 @@ slm doctor [--json]    # preflight check including daemon and embedding worker
 | Mistake | Consequence | Fix |
 |---------|-------------|-----|
 | Calling `session_init` twice in one session | Two session IDs; signals split across them | Call once; store the returned ID |
-| Omitting `session_id` from `recall` / `remember` | No learning attribution | Always pass the stored `session_id` |
+| Omitting `session_id` from `recall` / `remember` | No learning attribution, and every turn starts cold | Always pass the stored `session_id` |
+| Inventing a `session_id` such as `mcp:agent` or `http:1234` | Read as synthetic, excluded from the working set | Use the id `session_init` returned |
+| Never reporting an outcome | Ranking cannot tell a useful memory from a merely returned one | `report_outcome` after a recall that changed what you did |
 | Never calling `close_session` | Temporal summaries not written | Call at end of each meaningful work unit |
 | Calling `close_session` without a `session_id` when no prior writes exist | Returns error "No session_id found" | Pass the explicit `session_id` from `session_init` |
 
@@ -227,4 +253,4 @@ explicitly and call `recall` with `include_global`/`include_shared` after
 
 ---
 
-*SuperLocalMemory v4.0.4 · Qualixar · AGPL-3.0-or-later*
+*SuperLocalMemory v4.0.10 · Qualixar · AGPL-3.0-or-later*
