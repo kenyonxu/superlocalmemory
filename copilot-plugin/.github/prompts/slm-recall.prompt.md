@@ -112,8 +112,12 @@ each channel counts; `channel_status` says whether it ran at all.
 | `disabled` | switched off by configuration |
 | `not_configured` | the backing service is not set up |
 
-The seven channels are `semantic`, `bm25`, `temporal`, `hopfield`,
-`spreading_activation`, `entity_graph` and `profile`.
+`semantic`, `bm25`, `temporal`, `hopfield` and `spreading_activation` each
+search and return their own candidates. `profile` is a shortcut that runs before
+them and can answer directly. `entity_graph` produces nothing of its own — it
+re-scores what the others found, by how well each result connects to the
+entities in your question, which is why it reports `no_candidates` when the
+rest come back empty.
 
 `empty`, `no_candidates`, `disabled` and `not_configured` are normal. `error`,
 `timeout` and `no_embedding` mean the answer is **incomplete, not negative** —
