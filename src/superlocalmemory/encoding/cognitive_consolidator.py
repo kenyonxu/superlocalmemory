@@ -530,10 +530,15 @@ class CognitiveConsolidator:
                 representative_fact_id="",
             )
 
-        # Try LLM mode (Mode B) if configured
+        # Configuration first, then availability. Mode A sets use_llm_gist=False,
+        # so this refuses because the mode says to — not because an LLM happened
+        # not to be passed in. The previous order tested availability first,
+        # which meant a caller that supplied a model to a Mode A engine would
+        # have got an LLM call on a mode whose whole promise is that nothing
+        # does.
         if (
-            self._llm is not None
-            and self._config.use_llm_gist
+            self._config.use_llm_gist
+            and self._llm is not None
         ):
             try:
                 gist = self._extract_gist_llm(

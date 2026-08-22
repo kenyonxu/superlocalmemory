@@ -1819,6 +1819,13 @@ class SLMConfig:
                 base_dir=_base,
                 embedding=_a_emb,
                 llm=LLMConfig(),  # No LLM
+                # Mode A's promise is that nothing puts a model on any path, and
+                # a subsystem should refuse because the mode says so, not because
+                # it happened to be handed llm=None. Three of the four places
+                # that build the consolidator pass only a database, so today the
+                # guard holds by accident of wiring; this makes it hold by
+                # configuration, which is the thing a reader can check.
+                ccq=CCQConfig(use_llm_gist=False),
                 temporal_validator=TemporalValidatorConfig(mode="a"),
                 retrieval=RetrievalConfig(
                     # V3.3.2: ONNX cross-encoder enabled for all modes (~200MB)

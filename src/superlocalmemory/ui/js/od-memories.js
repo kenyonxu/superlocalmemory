@@ -458,6 +458,25 @@
         meta.style.cssText = 'margin-top:10px;font-size:12px;color:var(--fg-3);line-height:1.6';
         meta.textContent = _summaryProvenance(d);
         out.appendChild(meta);
+
+        /* Why it came out this way, and what to do about it.
+         *
+         * The provenance line above says a summary was assembled from the
+         * user's own notes rather than written. It never said why. Someone in
+         * Mode A — which has no language model by design — saw a plainer
+         * result than they expected with no way to learn that a written one
+         * needs a model, and would reasonably read the feature as broken.
+         */
+        var cap = d.capability;
+        if (cap && cap.message) {
+          var hint = document.createElement('div');
+          hint.style.cssText = 'margin-top:10px;font-size:12px;line-height:1.6;' +
+            'color:var(--fg-2);background:var(--card-2);border:1px solid var(--border);' +
+            'border-left:3px solid var(--accent, var(--border));' +
+            'border-radius:var(--r-md);padding:10px 12px';
+          hint.textContent = cap.message;
+          out.appendChild(hint);
+        }
       })
       .catch(function (e) {
         out.textContent = 'Could not build summary: ' + (e && e.message ? e.message : 'error');

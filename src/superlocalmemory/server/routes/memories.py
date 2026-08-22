@@ -817,6 +817,13 @@ async def get_summary(request: Request, kind: str = "day", target: str = ""):
     except Exception:
         raise _internal_error("Summary generation error")
 
+    # Say why, not just what. The response already reported that a summary was
+    # assembled rather than written; someone seeing a plainer result than they
+    # expected still had no way to learn that a written one needs a model, and
+    # would reasonably read the feature as broken.
+    from superlocalmemory.core.mode_capability import llm_capability
+
+    generated = str(getattr(result, "generated_by", "") or "")
     return {
         "kind": result.kind,
         "profile_id": result.profile_id,
@@ -826,6 +833,12 @@ async def get_summary(request: Request, kind: str = "day", target: str = ""):
         "source_fact_ids": result.source_fact_ids,
         "source_count": len(result.source_fact_ids),
         "metadata": result.metadata,
+        "capability": llm_capability(
+            cfg,
+            # This call has just been made, so its outcome is the honest answer
+            # about availability -- better than asking the configuration again.
+            llm_reachable=generated.startswith("llm"),
+        ),
     }
 
 
