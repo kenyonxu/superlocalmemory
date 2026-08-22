@@ -44,6 +44,13 @@ STILL_AHEAD = [
     "The meeting moved to next Tuesday",
     "The launch was postponed to next month",
     "Need to pick up dry cleaning before Friday",
+    # People write notes in the passive. A third review found the whole class
+    # missing: putting an event on a date is a placement, and a placement in the
+    # past tense still leaves the event in the future.
+    "The deployment was scheduled for next Monday",
+    "Dentist appointment was booked for next Tuesday",
+    "The review was planned for next Thursday",
+    "The deadline was extended to next Friday",
 ]
 
 ALREADY_BEHIND = [
@@ -211,4 +218,6 @@ def test_moving_an_event_keeps_it_in_the_future() -> None:
     one of them is something to look forward to.
     """
     assert looks_prospective("The release was rescheduled to next Friday")
+    assert looks_prospective("The release was scheduled for next Friday")
     assert not looks_prospective("We discussed the release for next Friday")
+    assert not looks_prospective("We decided the release for next Friday")

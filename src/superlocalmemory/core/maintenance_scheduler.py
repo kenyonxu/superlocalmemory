@@ -201,6 +201,27 @@ class MaintenanceScheduler:
             except Exception as exc:
                 logger.debug("Lineage retention skipped for %s: %s", profile_id, exc)
 
+            # Re-read what is filed as a plan. The one-time pass runs as a
+            # migration; the rule it uses keeps getting sharper, and a completed
+            # migration is never replayed — so without this the store drifts
+            # further from the rule with every release and nothing repairs it.
+            # The pass is a pure function of the text and idempotent, so this is
+            # a no-op once the store has converged.
+            try:
+                from superlocalmemory.storage.migrations import (
+                    M048_upcoming_holds_only_what_is_upcoming as _reclassify,
+                )
+                _conn = getattr(self._db, "_conn", None)
+                if _conn is None and hasattr(self._db, "connection"):
+                    _conn = self._db.connection
+                if _conn is not None:
+                    _reclassify.apply(_conn)
+            except Exception as exc:
+                logger.debug(
+                    "re-reading what is filed as a plan skipped for %s: %s",
+                    profile_id, exc,
+                )
+
             # Lifecycle evaluation must cover every stored profile, not only
             # whichever profile was active when the engine started.
             try:

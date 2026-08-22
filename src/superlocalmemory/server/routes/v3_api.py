@@ -496,8 +496,17 @@ async def set_full_config(request: Request):
         _emb_fields = ("embedding_provider", "embedding_endpoint", "embedding_key",
                        "embedding_model", "embedding_dimension")
         if any(k in body for k in _emb_fields):
+            _old_emb = config.embedding
+            _new_provider = body.get("embedding_provider", "")
             _new_model = body.get("embedding_model", "")
             _new_dim = int(body.get("embedding_dimension", 0) or 0)
+            # The same range the other save route enforces. Without it a
+            # dashboard save with no dimension field stored a width of zero.
+            if _new_dim and not (64 <= _new_dim <= 8192):
+                return JSONResponse(
+                    {"error": f"Dimension must be 64-8192, got {_new_dim}"},
+                    status_code=400,
+                )
             # The SECOND way to change the embedding model, and it was
             # unguarded. Switching mode from the dashboard carries the embedding
             # fields, so a width that the store cannot hold arrived here
@@ -506,15 +515,26 @@ async def set_full_config(request: Request):
             if not bool(body.get("force")):
                 _refusal = _refuse_incompatible_embedding(
                     config, config.embedding, _new_model, _new_dim,
+                    new_provider=_new_provider,
                 )
                 if _refusal is not None:
                     return _refusal
             config.embedding = EmbeddingConfig(
-                provider=body.get("embedding_provider", ""),
+                provider=_new_provider,
                 api_endpoint=body.get("embedding_endpoint", ""),
                 api_key=body.get("embedding_key", ""),
                 model_name=_new_model,
-                dimension=_new_dim,
+                dimension=_new_dim or _old_emb.dimension,
+                # Not naming these reset them to defaults, so every embedding
+                # save from the dashboard silently put the local model back to
+                # whatever ships — the exact defect the other route had.
+                ollama_model=(
+                    _new_model if _new_provider == "ollama" and _new_model
+                    else _old_emb.ollama_model
+                ),
+                ollama_base_url=_old_emb.ollama_base_url,
+                api_version=_old_emb.api_version,
+                deployment_name=_old_emb.deployment_name,
             )
 
         # When the mode actually changed, apply the new mode's structural presets
@@ -585,7 +605,9 @@ async def get_embedding_config(request: Request):
         return _internal_error()
 
 
-def _refuse_incompatible_embedding(config, old_emb, new_model, new_dim):
+def _refuse_incompatible_embedding(
+    config, old_emb, new_model, new_dim, new_provider=None,
+):
     """None when the change is safe, otherwise the 409 to return instead.
 
     Fail-open on anything it cannot determine: a store with no vectors yet, a
@@ -607,9 +629,17 @@ def _refuse_incompatible_embedding(config, old_emb, new_model, new_dim):
         if stored is None:
             return None
 
+        # The provider being SAVED, falling back to the current one when the
+        # caller is not changing it. Reading only the current provider meant
+        # that SWITCHING to a local model never probed at all — and switching
+        # is exactly when the width changes.
+        effective_provider = (
+            new_provider
+            if new_provider is not None
+            else getattr(old_emb, "provider", "")
+        )
         measured = None
-        if (getattr(old_emb, "provider", "") == "ollama"
-                or getattr(config.embedding, "provider", "") == "ollama"):
+        if effective_provider == "ollama" or getattr(old_emb, "provider", "") == "ollama":
             # The model being SAVED, not the one already configured. Probing the
             # old one always matched the stored width and therefore always
             # allowed the change — the guard measured the thing it was not
@@ -683,7 +713,7 @@ async def set_embedding_config(request: Request):
         # somebody who has already re-embedded.
         if not bool(body.get("force")):
             refusal = _refuse_incompatible_embedding(
-                config, old_emb, new_model, new_dim,
+                config, old_emb, new_model, new_dim, new_provider=new_provider,
             )
             if refusal is not None:
                 return refusal

@@ -154,3 +154,41 @@ def test_a_declared_width_cannot_talk_past_a_measurement(tmp_path, monkeypatch) 
         "mxbai-embed-large", 768,
     )
     assert result is not None, "the declared width overrode the measured one"
+
+
+def test_switching_to_a_local_model_is_probed(tmp_path, monkeypatch) -> None:
+    """The guard read the CURRENT provider, so switching to one never probed.
+
+    Switching is exactly when the width changes, so reading only the provider
+    already in place meant the check never ran at the moment it was needed.
+    """
+    _store_holding(tmp_path, 768)
+    asked: list[str] = []
+
+    class _Probe:
+        ok = True
+        message = ""
+        def __init__(self, dimension):
+            self.dimension = dimension
+
+    import superlocalmemory.core.ollama_validator as validator
+
+    def fake(model_name, role, *, base_url="", timeout=60.0):
+        asked.append(model_name)
+        return _Probe(4096)
+
+    monkeypatch.setattr(validator, "validate_ollama_model", fake)
+
+    # Currently no provider at all; the caller is switching TO the local one and
+    # declaring a width that happens to match the store.
+    result = _refuse_incompatible_embedding(
+        _Config(tmp_path), _Emb(provider=""), "qwen3-embedding:8b", 768,
+        new_provider="ollama",
+    )
+
+    assert asked == ["qwen3-embedding:8b"], (
+        "switching to a local model did not probe it"
+    )
+    assert result is not None, (
+        "a 4096-wide model entered a 768 store because the declared width lied"
+    )

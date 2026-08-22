@@ -48,6 +48,7 @@ __all__ = [
     "CIRCUMSTANTIAL_FUTURE",
     "RECURRING",
     "ALREADY_HAPPENED",
+    "PLACEMENT",
     "RESCHEDULING",
     "DEFINITE_FUTURE",
     "looks_prospective",
@@ -129,17 +130,28 @@ RECURRING = re.compile(
     re.IGNORECASE,
 )
 
-#: Verbs that MOVE an event rather than report on one. "Rescheduled to next
-#: Friday" is still a plan; "discussed the deadline for next month" is a record
-#: of a conversation. Both are past-tense sentences containing a forward date,
-#: and only the first is something to look forward to — so a forward anchor
-#: overrides the past only when one of these is what made it past.
-RESCHEDULING = re.compile(
+#: Verbs that PUT an event on a date, rather than report on one. "Rescheduled
+#: to next Friday" and "was scheduled for next Monday" are both still plans;
+#: "discussed the deadline for next month" is a record of a conversation. All
+#: three are past-tense sentences containing a forward date, and only the first
+#: two are something to look forward to — so a forward anchor overrides the past
+#: only when one of these is what made the sentence past.
+#:
+#: The passive forms matter more than they look: people write notes that way
+#: ("the appointment was booked for Tuesday"), and leaving them out missed a
+#: whole class of ordinary phrasing.
+PLACEMENT = re.compile(
     r"\b(?:reschedul(?:e|ed|ing)|mov(?:e|ed|ing)\s+to|postpon(?:e|ed|ing)|"
     r"push(?:ed)?\s+(?:to|back)|shift(?:ed)?\s+to|defer(?:red)?\s+to|"
-    r"brought\s+forward|pull(?:ed)?\s+forward|bumped\s+to)\b",
+    r"brought\s+forward|pull(?:ed)?\s+forward|bumped\s+to|"
+    r"(?:scheduled?|booked|planned|slated|arranged|set|pencilled|penciled)\s+"
+    r"(?:for|on|at|to)|"
+    r"extend(?:ed)?\s+to|mov(?:e|ed)\s+forward\s+to)\b",
     re.IGNORECASE,
 )
+
+#: The old name, kept because it reads in the one place it is used.
+RESCHEDULING = PLACEMENT
 
 #: Says the thing has already happened. Vetoes anything but an anchored future
 #: that was anchored BY a rescheduling.

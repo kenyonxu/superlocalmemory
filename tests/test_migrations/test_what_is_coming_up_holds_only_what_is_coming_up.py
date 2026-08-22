@@ -127,35 +127,57 @@ def test_verify_notices_a_pass_that_never_ran(store) -> None:
     assert M048.verify(store) is True
 
 
-def test_a_sharper_rule_later_does_not_condemn_a_pass_that_ran(store) -> None:
-    """The certificate must not measure against code that keeps changing.
+def test_drift_after_a_sharper_rule_is_visible_and_self_heals(store) -> None:
+    """The end state is the pass's own fixed point, and drift is repaired.
 
-    A memory the rule correctly kept in one release can fail a sharper rule in
-    the next. Reporting that as a broken migration is permanent, because a
-    completed migration is never replayed — and it happened for real within a
-    day of this being written.
+    An earlier version of this test mutated a memory to text that still read as
+    a plan, so it created no drift at all and passed whether the check worked or
+    not. This one uses text the rule genuinely rejects.
+
+    Drift makes the check False, correctly — the end state under today's rule is
+    not in place. It is repaired by re-running the pass, which the maintenance
+    cycle does, because a completed migration is never replayed.
     """
     _seed(store, STILL_UPCOMING)
     M048.apply(store)
     assert M048.verify(store) is True
 
-    # One memory the rule no longer recognises, among many it still does.
     store.execute(
         "UPDATE atomic_facts SET content = ? WHERE fact_id = 'f0'",
-        ("AEM upgrade for upcoming release uses non-ideal deployment steps",),
+        ("The outage was caused by a stale DNS entry",),
     )
     store.commit()
+    assert _resolve_says_not_a_plan(store, "f0")
 
-    assert M048.verify(store) is True, (
-        "one memory drifting under a sharper rule was reported as a failed "
-        "migration"
+    assert M048.verify(store) is False, (
+        "a memory that no longer reads as a plan was certified as in place"
     )
 
+    M048.apply(store)
+    assert M048.verify(store) is True, "re-running the pass did not converge"
 
-def test_a_store_where_nothing_was_ever_read_still_fails(store) -> None:
-    """The other side of the same boundary."""
-    _seed(store, NOT_UPCOMING * 3)
-    assert M048.verify(store) is False
+
+def _resolve_says_not_a_plan(conn, fact_id: str) -> bool:
+    content = conn.execute(
+        "SELECT content FROM atomic_facts WHERE fact_id = ?", (fact_id,)
+    ).fetchone()[0]
+    return M048._resolve(content) != "prospective"
+
+
+def test_a_store_where_a_third_disagrees_and_nothing_ran_still_fails(store) -> None:
+    """A share cannot tell "never ran" from "the rule sharpened".
+
+    Six real plans and three records, none of them ever read: a third disagrees.
+    An earlier version treated anything under half as drift and reported this
+    store as done.
+    """
+    _seed(store, STILL_UPCOMING)
+    _seed(store, NOT_UPCOMING[:3], start=100)
+
+    assert M048.verify(store) is False, (
+        "a store that had never been read was certified as done because only a "
+        "third of it disagreed"
+    )
 
 
 def test_more_rows_than_one_batch(store) -> None:

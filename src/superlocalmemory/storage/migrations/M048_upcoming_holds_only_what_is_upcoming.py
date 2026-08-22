@@ -138,33 +138,23 @@ def apply(conn: sqlite3.Connection) -> None:
     )
 
 
-#: Above this share of disagreement, the pass did not run. Below it, the rule
-#: improved. See ``verify``.
-_NEVER_RAN_THRESHOLD = 0.5
-
-
 def verify(conn: sqlite3.Connection) -> bool:
-    """Did this pass run — not does today's rule agree with every row.
+    """Is the end state in place: would running this pass again change nothing?
 
-    The obvious check is "no memory filed as a plan fails the rule", and it is
-    wrong, because the rule is code that keeps improving. A memory correctly
-    kept by the rule as it stood in one release can fail the sharper rule in the
-    next, and this certificate would then report a migration that did exactly
-    its job as broken — permanently, since a completed migration is not replayed.
-    It happened within a day of this being written: "AEM upgrade for upcoming
-    release" was a plan under a broad reading of "upcoming" and is not under a
-    narrower one.
+    That is the question the runner asks a verify, and it is answerable exactly
+    — this pass is a pure function of the text, so its end state is its own
+    fixed point. No estimate, no threshold.
 
-    What the pass promises is that every memory filed as a plan was re-read once
-    and the ones that were not plans were moved. At the moment it finishes,
-    nothing disagrees. Afterwards, disagreements accumulate slowly as the rule
-    sharpens — a handful. A pass that never ran leaves the original set almost
-    entirely disagreeing, because that set was over 99% wrong; that is what this
-    was built for.
+    An earlier version tried to tell "the pass never ran" from "the rule got
+    sharper" by how much disagreed, and a share cannot carry that: a store with
+    nine memories, six of them real plans, sits at 33% disagreement having never
+    been touched at all. It reported success.
 
-    So the two cases are told apart by how much disagrees, and the boundary is
-    halfway between "a few drifted" and "none of it was ever looked at".
-    Disagreements below it are reported and are not a failure.
+    Drift after a rule change makes this answer False, correctly — the end state
+    under today's rule is genuinely not in place. It is not left to the runner
+    to repair, because a completed migration is never replayed: the maintenance
+    cycle re-runs the same pass, so the store converges on its own. See
+    ``core/maintenance_scheduler``.
     """
     existing = {r[1] for r in conn.execute(f"PRAGMA table_info({_TABLE})")}
     if "fact_type" not in existing or "content" not in existing:
@@ -180,22 +170,10 @@ def verify(conn: sqlite3.Connection) -> bool:
     drifted = [
         fact_id for fact_id, content in rows if _resolve(content) != _PROSPECTIVE
     ]
-    if not drifted:
-        return True
-
-    share = len(drifted) / len(rows)
-    if share > _NEVER_RAN_THRESHOLD:
-        logger.error(
-            "M048 verify: %d of %d memories filed as plans do not read as one "
-            "(%.0f%%) — this pass did not run",
-            len(drifted), len(rows), share * 100,
+    if drifted:
+        logger.info(
+            "M048: %d of %d memories filed as plans no longer read as one; the "
+            "maintenance cycle re-reads them", len(drifted), len(rows),
         )
         return False
-
-    logger.info(
-        "M048 verify: %d of %d memories filed as plans no longer read as one "
-        "under the current rule (%.0f%%). The pass ran; the rule has since "
-        "sharpened. Re-reading them is maintenance, not a migration repair.",
-        len(drifted), len(rows), share * 100,
-    )
     return True
