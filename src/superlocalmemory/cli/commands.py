@@ -3489,7 +3489,12 @@ def cmd_profile(args: Namespace) -> None:
     if action in ("switch", "create"):
         from superlocalmemory.core.admission import gate_cli_mutation
         from superlocalmemory.core.operation_request import OperationKind
-        gate_cli_mutation(OperationKind.PROFILE_SWITCH)
+        # The role that decides this is the one held on the workspace being
+        # switched to or created, not on whichever one happens to be active.
+        gate_cli_mutation(
+            OperationKind.PROFILE_SWITCH,
+            profile=str(getattr(args, "name", "") or ""),
+        )
 
     from superlocalmemory.core.config import SLMConfig
     from superlocalmemory.storage.database import DatabaseManager
@@ -4091,6 +4096,7 @@ def cmd_observe(args: Namespace) -> None:
 
     # V3.3.28: Route through daemon (singleton engine, single embedding worker).
     # This is the P0 fix for the memory blast incident of April 7, 2026.
+    from superlocalmemory.cli.daemon import DaemonRefused
     try:
         from superlocalmemory.cli.daemon import is_daemon_running, daemon_request, ensure_daemon
         if is_daemon_running() or ensure_daemon():
@@ -4104,6 +4110,16 @@ def cmd_observe(args: Namespace) -> None:
                     reason = result.get("reason", "no patterns matched")
                     print(f"Not captured: {reason}")
                 return
+    except DaemonRefused as refusal:
+        # The workspace declined this write. The fallback below exists for a
+        # daemon that is not running -- not for one that answered no.
+        print(
+            f"[slm] Not captured: {refusal}. "
+            "This workspace requires authentication; set SLM_USER_SESSION or "
+            "log in, then try again.",
+            flush=True,
+        )
+        sys.exit(1)
     except Exception:
         pass  # Fall through to direct engine
 

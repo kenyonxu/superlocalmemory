@@ -189,9 +189,17 @@ def _resolve_deployment() -> "DeploymentConfig":
     try:
         from superlocalmemory.core.config import load_deployment_config
         result = load_deployment_config(config_toml_path=config_path)
-    except Exception as exc:
-        logger.debug("admission: load_deployment_config raised (unexpected): %s", exc)
-        return DEPLOYMENT_PERSONAL
+    except Exception as exc:  # noqa: BLE001
+        # config.toml exists and parsed as TOML; only its interpretation failed.
+        # Returning PERSONAL here would hand owner access to a store that may
+        # well be enterprise. Step 2 already returned PERSONAL for the fresh
+        # install with no config at all, which is the case that needs to stay
+        # frictionless.
+        logger.warning(
+            "admission: config.toml is present but could not be interpreted "
+            "(%s) -- fail-closed (treating as enterprise).", exc,
+        )
+        return DEPLOYMENT_ENTERPRISE
 
     # D1 fail-closed: [deployment] section present but mode is unrecognized or
     # absent means someone tried to configure enterprise and a typo/omission
@@ -417,6 +425,48 @@ def _company_mode_active(deployment) -> bool:
         return True
 
 
+def _target_profile(explicit: str = "") -> str:
+    """The workspace a call will actually touch.
+
+    An explicit argument wins when the caller supplies one. Otherwise this reads
+    the same ``profiles.json`` the engine and the HTTP layer read, because that
+    is where the write is going to land.
+
+    THE DEFECT THIS CLOSES
+
+    The role check used to key off ``kwargs.get("profile_id")``. ``remember``
+    has no such parameter, so every role lookup resolved against ``default``
+    while the write went to whichever workspace was active. A user who is an
+    admin on ``default`` and a viewer on ``team`` passed the check on
+    ``default`` and wrote to ``team`` -- which HTTP would have refused.
+    """
+    name = (explicit or "").strip()
+    if name:
+        return name
+    try:
+        from superlocalmemory.server.profile_runtime import current_request_profile
+
+        runtime = current_request_profile()
+        if runtime:
+            return str(runtime)
+    except Exception as exc:  # noqa: BLE001 -- no request context is normal off HTTP
+        logger.debug("admission: no request profile in scope: %s", exc)
+    try:
+        import json as _json
+
+        from superlocalmemory.infra.data_root import canonical_data_root
+
+        config_file = canonical_data_root() / "profiles.json"
+        if config_file.exists():
+            data = _json.loads(config_file.read_text(encoding="utf-8"))
+            active = str(data.get("active_profile", "") or "").strip()
+            if active:
+                return active
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("admission: cannot read the active workspace: %s", exc)
+    return "default"
+
+
 def _session_principal(profile: str) -> tuple[str, str, FrozenSet[ActorRole] | None]:
     """Resolve the caller from a session token in the environment.
 
@@ -484,7 +534,7 @@ def admits(kind: OperationKind):
             principal, token, roles = ("", "", None)
             if company:
                 principal, token, roles = _session_principal(
-                    kwargs.get("profile_id", "") or "",
+                    _target_profile(kwargs.get("profile_id", "") or ""),
                 )
             actor = resolve_actor(
                 Transport.MCP, tier=tier, mode=mode,
@@ -512,6 +562,7 @@ def gate_cli_mutation(
     *,
     principal: str = "",
     roles: FrozenSet[ActorRole] | None = None,
+    profile: str = "",
 ) -> None:
     """Gate a CLI mutation command. Exits with code 1 if denied.
 
@@ -524,16 +575,34 @@ def gate_cli_mutation(
     kind      : Operation being performed.
     principal : Authenticated CLI principal (from session store / login token).
     roles     : Explicit roles for an authenticated enterprise user.
+    profile   : Workspace the command will touch. Empty means the active one.
     """
     import sys
     deployment = _resolve_deployment()
-    tier = "enterprise" if deployment.is_enterprise else "personal"
-    mode = "company" if deployment.is_enterprise else "local"
+    # Either switch means company mode -- the same rule the MCP gate uses. This
+    # gate used to read config.toml alone, so turning per-user access on from
+    # the dashboard changed HTTP and MCP and left every CLI write running as the
+    # machine owner.
+    company = _company_mode_active(deployment)
+    tier = "enterprise" if company else "personal"
+    mode = "company" if company else "local"
+    session = ""
+    if company and not principal:
+        # A CLI caller identifies itself the same way an MCP caller does. With
+        # no token the principal stays empty, resolve_actor returns ANONYMOUS,
+        # and admit denies -- which is the intended answer for an unauthenticated
+        # write on a workspace that requires a login.
+        principal, session, resolved_roles = _session_principal(
+            _target_profile(profile),
+        )
+        if roles is None:
+            roles = resolved_roles
     actor = resolve_actor(
         Transport.CLI,
         tier=tier,
         mode=mode,
         principal=principal,
+        session=session,
         roles=roles,
     )
     try:
@@ -654,7 +723,11 @@ def enforce_read_scope(
     is left alone so the server default applies.
     """
     deployment = _resolve_deployment()
-    if not deployment.is_enterprise:
+    # Both switches, for the same reason the write gates read both: a dashboard
+    # toggle used to leave this path unclamped, so a viewer could ask for
+    # include_global=True over MCP and pull another workspace's facts into the
+    # candidate set while HTTP refused the same request.
+    if not _company_mode_active(deployment):
         return include_global, include_shared
 
     reg = registry if registry is not None else _DEFAULT_REGISTRY

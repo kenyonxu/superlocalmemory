@@ -322,6 +322,25 @@ def _get_port() -> int:
     return _DEFAULT_PORT
 
 
+class DaemonRefused(RuntimeError):
+    """The daemon answered, and the answer was no.
+
+    Raised for HTTP 401 and 403 only. Distinct from ``daemon_request``
+    returning ``None``, which means the daemon could not be reached or did not
+    answer usefully. Callers that fall back to a direct engine write MUST let
+    this propagate or exit on it: falling back after a refusal performs, as the
+    machine owner, exactly the write the workspace just declined.
+    """
+
+    def __init__(self, status: int, path: str = "") -> None:
+        self.status = int(status)
+        self.path = path
+        super().__init__(
+            f"the daemon refused this request (HTTP {status})"
+            + (f" for {path}" if path else "")
+        )
+
+
 def daemon_request(
     method: str,
     path: str,
@@ -376,6 +395,7 @@ def daemon_request(
             return {key: value for key, value in legacy.items() if key != "_legacy_port"}
         port = int(legacy["_legacy_port"])
     try:
+        import urllib.error
         import urllib.request
         url = f"http://127.0.0.1:{port}{path}"
         data = json.dumps(body).encode() if body else None
@@ -393,6 +413,16 @@ def daemon_request(
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         resp = urllib.request.urlopen(req, timeout=timeout_seconds)
         return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        # A refusal is an answer, not a failure to get one. Returning None here
+        # made "you are not allowed to do this" indistinguishable from "the
+        # daemon is not running", and every caller that falls back to a local
+        # engine write treated the first as the second -- so a workspace that
+        # required a login refused the write over HTTP and then performed it
+        # locally as the machine owner.
+        if exc.code in (401, 403):
+            raise DaemonRefused(exc.code, path) from exc
+        return None
     except Exception:
         return None
 
