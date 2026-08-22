@@ -165,6 +165,7 @@ from superlocalmemory.storage.migrations import (
 from superlocalmemory.storage.migrations import (
     M045_fact_outcome_score as _M045,
     M046_prospective_memory_has_its_own_name as _M046,
+    M047_fisher_vectors_are_stored_like_every_other_vector as _M047,
 )
 from superlocalmemory.storage.migrations import (
     M043_quarantine_display_summaries as _M043,
@@ -352,6 +353,14 @@ DEFERRED_MIGRATIONS: list[Migration] = [
     # Depends on M043 so the two never contend for the same table in one pass.
     Migration(name=_M046.NAME, db_target="memory", ddl=_M046.DDL,
               dependencies=(_M043.NAME,)),
+    # M047 rewrites the two Fisher vectors on each fact as float32 rather than
+    # as decimal text. Deferred because it walks every fact in atomic_facts,
+    # which engine init bootstraps. It changes no schema and both forms stay
+    # readable, so it is resumable and an interrupted store still works.
+    # Depends on M046 so a table rebuild and a full-table update never run in
+    # the same pass over the same table.
+    Migration(name=_M047.NAME, db_target="memory", ddl=_M047.DDL,
+              dependencies=(_M046.NAME,)),
 ]
 
 

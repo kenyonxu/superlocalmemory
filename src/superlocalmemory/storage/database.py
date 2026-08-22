@@ -40,7 +40,12 @@ from superlocalmemory.storage.models import (
     TemporalEvent,
     TrustScore,
 )
-from superlocalmemory.storage.embedding_codec import decode_embedding, encode_embedding
+from superlocalmemory.storage.embedding_codec import (
+    decode_embedding,
+    decode_float_vector,
+    encode_embedding,
+    encode_float_vector,
+)
 from superlocalmemory.storage.write_lock import get_write_lock
 
 logger = logging.getLogger(__name__)
@@ -642,7 +647,9 @@ class DatabaseManager:
                  fact.interval_start, fact.interval_end,
                  fact.confidence, fact.importance, fact.evidence_count, fact.access_count,
                  json.dumps(fact.source_turn_ids), fact.session_id,
-                 encode_embedding(fact.embedding), _jd(fact.fisher_mean), _jd(fact.fisher_variance),
+                 encode_embedding(fact.embedding),
+                 encode_float_vector(fact.fisher_mean),
+                 encode_float_vector(fact.fisher_variance),
                  fact.lifecycle.value, _jd(fact.langevin_position),
                  fact.emotional_valence, fact.emotional_arousal,
                  fact.signal_type.value, fact.created_at, _scope, _shared),
@@ -679,8 +686,12 @@ class DatabaseManager:
             source_turn_ids=_jl(d.get("source_turn_ids_json")),
             session_id=d.get("session_id", ""),
             embedding=decode_embedding(d.get("embedding"), fact_id=d.get("fact_id", "<unknown>")),
-            fisher_mean=_jl(d.get("fisher_mean"), None),
-            fisher_variance=_jl(d.get("fisher_variance"), None),
+            fisher_mean=decode_float_vector(
+                d.get("fisher_mean"), field="fisher_mean",
+                fact_id=d.get("fact_id", "<unknown>")),
+            fisher_variance=decode_float_vector(
+                d.get("fisher_variance"), field="fisher_variance",
+                fact_id=d.get("fact_id", "<unknown>")),
             lifecycle=MemoryLifecycle(d["lifecycle"]) if d.get("lifecycle") else MemoryLifecycle.ACTIVE,
             langevin_position=_jl(d.get("langevin_position"), None),
             emotional_valence=d.get("emotional_valence", 0.0),
@@ -733,8 +744,8 @@ class DatabaseManager:
                 json.dumps(fact.source_turn_ids),
                 fact.session_id,
                 encode_embedding(fact.embedding),
-                _jd(fact.fisher_mean),
-                _jd(fact.fisher_variance),
+                encode_float_vector(fact.fisher_mean),
+                encode_float_vector(fact.fisher_variance),
                 fact.lifecycle.value,
                 _jd(fact.langevin_position),
                 fact.emotional_valence,
@@ -1022,6 +1033,10 @@ class DatabaseManager:
                 # converted store, one fact at a time, undoing the conversion
                 # wherever a fact is updated.
                 clean[k] = encode_embedding(v) if v is not None else None
+            elif k in ("fisher_mean", "fisher_variance"):
+                # Same hazard, same answer: these are float vectors of the same
+                # width as the embedding and are stored the same way.
+                clean[k] = encode_float_vector(v) if v is not None else None
             elif isinstance(v, (list, dict)):
                 clean[k] = json.dumps(v)
             elif isinstance(v, (MemoryLifecycle, FactType, SignalType)):

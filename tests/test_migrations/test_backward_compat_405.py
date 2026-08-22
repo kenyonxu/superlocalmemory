@@ -142,7 +142,7 @@ import pytest
 #: about. M046 is not additive: it rebuilds atomic_facts with a constraint that
 #: rejects the value an older build writes planned events as. The ceiling is
 #: what converts that from a lost memory into a refusal to start.
-_EXPECTED_SCHEMA_VERSION: int = 46
+_EXPECTED_SCHEMA_VERSION: int = 47
 
 #: Total migrations in the MIGRATIONS + DEFERRED_MIGRATIONS catalogue.
 #: M001–M043 with M008 absent = 42 total.
@@ -159,7 +159,7 @@ _EXPECTED_SCHEMA_VERSION: int = 46
 # bandit_plays.shown_fact_ids) and +M045_fact_outcome_score (memory.db, the
 # per-fact outcome score). Both additive columns/tables; neither rewrites an
 # existing row, so 4.0.5 forward-compat is unaffected.
-_EXPECTED_MIGRATION_COUNT: int = 45
+_EXPECTED_MIGRATION_COUNT: int = 46
 
 #: Path to an installed reference package's migrations directory, if one exists.
 #:

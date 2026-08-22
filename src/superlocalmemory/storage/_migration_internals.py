@@ -162,6 +162,7 @@ from superlocalmemory.storage.migrations import (
 from superlocalmemory.storage.migrations import (
     M045_fact_outcome_score as _M045,
     M046_prospective_memory_has_its_own_name as _M046,
+    M047_fisher_vectors_are_stored_like_every_other_vector as _M047,
 )
 
 # Emit under the runner's logger name so operational log filters that key on
@@ -217,6 +218,7 @@ _MODULES = {
     _M044.NAME: _M044,
     _M045.NAME: _M045,
     _M046.NAME: _M046,
+    _M047.NAME: _M047,
 }
 
 # Exact historical DDL fingerprints whose resulting schema is intentionally
