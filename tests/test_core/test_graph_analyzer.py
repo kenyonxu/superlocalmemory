@@ -53,11 +53,19 @@ def ga_db(in_memory_db):
 
 @pytest.fixture
 def mock_db(ga_db):
-    """Wrap in-memory db to match DatabaseManager interface."""
+    """Wrap in-memory db to match DatabaseManager interface.
+
+    ``_conn`` is a real connection because the metrics pass needs one: it reads
+    the visible fact corpus and the logical-edge projection, and writes the whole
+    profile in a single transaction. A mock that only answers ``execute`` cannot
+    express either, and left unset the pass would report "could not read the
+    graph" for a store that reads fine.
+    """
     db = MagicMock()
     db.execute.side_effect = lambda sql, params=(): (
         ga_db.execute(sql, params).fetchall()
     )
+    db._conn = ga_db
     return db
 
 

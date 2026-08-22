@@ -67,6 +67,16 @@ class MaintenanceScheduler:
         self._initial_gc_timer = threading.Timer(90.0, self._initial_cache_gc)
         self._initial_gc_timer.daemon = True
         self._initial_gc_timer.start()
+        # An upgrade arrives with whatever backlog the previous version left.
+        # Waiting a full interval for the first graph-metrics pass would mean
+        # half an hour of ranking memories as though they had no position in the
+        # graph, on exactly the store that just gained the fix. Staggered behind
+        # the cache GC so the two never contend for the write lock.
+        self._initial_metrics_timer = threading.Timer(
+            150.0, self._initial_graph_metrics,
+        )
+        self._initial_metrics_timer.daemon = True
+        self._initial_metrics_timer.start()
         logger.info(
             "Maintenance scheduler started (interval=%dm)",
             self._config.forgetting.scheduler_interval_minutes,
@@ -86,6 +96,29 @@ class MaintenanceScheduler:
         except Exception as exc:
             logger.debug("Startup activation-cache GC skipped: %s", exc)
 
+    def _initial_graph_metrics(self) -> None:
+        """One-shot catch-up so an upgrade does not rank on stale metrics."""
+        if not self._running:
+            return
+        try:
+            from superlocalmemory.core.graph_metrics import (
+                compute_graph_metrics,
+                metrics_are_stale,
+            )
+            for profile_id in self._profile_ids():
+                stale, why = metrics_are_stale(self._db, profile_id)
+                if not stale:
+                    continue
+                report = compute_graph_metrics(self._db, profile_id)
+                if report.ok:
+                    logger.info(
+                        "Graph metrics at startup (%s): %s", why, report.summary(),
+                    )
+                else:
+                    logger.warning("Graph metrics at startup: %s", report.summary())
+        except Exception as exc:
+            logger.debug("Startup graph metrics skipped: %s", exc)
+
     def stop(self) -> None:
         """Stop the scheduler. Idempotent."""
         self._running = False
@@ -96,6 +129,10 @@ class MaintenanceScheduler:
         if _gc_timer is not None:
             _gc_timer.cancel()
             self._initial_gc_timer = None
+        _metrics_timer = getattr(self, "_initial_metrics_timer", None)
+        if _metrics_timer is not None:
+            _metrics_timer.cancel()
+            self._initial_metrics_timer = None
         logger.info("Maintenance scheduler stopped")
 
     def _schedule_next(self) -> None:
@@ -200,6 +237,49 @@ class MaintenanceScheduler:
                     )
             except Exception as exc:
                 logger.debug("Lineage retention skipped for %s: %s", profile_id, exc)
+
+            # Structural metrics. Recall multiplies a candidate's activation by
+            # its PageRank at every hop and biases it toward its query seeds'
+            # communities, and both numbers live in fact_importance -- so a
+            # memory missing from that table is found by the walk and then
+            # ranked as though it had no position in the graph.
+            #
+            # Nothing scheduled this. It ran only when a consolidation happened
+            # to fire or someone called the HTTP endpoint by hand, and on the
+            # author's store that meant one run in nine days: 1,036 of 4,034
+            # visible memories had no score and no community, and the newest
+            # four days of memories had none at all. This runs after pruning so
+            # it describes the graph that pruning left behind.
+            try:
+                from superlocalmemory.core.graph_metrics import (
+                    compute_graph_metrics,
+                    metrics_are_stale,
+                )
+                stale, why = metrics_are_stale(self._db, profile_id)
+                if stale:
+                    backend = None
+                    try:
+                        from superlocalmemory.core.backend_orchestrator import (
+                            get_orchestrator,
+                        )
+                        orchestrator = get_orchestrator()
+                        if orchestrator is not None:
+                            backend = orchestrator.get_graph_backend()
+                    except Exception:  # noqa: BLE001 -- in-process is the default anyway
+                        backend = None
+                    report = compute_graph_metrics(
+                        self._db, profile_id, backend=backend,
+                    )
+                    if report.ok:
+                        logger.info("Graph metrics (%s): %s", why, report.summary())
+                    else:
+                        logger.warning("Graph metrics: %s", report.summary())
+                else:
+                    logger.debug("Graph metrics up to date for %s", profile_id)
+            except Exception as exc:
+                logger.warning(
+                    "Graph metrics skipped for %s: %s", profile_id, exc,
+                )
 
             # Re-read what is filed as a plan. The one-time pass runs as a
             # migration; the rule it uses keeps getting sharper, and a completed

@@ -170,23 +170,27 @@ class EntityCompiler:
         if not facts:
             return None
 
-        has_pagerank = any(f["pagerank_score"] is not None for f in facts)
-
-        # ── Phase 2: PageRank (short write, NO Ollama) ────────────────────────
-        if not has_pagerank and len(facts) > 2:
-            self._compute_pagerank([f["fact_id"] for f in facts], profile_id)
-            # Re-fetch with updated scores
-            with memory_read(self._db_path) as conn:
-                facts = conn.execute("""
-                    SELECT af.fact_id, af.content, af.confidence, af.created_at,
-                           fi.pagerank_score, fi.community_id
-                    FROM atomic_facts af
-                    LEFT JOIN fact_importance fi ON af.fact_id = fi.fact_id
-                    WHERE af.canonical_entities_json LIKE ? AND af.profile_id = ?
-                    ORDER BY fi.pagerank_score DESC NULLS LAST, af.confidence DESC
-                    LIMIT 50
-                """, (f"%{entity_id}%", profile_id)).fetchall()
-                facts = [dict(f) for f in facts]
+        # There was a second PageRank here, and it made recall worse.
+        #
+        # On finding no score for this entity's facts it built a COMPLETE graph
+        # over them -- every pair joined, weight 0.5 -- and ran PageRank on it.
+        # PageRank of K_n is uniformly 1/n, so every fact received the identical
+        # score and the re-fetch's ORDER BY fell straight through to confidence,
+        # which is what had ordered them in the first place. It bought nothing.
+        #
+        # What it cost: that 1/n landed in the same column the ranker reads as a
+        # whole-graph score. On the author's store, ten facts from one 10-fact
+        # cluster were written 0.1 each, against a real whole-graph maximum of
+        # 0.008744 and median of 0.000214 -- eleven times the largest true score
+        # and roughly 470x the median. The hop boost min(1 + pr*2, 2) gave them
+        # 1.2 where every real memory got 1.0004, and the ten of them together
+        # carried as much PageRank mass as the other 2,988 facts combined (the
+        # table summed to 1.9999 instead of 1). They were also written with no
+        # community, so the community bias could not see them either.
+        #
+        # Whole-graph metrics belong to core/graph_metrics, which owns this
+        # table. Ordering for compilation is confidence, as it always effectively
+        # was.
 
         # ── Phase 3: generate compiled truth — NO write lock held ────────────
         # Mode B calls Ollama (up to 30 s) — write lock MUST NOT be held here.
@@ -339,47 +343,6 @@ class EntityCompiler:
             return None
 
     # -- Helpers --
-
-    def _compute_pagerank(self, fact_ids: list[str], profile_id: str) -> None:
-        """Compute PageRank for a set of facts and store in fact_importance.
-
-        Concurrency fix (v3.8.4): uses memory_write() for the INSERT so the
-        process write lock is acquired and busy_timeout is set correctly.
-        Pure PageRank computation (networkx) happens BEFORE the write lock.
-        """
-        from superlocalmemory.storage.memory_write import memory_write
-
-        try:
-            import networkx as nx
-            G = nx.Graph()
-            for fid in fact_ids:
-                G.add_node(fid)
-            for i, fid1 in enumerate(fact_ids):
-                for fid2 in fact_ids[i + 1:]:
-                    G.add_edge(fid1, fid2, weight=0.5)
-
-            if len(G.nodes) < 2:
-                return
-
-            # Compute scores in pure Python — no lock held yet.
-            scores = nx.pagerank(G, alpha=0.85)
-            now = datetime.now(timezone.utc).isoformat()
-
-            # Short write: lock held only for the INSERT batch.
-            with memory_write(self._db_path) as conn:
-                for fid, score in scores.items():
-                    conn.execute("""
-                        INSERT INTO fact_importance
-                            (fact_id, profile_id, pagerank_score, computed_at)
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT(fact_id) DO UPDATE
-                            SET pagerank_score = excluded.pagerank_score,
-                                computed_at    = excluded.computed_at
-                    """, (fid, profile_id, round(score, 6), now))
-        except ImportError:
-            logger.debug("NetworkX not available — skipping PageRank")
-        except Exception as exc:
-            logger.debug("PageRank computation failed: %s", exc)
 
     @staticmethod
     def _truncate(text: str, max_chars: int) -> str:
