@@ -113,27 +113,19 @@
             </div>
         </div>
 
-        <!-- Main content tabs — Bootstrap nav-tabs row removed (v3.4.21,
-             Domain 2). Sidebar (built by ng-shell.js) is the sole
-             navigation. Hidden tab buttons below keep the Bootstrap
-             ``shown.bs.tab`` event contract alive — ng-shell's
-             ``activateTab`` dispatches on them, and brain.js / other
-             listeners fire normally. No visual output on initial paint. -->
+        <!-- The visible navigation is the sidebar, built by od-shell.js.
+             These hidden buttons exist only so od-shell's ``activateTab`` can
+             dispatch Bootstrap's ``shown.bs.tab`` on a real element for panes
+             it does not render itself — today that is dashboard-pane alone,
+             whose data reload hangs off that event. Every button here must
+             target a pane that exists: nine did not, and clicking one did
+             nothing at all. -->
         <ul class="nav nav-tabs d-none" id="mainTabs" role="tablist" aria-hidden="true">
             <li class="nav-item"><button class="nav-link active" id="dashboard-tab" data-bs-toggle="tab" data-bs-target="#dashboard-pane" type="button"></button></li>
             <li class="nav-item"><button class="nav-link" id="graph-tab" data-bs-toggle="tab" data-bs-target="#graph-pane" type="button"></button></li>
             <li class="nav-item"><button class="nav-link" id="memories-tab" data-bs-toggle="tab" data-bs-target="#memories-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="recall-lab-tab" data-bs-toggle="tab" data-bs-target="#recall-lab-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="clusters-tab" data-bs-toggle="tab" data-bs-target="#clusters-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="timeline-tab" data-bs-toggle="tab" data-bs-target="#timeline-pane" type="button"></button></li>
             <li class="nav-item"><button class="nav-link" id="brain-tab" data-bs-toggle="tab" data-bs-target="#brain-pane" type="button" role="tab" aria-controls="brain-pane"></button></li>
-            <li class="nav-item"><button class="nav-link" id="events-tab" data-bs-toggle="tab" data-bs-target="#events-pane" type="button"></button></li>
             <li class="nav-item"><button class="nav-link" id="agents-tab" data-bs-toggle="tab" data-bs-target="#agents-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="trust-tab" data-bs-toggle="tab" data-bs-target="#trust-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="lifecycle-tab" data-bs-toggle="tab" data-bs-target="#lifecycle-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="compliance-tab" data-bs-toggle="tab" data-bs-target="#compliance-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="math-health-tab" data-bs-toggle="tab" data-bs-target="#math-health-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="ide-tab" data-bs-toggle="tab" data-bs-target="#ide-pane" type="button"></button></li>
             <li class="nav-item"><button class="nav-link" id="settings-tab" data-bs-toggle="tab" data-bs-target="#settings-pane" type="button"></button></li>
         </ul>
 
