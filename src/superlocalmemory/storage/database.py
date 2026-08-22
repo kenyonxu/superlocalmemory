@@ -47,6 +47,7 @@ from superlocalmemory.storage.embedding_codec import (
     encode_float_vector,
 )
 from superlocalmemory.storage.write_lock import get_write_lock
+from superlocalmemory.storage import projection_outbox
 
 logger = logging.getLogger(__name__)
 
@@ -534,15 +535,43 @@ class DatabaseManager:
             return self._execute_one(sql, params)
 
     def store_memory(self, record: MemoryRecord) -> str:
-        """Persist a raw memory record. Returns memory_id."""
+        """Persist a raw memory record. Returns memory_id.
+
+        Upserts in place rather than replacing. ``INSERT OR REPLACE`` is a
+        DELETE followed by an INSERT, and ``atomic_facts.memory_id`` is a
+        foreign key with ``ON DELETE CASCADE`` — so storing a record whose
+        ``memory_id`` already existed silently deleted every fact extracted from
+        it. Reproduced in isolation: three facts stored, one re-store of the same
+        memory_id, zero facts left, no error raised.
+
+        Most callers pass a freshly generated id, which is why this never fired.
+        But ``cognitive_consolidator`` supplies its own ``block_id``, and the
+        queryable-promotion path in ``run_store`` deliberately avoids calling
+        this at all for an existing memory — a rule that has to be remembered
+        rather than enforced. ``ON CONFLICT DO UPDATE`` keeps the same
+        last-write-wins semantics and takes the loaded gun out of the room.
+
+        ``created_at`` is deliberately not overwritten: the row's first
+        observation is a historical fact, and a re-store is not a new one.
+        """
         _scope = getattr(record, 'scope', None) or 'personal'
         _shared = _jd(getattr(record, 'shared_with', None))
         self.execute(
-            """INSERT OR REPLACE INTO memories
+            """INSERT INTO memories
                (memory_id, profile_id, content, session_id, speaker,
                 role, session_date, created_at, metadata_json,
                 scope, shared_with)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(memory_id) DO UPDATE SET
+                   profile_id    = excluded.profile_id,
+                   content       = excluded.content,
+                   session_id    = excluded.session_id,
+                   speaker       = excluded.speaker,
+                   role          = excluded.role,
+                   session_date  = excluded.session_date,
+                   metadata_json = excluded.metadata_json,
+                   scope         = excluded.scope,
+                   shared_with   = excluded.shared_with""",
             (record.memory_id, record.profile_id, record.content,
              record.session_id, record.speaker, record.role,
              record.session_date, record.created_at,
@@ -576,6 +605,22 @@ class DatabaseManager:
             pass
         return ""
 
+    def _atomically(self, work: Any) -> Any:
+        """Run ``work`` in one transaction, joining an open one rather than nesting.
+
+        A caller already inside ``transaction()`` must not start a second one:
+        the lock is re-entrant but ``_connect`` is not, so a nested attempt opens
+        a separate connection to the same file while the first still holds its
+        write. ``store_fact`` carried this check inline; it is here because
+        three more methods now need the same thing, and a projection intent that
+        commits in a different transaction from the row it describes is exactly
+        the window this whole mechanism exists to close.
+        """
+        if getattr(self._txn_state, "conn", None) is not None:
+            return work()
+        with self.transaction():
+            return work()
+
     def store_fact(self, fact: AtomicFact) -> str:
         """Persist an atomic fact. Returns fact_id.
 
@@ -590,6 +635,34 @@ class DatabaseManager:
         twice is one fact" — preventing the duplicate explosion that poisons
         importance ranking and core-memory promotion. Empty/whitespace
         content is exempt (handled by placeholder filtering, not dedup).
+
+        The insert below upserts rather than replaces, for the reason
+        ``store_memory`` does. ``INSERT OR REPLACE`` is a DELETE followed by an
+        INSERT, and eight tables hold
+        ``FOREIGN KEY (fact_id) REFERENCES atomic_facts (fact_id) ON DELETE
+        CASCADE`` — so re-storing a fact under an occupied id dropped its
+        retention row, access history, context and importance, and raised
+        nothing.
+
+        The dedup above does not close this: it matches on *content*, so a
+        second store of the same id with *different* content falls straight
+        through to the insert. ``MemoryEngine.store_fact_direct`` reaches it —
+        ``canonical_store_fact`` exists to persist a caller-chosen id and
+        raises if that id is not preserved. Within one profile an idempotency
+        key of ``prebuilt:<fact_id>`` catches the second store, but that key is
+        scoped ``(profile_id, source_type, idempotency_key)`` while
+        ``atomic_facts.fact_id`` is a bare ``TEXT PRIMARY KEY``. Reproduced
+        across two profiles on one store: the first profile's fact was replaced
+        outright — new owner, new content — and its associations were gone.
+
+        ``created_at`` is deliberately not overwritten: the row's first
+        observation is a historical fact, and a re-store is not a new one.
+        ``pinned`` is not in the column list at all, so the upsert now leaves it
+        alone where the replace silently reset it to 0 — pinning is user intent,
+        not something a re-store gets to revoke.
+
+        ``insert_fact_immutable`` remains the right call for a known-new fact
+        that must abort on a collision rather than win it.
         """
         if fact.content and fact.content.strip():
             # Dedup across all LIVE lifecycle zones (active/warm/cold). Excludes
@@ -624,12 +697,17 @@ class DatabaseManager:
                 # trustworthy observation that the anchor was missing.
                 if self.get_temporal_validity(canonical_id, fact.profile_id) is None:
                     self.store_temporal_validity(canonical_id, fact.profile_id)
+                # Re-storing known content is the natural moment to notice a
+                # projection that was never written — an upgraded store whose
+                # graph predates the migration reaches this branch, not the
+                # insert below.
+                projection_outbox.enqueue(self, canonical_id, fact.profile_id)
                 return canonical_id
         _scope = getattr(fact, 'scope', None) or 'personal'
         _shared = _jd(getattr(fact, 'shared_with', None))
         def _insert_with_knowledge_anchor() -> None:
             self.execute(
-                """INSERT OR REPLACE INTO atomic_facts
+                """INSERT INTO atomic_facts
                (fact_id, memory_id, profile_id, content, fact_type,
                 entities_json, canonical_entities_json,
                 observation_date, referenced_date, interval_start, interval_end,
@@ -639,7 +717,34 @@ class DatabaseManager:
                 lifecycle, langevin_position,
                 emotional_valence, emotional_arousal, signal_type, created_at,
                 scope, shared_with)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(fact_id) DO UPDATE SET
+                   memory_id               = excluded.memory_id,
+                   profile_id              = excluded.profile_id,
+                   content                 = excluded.content,
+                   fact_type               = excluded.fact_type,
+                   entities_json           = excluded.entities_json,
+                   canonical_entities_json = excluded.canonical_entities_json,
+                   observation_date        = excluded.observation_date,
+                   referenced_date         = excluded.referenced_date,
+                   interval_start          = excluded.interval_start,
+                   interval_end            = excluded.interval_end,
+                   confidence              = excluded.confidence,
+                   importance              = excluded.importance,
+                   evidence_count          = excluded.evidence_count,
+                   access_count            = excluded.access_count,
+                   source_turn_ids_json    = excluded.source_turn_ids_json,
+                   session_id              = excluded.session_id,
+                   embedding               = excluded.embedding,
+                   fisher_mean             = excluded.fisher_mean,
+                   fisher_variance         = excluded.fisher_variance,
+                   lifecycle               = excluded.lifecycle,
+                   langevin_position       = excluded.langevin_position,
+                   emotional_valence       = excluded.emotional_valence,
+                   emotional_arousal       = excluded.emotional_arousal,
+                   signal_type             = excluded.signal_type,
+                   scope                   = excluded.scope,
+                   shared_with             = excluded.shared_with""",
                 (fact.fact_id, fact.memory_id, fact.profile_id, fact.content,
                  fact.fact_type.value,
                  json.dumps(fact.entities), json.dumps(fact.canonical_entities),
@@ -658,6 +763,14 @@ class DatabaseManager:
             # anchor. Absence deliberately represents pre-4.0.2
             # ``legacy_unknown``; never backfill it from ``created_at``.
             self.store_temporal_validity(fact.fact_id, fact.profile_id)
+            # The graph and the vectors live in other storage engines, so the
+            # intent to project this fact is queued here, in this transaction.
+            # Enqueueing in the storage layer rather than at each pipeline call
+            # site is deliberate: ingestion, the background materializer, the
+            # consolidator and the CLI all write facts through this method, and
+            # a call site that forgets would produce a memory that is stored
+            # and unrecallable.
+            projection_outbox.enqueue(self, fact.fact_id, fact.profile_id)
 
         # The fact and its transaction-time anchor are one logical write. Do
         # not open a nested transaction when an owner already holds one.
@@ -757,6 +870,7 @@ class DatabaseManager:
             ),
         )
         self.store_temporal_validity(fact.fact_id, fact.profile_id)
+        projection_outbox.enqueue(self, fact.fact_id, fact.profile_id)
         return fact.fact_id
 
     def set_pinned(self, fact_id: str, pinned: bool) -> None:
@@ -1044,16 +1158,31 @@ class DatabaseManager:
             else:
                 clean[k] = v
         set_clause = ", ".join(f"{k} = ?" for k in clean)
-        if profile_id is not None:
-            self.execute(
-                f"UPDATE atomic_facts SET {set_clause} WHERE fact_id = ? AND profile_id = ?",
-                (*clean.values(), fact_id, profile_id),
-            )
-        else:
-            self.execute(
-                f"UPDATE atomic_facts SET {set_clause} WHERE fact_id = ?",
-                (*clean.values(), fact_id),
-            )
+
+        def _write() -> None:
+            if profile_id is not None:
+                self.execute(
+                    f"UPDATE atomic_facts SET {set_clause} "
+                    "WHERE fact_id = ? AND profile_id = ?",
+                    (*clean.values(), fact_id, profile_id),
+                )
+            else:
+                self.execute(
+                    f"UPDATE atomic_facts SET {set_clause} WHERE fact_id = ?",
+                    (*clean.values(), fact_id),
+                )
+            # Only an update that changes something a projection is derived
+            # from needs re-projecting. Recall bumps access_count on every hit,
+            # so queueing on any update at all would hand the drain worker one
+            # row per returned memory per recall, for a column neither Cozo nor
+            # Lance holds.
+            if set(updates) & projection_outbox.PROJECTED_FACT_COLUMNS:
+                if profile_id is not None:
+                    projection_outbox.enqueue(self, fact_id, profile_id)
+                else:
+                    projection_outbox.enqueue_for_fact(self, fact_id)
+
+        self._atomically(_write)
 
     def delete_fact(self, fact_id: str, profile_id: str | None = None) -> None:
         """Hard-delete a fact.
@@ -1074,14 +1203,31 @@ class DatabaseManager:
             )
             if not row:
                 return  # not this tenant's fact — no-op
-        self.execute("DELETE FROM embedding_metadata WHERE fact_id = ?", (fact_id,))
-        if profile_id is not None:
+        # A forgotten memory that survives in the graph or the vector index is
+        # still recallable, which makes an erasure receipt a false statement. So
+        # the deletes and the queued removal are one transaction: the process
+        # can die immediately afterwards and the projections still get cleaned.
+        def _write() -> None:
+            # Read the tenant while the fact is still there. After the DELETE
+            # there is nothing left to resolve it from, and a queued removal
+            # filed under the wrong tenant is a fact id that outlives that
+            # tenant's erasure.
+            owner = profile_id or projection_outbox.resolve_profile(self, fact_id)
             self.execute(
-                "DELETE FROM atomic_facts WHERE fact_id = ? AND profile_id = ?",
-                (fact_id, profile_id),
+                "DELETE FROM embedding_metadata WHERE fact_id = ?", (fact_id,),
             )
-        else:
-            self.execute("DELETE FROM atomic_facts WHERE fact_id = ?", (fact_id,))
+            if profile_id is not None:
+                self.execute(
+                    "DELETE FROM atomic_facts WHERE fact_id = ? AND profile_id = ?",
+                    (fact_id, profile_id),
+                )
+            else:
+                self.execute("DELETE FROM atomic_facts WHERE fact_id = ?", (fact_id,))
+            projection_outbox.enqueue(
+                self, fact_id, owner or "default", projection_outbox.OP_DELETE,
+            )
+
+        self._atomically(_write)
 
     def gc_orphaned_embedding_metadata(self) -> int:
         """Remove embedding_metadata rows whose parent atomic_fact is gone.
@@ -1237,30 +1383,59 @@ class DatabaseManager:
         duplicate we keep the MAX weight (strongest association wins) and
         return the existing edge_id.
         """
-        existing = self.execute(
-            "SELECT edge_id FROM graph_edges "
-            "WHERE profile_id = ? AND source_id = ? AND target_id = ? AND edge_type = ? "
-            "LIMIT 1",
-            (edge.profile_id, edge.source_id, edge.target_id, edge.edge_type.value),
-        )
-        if existing:
-            canonical_id = dict(existing[0])["edge_id"]
-            self.execute(
-                "UPDATE graph_edges SET weight = MAX(weight, ?) WHERE edge_id = ?",
-                (edge.weight, canonical_id),
+        # The edge and the re-projection of its endpoints are one logical write.
+        # Left as separate statements they were three separate commits, which
+        # cost three fsyncs on a path the materializer runs tens of thousands of
+        # times, and left a window where the edge was durable and the intent to
+        # project it was not.
+        def _write() -> str:
+            existing = self.execute(
+                "SELECT edge_id FROM graph_edges "
+                "WHERE profile_id = ? AND source_id = ? AND target_id = ? AND edge_type = ? "
+                "LIMIT 1",
+                (edge.profile_id, edge.source_id, edge.target_id, edge.edge_type.value),
             )
-            return canonical_id
-        _scope = getattr(edge, 'scope', None) or 'personal'
-        _shared = _jd(getattr(edge, 'shared_with', None))
-        self.execute(
-            """INSERT OR REPLACE INTO graph_edges
-               (edge_id, profile_id, source_id, target_id, edge_type, weight, created_at,
-                scope, shared_with)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
-            (edge.edge_id, edge.profile_id, edge.source_id, edge.target_id,
-             edge.edge_type.value, edge.weight, edge.created_at, _scope, _shared),
+            if existing:
+                canonical_id = dict(existing[0])["edge_id"]
+                self.execute(
+                    "UPDATE graph_edges SET weight = MAX(weight, ?) WHERE edge_id = ?",
+                    (edge.weight, canonical_id),
+                )
+                self._enqueue_edge_endpoints(edge)
+                return canonical_id
+            _scope = getattr(edge, 'scope', None) or 'personal'
+            _shared = _jd(getattr(edge, 'shared_with', None))
+            self.execute(
+                """INSERT OR REPLACE INTO graph_edges
+                   (edge_id, profile_id, source_id, target_id, edge_type, weight, created_at,
+                    scope, shared_with)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (edge.edge_id, edge.profile_id, edge.source_id, edge.target_id,
+                 edge.edge_type.value, edge.weight, edge.created_at, _scope, _shared),
+            )
+            self._enqueue_edge_endpoints(edge)
+            return edge.edge_id
+
+        return self._atomically(_write)
+
+    def _enqueue_edge_endpoints(self, edge: GraphEdge) -> None:
+        """Re-queue both ends of an edge for projection.
+
+        Ingestion is queryable-first: a fact commits immediately and its edges
+        arrive afterwards, from the background materializer. A projection
+        queued only when the fact was inserted would therefore be written
+        before a single edge existed, leaving the node in the graph with none
+        of its connections — which is precisely the adjacency the graph is
+        consulted for.
+
+        An endpoint may be an entity id rather than a fact id. Those are queued
+        too and the drain skips whatever it cannot find as a fact; filtering
+        here would mean a lookup per endpoint on every edge write, which the
+        materializer does tens of thousands of times.
+        """
+        projection_outbox.enqueue_many(
+            self, (edge.source_id, edge.target_id), edge.profile_id,
         )
-        return edge.edge_id
 
     def get_edges_for_node(
         self, node_id: str, profile_id: str,

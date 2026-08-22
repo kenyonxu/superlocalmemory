@@ -65,6 +65,11 @@ class MockDB:
             "INSERT INTO canonical_entities VALUES (?, 'default', ?, 'concept', 1)",
             [("e1", "Entity one"), ("e2", "Entity two")],
         )
+        # The outbox, from the real DDL rather than a hand-copy: the queue's
+        # presence is what enables queueing, so a double without it silently
+        # exercises the un-migrated path and proves nothing about the wiring.
+        from superlocalmemory.storage.projection_outbox import DDL as _OUTBOX_DDL
+        self._conn.executescript(_OUTBOX_DDL)
         self._conn.commit()
 
     def execute(self, sql, params=()):
@@ -167,14 +172,34 @@ class TestLifecycle:
 
 class TestIncrementalSync:
     def test_sync_new_fact_no_backends(self, orch):
-        """sync_new_fact is safe when no backends are active."""
+        """sync_new_fact is safe when no backends are active.
+
+        ``profile_id`` is set because a real ``AtomicFact`` always carries a
+        string there and the row is tenant-scoped: erasure finds a tenant's
+        tables by ``profile_id``, so this is the one field on the queued row
+        that has to be real.
+        """
         fact = MagicMock()
         fact.fact_id = "test-1"
         fact.lifecycle = "active"
+        fact.profile_id = "default"
         orch.sync_new_fact(fact)  # Should not raise
 
-    def test_sync_new_fact_with_cozo(self, orch):
-        """sync_new_fact calls CozoDB when active."""
+    def test_sync_new_fact_queues_rather_than_projecting_inline(self, orch):
+        """``sync_new_fact`` queues the fact and wakes the worker.
+
+        It used to write to CozoDB and LanceDB directly, on whichever thread
+        was storing, with every failure swallowed into a debug line — so a
+        projection could be lost with no error and no record. The write now
+        belongs to one worker, reading an outbox row that was committed in the
+        same SQLite transaction as the fact.
+
+        This test asserts the queue, not the projection: projecting is the
+        drain's job and is covered against real backends in
+        tests/test_core/test_the_drain_projects_what_recall_can_return.py.
+        """
+        from superlocalmemory.storage import projection_outbox
+
         orch._cozo = MagicMock()
         orch._update_status("cozo", "active")
         orch._lancedb = MagicMock()
@@ -188,9 +213,25 @@ class TestIncrementalSync:
         fact.profile_id = "default"
 
         orch.sync_new_fact(fact)
-        # CozoDB receives canonical entity records plus the fact bridge.
-        assert orch._cozo.add_entity.call_count == 2
-        orch._cozo.add_fact_entities.assert_called_once_with("test-2", ["e1", "e2"], "default")
+
+        queued = {
+            r[0] for r in orch._db.execute("SELECT fact_id FROM projection_outbox")
+        }
+        assert "test-2" in queued
+        assert orch._cozo.add_fact_entities.call_count == 0, (
+            "the projection was written on the caller's thread again"
+        )
+
+    def test_sync_deleted_fact_queues_a_removal(self, orch):
+        """A forgotten memory must leave the projections, durably."""
+        from superlocalmemory.storage import projection_outbox
+
+        orch.sync_deleted_fact("gone-1")
+
+        rows = orch._db.execute(
+            "SELECT op FROM projection_outbox WHERE fact_id = ?", ("gone-1",),
+        )
+        assert rows and dict(rows[0])["op"] == projection_outbox.OP_DELETE
 
 
 class TestBackendRouting:

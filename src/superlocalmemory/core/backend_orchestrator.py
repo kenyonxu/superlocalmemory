@@ -21,6 +21,9 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from superlocalmemory.core.projection_drain import ProjectionDrain
+from superlocalmemory.storage import projection_outbox
+
 if TYPE_CHECKING:
     from superlocalmemory.core.config import SLMConfig
     from superlocalmemory.storage.database import DatabaseManager
@@ -80,6 +83,12 @@ class BackendOrchestrator:
         self._lancedb: Any = None
         self._tiers: Any = None
         self._backend_cache: dict[str, str] = {}
+        # Given accessors, not backends: a promotion or a rollback replaces
+        # them underneath the worker, and a reference captured here would keep
+        # writing into the projection that was just swapped out.
+        self._drain = ProjectionDrain(
+            db, self.get_graph_backend, self.get_vector_backend,
+        )
 
     # ------------------------------------------------------------------
     # Daemon Startup
@@ -120,6 +129,11 @@ class BackendOrchestrator:
             # SQLite graph.  A no-op (and never even starts the build) for the
             # vast majority of installs, which sit far below the threshold.
             self._maybe_schedule_auto_promote()
+            # Started even with no projection open. A pass with no backend
+            # returns without touching a row, and starting it here means a
+            # promotion that completes mid-session has a worker waiting for it
+            # rather than a queue nobody is reading.
+            self._drain.start()
             return
 
         # 3. Initialize CozoDB if available
@@ -145,9 +159,14 @@ class BackendOrchestrator:
         except Exception as exc:
             logger.warning("TierManager backend registration failed (non-fatal): %s", exc)
 
-        logger.info("BackendOrchestrator: daemon ready (cozo=%s, lancedb=%s)",
-                     "active" if self._cozo and self._cozo_status() == "active" else "off",
-                     "active" if self._lancedb and self._lancedb_status() == "active" else "off")
+        self._drain.start()
+
+        logger.info(
+            "BackendOrchestrator: daemon ready (cozo=%s, lancedb=%s, queued=%d)",
+            "active" if self._cozo and self._cozo_status() == "active" else "off",
+            "active" if self._lancedb and self._lancedb_status() == "active" else "off",
+            projection_outbox.depth(self._db),
+        )
 
     def _maybe_schedule_auto_promote(self) -> None:
         """Schedule a delayed, one-shot scale auto-promote check (v3.8.5).
@@ -280,90 +299,44 @@ class BackendOrchestrator:
     # ------------------------------------------------------------------
 
     def sync_new_fact(self, fact: Any) -> None:
-        """Sync a newly stored fact to CozoDB and LanceDB.
+        """Signal that a stored fact needs projecting.
 
-        Called AFTER SQLite write in store_pipeline.
-        Non-blocking, best-effort. Failures are logged, not raised.
+        The projection itself is not written here. It used to be — inline, on
+        the caller's thread, with every failure swallowed into a debug line —
+        and that is the defect the outbox replaced. The intent to project was
+        already committed to ``projection_outbox`` in the same SQLite
+        transaction as the fact, so all that is left to do is wake the worker
+        that owns the projections.
+
+        Kept as a method because callers name this operation, and because a
+        caller that reaches it without an outbox row (an old store, mid-upgrade)
+        should still get its fact projected rather than silently skipped.
         """
-        try:
-            tier = getattr(fact, "lifecycle", "active")
-        except Exception:
-            tier = "active"
-
-        if tier in ("active", "warm"):
-            if self._cozo and self._cozo_status() == "active":
-                self._sync_fact_entities(fact)
-
-            if self._lancedb and self._lancedb_status() == "active":
-                self._sync_fact_embedding(fact)
-
-    def _sync_fact_entities(self, fact: Any) -> None:
-        """Synchronize one fact's canonical entity bridge and fact edges."""
-        try:
-            # Retrying ingestion must not retain stale fact/entity links.
-            self._cozo.remove_fact(fact.fact_id)
-            entities = getattr(fact, "canonical_entities", []) or []
-            profile_id = getattr(fact, "profile_id", "default") or "default"
-            for eid in entities:
-                rows = self._db.execute(
-                    "SELECT canonical_name, entity_type, fact_count FROM canonical_entities "
-                    "WHERE entity_id = ? AND profile_id = ?",
-                    (eid, profile_id),
-                )
-                if rows:
-                    entity = dict(rows[0])
-                    self._cozo.add_entity(
-                        eid,
-                        entity.get("canonical_name") or eid,
-                        entity.get("entity_type") or "concept",
-                        {"fact_count": int(entity.get("fact_count") or 0)},
-                        profile_id,
-                    )
-            self._cozo.add_fact_entities(fact.fact_id, entities, profile_id)
-            for row in self._db.execute(
-                "SELECT source_id, target_id, edge_type, weight FROM graph_edges "
-                "WHERE profile_id = ? AND (source_id = ? OR target_id = ?)",
-                (profile_id, fact.fact_id, fact.fact_id),
-            ):
-                edge = dict(row)
-                self._cozo.add_edge(
-                    edge["source_id"], edge["target_id"], edge.get("edge_type") or "related",
-                    float(edge.get("weight") or 1.0), profile_id=profile_id,
-                )
-        except Exception as exc:
-            logger.debug("CozoDB incremental sync skipped: %s", exc)
-
-    def _sync_fact_embedding(self, fact: Any) -> None:
-        """Sync fact's embedding to LanceDB."""
-        try:
-            embedding = getattr(fact, "embedding", None)
-            if embedding:
-                tier = getattr(fact, "lifecycle", "active")
-                self._lancedb.add_vectors(
-                    [fact.fact_id], [embedding], [tier],
-                    getattr(fact, "profile_id", "default") or "default",
-                )
-        except Exception as exc:
-            logger.debug("LanceDB incremental sync skipped: %s", exc)
+        fact_id = getattr(fact, "fact_id", None)
+        if fact_id:
+            projection_outbox.enqueue(
+                self._db, fact_id, getattr(fact, "profile_id", None) or "default",
+            )
+        self._drain.notify()
 
     def sync_deleted_fact(self, fact_id: str) -> None:
-        """Remove a fact from derived projections after canonical deletion."""
-        if self._cozo and self._cozo_status() == "active":
-            try:
-                self._cozo.remove_fact(fact_id)
-            except Exception as exc:
-                logger.warning("Cozo deletion sync failed for %s: %s", fact_id[:16], exc)
-        if self._lancedb and self._lancedb_status() == "active":
-            try:
-                self._lancedb.remove_vector(fact_id)
-            except Exception as exc:
-                logger.warning("Lance deletion sync failed for %s: %s", fact_id[:16], exc)
+        """Signal that a deleted fact must leave the projections.
+
+        A forgotten memory still present in the graph or the vector index is
+        still recallable, so the removal is queued with the same durability as
+        the delete itself.
+        """
+        if fact_id:
+            projection_outbox.enqueue_for_fact(
+                self._db, fact_id, projection_outbox.OP_DELETE,
+            )
+        self._drain.notify()
 
     def sync_changed_fact(self, fact_id: str) -> None:
         """Refresh projections after an authorized canonical fact update."""
-        fact = self._db.get_fact(fact_id)
-        if fact is not None:
-            self.sync_new_fact(fact)
+        if fact_id:
+            projection_outbox.enqueue_for_fact(self._db, fact_id)
+        self._drain.notify()
 
     # ------------------------------------------------------------------
     # Backend Access
@@ -430,7 +403,39 @@ class BackendOrchestrator:
                 "LanceDB not active. Install: pip install superlocalmemory[lancedb]"
             )
 
+        outbox = projection_outbox.health(self._db)
+        outbox["draining"] = self._drain.running
+        result["projection_queue"] = outbox
+        if outbox["stalled"]:
+            result["warnings"].append(
+                f"{outbox['stalled']} memory/memories could not be projected into "
+                "the graph or vector store. Run `slm doctor` for the ids."
+            )
+
         return result
+
+    # ------------------------------------------------------------------
+    # Projection queue
+    # ------------------------------------------------------------------
+
+    def drain_projections(self, limit: int = 200) -> dict[str, Any]:
+        """Apply queued facts now, on the calling thread.
+
+        For the CLI, for a repair pass, and for any caller that needs the
+        projections current before it reads them rather than a few milliseconds
+        later. Ordinary writes do not need this — they signal the worker.
+        """
+        return self._drain.drain_once(limit=limit).as_dict()
+
+    def outbox_health(self) -> dict[str, Any]:
+        """Queue depth and stalled count, for the status surfaces."""
+        health = projection_outbox.health(self._db)
+        health["draining"] = self._drain.running
+        return health
+
+    def stop(self) -> None:
+        """Stop the drain worker. For daemon shutdown and for tests."""
+        self._drain.stop()
 
     # ------------------------------------------------------------------
     # Internal: Detection

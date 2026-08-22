@@ -62,6 +62,7 @@ _TABLES: Final[tuple[str, ...]] = (
     "community_summaries",
     "consolidated_summaries",
     "persona_summary",
+    "projection_outbox",
 )
 
 _FTS_TABLES: Final[tuple[str, ...]] = (
@@ -915,6 +916,10 @@ CREATE TABLE IF NOT EXISTS persona_summary (
 # Ordered DDL list (tables before FTS, respects FK order)
 # ---------------------------------------------------------------------------
 
+#: Imported rather than restated so the table has exactly one definition; the
+#: module that owns the queue owns its shape.
+from superlocalmemory.storage.projection_outbox import DDL as _PROJECTION_OUTBOX_DDL
+
 _DDL_ORDERED: Final[tuple[str, ...]] = (
     _SQL_SCHEMA_VERSION,
     _SQL_PROFILES,
@@ -950,6 +955,12 @@ _DDL_ORDERED: Final[tuple[str, ...]] = (
     CONSOLIDATED_SUMMARIES_DDL,
     # Wave Q3: persona roll-up tier (additive; safe on existing DBs)
     _SQL_PERSONA_SUMMARY,
+    # The queue that makes a graph/vector projection write survive a crash.
+    # Created here, at every engine init, rather than only by its migration:
+    # if this table is missing, facts stop being projected and the only symptom
+    # is a memory that cannot be recalled. That invariant must not be
+    # contingent on a migration pass having succeeded.
+    _PROJECTION_OUTBOX_DDL,
 )
 
 

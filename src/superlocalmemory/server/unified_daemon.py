@@ -3082,6 +3082,18 @@ async def lifespan(application: FastAPI):
             await _cancel_fact_entity_association_repair(application)
             await _cancel_source_quality_repair(application)
 
+    # Stop the projection drain. Its queue is durable, so an interrupted pass
+    # costs a repeat of idempotent work and nothing else — but a live worker
+    # writing into RocksDB and Lance while the process tears down around it has
+    # no upside.
+    try:
+        from superlocalmemory.core.backend_orchestrator import get_orchestrator
+        _orch = get_orchestrator()
+        if _orch is not None:
+            _orch.stop()
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("projection drain shutdown failed: %s", exc)
+
     # Cancel the cross-platform sync loop (H-CONC-2) so adapter file I/O does
     # not outlive the daemon.
     try:
@@ -4964,6 +4976,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
         fact_count = 0
         entity_count = 0
         edge_count = 0
+        projection_queue_depth = 0
         if engine is not None:
             try:
                 fact_count = engine._db.get_fact_count(profile_snapshot.profile_id)
@@ -4980,6 +4993,11 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 edge_count = int(dict(edges[0])["c"]) if edges else 0
             except Exception:
                 logger.debug("daemon status count query failed", exc_info=True)
+            try:
+                from superlocalmemory.storage import projection_outbox
+                projection_queue_depth = projection_outbox.depth(engine._db)
+            except Exception:
+                logger.debug("projection queue depth unavailable", exc_info=True)
         db_path = getattr(config, "db_path", None)
         db_size_mb = (
             round(db_path.stat().st_size / 1024 / 1024, 2)
@@ -5005,6 +5023,10 @@ def _register_daemon_routes(application: FastAPI) -> None:
             "legacy_port": _LEGACY_PORT,
             "profile": profile_snapshot.profile_id,
             "profile_generation": profile_snapshot.generation,
+            # Facts stored but not yet in the graph and vector projections. The
+            # CLI and MCP read their own status from here, so this is where the
+            # number has to be for all three surfaces to agree.
+            "projection_queue_depth": projection_queue_depth,
             # F2 fix: expose M028 backfill progress so operators can monitor
             # the post-upgrade fact/entity association repair state.
             "m028_backfill": getattr(
