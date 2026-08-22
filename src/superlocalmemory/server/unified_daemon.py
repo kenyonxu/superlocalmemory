@@ -4137,14 +4137,14 @@ def _register_dashboard_routes(application: FastAPI) -> None:
             from superlocalmemory.server.asset_versions import render_index
 
             return render_index(
-                index_path, UI_DIR, substitutions={"__SLM_SLM_VERSIONSION__": _SLM_VERSION},
+                index_path, UI_DIR, substitutions={"__SLM_VERSION__": _SLM_VERSION},
             )
         except Exception as exc:  # noqa: BLE001 — serve the page regardless
             logger.warning(
                 "asset version rewrite unavailable, serving index.html as "
                 "written: %s: %s", type(exc).__name__, exc,
             )
-            return index_path.read_text().replace("__SLM_SLM_VERSIONSION__", _SLM_VERSION)
+            return index_path.read_text().replace("__SLM_VERSION__", _SLM_VERSION)
 
     @application.get("/favicon.ico", include_in_schema=False)
     async def favicon():

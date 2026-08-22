@@ -216,12 +216,33 @@
     var strip = document.getElementById('od-h-status');
     if (!strip) return;
 
-    // Card 1: Daemon — from /health
-    var daemonCls = (healthData && healthData.status === 'ok') ? 'ok' : 'warn';
-    var daemonVal = daemonCls === 'ok' ? 'Healthy' : 'Degraded';
+    // Card 1: Daemon — from /health.
+    // `status` is the literal string "ok" on every reply the daemon is alive
+    // enough to send, so reading it said "Healthy" for a daemon that had not
+    // finished starting, or whose search was not answering. `runtime_state` is
+    // the field that actually varies.
+    var runtime = healthData ? String(healthData.runtime_state || '') : '';
+    var RUNTIME_LABELS = {
+      serving_full: 'Healthy',
+      serving_degraded: 'Degraded',
+      warming: 'Starting up',
+      not_ready: 'Not ready'
+    };
+    var daemonCls = !healthData ? 'warn'
+      : (runtime === 'serving_full' ? 'ok'
+        : (runtime === 'warming' ? 'neutral' : 'warn'));
+    var daemonVal = !healthData ? 'Unreachable'
+      : (RUNTIME_LABELS[runtime] || (healthData.status === 'ok' ? 'Healthy' : 'Degraded'));
     var daemonDetail = healthData
       ? 'port 8765 · v' + esc(String(healthData.version || '?'))
       : 'daemon unreachable';
+    if (healthData && healthData.projection && healthData.projection.behind) {
+      // The graph copy being behind is not a daemon fault, and it does change
+      // what a search returns, so it belongs on the card the operator reads.
+      daemonDetail += ' · graph copy ' + esc(String(healthData.projection.depth || 0))
+        + ' behind';
+      if (daemonCls === 'ok') daemonCls = 'neutral';
+    }
 
     // Card 2: Memory DB — from /api/stats
     var dbMb = (statsData && statsData.overview)
@@ -239,10 +260,11 @@
     var mathVal = mathCls === 'ok' ? 'Active' : (mathOverall ? esc(mathOverall) : 'Unknown');
     var mathDetail = esc(String(mathLayerCount)) + ' / 3 layers online';
 
-    // Card 4: Mesh broker — TODO: no /api/mesh/* endpoint confirmed
+    // Card 4: Mesh broker. There is no endpoint for this yet, so the card says
+    // so rather than implying something was measured and came back unknown.
     var meshCls = 'neutral';
-    var meshVal = 'Unknown';
-    var meshDetail = 'no endpoint — configure mesh to enable'; // TODO: wire to /api/mesh/status
+    var meshVal = 'Not set up';
+    var meshDetail = 'coordinating several machines is not configured here';
 
     var CARDS = [
       { label: 'Daemon',       cls: daemonCls, value: daemonVal, detail: daemonDetail },
