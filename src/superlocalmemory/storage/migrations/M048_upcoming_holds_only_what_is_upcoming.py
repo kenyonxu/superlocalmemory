@@ -96,16 +96,23 @@ def apply(conn: sqlite3.Connection) -> None:
             try:
                 # Conditional on the row still being what was read, so a
                 # concurrent write is not clobbered.
-                conn.executemany(
-                    f"UPDATE {_TABLE} SET fact_type = ? "
-                    f"WHERE rowid = ? AND fact_type = '{_PROSPECTIVE}'",
-                    moves,
-                )
+                changed = 0
+                for new_type, rowid in moves:
+                    cur = conn.execute(
+                        f"UPDATE {_TABLE} SET fact_type = ? "
+                        f"WHERE rowid = ? AND fact_type = '{_PROSPECTIVE}'",
+                        (new_type, rowid),
+                    )
+                    # Count what the guard let through, not what was offered. A
+                    # concurrent write can change the row underneath, and a log
+                    # line that reports the intention as the outcome is how a
+                    # receipt comes to overstate what happened.
+                    changed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
                 conn.commit()
             except Exception:
                 conn.rollback()
                 raise
-            demoted += len(moves)
+            demoted += changed
 
     logger.info(
         "M048: re-read %d memories filed as plans; %d were, %d moved",

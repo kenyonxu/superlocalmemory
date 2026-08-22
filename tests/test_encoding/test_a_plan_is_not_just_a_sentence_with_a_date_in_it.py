@@ -39,6 +39,11 @@ STILL_AHEAD = [
     "Due Friday",
     "The deadline for NeurIPS is May",
     "The deployment of qualixar.com will occur on Monday morning",
+    # Moving an event keeps it in the future, and that is the ONE case where a
+    # forward anchor outranks a past-tense verb.
+    "The meeting moved to next Tuesday",
+    "The launch was postponed to next month",
+    "Need to pick up dry cleaning before Friday",
 ]
 
 ALREADY_BEHIND = [
@@ -78,6 +83,17 @@ ALREADY_BEHIND = [
     "The transport feature was merged on 2024-04-01",
     "157 files were changed on 2026-08-02",
     "The backup was created on 2026-08-04 at 23:26",
+    # A second review found these: a forward date inside a sentence ABOUT a
+    # past conversation. The forward anchor used to win outright, so a record
+    # of having talked about a deadline was filed as the deadline.
+    "We discussed the deadline for next month",
+    "Decided the release will be next Friday",
+    "Agreed to meet next week",
+    "The deadline is next Friday but was cancelled yesterday",
+    # And ordinary edit verbs, which are past tense and were not listed.
+    "Updated docs on 2026-08-03",
+    "Changed the config on 2026-08-05",
+    "Renamed the branch on 2026-08-11",
 ]
 
 
@@ -149,6 +165,24 @@ RECOGNISED_AND_DELIBERATE_MISSES = [
     "Let us meet Friday at 3",
 ]
 
+KNOWN_FALSE_POSITIVES = [
+    # The other side of the same trade. "Deleted", "removed" and "added" are
+    # each both a simple past and the participle in a future passive, and "the
+    # worktrees will be deleted" is a plan worth keeping. Leaving them out of
+    # the past-tense veto costs exactly one row on the store this was measured
+    # against — 14 instead of 13 — and that is the price of the plan case.
+    "Removed the config on 2026-08-05",
+]
+
+
+@pytest.mark.parametrize("text", KNOWN_FALSE_POSITIVES)
+def test_the_false_positives_are_the_ones_we_chose(text: str) -> None:
+    """Pinned in the same way the misses are: a change has to come here first."""
+    assert looks_prospective(text), (
+        f"{text!r} no longer classifies as a plan; if that was intended, check "
+        f"what it cost on the plan side and move it out of this list"
+    )
+
 
 @pytest.mark.parametrize("text", RECOGNISED_AND_DELIBERATE_MISSES)
 def test_the_misses_are_the_ones_we_chose(text: str) -> None:
@@ -168,3 +202,13 @@ def test_a_recurring_event_is_not_something_coming_up() -> None:
     assert not looks_prospective("Standup at 09:30 every day")
     assert not looks_prospective("The backup runs nightly at 02:00")
     assert looks_prospective("Standup moved to next Monday")
+
+
+def test_moving_an_event_keeps_it_in_the_future() -> None:
+    """The single exception to the past-tense veto, stated as a pair.
+
+    Both sentences are past tense and both contain the same forward date. Only
+    one of them is something to look forward to.
+    """
+    assert looks_prospective("The release was rescheduled to next Friday")
+    assert not looks_prospective("We discussed the release for next Friday")

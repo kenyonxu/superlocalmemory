@@ -496,12 +496,25 @@ async def set_full_config(request: Request):
         _emb_fields = ("embedding_provider", "embedding_endpoint", "embedding_key",
                        "embedding_model", "embedding_dimension")
         if any(k in body for k in _emb_fields):
+            _new_model = body.get("embedding_model", "")
+            _new_dim = int(body.get("embedding_dimension", 0) or 0)
+            # The SECOND way to change the embedding model, and it was
+            # unguarded. Switching mode from the dashboard carries the embedding
+            # fields, so a width that the store cannot hold arrived here
+            # untouched while the other route refused it — one door bolted, the
+            # other open.
+            if not bool(body.get("force")):
+                _refusal = _refuse_incompatible_embedding(
+                    config, config.embedding, _new_model, _new_dim,
+                )
+                if _refusal is not None:
+                    return _refusal
             config.embedding = EmbeddingConfig(
                 provider=body.get("embedding_provider", ""),
                 api_endpoint=body.get("embedding_endpoint", ""),
                 api_key=body.get("embedding_key", ""),
-                model_name=body.get("embedding_model", ""),
-                dimension=int(body.get("embedding_dimension", 0) or 0),
+                model_name=_new_model,
+                dimension=_new_dim,
             )
 
         # When the mode actually changed, apply the new mode's structural presets
@@ -605,7 +618,13 @@ def _refuse_incompatible_embedding(config, old_emb, new_model, new_dim):
             )
             measured = probe.dimension if probe.ok else None
 
-        effective = measured if measured is not None else int(new_dim)
+        declared = int(new_dim or 0)
+        if measured is None and declared <= 0:
+            # Nothing to compare: the server could not be asked and the caller
+            # named no width. Allowing is the fail-open the first-time setup
+            # needs; the other route's probe still guards the common path.
+            return None
+        effective = measured if measured is not None else declared
         if effective == stored:
             return None
 

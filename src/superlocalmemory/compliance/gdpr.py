@@ -686,6 +686,24 @@ class GDPRCompliance:
             else 0
         )
 
+        # Whether the data is gone and whether we can PROVE it is gone are two
+        # different questions, and one answer cannot carry both. Article 5(2) is
+        # accountability: an erasure whose tamper-evident receipt was not
+        # written really did delete the rows, and really cannot be demonstrated
+        # afterwards. Folding that into erasure_complete would report an
+        # erasure that happened as one that did not; leaving it out entirely —
+        # which is what happened until now — lets a caller reading one field
+        # believe it covers both.
+        counts["erasure_provable"] = (
+            1
+            if (
+                counts["erasure_complete"] == 1
+                and not counts.get("receipt_persist_failed")
+                and not counts.get("receipt_error")
+            )
+            else 0
+        )
+
         try:
             from superlocalmemory.compliance.audit import AuditChain
             from superlocalmemory.infra.data_root import state_path
