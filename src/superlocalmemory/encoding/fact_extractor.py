@@ -34,6 +34,7 @@ import uuid
 from typing import Any, Protocol, runtime_checkable
 
 from superlocalmemory.core.config import EncodingConfig
+from superlocalmemory.encoding.prospective_markers import looks_prospective
 from superlocalmemory.storage.models import AtomicFact, FactType, Mode, SignalType
 
 logger = logging.getLogger(__name__)
@@ -107,13 +108,6 @@ _EXPERIENCE_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
-_TEMPORAL_MARKERS = re.compile(
-    r"\b(?:deadline|due date|expires?|scheduled|appointment|meeting|"
-    r"on \w+day|at \d{1,2}:\d{2}|by \w+|until|before|after|"
-    r"in \d+ (?:days?|weeks?|months?|years?)|"
-    r"next week|next month|this weekend|tomorrow|yesterday)\b",
-    re.IGNORECASE,
-)
 
 _EMOTIONAL_KEYWORDS = frozenset({
     "love", "hate", "amazing", "terrible", "wonderful", "awful", "excited",
@@ -321,7 +315,7 @@ def _extract_entities(text: str) -> list[str]:
 
 def _classify_sentence(sentence: str) -> FactType:
     """Classify a sentence into a FactType using keyword markers."""
-    if _TEMPORAL_MARKERS.search(sentence):
+    if looks_prospective(sentence):
         return FactType.PROSPECTIVE
     if _OPINION_MARKERS.search(sentence):
         return FactType.OPINION

@@ -19,6 +19,7 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
+from superlocalmemory.encoding.prospective_markers import looks_prospective
 from superlocalmemory.storage.models import AtomicFact, FactType, Mode
 
 if TYPE_CHECKING:
@@ -73,12 +74,6 @@ _OPINION_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
-_TEMPORAL_MARKERS = re.compile(
-    r"\b(scheduled|deadline|appointment|planned|tomorrow|"
-    r"next week|next month|upcoming|due date|starts?|ends?|"
-    r"will happen|going to|plan to)\b",
-    re.IGNORECASE,
-)
 
 _EPISODIC_MARKERS = re.compile(
     r"\b(went|visited|traveled|attended|met|saw|did|"
@@ -155,7 +150,7 @@ class TypeRouter:
 
         if _OPINION_MARKERS.search(text):
             return FactType.OPINION
-        if _TEMPORAL_MARKERS.search(text):
+        if looks_prospective(text):
             return FactType.PROSPECTIVE
         if _EPISODIC_MARKERS.search(text):
             return FactType.EPISODIC
