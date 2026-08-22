@@ -116,6 +116,19 @@ class BackendOrchestrator:
 
         self._recover_interrupted_scale_promotion()
 
+        # Reconcile what the config CLAIMS against what is on disk, before
+        # anything reads either -- and before the early return below, because
+        # the stores that need reconciling are exactly the ones that take it.
+        #
+        # This used to sit after that return, so it ran only for a store already
+        # in the promoted state. The real case it was written for is a store
+        # whose settings name a graph and a vector backend, whose state is
+        # `verified` rather than `promoted`, and where neither directory exists:
+        # the settings kept the claim, the reconcile never ran, and every
+        # restart preserved it. The test asserted the call appeared before
+        # another call in the source text, which is true either way.
+        self._reconcile_backend_selection()
+
         # Backends may be installed with the product, but installing a wheel
         # is not authorization to mutate an existing data root.  Only a
         # verified, explicit promotion may initialize and migrate projections.
@@ -135,12 +148,6 @@ class BackendOrchestrator:
             # rather than a queue nobody is reading.
             self._drain.start()
             return
-
-        # Reconcile what the config CLAIMS against what is on disk, before
-        # anything reads either. Recovery above only acts when a promotion
-        # journal exists; a config that names a promoted backend with no journal
-        # and no directory is a claim nothing will ever correct.
-        self._reconcile_backend_selection()
 
         # 3. Initialize CozoDB if available
         cozo_available = self._detect_cozo()

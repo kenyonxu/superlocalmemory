@@ -347,6 +347,19 @@ def main() -> None:
     db_scale_p.add_argument("--stage-id", help="Stage identifier required by verify/promote")
     db_scale_p.add_argument("--backup-id", help="Backup identifier required by rollback")
 
+    db_regraph_p = db_sub.add_parser(
+        "regraph",
+        help="Re-derive the graph copy of your memories from the store",
+    )
+    db_regraph_p.add_argument(
+        "--check", action="store_true",
+        help="Report how far the graph copy has drifted; change nothing",
+    )
+    db_regraph_p.add_argument(
+        "--profile", default="",
+        help="Workspace to re-derive. Default: all of them",
+    )
+
     db_reembed_p = db_sub.add_parser(
         "reembed",
         help="Backfill NULL embeddings (facts never embedded)",

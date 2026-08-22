@@ -91,12 +91,125 @@ def _cmd_db_dispatch(args: Namespace) -> None:
     if sub == "reembed":
         _cmd_db_reembed(args)
         return
+    if sub == "regraph":
+        _cmd_db_regraph(args)
+        return
     print(
         "Usage: slm db migrate [--status] [--dry-run] "
         "| slm db scale <action> "
+        "| slm db regraph [--check] [--profile NAME] "
         "| slm db reembed [--missing-only] [--all-profiles] [--limit N]"
     )
     sys.exit(2)
+
+
+def _cmd_db_regraph(args: Namespace) -> None:
+    """Re-derive the graph copy of your memories from the store.
+
+    Your memories live in one place; a second copy of the connections between
+    them is kept in a graph store so that searching them is fast. The two are
+    kept in step by a queue. If the queue is empty and the two still disagree
+    -- after a crash, a disk problem, or a copy restored from elsewhere --
+    nothing notices, because "the queue is empty" is what "in step" looks like.
+
+    This is how you say so out loud. ``--check`` reports the difference and
+    changes nothing; without it, every memory is queued to be re-derived and
+    the background worker rebuilds the copy from the store, which is the one
+    that is authoritative.
+    """
+    from superlocalmemory.core.config import SLMConfig
+    from superlocalmemory.storage import projection_outbox
+    from superlocalmemory.storage.database import DatabaseManager
+    from superlocalmemory.storage.logical_edges import count_logical_edges
+
+    config = SLMConfig.load()
+    db = DatabaseManager(config.db_path)
+    wanted = str(getattr(args, "profile", "") or "").strip()
+    try:
+        rows = db.execute(
+            "SELECT DISTINCT profile_id FROM atomic_facts ORDER BY profile_id"
+        )
+        profiles = [dict(r)["profile_id"] for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        print(f"[slm] could not list workspaces: {exc}")
+        sys.exit(1)
+    if wanted:
+        profiles = [p for p in profiles if p == wanted]
+        if not profiles:
+            print(f"[slm] no workspace named {wanted!r}")
+            sys.exit(1)
+
+    backend = None
+    try:
+        from superlocalmemory.core.backend_orchestrator import get_orchestrator
+
+        orchestrator = get_orchestrator()
+        backend = orchestrator.get_graph_backend() if orchestrator else None
+    except Exception as exc:  # noqa: BLE001
+        print(f"[slm] no graph copy is configured on this store ({exc}).")
+        return
+    if backend is None:
+        print("[slm] no graph copy is configured on this store; nothing to do.")
+        return
+
+    total_queued = 0
+    for profile_id in profiles:
+        with db.raw_connection() as conn:
+            stored = count_logical_edges(conn, profile_id)
+        try:
+            result = backend._db.run(
+                "?[count(a)] := *edge{from_id: a, profile_id: $pid}",
+                {"pid": profile_id},
+            )
+            copied = int(result.values.tolist()[0][0]) if len(result) else 0
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {profile_id}: the graph copy could not be read ({exc})")
+            continue
+        drift = abs(copied - stored) / float(stored) if stored else 0.0
+        pending = 0
+        try:
+            pending_rows = db.execute(
+                "SELECT COUNT(*) AS c FROM projection_outbox WHERE profile_id = ?",
+                (profile_id,),
+            )
+            pending = int(dict(pending_rows[0])["c"]) if pending_rows else 0
+        except Exception:  # noqa: BLE001
+            pending = -1
+        print(
+            f"  {profile_id}: {stored} connections stored, {copied} in the "
+            f"graph copy ({drift:.1%} apart), {pending} waiting to be applied"
+        )
+        if getattr(args, "check", False):
+            continue
+
+        fact_rows = db.execute(
+            "SELECT fact_id FROM atomic_facts WHERE profile_id = ?", (profile_id,)
+        )
+        fact_ids = [dict(r)["fact_id"] for r in fact_rows]
+        if not fact_ids:
+            continue
+        if not projection_outbox.is_available(db):
+            print("  (this store has no queue to rebuild through)")
+            continue
+        for start in range(0, len(fact_ids), 500):
+            projection_outbox.enqueue_many(
+                db, fact_ids[start:start + 500], profile_id,
+                op=projection_outbox.OP_UPSERT,
+            )
+        total_queued += len(fact_ids)
+        print(f"  {profile_id}: queued {len(fact_ids)} memories to re-derive")
+
+    db.close()
+    if getattr(args, "check", False):
+        return
+    if total_queued:
+        print(
+            f"[slm] {total_queued} memories queued. The background worker "
+            f"rebuilds the copy from the store; watch `slm status` until the "
+            f"waiting count reaches zero."
+        )
+    else:
+        print("[slm] nothing to re-derive.")
 
 
 def _cmd_db_reembed(args: Namespace) -> None:

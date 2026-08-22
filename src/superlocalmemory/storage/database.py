@@ -1264,9 +1264,18 @@ class DatabaseManager:
         """Hard-delete a fact.
 
         DatabaseManager connections enforce FKs (PRAGMA foreign_keys=ON), so
-        embedding_metadata / fact_retention / edges cascade. The explicit
+        embedding_metadata / fact_retention cascade. The explicit
         embedding_metadata delete below is belt-and-suspenders for the case a
         future caller routes through a connection without FK enforcement.
+
+        ``graph_edges`` does NOT cascade, whatever this docstring used to say.
+        Its only foreign key is to ``profiles``; there is none to
+        ``atomic_facts``, because an edge's endpoints can be entity ids as well
+        as fact ids and a single column cannot reference two tables. So the
+        edges are deleted here, explicitly. Without that, deleting a memory left
+        its connections behind pointing at nothing, and the graph tidy-up pass
+        would not reach them until its next run -- during which a search could
+        still follow an edge into a memory that no longer exists.
 
         Tenant safety: when ``profile_id`` is supplied the delete is constrained
         to that tenant (the fact must belong to it), so a fact_id from another
@@ -1299,6 +1308,12 @@ class DatabaseManager:
                 )
             else:
                 self.execute("DELETE FROM atomic_facts WHERE fact_id = ?", (fact_id,))
+            # Both directions: an edge naming this fact at either end is now an
+            # edge to nothing.
+            self.execute(
+                "DELETE FROM graph_edges WHERE source_id = ? OR target_id = ?",
+                (fact_id, fact_id),
+            )
             projection_outbox.enqueue(
                 self, fact_id, owner or "default", projection_outbox.OP_DELETE,
             )

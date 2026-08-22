@@ -4322,6 +4322,12 @@ def _register_daemon_routes(application: FastAPI) -> None:
             # reveal staleness on its own. Loopback-only, alongside the other
             # operational metadata.
             "version_integrity": _version_integrity_payload(),
+            # How far behind the second graph store is. A drain that stops
+            # advancing is the failure that does not announce itself: every
+            # other signal here stays green while the graph quietly diverges
+            # from the record, and the only symptom is answers that are subtly
+            # worse. A depth that does not fall is the thing to alert on.
+            "projection": _projection_health(application),
         }
 
     @application.get("/recall")
@@ -5636,6 +5642,30 @@ def _terminalize_orphan_operation(engine, operation_id: str) -> None:
         Reconciler(ledger).reconcile(
             conn, operation_id, profile_id, canonical_committed=False,
         )
+
+
+def _projection_health(application) -> dict:
+    """Queue depth, stall count, and whether the worker is running.
+
+    Never raises: a health endpoint that fails because one of its fields could
+    not be computed is worse than the missing field.
+    """
+    try:
+        from superlocalmemory.core.backend_orchestrator import get_orchestrator
+
+        orchestrator = get_orchestrator()
+        if orchestrator is None:
+            return {"available": False}
+        health = dict(orchestrator.outbox_health())
+        health["available"] = True
+        # One boolean an alert can key on without knowing what a healthy depth
+        # looks like on this store.
+        health["behind"] = bool(health.get("depth", 0)) or bool(
+            health.get("stalled", 0)
+        )
+        return health
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "error": str(exc)[:120]}
 
 
 def _ops_failure_counts(engine, application) -> dict:

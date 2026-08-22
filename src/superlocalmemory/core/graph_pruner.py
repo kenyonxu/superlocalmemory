@@ -210,6 +210,17 @@ def _batch_delete_by_ids(
     return removed
 
 
+#: The two columns naming an edge's ends, per table. ``association_edges``
+#: calls them ``source_fact_id``/``target_fact_id``, so a helper that assumed
+#: ``source_id``/``target_id`` raised there, returned nothing, and every
+#: association-edge deletion went unannounced to the graph store -- silently,
+#: because the failure looked exactly like "this table has no endpoints".
+_ENDPOINT_COLUMNS: dict[str, tuple[str, str]] = {
+    "graph_edges": ("source_id", "target_id"),
+    "association_edges": ("source_fact_id", "target_fact_id"),
+}
+
+
 def _endpoints_of(
     db: "DatabaseManager", table: str, id_col: str, ids: list,
 ) -> list[tuple[str, str]]:
@@ -221,21 +232,31 @@ def _endpoints_of(
     """
     if not ids:
         return []
+    columns = _ENDPOINT_COLUMNS.get(table)
+    if columns is None:
+        # A table nobody has named the endpoints of is one this pass must not
+        # guess at. Loudly, because guessing wrong is what produced the silent
+        # hole above.
+        logger.warning(
+            "prune: %s has no declared endpoint columns, so its deletions "
+            "cannot be announced to the graph projection", table,
+        )
+        return []
     ph = ",".join("?" * len(ids))
     try:
         rows = db.execute(
-            f"SELECT source_id, target_id, profile_id FROM {table} "
+            f"SELECT {columns[0]}, {columns[1]}, profile_id FROM {table} "
             f"WHERE {id_col} IN ({ph})",
             tuple(ids),
         )
-    except Exception as exc:  # noqa: BLE001 -- a table without endpoints is not one we project
-        logger.debug("prune: cannot read endpoints from %s: %s", table, exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("prune: cannot read endpoints from %s: %s", table, exc)
         return []
     seen: dict[tuple[str, str], None] = {}
     for row in rows:
         record = dict(row)
         profile_id = str(record.get("profile_id") or "default")
-        for column in ("source_id", "target_id"):
+        for column in columns:
             value = record.get(column)
             if value:
                 seen[(str(value), profile_id)] = None
@@ -284,19 +305,22 @@ def _enqueue_reprojection(
             continue
         if not real:
             continue
-        try:
-            projection_outbox.enqueue_many(
-                db, real, profile_id, op=projection_outbox.OP_UPSERT,
-            )
-        except Exception as exc:  # noqa: BLE001
-            # Raising here would roll back the delete, and a delete that cannot
-            # be announced is still a delete the store wants. The drift check
-            # at read time is the backstop.
-            logger.warning(
-                "prune: %d facts in %s could not be queued for re-projection "
-                "(%s); the graph projection may serve removed edges until the "
-                "next full rebuild", len(real), profile_id, exc,
-            )
+        # Deliberately allowed to raise. This runs inside the same transaction
+        # as the delete, so a failure here rolls the delete back and the batch
+        # is simply retried on the next pass -- nothing is lost and nothing
+        # diverges.
+        #
+        # Swallowing it, as this once did, committed the delete with no record
+        # that the graph needed telling. The queue would then be empty, which
+        # is exactly what "the graph is up to date" looks like, and the graph
+        # would serve a link the store had removed with nothing anywhere
+        # recording that it happened. That is the failure this queue exists to
+        # make impossible, and it is the module's own stated policy: "a
+        # durability mechanism that silently degrades to best-effort is the
+        # defect it exists to remove."
+        projection_outbox.enqueue_many(
+            db, real, profile_id, op=projection_outbox.OP_UPSERT,
+        )
 
 
 def _remove_orphan_edges_batched(

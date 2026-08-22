@@ -45,7 +45,7 @@ Proxy: <code>slm wrap claude</code> &nbsp;·&nbsp; MCP: add <code>slm_compress</
   <a href="https://superlocalmemory.com"><img src="https://img.shields.io/badge/Web-superlocalmemory.com-ff6b35?style=for-the-badge" alt="Website"/></a>
   <a href="#dual-interface-mcp--cli"><img src="https://img.shields.io/badge/MCP-Native-blue?style=for-the-badge" alt="MCP Native"/></a>
   <a href="#dual-interface-mcp--cli"><img src="https://img.shields.io/badge/CLI-Agent--Native-green?style=for-the-badge" alt="CLI Agent-Native"/></a>
-  <a href="#multilingual-embedding-support"><img src="https://img.shields.io/badge/Multilingual-30%2B_Languages-ff69b4?style=for-the-badge" alt="Multilingual 30+ Languages"/></a>
+  <a href="#multilingual-embedding-support"><img src="https://img.shields.io/badge/Multilingual-via_your_embedding_model-ff69b4?style=for-the-badge" alt="Multilingual via your embedding model"/></a>
 </p>
 
 ---
@@ -310,7 +310,7 @@ can run without a cloud LLM:
 
 1. **Fisher-informed scoring** — dense candidate generation uses cosine similarity; Fisher-derived terms can modify later scoring when their state is available.
 2. **Sheaf Cohomology for Consistency** — algebraic topology detects contradictions via coboundary norms on the knowledge graph.
-3. **Riemannian Langevin Lifecycle** — memory positions evolve on the Poincare ball; neglected memories self-archive, no hardcoded thresholds.
+3. **Riemannian Langevin Lifecycle** — memory positions evolve continuously on the Poincare ball, and where a memory sits decides its lifecycle stage. There is no retention timer counting down against a memory: what moves it outward is being left alone, and what pulls it back is being used. The stage boundaries themselves are fixed radii.
 
 Auto-capture hooks are installed explicitly with `slm hooks install` (Claude
 Code) or `slm hooks install --agent codex` (Codex). Hook latency and capture

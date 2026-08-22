@@ -611,10 +611,15 @@ def gate_cli_mutation(
     try:
         admit(kind, actor, mode=mode)
     except AdmissionDenied as exc:
+        # Name something the reader can actually do. This used to say
+        # "log in with 'slm login'", and there is no such command -- so the one
+        # instruction the message gave was a dead end.
         print(
             f"[slm] Operation denied ({exc.decision.reason}). "
-            "This workspace requires authentication. "
-            "Log in with 'slm login' or contact your workspace administrator.",
+            "This workspace requires a signed-in user. Sign in on the dashboard "
+            "(slm dashboard), copy your session token, and put it in the "
+            "SLM_USER_SESSION environment variable -- or ask whoever "
+            "administers this workspace for access.",
             flush=True,
         )
         sys.exit(1)

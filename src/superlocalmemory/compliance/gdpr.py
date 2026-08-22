@@ -84,6 +84,39 @@ _EXPORT_ALIASES = {
 }
 
 
+def _unproject_entity(entity_id: str) -> bool:
+    """Remove an entity node from the graph projection, if there is one.
+
+    The projection is a separate storage engine, so deleting the row from
+    SQLite reaches nothing there. An entity node left behind still carries the
+    name it was created with, which is exactly the thing an erasure was asked
+    to remove.
+
+    Returns False when a projection exists and refused, so a caller that
+    reports completeness can report this honestly. No projection at all is not
+    a failure -- there is nothing to remove.
+    """
+    try:
+        from superlocalmemory.core.backend_orchestrator import get_orchestrator
+    except Exception:  # noqa: BLE001
+        return True
+    try:
+        orchestrator = get_orchestrator()
+        graph = orchestrator.get_graph_backend() if orchestrator else None
+        if graph is None:
+            return True
+        remove = getattr(graph, "remove_entity", None)
+        if remove is None:
+            return True
+        remove(entity_id)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "the graph projection still holds entity %s (%s)", entity_id[:12], exc,
+        )
+        return False
+
+
 class GDPRCompliance:
     """GDPR compliance operations for memory data.
 
@@ -336,6 +369,16 @@ class GDPRCompliance:
             code_graph_data = self._export_code_graph(self._data_root)
             if code_graph_data is not None:
                 data["code_graph"] = code_graph_data
+
+            # What the system learned about how this person works: which
+            # questions they asked, which answers they found useful, and the
+            # weights derived from that. It was erased on request and could not
+            # be asked for -- which makes an export that claims to be everything
+            # untrue. It lives in a second file, so the table sweep above never
+            # reached it.
+            behaviour = self._export_learning_signals(self._data_root, profile_id)
+            if behaviour is not None:
+                data["learning_signals"] = behaviour
 
         # total_items counts the canonical (table-name) keys only, before
         # friendly aliases are added, so it is not double-counted.
@@ -911,6 +954,10 @@ class GDPRCompliance:
             "DELETE FROM canonical_entities WHERE entity_id = ? AND profile_id = ?",
             (eid, profile_id),
         )
+        # The graph holds its own copy of this node, with the name in it.
+        # Deleting the row above does not reach it.
+        if not _unproject_entity(eid):
+            counts["projection_failed"] = 1
         counts["entity"] = 1
         if not audit_request_ok:
             counts["audit_request_failed"] = 1
@@ -1184,6 +1231,67 @@ class GDPRCompliance:
             logger.warning("GDPR export: code_graph.db read failed: %s", exc)
             return None
         return export if export else None
+
+    def _export_learning_signals(
+        self, data_root: Path, profile_id: str
+    ) -> dict | None:
+        """Read this workspace's rows out of ``learning.db`` for an export.
+
+        Everything the system inferred about how somebody works is personal
+        data about them, and an export that leaves it out is not the export it
+        says it is. Erasure already covers this file; asking for it did not.
+
+        Scoped by ``profile_id`` wherever the table has one, and skipped where
+        it does not -- a table with no workspace column holds nothing that can
+        be attributed to one workspace, and returning it would export another
+        workspace's rows into this person's file.
+        """
+        learning_path = data_root / "learning.db"
+        if not learning_path.exists():
+            return None
+        export: dict = {}
+        try:
+            conn = sqlite3.connect(
+                f"file:{learning_path}?mode=ro", uri=True, timeout=5,
+            )
+            conn.row_factory = sqlite3.Row
+            try:
+                tables = [
+                    row[0] for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name NOT LIKE 'sqlite_%'"
+                    ).fetchall()
+                ]
+                for table in tables:
+                    if table.endswith((
+                        "_fts", "_fts_data", "_fts_idx",
+                        "_fts_content", "_fts_docsize", "_fts_config",
+                    )):
+                        continue
+                    try:
+                        columns = {
+                            row[1] for row in
+                            conn.execute(f"PRAGMA table_info({table})")  # noqa: S608
+                        }
+                        if "profile_id" not in columns:
+                            continue
+                        rows = conn.execute(
+                            f"SELECT * FROM {table} WHERE profile_id = ? "  # noqa: S608
+                            f"LIMIT 10000",
+                            (profile_id,),
+                        ).fetchall()
+                        if rows:
+                            export[table] = [dict(row) for row in rows]
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "export: learning table %s skipped: %s", table, exc,
+                        )
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("export: learning.db could not be read: %s", exc)
+            return None
+        return export or None
 
     # -- C1: backup obligation helpers -------------------------------------
 

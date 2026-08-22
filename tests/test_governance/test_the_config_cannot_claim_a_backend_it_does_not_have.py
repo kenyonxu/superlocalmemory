@@ -177,24 +177,91 @@ class TestItIsSafeToRunEveryStartup:
 class TestItActuallyRunsAtStartup:
     """A repair nothing calls is the same as no repair."""
 
-    def test_bringing_the_backends_up_reconciles_first(self, data_dir) -> None:
-        """It must run BEFORE anything reads the selection it is correcting.
+    @pytest.mark.parametrize(
+        "state", ["local_core", "prepared", "verified", "promoted"],
+    )
+    def test_bringing_the_backends_up_reconciles_whatever_state_it_is_in(
+        self, data_dir, state,
+    ) -> None:
+        """It must run before anything reads the selection it is correcting,
+        and it must run for every store — not only one already promoted.
 
-        Detection reads ``graph_backend`` to decide whether to look for the
-        projection at all, so a reconciliation placed after that point would
-        correct the file and leave the process running on the stale value for the
-        rest of its life.
+        The stores that need it are precisely the ones that do NOT reach the
+        promoted path. The real case is a store whose settings name a graph and
+        a vector backend, whose state is ``verified``, and where neither
+        directory exists: startup returned early, the reconciliation never ran,
+        and every restart preserved the claim.
+
+        This was asserted by comparing where two strings appeared in the source
+        of the startup method, which is true whether or not the method returns
+        between them.
         """
-        import inspect
-
         from superlocalmemory.core.backend_orchestrator import BackendOrchestrator
 
-        source = inspect.getsource(BackendOrchestrator.on_daemon_start)
-        assert "_reconcile_backend_selection()" in source, (
-            "the reconciliation is never called from startup"
+        calls: list[str] = []
+
+        class _Orchestrator:
+            _config = _StartupConfig(
+                graph_backend="cozo",
+                vector_backend="lancedb",
+                scale_engine_state=state,
+            )
+            _db = None
+            _drain = _NoOpDrain()
+
+            def _recover_interrupted_scale_promotion(self):
+                calls.append("recover")
+
+            def _reconcile_backend_selection(self):
+                calls.append("reconcile")
+
+            def _maybe_schedule_auto_promote(self):
+                calls.append("auto_promote")
+
+            def _detect_cozo(self):
+                calls.append("detect_cozo")
+                return False
+
+            def _detect_lancedb(self):
+                calls.append("detect_lance")
+                return False
+
+            def __getattr__(self, name):
+                def _noop(*args, **kwargs):
+                    calls.append(name)
+                return _noop
+
+        try:
+            BackendOrchestrator.on_daemon_start(_Orchestrator())
+        except AttributeError:
+            # The promoted path goes on to bring real backends up, which this
+            # stand-in cannot provide. What is being checked happens before
+            # that, and `calls` records whether it happened.
+            pass
+
+        assert "reconcile" in calls, (
+            f"startup with state={state!r} never reconciled what the settings "
+            f"claim against what is on disk"
         )
-        reconcile_at = source.index("_reconcile_backend_selection()")
-        detect_at = source.index("self._detect_cozo()")
-        assert reconcile_at < detect_at, (
-            "reconciliation must run before the selection is read"
-        )
+        if "detect_cozo" in calls:
+            assert calls.index("reconcile") < calls.index("detect_cozo"), (
+                "the selection was read before it was corrected"
+            )
+
+
+class _StartupConfig:
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+    def __getattr__(self, name):
+        return None
+
+
+class _NoOpDrain:
+    running = False
+
+    def start(self):
+        return None
+
+    def stop(self):
+        return None

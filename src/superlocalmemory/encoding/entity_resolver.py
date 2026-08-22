@@ -223,6 +223,39 @@ def _guess_entity_type(name: str) -> str:
 # Entity Resolver
 # ---------------------------------------------------------------------------
 
+def _unproject_entity(entity_id: str) -> bool:
+    """Remove an entity node from the graph projection, if there is one.
+
+    The projection is a separate storage engine, so deleting the row from
+    SQLite reaches nothing there. An entity node left behind still carries the
+    name it was created with, which is exactly the thing an erasure was asked
+    to remove.
+
+    Returns False when a projection exists and refused, so a caller that
+    reports completeness can report this honestly. No projection at all is not
+    a failure -- there is nothing to remove.
+    """
+    try:
+        from superlocalmemory.core.backend_orchestrator import get_orchestrator
+    except Exception:  # noqa: BLE001
+        return True
+    try:
+        orchestrator = get_orchestrator()
+        graph = orchestrator.get_graph_backend() if orchestrator else None
+        if graph is None:
+            return True
+        remove = getattr(graph, "remove_entity", None)
+        if remove is None:
+            return True
+        remove(entity_id)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "the graph projection still holds entity %s (%s)", entity_id[:12], exc,
+        )
+        return False
+
+
 class EntityResolver:
     """Resolves raw entity mentions to persisted canonical entities.
 
@@ -444,6 +477,11 @@ class EntityResolver:
             "DELETE FROM canonical_entities WHERE entity_id = ? AND profile_id = ?",
             (entity_id_merge, profile_id),
         )
+        # The merged-away node has its own copy in the graph projection, and
+        # deleting the row above does not reach it. Left there it keeps its own
+        # name and its own edges, so the two halves of a merged entity stay
+        # visible to a graph query as two entities.
+        _unproject_entity(entity_id_merge)
         logger.info(
             "Merged entity %s into %s (profile=%s)",
             entity_id_merge, entity_id_keep, profile_id,

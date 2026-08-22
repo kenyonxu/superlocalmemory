@@ -284,6 +284,40 @@ class CozoDBGraphBackend:
             :rm edge {from_id, to_id, edge_type => weight, metadata, profile_id, created_at}
         """, {"fact_id": fact_id})
 
+    def remove_entity(self, entity_id: str) -> None:
+        """Remove an entity node and every bridge that reaches it.
+
+        ``remove_fact`` clears a fact's bridges and edges and leaves the entity
+        nodes alone, which is right when a fact is deleted -- the entity is
+        still real and other facts still reference it. It is wrong when the
+        entity itself is erased: the node stayed behind with its name in it,
+        so a graph query could still name somebody after their record had been
+        removed from the store.
+
+        The id is bound as a parameter, so an entity name containing a quote
+        cannot become query text.
+        """
+        self._db.run("""
+            ?[fact_id, entity_id, profile_id] :=
+                *fact_entity{fact_id, entity_id, profile_id}, entity_id = $entity_id
+            :rm fact_entity {fact_id, entity_id => profile_id}
+        """, {"entity_id": entity_id})
+        self._db.run("""
+            ?[from_id, to_id, edge_type, weight, metadata, profile_id, created_at] :=
+                *edge{from_id, to_id, edge_type, weight, metadata, profile_id, created_at},
+                (from_id = $entity_id or to_id = $entity_id)
+            :rm edge {from_id, to_id, edge_type => weight, metadata, profile_id, created_at}
+        """, {"entity_id": entity_id})
+        self._db.run("""
+            ?[id, name, entity_type, tier, properties, profile_id,
+              created_at, updated_at] :=
+                *entity{id, name, entity_type, tier, properties, profile_id,
+                        created_at, updated_at},
+                id = $entity_id
+            :rm entity {id => name, entity_type, tier, properties, profile_id,
+                        created_at, updated_at}
+        """, {"entity_id": entity_id})
+
     def remove_fact_candidacy(self, fact_id: str) -> None:
         """Stop a fact being *offered* as a candidate, without touching the graph.
 
