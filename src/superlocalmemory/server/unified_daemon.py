@@ -2192,6 +2192,30 @@ async def lifespan(application: FastAPI):
                 "deferred migration runner crashed (non-fatal): %s", _dexc,
             )
 
+        # Move an existing store onto the graph and vector backends on the
+        # first start after an upgrade. They have shipped as required
+        # dependencies since 3.7 and sat unused, because building the
+        # projections was three manual commands almost nobody ran. Runs after
+        # the deferred migrations so it projects the converted store, and never
+        # fatal: if the libraries will not import or the projection does not
+        # match, the daemon serves from SQLite and says so.
+        try:
+            from superlocalmemory.core.scale_autopromote import (
+                auto_promote_scale_backends,
+            )
+            _promotion = auto_promote_scale_backends(config)
+            application.state.scale_autopromotion = _promotion.as_dict()
+            if _promotion.promoted and _promotion.restart_required:
+                logger.info(
+                    "graph and vector backends are promoted and serve after the "
+                    "next restart",
+                )
+        except Exception as _pexc:  # pragma: no cover — defensive
+            logger.warning("automatic backend promotion crashed (non-fatal): %s", _pexc)
+            application.state.scale_autopromotion = {
+                "attempted": True, "promoted": False, "reason": str(_pexc),
+            }
+
         # S9-DASH-02: start the outcome-queue worker so recall →
         # pending_outcomes is actually produced. Before v3.4.22 this
         # producer had zero callers and the closed-loop pipeline was

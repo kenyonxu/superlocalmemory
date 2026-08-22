@@ -173,7 +173,7 @@ _FORGETTING_DEFAULTS: dict = {
 
 
 @router.get("/storage/config")
-def get_storage_config():
+def get_storage_config(request: Request = None):  # noqa: B008 - FastAPI idiom
     """Return current storage backend configuration.
 
     base_dir is read-only — it is derived from the process namespace and
@@ -195,6 +195,13 @@ def get_storage_config():
             "backend_matches_configuration": (
                 active_graph == declared_graph and active_vector == declared_vector
             ),
+            "scale_engine_state": data.get("scale_engine_state", "local_core"),
+            # What the last start did about moving this store onto the graph
+            # and vector backends. A store that could not be moved says why
+            # here rather than looking like one that was never asked.
+            "automatic_promotion": getattr(
+                request.app.state, "scale_autopromotion", None,
+            ) if request is not None else None,
             "base_dir": data.get("base_dir", str(MEMORY_DIR)),
         }
     except Exception:
