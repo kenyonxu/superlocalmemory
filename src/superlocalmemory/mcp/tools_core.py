@@ -29,6 +29,19 @@ from superlocalmemory.mcp.shared import authorize_mcp_mutation
 logger = logging.getLogger(__name__)
 
 
+def _projection_queue_depth(db: object) -> int:
+    """Facts queued for the graph and vector projections, or 0 when there are none.
+
+    Imported inside the function: this module is loaded on every MCP start over
+    stdio, where import cost is startup latency a user feels.
+    """
+    try:
+        from superlocalmemory.storage import projection_outbox
+        return projection_outbox.depth(db)
+    except Exception:
+        return 0
+
+
 async def _runtime_profile(get_engine: Callable, explicit: str = "") -> str:
     """Resolve an MCP default profile from daemon runtime truth."""
     if explicit:
@@ -545,6 +558,9 @@ def register_core_tools(server, get_engine: Callable) -> None:
                             daemon_status.get("profile_generation", 0)
                         ),
                         "version": SLM_VERSION,
+                        "projection_queue_depth": int(
+                            daemon_status.get("projection_queue_depth", 0)
+                        ),
                     }
 
             engine = get_engine()
@@ -582,6 +598,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 "edge_count": edge_count,
                 "profile_generation": 0,
                 "version": SLM_VERSION,
+                "projection_queue_depth": _projection_queue_depth(engine._db),
             }
         except Exception as exc:
             logger.exception("get_status failed")

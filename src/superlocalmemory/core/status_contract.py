@@ -34,6 +34,7 @@ CANONICAL_STATUS_FIELDS: tuple[str, ...] = (
     "edge_count",
     "profile_generation",
     "version",
+    "projection_queue_depth",
 )
 
 #: The counts, and the one query each comes from. Profile-scoped without
@@ -70,6 +71,30 @@ def counts_from_sqlite(conn: sqlite3.Connection, profile_id: str) -> dict[str, i
         except sqlite3.Error:
             counts[field] = 0
     return counts
+
+
+def projection_queue_depth(conn: sqlite3.Connection) -> int:
+    """Facts stored but not yet carried into the graph and vector projections.
+
+    Zero is the healthy steady state. A number that does not fall means the
+    projections have stopped keeping up with the store, which is the one failure
+    that would otherwise be invisible: the memory is safely in SQLite, so
+    nothing errors, and it is simply missing from the graph until someone
+    notices recall got worse.
+
+    Deliberately NOT profile-scoped. The worker is one queue for the whole
+    store, and a projection stalled on another workspace's facts is still a
+    stalled projection. Scoping it per profile would let a status page report
+    zero while the drain was wedged.
+    """
+    from superlocalmemory.storage.projection_outbox import DEPTH_SQL
+
+    try:
+        row = conn.execute(DEPTH_SQL).fetchone()
+    except sqlite3.Error:
+        # A store that predates the queue has nothing pending by definition.
+        return 0
+    return int(row[0]) if row else 0
 
 
 def store_size_mb(db_path: Path | str | None) -> float:

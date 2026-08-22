@@ -21,6 +21,27 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _cli_projection_queue_depth(db_path: object) -> int:
+    """Facts queued for the graph and vector projections, read straight from disk.
+
+    The no-daemon branch of ``slm status`` has no engine, so it opens the store
+    read-only rather than building one. A store that predates the queue reports
+    zero, which is the truth for it.
+    """
+    import sqlite3
+
+    from superlocalmemory.core.status_contract import projection_queue_depth
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return 0
+    try:
+        return projection_queue_depth(conn)
+    finally:
+        conn.close()
+
+
 def _daemon_unavailable(command: str, use_json: bool) -> None:
     """Exit a mutation client without opening a process-local writer.
 
@@ -1928,6 +1949,9 @@ def cmd_status(args: Namespace) -> None:
                     daemon_status.get("profile_generation", 0)
                 ),
                 "version": SLM_VERSION,
+                "projection_queue_depth": int(
+                    daemon_status.get("projection_queue_depth", 0)
+                ),
             }
             json_print("status", data=data, next_actions=[
                 {"command": "slm health --json", "description": "Check math layer health"},
@@ -1989,6 +2013,7 @@ def cmd_status(args: Namespace) -> None:
             "edge_count": edge_count,
             "profile_generation": 0,
             "version": SLM_VERSION,
+            "projection_queue_depth": _cli_projection_queue_depth(config.db_path),
         }
         json_print("status", data=data, next_actions=[
             {"command": "slm health --json", "description": "Check math layer health"},
@@ -2810,6 +2835,46 @@ def cmd_doctor(args: Namespace) -> None:
             _check("Database", "FAIL", str(exc))
     else:
         _check("Database", "PASS", "not yet created (will initialize on first use)")
+
+    # 10b. Projection queue. The graph and the vectors live in other storage
+    # engines, and a queue that stops draining is the one failure that produces
+    # no error at all: the memory is safely in SQLite, nothing raises, and
+    # recall quietly stops finding it. Depth alone cannot distinguish a busy
+    # queue from a wedged one, so the check keys on attempts — a row that has
+    # been tried and refused is a defect with a fact id attached.
+    if db_path.exists():
+        try:
+            from superlocalmemory.storage.memory_write import memory_read
+            from superlocalmemory.storage.projection_outbox import DEPTH_SQL
+
+            with memory_read(db_path) as conn:
+                depth = int(conn.execute(DEPTH_SQL).fetchone()[0])
+                stalled = [
+                    row[0] for row in conn.execute(
+                        "SELECT fact_id FROM projection_outbox "
+                        "WHERE attempts >= 3 ORDER BY attempts DESC LIMIT 5"
+                    )
+                ]
+            if stalled:
+                _check(
+                    "Projection queue", "FAIL",
+                    f"{len(stalled)}+ memories refused by the graph or vector "
+                    f"store (e.g. {', '.join(f[:12] for f in stalled)})",
+                    "Check `slm logs` for the projection error, then restart "
+                    "the daemon to retry",
+                )
+            elif depth:
+                _check(
+                    "Projection queue", "PASS",
+                    f"{depth} memory/memories queued — the worker drains these "
+                    "in the background",
+                )
+            else:
+                _check("Projection queue", "PASS", "empty (graph is up to date)")
+        except Exception:
+            # No table means a store that predates the queue. Nothing is
+            # pending on it by definition, so this is not a finding.
+            _check("Projection queue", "PASS", "not applicable to this store")
 
     # 11. PEP 668 advisory: detect EXTERNALLY-MANAGED marker and
     #     recommend pipx when the system Python is managed by the OS package

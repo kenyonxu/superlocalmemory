@@ -16,6 +16,7 @@ from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
 from superlocalmemory.core.status_contract import (
     COUNT_QUERIES,
     counts_from_sqlite,
+    projection_queue_depth,
     store_size_mb,
 )
 from superlocalmemory.server.routes.helpers import SLM_VERSION, get_read_connection
@@ -110,11 +111,13 @@ async def dashboard(request: Request):
         # Read stats directly from SQLite (dashboard doesn't load engine)
         memory_count = 0
         counts = dict.fromkeys(COUNT_QUERIES, 0)
+        queue_depth = 0
         db_path = config.base_dir / "memory.db"
         if db_path.exists():
             try:
                 conn = get_read_connection(db_path)
                 counts = counts_from_sqlite(conn, active_profile)
+                queue_depth = projection_queue_depth(conn)
                 cursor = conn.cursor()
                 try:
                     try:
@@ -154,6 +157,11 @@ async def dashboard(request: Request):
             "profile_generation": get_profile_runtime(
                 request.app.state,
             ).snapshot.generation,
+            # Facts stored but not yet in the graph and vector projections. A
+            # number that does not fall is a projection that has stopped
+            # keeping up, which is otherwise invisible: nothing errors, the
+            # memory is safely in SQLite, and recall just quietly gets worse.
+            "projection_queue_depth": queue_depth,
             **counts,
         }
         payload.update(dashboard_mode_fields(config.mode))
