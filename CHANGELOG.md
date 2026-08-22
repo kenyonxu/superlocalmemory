@@ -5,6 +5,19 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A second workspace could take over a memory belonging to the first.** Where
+  two workspaces on one store were handed the same identifier for a memory or a
+  fact — an import keyed on an external record id, feeding one source into two
+  workspaces, does exactly this — the later write could claim the first
+  workspace's entry outright: new owner, new content, and the notes attached to
+  it discarded, with nothing raised. Whether it was refused or went through in
+  silence depended on unrelated details of the entry, so neither outcome could
+  be relied on. A write that would move an entry from one workspace to another
+  is now refused, and says which workspace owns it.
+
 ## [4.0.10] — Your memories, not the summarizer's
 
 ### Fixed
