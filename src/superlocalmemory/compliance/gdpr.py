@@ -545,6 +545,12 @@ class GDPRCompliance:
                     "learning receipt purge failed; profile deletion was not started"
                 ) from exc
 
+        # Tables keyed on a fact rather than on a profile are invisible to the
+        # profile-scoped sweep below, which discovers tables by looking for a
+        # profile_id column. They have to go FIRST, while the facts that name
+        # them still exist to be joined against.
+        self._erase_fact_keyed_tables(profile_id, counts)
+
         # Pass 2 — full-tenant wipe with FK enforcement OFF so table order is
         # irrelevant (every profile row in every table goes). FTS shadow rows
         # are still removed by the base-table delete triggers.
@@ -671,6 +677,9 @@ class GDPRCompliance:
                 and not counts.get("backup_scan_failed")
                 and not counts.get("fts_residue_rows")
                 and not counts.get("working_sets_failed")
+                and not any(
+                    counts.get(f"{t}_failed") for t, _ in self._FACT_KEYED_TABLES
+                )
             )
             else 0
         )
@@ -822,6 +831,50 @@ class GDPRCompliance:
         return counts
 
     # -- C2: code_graph helpers --------------------------------------------
+
+    #: Tables that hold a person's text but are keyed on a fact, not a profile.
+    #: The erasure sweep finds tables by looking for a profile_id column, so
+    #: these are invisible to it — the search-expansion index kept a copy of a
+    #: memory's alternate keys after every trace of the memory itself was gone.
+    #: Erasing them needs a join, and the join needs the facts to still exist,
+    #: so it runs before the sweep rather than after.
+    _FACT_KEYED_TABLES: tuple[tuple[str, str], ...] = (
+        ("fact_expansion_fts", "fact_id"),
+    )
+
+    def _erase_fact_keyed_tables(self, profile_id: str, counts: dict) -> None:
+        """Delete rows that name this profile's facts but not the profile."""
+        fact_ids = self._fact_ids_for(profile_id)
+        for table, column in self._FACT_KEYED_TABLES:
+            try:
+                exists = self._db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name = ?", (table,)
+                )
+            except Exception as exc:  # noqa: BLE001 - reported, not raised
+                logger.warning("GDPR erase: cannot look for %s: %s", table, exc)
+                counts[f"{table}_failed"] = 1
+                continue
+            if not exists:
+                continue
+            if not fact_ids:
+                continue
+            removed = 0
+            try:
+                # Chunked so a large profile does not build one enormous
+                # statement, and each chunk is independently committed.
+                for start in range(0, len(fact_ids), 500):
+                    chunk = fact_ids[start:start + 500]
+                    placeholders = ",".join("?" * len(chunk))
+                    self._db.execute(
+                        f"DELETE FROM {table} WHERE {column} IN ({placeholders})",
+                        tuple(chunk),
+                    )
+                    removed += len(chunk)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GDPR erase: delete from %s failed: %s", table, exc)
+                counts[f"{table}_failed"] = 1
+                continue
+            counts[table] = removed
 
     def _is_sole_profile(self, profile_id: str) -> bool:
         """Whether this profile is the only one in the store.
