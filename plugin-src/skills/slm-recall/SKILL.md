@@ -65,12 +65,12 @@ Real response shape (`--json` equivalent):
       "score": 0.87,
       "confidence": 0.91,
       "trust_score": 0.84,
-      "fact_type": "decision",
+      "fact_type": "semantic",
       "channel_scores": {
         "semantic": 0.88,
-        "lexical": 0.61,
+        "bm25": 0.61,
         "temporal": 0.72,
-        "structural": 0.55
+        "hopfield": 0.55
       }
     }
   ],
@@ -78,15 +78,18 @@ Real response shape (`--json` equivalent):
   "query_type": "semantic",
   "channel_weights": {
     "semantic": 0.4,
-    "lexical": 0.2,
+    "bm25": 0.2,
     "temporal": 0.2,
-    "structural": 0.2
+    "hopfield": 0.2
   },
   "channel_status": {
     "semantic": "ok",
-    "lexical": "ok",
+    "bm25": "ok",
     "temporal": "empty",
-    "entity_graph": "no_embedding"
+    "hopfield": "ok",
+    "spreading_activation": "no_candidates",
+    "entity_graph": "no_embedding",
+    "profile": "disabled"
   },
   "incomplete_channels": [],
   "retrieval_time_ms": 134,
@@ -108,6 +111,9 @@ each channel counts; `channel_status` says whether it ran at all.
 | `no_embedding` | the query could not be embedded, so it could not run |
 | `disabled` | switched off by configuration |
 | `not_configured` | the backing service is not set up |
+
+The seven channels are `semantic`, `bm25`, `temporal`, `hopfield`,
+`spreading_activation`, `entity_graph` and `profile`.
 
 `empty`, `no_candidates`, `disabled` and `not_configured` are normal. `error`,
 `timeout` and `no_embedding` mean the answer is **incomplete, not negative** —
@@ -142,7 +148,7 @@ the registry and evict genuine conversations.
 ### 3. Fast mode
 
 `fast` controls **one** thing: whether the server runs its own internal LLM
-reformulation round. It does **not** disable any retrieval channel — all six
+reformulation round. It does **not** disable any retrieval channel — all seven
 channels and the reranker run either way.
 
 Leave it unset. Unset resolves to "skip the internal round", because you are the

@@ -43,9 +43,12 @@ from __future__ import annotations
 import re
 
 __all__ = [
-    "DEFINITE_FUTURE",
+    "ANCHORED_FUTURE",
+    "PLANNING_LANGUAGE",
     "CIRCUMSTANTIAL_FUTURE",
+    "RECURRING",
     "ALREADY_HAPPENED",
+    "DEFINITE_FUTURE",
     "looks_prospective",
 ]
 
@@ -55,25 +58,50 @@ _MONTH = (
     r"october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)"
 )
 
-#: Forward-looking on its own, whatever else the sentence contains.
-DEFINITE_FUTURE = re.compile(
+#: Points forward on its own, whatever else the sentence says. Every member
+#: carries an explicit forward time anchor, so "rescheduled to next Friday" is
+#: still a plan even though "rescheduled" reads as past.
+ANCHORED_FUTURE = re.compile(
     r"\b(?:"
-    r"deadline|due\s+(?:date|by|on)|"
-    r"expir(?:es|ing|e)\s+(?:on|at|in|after)|expir(?:y|ation)\s+date|"
-    r"scheduled?\s+(?:for|on|at|to)|reschedul(?:e|ed|ing)|"
-    r"appointment|"
-    r"upcoming|"
     r"tomorrow|"
     r"next\s+(?:week|month|year|quarter|sprint|release|" + _WEEKDAY + r")|"
     r"this\s+(?:coming|weekend)|"
+    r"upcoming\s+(?:release|meeting|week|month|sprint|deadline|event|launch|"
+    r"call|review|milestone)|"
     r"by\s+(?:end\s+of|eod|eow|cob|" + _WEEKDAY + r"|" + _MONTH + r"|\d{4}-\d{2}-\d{2})|"
-    r"plans?\s+to|planning\s+to|"
-    r"go[-\s]?live|cut[-\s]?over|launch\s+date|"
-    r"will\s+(?:be|happen|start|begin|run|ship|land|expire|need|have)|"
-    r"going\s+to\s+\w+"
+    r"due\s+(?:date|by|on|" + _WEEKDAY + r"|" + _MONTH + r")"
     r")\b",
     re.IGNORECASE,
 )
+
+#: The vocabulary of planning. These words are ABOUT something being planned,
+#: and they read exactly as well in the past: a deadline can be missed, an
+#: appointment cancelled, a launch date long gone. They count only when nothing
+#: says the thing already happened.
+#:
+#: Treating them as definite is what re-polluted the list this module exists to
+#: clean — "the appointment was cancelled yesterday" was filed as something to
+#: look forward to.
+PLANNING_LANGUAGE = re.compile(
+    r"\b(?:"
+    r"deadline|"
+    r"appointment|"
+    r"expir(?:es|ing|e)\s+(?:on|at)\s+(?:" + _WEEKDAY + r"|" + _MONTH + r"|\d)|"
+    r"expir(?:y|ation)\s+date|"
+    r"scheduled?\s+(?:for|on|at|to)|reschedul(?:e|ed|ing)|"
+    r"plans?\s+to|planning\s+to|"
+    r"go[-\s]?live|cut[-\s]?over|launch\s+date|"
+    r"will\s+(?:happen|start|begin|expire|ship|launch|resume|reopen|take\s+place)|"
+    r"will\s+be\s+(?:deleted|removed|released|deployed|held|published|migrated|"
+    r"archived|retired|rotated|decommissioned|shut\s+down)|"
+    r"going\s+to\s+(?:happen|ship|start|launch|begin)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+#: Kept for callers that imported the old name; the two tiers together are what
+#: it used to mean.
+DEFINITE_FUTURE = ANCHORED_FUTURE
 
 #: Shaped like a plan, but reads equally well as narration.
 CIRCUMSTANTIAL_FUTURE = re.compile(
@@ -81,13 +109,23 @@ CIRCUMSTANTIAL_FUTURE = re.compile(
     r"on\s+" + _WEEKDAY + r"|"
     r"at\s+\d{1,2}:\d{2}|"
     r"in\s+\d+\s+(?:days?|weeks?|months?|years?)|"
-    r"starts?\s+(?:on|at)|begins?\s+(?:on|at)|"
+    r"(?:starts?|begins?|resumes?|reopens?)\s+(?:on|at)|"
+    r"(?:on|at)\s+\d{4}-\d{2}-\d{2}|"
     r"meeting\s+(?:on|at)"
     r")\b",
     re.IGNORECASE,
 )
 
-#: Says the thing has already happened. Vetoes a circumstantial match.
+#: A thing that happens on a cycle is not a thing that is coming up. "Standup at
+#: 09:30 every day" belongs in nobody's list of what to expect this week.
+RECURRING = re.compile(
+    r"\b(?:every|each)\s+(?:day|week|month|morning|afternoon|evening|night|"
+    r"sprint|release|" + _WEEKDAY + r")|\b(?:daily|weekly|monthly|nightly|"
+    r"hourly|per\s+request|recurring)\b",
+    re.IGNORECASE,
+)
+
+#: Says the thing has already happened. Vetoes anything but an anchored future.
 ALREADY_HAPPENED = re.compile(
     r"\b(?:"
     r"yesterday|"
@@ -98,7 +136,7 @@ ALREADY_HAPPENED = re.compile(
     r"did|done|"
     r"complet(?:e|ed)|finish(?:ed)?|"
     r"shipped|released|landed|merged|deployed|"
-    r"fixed|resolved|closed|"
+    r"fixed|resolved|closed|cancelled|canceled|missed|happened|expired|"
     r"turned\s+out|ended|began|begun|started|"
     r"produced|caused|created|caught|found|"
     r"decided|agreed|discussed|reviewed|reported|"
@@ -112,14 +150,18 @@ ALREADY_HAPPENED = re.compile(
 def looks_prospective(text: str) -> bool:
     """True when the text describes something still ahead.
 
-    A definite marker is enough on its own — "rescheduled to next Tuesday" is a
-    plan even though "rescheduled" reads as past. A circumstantial one counts
-    only when nothing says the thing already happened.
+    Three tiers, because the evidence really is of three strengths. An anchored
+    future — "next Tuesday", "by Friday", "on 2026-09-04" — points forward
+    whatever else the sentence says. Planning vocabulary and circumstantial
+    wording both read equally well in the past, so they count only when nothing
+    says the thing already happened. Anything on a cycle is not a plan at all.
     """
     if not text:
         return False
-    if DEFINITE_FUTURE.search(text):
+    if RECURRING.search(text):
+        return False
+    if ANCHORED_FUTURE.search(text):
         return True
-    if CIRCUMSTANTIAL_FUTURE.search(text):
+    if PLANNING_LANGUAGE.search(text) or CIRCUMSTANTIAL_FUTURE.search(text):
         return not ALREADY_HAPPENED.search(text)
     return False

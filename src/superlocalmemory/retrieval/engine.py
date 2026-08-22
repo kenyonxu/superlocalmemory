@@ -419,7 +419,14 @@ class RetrievalEngine:
         # it. Bound by data if it ever needs bounding, never by elapsed time.
         if self._entity is None:
             channel_status["entity_graph"] = chstat.NOT_CONFIGURED
-        elif "entity_graph" in set(self._config.disabled_channels):
+        elif "entity_graph" in set(self._config.disabled_channels) | set(
+            extra_disabled_channels or (),
+        ):
+            # Both the configured set AND the per-call one, the same way the
+            # profile channel resolves it. Reading only the configured set meant
+            # a caller that switched this channel off for one recall still had
+            # it run, and still saw it reported as though it were the caller's
+            # own setting that was being honoured.
             channel_status["entity_graph"] = chstat.DISABLED
         elif not fused:
             # It did not run, and saying "found nothing" would be a different

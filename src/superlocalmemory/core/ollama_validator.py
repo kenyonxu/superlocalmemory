@@ -94,11 +94,21 @@ def same_embedding_model(left: str, right: str) -> bool:
     """
     def base(name: str) -> str:
         stem = name.strip().lower().rsplit("/", 1)[-1]
-        stem = stem.split(":", 1)[0]
-        # Trailing version suffixes are packaging, not weights.
-        for suffix in ("-v1.5", "-v1", "-v2", "-latest"):
-            if stem.endswith(suffix):
-                stem = stem[: -len(suffix)]
+        # An Ollama tag is PART OF THE IDENTITY, not packaging.
+        # ``qwen3-embedding:0.6b`` emits 1024 numbers and ``qwen3-embedding:8b``
+        # emits 4096, and stripping the tag made this function call them the
+        # same model — which then skipped the width check that exists to stop
+        # exactly that swap. Only ``:latest`` means "whatever the bare name
+        # means", so only that one is dropped.
+        if stem.endswith(":latest"):
+            stem = stem[: -len(":latest")]
+        # A HuggingFace revision suffix on an otherwise identical name is
+        # packaging; ``nomic-embed-text-v1.5`` and ``nomic-embed-text`` are the
+        # same weights under two registries' conventions.
+        if ":" not in stem:
+            for suffix in ("-v1.5", "-v1", "-v2"):
+                if stem.endswith(suffix):
+                    stem = stem[: -len(suffix)]
         return stem
 
     return base(left) == base(right)
@@ -265,17 +275,24 @@ def check_embedding_model_change(
     and the outcome of getting this wrong is a store whose similarity search is
     quietly meaningless.
     """
-    if current_model and same_embedding_model(current_model, new_model):
-        return DimensionChange(
-            True,
-            f"{new_model} is another name for the model already in use.",
-        )
-
+    # The width is asked for FIRST, always. Recognising two names as the same
+    # model may soften the message, but it must never stand in for measuring —
+    # a name that merely looks familiar is exactly how a different-width model
+    # would get through.
     probe = validate_ollama_model(new_model, EMBEDDING, base_url=base_url)
     if not probe.ok:
         return DimensionChange(False, probe.message)
 
+    familiar = bool(current_model) and same_embedding_model(current_model, new_model)
     stored = stored_embedding_dimension(db_path)
+    if familiar and (stored is None or stored == probe.dimension):
+        return DimensionChange(
+            True,
+            f"{new_model} is another name for the model already in use, and it "
+            f"emits the same {probe.dimension}-dimensional vectors.",
+            stored,
+            probe.dimension,
+        )
     if stored is None:
         return DimensionChange(
             True,

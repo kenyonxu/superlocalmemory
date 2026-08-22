@@ -166,6 +166,7 @@ from superlocalmemory.storage.migrations import (
     M045_fact_outcome_score as _M045,
     M046_prospective_memory_has_its_own_name as _M046,
     M047_fisher_vectors_are_stored_like_every_other_vector as _M047,
+    M048_upcoming_holds_only_what_is_upcoming as _M048,
 )
 from superlocalmemory.storage.migrations import (
     M043_quarantine_display_summaries as _M043,
@@ -360,6 +361,11 @@ DEFERRED_MIGRATIONS: list[Migration] = [
     # Depends on M046 so a table rebuild and a full-table update never run in
     # the same pass over the same table.
     Migration(name=_M047.NAME, db_target="memory", ddl=_M047.DDL,
+              dependencies=(_M046.NAME,)),
+    # M048 finishes what M046 started: M046 renamed the type used for planned
+    # events without re-reading a single one of them, so the same wrongly-filed
+    # rows now carry a more confident name. Depends on M046 for the rename.
+    Migration(name=_M048.NAME, db_target="memory", ddl=_M048.DDL,
               dependencies=(_M046.NAME,)),
 ]
 

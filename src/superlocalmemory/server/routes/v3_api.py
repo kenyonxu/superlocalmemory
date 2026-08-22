@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 import os
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -571,6 +572,65 @@ async def get_embedding_config(request: Request):
         return _internal_error()
 
 
+def _refuse_incompatible_embedding(config, old_emb, new_model, new_dim):
+    """None when the change is safe, otherwise the 409 to return instead.
+
+    Fail-open on anything it cannot determine: a store with no vectors yet, a
+    model server that is not running, an unreadable database. Refusing on
+    "I could not tell" would block a legitimate first-time setup, and the
+    dimension a caller declares is still checked against the store either way.
+    """
+    from fastapi.responses import JSONResponse as _JSON
+
+    try:
+        from superlocalmemory.core.ollama_validator import (
+            EMBEDDING,
+            stored_embedding_dimension,
+            validate_ollama_model,
+        )
+
+        db_path = Path(config.base_dir) / "memory.db"
+        stored = stored_embedding_dimension(db_path)
+        if stored is None:
+            return None
+
+        measured = None
+        if (getattr(old_emb, "provider", "") == "ollama"
+                or config.embedding.provider == "ollama"):
+            probe = validate_ollama_model(
+                getattr(old_emb, "ollama_model", "") or new_model,
+                EMBEDDING,
+                base_url=getattr(old_emb, "ollama_base_url", "")
+                or "http://localhost:11434",
+            )
+            measured = probe.dimension if probe.ok else None
+
+        effective = measured if measured is not None else int(new_dim)
+        if effective == stored:
+            return None
+
+        return _JSON(
+            {
+                "error": "embedding_width_mismatch",
+                "stored_dimension": stored,
+                "requested_dimension": effective,
+                "model_name": new_model,
+                "detail": (
+                    f"{new_model} produces {effective}-dimensional vectors and "
+                    f"this store holds {stored}-dimensional ones. Vectors of "
+                    f"different widths cannot be compared, so every memory "
+                    f"already stored would become unfindable by meaning. "
+                    f"Rebuild them first with: slm db migrate — or resend with "
+                    f"force=true if they have already been rebuilt."
+                ),
+            },
+            status_code=409,
+        )
+    except Exception:  # noqa: BLE001 - never block a save on the check failing
+        logger.exception("embedding width pre-check failed; allowing the save")
+        return None
+
+
 @router.put("/embedding/config")
 async def set_embedding_config(request: Request):
     """Update embedding configuration independently of mode switch."""
@@ -591,6 +651,20 @@ async def set_embedding_config(request: Request):
         new_key = body.get("api_key", config.embedding.api_key)
 
         old_emb = config.embedding
+
+        # A width that disagrees with what the store already holds is refused
+        # here, at the moment of writing, not merely offered as a check the
+        # caller may or may not have run. Vectors of different widths cannot be
+        # compared, so the store would keep answering similarity questions and
+        # every answer would be noise. ``force=true`` is the escape hatch for
+        # somebody who has already re-embedded.
+        if not bool(body.get("force")):
+            refusal = _refuse_incompatible_embedding(
+                config, old_emb, new_model, new_dim,
+            )
+            if refusal is not None:
+                return refusal
+
         config.embedding = EmbeddingConfig(
             model_name=new_model,
             dimension=new_dim,

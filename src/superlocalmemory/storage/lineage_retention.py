@@ -198,11 +198,29 @@ def prune_orphan_lineage(
             if not ids:
                 break
             placeholders = ",".join("?" * len(ids))
-            rows.write(
-                f"DELETE FROM derivation_lineage WHERE lineage_id IN ({placeholders})",
+            # Re-check absence in the DELETE itself. Selecting orphans and then
+            # deleting them by id is a check-then-act: another process can
+            # recreate the object between the two statements, and the row would
+            # be deleted anyway. Repeating the predicate makes the decision and
+            # the deletion one statement.
+            delete_sql = (
+                f"DELETE FROM derivation_lineage WHERE lineage_id IN ({placeholders}) "
+                f"AND NOT EXISTS (SELECT 1 FROM {table} t "
+                f"WHERE t.{column} = derivation_lineage.object_id)"
+            )
+            rows.write(delete_sql, tuple(ids))
+            # Count what survived the re-check rather than what was offered.
+            still = rows.query(
+                f"SELECT COUNT(*) FROM derivation_lineage "
+                f"WHERE lineage_id IN ({placeholders})",
                 tuple(ids),
             )
-            removed += len(ids)
+            remaining_here = int(still[0][0]) if still else 0
+            removed += len(ids) - remaining_here
+            if remaining_here == len(ids):
+                # Every row in this batch was rescued by a concurrent writer.
+                # Another pass would select the same rows forever.
+                break
         if removed:
             deleted[object_type] = removed
             logger.info(

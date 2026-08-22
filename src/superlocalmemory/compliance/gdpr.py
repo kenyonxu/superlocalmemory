@@ -499,10 +499,11 @@ class GDPRCompliance:
             counts["receipt_error"] = str(exc)
             raise
 
-        # C2 — erase code_graph.db before main profile rows (fail-closed: a
-        # code_graph failure is logged but does NOT abort the erasure; the
-        # graph is installation-level personal data with no profile_id column,
-        # so it is wiped entirely on any Art.17 request).
+        # C2 — erase this profile's share of code_graph.db before the main
+        # profile rows. How much of it is "this profile's share" depends on
+        # whether anybody else is in the store; see _erase_code_graph. A failure
+        # here does not abort the rest of the erasure, but it does block the
+        # completeness claim below.
         if data_root is not None:
             code_graph_result = self._erase_code_graph(
                 data_root,
@@ -677,6 +678,7 @@ class GDPRCompliance:
                 and not counts.get("backup_scan_failed")
                 and not counts.get("fts_residue_rows")
                 and not counts.get("working_sets_failed")
+                and not counts.get("code_graph_failed")
                 and not any(
                     counts.get(f"{t}_failed") for t, _ in self._FACT_KEYED_TABLES
                 )
@@ -845,6 +847,11 @@ class GDPRCompliance:
     def _erase_fact_keyed_tables(self, profile_id: str, counts: dict) -> None:
         """Delete rows that name this profile's facts but not the profile."""
         fact_ids = self._fact_ids_for(profile_id)
+        if fact_ids is None:
+            # Could not find out what to erase. Say so; do not report zero.
+            for table, _column in self._FACT_KEYED_TABLES:
+                counts[f"{table}_failed"] = 1
+            return
         for table, column in self._FACT_KEYED_TABLES:
             try:
                 exists = self._db.execute(
@@ -860,16 +867,22 @@ class GDPRCompliance:
                 continue
             removed = 0
             try:
-                # Chunked so a large profile does not build one enormous
-                # statement, and each chunk is independently committed.
+                # Count what was actually holding rows, not how many ids were
+                # offered — most facts have no expansion entry, and counting
+                # ids made the receipt claim erasures that never happened.
                 for start in range(0, len(fact_ids), 500):
                     chunk = fact_ids[start:start + 500]
                     placeholders = ",".join("?" * len(chunk))
+                    present = self._db.execute(
+                        f"SELECT COUNT(*) AS c FROM {table} "
+                        f"WHERE {column} IN ({placeholders})",
+                        tuple(chunk),
+                    )
+                    removed += int(dict(present[0])["c"]) if present else 0
                     self._db.execute(
                         f"DELETE FROM {table} WHERE {column} IN ({placeholders})",
                         tuple(chunk),
                     )
-                    removed += len(chunk)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GDPR erase: delete from %s failed: %s", table, exc)
                 counts[f"{table}_failed"] = 1
@@ -899,8 +912,13 @@ class GDPRCompliance:
                 found.add(str(row[0]))
         return found <= {profile_id}
 
-    def _fact_ids_for(self, profile_id: str) -> list[str]:
-        """Every fact id belonging to this profile, for cross-database joins."""
+    def _fact_ids_for(self, profile_id: str) -> list[str] | None:
+        """Every fact id belonging to this profile, for cross-database joins.
+
+        Returns None when the listing FAILED, which is not the same as a
+        profile with no facts. Collapsing the two is how a locked database
+        turned into "nothing to erase" and then into a receipt saying complete.
+        """
         try:
             rows = self._db.execute(
                 "SELECT fact_id FROM atomic_facts WHERE profile_id = ?",
@@ -908,7 +926,7 @@ class GDPRCompliance:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("GDPR erase: could not list facts for %r: %s", profile_id, exc)
-            return []
+            return None
         out: list[str] = []
         for row in rows:
             try:
@@ -973,11 +991,19 @@ class GDPRCompliance:
                         "structure describes a repository, not this person, and "
                         "deleting it would erase another data subject's records"
                     )
-                    if "code_memory_links" in tables and profile_id:
+                    owned = self._fact_ids_for(profile_id) if profile_id else []
+                    if owned is None:
+                        # Not knowing which links are this person's is a failure
+                        # to erase, not an empty erasure.
+                        raise sqlite3.OperationalError(
+                            "could not list this profile's facts, so its code "
+                            "links cannot be identified"
+                        )
+                    if "code_memory_links" in tables and owned:
                         cur = conn.execute(
                             "DELETE FROM code_memory_links WHERE slm_fact_id IN "
                             "(SELECT value FROM json_each(?))",
-                            (json.dumps(self._fact_ids_for(profile_id)),),
+                            (json.dumps(owned),),
                         )
                         total += cur.rowcount
                 conn.execute("PRAGMA foreign_keys=ON")

@@ -124,14 +124,52 @@ def test_an_empty_store_can_take_any_model(monkeypatch, tmp_path) -> None:
 def test_two_names_for_one_model_are_not_a_change(
     monkeypatch, store_with_768d_vectors
 ) -> None:
-    """Never reach the server for this: a false alarm teaches users to ignore it."""
-    _raises(monkeypatch, AssertionError("the server must not be asked"))
+    """A familiar name softens the message. It never replaces the measurement.
+
+    This test used to assert the opposite — that a recognised name skips the
+    probe entirely — and that shortcut was the hole. Names are not widths:
+    ``qwen3-embedding:0.6b`` and ``qwen3-embedding:8b`` looked like one model to
+    the name check and emit 1024 and 4096 numbers respectively.
+    """
+    _answers(monkeypatch, _Response(200, {"embeddings": [[0.0] * 768]}))
     result = check_embedding_model_change(
         "nomic-embed-text",
         db_path=store_with_768d_vectors,
         current_model="nomic-ai/nomic-embed-text-v1.5",
     )
     assert result.allowed is True
+    assert result.new_dimension == 768, "the width was not measured"
+
+
+def test_a_familiar_name_does_not_excuse_a_different_width(
+    monkeypatch, store_with_768d_vectors
+) -> None:
+    """The case that made the shortcut dangerous."""
+    _answers(monkeypatch, _Response(200, {"embeddings": [[0.0] * 4096]}))
+    result = check_embedding_model_change(
+        "qwen3-embedding:8b",
+        db_path=store_with_768d_vectors,
+        current_model="qwen3-embedding:0.6b",
+    )
+    assert result.allowed is False, (
+        "a 4096-wide model was allowed into a 768 store because its name looked "
+        "like the one already in use"
+    )
+    assert result.new_dimension == 4096
+
+
+def test_a_stopped_server_can_no_longer_be_talked_past(
+    monkeypatch, store_with_768d_vectors
+) -> None:
+    """If the width cannot be measured, the switch does not happen."""
+    _raises(monkeypatch, httpx.ConnectError("refused"))
+    result = check_embedding_model_change(
+        "nomic-embed-text",
+        db_path=store_with_768d_vectors,
+        current_model="nomic-ai/nomic-embed-text-v1.5",
+    )
+    assert result.allowed is False
+    assert "ollama serve" in result.message
 
 
 @pytest.mark.parametrize(
@@ -141,6 +179,10 @@ def test_two_names_for_one_model_are_not_a_change(
         ("nomic-embed-text:latest", "nomic-embed-text", True),
         ("nomic-embed-text", "mxbai-embed-large", False),
         ("bge-m3", "bge-large", False),
+        # An Ollama tag is part of the identity, not packaging. These two emit
+        # 1024 and 4096 numbers.
+        ("qwen3-embedding:0.6b", "qwen3-embedding:8b", False),
+        ("mxbai-embed-large:335m", "mxbai-embed-large:1b", False),
     ],
 )
 def test_which_names_mean_the_same_weights(left, right, same) -> None:

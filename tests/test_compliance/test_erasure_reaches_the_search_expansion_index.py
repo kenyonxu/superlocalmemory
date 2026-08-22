@@ -116,15 +116,58 @@ def test_a_store_without_the_index_is_not_an_error(tmp_path) -> None:
     conn.close()
 
 
-def test_it_runs_before_the_facts_are_deleted(store) -> None:
-    """Doing it after leaves nothing to join on, and reports success anyway."""
-    store.execute("DELETE FROM atomic_facts WHERE profile_id = 'alice'")
+def test_the_ordering_is_pinned_where_the_call_actually_is(store) -> None:
+    """Demonstrating the hazard is not the same as pinning the fix.
+
+    The previous version of this test called the helper directly after deleting
+    the facts and asserted the keys survived — true whether or not the erasure
+    calls the helper at the right point, or at all. This reads the source of
+    ``forget_profile`` and requires the call to come BEFORE the sweep that
+    removes the facts it joins against.
+    """
+    import inspect
+
+    source = inspect.getsource(GDPRCompliance.forget_profile)
+    call = source.find("_erase_fact_keyed_tables")
+    sweep = source.find("DELETE FROM {table} WHERE profile_id")
+    assert call != -1, "the erasure no longer reaches the fact-keyed tables at all"
+    assert sweep != -1, (
+        "the profile sweep has moved or been renamed; re-anchor this test on it"
+    )
+    assert call < sweep, (
+        "the fact-keyed erasure now runs after the facts are deleted, so its "
+        "join finds nothing and it erases nothing while reporting success"
+    )
+
+
+def test_erasing_nothing_because_the_lookup_failed_is_not_success(store) -> None:
+    """An unreadable database is not a profile with no memories."""
+    class Broken:
+        def execute(self, sql, params=()):
+            if "FROM atomic_facts" in sql:
+                raise sqlite3.OperationalError("database is locked")
+            return store.execute(sql, params)
+
+    counts: dict = {}
+    GDPRCompliance(Broken())._erase_fact_keyed_tables("alice", counts)
+
+    assert counts.get("fact_expansion_fts_failed") == 1, (
+        "a failed lookup was reported as nothing to erase"
+    )
+    assert _alt_keys(store) == {"a1", "a2", "b1"}
+
+
+def test_the_receipt_counts_rows_removed_not_ids_offered(store) -> None:
+    """Most memories have no expansion entry; counting ids inflates the receipt."""
+    store.execute(
+        "INSERT INTO atomic_facts VALUES ('a3','alice','alice has a third memory')"
+    )
+    store.execute("DELETE FROM fact_expansion_fts WHERE fact_id = 'a2'")
 
     counts: dict = {}
     GDPRCompliance(store)._erase_fact_keyed_tables("alice", counts)
 
-    # This is the failure mode being guarded against: with the facts gone, the
-    # join finds nothing and the alternate keys survive.
-    assert _alt_keys(store) == {"a1", "a2", "b1"}, (
-        "this test no longer demonstrates the ordering hazard it exists for"
+    assert counts["fact_expansion_fts"] == 1, (
+        f"alice has three memories and one expansion row; the receipt says "
+        f"{counts['fact_expansion_fts']}"
     )

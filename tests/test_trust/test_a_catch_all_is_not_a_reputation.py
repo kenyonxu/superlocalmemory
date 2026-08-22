@@ -34,8 +34,9 @@ NEUTRAL = 0.5
 class _MemoryDB:
     """A trust table in a dict, with the row shape the scorer expects."""
 
-    def __init__(self) -> None:
+    def __init__(self) -> None:  # noqa: D107 - see class docstring
         self.rows: dict[tuple[str, str, str], tuple[float, int]] = {}
+        self.writes: list[str] = []
 
     def execute(self, sql: str, params: tuple = ()):
         if sql.strip().upper().startswith("SELECT TRUST_SCORE"):
@@ -47,6 +48,9 @@ class _MemoryDB:
         if "FROM provenance" in sql:
             return []
         if sql.strip().upper().startswith(("INSERT", "UPDATE", "REPLACE")):
+            # Record it. Asserting on a dict the fake never fills would pass
+            # whether or not the code persisted anything.
+            self.writes.append(sql)
             return []
         return []
 
@@ -66,6 +70,13 @@ def test_case_and_padding_do_not_smuggle_it_through(name: str) -> None:
     assert TrustScorer(db).get_agent_trust(name, "default") == NEUTRAL
 
 
+def test_the_write_recorder_actually_records() -> None:
+    """The control for the test above: a named agent DOES write."""
+    db = _MemoryDB()
+    TrustScorer(db).record_signal("claude", "default", "store_success")
+    assert db.writes, "the fake never observed a write, so the assertion is dead"
+
+
 def test_a_named_agent_keeps_its_record() -> None:
     db = _MemoryDB()
     db.rows[("agent", "claude", "default")] = (0.857, 5)
@@ -79,8 +90,8 @@ def test_nothing_accumulates_against_the_catch_all() -> None:
     for _ in range(50):
         scorer.record_signal("unknown", "default", "store_success")
     assert scorer.get_agent_trust("unknown", "default") == NEUTRAL
-    assert ("agent", "unknown", "default") not in db.rows, (
-        "a signal was persisted against a bucket that names nobody"
+    assert db.writes == [], (
+        f"a signal was persisted against a bucket that names nobody: {db.writes[:2]}"
     )
 
 

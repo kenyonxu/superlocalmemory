@@ -314,11 +314,18 @@ def _extract_entities(text: str) -> list[str]:
 
 
 def _classify_sentence(sentence: str) -> FactType:
-    """Classify a sentence into a FactType using keyword markers."""
-    if looks_prospective(sentence):
-        return FactType.PROSPECTIVE
+    """Classify a sentence into a FactType using keyword markers.
+
+    Opinion is asked first, and the router asks in the same order. They used to
+    differ, so "I think we should ship next week" was a plan on one path and an
+    opinion on the other, for the same sentence. Opinion wins because an opinion
+    about a plan is not a commitment, and the list of what is coming up should
+    hold commitments.
+    """
     if _OPINION_MARKERS.search(sentence):
         return FactType.OPINION
+    if looks_prospective(sentence):
+        return FactType.PROSPECTIVE
     if _EXPERIENCE_MARKERS.search(sentence):
         return FactType.EPISODIC
     return FactType.SEMANTIC

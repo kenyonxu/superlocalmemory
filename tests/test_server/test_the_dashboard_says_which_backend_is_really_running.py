@@ -62,18 +62,44 @@ def test_a_matching_configuration_says_so(monkeypatch, tmp_path) -> None:
     assert body["graph_backend_active"] == "sqlite"
 
 
-def test_a_library_alone_is_not_enough(monkeypatch, tmp_path) -> None:
-    """Both have to be true: the library imports AND its data is on disk."""
+def test_both_the_library_and_its_data_are_required(monkeypatch, tmp_path) -> None:
+    """Neither alone is enough, and the library must IMPORT, not merely exist."""
     monkeypatch.setattr(config_api, "MEMORY_DIR", tmp_path)
-    import importlib.util
+    import importlib
 
-    real = importlib.util.find_spec
-    monkeypatch.setattr(
-        importlib.util, "find_spec",
-        lambda name, *a, **k: object() if name in ("pycozo", "lancedb") else real(name, *a, **k),
-    )
-    # The libraries "exist" but no directory does.
+    real = importlib.import_module
+
+    def importable(name, *args, **kwargs):
+        if name in ("pycozo", "lancedb"):
+            return object()
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", importable)
+
+    # The libraries import, but no data directory exists.
     assert config_api._active_backends("cozo", "lancedb") == ("sqlite", "sqlite-vec")
 
+    # Both true.
     (tmp_path / "cozo").mkdir()
     assert config_api._active_backends("cozo", "lancedb")[0] == "cozo"
+
+
+def test_a_library_present_but_broken_is_not_active(monkeypatch, tmp_path) -> None:
+    """A native extension that no longer matches the interpreter is on disk
+    and raises on import. Finding the file would have called it active."""
+    monkeypatch.setattr(config_api, "MEMORY_DIR", tmp_path)
+    (tmp_path / "cozo").mkdir()
+    import importlib
+
+    real = importlib.import_module
+
+    def broken(name, *args, **kwargs):
+        if name == "pycozo":
+            raise ImportError("dlopen failed: incompatible architecture")
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", broken)
+
+    assert config_api._active_backends("cozo", "lancedb")[0] == "sqlite", (
+        "a backend whose library will not import was reported as serving queries"
+    )

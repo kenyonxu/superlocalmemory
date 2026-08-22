@@ -34,7 +34,7 @@ from pathlib import Path
 #: writer against a migrated store fails its INSERT.  The ceiling is what turns
 #: that from a lost memory into a refusal to start, which is why it moves here
 #: and why it moves to the trailing serial rather than to 43.
-SUPPORTED_SCHEMA_VERSION: int = 47
+SUPPORTED_SCHEMA_VERSION: int = 48
 
 
 class SchemaVersionError(RuntimeError):

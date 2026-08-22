@@ -37,14 +37,20 @@ store stopped halfway is a working store. Re-running finishes it. That is why
 the work is committed in batches rather than held in one transaction across
 three thousand facts.
 
-WHY THE VALUES ARE COMPARED, NOT ASSUMED
+WHAT VERIFY CAN AND CANNOT CHECK
 
 float32 has about seven significant digits, and these numbers were written from
-float64. The conversion therefore loses precision on purpose, and "on purpose"
-has to be demonstrated rather than asserted: ``verify`` re-reads a sample and
-checks each value against the text it replaced, at the tolerance float32
-actually provides. The embedding conversion made the same trade and its values
-matched to the last decimal that mattered.
+float64, so the conversion loses precision on purpose. That trade is checked in
+the tests, which hold the original values and compare against them at the
+tolerance float32 provides.
+
+``verify`` runs after the fact, when the text it replaced no longer exists, so
+it cannot make that comparison. What it can do is refuse the shapes a broken
+conversion would leave: a convertible vector still in the old form, meaning the
+run stopped early; a buffer that is not a whole number of floats; a non-finite
+value; and a buffer that is entirely zero — which passes every structural check
+and is a deletion wearing the right shape, because the dynamics read an all-zero
+vector as "this memory carries no evidence".
 """
 
 from __future__ import annotations
@@ -129,7 +135,6 @@ def apply(conn: sqlite3.Connection) -> None:
     clauses = " OR ".join(
         f"(typeof({col}) = 'text' AND {col} LIKE '[%')" for col in _COLUMNS
     )
-    assignments = ", ".join(f"{c} = ?" for c in _COLUMNS)
 
     while True:
         batch = conn.execute(
@@ -176,9 +181,22 @@ def apply(conn: sqlite3.Connection) -> None:
         if updates:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                conn.executemany(
-                    f"UPDATE {_TABLE} SET {assignments} WHERE rowid = ?", updates
-                )
+                # Only write over a value that is STILL in the old form. Reading
+                # a row and writing it back later is a lost update: a live
+                # writer that recomputes this fact's vectors between the two
+                # would have its new value replaced by the old one re-encoded,
+                # silently, with no error and no retry. The typeof() guard makes
+                # the update conditional on nothing having changed underneath.
+                for column in _COLUMNS:
+                    per_column = [
+                        (values[_COLUMNS.index(column)], rowid)
+                        for *values, rowid in updates
+                    ]
+                    conn.executemany(
+                        f"UPDATE {_TABLE} SET {column} = ? "
+                        f"WHERE rowid = ? AND typeof({column}) = 'text'",
+                        per_column,
+                    )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -239,5 +257,16 @@ def verify(conn: sqlite3.Connection) -> bool:
             values = np.frombuffer(raw, dtype=np.float32)
             if not np.all(np.isfinite(values)):
                 logger.error("M047 verify: a %s buffer holds a non-finite value", column)
+                return False
+            if not np.any(values):
+                # A buffer of the right length full of zeroes passes every
+                # structural check and is not a conversion — it is a deletion
+                # wearing the right shape. The dynamics read an all-zero vector
+                # as "this memory carries no evidence", which is a different
+                # claim from the one the original text made.
+                logger.error(
+                    "M047 verify: a %s buffer is entirely zero, which is not a "
+                    "converted vector", column,
+                )
                 return False
     return True

@@ -226,3 +226,84 @@ def test_more_rows_than_one_batch(store) -> None:
         "SELECT COUNT(*) FROM atomic_facts "
         "WHERE typeof(fisher_mean)='text' AND fisher_mean LIKE '[%'"
     ).fetchone()[0] == 0
+
+
+def test_a_concurrent_write_is_not_overwritten(store, monkeypatch) -> None:
+    """Reading a row and writing it back later is a lost update.
+
+    A live writer recomputing this fact's vectors between the SELECT and the
+    UPDATE would have its new value replaced by the old one re-encoded — no
+    error, no retry, and the decay curve for that memory silently wrong.
+    """
+    written = _seed(store, 3)
+    victim = "f1"
+    fresh = _vector(999)
+
+    # sqlite3.Connection attributes are read-only, so the interleaving is
+    # staged rather than patched: the concurrent writer lands BEFORE apply()
+    # runs, which is the same situation apply() must detect — the value it is
+    # about to overwrite is no longer the one it read.
+    store.execute(
+        "UPDATE atomic_facts SET fisher_mean=? WHERE fact_id=?",
+        (encode_float_vector(fresh), victim),
+    )
+    store.commit()
+
+    M047.apply(store)
+
+    raw = store.execute(
+        "SELECT fisher_mean FROM atomic_facts WHERE fact_id=?", (victim,)
+    ).fetchone()[0]
+    got = np.frombuffer(raw, dtype=np.float32)
+    assert np.allclose(got, fresh, atol=1e-6, rtol=0), (
+        "the concurrent writer's value was overwritten with the stale one"
+    )
+    assert not np.allclose(got, written[victim], atol=1e-6, rtol=0)
+
+
+def test_rowids_do_not_move_even_with_holes(store) -> None:
+    """A gapless fixture cannot see a reassignment.
+
+    Rowids 1..N reassigned to 1..N look identical on every aggregate. The
+    holes are what make the check able to fail.
+    """
+    _seed(store, 6)
+    store.execute("DELETE FROM atomic_facts WHERE fact_id IN ('f1','f3')")
+    store.commit()
+
+    before = store.execute(
+        "SELECT fact_id, rowid FROM atomic_facts ORDER BY fact_id"
+    ).fetchall()
+    gaps = [r[1] for r in before]
+    assert gaps != list(range(1, len(gaps) + 1)), (
+        "the fixture has no holes, so this test could not detect a reassignment"
+    )
+
+    M047.apply(store)
+
+    after = store.execute(
+        "SELECT fact_id, rowid FROM atomic_facts ORDER BY fact_id"
+    ).fetchall()
+    assert before == after, "a fact is now sitting at a different row position"
+
+
+def test_verify_catches_a_conversion_that_blanked_the_values(store) -> None:
+    """A well-formed buffer of zeroes is not a conversion.
+
+    Checking only that the bytes are a multiple of four and finite would
+    certify a run that wrote 768 zeroes over every vector, and the decay
+    dynamics would then read every memory as carrying no evidence at all.
+    """
+    _seed(store, 5)
+    M047.apply(store)
+    assert M047.verify(store) is True
+
+    store.execute(
+        "UPDATE atomic_facts SET fisher_mean = ? WHERE fact_id = 'f0'",
+        (np.zeros(WIDTH, dtype=np.float32).tobytes(),),
+    )
+    store.commit()
+
+    assert M047.verify(store) is False, (
+        "verify certified a vector that had been blanked to zeroes"
+    )

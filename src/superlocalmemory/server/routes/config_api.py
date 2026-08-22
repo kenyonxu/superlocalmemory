@@ -214,11 +214,19 @@ def _active_backends(declared_graph: str, declared_vector: str) -> tuple[str, st
     its library imports, and its data directory is on disk.
     """
     def usable(module: str, directory: str) -> bool:
-        import importlib.util
+        # Importing it, not merely finding it. A package whose native extension
+        # no longer matches the interpreter is present on disk and raises on
+        # import, and "the file is there" would report it as serving queries it
+        # cannot answer.
+        import importlib
 
-        if importlib.util.find_spec(module) is None:
+        if not (MEMORY_DIR / directory).is_dir():
             return False
-        return (MEMORY_DIR / directory).is_dir()
+        try:
+            importlib.import_module(module)
+        except Exception:  # noqa: BLE001 - any import failure means unusable
+            return False
+        return True
 
     graph = "sqlite"
     if declared_graph in ("cozo", "auto") and usable("pycozo", "cozo"):

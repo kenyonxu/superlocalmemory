@@ -197,11 +197,21 @@ def _referencing_objects(conn: sqlite3.Connection) -> list[tuple[str, str, str]]
         ).fetchall()
     except sqlite3.Error:
         return []
+    # ``LIKE '%atomic_facts%'`` is a substring test, so it also matches a
+    # future ``atomic_facts_archive``. Narrow it to the table named as a whole
+    # word, in any of the spellings SQL allows.
+    import re as _re
+
+    named = _re.compile(
+        r"(?<![A-Za-z0-9_])[\"`\[]?" + _re.escape(_TABLE) + r"[\"`\]]?(?![A-Za-z0-9_])"
+    )
     for row in rows:
         kind, name, sql = str(row[0]), str(row[1]), str(row[2])
         # The shadow tables of the external-content FTS index name the table
         # too, and they are handled by the FTS rebuild, not by replay.
         if name.startswith(_FTS):
+            continue
+        if not named.search(sql):
             continue
         out.append((kind, name, sql))
     return out
