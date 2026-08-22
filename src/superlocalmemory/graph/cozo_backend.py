@@ -425,152 +425,25 @@ class CozoDBGraphBackend:
 
         return len(edge_dicts)
 
-    def recall_facts(
-        self,
-        seed_entity_ids: list[str],
-        *,
-        profile_id: str = "default",
-        depth: int = 4,
-        decay: float = 0.7,
-        threshold: float = 0.05,
-        top_k: int = 50,
-    ) -> list[tuple[str, float]]:
-        """Mirror SLM's entity-to-fact/fact-graph activation in Cozo storage.
-
-        Query values never enter Datalog source.  Cozo is used as the durable
-        projection; activation runs in Python so the algorithm stays aligned
-        with the SQLite in-memory channel and can be shadow-compared exactly.
-        """
-        if not seed_entity_ids:
-            return []
-        entity_rows = self._db.run(
-            "?[fact_id, entity_id] := *fact_entity{fact_id, entity_id, profile_id}, profile_id = $profile_id",
-            {"profile_id": profile_id},
-        )
-        edge_rows = self._db.run(
-            "?[from_id, to_id, weight] := *edge{from_id, to_id, weight, profile_id}, profile_id = $profile_id",
-            {"profile_id": profile_id},
-        )
-        entity_to_facts: dict[str, list[str]] = {}
-        fact_to_entities: dict[str, list[str]] = {}
-        for fact_id, entity_id in entity_rows.values.tolist() if len(entity_rows) else []:
-            entity_to_facts.setdefault(str(entity_id), []).append(str(fact_id))
-            fact_to_entities.setdefault(str(fact_id), []).append(str(entity_id))
-        adjacency: dict[str, list[tuple[str, float]]] = {}
-        for source_id, target_id, weight in edge_rows.values.tolist() if len(edge_rows) else []:
-            source, target = str(source_id), str(target_id)
-            # Match EntityGraphChannel: graph edges are bidirectional during
-            # activation even when stored as directed rows.
-            adjacency.setdefault(source, []).append((target, float(weight)))
-            adjacency.setdefault(target, []).append((source, float(weight)))
-
-        activation: dict[str, float] = {}
-        visited_entities = set(seed_entity_ids)
-        for entity_id in seed_entity_ids:
-            for fact_id in entity_to_facts.get(entity_id, ()):
-                activation[fact_id] = max(activation.get(fact_id, 0.0), 1.0)
-        frontier = set(activation)
-        for hop in range(1, depth):
-            hop_decay = decay ** hop
-            if hop_decay < threshold:
-                break
-            next_frontier: set[str] = set()
-            for fact_id in frontier:
-                for neighbor_id, _weight in adjacency.get(fact_id, ()):
-                    # SQLite intentionally ignores edge weights when graph
-                    # metrics are unavailable; use that same baseline here.
-                    score = activation[fact_id] * decay
-                    if score >= threshold and score > activation.get(neighbor_id, 0.0):
-                        activation[neighbor_id] = score
-                        next_frontier.add(neighbor_id)
-            for fact_id in frontier:
-                for entity_id in fact_to_entities.get(fact_id, ()):
-                    if entity_id in visited_entities:
-                        continue
-                    visited_entities.add(entity_id)
-                    for related_fact_id in entity_to_facts.get(entity_id, ()):
-                        if hop_decay > activation.get(related_fact_id, 0.0):
-                            activation[related_fact_id] = hop_decay
-                            next_frontier.add(related_fact_id)
-            frontier = next_frontier
-            if not frontier:
-                break
-        results = [(fact_id, score) for fact_id, score in activation.items() if score >= threshold]
-        if not results:
-            return []
-        maximum = max(score for _, score in results)
-        results = [(fact_id, score / maximum) for fact_id, score in results]
-        # Tie-break on fact_id, exactly as the SQLite channel does
-        # (``results.sort(key=lambda x: (-x[1], x[0]))``). Sorting on score
-        # alone left ties to dict insertion order, and an entity-seeded walk
-        # produces a large tie group at 1.0 — every fact directly linked to a
-        # query entity scores the same. Measured on a copy of the author's
-        # store: 12 of 20 results differed between the two paths, all at score
-        # 1.0, so the shadow comparison failed on every query and the projection
-        # was never used. Its contract is membership, and membership at the
-        # cut-off is decided by the tie-break, so the tie-break has to agree.
-        return sorted(results, key=lambda item: (-item[1], item[0]))[:top_k]
-
-    # ------------------------------------------------------------------
-    # Spreading Activation (Python BFS over CozoDB edges)
-    # ------------------------------------------------------------------
-
-    def spreading_activation(
-        self,
-        seed_entities: list[str],
-        depth: int = 3,
-        decay: float = 0.5,
-        top_k: int = 50,
-    ) -> list[tuple[str, float]]:
-        """BFS from seed nodes with weight decay per hop.
-
-        Uses CozoDB as fast edge store, Python for BFS logic.
-        Returns [(entity_id, activation_score), ...] sorted by score desc.
-        """
-        if not seed_entities:
-            return []
-
-        scores: dict[str, float] = {}
-        current_frontier: set[str] = set(seed_entities)
-        for s in seed_entities:
-            scores[s] = 1.0
-
-        for d in range(depth):
-            if not current_frontier:
-                break
-            next_frontier: set[str] = set()
-            hop_multiplier = decay ** (d + 1)
-
-            for entity_id in current_frontier:
-                # Query all outgoing edges from this entity
-                try:
-                    result = self._db.run("""
-                        ?[to_id, weight] :=
-                            *edge{from_id, to_id, weight}, from_id = $entity_id
-                    """, {"entity_id": entity_id})
-                    df = result if hasattr(result, "values") else result
-                    if df is None or len(df) == 0:
-                        continue
-                    rows = df.values.tolist() if hasattr(df, "values") else []
-                    for to_id, weight in rows:
-                        to_id_str = str(to_id)
-                        score = hop_multiplier * float(weight)
-                        if to_id_str not in scores or score > scores[to_id_str]:
-                            scores[to_id_str] = score
-                        next_frontier.add(to_id_str)
-                except Exception:
-                    continue
-
-            current_frontier = next_frontier
-
-        # Sort by score desc, return top_k
-        # Same deterministic tie-break as recall_facts and the SQLite channel.
-        ranked = sorted(scores.items(), key=lambda x: (-x[1], x[0]))
-        return ranked[:top_k]
-
-    # ------------------------------------------------------------------
-    # PageRank (Python iterative over CozoDB edges)
-    # ------------------------------------------------------------------
+    # recall_facts() and spreading_activation() were here, and they were a
+    # second implementation of the walk in retrieval/entity_channel.py. They did
+    # not compute the same function: the channel multiplies activation by a
+    # PageRank factor every hop and these did not, so on a real store 3,567 of
+    # 3,667 shared facts came out with different scores, the result sets
+    # differed, and the projected path failed its shadow comparison on every
+    # query and fell back to SQLite. The projection was correct data that
+    # nothing could use.
+    #
+    # spreading_activation() also queried Cozo once per frontier node: 200
+    # single-node queries measured 18,125 ms against 303 ms for one batched
+    # query returning the identical 6,046 rows. With a mean degree of 228 over
+    # four hops that is minutes per recall.
+    #
+    # The walk now lives in retrieval/spreading.py, once, as a pure function of
+    # an AdjacencySnapshot. A storage backend supplies adjacency, not answers —
+    # which is also why there is no longer anything to shadow-compare. Do not
+    # reintroduce a traversal here; add an AdjacencySource adapter instead
+    # (retrieval/graph_adjacency.py).
 
     def pagerank(
         self, damping: float = 0.85, max_iter: int = 100

@@ -21,6 +21,7 @@ import threading
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
+from superlocalmemory.retrieval import spreading
 from superlocalmemory.retrieval.scope_policy import (
     authorized_fact_ids,
     filter_authorized_results,
@@ -338,6 +339,32 @@ class EntityGraphChannel:
         # v3.4.1: Load graph intelligence metrics (P0)
         self._load_graph_metrics(profile_id)
 
+        # One array-shaped view of the same graph, for the walk to run over.
+        # Built here rather than per query because it is derived entirely from
+        # the maps above and shares their staleness lifecycle exactly.
+        from superlocalmemory.retrieval.graph_adjacency import snapshot_from_maps
+
+        self._snapshot = snapshot_from_maps(
+            self._adj,
+            self._entity_to_facts,
+            self._fact_to_entities,
+            self._graph_metrics,
+            source=getattr(self, "_adjacency_source_name", "sqlite"),
+            profile_id=profile_id,
+            # Every visible fact is a node, including the ones with no edges
+            # yet. Ingestion is queryable-first, so a memory stored a moment ago
+            # has entities and no edges, and it must still be reachable.
+            nodes=self._visible_fact_ids,
+            # Only a real count. The staleness check above compares this value
+            # with ``==``, which a MagicMock tolerates; an ordering comparison
+            # does not, and the mock DBs in the test suite reach here.
+            fact_count=(
+                current_fact_count
+                if isinstance(current_fact_count, int) and current_fact_count >= 0
+                else 0
+            ),
+        )
+
         logger.info(
             "Loaded adjacency cache: %d nodes, %d edges, %d entity mappings for profile %s",
             len(self._adj),
@@ -513,113 +540,93 @@ class EntityGraphChannel:
             include_shared=include_shared,
         )
 
-        # v3.4.5: Route to CozoDB if active
-        if self._cozo is not None:
-            return self._search_via_cozo(
-                query,
-                raw_entities,
-                profile_id,
-                top_k,
-                include_global=include_global,
-                include_shared=include_shared,
-            )
-
         canonical_ids = self._resolve_entities(raw_entities, profile_id)
         if not canonical_ids:
             return []
 
-        # Seed activation from direct entity-linked facts
-        # Use in-memory map when available, fall back to SQL for mock/test DBs
+        # One walk, over the array-shaped snapshot when there is one. The
+        # dict form below is kept for the mock/lightweight DBs that never build
+        # an adjacency cache, and it is the only path that still pays a Python
+        # loop per edge.
+        snapshot = getattr(self, "_snapshot", None)
+        if snapshot is not None and snapshot.node_count:
+            activation_result = spreading.activate(
+                snapshot,
+                canonical_ids,
+                decay=self._decay,
+                threshold=self._threshold,
+                max_hops=self._max_hops,
+            )
+            spreading.apply_community_bias(
+                activation_result.scores, snapshot, canonical_ids,
+            )
+            activation = activation_result.as_mapping(snapshot, threshold=-1.0)
+            if activation:
+                self._suppress_contradictions(activation, profile_id)
+            results = [
+                (fid, sc) for fid, sc in activation.items() if sc >= self._threshold
+            ]
+            if not results:
+                return []
+            max_score = max(sc for _, sc in results)
+            if max_score > 0:
+                results = [(fid, sc / max_score) for fid, sc in results]
+            results.sort(key=lambda x: (-x[1], x[0]))
+            return filter_authorized_results(
+                self._db,
+                results,
+                profile_id,
+                include_global=include_global,
+                include_shared=include_shared,
+            )[:top_k]
+
+        # Seed activation from direct entity-linked facts (no adjacency cache:
+        # mock and lightweight DBs only). Graph intelligence is unavailable on
+        # this path by design -- see Phase 7 LLD H-01.
         activation: dict[str, float] = defaultdict(float)
         visited_entities: set[str] = set(canonical_ids)
-
-        use_cache = bool(self._entity_to_facts)
+        use_cache = False
         for eid in canonical_ids:
-            if use_cache:
-                for fid in self._entity_to_facts.get(eid, ()):
-                    activation[fid] = max(activation[fid], 1.0)
-            else:
-                for fact in self._db.get_facts_by_entity(
-                    eid,
-                    profile_id,
-                    include_global=include_global,
-                    include_shared=include_shared,
-                ):
-                    activation[fact.fact_id] = max(activation[fact.fact_id], 1.0)
+            for fact in self._db.get_facts_by_entity(
+                eid,
+                profile_id,
+                include_global=include_global,
+                include_shared=include_shared,
+            ):
+                activation[fact.fact_id] = max(activation[fact.fact_id], 1.0)
 
-        # Spreading activation through graph edges (all in-memory O(1) lookups)
         frontier = set(activation.keys())
         for hop in range(1, self._max_hops):
             hop_decay = self._decay**hop
             if hop_decay < self._threshold:
                 break
             next_frontier: set[str] = set()
-
             for fid in frontier:
-                if use_cache:
-                    neighbors = self._adj.get(fid, ())
-                    for neighbor, edge_weight in neighbors:
-                        # v3.4.2: Only apply edge_weight and PageRank bias when
-                        # graph metrics are available. Without metrics, edge_weight
-                        # dampens propagation by ~14% with no compensating boost,
-                        # causing retrieval regression (68.4% vs 70.4% on LoCoMo).
-                        if self._graph_metrics:
-                            weighted = activation[fid] * self._decay * edge_weight
-                            if neighbor in self._graph_metrics:
-                                target_pr = self._graph_metrics[neighbor].get("pagerank_score", 0.0)
-                                pr_boost = min(1.0 + target_pr * 2.0, 2.0)
-                                weighted *= pr_boost
-                        else:
-                            weighted = activation[fid] * self._decay
-                        if weighted >= self._threshold and weighted > activation.get(neighbor, 0.0):
-                            activation[neighbor] = weighted
-                            next_frontier.add(neighbor)
-                else:
-                    # NOTE: SQL fallback path does NOT use graph intelligence (P1/P2/P3).
-                    # Graph intelligence is only available on the in-memory cache path.
-                    # This fallback exists for mock/test DBs. See Phase 7 LLD H-01.
-                    for edge in self._db.get_edges_for_node(
-                        fid,
-                        profile_id,
-                        include_global=include_global,
-                        include_shared=include_shared,
+                for edge in self._db.get_edges_for_node(
+                    fid,
+                    profile_id,
+                    include_global=include_global,
+                    include_shared=include_shared,
+                ):
+                    neighbor = edge.target_id if edge.source_id == fid else edge.source_id
+                    propagated = activation[fid] * self._decay
+                    if propagated >= self._threshold and propagated > activation.get(
+                        neighbor, 0.0
                     ):
-                        neighbor = edge.target_id if edge.source_id == fid else edge.source_id
-                        propagated = activation[fid] * self._decay
-                        if propagated >= self._threshold and propagated > activation.get(
-                            neighbor, 0.0
-                        ):
-                            activation[neighbor] = propagated
-                            next_frontier.add(neighbor)
-
-            # Discover new entities from activated facts
-            if use_cache:
-                new_eids: list[str] = []
-                for fid in frontier:
-                    for eid in self._fact_to_entities.get(fid, ()):
-                        if eid not in visited_entities:
-                            visited_entities.add(eid)
-                            new_eids.append(eid)
-                for eid in new_eids:
-                    for fid in self._entity_to_facts.get(eid, ()):
-                        if hop_decay > activation.get(fid, 0.0):
-                            activation[fid] = hop_decay
-                            next_frontier.add(fid)
-            else:
-                # SQL fallback (mock/test DBs)
-                new_eids_sql = self._discover_entities(frontier, profile_id, visited_entities)
-                for eid in new_eids_sql:
-                    visited_entities.add(eid)
-                    for fact in self._db.get_facts_by_entity(
-                        eid,
-                        profile_id,
-                        include_global=include_global,
-                        include_shared=include_shared,
-                    ):
-                        if hop_decay > activation.get(fact.fact_id, 0.0):
-                            activation[fact.fact_id] = hop_decay
-                            next_frontier.add(fact.fact_id)
-
+                        activation[neighbor] = propagated
+                        next_frontier.add(neighbor)
+            new_eids_sql = self._discover_entities(frontier, profile_id, visited_entities)
+            for eid in new_eids_sql:
+                visited_entities.add(eid)
+                for fact in self._db.get_facts_by_entity(
+                    eid,
+                    profile_id,
+                    include_global=include_global,
+                    include_shared=include_shared,
+                ):
+                    if hop_decay > activation.get(fact.fact_id, 0.0):
+                        activation[fact.fact_id] = hop_decay
+                        next_frontier.add(fact.fact_id)
             frontier = next_frontier
             if not frontier:
                 break
@@ -747,77 +754,32 @@ class EntityGraphChannel:
         if not canonical_ids:
             return {}
 
-        # Run full spreading activation (same as search())
-        activation: dict[str, float] = defaultdict(float)
-        visited_entities: set[str] = set(canonical_ids)
-        use_cache = bool(self._entity_to_facts)
-
-        for eid in canonical_ids:
-            if use_cache:
-                for fid in self._entity_to_facts.get(eid, ()):
-                    activation[fid] = max(activation[fid], 1.0)
-            else:
-                for fact in self._db.get_facts_by_entity(
-                    eid,
-                    profile_id,
-                    include_global=include_global,
-                    include_shared=include_shared,
-                ):
-                    activation[fact.fact_id] = max(activation[fact.fact_id], 1.0)
-
-        frontier = set(activation.keys())
-        for hop in range(1, self._max_hops):
-            hop_decay = self._decay**hop
-            if hop_decay < self._threshold:
-                break
-            next_frontier: set[str] = set()
-            for fid in frontier:
-                if use_cache:
-                    for neighbor, edge_weight in self._adj.get(fid, ()):
-                        if self._graph_metrics:
-                            weighted = activation[fid] * self._decay * edge_weight
-                            if neighbor in self._graph_metrics:
-                                pr = self._graph_metrics[neighbor].get("pagerank_score", 0.0)
-                                weighted *= min(1.0 + pr * 2.0, 2.0)
-                        else:
-                            weighted = activation[fid] * self._decay
-                        if weighted >= self._threshold and weighted > activation.get(neighbor, 0.0):
-                            activation[neighbor] = weighted
-                            next_frontier.add(neighbor)
-
-            if use_cache:
-                for fid in frontier:
-                    for eid in self._fact_to_entities.get(fid, ()):
-                        if eid not in visited_entities:
-                            visited_entities.add(eid)
-                            for linked_fid in self._entity_to_facts.get(eid, ()):
-                                if hop_decay > activation.get(linked_fid, 0.0):
-                                    activation[linked_fid] = hop_decay
-                                    next_frontier.add(linked_fid)
-
-            frontier = next_frontier
-            if not frontier:
-                break
-
-        # Community-aware boosting (same as search)
-        if self._graph_metrics and use_cache:
-            from collections import Counter as _Counter
-
-            seed_communities: _Counter = _Counter()
-            for eid in canonical_ids:
-                for fid in self._entity_to_facts.get(eid, ()):
-                    m = self._graph_metrics.get(fid, {})
-                    comm = m.get("community_id")
-                    if comm is not None:
-                        seed_communities[comm] += 1
-            if seed_communities:
-                total_seeds = sum(seed_communities.values())
-                for fid in list(activation.keys()):
-                    m = self._graph_metrics.get(fid, {})
-                    fact_comm = m.get("community_id")
-                    if fact_comm is not None and fact_comm in seed_communities:
-                        boost = min(1.0 + 0.15 * (seed_communities[fact_comm] / total_seeds), 1.3)
-                        activation[fid] *= boost
+        # The same walk as search(), over the same snapshot. This method used
+        # to carry its own copy of the loop, which is how the two drifted: the
+        # community bias here has never applied search()'s outsider penalty, and
+        # the only record of that was the absence of six lines.
+        snapshot = getattr(self, "_snapshot", None)
+        if snapshot is None or not snapshot.node_count:
+            return {}
+        activation_result = spreading.activate(
+            snapshot,
+            canonical_ids,
+            decay=self._decay,
+            threshold=self._threshold,
+            max_hops=self._max_hops,
+        )
+        spreading.apply_community_bias(
+            activation_result.scores,
+            snapshot,
+            canonical_ids,
+            # Re-scoring another channel's candidates, so a fact outside every
+            # seed community is not damped -- see apply_community_bias.
+            penalise_outsiders=False,
+        )
+        activation = {
+            fid: float(activation_result.scores[idx])
+            for fid, idx in snapshot.node_index.items()
+        }
 
         # Extract scores ONLY for the candidate set, normalize to [0, 1]
         candidate_set = allowed_candidates
@@ -959,82 +921,3 @@ class EntityGraphChannel:
         return new
 
     # v3.4.5: CozoDB-backed search (Sprint 2)
-    def _search_via_cozo(
-        self,
-        query: str,
-        raw_entities: list[str],
-        profile_id: str,
-        top_k: int,
-        *,
-        include_global: bool = False,
-        include_shared: bool = False,
-    ) -> list[tuple[str, float]]:
-        """Entity graph search routed through CozoDB.
-
-        Uses CozoDB for spreading activation — avoids loading
-        the full adjacency graph into memory.
-        Falls back to in-memory adjacency if CozoDB fails.
-        """
-        if not raw_entities:
-            return []
-
-        canonical_ids = self._resolve_entities(raw_entities, profile_id)
-        if not canonical_ids:
-            return []
-
-        # Scoped/global recall has deliberately more complex authorization
-        # semantics than the promoted default-profile projection.  Never let
-        # a projection broaden that boundary: SQLite remains authoritative.
-        if include_global or include_shared:
-            return self._search_without_cozo(query, profile_id, top_k)
-
-        try:
-            scored = self._cozo.recall_facts(
-                canonical_ids,
-                profile_id=profile_id,
-                depth=self._max_hops,
-                decay=self._decay,
-                threshold=self._threshold,
-                top_k=top_k * 2,
-            )
-
-            cozo_results = filter_authorized_results(
-                self._db,
-                scored,
-                profile_id,
-                include_global=include_global,
-                include_shared=include_shared,
-            )[:top_k]
-            # Shadow SQLite before accepting a projected answer.  The graph
-            # channel has optional PageRank/community enrichments, so exact
-            # Score equality is neither required nor useful; result *membership*
-            # is the correctness contract. Order within the same fact set is
-            # tolerated — requiring identical ordering would fail closed on
-            # every query with score ties, leaving Cozo permanently unused.
-            # Any membership divergence is recorded and fails closed to SQLite.
-            sqlite_results = self._search_without_cozo(query, profile_id, top_k)
-            matches = {fact_id for fact_id, _ in cozo_results} == {
-                fact_id for fact_id, _ in sqlite_results
-            }
-            record = getattr(self._cozo, "record_shadow_comparison", None)
-            if callable(record):
-                record(matches=matches, projected=cozo_results, canonical=sqlite_results)
-            return cozo_results if matches else sqlite_results
-        except Exception as exc:
-            record = getattr(self._cozo, "record_shadow_error", None)
-            if callable(record):
-                record(str(exc))
-            return self._search_without_cozo(query, profile_id, top_k)
-
-    def _search_without_cozo(
-        self,
-        query: str,
-        profile_id: str,
-        top_k: int,
-    ) -> list[tuple[str, float]]:
-        """Run canonical SQLite entity recall without recursive projection use."""
-        cozo, self._cozo = self._cozo, None
-        try:
-            return self._search_locked(query, profile_id, top_k)
-        finally:
-            self._cozo = cozo
