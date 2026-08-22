@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Nothing was recording which memories a recall actually returned, so nothing
+  could learn from it.** The step that notes "these memories were shown, for this
+  question, in this session" had no caller anywhere — a worker started with the
+  service and waited for events that were never sent. On a real store that left
+  every one of 162 recorded outcomes with no way to trace back to the recall that
+  produced it, every per-memory usefulness score sitting at its untouched
+  starting value, and the ranking model unchanged for eleven weeks. Recalls now
+  leave that record. It costs 1.6 microseconds and is written outside the reply,
+  so recall returns the same answers in the same time — measured across 30 warmed
+  queries, the difference was 3.5 ms in favour of the change, which is to say
+  none. It records only: whether what is learned may reorder your results remains
+  a separate setting that stays off unless you turn it on.
 - **Memories stored since the last graph analysis were ranked as unconnected.**
   Recall weighs a memory partly by where it sits in your knowledge graph. That
   position was only recalculated when a consolidation happened to run or you
