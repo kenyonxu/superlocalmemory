@@ -438,6 +438,9 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     "score_contract_version": result.get("score_contract_version", "2"),
                     "calibration_status": result.get("calibration_status", "uncalibrated"),
                     "calibration_id": result.get("calibration_id"),
+                    # Quote this back to report_outcome and the report ties to
+                    # this exact answer instead of being matched by guesswork.
+                    "query_id": result.get("query_id", ""),
                     "answer_confidence": result.get("answer_confidence"),
                     "abstained": result.get("abstained", False),
                     "abstention_reason": result.get("abstention_reason"),

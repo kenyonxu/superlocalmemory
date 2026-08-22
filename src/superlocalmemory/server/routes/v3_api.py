@@ -24,6 +24,29 @@ from superlocalmemory.server.route_mutations import authorize_route_mutation
 
 logger = logging.getLogger(__name__)
 
+def _signal_session_id() -> str:
+    """A name for the caller, for matching an outcome back to this recall.
+
+    The agent id the request arrived under, when it arrived under one. Falls
+    back to the workspace, which keeps dashboard and scripted traffic separable
+    from an agent's. Never empty: an unnamed recall leaves no record.
+    """
+    try:
+        from superlocalmemory.mcp.agent_context import get_current_agent_id
+
+        agent = str(get_current_agent_id() or "").strip()
+        if agent:
+            return f"agent:{agent}"
+    except Exception:  # noqa: BLE001 -- naming the caller must never fail a read
+        pass
+    try:
+        from superlocalmemory.server.routes.helpers import get_active_profile
+
+        return f"api:{get_active_profile()}"
+    except Exception:  # noqa: BLE001
+        return "api:default"
+
+
 router = APIRouter(prefix="/api/v3", tags=["v3"])
 
 
@@ -1222,6 +1245,10 @@ async def recall_trace(request: Request):
                 window=window or None, as_of=_as_of,
                 known_as_of=_known_as_of, valid_at=_valid_at,
                 include_unknown=include_unknown,
+                # Whoever asked, by the name they arrived under. Without a name
+                # the record of this recall is discarded and no outcome
+                # reported afterwards can be matched back to it.
+                session_id=_signal_session_id(),
             ),
         )
         elapsed_ms = round((_time.monotonic() - t0) * 1000, 1)

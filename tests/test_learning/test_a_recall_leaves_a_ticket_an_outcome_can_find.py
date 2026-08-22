@@ -112,17 +112,37 @@ class TestARecallLeavesATicket:
 
 
 class TestItCannotHurtTheReader:
-    def test_a_recall_with_no_session_is_not_recorded(
+    def test_a_recall_with_no_session_is_recorded_under_a_stable_name(
         self, engine_with_mock_deps,
     ) -> None:
-        """A ticket nothing can key on is worse than none: the hooks match by
-        session, so it would sit in the table forever and never resolve."""
+        """Almost no caller names a session, so refusing to record those meant
+        recording almost nothing.
+
+        This asserted the opposite until it was measured: one of the thirty-five
+        places that call recall threads a session through, and the network route
+        threads none, so every other recall left no trace at all. A name that is
+        stable for this process is not as good as the caller's own, and it is
+        far better than an empty one, which is discarded and can never be
+        matched to anything.
+        """
         engine = force_sync_enrichment(engine_with_mock_deps)
         engine.store("A memory recalled without a session.")
 
         engine.recall("without a session", limit=5)
 
-        assert _events() == []
+        (event,) = _events()
+        assert event.session_id, "the recall left a record with no name on it"
+        assert event.query_id, "the record cannot be joined to an outcome"
+
+    def test_a_ticket_with_no_name_is_still_refused(self) -> None:
+        """The control for the rule above. The name has to come from somewhere;
+        the queue must keep refusing one that does not."""
+        before = outcome_queue.get_counters()["recall_enqueued"]
+        outcome_queue.enqueue_recall(outcome_queue.RecallEvent(
+            session_id="", profile_id="default", query="q",
+            fact_ids=(), query_id="x",
+        ))
+        assert outcome_queue.get_counters()["recall_enqueued"] == before
 
     def test_a_broken_queue_does_not_break_the_recall(
         self, engine_with_mock_deps, monkeypatch,

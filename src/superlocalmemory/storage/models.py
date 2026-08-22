@@ -467,6 +467,10 @@ class RecallResponse:
     score_contract_version: str = "2"
     calibration_status: str = "uncalibrated"
     calibration_id: str | None = None
+    #: Names this particular answer, so an outcome reported later can be tied
+    #: back to it exactly rather than guessed at from which memories overlap.
+    #: Empty means the answer was produced by a path that does not record one.
+    query_id: str = ""
     answer_confidence: float | None = None
     abstained: bool = False
     abstention_reason: str | None = None

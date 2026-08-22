@@ -65,6 +65,7 @@ class OutcomeTracker:
         outcome: str,
         profile_id: str,
         context: dict[str, Any] | None = None,
+        recall_query_id: str = "",
     ) -> ActionOutcome:
         """Record an outcome against one or more facts.
 
@@ -74,6 +75,10 @@ class OutcomeTracker:
             outcome: One of "success", "failure", "partial".
             profile_id: Profile scope.
             context: Arbitrary metadata dict.
+            recall_query_id: The name of the answer being reported on, as it
+                came back from recall. Supplying it ties this report to that
+                exact answer; leaving it empty falls back to matching on which
+                memories overlap, inside a time window.
 
         Returns:
             The persisted ActionOutcome.
@@ -92,22 +97,43 @@ class OutcomeTracker:
             context=dict(context) if context else {},
         )
 
+        columns = [
+            "outcome_id", "profile_id", "query", "fact_ids_json", "outcome",
+            "context_json", "timestamp",
+        ]
+        values: list[Any] = [
+            ao.outcome_id, ao.profile_id, ao.query, json.dumps(ao.fact_ids),
+            ao.outcome, json.dumps(ao.context), ao.timestamp,
+        ]
+        # Only when there is one to write, and only on a store that has the
+        # column: it arrives with a migration, and an older store must keep
+        # recording outcomes rather than start failing on them.
+        if recall_query_id and self._has_recall_query_id():
+            columns.append("recall_query_id")
+            values.append(str(recall_query_id))
+        placeholders = ", ".join("?" * len(values))
         self._db.execute(
-            "INSERT OR REPLACE INTO action_outcomes "
-            "(outcome_id, profile_id, query, fact_ids_json, outcome, "
-            " context_json, timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                ao.outcome_id,
-                ao.profile_id,
-                ao.query,
-                json.dumps(ao.fact_ids),
-                ao.outcome,
-                json.dumps(ao.context),
-                ao.timestamp,
-            ),
+            f"INSERT OR REPLACE INTO action_outcomes ({', '.join(columns)}) "
+            f"VALUES ({placeholders})",
+            tuple(values),
         )
         return ao
+
+    def _has_recall_query_id(self) -> bool:
+        """Whether this store records which answer an outcome is about."""
+        cached = getattr(self, "_recall_query_id_column", None)
+        if cached is not None:
+            return bool(cached)
+        try:
+            rows = self._db.execute("PRAGMA table_info(action_outcomes)")
+            present = any(
+                str(dict(row).get("name") or row[1]) == "recall_query_id"
+                for row in rows
+            )
+        except Exception:  # noqa: BLE001
+            present = False
+        self._recall_query_id_column = present
+        return present
 
     # ------------------------------------------------------------------
     # Public API — Querying

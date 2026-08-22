@@ -36,6 +36,7 @@ def register_v28_tools(server, get_engine: Callable) -> None:
         memory_ids: str,
         outcome: str,
         context: str = "",
+        recall_query_id: str = "",
     ) -> dict:
         """Report outcome of using recalled memories.
 
@@ -46,6 +47,10 @@ def register_v28_tools(server, get_engine: Callable) -> None:
             memory_ids: Comma-separated list of fact/memory IDs.
             outcome: One of 'success', 'failure', 'partial'.
             context: Optional freetext context about the outcome.
+            recall_query_id: The ``query_id`` that came back with the recall
+                this report is about. Passing it ties the report to that exact
+                answer; leaving it out falls back to matching on which memories
+                overlap, within a time window.
         """
         try:
             engine = get_engine()
@@ -64,6 +69,7 @@ def register_v28_tools(server, get_engine: Callable) -> None:
                 outcome=outcome,
                 profile_id=engine.profile_id,
                 context=ctx,
+                recall_query_id=str(recall_query_id or "").strip(),
             )
 
             # v3.4.7: Bridge outcomes → learning signals for two-way learning.

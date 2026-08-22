@@ -670,6 +670,11 @@ async def search_memories(request: Request, body: SearchRequest):
                 lambda: engine.recall(
                     body.query, limit=body.limit, fast=True,
                     window=_window or None,
+                    # Name the surface. A recall with no name leaves no record
+                    # an outcome can be matched to, and a search typed into the
+                    # dashboard is one continuous thread of use, not a
+                    # conversation turn.
+                    session_id=f"dashboard:{get_active_profile()}",
                 ),
             )
             # A run_in_executor thread cannot be cancelled, and wait_for() on it

@@ -102,6 +102,14 @@ class MemoryEngine:
         self._caps = get_capabilities(config.mode)
         self._capabilities = capabilities
         self._profile_id = config.active_profile
+        # The session a recall belongs to, for matching an outcome back to it
+        # later. Set from whatever the caller last named; falls back to a stable
+        # per-process id so a caller that never names one still leaves a record
+        # that can be matched to another call from the same process. An empty
+        # one is dropped by the queue, which is how 34 of 35 recall paths came
+        # to leave no record at all.
+        self._last_session_id: str = ""
+        self._ambient_session_id: str = f"engine:{os.getpid()}"
         self._initialized = False
 
         self._db = None
@@ -1112,24 +1120,50 @@ class MemoryEngine:
                 enqueue_recall,
             )
 
+            # A fresh id per answer, put on the response as well as the
+            # ticket. `calibration_id` was the obvious candidate and is wrong:
+            # it is None on most paths, and an empty join key is exactly the
+            # state that made all 162 recorded outcomes unmatchable. Returning
+            # it is what makes it useful -- until an answer carried its own
+            # name, no caller could quote one back, so an outcome could only
+            # ever be matched by guessing from overlapping memories.
+            answer_id = uuid.uuid4().hex
+            try:
+                response.query_id = answer_id
+            except Exception:  # noqa: BLE001 -- an older response shape
+                pass
             enqueue_recall(RecallEvent(
-                session_id=str(session_id or ""),
+                session_id=self._session_for_signals(session_id),
                 profile_id=str(pid),
                 query=query,
                 fact_ids=[
                     r.fact.fact_id for r in (response.results or [])
                     if getattr(r, "fact", None) is not None
                 ],
-                # A fresh id per recall. `calibration_id` was the obvious
-                # candidate and is wrong: it is None on most paths, and an empty
-                # join key is exactly the state that made all 162 recorded
-                # outcomes unmatchable.
-                query_id=uuid.uuid4().hex,
+                query_id=answer_id,
             ))
         except Exception as exc:  # noqa: BLE001 -- a read must not fail on this
             logger.debug("recall outcome ticket skipped: %s", exc)
 
         return response
+
+    def _session_for_signals(self, session_id: str | None) -> str:
+        """The name to file this call's outcome under.
+
+        In order: what the caller said, then the last thing any caller on this
+        engine said, then a stable id for this process. Never empty, because an
+        empty one is discarded and the call then leaves no trace an outcome
+        could ever be matched to -- which is what happened on every path that
+        did not thread a session through, meaning nearly all of them.
+
+        Three attribute reads and no I/O. Recall must not get slower to record
+        that it happened.
+        """
+        named = str(session_id or "").strip()
+        if named:
+            self._last_session_id = named
+            return named
+        return self._last_session_id or self._ambient_session_id
 
     # -- Session operations -------------------------------------------------
 
