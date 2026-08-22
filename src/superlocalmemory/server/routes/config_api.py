@@ -523,3 +523,126 @@ def put_graph_config(request: Request, body: GraphPruningConfigUpdate):
     except Exception:
         logger.exception("put_graph_config failed")
         return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# Ollama model selection
+# ---------------------------------------------------------------------------
+
+
+class OllamaModelCheck(BaseModel):
+    """A model a user is considering, and what they want to use it for."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_name: str = Field(..., min_length=1, max_length=200)
+    role: str = Field("embedding", pattern="^(embedding|generation)$")
+
+
+@router.get("/ollama/models")
+def get_ollama_models():
+    """Which Ollama models are installed, and which two are in use.
+
+    A user picking a model should be picking from a list, not typing a name and
+    finding out later that they typed it wrong.
+    """
+    from superlocalmemory.core.ollama_validator import DEFAULT_BASE_URL
+
+    try:
+        data = _read_config()
+        embedding = data.get("embedding") or {}
+        llm = data.get("llm") or {}
+        base_url = llm.get("base_url") or DEFAULT_BASE_URL
+
+        installed: list[dict] = []
+        reachable = True
+        detail = ""
+        try:
+            import httpx
+
+            response = httpx.get(f"{base_url.rstrip('/')}/api/tags", timeout=3.0)
+            if response.status_code == 200:
+                for entry in response.json().get("models", []):
+                    installed.append({
+                        "name": entry.get("name", ""),
+                        "size": entry.get("size", 0),
+                    })
+            else:
+                reachable = False
+                detail = f"Ollama answered {response.status_code}."
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            reachable = False
+            detail = f"Ollama is not running at {base_url}. Start it with: ollama serve ({exc})"
+
+        return {
+            "reachable": reachable,
+            "detail": detail,
+            "base_url": base_url,
+            "installed": sorted(installed, key=lambda m: m["name"]),
+            "embedding_model": embedding.get("ollama_model", ""),
+            "generation_model": llm.get("model", "") if llm.get("provider") == "ollama" else "",
+            "stored_dimension": _stored_dimension(),
+        }
+    except Exception:
+        logger.exception("get_ollama_models failed")
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+
+@router.post("/ollama/validate")
+def post_ollama_validate(request: Request, body: OllamaModelCheck):
+    """Ask the server to actually use the model, before anything is saved.
+
+    For the embedding role this also decides whether the switch is safe for this
+    store: two vector widths cannot be compared, and a store holding both
+    answers similarity questions with noise rather than failing.
+    """
+    _require_admin(request)
+    from superlocalmemory.core.ollama_validator import (
+        DEFAULT_BASE_URL,
+        EMBEDDING,
+        check_embedding_model_change,
+        validate_ollama_model,
+    )
+
+    try:
+        data = _read_config()
+        llm = data.get("llm") or {}
+        embedding = data.get("embedding") or {}
+        base_url = llm.get("base_url") or DEFAULT_BASE_URL
+
+        if body.role != EMBEDDING:
+            probe = validate_ollama_model(body.model_name, body.role, base_url=base_url)
+            return {
+                "ok": probe.ok,
+                "message": probe.message,
+                "role": body.role,
+                "model_name": body.model_name,
+                "dimension": probe.dimension,
+                "safe_to_apply": probe.ok,
+            }
+
+        decision = check_embedding_model_change(
+            body.model_name,
+            db_path=MEMORY_DIR / "memory.db",
+            current_model=embedding.get("ollama_model", "")
+                or embedding.get("model_name", ""),
+            base_url=base_url,
+        )
+        return {
+            "ok": decision.allowed,
+            "message": decision.message,
+            "role": body.role,
+            "model_name": body.model_name,
+            "dimension": decision.new_dimension,
+            "stored_dimension": decision.stored_dimension,
+            "safe_to_apply": decision.allowed,
+        }
+    except Exception:
+        logger.exception("post_ollama_validate failed")
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+
+def _stored_dimension() -> int | None:
+    from superlocalmemory.core.ollama_validator import stored_embedding_dimension
+
+    return stored_embedding_dimension(MEMORY_DIR / "memory.db")
