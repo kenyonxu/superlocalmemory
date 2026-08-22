@@ -39,21 +39,61 @@ class TestModeARefusesByConfigurationNotByAccident:
         assert SLMConfig.for_mode(Mode.B).ccq.use_llm_gist is True
         assert SLMConfig.for_mode(Mode.C).ccq.use_llm_gist is True
 
-    def test_the_consolidator_checks_configuration_before_availability(self) -> None:
-        """Order matters: availability-first means a supplied model wins over
-        the mode's own instruction."""
-        import inspect
+    def test_a_supplied_model_does_not_override_the_mode(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Handing a model to a store that runs without one changes nothing.
 
+        This used to be asserted by reading the source of the check and
+        comparing where two strings appeared in it, which passes whatever the
+        object does. It now builds the thing and asks it.
+        """
+        monkeypatch.setenv("SLM_DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("SLM_MODE", "a")
+
+        from superlocalmemory.core.config import SLMConfig
         from superlocalmemory.encoding.cognitive_consolidator import (
             CognitiveConsolidator,
         )
+        from superlocalmemory.storage import schema
+        from superlocalmemory.storage.database import DatabaseManager
 
-        source = inspect.getsource(CognitiveConsolidator._step3_extract_gist)
-        config_at = source.index("use_llm_gist")
-        llm_at = source.index("self._llm is not None")
-        assert config_at < llm_at, (
-            "availability is being tested before the mode's own setting"
+        config = SLMConfig.load()
+        assert config.ccq.use_llm_gist is False, (
+            "this test is only meaningful on a store configured to summarise "
+            "without a language model"
         )
+        db = DatabaseManager(config.db_path)
+        db.initialize(schema)
+
+        class _Model:
+            def generate(self, *args, **kwargs):
+                raise AssertionError("a model was consulted on a mode without one")
+
+        # The three places that build this in production pass only a database.
+        assert CognitiveConsolidator(db=db)._config.use_llm_gist is False
+        # And supplying one does not change the answer.
+        assert CognitiveConsolidator(db=db, llm=_Model())._config.use_llm_gist is False
+
+    def test_an_explicit_setting_still_wins(self, tmp_path, monkeypatch) -> None:
+        """The control. Reading the store's settings must not stop a caller
+        from stating its own."""
+        monkeypatch.setenv("SLM_DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("SLM_MODE", "a")
+
+        from superlocalmemory.core.config import CCQConfig, SLMConfig
+        from superlocalmemory.encoding.cognitive_consolidator import (
+            CognitiveConsolidator,
+        )
+        from superlocalmemory.storage import schema
+        from superlocalmemory.storage.database import DatabaseManager
+
+        db = DatabaseManager(SLMConfig.load().db_path)
+        db.initialize(schema)
+        consolidator = CognitiveConsolidator(
+            db=db, config=CCQConfig(use_llm_gist=True),
+        )
+        assert consolidator._config.use_llm_gist is True
 
 
 class TestTheExplanationIsPresentWhenItIsNeeded:

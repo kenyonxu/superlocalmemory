@@ -187,6 +187,33 @@ def _temporal_midpoint(dates: list[datetime]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _config_for_this_store() -> "CCQConfig":
+    """The settings this store is actually running under.
+
+    A caller that supplies only a database used to get the bare defaults, which
+    say a language model may be used to summarise. Three of the four places
+    that build this pass only a database, so on a store configured to use no
+    language model at all, the refusal below rested on nobody having handed one
+    in -- true today, and not a property of the mode. Reading the store's own
+    settings makes it a property of the mode.
+
+    Falls back to the defaults if the settings cannot be read, because a
+    consolidation pass that cannot start is worse than one that starts with the
+    documented defaults.
+    """
+    from superlocalmemory.core.config import CCQConfig as _CCQConfig
+
+    try:
+        from superlocalmemory.core.config import SLMConfig
+
+        resolved = getattr(SLMConfig.load(), "ccq", None)
+        if isinstance(resolved, _CCQConfig):
+            return resolved
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("consolidator: using default settings (%s)", exc)
+    return _CCQConfig()
+
+
 class CognitiveConsolidator:
     """CCQ engine: sleep-time consolidation with quantization.
 
@@ -203,12 +230,10 @@ class CognitiveConsolidator:
         llm: LLM | None = None,
         config: CCQConfig | None = None,
     ) -> None:
-        from superlocalmemory.core.config import CCQConfig as _CCQConfig
-
         self._db = db
         self._embedder = embedder
         self._llm = llm
-        self._config = config or _CCQConfig()
+        self._config = config if config is not None else _config_for_this_store()
 
     # ------------------------------------------------------------------
     # Public API
