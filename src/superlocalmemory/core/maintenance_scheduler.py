@@ -183,6 +183,24 @@ class MaintenanceScheduler:
             except Exception as exc:
                 logger.debug("Graph pruning skipped for %s: %s", profile_id, exc)
 
+            # Pruning the graph orphans the lineage of every edge it removed,
+            # and nothing had ever deleted from that table — on a real store it
+            # had grown to 39% rows describing edges that no longer existed.
+            # This runs immediately after so the rows the pass just orphaned are
+            # collected in the same pass.
+            try:
+                from superlocalmemory.storage.lineage_retention import (
+                    prune_orphan_lineage,
+                )
+                report = prune_orphan_lineage(self._db, profile_id=profile_id)
+                if report.total:
+                    logger.info(
+                        "Lineage retention for %s: %d row(s) removed (%s)",
+                        profile_id, report.total, report.deleted,
+                    )
+            except Exception as exc:
+                logger.debug("Lineage retention skipped for %s: %s", profile_id, exc)
+
             # Lifecycle evaluation must cover every stored profile, not only
             # whichever profile was active when the engine started.
             try:
