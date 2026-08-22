@@ -855,6 +855,29 @@ class GDPRCompliance:
         if not audit_request_ok:
             counts["audit_request_failed"] = 1
 
+        # The same two questions the profile path answers. Their absence here
+        # meant a caller could not tell a complete entity erasure from a partial
+        # one at all — it just got a dict of counts.
+        counts["erasure_complete"] = (
+            0
+            if any(
+                counts.get(marker)
+                for marker in (
+                    "vector_store_failures",
+                    "audit_request_failed",
+                    *(f"{table}_failed" for table, _ in self._FACT_KEYED_TABLES),
+                )
+            )
+            else 1
+        )
+        counts["erasure_provable"] = (
+            1
+            if counts["erasure_complete"] == 1
+            and not counts.get("receipt_persist_failed")
+            and not counts.get("audit_completion_failed")
+            else 0
+        )
+
         logger.info("Entity erasure '%s' in '%s': %s", entity_name, profile_id, counts)
         return counts
 
@@ -915,49 +938,21 @@ class GDPRCompliance:
             counts[table] = counts.get(table, 0) + removed
 
     def _erase_fact_keyed_tables(self, profile_id: str, counts: dict) -> None:
-        """Delete rows that name this profile's facts but not the profile."""
+        """Delete rows that name this profile's facts but not the profile.
+
+        Delegates rather than repeating the loop. It WAS a second copy, and the
+        commit that introduced the shared helper claimed otherwise — which is
+        exactly the failure the helper existed to prevent: the entity path could
+        have been fixed with the profile path left untouched, and nothing would
+        have noticed.
+        """
         fact_ids = self._fact_ids_for(profile_id)
         if fact_ids is None:
             # Could not find out what to erase. Say so; do not report zero.
             for table, _column in self._FACT_KEYED_TABLES:
                 counts[f"{table}_failed"] = 1
             return
-        for table, column in self._FACT_KEYED_TABLES:
-            try:
-                exists = self._db.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name = ?", (table,)
-                )
-            except Exception as exc:  # noqa: BLE001 - reported, not raised
-                logger.warning("GDPR erase: cannot look for %s: %s", table, exc)
-                counts[f"{table}_failed"] = 1
-                continue
-            if not exists:
-                continue
-            if not fact_ids:
-                continue
-            removed = 0
-            try:
-                # Count what was actually holding rows, not how many ids were
-                # offered — most facts have no expansion entry, and counting
-                # ids made the receipt claim erasures that never happened.
-                for start in range(0, len(fact_ids), 500):
-                    chunk = fact_ids[start:start + 500]
-                    placeholders = ",".join("?" * len(chunk))
-                    present = self._db.execute(
-                        f"SELECT COUNT(*) AS c FROM {table} "
-                        f"WHERE {column} IN ({placeholders})",
-                        tuple(chunk),
-                    )
-                    removed += int(dict(present[0])["c"]) if present else 0
-                    self._db.execute(
-                        f"DELETE FROM {table} WHERE {column} IN ({placeholders})",
-                        tuple(chunk),
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("GDPR erase: delete from %s failed: %s", table, exc)
-                counts[f"{table}_failed"] = 1
-                continue
-            counts[table] = removed
+        self._erase_fact_keyed_tables_for(fact_ids, counts)
 
     def _is_sole_profile(self, profile_id: str) -> bool:
         """Whether this profile is the only one in the store.

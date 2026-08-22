@@ -57,10 +57,38 @@ def test_a_real_mention_is_still_found(text: str, expected: set) -> None:
     )
 
 
-def test_punctuated_names_survive_the_boundary() -> None:
-    """A boundary is only added where the keyword ends in a word character."""
-    for keyword in ("node.js", "c++", ".net"):
-        if keyword in _TECH_KEYWORDS:
-            assert _matcher(keyword).search(f"we use {keyword} here"), (
-                f"{keyword!r} no longer matches its own name"
-            )
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Whole-word matching cost these when it landed: there is no boundary
+        # inside "golang" or "nodejs", and people write them constantly.
+        ("rewriting the API in golang this quarter", "Go"),
+        ("migrating the workers to nodejs 22", "Node.js"),
+        ("the frontend is reactjs with hooks", "React"),
+        ("we use node.js in the worker", "Node.js"),
+        ("deployed on k8s", "Kubernetes"),
+        ("the database is postgres", "PostgreSQL"),
+    ],
+)
+def test_the_spellings_people_actually_type(text: str, expected: str) -> None:
+    assert expected in _found(text), (
+        f"{text!r} names {expected} and the miner found {_found(text)}"
+    )
+
+
+def test_every_punctuated_key_matches_its_own_name() -> None:
+    """A boundary is only added where the keyword ends in a word character.
+
+    The earlier version of this looped over three names and skipped any that
+    were not in the table. None of them were, so it asserted nothing at all.
+    This walks the table itself, so it cannot be empty.
+    """
+    punctuated = [k for k in _TECH_KEYWORDS if not k.isalnum()]
+    assert punctuated, (
+        "no keyword contains punctuation any more; if that is deliberate, "
+        "delete this test rather than leaving it passing vacuously"
+    )
+    for keyword in punctuated:
+        assert _matcher(keyword).search(f"we use {keyword} here"), (
+            f"{keyword!r} no longer matches its own name"
+        )

@@ -94,13 +94,37 @@ def parse_mutation_output(output: str) -> Optional[str]:
 # secret-exfiltration instructions must never be persisted. Structure checks
 # alone are insufficient — reject dangerous content outright.
 _SKILL_DENY_PATTERNS: tuple[str, ...] = (
-    "os.environ", "subprocess", "exec(", "eval(", "__import__", "import os",
-    "import subprocess", "pickle.loads", "curl ", "wget ", "rm -rf",
-    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AWS_SECRET", "/.ssh/", ".install_token",
+    # Reading the environment. "os.environ" was listed and "os.getenv" was not,
+    # which is the same act spelled the other way.
+    "os.environ", "os.getenv", "getenv(", "environ[",
+    # Running things.
+    "subprocess", "import subprocess", "import os", "__import__",
+    "exec(", "eval(", "compile(", "os.system", "os.popen", "os.spawn",
+    "popen(", "pty.spawn", "runpy",
+    # PowerShell and Windows shells, which were absent entirely.
+    "invoke-webrequest", "invoke-expression", "iex ", "start-process",
+    "new-object net.webclient", "powershell -", "cmd.exe /c",
+    # POSIX shells and fetchers. The trailing space is gone: "curl" at the end
+    # of a line, or followed by a newline, was not matched.
+    "curl", "wget", "rm -rf", "bash -c", "sh -c", "zsh -c", "nc -",
+    # Network from inside Python.
+    "requests.get", "requests.post", "urllib.request", "httpx.get",
+    "httpx.post", "socket.socket", "smtplib",
+    # Deserialisation and encoding used to smuggle payloads.
+    "pickle.loads", "marshal.loads", "base64.b64decode", "codecs.decode",
+    # Secrets.
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AWS_SECRET", "AWS_ACCESS_KEY",
+    "/.ssh/", ".install_token", ".aws/credentials", ".netrc",
     # Semantic exfiltration patterns — skills must not instruct unauthorized
     # data transfer or bypass of user consent.
     "without consent", "exfiltrat",
 )
+
+#: Whitespace between a name and its opening parenthesis. ``eval (payload)``
+#: runs exactly as ``eval(payload)`` does, and a substring list only saw the
+#: second. Collapsing it before matching closes the whole family rather than
+#: one member of it.
+_CALL_SPACING = re.compile(r"([A-Za-z_][A-Za-z0-9_.]*)\s+\(")
 
 
 def validate_skill_content(content: str) -> Optional[str]:
@@ -111,7 +135,9 @@ def validate_skill_content(content: str) -> Optional[str]:
         return "Missing YAML frontmatter (no --- found)"
     if content.count("---") >= 2 and "name:" not in content.split("---")[1]:
         return "Missing 'name:' in frontmatter"
-    lowered = content.lower()
+    # Normalise before matching, so a space, a newline or a non-breaking space
+    # between the name and the parenthesis does not walk past the list.
+    lowered = _CALL_SPACING.sub(r"\1(", content.lower().replace("\u00a0", " "))
     for pat in _SKILL_DENY_PATTERNS:
         if pat.lower() in lowered:
             return (f"Rejected: evolved skill contains a disallowed pattern "

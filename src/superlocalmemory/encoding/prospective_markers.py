@@ -48,6 +48,7 @@ __all__ = [
     "CIRCUMSTANTIAL_FUTURE",
     "RECURRING",
     "ALREADY_HAPPENED",
+    "CALLED_OFF",
     "PLACEMENT",
     "RESCHEDULING",
     "DEFINITE_FUTURE",
@@ -66,7 +67,7 @@ _MONTH = (
 ANCHORED_FUTURE = re.compile(
     r"\b(?:"
     r"tomorrow|"
-    r"next\s+(?:week|month|year|quarter|sprint|release|" + _WEEKDAY + r")|"
+    r"next\s+(?:week|weekend|month|year|quarter|sprint|release|" + _WEEKDAY + r")|"
     r"this\s+(?:coming|weekend)|"
     r"upcoming\s+(?:release|meeting|week|month|sprint|deadline|event|launch|"
     r"call|review|milestone)|"
@@ -146,7 +147,9 @@ PLACEMENT = re.compile(
     r"brought\s+forward|pull(?:ed)?\s+forward|bumped\s+to|"
     r"(?:scheduled?|booked|planned|slated|arranged|set|pencilled|penciled)\s+"
     r"(?:for|on|at|to)|"
-    r"extend(?:ed)?\s+to|mov(?:e|ed)\s+forward\s+to)\b",
+    r"extend(?:ed)?\s+to|mov(?:e|ed)\s+forward\s+to|"
+    r"chang(?:e|ed)\s+(?:the\s+)?(?:\w+\s+)?"
+    r"(?:date|deadline|time|schedule|window)\s+to)\b",
     re.IGNORECASE,
 )
 
@@ -183,6 +186,44 @@ ALREADY_HAPPENED = re.compile(
 )
 
 
+#: The event is off. This outranks everything, including a present-tense clause
+#: saying when it was going to be.
+CALLED_OFF = re.compile(
+    r"\b(?:cancel(?:led|ed|s)?|called\s+off|scrapped|abandoned|"
+    r"dropped|shelved|withdrawn|no\s+longer\s+(?:happening|planned|scheduled))\b",
+    re.IGNORECASE,
+)
+
+
+#: A present-tense statement that something is on a future date: "the launch is
+#: next Friday", "the freeze starts Monday", "the review is this Tuesday".
+#: Present tense about a forward date is a plan whatever else the surrounding
+#: sentence reports having done.
+#:
+#: Every part of this is bounded on both sides. A first attempt was not, and it
+#: matched "is dec" inside "is decision", "are mar" inside "are marked", and
+#: "this a" inside "is this a" — turning 14 memories into 72 on a real store.
+#: An unbounded month abbreviation is a trap in any prose.
+_FUTURE_FACT = re.compile(
+    r"\b(?:is|are|starts?|begins?|opens?|closes?|resumes?|reopens?|runs?|"
+    r"lands?|ships?|goes\s+live|kicks\s+off)\s+"
+    r"(?:on\s+|at\s+)?"
+    r"(?:"
+    r"tomorrow"
+    r"|next\s+(?:week|weekend|month|year|quarter|sprint|release|" + _WEEKDAY + r")"
+    r"|this\s+(?:coming\s+)?(?:week|weekend|" + _WEEKDAY + r")"
+    r"|" + _WEEKDAY +
+    r"|\d{4}-\d{2}-\d{2}"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _states_a_future_fact(text: str) -> bool:
+    """Present tense about a forward date, inside any sentence."""
+    return bool(_FUTURE_FACT.search(text))
+
+
 def looks_prospective(text: str) -> bool:
     """True when the text describes something still ahead.
 
@@ -195,6 +236,17 @@ def looks_prospective(text: str) -> bool:
     if not text:
         return False
     behind = ALREADY_HAPPENED.search(text)
+    if CALLED_OFF.search(text):
+        # "The deadline is next Friday but was cancelled yesterday" reads as a
+        # future fact and is not one. Cancelling is the one thing that beats a
+        # present-tense statement about a forward date.
+        return False
+    if _states_a_future_fact(text):
+        # "I updated the timeline so the launch IS next Friday" — the past-tense
+        # verb is about the note, and the clause with the date is in the present
+        # about something ahead. A veto that scans the whole sentence cannot see
+        # that difference and drops a real deadline.
+        return True
     if ANCHORED_FUTURE.search(text):
         # Checked BEFORE the recurring veto. "The weekly review is next Tuesday"
         # names one dated occurrence of a recurring thing, and that occurrence

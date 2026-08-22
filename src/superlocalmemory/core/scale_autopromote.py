@@ -84,6 +84,24 @@ def _missing_libraries() -> list[str]:
     return missing
 
 
+def _resumable_stage(status: dict[str, Any]) -> str:
+    """The newest stage already built and not yet promoted, if there is one.
+
+    A stage that is `prepared` or `verified` represents work already done
+    against the same store. Building another one repeats it and leaves the
+    first behind.
+    """
+    usable = [
+        stage for stage in (status.get("stages") or [])
+        if str(stage.get("state")) in {"prepared", "verified"}
+        and stage.get("stage_id")
+    ]
+    if not usable:
+        return ""
+    usable.sort(key=lambda stage: str(stage.get("created_at", "")))
+    return str(usable[-1]["stage_id"])
+
+
 def auto_promote_scale_backends(config: Any) -> AutoPromotionResult:
     """Build and promote the projections if this store has not got them yet.
 
@@ -93,6 +111,15 @@ def auto_promote_scale_backends(config: Any) -> AutoPromotionResult:
     state = str(getattr(config, "scale_engine_state", "") or "local_core").lower()
     if state == "promoted":
         return AutoPromotionResult(False, True, "already promoted")
+
+    # A switch that exists and is honoured elsewhere is a switch this must
+    # honour too. The background path has read it since 3.7; starting to move a
+    # user's store on a setting that says not to would be worse than never
+    # having automated it.
+    if not bool(getattr(config, "scale_auto_promote_enabled", True)):
+        return AutoPromotionResult(
+            False, False, "automatic promotion is switched off in the configuration",
+        )
 
     missing = _missing_libraries()
     if missing:
@@ -129,8 +156,17 @@ def auto_promote_scale_backends(config: Any) -> AutoPromotionResult:
         return AutoPromotionResult(False, False, "a previous promotion needs repair")
 
     try:
-        prepared = manager.prepare()
-        stage_id = str(prepared.get("stage_id", ""))
+        # Resume a stage that is already built rather than building another.
+        # Only "promoted" used to stop this, so a start that prepared and then
+        # failed to verify left the state at "prepared" and the NEXT start
+        # built a second stage — and the one after that a third, with the
+        # staging directory growing every time.
+        stage_id = _resumable_stage(status)
+        if stage_id:
+            logger.info("resuming the projection already staged as %s", stage_id)
+        else:
+            prepared = manager.prepare()
+            stage_id = str(prepared.get("stage_id", ""))
         verified = manager.verify(stage_id)
         if str(verified.get("state")) != "verified":
             logger.warning(

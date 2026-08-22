@@ -821,7 +821,13 @@ def cmd_config(args: Namespace) -> None:
             "evolution.mutation_model", "evolution.verify_model",
             "evolution.confirm_model",
             "mesh_enabled", "daemon_idle_timeout", "entity_compilation_enabled",
-            "graph_backend", "vector_backend", "scale_engine_state",
+            "graph_backend", "vector_backend",
+            # scale_engine_state is deliberately NOT settable. It is a record of
+            # what has been done to the store, not a preference: writing
+            # "promoted" by hand makes the daemon skip projecting a store that
+            # was never projected, and writing "local_core" onto a promoted one
+            # makes it project again over live backends. A real installation was
+            # found declaring two backends it had never built.
             "scope.default_scope", "scope.recall_include_global",
             "scope.recall_include_shared",
         }

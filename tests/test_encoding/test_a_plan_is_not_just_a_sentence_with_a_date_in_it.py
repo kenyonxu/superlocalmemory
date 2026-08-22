@@ -51,6 +51,15 @@ STILL_AHEAD = [
     "Dentist appointment was booked for next Tuesday",
     "The review was planned for next Thursday",
     "The deadline was extended to next Friday",
+    # A third review: the past-tense veto scanned the whole sentence, so a note
+    # about having done something dropped the deadline it was announcing.
+    "I updated the timeline so the launch is next Friday",
+    "We changed the release date to next Friday",
+    "I configured the job to run next Tuesday",
+    "I'll be on call next weekend",
+    "The weekly review is this Tuesday",
+    "Daily standup is this Friday instead",
+    "We agreed the freeze starts on Monday",
 ]
 
 ALREADY_BEHIND = [
@@ -101,6 +110,14 @@ ALREADY_BEHIND = [
     "Updated docs on 2026-08-03",
     "Changed the config on 2026-08-05",
     "Renamed the branch on 2026-08-11",
+    # The first attempt at recognising a present-tense future clause was not
+    # bounded, and matched "is dec" inside "is decision", "are mar" inside "are
+    # marked" and "this a" inside "is this a". It turned 14 memories into 72 on
+    # a real store. An unbounded month abbreviation is a trap in any prose.
+    "AgentAssert V2 paper rejected by arXiv, is this a problem",
+    "HARD RULE quality over speed, this is decision D64",
+    "The findings are marked resolved",
+    "The release notes are separate from the changelog",
 ]
 
 
@@ -165,8 +182,8 @@ RECOGNISED_AND_DELIBERATE_MISSES = [
     # memory is still found by every retrieval channel — while an ordinary
     # memory filed as a plan is the pollution this exists to remove.
     #
-    # A past-tense verb about the DECISION, not about the event:
-    "We agreed the freeze starts on Monday",
+    # "We agreed the freeze starts on Monday" used to be here. It is a plan and
+    # it now classifies as one — a documented miss that stopped being one.
     "I created a calendar event on Friday at 15:00",
     # A bare clock with no minutes:
     "Let us meet Friday at 3",

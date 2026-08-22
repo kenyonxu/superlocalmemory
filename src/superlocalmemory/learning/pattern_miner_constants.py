@@ -29,6 +29,18 @@ TECH_KEYWORDS: dict[str, str] = {
     "terraform": "Terraform", "nginx": "Nginx",
     "linux": "Linux", "macos": "macOS",
     "vscode": "VS Code", "neovim": "Neovim",
+    # The spellings people actually type. Whole-word matching fixed a real
+    # defect — "going" no longer counts as Go — and cost these, because there
+    # is no word boundary inside "golang" or "nodejs". They are listed rather
+    # than matched by prefix, because a prefix rule brings the original problem
+    # straight back.
+    "golang": "Go", "nodejs": "Node.js", "node.js": "Node.js",
+    "reactjs": "React", "react.js": "React",
+    "vuejs": "Vue", "vue.js": "Vue",
+    "next.js": "Next.js", "nuxtjs": "Nuxt", "nuxt": "Nuxt",
+    "postgres": "PostgreSQL", "k8s": "Kubernetes",
+    "typescript": "TypeScript", "ts": "TypeScript",
+    "golang.org": "Go",
 }
 
 

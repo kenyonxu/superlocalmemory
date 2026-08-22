@@ -141,3 +141,59 @@ def test_the_library_check_is_a_real_import(monkeypatch) -> None:
 
     monkeypatch.setattr(importlib, "import_module", broken)
     assert "pycozo" in auto._missing_libraries()
+
+
+def test_a_switch_that_says_no_is_obeyed(manager) -> None:
+    """It exists, it is honoured elsewhere, and this ignored it.
+
+    Moving somebody's store on a setting that says not to would be worse than
+    never having automated it at all.
+    """
+    m = manager(_Manager())
+    config = _Config()
+    config.scale_auto_promote_enabled = False
+
+    result = auto.auto_promote_scale_backends(config)
+
+    assert result.attempted is False
+    assert "switched off" in result.reason
+    assert m.calls == [], "it projected a store whose configuration said not to"
+
+
+def test_a_stage_already_built_is_resumed_not_rebuilt(manager, monkeypatch) -> None:
+    """Only "promoted" used to stop it, so every start built another stage.
+
+    A start that prepares and then fails to verify leaves the state at
+    "prepared". The next start built a second stage, the one after a third, and
+    the staging directory grew with each.
+    """
+    class _WithStage(_Manager):
+        def status(self):
+            self.calls.append("status")
+            return {
+                "migration_repair_required": False,
+                "stages": [
+                    {"stage_id": "earlier", "state": "prepared", "created_at": "1"},
+                    {"stage_id": "latest", "state": "verified", "created_at": "2"},
+                ],
+            }
+
+    m = manager(_WithStage())
+    result = auto.auto_promote_scale_backends(_Config("prepared"))
+
+    assert "prepare" not in m.calls, "it built another stage over one already built"
+    assert m.calls == ["status", "verify:latest", "promote:latest"]
+    assert result.promoted is True
+
+
+def test_the_newest_usable_stage_wins() -> None:
+    picked = auto._resumable_stage({
+        "stages": [
+            {"stage_id": "a", "state": "prepared", "created_at": "1"},
+            {"stage_id": "b", "state": "verified", "created_at": "2"},
+            {"stage_id": "gone", "state": "promoted", "created_at": "3"},
+            {"stage_id": "broken", "state": "corrupt", "created_at": "4"},
+        ],
+    })
+    assert picked == "b"
+    assert auto._resumable_stage({"stages": []}) == ""
