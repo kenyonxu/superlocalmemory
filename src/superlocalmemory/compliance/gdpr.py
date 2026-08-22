@@ -13,6 +13,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from datetime import UTC, datetime
@@ -503,8 +504,17 @@ class GDPRCompliance:
         # graph is installation-level personal data with no profile_id column,
         # so it is wiped entirely on any Art.17 request).
         if data_root is not None:
-            code_graph_result = self._erase_code_graph(data_root)
+            code_graph_result = self._erase_code_graph(
+                data_root,
+                profile_id=profile_id,
+                sole_profile=self._is_sole_profile(profile_id),
+            )
             counts["code_graph"] = code_graph_result.get("rows_deleted", 0)
+            counts["code_graph_scope"] = code_graph_result.get("scope", "")
+            if code_graph_result.get("retained_reason"):
+                counts["code_graph_retained_reason"] = code_graph_result[
+                    "retained_reason"
+                ]
             if code_graph_result.get("error"):
                 counts["code_graph_failed"] = 1
 
@@ -813,14 +823,66 @@ class GDPRCompliance:
 
     # -- C2: code_graph helpers --------------------------------------------
 
-    def _erase_code_graph(self, data_root: Path) -> dict:
-        """Wipe all rows from the live code_graph.db (C2 — Art.17 scope).
+    def _is_sole_profile(self, profile_id: str) -> bool:
+        """Whether this profile is the only one in the store.
 
-        code_graph.db carries repo paths, file names and symbol names —
-        identifying data in a work context with no profile_id column.  The
-        entire graph is wiped on any Art.17 erasure request.  Fail-open: an
-        error is recorded in the returned dict so the caller can surface it,
-        but it does NOT abort the rest of the erasure.
+        Decides how much of the shared code graph an erasure may take. Errs
+        toward FALSE — the narrower erasure — because failing to answer is not
+        a reason to delete somebody else's records.
+        """
+        try:
+            rows = self._db.execute("SELECT profile_id FROM profiles")
+        except Exception as exc:  # noqa: BLE001 - reported by erring narrow
+            logger.warning(
+                "GDPR erase: could not count profiles (%s); erasing only this "
+                "profile's own rows from the code graph", exc,
+            )
+            return False
+        found = set()
+        for row in rows:
+            try:
+                found.add(str(dict(row)["profile_id"]))
+            except Exception:  # noqa: BLE001 - row shape varies by driver
+                found.add(str(row[0]))
+        return found <= {profile_id}
+
+    def _fact_ids_for(self, profile_id: str) -> list[str]:
+        """Every fact id belonging to this profile, for cross-database joins."""
+        try:
+            rows = self._db.execute(
+                "SELECT fact_id FROM atomic_facts WHERE profile_id = ?",
+                (profile_id,),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("GDPR erase: could not list facts for %r: %s", profile_id, exc)
+            return []
+        out: list[str] = []
+        for row in rows:
+            try:
+                out.append(str(dict(row)["fact_id"]))
+            except Exception:  # noqa: BLE001
+                out.append(str(row[0]))
+        return out
+
+    def _erase_code_graph(
+        self, data_root: Path, *, profile_id: str = "", sole_profile: bool = True,
+    ) -> dict:
+        """Erase this profile's share of the live code_graph.db (C2 — Art.17).
+
+        The graph carries repository paths, file names and symbol names, and no
+        table in it has a profile_id. When the store holds ONE profile the whole
+        graph belongs to that person and wiping it is exactly right.
+
+        When it holds more than one, wiping it destroys the other people's data
+        too — and an erasure request that erases a second data subject is itself
+        a breach, not an over-achievement. So in that case only the rows that
+        are unambiguously this profile's are removed: ``code_memory_links``
+        joins a code node to an SLM fact, and facts carry a profile. The graph
+        of the source code stays, because it describes a repository rather than
+        a person, and the receipt says plainly that it was left.
+
+        Fail-open: an error is recorded in the returned dict so the caller can
+        surface it, but it does NOT abort the rest of the erasure.
         """
         result: dict = {"rows_deleted": 0}
         code_graph_path = data_root / "code_graph.db"
@@ -840,15 +902,31 @@ class GDPRCompliance:
                 ]
                 total = 0
                 conn.execute("BEGIN")
-                for tbl in tables:
-                    # Skip FTS virtual-table shadow files — deleting base rows handles them
-                    if tbl.endswith((
-                        "_fts", "_fts_data", "_fts_idx",
-                        "_fts_content", "_fts_docsize", "_fts_config",
-                    )):
-                        continue
-                    cur = conn.execute(f"DELETE FROM {tbl}")  # noqa: S608
-                    total += cur.rowcount
+                if sole_profile:
+                    for tbl in tables:
+                        # Skip FTS virtual-table shadow files — deleting base rows handles them
+                        if tbl.endswith((
+                            "_fts", "_fts_data", "_fts_idx",
+                            "_fts_content", "_fts_docsize", "_fts_config",
+                        )):
+                            continue
+                        cur = conn.execute(f"DELETE FROM {tbl}")  # noqa: S608
+                        total += cur.rowcount
+                    result["scope"] = "whole_graph"
+                else:
+                    result["scope"] = "links_only"
+                    result["retained_reason"] = (
+                        "another profile shares this graph; the source-code "
+                        "structure describes a repository, not this person, and "
+                        "deleting it would erase another data subject's records"
+                    )
+                    if "code_memory_links" in tables and profile_id:
+                        cur = conn.execute(
+                            "DELETE FROM code_memory_links WHERE slm_fact_id IN "
+                            "(SELECT value FROM json_each(?))",
+                            (json.dumps(self._fact_ids_for(profile_id)),),
+                        )
+                        total += cur.rowcount
                 conn.execute("PRAGMA foreign_keys=ON")
                 conn.execute("COMMIT")
                 # VACUUM must run outside any transaction (autocommit mode required)
