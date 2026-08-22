@@ -209,6 +209,36 @@ def apply(conn: sqlite3.Connection) -> None:
     )
 
 
+def repair(conn: sqlite3.Connection) -> None:
+    """Finish the conversion on a store that has drifted back to the old form.
+
+    WHY A COMPLETED MIGRATION NEEDS THIS
+    ------------------------------------
+    A long-running daemon holds its writers in memory. This migration and the
+    write-path change that stores the new form shipped in the same commit, so a
+    daemon started before that commit converts nothing and keeps writing text --
+    and the migration, run by some later short-lived process, marks itself
+    complete against a store that is still gaining old-form rows behind it.
+
+    That happened, and the numbers say so exactly: on the author's store the
+    migration completed at 08:37, the newest converted row was written at 08:08,
+    and sixteen facts written between 10:50 and 17:34 were text. The daemon had
+    been up for twenty-five hours, since before the commit existed.
+
+    Without a repair hook the framework refuses to touch a completed migration
+    and logs "schema incomplete for completed migration; automatic replay is
+    disabled" on every open. Both halves of that are wrong here -- the
+    conversion did not stop early, and disabling replay for a false alarm means
+    a migration that IS incomplete later goes unrepaired. The mechanism was
+    already there; this migration simply never supplied the hook.
+
+    ``apply`` is the whole repair: every row converts independently, the read
+    path accepts both forms, and re-running finishes what is left. So this is
+    not a second implementation to keep in step -- it is the same one.
+    """
+    apply(conn)
+
+
 def verify(conn: sqlite3.Connection) -> bool:
     """Every convertible vector is converted, and the numbers still agree.
 

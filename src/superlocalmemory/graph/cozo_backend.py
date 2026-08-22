@@ -5,7 +5,14 @@
 """SuperLocalMemory v3.4.5 — CozoDB Graph Backend.
 
 Embedded graph database backend powered by CozoDB (MPL-2.0).
-Replaces NetworkX for entity graph storage and traversal.
+
+It stores the graph. It does not traverse it, and the line that used to claim it
+replaced NetworkX "for storage and traversal" outlived the traversal by a
+release: the walk lives once in ``retrieval/spreading``, as a pure function of an
+adjacency snapshot, and is numpy rather than NetworkX either way. What this
+module supplies is the snapshot's edges, read by
+``graph/cozo_adjacency.CozoAdjacencySource`` -- measured at 395 ms against
+SQLite's 2,477 ms on a 208,151-edge store.
 
 All Datalog queries are private to this module.
 External code calls Python methods only — never raw Datalog strings.

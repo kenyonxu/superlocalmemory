@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Memories stored since the last graph analysis were ranked as unconnected.**
+  Recall weighs a memory partly by where it sits in your knowledge graph. That
+  position was only recalculated when a consolidation happened to run or you
+  asked for it by hand, so on a real store 1,036 of 4,034 memories had no
+  position recorded — including every memory from the previous four days. They
+  were still found, then ranked as though nothing linked to them. The
+  calculation now runs on a schedule and again shortly after startup, it covers
+  every memory including ones with no links yet, and it no longer ranks memories
+  the store is not allowed to return, which had been diluting the scores of the
+  ones it can.
+- **One small calculation could push a handful of memories above everything
+  else.** A separate routine gave every memory in a group the same score and
+  wrote it where the ranking reads. On a real store that score was more than ten
+  times the highest genuine one, so those memories took the largest ranking
+  bonus available for no reason beyond having shared a subject with a few
+  others. It has been removed; nothing depended on it.
 - **A second workspace could take over a memory belonging to the first.** Where
   two workspaces on one store were handed the same identifier for a memory or a
   fact — an import keyed on an external record id, feeding one source into two
@@ -17,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silence depended on unrelated details of the entry, so neither outcome could
   be relied on. A write that would move an entry from one workspace to another
   is now refused, and says which workspace owns it.
+
+### Changed
+- **Recall assembles your knowledge graph from the graph store.** On a store with
+  208,000 connections that assembly took 2.5 seconds and now takes 0.4. It runs
+  whenever the graph changes, so it was on the path of a recall. The answers are
+  the same — every probe query returns the same memories with the same scores
+  from either source. Recalls that also span shared or global memories continue
+  to read SQLite, which is the only store that holds them.
 
 ## [4.0.10] — Your memories, not the summarizer's
 

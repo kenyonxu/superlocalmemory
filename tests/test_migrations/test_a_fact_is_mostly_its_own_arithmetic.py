@@ -326,3 +326,117 @@ def test_one_honestly_zero_vector_is_not_a_wipe(store) -> None:
     assert M047.verify(store) is True, (
         "one legitimately-zero vector was read as a blanket wipe"
     )
+
+
+# ---------------------------------------------------------------------------
+# Drifting back after the migration says it is done
+# ---------------------------------------------------------------------------
+
+
+def _text_rows(conn) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM atomic_facts "
+        "WHERE typeof(fisher_mean) = 'text' AND fisher_mean LIKE '[%'"
+    ).fetchone()[0]
+
+
+def test_a_store_that_drifted_back_is_repaired(store) -> None:
+    """A completed conversion plus newer old-form rows is a repairable state.
+
+    This is not hypothetical. A long-running daemon holds its writers in memory,
+    and this migration shipped in the same commit as the write-path change that
+    stores the new form -- so a daemon started before that commit converts
+    nothing and keeps writing text while the migration, run later by a
+    short-lived process, records itself complete.
+
+    On the author's store: migration complete at 08:37, newest converted row
+    08:08, and sixteen facts written between 10:50 and 17:34 still text, from a
+    daemon that had been up twenty-five hours.
+
+    Without a repair hook the framework refuses to touch a completed migration
+    and logs "automatic replay is disabled" on every open -- a false alarm that
+    also switches off the repair a genuinely incomplete migration would need.
+    """
+    conn = store
+    M047.apply(conn)
+    assert M047.verify(conn) is True
+
+    # An older writer adds two facts in the form it still knows.
+    for index in (900, 901):
+        conn.execute(
+            "INSERT INTO atomic_facts (fact_id, content, fisher_mean, fisher_variance)"
+            " VALUES (?, ?, ?, ?)",
+            (f"stale-{index}", "written by a process older than the migration",
+             json.dumps(_vector(index)), json.dumps(_vector(index + 1))),
+        )
+    conn.commit()
+    assert _text_rows(conn) == 2
+    assert M047.verify(conn) is False, (
+        "verify must still notice old-form rows; that signal is what triggers repair"
+    )
+
+    M047.repair(conn)
+
+    assert _text_rows(conn) == 0
+    assert M047.verify(conn) is True
+
+
+def test_the_repair_converts_rather_than_discards(store) -> None:
+    """The numbers come back, at the precision float32 offers.
+
+    A repair that zeroed these would pass every structural check and be a
+    deletion wearing the right shape, because the decay dynamics read an
+    all-zero Fisher vector as "this memory carries no evidence".
+    """
+    conn = store
+    M047.apply(conn)
+    original = _vector(4242)
+    conn.execute(
+        "INSERT INTO atomic_facts (fact_id, content, fisher_mean, fisher_variance)"
+        " VALUES (?, ?, ?, ?)",
+        ("drifted", "a fact from a stale writer",
+         json.dumps(original), json.dumps(_vector(4243))),
+    )
+    conn.commit()
+
+    M047.repair(conn)
+
+    stored = conn.execute(
+        "SELECT fisher_mean FROM atomic_facts WHERE fact_id = 'drifted'"
+    ).fetchone()[0]
+    assert isinstance(stored, bytes)
+    recovered = decode_float_vector(stored, field="fisher_mean", fact_id="drifted")
+    assert recovered is not None
+    assert len(recovered) == WIDTH
+    assert any(value != 0.0 for value in recovered), "a zeroed vector is a deletion"
+    assert np.allclose(recovered, original, atol=1e-6)
+
+
+def test_repairing_a_store_that_needs_nothing_changes_nothing(store) -> None:
+    """The framework re-verifies after repairing, so repair must be idempotent."""
+    conn = store
+    M047.apply(conn)
+    before = conn.execute(
+        "SELECT fact_id, hex(fisher_mean), hex(fisher_variance) FROM atomic_facts"
+        " ORDER BY fact_id"
+    ).fetchall()
+
+    M047.repair(conn)
+
+    after = conn.execute(
+        "SELECT fact_id, hex(fisher_mean), hex(fisher_variance) FROM atomic_facts"
+        " ORDER BY fact_id"
+    ).fetchall()
+    assert before == after
+
+
+def test_the_migration_offers_the_hook_the_framework_looks_for(store) -> None:
+    """A data conversion whose end-state a writer can undo needs `repair`.
+
+    The runner's contract: when a completed migration fails verification it
+    calls `repair(conn)` if the module has one and otherwise refuses, logging
+    that automatic replay is disabled. An additive migration cannot drift -- a
+    column does not disappear -- but a value-format conversion can, so for this
+    one the absence of the hook was the defect.
+    """
+    assert callable(getattr(M047, "repair", None))
