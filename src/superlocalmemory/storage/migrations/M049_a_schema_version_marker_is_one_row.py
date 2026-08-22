@@ -102,13 +102,17 @@ def apply(conn: sqlite3.Connection) -> None:
     # original. Reproduced: rows dated 2026-01-01 and 2026-08-01 for one
     # version, and the January one -- the true first application -- was the one
     # that went.
+    # A window function, not a correlated subquery. Both are correct; only one
+    # finishes. The correlated form re-scans the whole table for every row, and
+    # on the store this migration exists for -- 234,348 rows over 7 versions --
+    # that is 7.8 billion row comparisons. Measured: it ran for more than
+    # twenty-five minutes at full CPU without completing, which on a first
+    # upgrade is indistinguishable from a hang. The window form ranks each
+    # partition once.
     survivor = (
-        f"SELECT outer_row.rowid FROM {_TABLE} AS outer_row "
-        f"WHERE outer_row.rowid = ("
-        f"  SELECT inner_row.rowid FROM {_TABLE} AS inner_row"
-        f"  WHERE inner_row.version = outer_row.version"
-        f"  ORDER BY {order_by.replace('applied_at', 'inner_row.applied_at').replace('rowid', 'inner_row.rowid')}"
-        f"  LIMIT 1)"
+        f"SELECT rowid FROM (SELECT rowid, ROW_NUMBER() OVER ("
+        f"PARTITION BY version ORDER BY {order_by}) AS rn FROM {_TABLE}"
+        f") WHERE rn = 1"
     )
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -119,16 +123,27 @@ def apply(conn: sqlite3.Connection) -> None:
             # is about to survive. Running it afterwards -- as this once did --
             # could only turn NULL into an empty string, which recovers nothing
             # and reads in the log as though it had.
+            # One pass to find the best description per version, then one
+            # update joined against it. Correlated here for the same reason as
+            # above -- one scan per blank row -- would be just as slow.
+            conn.execute(f"""
+                CREATE TEMP TABLE IF NOT EXISTS _m049_best AS
+                SELECT version, description FROM (
+                    SELECT version, description, ROW_NUMBER() OVER (
+                        PARTITION BY version ORDER BY {order_by}
+                    ) AS rn
+                    FROM {_TABLE}
+                    WHERE description IS NOT NULL AND TRIM(description) <> ''
+                ) WHERE rn = 1
+            """)
             conn.execute(
                 f"UPDATE {_TABLE} SET description = COALESCE(("
-                f"  SELECT other.description FROM {_TABLE} AS other"
-                f"  WHERE other.version = {_TABLE}.version"
-                f"    AND other.description IS NOT NULL"
-                f"    AND TRIM(other.description) <> ''"
-                f"  ORDER BY {order_by}"
-                f"  LIMIT 1), '') "
+                f"  SELECT description FROM _m049_best"
+                f"  WHERE _m049_best.version = {_TABLE}.version"
+                f"), '') "
                 f"WHERE description IS NULL OR TRIM(description) = ''"
             )
+            conn.execute("DROP TABLE IF EXISTS _m049_best")
         conn.execute(
             f"DELETE FROM {_TABLE} WHERE rowid NOT IN ({survivor})"
         )
