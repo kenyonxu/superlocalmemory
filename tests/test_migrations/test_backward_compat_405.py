@@ -159,7 +159,7 @@ _EXPECTED_SCHEMA_VERSION: int = 48
 # bandit_plays.shown_fact_ids) and +M045_fact_outcome_score (memory.db, the
 # per-fact outcome score). Both additive columns/tables; neither rewrites an
 # existing row, so 4.0.5 forward-compat is unaffected.
-_EXPECTED_MIGRATION_COUNT: int = 47
+_EXPECTED_MIGRATION_COUNT: int = 48
 
 #: Path to an installed reference package's migrations directory, if one exists.
 #:

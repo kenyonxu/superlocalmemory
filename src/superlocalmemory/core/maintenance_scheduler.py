@@ -291,11 +291,15 @@ class MaintenanceScheduler:
                 from superlocalmemory.storage.migrations import (
                     M048_upcoming_holds_only_what_is_upcoming as _reclassify,
                 )
-                _conn = getattr(self._db, "_conn", None)
-                if _conn is None and hasattr(self._db, "connection"):
-                    _conn = self._db.connection
-                if _conn is not None:
-                    _reclassify.apply(_conn)
+                # This reached for `_conn` and then `.connection`, and the
+                # database manager has neither -- so the guard below was always
+                # False and this pass had never run once. Verified directly:
+                # both attributes are absent on the manager, which means the
+                # store drifted further from the rule with every release while
+                # a block that looks like it repairs that sat here doing
+                # nothing. `raw_connection` is the documented way to get one.
+                with self._db.raw_connection() as conn:
+                    _reclassify.apply(conn)
             except Exception as exc:
                 logger.debug(
                     "re-reading what is filed as a plan skipped for %s: %s",

@@ -27,6 +27,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import sqlite3
 from typing import TYPE_CHECKING, FrozenSet
 
 from superlocalmemory.core.actor_context import ActorContext, ActorRole, Transport
@@ -393,7 +394,22 @@ def _company_mode_active(deployment) -> bool:
         return False
     try:
         return bool(rbac.require_login())
-    except Exception as exc:  # noqa: BLE001 -- unreadable policy is not a licence
+    except sqlite3.OperationalError as exc:
+        # "No such table" means the role tables were never created, which means
+        # roles were never set up, which is a personal install. Failing closed on
+        # THIS is not caution -- it is refusing every write on every store that
+        # has never used company mode, which is nearly all of them. It was caught
+        # by an existing test whose second MCP write started failing once a store
+        # file appeared in the data root.
+        if "no such table" in str(exc).lower():
+            logger.debug("admission: no role tables; personal workspace")
+            return False
+        logger.warning(
+            "admission: the login policy is unreadable (%s); treating the "
+            "workspace as requiring one", exc,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 -- an unreadable policy is not a licence
         logger.warning(
             "admission: cannot read the login policy (%s); treating the "
             "workspace as requiring one", exc,
