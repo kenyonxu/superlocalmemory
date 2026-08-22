@@ -38,9 +38,25 @@ def get_schema_version(conn: sqlite3.Connection) -> int:
 
 
 def set_schema_version(conn: sqlite3.Connection, version: int) -> None:
-    """Record a schema version upgrade."""
+    """Record a schema version upgrade. Stamping the same version twice is a
+    no-op rather than an error.
+
+    A version is a marker, not an event log: the store either is at a version or
+    is not. This table used to have no constraint saying so, and the call sites
+    that stamp it all believed they were idempotent -- one store had 234,348
+    rows describing seven distinct versions. The constraint exists now, and this
+    keeps the first stamp, because that is the one that says when the version
+    actually landed.
+    """
+    # OR IGNORE rather than ON CONFLICT(version): the constraint is added by a
+    # migration, so a store that has not run it yet has no unique index for a
+    # conflict target to name, and naming one there raises. OR IGNORE is correct
+    # both before and after -- a no-op once the constraint exists, and the
+    # previous append-only behaviour until it does, which that migration then
+    # collapses.
     conn.execute(
-        "INSERT INTO schema_version (version, applied_at, description) VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO schema_version (version, applied_at, description) "
+        "VALUES (?, ?, ?)",
         (version, datetime.now(UTC).isoformat(), f"Migration to v{version}"),
     )
 

@@ -95,25 +95,43 @@ def apply(conn: sqlite3.Connection) -> None:
     ).fetchone()[0]
 
     order_by = "applied_at ASC, rowid ASC" if has_applied_at else "rowid ASC"
+    # The row to keep for each version, chosen by when the version was recorded
+    # as landing. ``MIN(rowid)`` will not do: an ORDER BY inside a grouped
+    # subquery does not decide which row MIN() picks, so on a store where the
+    # duplicates were written out of order it kept a later stamp and deleted the
+    # original. Reproduced: rows dated 2026-01-01 and 2026-08-01 for one
+    # version, and the January one -- the true first application -- was the one
+    # that went.
+    survivor = (
+        f"SELECT outer_row.rowid FROM {_TABLE} AS outer_row "
+        f"WHERE outer_row.rowid = ("
+        f"  SELECT inner_row.rowid FROM {_TABLE} AS inner_row"
+        f"  WHERE inner_row.version = outer_row.version"
+        f"  ORDER BY {order_by.replace('applied_at', 'inner_row.applied_at').replace('rowid', 'inner_row.rowid')}"
+        f"  LIMIT 1)"
+    )
     conn.execute("BEGIN IMMEDIATE")
     try:
-        # Keep the earliest row per version. Ordering by applied_at first means
-        # the surviving row is the one that records when the version really
-        # landed, not whichever duplicate happens to sit lowest in the file.
-        conn.execute(
-            f"DELETE FROM {_TABLE} WHERE rowid NOT IN "
-            f"(SELECT MIN(rowid) FROM (SELECT rowid, version FROM {_TABLE} "
-            f" ORDER BY {order_by}) GROUP BY version)"
-        )
         if has_description:
-            # A later duplicate may have carried the only real description.
-            # Recover it before the index makes it unreachable -- the delete
-            # above has already run, so this reads what survived and only fills
-            # a blank from nothing, which is a no-op when nothing was lost.
+            # A later duplicate may carry the only real description, and after
+            # the delete there is nothing left to read it from. So this runs
+            # FIRST, moving the earliest non-empty description onto the row that
+            # is about to survive. Running it afterwards -- as this once did --
+            # could only turn NULL into an empty string, which recovers nothing
+            # and reads in the log as though it had.
             conn.execute(
-                f"UPDATE {_TABLE} SET description = '' "
-                f"WHERE description IS NULL"
+                f"UPDATE {_TABLE} SET description = COALESCE(("
+                f"  SELECT other.description FROM {_TABLE} AS other"
+                f"  WHERE other.version = {_TABLE}.version"
+                f"    AND other.description IS NOT NULL"
+                f"    AND TRIM(other.description) <> ''"
+                f"  ORDER BY {order_by}"
+                f"  LIMIT 1), '') "
+                f"WHERE description IS NULL OR TRIM(description) = ''"
             )
+        conn.execute(
+            f"DELETE FROM {_TABLE} WHERE rowid NOT IN ({survivor})"
+        )
         conn.execute(
             f"CREATE UNIQUE INDEX IF NOT EXISTS {_INDEX} ON {_TABLE}(version)"
         )

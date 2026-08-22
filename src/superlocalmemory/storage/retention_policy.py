@@ -102,6 +102,12 @@ class RetentionPolicy:
     #: ``(local_column, "referent_table.referent_column")`` for ORPHAN.
     referent: tuple[str, str] | None = None
     pruned_by: str | None = None
+    #: Extra columns that, with ``key_column``, name one key. A cap counts
+    #: "the newest N per key", so a key that is not unique across the whole
+    #: table counts other rows' entries against a key's allowance. ``profile_id``
+    #: is added automatically wherever the table has it and does not need to be
+    #: listed here -- see ``_partition_columns``.
+    also_partition_by: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.reason.strip():
@@ -132,6 +138,7 @@ REGISTERED_POLICIES: dict[str, RetentionPolicy] = {
             table="derivation_lineage",
             kind=RetentionKind.CAP_PER_KEY,
             key_column="object_id",
+            also_partition_by=("object_type",),
             cap_per_key=10,
             timestamp_column="created_at",
             reason=(
@@ -139,7 +146,9 @@ REGISTERED_POLICIES: dict[str, RetentionPolicy] = {
                 "row, so the older ones are superseded rather than historical -- "
                 "one object had 690. No time window: the newest ten answer every "
                 "question the table is asked, at any age. The orphan half of this "
-                "table's upkeep is lineage_retention.prune_orphan_lineage."
+                "table's upkeep is lineage_retention.prune_orphan_lineage. The "
+                "key is the object's id together with its type and workspace, "
+                "because the id alone is unique in none of those directions."
             ),
         ),
         RetentionPolicy(
@@ -654,9 +663,10 @@ def apply_policy(
         if policy.kind is RetentionKind.TTL_AND_CAP:
             age = f" AND {policy.timestamp_column} < datetime('now', ?)"
             params = (f"-{policy.ttl_days} days",)
+        partition = ", ".join(_partition_columns(conn, policy))
         where = (
             f"rowid IN (SELECT rowid FROM (SELECT rowid, ROW_NUMBER() OVER ("
-            f"PARTITION BY {policy.key_column} "
+            f"PARTITION BY {partition} "
             f"ORDER BY {policy.timestamp_column} DESC, rowid DESC) AS rn "
             f"FROM {policy.table}) WHERE rn > {int(policy.cap_per_key or 0)})"
             f"{age}"
@@ -670,6 +680,43 @@ def apply_policy(
 
     cursor = conn.execute(f"DELETE FROM {policy.table} WHERE {where}", params)
     return int(cursor.rowcount or 0)
+
+
+def _partition_columns(
+    conn: sqlite3.Connection, policy: RetentionPolicy
+) -> tuple[str, ...]:
+    """Every column that has to match for two rows to be under the same cap.
+
+    A cap keeps the newest N rows per key, so anything the key does not
+    distinguish gets counted against somebody else's allowance. Two workspaces
+    are the case that matters: a shared table's ids are unique per workspace,
+    not across the store, so partitioning on the id alone lets one workspace's
+    rows evict another's. Nothing on a single-workspace store notices, which is
+    why this has to be structural rather than something a policy author
+    remembers.
+
+    ``profile_id`` is added wherever the table has it, checked against the live
+    schema rather than assumed, because these policies also run on stores old
+    enough to predate the column.
+    """
+    columns: list[str] = []
+    if _has_column(conn, policy.table, "profile_id"):
+        columns.append("profile_id")
+    for extra in policy.also_partition_by:
+        if _has_column(conn, policy.table, extra) and extra not in columns:
+            columns.append(extra)
+    if policy.key_column and policy.key_column not in columns:
+        columns.append(policy.key_column)
+    return tuple(columns)
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Whether ``table`` has ``column`` on this store."""
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return False
+    return any(str(row[1]) == column for row in rows)
 
 
 def run_retention(
