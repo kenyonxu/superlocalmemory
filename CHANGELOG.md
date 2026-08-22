@@ -24,6 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   times the highest genuine one, so those memories took the largest ranking
   bonus available for no reason beyond having shared a subject with a few
   others. It has been removed; nothing depended on it.
+- **Turning on per-user access did not apply to agent connections.** Company
+  mode is set from the dashboard, and the setting it writes was read by the web
+  interface but not by the connection your AI tools use — so with per-user access
+  on, two users configured, and one of them restricted to read-only, a write
+  arriving over the tool connection was accepted as the machine owner while the
+  same write through the dashboard was refused. Both now read the same setting,
+  and a tool connection that cannot identify who is calling is refused. Personal,
+  single-user use is unchanged and needs no login.
+- **The settings could claim a storage engine that was not there.** A store
+  recorded the fast graph and vector engines as active with neither present on
+  disk and nothing in progress to explain it, so the dashboard reported one thing
+  while retrieval used another, on every restart. The claim is now checked
+  against what is actually on disk when the service starts, and dropped if there
+  is nothing behind it. Nothing is disabled: an engine that is installed is still
+  detected and used.
 - **A note about which schema versions had been applied was stored thousands of
   times over.** Seven versions were recorded as 3,496 rows on one store and
   234,348 on another, because the six places that write it all assumed a

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 from typing import TYPE_CHECKING, FrozenSet
 
 from superlocalmemory.core.actor_context import ActorContext, ActorRole, Transport
@@ -326,6 +327,116 @@ def admit(
 # @admits decorator for async MCP tools
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# Company mode has two switches, and this is where they become one
+# ---------------------------------------------------------------------------
+
+#: Environment variable carrying the caller's user session over a transport that
+#: has no request to put a header on. The dashboard issues the same token, so
+#: this is not a second credential system -- it is the only channel the MCP
+#: surface offers for presenting the one that already exists.
+_SESSION_ENV = "SLM_USER_SESSION"
+
+_RBAC_ROLE_TO_ACTOR = {
+    "admin": ActorRole.ADMIN,
+    "member": ActorRole.MEMBER,
+    "viewer": ActorRole.VIEWER,
+}
+
+
+def _rbac_engine():
+    """The workspace's role store, or None when there is not one.
+
+    Built from the data root rather than from an HTTP app state, because the
+    callers here have no request. Failures return None, which then reads as
+    "personal mode" -- safe, because a workspace with no role store has no roles
+    to enforce.
+    """
+    try:
+        from superlocalmemory.access.rbac import RbacEngine
+        from superlocalmemory.infra.data_root import canonical_data_root
+
+        path = canonical_data_root() / "memory.db"
+        if not path.exists():
+            return None
+        return RbacEngine(str(path))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("admission: no role store available: %s", exc)
+        return None
+
+
+def _company_mode_active(deployment) -> bool:
+    """Whether a login is required, by EITHER of the two switches.
+
+    THE DEFECT THIS CLOSES
+
+    "Company mode" was two independent settings that nobody had joined up:
+    ``deployment`` in config.toml, which this module read, and ``require_login``
+    in the workspace's own settings, which the dashboard toggle writes and which
+    the HTTP routes read. Turning company mode on from the dashboard therefore
+    changed what HTTP would allow and changed nothing here.
+
+    Measured on a real store: with ``require_login`` on, two users configured,
+    and the viewer's role denying WRITE, an MCP write resolved to
+    ``local-operator`` with role ``owner`` and succeeded -- while the same write
+    over HTTP returned 401. The role check was not bypassed by a missing call;
+    it was bypassed because this path was still being told the workspace was
+    personal.
+
+    Either switch now means the same thing on every transport.
+    """
+    if getattr(deployment, "is_enterprise", False):
+        return True
+    rbac = _rbac_engine()
+    if rbac is None:
+        return False
+    try:
+        return bool(rbac.require_login())
+    except Exception as exc:  # noqa: BLE001 -- unreadable policy is not a licence
+        logger.warning(
+            "admission: cannot read the login policy (%s); treating the "
+            "workspace as requiring one", exc,
+        )
+        return True
+
+
+def _session_principal(profile: str) -> tuple[str, str, FrozenSet[ActorRole] | None]:
+    """Resolve the caller from a session token in the environment.
+
+    Returns ``(principal_id, raw_token, roles)``. An empty principal means the
+    caller could not be identified, which ``resolve_actor`` turns into ANONYMOUS
+    and ``admit`` then denies -- so an unset or expired token fails closed.
+    """
+    token = os.environ.get(_SESSION_ENV, "").strip()
+    if not token:
+        return "", "", None
+    rbac = _rbac_engine()
+    if rbac is None:
+        return "", "", None
+    try:
+        user = rbac.resolve_session(token)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("admission: session lookup failed: %s", exc)
+        return "", "", None
+    if not user:
+        return "", "", None
+    role = None
+    try:
+        role = rbac.get_role(user["user_id"], profile or "default")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("admission: role lookup failed: %s", exc)
+    # No membership on this workspace is not the same as MEMBER. Falling back to
+    # a write-capable default here would hand every authenticated user write
+    # access to every workspace on the machine.
+    actor_role = _RBAC_ROLE_TO_ACTOR.get(
+        getattr(role, "value", role) if role is not None else "", None,
+    )
+    if actor_role is None:
+        return user["user_id"], token, frozenset({ActorRole.ANONYMOUS})
+    return user["user_id"], token, frozenset({actor_role})
+
+
 def admits(kind: OperationKind):
     """Decorator that gates an async MCP tool function via the policy registry.
 
@@ -348,9 +459,21 @@ def admits(kind: OperationKind):
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
             deployment = _resolve_deployment()
-            tier = "enterprise" if deployment.is_enterprise else "personal"
-            mode = "company" if deployment.is_enterprise else "local"
-            actor = resolve_actor(Transport.MCP, tier=tier, mode=mode)
+            # Either switch means company mode. Reading only the config file is
+            # what let a dashboard toggle change HTTP and leave this transport
+            # writing as the machine owner.
+            company = _company_mode_active(deployment)
+            tier = "enterprise" if company else "personal"
+            mode = "company" if company else "local"
+            principal, token, roles = ("", "", None)
+            if company:
+                principal, token, roles = _session_principal(
+                    kwargs.get("profile_id", "") or "",
+                )
+            actor = resolve_actor(
+                Transport.MCP, tier=tier, mode=mode,
+                principal=principal, session=token, roles=roles,
+            )
             try:
                 admit(kind, actor, mode=mode)
             except AdmissionDenied as exc:

@@ -136,6 +136,12 @@ class BackendOrchestrator:
             self._drain.start()
             return
 
+        # Reconcile what the config CLAIMS against what is on disk, before
+        # anything reads either. Recovery above only acts when a promotion
+        # journal exists; a config that names a promoted backend with no journal
+        # and no directory is a claim nothing will ever correct.
+        self._reconcile_backend_selection()
+
         # 3. Initialize CozoDB if available
         cozo_available = self._detect_cozo()
         if cozo_available:
@@ -274,6 +280,75 @@ class BackendOrchestrator:
                 "Scale auto-promote skipped — staying on Local Core / SQLite: %s",
                 exc,
             )
+
+    def _reconcile_backend_selection(self) -> None:
+        """Stop the config claiming a backend the store does not have.
+
+        THE STATE THIS REPAIRS
+
+        On a real store: ``graph_backend='cozo'``, ``vector_backend='lancedb'``,
+        ``scale_engine_state='verified'`` -- and neither the ``cozo/`` nor the
+        ``lance/`` directory existed, with no promotion journal to explain it.
+        Something wrote the selection a completed promotion writes, without a
+        promotion having completed.
+
+        Nothing corrected it. ``recover_interrupted_promotion`` acts only when a
+        journal exists, so with no journal it returns immediately and the claim
+        survives every restart. The dashboard then reports the configured backend
+        while retrieval uses SQLite, which is the disagreement a person notices
+        last and trusts first.
+
+        WHAT THIS DOES NOT DO
+
+        It does not disable anything. ``auto`` still detects and initialises both
+        projections when their libraries are installed, so the only thing removed
+        is the false claim. It leaves ``verified`` alone -- that is a legitimate
+        waypoint meaning "parity checked, not yet promoted" -- and only resets
+        ``promoted``, which asserts a swap that plainly did not happen. And it
+        never touches a selection whose directory is present, nor one with a
+        journal still open, because those belong to the promotion lifecycle.
+        """
+        try:
+            from superlocalmemory.core.scale_engine import ScaleEngineManager
+
+            manager = ScaleEngineManager(self._config, profile_id="default")
+            if manager.promotion_journal_path.exists():
+                return  # the recovery path owns this
+            cozo_path, lance_path = manager.active_paths
+        except Exception as exc:  # noqa: BLE001 -- reconciliation is best effort
+            logger.debug("Backend reconciliation skipped: %s", exc)
+            return
+
+        corrections: list[str] = []
+        graph = getattr(self._config, "graph_backend", "auto") or "auto"
+        if graph not in ("auto", "sqlite") and not cozo_path.exists():
+            corrections.append(f"graph_backend {graph!r} -> 'auto' (no {cozo_path.name}/)")
+            self._config.graph_backend = "auto"
+        vector = getattr(self._config, "vector_backend", "auto") or "auto"
+        if vector not in ("auto", "sqlite-vec") and not lance_path.exists():
+            corrections.append(
+                f"vector_backend {vector!r} -> 'auto' (no {lance_path.name}/)"
+            )
+            self._config.vector_backend = "auto"
+        state = getattr(self._config, "scale_engine_state", "") or ""
+        if state == "promoted" and not (cozo_path.exists() or lance_path.exists()):
+            corrections.append("scale_engine_state 'promoted' -> 'local_core'")
+            self._config.scale_engine_state = "local_core"
+
+        if not corrections:
+            return
+        try:
+            self._config.save()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Backend selection is inconsistent with the data directory and "
+                "could not be corrected (%s): %s", exc, "; ".join(corrections),
+            )
+            return
+        logger.warning(
+            "Backend selection did not match the data directory; corrected: %s",
+            "; ".join(corrections),
+        )
 
     def _recover_interrupted_scale_promotion(self) -> None:
         """Repair an interrupted promotion; never auto-mutate a legacy root."""

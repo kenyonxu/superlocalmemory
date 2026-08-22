@@ -338,10 +338,10 @@ REGISTERED_POLICIES: dict[str, RetentionPolicy] = {
             timestamp_column="created_at",
             reason=(
                 "Login sessions. 0 rows today because company mode has never run "
-                "with users, which is exactly why this needs a rule before it "
-                "does: a session table without an expiry is the standard way a "
-                "database fills up, and an expired session row is not evidence of "
-                "anything."
+                "with users, which is exactly why it needs a rule before it does. "
+                "Expired sessions are also purged once when the daemon starts, "
+                "which is not a bound: a daemon that has been up for 25 hours "
+                "accumulates for 25 hours. This is the recurring half."
             ),
         ),
         RetentionPolicy(
