@@ -143,6 +143,47 @@ class MaintenanceScheduler:
         self._timer.daemon = True
         self._timer.start()
 
+    #: Consecutive failures of one step before it stops being a hiccup.
+    _ESCALATE_AFTER = 3
+
+    def _record_step(self, step: str, ok: bool, detail: str = "") -> None:
+        """Remember whether a maintenance step worked, and say so when it has
+        stopped working."""
+        counts = getattr(self, "_step_failures", None)
+        if counts is None:
+            counts = self._step_failures = {}
+        if ok:
+            if counts.pop(step, 0):
+                logger.info("maintenance: %s is working again", step)
+            return
+        counts[step] = counts.get(step, 0) + 1
+        if counts[step] >= self._ESCALATE_AFTER:
+            logger.error(
+                "maintenance: %s has failed %d cycles in a row (%s). This is "
+                "not a transient failure; the work it does is not being done.",
+                step, counts[step], detail or "no detail",
+            )
+        else:
+            logger.warning("maintenance: %s failed (%s)", step, detail or "")
+
+    def failing_steps(self) -> dict[str, int]:
+        """Steps that have failed on consecutive cycles, and how many.
+
+        Read by the status surfaces, so an operator can see a persistently
+        broken maintenance step instead of having to find it in the log.
+        """
+        return dict(getattr(self, "_step_failures", {}) or {})
+
+    def _note_step_outcomes(self) -> None:
+        """Escalate anything still failing after this cycle's steps."""
+        failing = self.failing_steps()
+        if failing:
+            logger.warning(
+                "maintenance: %d step(s) still failing: %s",
+                len(failing),
+                ", ".join(f"{name} x{count}" for name, count in sorted(failing.items())),
+            )
+
     def _run(self) -> None:
         """Execute maintenance + auto-backup check, then schedule next run."""
         if not self._running:
@@ -276,10 +317,9 @@ class MaintenanceScheduler:
                         logger.warning("Graph metrics: %s", report.summary())
                 else:
                     logger.debug("Graph metrics up to date for %s", profile_id)
-            except Exception as exc:
-                logger.warning(
-                    "Graph metrics skipped for %s: %s", profile_id, exc,
-                )
+                self._record_step("graph metrics", True)
+            except Exception as exc:  # noqa: BLE001
+                self._record_step("graph metrics", False, str(exc))
 
             # Lifecycle evaluation must cover every stored profile, not only
             # whichever profile was active when the engine started.
@@ -322,8 +362,16 @@ class MaintenanceScheduler:
                 M048_upcoming_holds_only_what_is_upcoming as _reclassify,
             )
             _reclassify.apply(open_connection=self._db.raw_connection)
-        except Exception as exc:
-            logger.debug("re-reading what is filed as a plan skipped: %s", exc)
+            self._record_step("re-reading plans", True)
+        except Exception as exc:  # noqa: BLE001
+            self._record_step("re-reading plans", False, str(exc))
+
+        # Anything that has failed on several cycles running is not a blip.
+        # Every step here logs and continues, which is right -- one broken step
+        # must not stop the rest -- but it meant a step that had been failing
+        # for a week looked exactly like one that had just hiccupped, and the
+        # daemon still reported itself healthy throughout.
+        self._note_step_outcomes()
 
         # Retention. Three tables had a pruner each, written and wired
         # separately; the fourth unbounded table was found by reading a
@@ -354,8 +402,9 @@ class MaintenanceScheduler:
                         f"{table} -{count}" for table, count in sorted(removed.items())
                     ),
                 )
-        except Exception as exc:
-            logger.warning("Retention pass skipped: %s", exc)
+            self._record_step("retention", True)
+        except Exception as exc:  # noqa: BLE001
+            self._record_step("retention", False, str(exc))
 
         # V3.4.10: Check if auto-backup is due
         try:

@@ -84,10 +84,15 @@ class OutcomeTracker:
             The persisted ActionOutcome.
         """
         if outcome not in VALID_OUTCOMES:
-            logger.warning(
-                "Invalid outcome '%s'. Must be one of %s", outcome, VALID_OUTCOMES
+            # Refused, not reinterpreted. This used to become "partial", which
+            # carries a reward of 0.5 -- so a typo, a wrong enum, or a client
+            # sending "ok" was recorded as a mildly positive judgement of those
+            # memories and fed to the ranking as if somebody had meant it.
+            # Silently inventing a signal is worse than having none.
+            raise ValueError(
+                f"outcome must be one of {sorted(VALID_OUTCOMES)}, not "
+                f"{outcome!r}"
             )
-            outcome = "partial"
 
         ao = ActionOutcome(
             profile_id=profile_id,

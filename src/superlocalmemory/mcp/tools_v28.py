@@ -59,7 +59,20 @@ def register_v28_tools(server, get_engine: Callable) -> None:
                 "update",
                 mutation_source="mcp-report-outcome",
             )
-            from superlocalmemory.learning.outcomes import OutcomeTracker
+            from superlocalmemory.learning.outcomes import (
+                VALID_OUTCOMES,
+                OutcomeTracker,
+            )
+            if outcome not in VALID_OUTCOMES:
+                # Answered here rather than as a stack trace: the caller is an
+                # assistant that can correct itself if told what is allowed.
+                return {
+                    "success": False,
+                    "error": (
+                        f"outcome must be one of {sorted(VALID_OUTCOMES)}, "
+                        f"not {outcome!r}"
+                    ),
+                }
             tracker = OutcomeTracker(engine._db)
             ids = [mid.strip() for mid in memory_ids.split(",") if mid.strip()]
             ctx = {"note": context} if context else None
