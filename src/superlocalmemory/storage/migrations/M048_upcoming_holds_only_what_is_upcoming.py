@@ -138,8 +138,34 @@ def apply(conn: sqlite3.Connection) -> None:
     )
 
 
+#: Above this share of disagreement, the pass did not run. Below it, the rule
+#: improved. See ``verify``.
+_NEVER_RAN_THRESHOLD = 0.5
+
+
 def verify(conn: sqlite3.Connection) -> bool:
-    """Nothing left under the plan type that the rule would not file there."""
+    """Did this pass run — not does today's rule agree with every row.
+
+    The obvious check is "no memory filed as a plan fails the rule", and it is
+    wrong, because the rule is code that keeps improving. A memory correctly
+    kept by the rule as it stood in one release can fail the sharper rule in the
+    next, and this certificate would then report a migration that did exactly
+    its job as broken — permanently, since a completed migration is not replayed.
+    It happened within a day of this being written: "AEM upgrade for upcoming
+    release" was a plan under a broad reading of "upcoming" and is not under a
+    narrower one.
+
+    What the pass promises is that every memory filed as a plan was re-read once
+    and the ones that were not plans were moved. At the moment it finishes,
+    nothing disagrees. Afterwards, disagreements accumulate slowly as the rule
+    sharpens — a handful. A pass that never ran leaves the original set almost
+    entirely disagreeing, because that set was over 99% wrong; that is what this
+    was built for.
+
+    So the two cases are told apart by how much disagrees, and the boundary is
+    halfway between "a few drifted" and "none of it was ever looked at".
+    Disagreements below it are reported and are not a failure.
+    """
     existing = {r[1] for r in conn.execute(f"PRAGMA table_info({_TABLE})")}
     if "fact_type" not in existing or "content" not in existing:
         return True
@@ -148,11 +174,28 @@ def verify(conn: sqlite3.Connection) -> bool:
         f"SELECT fact_id, content FROM {_TABLE} WHERE fact_type = ?",
         (_PROSPECTIVE,),
     ).fetchall()
-    for fact_id, content in rows:
-        if _resolve(content) != _PROSPECTIVE:
-            logger.error(
-                "M048 verify: fact %s is still filed as a plan and does not "
-                "read as one", fact_id,
-            )
-            return False
+    if not rows:
+        return True
+
+    drifted = [
+        fact_id for fact_id, content in rows if _resolve(content) != _PROSPECTIVE
+    ]
+    if not drifted:
+        return True
+
+    share = len(drifted) / len(rows)
+    if share > _NEVER_RAN_THRESHOLD:
+        logger.error(
+            "M048 verify: %d of %d memories filed as plans do not read as one "
+            "(%.0f%%) — this pass did not run",
+            len(drifted), len(rows), share * 100,
+        )
+        return False
+
+    logger.info(
+        "M048 verify: %d of %d memories filed as plans no longer read as one "
+        "under the current rule (%.0f%%). The pass ran; the rule has since "
+        "sharpened. Re-reading them is maintenance, not a migration repair.",
+        len(drifted), len(rows), share * 100,
+    )
     return True

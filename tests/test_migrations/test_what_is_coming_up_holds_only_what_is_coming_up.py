@@ -127,6 +127,37 @@ def test_verify_notices_a_pass_that_never_ran(store) -> None:
     assert M048.verify(store) is True
 
 
+def test_a_sharper_rule_later_does_not_condemn_a_pass_that_ran(store) -> None:
+    """The certificate must not measure against code that keeps changing.
+
+    A memory the rule correctly kept in one release can fail a sharper rule in
+    the next. Reporting that as a broken migration is permanent, because a
+    completed migration is never replayed — and it happened for real within a
+    day of this being written.
+    """
+    _seed(store, STILL_UPCOMING)
+    M048.apply(store)
+    assert M048.verify(store) is True
+
+    # One memory the rule no longer recognises, among many it still does.
+    store.execute(
+        "UPDATE atomic_facts SET content = ? WHERE fact_id = 'f0'",
+        ("AEM upgrade for upcoming release uses non-ideal deployment steps",),
+    )
+    store.commit()
+
+    assert M048.verify(store) is True, (
+        "one memory drifting under a sharper rule was reported as a failed "
+        "migration"
+    )
+
+
+def test_a_store_where_nothing_was_ever_read_still_fails(store) -> None:
+    """The other side of the same boundary."""
+    _seed(store, NOT_UPCOMING * 3)
+    assert M048.verify(store) is False
+
+
 def test_more_rows_than_one_batch(store) -> None:
     _seed(store, NOT_UPCOMING * ((M048._BATCH // len(NOT_UPCOMING)) + 3))
     M048.apply(store)
