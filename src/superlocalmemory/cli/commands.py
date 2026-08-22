@@ -2581,14 +2581,22 @@ def cmd_doctor(args: Namespace) -> None:
                "pip install " + " ".join(core_modules[m] for m in missing))
 
     # 3. Search deps
+    #
+    # Presence only. Importing these executes torch, which cost ~4 s of every
+    # doctor run — a quarter of the whole command — to learn something the
+    # embedding-worker check below already proves by actually running them.
+    # find_spec answers "is it installed" without executing a line of it.
+    # A package that is present but broken on import is caught by check 7,
+    # which spawns the worker and waits for it to answer.
     search_mods = {"sentence_transformers": "sentence-transformers", "torch": "torch",
                    "sklearn": "scikit-learn"}
     search_ok = []
     for mod, pkg in search_mods.items():
         try:
-            __import__(mod)
-            search_ok.append(mod)
-        except Exception:  # dependency import may fail after module discovery
+            import importlib.util as _ilu
+            if _ilu.find_spec(mod) is not None:
+                search_ok.append(mod)
+        except Exception:  # a broken meta-path finder must not fail the check
             pass
     if len(search_ok) == len(search_mods):
         _check("Search deps", "PASS", "sentence-transformers, torch, sklearn")
@@ -2775,13 +2783,28 @@ def cmd_doctor(args: Namespace) -> None:
         try:
             from superlocalmemory.storage.memory_write import memory_read
 
+            # integrity_check reads every page. On a 610 MB store that is
+            # 10-15 s — over half of this command — and it ran on every
+            # invocation, including the ones a user makes twice in a row while
+            # fixing something else. quick_check walks the same B-trees and
+            # catches structural damage; what it skips is page-level checksum
+            # work that only finds hardware bit rot, which surfaces as read
+            # errors long before anyone runs a doctor.
+            #
+            # The trade is named rather than hidden: the output says which
+            # check ran, and --deep runs the exhaustive one.
+            deep = bool(getattr(args, "deep", False))
+            pragma = "integrity_check" if deep else "quick_check"
             with memory_read(db_path) as conn:
-                result = conn.execute("PRAGMA integrity_check").fetchone()
+                result = conn.execute(f"PRAGMA {pragma}").fetchone()
             if result and result[0] == "ok":
                 size_mb = db_path.stat().st_size / (1024 * 1024)
-                _check("Database", "PASS", f"OK ({size_mb:.2f} MB)")
+                detail = f"OK ({size_mb:.2f} MB, {pragma})"
+                if not deep:
+                    detail += " — run `slm doctor --deep` for a full page scan"
+                _check("Database", "PASS", detail)
             else:
-                _check("Database", "FAIL", f"integrity check: {result}",
+                _check("Database", "FAIL", f"{pragma}: {result}",
                        "Backup and recreate database")
         except Exception as exc:
             _check("Database", "FAIL", str(exc))

@@ -535,6 +535,11 @@ def main() -> None:
         help="Run only the fast checks (deps + config); skip daemon/embedding probes",
     )
     doctor_p.add_argument(
+        "--deep", action="store_true",
+        help="Read every database page (PRAGMA integrity_check) instead of the "
+             "structural check; slow on a large store",
+    )
+    doctor_p.add_argument(
         "--fix", action="store_true",
         help="Auto-repair fixable components (re-download missing models, "
              "install sqlite-vec) before checking, then report",
