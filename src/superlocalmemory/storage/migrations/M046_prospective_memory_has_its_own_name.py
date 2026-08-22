@@ -167,6 +167,46 @@ def _dependents(conn: sqlite3.Connection) -> list[str]:
     return out
 
 
+def _referencing_objects(conn: sqlite3.Connection) -> list[tuple[str, str, str]]:
+    """Triggers and views that NAME this table while living somewhere else.
+
+    ``_dependents`` finds what is attached to the table. This finds what points
+    at it. Since SQLite 3.25 an ``ALTER TABLE ... RENAME`` reparses every
+    trigger and view in the schema so it can fix up their references, and at
+    that moment the old table has already been dropped — so a trigger on
+    another table that joins this one makes the rename fail outright:
+
+        error in trigger trg_scene_fact_members_insert:
+        no such table: main.atomic_facts
+
+    Two such triggers ship on ``memory_scenes``, which means every store that
+    has ever held a scene. Caught by running the whole migration chain against
+    a real archive; running this migration on its own does not reach it,
+    because the triggers are created by a migration that had not run yet.
+
+    Returned as (kind, name, sql) so each can be dropped before the rename and
+    replayed identically afterwards.
+    """
+    out: list[tuple[str, str, str]] = []
+    try:
+        rows = conn.execute(
+            "SELECT type, name, sql, tbl_name FROM sqlite_master "
+            "WHERE type IN ('trigger','view') AND sql IS NOT NULL "
+            "AND tbl_name <> ? AND sql LIKE ?",
+            (_TABLE, f"%{_TABLE}%"),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    for row in rows:
+        kind, name, sql = str(row[0]), str(row[1]), str(row[2])
+        # The shadow tables of the external-content FTS index name the table
+        # too, and they are handled by the FTS rebuild, not by replay.
+        if name.startswith(_FTS):
+            continue
+        out.append((kind, name, sql))
+    return out
+
+
 def _has_rowid(conn: sqlite3.Connection) -> bool:
     """Whether this table has a rowid to preserve.
 
@@ -414,6 +454,7 @@ def _rebuild(conn: sqlite3.Connection) -> None:
     carries_rowid = _has_rowid(conn)
 
     dependents = _dependents(conn)
+    referencing = _referencing_objects(conn)
     before = _count(conn, f"SELECT COUNT(*) FROM {_TABLE}")
     if before < 0:  # pragma: no cover — defensive
         raise sqlite3.OperationalError(f"M046: cannot count {_TABLE}")
@@ -481,8 +522,20 @@ def _rebuild(conn: sqlite3.Connection) -> None:
         for kind, name in _trigger_and_index_names(conn):
             conn.execute(f'DROP {kind} IF EXISTS "{name}"')
 
+        # And anything elsewhere in the schema that merely POINTS at the table:
+        # the rename reparses every trigger and view, and one that joins a table
+        # which no longer exists fails the whole statement.
+        for kind, name, _sql in referencing:
+            conn.execute(f'DROP {kind} IF EXISTS "{name}"')
+
         conn.execute(f"DROP TABLE {_TABLE}")
         conn.execute(f'ALTER TABLE "{_TABLE}_m046_new" RENAME TO {_TABLE}')
+
+        for _kind, _name, ddl in referencing:
+            # Fatal for the same reason the table's own dependents are: these
+            # keep a derived table in step, and committing without them leaves
+            # it silently stale.
+            conn.execute(ddl)
 
         for ddl in dependents:
             # Fatal, which reverses an earlier judgement here. That judgement

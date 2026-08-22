@@ -774,3 +774,96 @@ def test_the_runner_waits_for_a_busy_database(tmp_path):
         assert timeout > 0
     finally:
         conn.close()
+
+
+class TestARebuildSurvivesTriggersThatPointAtTheTable:
+    """A trigger elsewhere that joins this table makes the rename fail.
+
+    Since SQLite 3.25, ``ALTER TABLE ... RENAME TO`` reparses every trigger and
+    view in the schema so it can fix up their references. The rebuild drops the
+    old table first, so at that moment any trigger that joins it names something
+    that no longer exists, and the whole statement fails:
+
+        error in trigger trg_scene_fact_members_insert:
+        no such table: main.atomic_facts
+
+    Two such triggers ship on ``memory_scenes``. Running this migration on its
+    own never reached them, because the migration that creates them had not run
+    yet — it took the whole chain against a real archive to find it.
+    """
+
+    @staticmethod
+    def _store_with_a_trigger_pointing_at_the_table(tmp_path):
+        db = tmp_path / "memory.db"
+        conn = sqlite3.connect(db)
+        conn.executescript(
+            """
+            CREATE TABLE atomic_facts (
+                fact_id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL DEFAULT 'default',
+                memory_id TEXT,
+                content TEXT,
+                fact_type TEXT NOT NULL DEFAULT 'semantic'
+                    CHECK (fact_type IN ('episodic','semantic','opinion','temporal'))
+            );
+            CREATE TABLE memory_scenes (
+                scene_id TEXT PRIMARY KEY, profile_id TEXT, fact_ids_json TEXT);
+            CREATE TABLE scene_fact_members (
+                profile_id TEXT, scene_id TEXT, fact_id TEXT, position INTEGER);
+            CREATE TRIGGER trg_scene_fact_members_insert
+            AFTER INSERT ON memory_scenes
+            BEGIN
+                DELETE FROM scene_fact_members WHERE scene_id = NEW.scene_id;
+                INSERT OR IGNORE INTO scene_fact_members
+                    (profile_id, scene_id, fact_id, position)
+                SELECT NEW.profile_id, NEW.scene_id, af.fact_id, 0
+                FROM atomic_facts AS af
+                WHERE af.profile_id = NEW.profile_id;
+            END;
+            """
+        )
+        conn.execute(
+            "INSERT INTO atomic_facts (fact_id, profile_id, memory_id, content, "
+            "fact_type) VALUES ('f1','default','m1','a deadline','temporal')"
+        )
+        conn.commit()
+        return conn
+
+    def test_the_rebuild_completes(self, tmp_path) -> None:
+        conn = self._store_with_a_trigger_pointing_at_the_table(tmp_path)
+        try:
+            M046.apply(conn)
+            assert M046.verify(conn) is True
+            assert conn.execute(
+                "SELECT fact_type FROM atomic_facts WHERE fact_id='f1'"
+            ).fetchone()[0] == "prospective"
+        finally:
+            conn.close()
+
+    def test_the_trigger_is_put_back_and_still_works(self, tmp_path) -> None:
+        conn = self._store_with_a_trigger_pointing_at_the_table(tmp_path)
+        try:
+            M046.apply(conn)
+
+            names = {
+                r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='trigger'"
+                )
+            }
+            assert "trg_scene_fact_members_insert" in names, (
+                "the trigger was dropped to allow the rebuild and never replaced"
+            )
+
+            # Replaced is not the same as working.
+            conn.execute(
+                "INSERT INTO memory_scenes VALUES ('s1','default','[\"f1\"]')"
+            )
+            conn.commit()
+            members = conn.execute(
+                "SELECT fact_id FROM scene_fact_members WHERE scene_id='s1'"
+            ).fetchall()
+            assert members == [("f1",)], (
+                "the trigger exists but no longer populates the derived table"
+            )
+        finally:
+            conn.close()
