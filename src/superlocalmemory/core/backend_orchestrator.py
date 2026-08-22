@@ -164,7 +164,23 @@ class BackendOrchestrator:
         cfg = self._config
         if not getattr(cfg, "scale_auto_promote_enabled", True):
             return
-        if getattr(cfg, "scale_engine_state", "local_core") != "local_core":
+        # Only a store that has finished promoting has nothing left to do.
+        #
+        # This used to skip every state except ``local_core``, which made
+        # ``prepared`` and ``verified`` terminal: the daemon above returns
+        # early for anything that is not ``promoted``, so the backends never
+        # started, and this refused to finish the promotion that would have
+        # started them. A store that got as far as building and checking its
+        # projection then sat on SQLite forever while its own config named Cozo
+        # and LanceDB as the backends — measured on a real store whose
+        # ``backend_status`` read lancedb=not_initialized under
+        # ``scale_engine_state=verified``.
+        #
+        # ``run_auto_promote`` already resumes a half-finished stage
+        # (``_resumable_stage``) and applies the size threshold and the
+        # repair-required check itself, so it is the right place for every
+        # decision except "there is nothing left to do".
+        if str(getattr(cfg, "scale_engine_state", "local_core")).lower() == "promoted":
             return
         try:
             delay = float(os.environ.get("SLM_AUTO_PROMOTE_DELAY_S", "300"))
