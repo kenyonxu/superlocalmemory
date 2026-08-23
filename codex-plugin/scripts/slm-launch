@@ -18,11 +18,33 @@
 #                  (default: ~/.superlocalmemory)
 
 _SLM_DATA_DIR="${SLM_DATA_DIR:-${HOME}/.superlocalmemory}"
-SLM_BIN="${_SLM_DATA_DIR}/venv/bin/slm"
+_VENV_BIN="${_SLM_DATA_DIR}/venv/bin/slm"
 
-# Fall back to PATH if venv binary is not present (e.g. global install via pip/pipx).
-if [ ! -x "${SLM_BIN}" ]; then
-    SLM_BIN="slm"
+# An installed slm wins over a plugin-owned venv.
+#
+# The order used to be the other way round -- venv first, PATH only as a
+# fallback -- which meant a machine that had once bootstrapped a venv kept using
+# it forever, even after the user installed or upgraded SLM properly. Two copies
+# reading one store, and which one served it depended on which started first.
+#
+# When both exist and their versions differ, say so. One store served by two
+# versions is worth seeing rather than guessing at.
+if command -v slm >/dev/null 2>&1; then
+    SLM_BIN="$(command -v slm)"
+    if [ -x "${_VENV_BIN}" ]; then
+        _sys_v="$("${SLM_BIN}" --version 2>/dev/null | awk '{print $NF}')"
+        _venv_v="$("${_VENV_BIN}" --version 2>/dev/null | awk '{print $NF}')"
+        if [ -n "${_venv_v}" ] && [ "${_sys_v}" != "${_venv_v}" ]; then
+            echo "SLM: using the installed slm ${_sys_v:-?} and IGNORING a leftover venv at ${_VENV_BIN} (${_venv_v})." >&2
+            echo "  One store, one version. Remove it to stop it drifting:  rm -rf \"${_SLM_DATA_DIR}/venv\"" >&2
+        fi
+    fi
+elif [ -x "${_VENV_BIN}" ]; then
+    SLM_BIN="${_VENV_BIN}"
+else
+    echo "SLM: no SuperLocalMemory found — looked for 'slm' on PATH and ${_VENV_BIN}." >&2
+    echo "  Install it with:  pipx install superlocalmemory" >&2
+    exit 1
 fi
 
 if ! "${SLM_BIN}" serve start >&2; then

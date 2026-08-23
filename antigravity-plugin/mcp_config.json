@@ -6,8 +6,7 @@
         "mcp"
       ],
       "env": {
-        "SLM_AGENT_ID": "antigravity",
-        "SLM_MCP_PROFILE": "code"
+        "SLM_AGENT_ID": "antigravity"
       }
     }
   }

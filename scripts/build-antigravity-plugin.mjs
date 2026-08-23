@@ -78,7 +78,9 @@ files.set('mcp_config.json', JSON.stringify({
     superlocalmemory: {
       command: 'slm',
       args: ['mcp'],
-      env: { SLM_AGENT_ID: AGENT_ID, SLM_MCP_PROFILE: 'code' },
+      // Agent id only. A plugin must not narrow the tool set or re-point
+      // the store -- both belong to whoever installed it.
+      env: { SLM_AGENT_ID: AGENT_ID },
     },
   },
 }, null, 2) + '\n');
