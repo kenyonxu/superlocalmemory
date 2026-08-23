@@ -254,6 +254,29 @@ def is_daemon_running() -> bool:
     return legacy is not None
 
 
+def owned_daemon_process_alive() -> bool:
+    """Return whether an owned daemon *process* is alive, HTTP aside.
+
+    ``is_daemon_running()`` additionally requires a live, matching
+    ``/health`` response, which conflates two different questions: "is there
+    a process I need to stop" and "is it ready to serve requests right now."
+    A daemon whose event loop is synchronously blocked by a long-running
+    handler (``/maintenance/run``, ``/consolidate/cognitive``) cannot answer
+    the second for the duration of that call, but the answer to the first is
+    still yes. Callers that only need to decide whether a stop is owed
+    (``slm restart`` Step 1) should use this instead, so a transiently busy
+    daemon is not skipped as "already stopped" while it keeps running and
+    holding the port — which then made Step 3 refuse to start a second
+    daemon on the still-occupied port and fail the whole restart.
+    """
+    descriptor = read_descriptor()
+    if descriptor is not None:
+        return _descriptor_process_is_alive(descriptor)
+    if descriptor_path().exists():
+        return False
+    return _verified_legacy_health() is not None
+
+
 def _fetch_health(port: int) -> dict | None:
     """Fetch loopback health without following cross-namespace discovery."""
     try:
@@ -349,8 +372,25 @@ def daemon_request(
     timeout_seconds: float = 30.0,
     expected_descriptor=_EXPECTED_DESCRIPTOR_UNSET,
     expected_legacy: dict | None = None,
+    verify_health: bool = True,
 ) -> dict | None:
-    """Send a request only after validating the owned daemon identity."""
+    """Send a request only after validating the owned daemon identity.
+
+    ``verify_health`` — when True (the default), a ``GET /health`` preflight
+    must succeed and match the descriptor before the real request is sent.
+    That preflight needs the daemon's event loop to be free to answer HTTP,
+    which is a *readiness* question, not a *liveness* one: a daemon whose
+    loop is synchronously blocked by a long-running handler (e.g.
+    ``/maintenance/run``, ``/consolidate/cognitive``, neither of which is
+    offloaded to a thread the way ``/recall`` was for exactly this reason in
+    v3.4.52) cannot answer /health for the duration of that call even though
+    the process is fully alive and listening. Callers that have already
+    proven process-level ownership some other way (e.g. ``stop_daemon()`` via
+    ``_descriptor_process_is_alive``) should pass ``verify_health=False`` so a
+    busy-but-alive daemon does not get misreported as not running. Only
+    meaningful for the descriptor path — the legacy bridge has no capability
+    header and still needs health to identify its target.
+    """
     legacy = None
     if expected_legacy is not None:
         # Legacy daemons have no capability header. Bind the compatibility
@@ -377,11 +417,12 @@ def daemon_request(
     capability: str | None = None
     target_instance: str | None = None
     if descriptor is not None:
-        health = _fetch_health(descriptor.port)
-        if health is None or not descriptor_matches_health(descriptor, health):
-            return None
-        if method.upper() == "GET" and path == "/health":
-            return health
+        if verify_health:
+            health = _fetch_health(descriptor.port)
+            if health is None or not descriptor_matches_health(descriptor, health):
+                return None
+            if method.upper() == "GET" and path == "/health":
+                return health
         port = descriptor.port
         capability = descriptor.capability
         target_instance = descriptor.instance_id
@@ -796,16 +837,38 @@ def stop_daemon() -> bool:
     HTTP capability; the daemon itself terminates its child process tree.
     Success means the owned process exited and released its listener, not just
     that the asynchronous stop request was accepted.
+
+    A busy daemon is not a dead daemon. ``daemon_request()`` normally
+    preflights every call with ``GET /health`` before sending it, but that
+    preflight needs the daemon's single-threaded event loop to be free to
+    answer HTTP. ``/maintenance/run`` and ``/consolidate/cognitive`` run
+    multi-second (sometimes multi-minute) synchronous work directly inline in
+    their handlers with no thread offload, which blocks *every* request on
+    that loop, health included, for as long as they run. Reproduced live: a
+    genuine ``/maintenance/run`` call held the loop long enough that 15/15
+    health polls during the window timed out at exactly the 2s cap while
+    ``ps``/``lsof`` proved the process never stopped listening — which is
+    exactly the "Daemon was not running" false report this fixes. Process
+    liveness (PID + clock-independent start token, proven below via
+    ``_descriptor_process_is_alive``) is the fact that actually matters for
+    "should I try to stop this," so it is checked directly and the mutating
+    ``/stop`` POST is sent with ``verify_health=False`` once that is proven —
+    the daemon still authenticates the request by its capability header on
+    arrival, so this loses no ownership guarantee, only the redundant,
+    stall-prone preflight round trip.
     """
     descriptor = read_descriptor()
     legacy = _verified_legacy_health() if descriptor is None else None
     if descriptor is None and legacy is None:
         return False
     if descriptor is not None:
+        if not _descriptor_process_is_alive(descriptor):
+            return False
         response = daemon_request(
             "POST",
             "/stop",
             expected_descriptor=descriptor,
+            verify_health=False,
         )
     else:
         if legacy is None:

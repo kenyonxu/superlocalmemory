@@ -754,13 +754,19 @@ def cmd_restart(args: Namespace) -> None:
     # Step 1: stop only the descriptor-owned daemon. Its graceful shutdown
     # owns worker termination; process-name-wide scans are forbidden.
     from superlocalmemory.cli.daemon import (
-        is_daemon_running,
+        owned_daemon_process_alive,
         read_descriptor,
         stop_daemon,
         wait_for_owned_daemon_shutdown,
     )
 
-    was_running = is_daemon_running()
+    # v4.1.4: process liveness, not HTTP health-readiness, decides whether a
+    # stop is owed. is_daemon_running() additionally requires a live /health
+    # response, which a daemon busy inside /maintenance/run or
+    # /consolidate/cognitive cannot give for the duration of that call even
+    # though it is fully alive and holding the port — see stop_daemon()'s
+    # docstring for the reproduced failure this fixes.
+    was_running = owned_daemon_process_alive()
     owned_descriptor = read_descriptor() if was_running else None
     stopped = stop_daemon() if was_running else True
     if stopped and was_running:

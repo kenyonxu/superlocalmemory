@@ -331,10 +331,19 @@ def test_stop_never_scans_or_kills_machine_wide_processes() -> None:
     ):
         assert daemon.stop_daemon()
 
+    # v4.1.4: verify_health=False -- stop_daemon() already proved process
+    # ownership via _descriptor_process_is_alive() (real PID here, since
+    # _owned_descriptor() records os.getpid()), so it no longer requires a
+    # separate GET /health round trip to succeed before sending /stop. See
+    # tests/test_cli/test_stop_daemon_busy_health.py for the full bug this
+    # fixes: a busy-but-alive daemon's event loop can't answer /health, and
+    # the old unconditional preflight made stop_daemon() falsely report the
+    # daemon as not running.
     request.assert_called_once_with(
         "POST",
         "/stop",
         expected_descriptor=descriptor,
+        verify_health=False,
     )
     wait_for_shutdown.assert_called_once_with(descriptor)
     process_iter.assert_not_called()

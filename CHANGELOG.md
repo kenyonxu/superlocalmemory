@@ -5,6 +5,38 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.4] — A busy daemon is not a dead daemon
+
+### Fixed
+- **`slm serve stop` and `slm restart` could report a live daemon as "not
+  running."** `daemon_request()` preflights every call with `GET /health`,
+  which needs the daemon's single-threaded event loop to be free to answer.
+  `/maintenance/run` and `/consolidate/cognitive` run multi-second (sometimes
+  multi-minute) work directly inline in their handlers with no thread
+  offload — unlike `/recall`, fixed for exactly this in v3.4.52 — so every
+  request blocks for as long as they run, health included. Reproduced live: a
+  genuine `/maintenance/run` call held the loop long enough that 15 of 15
+  health polls in that window timed out at the 2s cap while the process never
+  stopped listening. `stop_daemon()` now checks process liveness directly
+  (PID plus a clock-independent start token, no HTTP) before deciding whether
+  a stop is owed, and sends the stop itself without the health preflight —
+  the daemon still authenticates the request by its capability header on
+  arrival, so no ownership guarantee is lost, only the stall-prone round
+  trip. `cmd_restart`'s Step 1 uses the same liveness check, so a busy-but-alive
+  daemon is no longer skipped as "already stopped," which previously cascaded
+  into Step 3 refusing to start a second daemon and failing the whole restart.
+  The underlying blocking handlers are unchanged by this fix — recall and
+  remember calls can still be delayed by a running maintenance pass, just not
+  misreported as a dead daemon.
+
+### Added
+- **A one-command Antigravity plugin install.** `agy`'s plugin installer only
+  accepts a local directory — there is no marketplace or remote-install
+  path — so Claude Code and Codex had a real one-liner and Antigravity did
+  not. `scripts/install-antigravity-plugin.sh` closes the gap: a shallow,
+  sparse checkout of `antigravity-plugin/` into a local cache, then
+  `agy plugin install` against it. Idempotent; safe to re-run to update.
+
 ## [4.1.3] — Your install, your tools, your memories
 
 ### Fixed
