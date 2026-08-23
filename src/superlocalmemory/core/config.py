@@ -1417,6 +1417,44 @@ class SLMConfig:
                 if k in RetrievalConfig.__dataclass_fields__
             })
 
+        # 4.1.0 (#124): restore the two sections save() now writes. This runs
+        # AFTER for_mode() has applied its presets, so a value someone chose
+        # beats the mode default -- the same ordering retrieval already relies
+        # on. A malformed section falls back to the dataclass defaults rather
+        # than raising, matching quantization and sagq above: a corrupt config
+        # file must not make `slm` unrunnable.
+        mth = data.get("math")
+        if isinstance(mth, dict) and mth:
+            try:
+                fields = {
+                    k: v for k, v in mth.items()
+                    if k in MathConfig.__dataclass_fields__
+                }
+                # JSON has no tuple. Written as a list, it must come back a
+                # tuple or every reader that unpacks a pair gets a list and the
+                # difference surfaces somewhere far from here.
+                rng = fields.get("langevin_weight_range")
+                if isinstance(rng, list):
+                    fields["langevin_weight_range"] = tuple(rng)
+                config.math = MathConfig(**fields)
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Ignoring invalid math config (%s) — using defaults", exc
+                )
+
+        cw = data.get("channel_weights")
+        if isinstance(cw, dict) and cw:
+            try:
+                config.channel_weights = ChannelWeights(**{
+                    k: v for k, v in cw.items()
+                    if k in ChannelWeights.__dataclass_fields__
+                })
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Ignoring invalid channel_weights config (%s) — using defaults",
+                    exc,
+                )
+
         # V3.4.3 config fields (additive — missing keys get dataclass defaults)
         config.daemon_idle_timeout = data.get("daemon_idle_timeout", 0)
         config.daemon_port = data.get("daemon_port", 8765)
@@ -1679,11 +1717,20 @@ class SLMConfig:
         #
         # embedding_signature: has no typed in-memory model — it is an opaque blob
         # written by external tooling (see below).
+        # ``math`` and ``channel_weights`` join this loop as of 4.1.0. Both are
+        # read by engine wiring -- ``math.sheaf_contradiction_threshold`` by the
+        # consistency checker, ``channel_weights`` as the retrieval base weights
+        # -- and neither was ever written here or restored in ``load()``. Tuning
+        # either one, by hand or by switching mode, survived until the next
+        # restart and then silently reverted to the dataclass default, with
+        # nothing said. Reported as #124.
         for _section, _obj in (
             ("forgetting", self.forgetting),
             ("quantization", self.quantization),
             ("sagq", self.sagq),
             ("auto_invoke", self.auto_invoke),
+            ("math", self.math),
+            ("channel_weights", self.channel_weights),
         ):
             _base = existing.get(_section)
             _merged = dict(_base) if isinstance(_base, dict) else {}

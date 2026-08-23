@@ -130,6 +130,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A refusal from the service was reported as a crash.** Commands that were
   correctly denied printed a stack trace instead of the reason, and one denial
   told users to run a command that does not exist.
+- **`slm connect claude-code` told you to run a command that does not exist.**
+  It pointed at `slm plugin install`; there is no `slm plugin` subcommand, so
+  the only instruction it gave ended in an error with nothing else offered. It
+  now names the two Claude Code commands that actually install the plugin, and
+  the setup wizard that runs both for you. Reported by @barrygfox (#123).
+- **The bridge install in the IDE guide named a package that is not on npm.**
+  `@modelcontextprotocol/client-cli` has never existed, so the documented
+  install could not produce the `mcp-remote` binary that the config we write
+  points at. All three places now name `mcp-remote`, which does provide it.
+  Reported by @tonydzi (#122).
+- **Two settings did not survive a restart.** The consistency threshold and the
+  per-channel retrieval weights were never written to the config file and never
+  read back, so tuning either one — by hand or by switching mode — lasted until
+  the next restart and then reverted to the default with nothing said. Both are
+  now saved and restored, a pair stays a pair through the file, and a section
+  someone has hand-edited into nonsense falls back to defaults instead of
+  stopping `slm` from running. Reported by @barrygfox (#124).
+- **A migration failure said which, never why.** A migration recorded complete
+  is re-checked by its own verification on every start; when that check stops
+  passing, the log still reads complete while the health endpoint reports a
+  failure, and nothing said the two were answering different questions. The
+  health output now carries the reason for each failure, and `slm db migrate
+  --status` marks any migration whose recorded state and actual end-state
+  disagree instead of only reprinting the log. Reported by @unfall103-debug
+  (#125).
 ### Changed
 - **Every table that only grows now has a stated limit, or states why it has
   none.** Three of them had a cleanup routine, each written and wired

@@ -4296,6 +4296,20 @@ def _register_daemon_routes(application: FastAPI) -> None:
             "embedding": embedding_ready,
             "recall_health": recall_health.get("recall_healthy") is True,
             "migration_failures": migration_failures,
+            # WHY each one failed, not just which. The runner already produces
+            # a precise sentence per migration -- "safe repair did not restore
+            # M043_...", "schema verification failed ... : <sqlite error>" --
+            # and this endpoint computed it and then dropped it on the floor.
+            # A migration recorded ``complete`` in migration_log can still be
+            # reported failed here, because a completed migration is re-checked
+            # by its own verify() on every start; with only a name to go on,
+            # that reads as the health check contradicting the database. It is
+            # not: they are answering different questions, and this is the
+            # sentence that says which. Reported as #125.
+            "migration_failure_reasons": {
+                name: str(migration_details.get(name, "(no detail recorded)"))
+                for name in migration_failures
+            },
         }
         readiness["retrieval"] = bool(
             readiness["embedding"] and readiness["recall_health"]
