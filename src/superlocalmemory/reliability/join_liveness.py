@@ -2,7 +2,16 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory | https://qualixar.com | https://varunpratap.com
 
-"""Has a schema-guarded code path ever run against this store?
+"""Can a schema-guarded code path run against this store, and has it had the data?
+
+A note on what this proves, because the honest scope is narrower than the
+convenient phrasing. The check reads the schema: it establishes whether the
+guard's requirements are present *now*, and therefore whether the path is
+reachable at all. It does not read an execution history, so a satisfied guard
+means "this would execute", not "this has executed". The inference to "never
+executed" is sound only in the other direction -- if a required column is absent
+from a store that has been in service, the guarded path cannot have run against
+it -- and that is the direction the findings rely on.
 
 Some features are wired behind a guard that asks the schema a question before
 doing any work — "is this table here, does that column exist" — and fall back
@@ -69,6 +78,8 @@ class Guard:
 class GuardVerdict:
     name: str
     describes: str
+    #: LIVE = requirements present, so the path is reachable now. DEAD /     #: SATISFIED_ELSEWHERE = a requirement is absent, so the path cannot have run
+    #: against this store. LIVE is NOT evidence of past execution.
     verdict: str
     missing: tuple[str, ...] = field(default=())
     found_elsewhere: tuple[tuple[str, str, int, float], ...] = field(default=())
@@ -190,7 +201,11 @@ def _evaluate(conn: sqlite3.Connection, guard: Guard) -> GuardVerdict:
             name=guard.name,
             describes=guard.describes,
             verdict="LIVE",
-            detail="Every requirement is present; the guarded path executes.",
+            detail=(
+                "Every requirement is present, so the guarded path is reachable "
+                "on this store. This is schema evidence, not execution history: "
+                "it does not establish that the path has ever actually run."
+            ),
         )
 
     elsewhere: list[tuple[str, str, int, float]] = []
@@ -204,7 +219,10 @@ def _evaluate(conn: sqlite3.Connection, guard: Guard) -> GuardVerdict:
 
     populated = [e for e in elsewhere if e[2] > 0]
     if populated:
-        best = max(populated, key=lambda e: e[2])
+        # Rank by coverage of the guarded table, falling back to row count only
+        # when coverage could not be measured. Picking the largest table instead
+        # would recommend a 4,000-row partial source over a smaller complete one.
+        best = max(populated, key=lambda e: (e[3], e[2]))
         cov = best[3]
         if cov < 0:
             remedy = (

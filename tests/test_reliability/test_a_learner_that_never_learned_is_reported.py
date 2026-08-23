@@ -97,6 +97,31 @@ class TestALearningLearnerIsNotFlagged:
         assert verdict.verdict == "MOVING"
         assert not verdict.is_stalled
 
+    def test_many_units_sharing_few_observations_is_not_stalled(
+        self, tmp_path,
+    ) -> None:
+        """The aggregate floor alone is not enough.
+
+        Forty arms sharing forty-two observations clears a total floor of twenty
+        while leaving most arms untouched at exactly the prior -- which satisfies
+        the unmoved test for a reason that carries no information. STALLED has to
+        mean "measured inert", never "too sparse to tell", or the first operator
+        to see it on a cold store learns to ignore it.
+        """
+        arms = [(f"arm{i}", 1.0, 1.0, 0) for i in range(38)]
+        arms += [("hot1", 1.0 + 21 * 0.5, 1.0 + 21 * 0.5, 21),
+                 ("hot2", 1.0 + 21 * 0.5, 1.0 + 21 * 0.5, 21)]
+        db = _learning_db(tmp_path / "learning.db", arms)
+
+        (verdict,) = check_beta_learners(db, min_observations=20)
+
+        assert verdict.observations == 42, "clears the aggregate floor"
+        assert verdict.verdict == "INSUFFICIENT_DATA", (
+            "40 units sharing 42 observations is ~1 per unit and must not be "
+            "reported as measured inert"
+        )
+        assert "per unit" in verdict.detail
+
     def test_a_cold_learner_is_not_accused(self, tmp_path) -> None:
         """Below the observation floor, sitting at the prior is correct."""
         db = _learning_db(

@@ -41,9 +41,14 @@ from typing import Any
 
 logger = logging.getLogger("superlocalmemory.reliability.prior_distance")
 
-#: Below this many observations, a posterior sitting at its prior is expected
-#: rather than suspicious, so no verdict is issued.
+#: Below this many observations in total, a posterior sitting at its prior is
+#: expected rather than suspicious, so no verdict is issued.
 DEFAULT_MIN_OBSERVATIONS = 20
+
+#: And below this many observations *per unit*. An aggregate floor alone lets a
+#: store with many units and few observations report STALLED on units that were
+#: never played at all.
+_MIN_OBSERVATIONS_PER_UNIT = 2.0
 
 #: Distance from the prior mean below which a unit counts as unmoved. Kept well
 #: above float noise so that a genuinely tiny update is not reported as none.
@@ -142,20 +147,29 @@ def _inspect_learner(
         (str(r[0]), float(r[1] or 0.0), float(r[2] or 0.0)) for r in rows[:3]
     )
 
-    if observations < min_observations:
+    # The floor has to bind per unit, not in aggregate. 165 arms sharing 20
+    # observations leaves most of them untouched at exactly the prior, which
+    # satisfies the unmoved test for a reason that carries no information. A
+    # verdict of STALLED must mean "measured inert", never "too sparse to tell".
+    per_unit = observations / units if units else 0.0
+    if observations < min_observations or per_unit < _MIN_OBSERVATIONS_PER_UNIT:
         verdict = "INSUFFICIENT_DATA"
         detail = (
-            f"{observations} observations across {units} units is below the "
-            f"{min_observations} needed before an unmoved posterior means anything."
+            f"{observations} observations across {units} units "
+            f"({per_unit:.2f} per unit) is too sparse for an unmoved posterior to "
+            f"mean anything; the floors are {min_observations} in total and "
+            f"{_MIN_OBSERVATIONS_PER_UNIT:g} per unit."
         )
     elif neutral_identity == units:
         verdict = "STALLED"
         detail = (
             f"All {units} units satisfy (alpha-{_PRIOR_ALPHA:g}) == "
             f"(beta-{_PRIOR_BETA:g}) == n/2 exactly across {observations} "
-            f"observations. Every reward applied was the neutral value, so the "
-            f"posterior mean is still {0.5} everywhere and nothing has been "
-            f"learned. Counters advance; the distribution does not."
+            f"observations, so the rewards sum to exactly n/2 on every unit and "
+            f"each posterior mean is still {0.5}. No unit has acquired any "
+            f"preference. Note the identity constrains the SUM: it is also "
+            f"satisfied by a symmetric non-neutral stream, so confirm against a "
+            f"per-observation record before concluding the reward was constant."
         )
     elif at_prior_mean == units:
         verdict = "STALLED"
