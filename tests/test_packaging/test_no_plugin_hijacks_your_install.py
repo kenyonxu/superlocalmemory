@@ -53,6 +53,15 @@ def _vscode_env():
     return d["servers"]["superlocalmemory"].get("env", {})
 
 
+def _codex_plugin_mcp_env():
+    """The Codex tree's own .mcp.json — what a marketplace install of
+    ``superlocalmemory-codex`` actually runs. Added in 4.1.3: before it existed,
+    the marketplace could only serve the Claude tree, so Codex ran with
+    ``SLM_AGENT_ID=claude_code`` and filed every memory under the wrong host."""
+    d = json.loads((REPO / "codex-plugin/.mcp.json").read_text(encoding="utf-8"))
+    return d["mcpServers"]["superlocalmemory"].get("env", {})
+
+
 def _codex_env():
     text = (REPO / "codex-plugin/.codex/config.toml").read_text(encoding="utf-8")
     match = re.search(r"^env = \{(.*)\}\s*$", text, re.MULTILINE)
@@ -72,6 +81,7 @@ SURFACES = (
     ("Codex", _codex_env),
     ("VS Code", _vscode_env),
     ("Antigravity", _antigravity_env),
+    ("Codex plugin tree", _codex_plugin_mcp_env),
 )
 
 
@@ -109,6 +119,7 @@ class TestAttributionIsStillSet:
             ("Claude Code", _claude_env, "claude_code"),
             ("Codex", _codex_env, "codex"),
             ("Antigravity", _antigravity_env, "antigravity"),
+            ("Codex plugin tree", _codex_plugin_mcp_env, "codex"),
         ],
     )
     def test_the_agent_id_identifies_the_host(self, name, reader, expected) -> None:

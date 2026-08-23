@@ -226,6 +226,26 @@ export function renderMarketplaceJson(manifest) {
         source: './plugin',
         version: manifest.version,
       },
+      // A second entry for the Codex build. One marketplace, two trees, and a
+      // user picks the one for their host.
+      //
+      // Before this the marketplace offered only './plugin' — the Claude Code
+      // tree — so Codex installed that and reported itself as `claude_code`.
+      // Every memory written from Codex was filed under the wrong host, and the
+      // Codex-shaped rules, hooks and launcher in codex-plugin/ were never
+      // delivered by the marketplace at all.
+      {
+        author: { name: 'Qualixar' },
+        description:
+          'Local-first agent memory with auditable hybrid retrieval — the '
+          + 'Codex build, with Codex-shaped rules, hooks and launcher.',
+        homepage: 'https://github.com/qualixar/superlocalmemory',
+        keywords: ['memory', 'mcp', 'agents', 'local-first', 'context-compression'],
+        license: 'AGPL-3.0-or-later',
+        name: `${manifest.pluginName}-codex`,
+        source: './codex-plugin',
+        version: manifest.version,
+      },
     ],
   };
   return stableStringify(obj);

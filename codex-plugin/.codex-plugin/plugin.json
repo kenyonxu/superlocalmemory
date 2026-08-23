@@ -1,5 +1,5 @@
 {
-  "name": "superlocalmemory",
+  "name": "superlocalmemory-codex",
   "version": "4.1.2",
   "description": "Local-first agent memory with auditable hybrid retrieval. Remember decisions and recall them by asking, entirely on your machine.",
   "author": {

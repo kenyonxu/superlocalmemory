@@ -11,7 +11,9 @@ Version: **4.1.2**
 | `skills/*/SKILL.md` | `plugin-src/skills/*/SKILL.md`, with `SLM_AGENT_ID` retargeted to `codex` |
 | version footers | `plugin-src/manifest.json` |
 
+- `.claude-plugin/plugin.json`
 - `.codex-plugin/plugin.json`
+- `.mcp.json`
 - `AGENTS.md`
 - `README.md`
 - `agents/slm-governance-advisor.md`

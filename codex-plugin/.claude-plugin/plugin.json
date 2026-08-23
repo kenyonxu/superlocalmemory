@@ -1,0 +1,19 @@
+{
+  "author": {
+    "name": "Qualixar",
+    "url": "https://github.com/qualixar/superlocalmemory"
+  },
+  "description": "Local-first agent memory with auditable hybrid retrieval — the Codex build, with Codex-shaped rules, hooks and launcher.",
+  "displayName": "SuperLocalMemory (Codex)",
+  "keywords": [
+    "memory",
+    "mcp",
+    "agents",
+    "local-first",
+    "context-compression"
+  ],
+  "mcpServers": "./.mcp.json",
+  "name": "superlocalmemory-codex",
+  "repository": "https://github.com/qualixar/superlocalmemory",
+  "version": "4.1.2"
+}

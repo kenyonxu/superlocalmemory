@@ -113,7 +113,11 @@ for (const [srcDir, outDir] of [[SRC_AGENTS, 'agents'], [SRC_COMMANDS, 'commands
 // failure this whole file exists to prevent.
 {
   files.set('.codex-plugin/plugin.json', JSON.stringify({
-    name: 'superlocalmemory',
+    // Must equal the marketplace entry's name or the installer refuses:
+    // "plugin.json name X does not match marketplace plugin name Y".
+    // The suffix is also what distinguishes this tree from the Claude one
+    // when both are offered by the same marketplace.
+    name: 'superlocalmemory-codex',
     version: VERSION,
     // Literal, not manifest.description -- that field does not exist in
     // plugin-src/manifest.json, and JSON.stringify drops undefined, so the
@@ -152,6 +156,44 @@ for (const [srcDir, outDir] of [[SRC_AGENTS, 'agents'], [SRC_COMMANDS, 'commands
         'What am I working on?',
       ],
       brandColor: '#7C3AED',
+    },
+  }, null, 2) + '\n');
+}
+
+// 3c. .claude-plugin/plugin.json and .mcp.json — so a marketplace can install
+//     THIS tree, with Codex's own attribution.
+//
+// The marketplace could previously only offer `./plugin`, the Claude Code tree.
+// Codex installed that and reported itself as `claude_code`, so every memory
+// written from Codex was filed under the wrong host. The marketplace format is
+// the Claude one, so serving this directory needs a manifest in that shape here.
+//
+// Named `superlocalmemory-codex`: two entries in one marketplace need distinct
+// names, and the suffix is what a user picks between when installing.
+{
+  files.set('.claude-plugin/plugin.json', JSON.stringify({
+    author: { name: 'Qualixar', url: 'https://github.com/qualixar/superlocalmemory' },
+    description:
+      'Local-first agent memory with auditable hybrid retrieval — the Codex '
+      + 'build, with Codex-shaped rules, hooks and launcher.',
+    displayName: 'SuperLocalMemory (Codex)',
+    keywords: ['memory', 'mcp', 'agents', 'local-first', 'context-compression'],
+    mcpServers: './.mcp.json',
+    name: 'superlocalmemory-codex',
+    repository: 'https://github.com/qualixar/superlocalmemory',
+    version: VERSION,
+  }, null, 2) + '\n');
+
+  // The launcher, not a bare `slm`, so the same resolution applies here: use the
+  // slm that is already installed, fall back to an owned venv only if there is
+  // none. Sets the agent id and NOTHING else -- not the profile, not the store.
+  files.set('.mcp.json', JSON.stringify({
+    mcpServers: {
+      superlocalmemory: {
+        command: '${CLAUDE_PLUGIN_ROOT}/scripts/slm-launch',
+        args: [],
+        env: { SLM_AGENT_ID: AGENT_ID },
+      },
     },
   }, null, 2) + '\n');
 }
