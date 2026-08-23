@@ -5,6 +5,38 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.5] — Ask whether a feature is working, not whether it is present
+
+### Added
+- **`slm diagnostics reliability`** — two read-only checks that answer a question
+  neither a code search nor a call trace can: is a wired feature actually taking
+  effect on *your* store?
+  - The first asks whether the retrieval learner's posteriors have moved away from
+    where they started. A learner that records activity and never shifts its
+    distribution looks healthy from every counter it keeps; this reports it plainly.
+  - The second asks whether a feature gated on a table or column can run here at
+    all, and when it cannot, searches the rest of the store for the data it needs
+    and tells you where it is, how much of what is needed it covers, and whether
+    connecting it would need a backfill.
+  Both are read-only, run in a second, and print what they found in plain language.
+  Run it on your own store: it may tell you something you assumed was on is not.
+
+### Fixed
+- **A refused write said only "temporarily unavailable."** Three unrelated causes
+  produced that one message — a busy write journal, another process holding the
+  writer, and a rejected stale write. They call for different responses, and one of
+  them is not a fault at all. The cause is now named, so a log line says which
+  happened instead of leaving you to guess.
+- **The Codex and Antigravity plugins still advertised 4.1.3 after 4.1.4 shipped.**
+  Their manifests are generated from a shared source and were not regenerated during
+  that release, so both surfaces reported a version they were not. All four editor
+  surfaces are regenerated and checked against the package version on every release.
+- **The benchmark instructions could not be followed.** The documented command named
+  a directory that does not exist and an interpreter path pointing outside the
+  project, and the environment it suggested carries an older release — so anyone
+  following it measured the wrong code. Corrected, with a check that the interpreter
+  you choose has the version you mean to test.
+
 ## [4.1.4] — A busy daemon is not a dead daemon
 
 ### Fixed
