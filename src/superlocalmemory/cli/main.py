@@ -875,6 +875,18 @@ def main() -> None:
         "export", help="Write a deterministic content-free JSON report",
     )
     diagnostics_export.add_argument("destination")
+    diagnostics_reliability = diagnostics_sub.add_parser(
+        "reliability",
+        help=(
+            "Ask whether wired mechanisms are actually effective: has each "
+            "Bayesian learner moved off its prior, and has each schema-guarded "
+            "path ever executed against this store"
+        ),
+    )
+    diagnostics_reliability.add_argument(
+        "--min-observations", type=int, default=None,
+        help="Observation floor below which an unmoved posterior is not reported",
+    )
     diagnostics_export.add_argument(
         "--json", action="store_true", help="Output structured JSON",
     )

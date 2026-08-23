@@ -55,6 +55,8 @@ from __future__ import annotations
 import json
 import platform
 import shutil
+import itertools
+import random
 import statistics
 import sys
 import tempfile
@@ -238,6 +240,130 @@ def measure_bypass(ws: Path, n_warmup: int, n_measure: int) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
+# Interleaved measurement — both paths under identical conditions
+# ---------------------------------------------------------------------------
+
+#: Fixed so the interleaving is reproducible run to run. Recorded in the result.
+INTERLEAVE_SEED = 20260823
+
+
+def measure_interleaved(
+    ws: Path, n_warmup: int, n_measure: int, *, seed: int = INTERLEAVE_SEED,
+) -> tuple[list[float], list[float]]:
+    """Measure both paths in one interleaved pass. Returns (governed, bypass).
+
+    WHY THIS REPLACED TWO SEQUENTIAL PHASES
+    ---------------------------------------
+    The governed path *contains* the bypass path: ``remember()`` ends in the
+    same ``IngestionCommand.submit() -> write_queryable()`` the bypass path
+    calls directly. So ``governed - bypass`` can only be non-negative, and any
+    negative delta is a property of the measurement rather than of the code.
+
+    Measuring them as two sequential phases produced exactly that. Each phase
+    wrote a thousand rows to its own database before the next phase started, so
+    whichever ran second inherited the first one's page-cache pressure and
+    accumulated state. The minimums stayed within 0.1 ms of each other -- the
+    fast path is identical once everything is cached -- while the medians drifted
+    apart by 20 ms in the *wrong direction*.
+
+    Interleaving removes the confound: both paths see the same cache state, the
+    same thermal state, and the same point in the run. The order within each
+    pair is drawn from a seeded shuffle of a balanced sequence, so neither path
+    systematically occupies the favourable position, and the seed is recorded so
+    the sequence is reproducible.
+    """
+    governed_db = fresh_db(ws, "governed.db")
+    add_profile(governed_db, PROFILE_ID)
+    governed_writer = build_immediate_admission_handler(
+        governed_db, profile_id=PROFILE_ID,
+    )
+    runtime = CanonicalRememberRuntime(
+        db=governed_db,
+        profile_id=PROFILE_ID,
+        writer=governed_writer,
+        journal_path=ws / "governed_journal.db",
+    )
+    runtime.start()
+    assert runtime.ready, "CanonicalRememberRuntime did not become ready"
+    actor = _actor()
+
+    # The ungoverned comparand is the SAME writer callback the governed path
+    # ends in, so that the only difference between the two is the governance
+    # envelope itself.
+    #
+    # It used to be ``IngestionCommand.submit()``, and that made the subtraction
+    # invalid. ``build_immediate_admission_handler`` returns the bare
+    # ``write_queryable`` callback, and ``IngestionCommand`` *wraps* that
+    # callback with operation creation and a receipt transition -- three writes
+    # in one transaction where the governed writer does one. So the two paths
+    # were siblings, not nested: each carried bookkeeping the other did not, and
+    # ``governed - bypass`` measured the difference between two pipelines rather
+    # than the cost of governance. The sign of that difference is not even
+    # stable -- it came out negative at the median on this store, which is
+    # impossible for a genuine overhead.
+    bypass_db = fresh_db(ws, "bypass.db")
+    add_profile(bypass_db, PROFILE_ID)
+    bypass_writer = build_immediate_admission_handler(
+        bypass_db, profile_id=PROFILE_ID,
+    )
+    _bypass_op_seq = itertools.count(1)
+
+    def _ungoverned_bare(request):  # noqa: ANN001, ANN202
+        """The innermost writer, called with no caller-managed transaction."""
+        return bypass_writer(request, f"bench-op-{next(_bypass_op_seq):07d}")
+
+    def _noop_materialize(op):  # noqa: ANN001
+        return []
+
+    wrapped_command = IngestionCommand(
+        IngestionOperationRepository(bypass_db),
+        write_queryable=bypass_writer,
+        materialize=_noop_materialize,
+    )
+
+    # Warm both before either is measured.
+    for i in range(n_warmup):
+        runtime.remember(_governed_request(-(i + 1)), actor)
+        _ungoverned_bare(_bypass_request(-(i + 1)))
+        wrapped_command.submit(_bypass_request(-(n_warmup + i + 1)))
+
+    # A balanced sequence over all three arms, shuffled once with a recorded
+    # seed so no arm systematically occupies the favourable position.
+    order = (
+        ["governed"] * n_measure
+        + ["bare"] * n_measure
+        + ["wrapped"] * n_measure
+    )
+    random.Random(seed).shuffle(order)
+
+    governed: list[float] = []
+    bare: list[float] = []
+    wrapped: list[float] = []
+    gi = bi = wi = 0
+    for which in order:
+        if which == "governed":
+            req = _governed_request(gi); gi += 1
+            t0 = time.monotonic()
+            runtime.remember(req, actor)
+            governed.append((time.monotonic() - t0) * 1_000)
+        elif which == "bare":
+            req = _bypass_request(bi); bi += 1
+            t0 = time.monotonic()
+            _ungoverned_bare(req)
+            bare.append((time.monotonic() - t0) * 1_000)
+        else:
+            req = _bypass_request(1_000_000 + wi); wi += 1
+            t0 = time.monotonic()
+            wrapped_command.submit(req)
+            wrapped.append((time.monotonic() - t0) * 1_000)
+
+    runtime.stop()
+    governed_db.close()
+    bypass_db.close()
+    return governed, bare, wrapped
+
+
+# ---------------------------------------------------------------------------
 # Percentile helpers
 # ---------------------------------------------------------------------------
 
@@ -297,18 +423,30 @@ def run(
         print(f"  superlocalmemory module: {_SLM_FILE}", flush=True)
         print(f"  warmup={n_warmup}, measure={n_measure}", flush=True)
 
-        print("[exp_governed_latency] measuring GOVERNED path ...", flush=True)
-        governed_latencies = measure_governed(ws, n_warmup, n_measure)
-
-        print("[exp_governed_latency] measuring BYPASS (IngestionCommand.submit) ...",
-              flush=True)
-        bypass_latencies = measure_bypass(ws, n_warmup, n_measure)
+        print("[exp_governed_latency] measuring both paths interleaved "
+              f"(seed={INTERLEAVE_SEED}) ...", flush=True)
+        governed_latencies, bare_latencies, wrapped_latencies = (
+            measure_interleaved(ws, n_warmup, n_measure)
+        )
+        bypass_latencies = wrapped_latencies  # v1's comparand, kept comparable
 
     governed_stats = _stats(governed_latencies, "governed_write_envelope")
-    bypass_stats = _stats(bypass_latencies, "bypass_ingestion_command")
+    bypass_stats = _stats(bypass_latencies, "ungoverned_wrapped_ingestion_command")
+    bare_stats = _stats(bare_latencies, "ungoverned_bare_writer_no_transaction")
 
     delta_p50 = round(governed_stats["p50_ms"] - bypass_stats["p50_ms"], 3)
     delta_p99 = round(governed_stats["p99_ms"] - bypass_stats["p99_ms"], 3)
+    bare_delta_p50 = round(governed_stats["p50_ms"] - bare_stats["p50_ms"], 3)
+    bare_delta_p99 = round(governed_stats["p99_ms"] - bare_stats["p99_ms"], 3)
+    # A governance envelope can only add work, so a valid overhead is >= 0.
+    # Both candidate comparands yield a negative delta, which is a statement
+    # about the comparison rather than about the code: neither is nested inside
+    # the governed path. IngestionCommand does three writes in one transaction
+    # where the governed writer does one; the bare callback is designed to run
+    # inside a caller-managed transaction and pays an unbatched fsync per call
+    # when it does not. Report the arms, and do not report a difference as an
+    # overhead.
+    overhead_well_defined = delta_p50 >= 0 and bare_delta_p50 >= 0
 
     method_para = (
         "Method B (in-process governed envelope). "
@@ -364,8 +502,27 @@ def run(
         "method": method_para,
         "governed": governed_stats,
         "bypass": bypass_stats,
+        "ungoverned_bare": bare_stats,
         "governance_overhead_delta_p50_ms": delta_p50,
         "governance_overhead_delta_p99_ms": delta_p99,
+        "bare_delta_p50_ms": bare_delta_p50,
+        "bare_delta_p99_ms": bare_delta_p99,
+        "overhead_well_defined": overhead_well_defined,
+        "overhead_interpretation": (
+            "A governance envelope can only add work, so a valid overhead is "
+            ">= 0. Both candidate comparands give a negative p50 delta, which "
+            "is a fact about the comparison and not about the code: neither is "
+            "nested inside the governed path. IngestionCommand.submit performs "
+            "operation creation, the queryable write and a receipt transition "
+            "in one transaction, where the governed writer performs the "
+            "queryable write alone. The bare callback is built to run inside a "
+            "caller-managed transaction and pays an unbatched fsync per call "
+            "when it does not. The three arms are reported; the difference "
+            "between them is NOT a governance overhead and must not be quoted "
+            "as one. Isolating that cost needs the same pipeline measured with "
+            "the envelope enabled and disabled."
+        ),
+        "interleave_seed": INTERLEAVE_SEED,
         "caveats": caveats,
         "platform": {
             "python": sys.version.split()[0],
@@ -376,12 +533,21 @@ def run(
 
     print("\n=== GOVERNED WRITE-PATH LATENCY RESULTS ===")
     print(f"  Module: {_SLM_FILE}")
-    for label, stats in [("GOVERNED", governed_stats), ("BYPASS (IngestionCommand)", bypass_stats)]:
+    for label, stats in [
+        ("GOVERNED (journal + coordinator + writer)", governed_stats),
+        ("UNGOVERNED, wrapped (IngestionCommand: 3 writes, 1 txn)", bypass_stats),
+        ("UNGOVERNED, bare writer (no caller txn)", bare_stats),
+    ]:
         print(f"\n  {label}")
         print(f"    n={stats['n']}  p50={stats['p50_ms']}ms  "
               f"p95={stats['p95_ms']}ms  p99={stats['p99_ms']}ms  "
               f"mean={stats['mean_ms']}ms  stdev={stats['stdev_ms']}ms")
-    print(f"\n  Governance overhead delta: p50={delta_p50}ms  p99={delta_p99}ms")
+    print(f"\n  governed - wrapped: p50={delta_p50}ms  p99={delta_p99}ms")
+    print(f"  governed - bare:    p50={bare_delta_p50}ms  p99={bare_delta_p99}ms")
+    if not overhead_well_defined:
+        print("\n  !! Negative delta: neither comparand is nested inside the")
+        print("     governed path, so no governance overhead is defined here.")
+        print("     Report the arms; do not report a difference as an overhead.")
 
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
