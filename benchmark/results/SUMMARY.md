@@ -1,9 +1,9 @@
-# SLM 4.0 — Reliability Evaluation Results
+# SLM 4.1 — Reliability Evaluation Results
 
-- Package version: **4.0.0**
-- Python: 3.13.13
-- Platform: macOS-26.5.2-arm64-arm-64bit-Mach-O
-- Generated: 2026-08-08T08:38:21.471531+00:00
+- Package version: **4.1.0**
+- Python: 3.14.5
+- Platform: macOS-26.4.1-arm64-arm-64bit-Mach-O
+- Generated: 2026-08-23T07:06:37.351795+00:00
 
 | Experiment | Guarantee | Metric | Trials | Held | Rate | Verdict |
 |---|---|---|---:|---:|---:|:--:|
