@@ -393,12 +393,32 @@ class TestScripts:
             "codex-plugin/scripts/slm-launch must use SLM_DATA_DIR (portable)"
         )
 
-    def test_posix_launcher_has_fallback_to_path_slm(self) -> None:
-        """Codex launcher must fall back to PATH `slm` if venv binary not found."""
+    def test_posix_launcher_prefers_path_slm_over_its_own_venv(self) -> None:
+        """INVERTED in 4.1.2. This required PATH to be the FALLBACK, checked only
+        when the venv binary was absent.
+
+        That order meant a machine which had once bootstrapped a venv kept using
+        it forever — including after the user installed or upgraded SLM properly
+        — so two copies read one store and whichever started first decided which
+        code served it. Installing a plugin should not fork your installation.
+
+        Behaviour is covered by
+        ``tests/test_packaging/test_no_plugin_hijacks_your_install.py``, which
+        RUNS both launchers against a stubbed slm. This one only holds the shape:
+        PATH is consulted, and a venv remains available as the fallback for a
+        machine with no install at all.
+        """
         source = (CODEX_SCRIPTS / "slm-launch").read_text(encoding="utf-8")
-        # Check for a fallback assignment like: SLM_BIN="slm"
-        assert 'SLM_BIN="slm"' in source or "SLM_BIN='slm'" in source, (
-            "slm-launch must fall back to PATH 'slm' when venv binary is not present"
+
+        assert "command -v slm" in source, (
+            "the launcher must look for an installed slm"
+        )
+        assert "/venv/bin/slm" in source, (
+            "the venv fallback must remain for a machine with no install"
+        )
+        assert 'SLM_BIN="slm"' not in source, (
+            "assigning the bare name as a fallback is the inverted order this "
+            "release removed"
         )
 
     def test_ensure_venv_sh_uses_slm_data_dir_not_claude_plugin_data(self) -> None:
