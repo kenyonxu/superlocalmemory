@@ -71,7 +71,7 @@ class GuardVerdict:
     describes: str
     verdict: str
     missing: tuple[str, ...] = field(default=())
-    found_elsewhere: tuple[tuple[str, str, int], ...] = field(default=())
+    found_elsewhere: tuple[tuple[str, str, int, float], ...] = field(default=())
     detail: str = ""
 
     @property
@@ -126,13 +126,25 @@ def _satisfied(conn: sqlite3.Connection, requirement: Requirement) -> bool:
 
 
 def _look_elsewhere(
-    conn: sqlite3.Connection, column: str,
+    conn: sqlite3.Connection,
+    column: str,
+    *,
+    join_target: str | None = None,
+    join_key: str = "fact_id",
 ) -> list[tuple[str, str, int]]:
     """Find other tables carrying ``column``, with a populated-row count.
 
     This is the part that turns a failed guard into a fix. A column the guard
-    could not find on its own table is usually present on a neighbouring one,
-    already populated, needing no migration.
+    could not find on its own table is often present on a neighbouring one,
+    already populated.
+
+    **A populated count is not coverage, and reporting it alone overstates the
+    remedy.** A provenance-style table can carry a value on every one of its own
+    rows while describing only part of the set the join needs: rows can be
+    missing for older entities entirely. When ``join_target`` is given, the
+    coverage fraction over that table is measured and returned, because the
+    honest question is not "does this column exist somewhere" but "how much of
+    what the guard needs would the re-keyed join actually resolve".
     """
     out: list[tuple[str, str, int]] = []
     tables = [
@@ -152,7 +164,22 @@ def _look_elsewhere(
             ).fetchone()[0]
         except sqlite3.Error:
             populated = 0
-        out.append((table, column, int(populated)))
+        covered = -1
+        if join_target and join_target != table:
+            try:
+                total = conn.execute(
+                    f'SELECT COUNT(*) FROM "{join_target}"',
+                ).fetchone()[0]
+                if total:
+                    hit = conn.execute(
+                        f'SELECT COUNT(*) FROM "{join_target}" t WHERE EXISTS ('
+                        f'  SELECT 1 FROM "{table}" s WHERE s."{join_key}" = t."{join_key}"'
+                        f'  AND s."{column}" IS NOT NULL AND TRIM(s."{column}") <> \'\')',
+                    ).fetchone()[0]
+                    covered = round(100.0 * hit / total, 1)
+            except sqlite3.Error:
+                covered = -1
+        out.append((table, column, int(populated), covered))
     return out
 
 
@@ -166,16 +193,37 @@ def _evaluate(conn: sqlite3.Connection, guard: Guard) -> GuardVerdict:
             detail="Every requirement is present; the guarded path executes.",
         )
 
-    elsewhere: list[tuple[str, str, int]] = []
+    elsewhere: list[tuple[str, str, int, float]] = []
     for requirement in guard.requires:
         if requirement.column and not _satisfied(conn, requirement):
-            for found in _look_elsewhere(conn, requirement.column):
+            for found in _look_elsewhere(
+                conn, requirement.column, join_target=requirement.table,
+            ):
                 if found[0] != requirement.table:
                     elsewhere.append(found)
 
     populated = [e for e in elsewhere if e[2] > 0]
     if populated:
         best = max(populated, key=lambda e: e[2])
+        cov = best[3]
+        if cov < 0:
+            remedy = (
+                f"Re-keying the join onto that table would make the path "
+                f"executable; coverage over the guarded table could not be "
+                f"measured here, so confirm it before relying on the remedy."
+            )
+        elif cov >= 99.5:
+            remedy = (
+                f"That table covers {cov}% of the rows the guard needs, so "
+                f"re-keying the join makes the path live without a backfill."
+            )
+        else:
+            remedy = (
+                f"That table covers only {cov}% of the rows the guard needs. "
+                f"Re-keying the join makes the path executable for those rows "
+                f"and leaves the remainder on the same fallback, so this is a "
+                f"partial remedy and a backfill decision, not a free fix."
+            )
         return GuardVerdict(
             name=guard.name,
             describes=guard.describes,
@@ -186,9 +234,7 @@ def _evaluate(conn: sqlite3.Connection, guard: Guard) -> GuardVerdict:
                 f"The guard requires {', '.join(missing)}, which is absent, so "
                 f"the path has never executed against this store — "
                 f"{guard.fallback_behaviour}. The data it needs is present on "
-                f"{best[0]}.{best[1]} with {best[2]} populated rows. Re-keying "
-                f"the join onto that table makes the path live with no "
-                f"migration and no backfill."
+                f"{best[0]}.{best[1]} with {best[2]} populated rows. {remedy}"
             ),
         )
 

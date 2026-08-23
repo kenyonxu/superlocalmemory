@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 #
-# SLM V4 sub-wave 3c — TWO-NODE (loopback) END-TO-END convergence.
+# TWO-NODE (loopback) END-TO-END convergence.
 # Delivery-lead integration test: exercises the REAL StateSyncer.merge_remote,
 # LockCoordinator.resolve, local_delta/local_lock_delta, broker.set_state,
 # broker.lock_action, and broker.validate_lock_fence across TWO independent

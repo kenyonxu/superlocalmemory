@@ -32,13 +32,20 @@ _GUARD = (
 )
 
 
-def _store(path, *, with_column: bool, elsewhere: int | None = None):
+def _store(path, *, with_column: bool, elsewhere: int | None = None, facts: int = 0):
+    """``elsewhere`` provenance rows over ``facts`` rows, so coverage is
+    expressible as a fraction rather than only as a presence flag."""
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE trust_scores (source_id TEXT, alpha REAL, beta REAL)")
     cols = "fact_id TEXT PRIMARY KEY, content TEXT"
     if with_column:
         cols += ", created_by TEXT"
     conn.execute(f"CREATE TABLE facts ({cols})")
+    if facts:
+        conn.executemany(
+            f"INSERT INTO facts (fact_id, content) VALUES (?, ?)",
+            [(f"f{i}", "x") for i in range(facts)],
+        )
     if elsewhere is not None:
         conn.execute("CREATE TABLE provenance (fact_id TEXT, created_by TEXT)")
         conn.executemany(
@@ -65,25 +72,47 @@ class TestAGuardWhoseDataLivesElsewhereSaysSo:
     """The actionable case, and the one the live store actually exhibits."""
 
     def test_it_finds_the_column_on_another_table(self, tmp_path) -> None:
-        db = _store(tmp_path / "m.db", with_column=False, elsewhere=4340)
+        db = _store(tmp_path / "m.db", with_column=False, elsewhere=4, facts=4)
 
         (v,) = check_schema_guards(db, guards=_GUARD)
 
         assert v.verdict == "SATISFIED_ELSEWHERE"
         assert v.missing == ("facts.created_by",)
-        assert ("provenance", "created_by", 4340) in v.found_elsewhere
+        table, column, populated, coverage = v.found_elsewhere[0]
+        assert (table, column, populated) == ("provenance", "created_by", 4)
+        assert coverage == 100.0
 
     def test_it_names_the_table_the_row_count_and_the_remedy(self, tmp_path) -> None:
-        db = _store(tmp_path / "m.db", with_column=False, elsewhere=12)
+        db = _store(tmp_path / "m.db", with_column=False, elsewhere=12, facts=12)
 
         (v,) = check_schema_guards(db, guards=_GUARD)
 
         assert "provenance.created_by" in v.detail
         assert "12 populated rows" in v.detail
-        assert "no migration" in v.detail
+        assert "without a backfill" in v.detail
         # The fallback must be stated, because "off" and "computing the same
         # thing as being off" are different things to an operator.
         assert "inert" in v.detail
+
+    def test_partial_coverage_is_not_offered_as_a_free_fix(self, tmp_path) -> None:
+        """The correction that matters. A column fully populated on its OWN table
+        can still describe only part of the set the join needs, and reporting the
+        populated count alone overstates the remedy. This is the live store's
+        actual shape: every provenance row carries an author, and 30% of facts
+        have no provenance row at all."""
+        db = _store(tmp_path / "m.db", with_column=False, elsewhere=7, facts=10)
+
+        (v,) = check_schema_guards(db, guards=_GUARD)
+
+        _, _, populated, coverage = v.found_elsewhere[0]
+        assert populated == 7, "every row on its own table is populated"
+        assert coverage == 70.0, "but it covers only 70% of what the guard needs"
+        assert "only 70.0%" in v.detail
+        assert "partial remedy" in v.detail
+        assert "backfill decision" in v.detail
+        assert "no migration" not in v.detail, (
+            "must not promise a free fix at partial coverage"
+        )
 
     def test_an_empty_column_elsewhere_is_not_offered_as_a_fix(
         self, tmp_path,

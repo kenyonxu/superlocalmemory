@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 
-"""Phase 6a Sub-Wave 3a — Mesh Security Spine tests.
+"""Mesh security spine tests.
 
 TDD test file — written RED first, implemented GREEN.
 

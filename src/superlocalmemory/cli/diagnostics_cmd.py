@@ -66,8 +66,15 @@ def _cmd_reliability(args: Namespace) -> None:
                 "verdict": g.verdict,
                 "missing": list(g.missing),
                 "found_elsewhere": [
-                    {"table": tbl, "column": col, "populated_rows": n}
-                    for tbl, col, n in g.found_elsewhere
+                    {
+                        "table": tbl,
+                        "column": col,
+                        "populated_rows": n,
+                        # -1 when coverage over the guarded table could not be
+                        # measured. Populated rows alone overstate the remedy.
+                        "coverage_pct_of_guarded_table": cov,
+                    }
+                    for tbl, col, n, cov in g.found_elsewhere
                 ],
                 "detail": g.detail,
             }

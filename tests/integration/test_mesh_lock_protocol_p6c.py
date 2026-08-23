@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 #
-# Integration tests for SLM V4 sub-wave 3c-2: leaderless cross-node lock
+# Integration tests for leaderless cross-node lock
 # coordination (LockCoordinator — fencing-token total-order resolution).
 #
 # xdist-UNSAFE: share a SQLite file per test via tmp_path; run SERIALLY.

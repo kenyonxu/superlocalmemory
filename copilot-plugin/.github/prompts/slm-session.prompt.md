@@ -52,7 +52,7 @@ recalls or remembers in that session.
 
 ```
 session_init(
-  project_path: str = "",  # working directory path, e.g. "/Users/me/projects/foo"
+  project_path: str = "",  # working directory path, e.g. "~/projects/foo"
   query: str = "",         # topic override; if omitted, derived from project_path
   max_results: int = 10,   # max memories to return (default: 10)
   max_age_days: int = 30,  # suppress memories older than N days unless score >= 0.7

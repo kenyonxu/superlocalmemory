@@ -100,7 +100,7 @@ mesh_send(to=target_id, message="I'm starting work on auth/handler.py — please
 mesh_send(to="broadcast", message="Deploying to staging in 5 minutes")
 
 # Message all sessions working in the same project
-mesh_send(to="project:/Users/me/myproject", message="Tests are green on main")
+mesh_send(to="project:~/myproject", message="Tests are green on main")
 ```
 
 **4 KB message cap.** For large payloads (diffs, file contents), write to a file
