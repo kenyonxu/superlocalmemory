@@ -1804,6 +1804,41 @@ def _stop_deployment_retention(application) -> bool:
     return True
 
 
+def _start_embedder_warmup(engine: object) -> "threading.Thread | None":
+    """Load the embedding model in the background. Never blocks startup.
+
+    Returns the thread so a test can join it; ``None`` when there is nothing to
+    warm. Every failure is "not warmed", never a failed startup: a daemon that
+    cannot embed still serves keyword recall and still stores memories, and the
+    materializer fills the vectors in afterwards either way.
+    """
+    embedder = getattr(engine, "_embedder", None)
+    if embedder is None or not hasattr(embedder, "embed"):
+        return None
+
+    from superlocalmemory.core.engine import _is_remote_embedder
+
+    if _is_remote_embedder(embedder):
+        # A hosted embedder has no model to load and warming it would spend a
+        # request, and money, on a sentence nobody asked about.
+        return None
+
+    def _warm() -> None:
+        started = time.time()
+        try:
+            embedder.embed("slm embedder warm-up")
+        except Exception as exc:  # pragma: no cover — warming is best effort
+            logger.debug("embedder warm-up failed (%s) — writes will defer", exc)
+            return
+        logger.info(
+            "Embedding model warm and ready (%.1fs)", time.time() - started,
+        )
+
+    thread = threading.Thread(target=_warm, daemon=True, name="slm-embed-warmup")
+    thread.start()
+    return thread
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Initialize engine, workers, and optional services on startup."""
@@ -2087,6 +2122,23 @@ async def lifespan(application: FastAPI):
         application.state.deployment = deployment
         engine = MemoryEngine(config)
         engine.initialize()
+
+        # Load the embedding model now, off the request path, the way the
+        # cross-encoder is already warmed at startup.
+        #
+        # A write embeds inline so the memory it stores can be found by asking a
+        # question rather than only by quoting its own words, and it gives that
+        # one second before deferring to the materializer. Loading the model
+        # takes 9.9-11.0 s here; once loaded an embed is 42 ms. So on a daemon
+        # that had not embedded yet, the first writes each waited the full second
+        # and stored no vector regardless -- and the model only ever loaded
+        # because some *recall* eventually paid for it. Whoever recalled first
+        # wore the cold start.
+        #
+        # This belongs to the daemon and not to engine wiring: the worker is a
+        # subprocess per engine, so warming from wiring would have every `slm
+        # status` spawn one and load a model it will never use.
+        _start_embedder_warmup(engine)
 
         # Tell the hook subprocesses that skill evolution is on. The hook reads
         # this env var as its fast-path signal and nothing ever set it, so the

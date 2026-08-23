@@ -53,6 +53,29 @@ def _verify_ingestion_schema(memory_db: Path) -> bool:
 # Embedding a memory on the write path, before the receipt is returned
 # ---------------------------------------------------------------------------
 
+def _embedder_is_warm(embedder: object) -> bool:
+    """Has this embedder already served a request, so the next one is cheap?
+
+    Availability and readiness are different questions and the write path needs
+    the second one. ``EmbeddingService._available`` is set to ``True`` in its
+    constructor, before the worker subprocess exists; the model behind it takes
+    **9.9-11.0 s** to load on this machine against **42 ms** once loaded. A write
+    that embeds inline does so behind a one-second deadline, so keying off
+    availability meant every write until something else warmed the model paid the
+    whole deadline and then stored no vector anyway -- 10 of the first 12,
+    measured. The deadline was spent proving the model was cold.
+
+    ``EmbeddingService.is_warm`` answers the real question: a live worker that has
+    served at least one request. Embedders that do not offer it keep the old
+    check -- ``OllamaEmbedder`` talks to a server that is already running and has
+    no worker of its own to start, so availability is readiness there.
+    """
+    warm = getattr(embedder, "is_warm", None)
+    if warm is not None:
+        return bool(warm)
+    return getattr(embedder, "_available", None) is True
+
+
 def _is_remote_embedder(embedder: object) -> bool:
     """Return True if *embedder* makes remote HTTP calls (cloud / OpenAI-compatible).
 
@@ -580,7 +603,7 @@ class MemoryEngine:
         _embedder_ref = self._embedder
         if (
             _embedder_ref is None
-            or getattr(_embedder_ref, "_available", None) is not True
+            or not _embedder_is_warm(_embedder_ref)
             or _is_remote_embedder(_embedder_ref)
         ):
             return None, None, None
