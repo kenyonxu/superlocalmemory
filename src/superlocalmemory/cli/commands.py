@@ -2577,6 +2577,56 @@ def _migration_error_logs() -> list:
         return []
 
 
+def _slm_version() -> str:
+    """The installed package version, or "unknown"."""
+    try:
+        from importlib.metadata import version
+        return version("superlocalmemory")
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _installed_plugin_versions() -> dict:
+    """Version of each editor plugin found on this machine, by install name.
+
+    The skills, agents and commands live in the editor's plugin channel rather
+    than in the Python package, so upgrading with pip leaves them exactly where
+    they were. This looks for them where each editor puts them, and returns an
+    empty mapping when none is installed -- which is itself the answer worth
+    reporting, because it means pip is the only thing being upgraded.
+
+    Best effort by design: an editor this does not know about should produce
+    "not detected", never an error.
+    """
+    import json
+    from pathlib import Path
+
+    found: dict[str, str] = {}
+    roots = (
+        # Claude Code: marketplace installs and directly-added plugins.
+        Path.home() / ".claude" / "plugins",
+        # Codex and VS Code copies, when placed by hand.
+        Path.home() / ".codex" / "plugins",
+        Path.home() / ".vscode" / "extensions",
+    )
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for manifest in list(root.glob("*/.claude-plugin/plugin.json")) + \
+                list(root.glob("*/plugin.json")) + \
+                list(root.glob("*/*/.claude-plugin/plugin.json")):
+            try:
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 — a sibling plugin's bad json is not ours
+                continue
+            if str(data.get("name", "")) != "superlocalmemory":
+                continue
+            found[str(manifest.parent.parent.name)] = str(
+                data.get("version", "unknown")
+            )
+    return found
+
+
 def _detect_all_installs() -> list:
     """Thin shim so cmd_doctor can be tested without importing install_detector."""
     try:
@@ -3092,6 +3142,50 @@ def cmd_doctor(args: Namespace) -> None:
             )
     except Exception as _inst_exc:  # noqa: BLE001 — never break doctor
         _check("install_versions", "WARN", f"could not probe installs: {_inst_exc}")
+
+    # 14. The skills, agents and commands are NOT in the Python package.
+    #     They ship through the editor's own plugin channel -- `plugin/` in the
+    #     repository -- so `pip install --upgrade` cannot move them, and until now
+    #     nothing said so. 4.1 changed 76 files across those trees; a user who
+    #     upgraded the package and read a clean `slm doctor` had every reason to
+    #     believe they had all of it, and no way to find out otherwise.
+    try:
+        _pkg_version = _slm_version()
+        _pl = _installed_plugin_versions()
+        if not _pl:
+            _check(
+                "plugin_skills",
+                "WARN",
+                f"package is {_pkg_version}; no editor plugin detected, so the "
+                f"skills, agents and commands are not installed or updated by "
+                f"pip",
+                fix="Claude Code:  claude plugin marketplace add "
+                    "qualixar/superlocalmemory  &&  claude plugin install "
+                    "superlocalmemory@qualixar     "
+                    "Codex / VS Code: copy codex-plugin/ or copilot-plugin/ "
+                    "from the tag you are on",
+            )
+        else:
+            _stale = {n: v for n, v in _pl.items() if v != _pkg_version}
+            if _stale:
+                _check(
+                    "plugin_skills",
+                    "WARN",
+                    "package is %s; plugin content still at %s" % (
+                        _pkg_version,
+                        ", ".join(f"{n}={v}" for n, v in sorted(_stale.items())),
+                    ),
+                    fix="claude plugin marketplace update qualixar && "
+                        "claude plugin update superlocalmemory@qualixar",
+                )
+            else:
+                _check(
+                    "plugin_skills",
+                    "PASS",
+                    f"plugin content matches the package ({_pkg_version})",
+                )
+    except Exception as _pl_exc:  # noqa: BLE001 — never break doctor
+        _check("plugin_skills", "WARN", f"could not probe plugins: {_pl_exc}")
 
     # 14. Migration error logs — surface any unresolved failure from a previous
     #     upgrade attempt. The daemon writes these and they persist until the

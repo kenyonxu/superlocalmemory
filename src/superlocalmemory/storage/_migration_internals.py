@@ -332,6 +332,22 @@ def _delete_log(conn: sqlite3.Connection, name: str) -> None:
     conn.execute("DELETE FROM migration_log WHERE name = ?", (name,))
 
 
+def _why_unmet(mod, conn) -> str:
+    """The migration's own account of which check does not hold.
+
+    A migration may expose ``unmet(conn)`` returning a sentence. Most do not,
+    and for those the caller keeps its generic wording. Never raises: this runs
+    while reporting a failure and must not become a second one.
+    """
+    fn = getattr(mod, "unmet", None)
+    if not callable(fn):
+        return ""
+    try:
+        return str(fn(conn) or "")
+    except Exception:  # noqa: BLE001 - a detail string is not worth a crash
+        return ""
+
+
 def _apply_single(
     conn: sqlite3.Connection,
     migration: Migration,
@@ -414,9 +430,12 @@ def _apply_single(
                         try:
                             repair_fn(conn)
                             if not bool(verify_fn(conn)):
+                                _why = _why_unmet(mod, conn)
                                 return (
                                     "failed",
-                                    f"safe repair did not restore {migration.name}",
+                                    f"safe repair did not restore "
+                                    f"{migration.name}"
+                                    + (f": {_why}" if _why else ""),
                                 )
                             _upsert_log(conn, migration.name, ddl_hash, "complete")
                             return (
@@ -482,9 +501,11 @@ def _apply_single(
                 )
             try:
                 if not bool(verify_fn(conn)):
+                    _why = _why_unmet(mod, conn)
                     return (
                         "failed",
-                        f"safe repair did not restore {migration.name}",
+                        f"safe repair did not restore {migration.name}"
+                        + (f": {_why}" if _why else ""),
                     )
             except sqlite3.Error as exc:
                 return (

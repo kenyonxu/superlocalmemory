@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<h1 align="center">SuperLocalMemory V4.1.1</h1>
+<h1 align="center">SuperLocalMemory V4.1.2</h1>
 
 <h2 align="center">Rent the LLM. Own the memory.</h2>
 
@@ -27,12 +27,12 @@ guarantee here is stated as a falsifiable invariant, tested under an adversarial
 negative control, and shipped with the harness that regenerates the evidence:
 <code>python benchmark/run_all.py --trials 200 --output-dir results/</code>. What each experiment
 does <em>not</em> exercise is stated too.</p>
-<p align="center"><code>v4.1.1</code> — one control plane: <strong>SLM-Mesh</strong> peer coordination · multi-scope memory (personal / shared / global) · profiles · Cache · Compress · 7-layer retrieval · code graph · Entity Explorer · skill evolution · Modes A/B/C · GDPR retention &amp; audit chain · bounded loops — across CLI, MCP, dashboard, the <strong>Claude plugin</strong>, the <strong>Codex add-on</strong>, and documented IDE integrations.<br/>
+<p align="center"><code>v4.1.2</code> — one control plane: <strong>SLM-Mesh</strong> peer coordination · multi-scope memory (personal / shared / global) · profiles · Cache · Compress · 7-layer retrieval · code graph · Entity Explorer · skill evolution · Modes A/B/C · GDPR retention &amp; audit chain · bounded loops — across CLI, MCP, dashboard, the <strong>Claude plugin</strong>, the <strong>Codex add-on</strong>, and documented IDE integrations.<br/>
 Proxy: <code>slm wrap claude</code> &nbsp;·&nbsp; MCP: add <code>slm_compress</code> to your config &nbsp;·&nbsp; Skill: zero-config</p>
 <p align="center"><strong>Four public arXiv preprints</strong> · V4: <a href="https://arxiv.org/abs/2608.08253">arXiv:2608.08253</a> · companion archive: <a href="https://zenodo.org/records/21853302">Zenodo 21853302</a> (<a href="https://doi.org/10.5281/zenodo.21853302">DOI 10.5281/zenodo.21853302</a>) · prior preprints: <a href="https://arxiv.org/abs/2603.02240">2603.02240</a> · <a href="https://arxiv.org/abs/2603.14588">2603.14588</a> · <a href="https://arxiv.org/abs/2604.04514">2604.04514</a>.</p>
 
 <p align="center">
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/v4.1.1-Current_Release-2ea44f?style=for-the-badge&logo=checkmarx&logoColor=white" alt="v4.1.1 — Current Release"/></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/v4.1.2-Current_Release-2ea44f?style=for-the-badge&logo=checkmarx&logoColor=white" alt="v4.1.2 — Current Release"/></a>
   <a href="https://arxiv.org/abs/2608.08253"><img src="https://img.shields.io/badge/arXiv-2608.08253-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="SuperLocalMemory 4.0 paper on arXiv:2608.08253"/></a>
   <a href="https://zenodo.org/records/21853302"><img src="https://img.shields.io/badge/Zenodo-10.5281%2Fzenodo.21853302-1682D4?style=for-the-badge&logo=zenodo&logoColor=white" alt="V4 paper on Zenodo: 10.5281/zenodo.21853302"/></a>
   <a href="https://arxiv.org/abs/2603.14588"><img src="https://img.shields.io/badge/arXiv-2603.14588-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="arXiv Paper"/></a>
@@ -62,11 +62,7 @@ SuperLocalMemory V4 combines conventional dense and lexical retrieval with graph
 
 **Memory with a sense of time.** SLM does not only store *what* an agent learned — it records *when*. Every fact carries ingestion timing and provenance; recall runs a dedicated temporal candidate channel alongside semantic, lexical, and associative retrieval; scenes and entity timelines reconstruct sequence; and the lifecycle lets neglected memory decay and self-archive instead of growing without bound. Time is a first-class ranking and lifecycle signal rather than a timestamp column an agent never reads — which is what lets a long-lived agent reason about how its context changed, not only what it currently holds.
 
-**What V4.0.7 ships.** Three things that existed but could not be used. `slm summary` gives you a readable layer over your own memories — `day` for what you recorded today, `project` for a directory, `session` for one session — each stating how much of the underlying data it could actually see, with `--json` listing the exact memories it came from. Memories that mention a function, method or file are now linked to that code, with a short description of what they point at and a marker once the code has changed; expanding a memory in the dashboard shows it. Both need no language model, so they work in the fully local mode. The code↔memory bridge behind the second one had never run at all: the setup flag was written and never read, the build discarded it, its settings had no loader, and the method it was written against was an unimplemented placeholder. Linking runs during background maintenance, never when a memory is saved. See [reviewed corrections](docs/reviewed-corrections.md) for the correction lifecycle and [MCP tools](docs/mcp-tools.md) for host-facing commands.
-
-**Fixed in V4.0.7.** Version numbers disagreed across the project — the pip requirement pins, npm lockfile, editor plugin manifest, citation metadata and lockfile all still named the previous release, so installing from `requirements.txt` fetched the wrong version; one script now sets all fifteen. Stale-memory checks reported "nothing is stale" when code linking was simply switched off, and pointed at a setting that did not exist. `slm gdpr` was missing from `slm help`. Consolidation, handed something that was neither a database handle nor a path, created a file named after the object instead of refusing it.
-
-**Carried forward from V4.0.5 and V4.0.6.** A correction is a review-gated lifecycle, not an in-place edit: SLM creates an immutable successor, keeps it out of current recall until an authenticated reviewer applies it, and preserves the predecessor for time-aware history. Every candidate path — cached context, pins, bridge and scene expansion — uses hard current-truth admission and abstains if that truth cannot be read. `slm brain`, MCP, HTTP and the Living Brain share one observation-only BrainTruth snapshot; feedback, external Bounded Loops evidence and receipt claims are shown honestly but never silently alter recall, ranking or model routing. The Living Brain leads with how many questions your memory has answered rather than a raw event count, and says so plainly where nothing has been measured yet. The knowledge graph opens reliably, with a default of 50 nodes and its details panel reachable on narrow screens. The optional adaptive ranker stays off unless an operator sets `SLM_RANKING` (`v1`, `v2`, or `v2-ensemble`) — that gate prevents feedback and observation data from changing ranking without an explicit decision, and does not disable the normal retrieval channels.
+**What changed in this release.** See the [CHANGELOG](CHANGELOG.md) — every release is written up there, in plain language, newest first.
 
 - **[SLM-Mesh](#slm-mesh-cross-session--cross-machine-coordination)** — authenticated cross-session and cross-machine peer coordination (messages, locks, shared state, inbox/outbox, optional discovery). Coordination only — not automatic replicated memory.
 - **Multi-scope memory & profiles** — workspaces (profiles) plus `personal` / `shared` / `global` scopes; cross-profile recall is default-deny.
@@ -300,7 +296,7 @@ retrieved at runtime rather than copied into those files.
 **Score Contract v2:** `relevance_score` is query-relative relevance;
 `ranking_score` is internal ranking utility; `memory_confidence` belongs to the
 stored assertion; and `trust_score` is an evidence-policy signal. Legacy
-`score` and `confidence` remain aliases for one compatibility release. V3.8.0 is
+`score` and `confidence` remain aliases for one compatibility release. It is
 explicitly uncalibrated: `calibration_status` is `uncalibrated` and
 `answer_confidence` is `null`. See
 [the retrieval score contract](docs/retrieval-score-contract.md).
@@ -314,9 +310,9 @@ can run without a cloud LLM:
 
 Auto-capture hooks are installed explicitly with `slm hooks install` (Claude
 Code) or `slm hooks install --agent codex` (Codex). Hook latency and capture
-quality must be evaluated for the target client and workload; V3.8.0 publishes no universal p99 claim.
+quality must be evaluated for the target client and workload; SLM publishes no universal p99 claim.
 
-**Multi-scope memory (v3.6.15, opt-in):** keep memories `personal` (default), `shared` with named profiles, or `global` across the machine. Off by default — recall only ever returns your own facts until you turn sharing on, per call or in config. See **[docs/shared-memory.md](docs/shared-memory.md)**.
+**Multi-scope memory (opt-in):** keep memories `personal` (default), `shared` with named profiles, or `global` across the machine. Off by default — recall only ever returns your own facts until you turn sharing on, per call or in config. See **[docs/shared-memory.md](docs/shared-memory.md)**.
 
 <a id="multilingual-embedding-support"></a>
 
@@ -422,7 +418,7 @@ and the Claude Code plugin update path.
 
 SLM supports two MCP transports:
 
-**HTTP (recommended, v3.6.7+):**
+**HTTP (recommended):**
 ```json
 { "mcpServers": { "superlocalmemory": { "type": "http", "url": "http://127.0.0.1:8765/mcp/" } } }
 ```
@@ -461,77 +457,46 @@ Per-IDE configs available for Claude Code, Cursor, Windsurf, VS Code Copilot, Co
 
 ---
 
-## Claude Code Plugin
+## Editor plugins
 
-Install directly in Claude Code — no system-level npm/pip needed. This is how you
-get the **skills, agents, hooks, commands, and rules** (the MCP server is
-bootstrapped automatically). It is a two-step flow — add the marketplace once,
-then install:
+The plugin is how most people should install SLM. It brings the MCP server, the
+skills, the sub-agents, the slash commands and the hooks in one step, and keeps
+them at the same version as the package.
 
-```bash
-# 1. Add the Qualixar marketplace (one-time — the repo IS the marketplace)
-/plugin marketplace add qualixar/superlocalmemory
+**Four surfaces, one source.** Everything below is generated from `plugin-src/`,
+so no surface can quietly fall behind another:
 
-# 2. Install the plugin
-/plugin install superlocalmemory@qualixar
-```
+| Editor | Install | Skills | Agents | Commands | Hooks |
+|---|---|---:|---:|---:|---:|
+| **Claude Code** | `claude plugin marketplace add qualixar/superlocalmemory` then `claude plugin install superlocalmemory@qualixar` | 12 | 4 | 1 | yes |
+| **Codex** | copy `codex-plugin/` into your Codex plugins directory | 12 | 4 | 1 | yes |
+| **VS Code / Copilot** | copy `copilot-plugin/.github/` into your repository | 12 | 4 | as prompts | yes |
+| **Antigravity** | copy `antigravity-plugin/` into your plugins directory | 12 | 4 | 1 | yes |
 
-- Self-bootstraps a Python venv, installs all deps in an isolated `SLM_DATA_DIR`
-- Registers the 34-tool `code` MCP surface — the 18-tool `core` memory surface plus code-graph, portable-evidence, bounded-loop and usefulness-report tools
-- Ships the SLM skills / agents / hooks / commands / rules
-- Additive — does not replace an existing SLM install
-- `slm connect claude-code` detects an existing plugin install and links them
+### What you get
 
-> **Plugin vs Python/npm:** `python -m pip install superlocalmemory` inside an
-> activated virtual environment, or `npm i -g superlocalmemory`,
-> give you the `slm` CLI + the MCP server (the *tools*). The **skills/agents/hooks/
-> commands** come only through the plugin above. Use the plugin for Claude Code; use
-> pip/npm for the CLI or other IDEs.
+- **Skills** — `slm-remember`, `slm-recall`, `slm-session`, `slm-graph`,
+  `slm-mesh`, `slm-scope`, `slm-profile`, `slm-governance`, `slm-cache`,
+  `slm-compress`, `slm-status`, `slm-loop`.
+- **Sub-agents** — a memory advisor, a governance advisor, a context-optimization
+  advisor, and a loop runner, each scoped to the tools it actually needs.
+- **Commands** — `/slm-loop`, to run a task as a gate-verified bounded loop.
+- **Hooks** — session start and end, so context loads and commits without being
+  asked.
 
-To update later: `/plugin marketplace update qualixar` then `/plugin install superlocalmemory@qualixar`.
+### Keeping it current
 
-## Codex add-on
-
-For Codex, install the SLM-owned skills, two focused subagents, and four
-lifecycle hooks explicitly:
-
-```bash
-slm codex install
-```
-
-This adds only SLM-owned files under `~/.agents/skills`, `~/.codex/agents`, and
-`~/.codex/hooks.json`; it does not replace another agent's hooks or rewrite
-`~/.codex/config.toml`. Codex requires review and trust for new command hooks:
-open `/hooks` after installation. MCP wiring remains a separate explicit step:
+`pipx upgrade superlocalmemory` upgrades the **package**. It does not
+upgrade the plugin — those are separate channels, and the plugin is delivered by
+your editor. `slm doctor` reports both versions side by side and names the
+command that updates the one that is behind.
 
 ```bash
-slm connect codex
+claude plugin marketplace update qualixar
+claude plugin update superlocalmemory@qualixar
 ```
 
-`slm connect codex` semantically merges the `superlocalmemory` MCP server into
-`~/.codex/config.toml`, preserving unrelated configuration keys and writing
-atomically. TOML serializers can normalize whitespace and comments, so it is
-not a byte-preserving operation; use it only when you want the MCP server
-configured. Check the result with `slm codex status`; undo SLM-owned add-ons
-with `slm codex remove`.
-
-## GitHub Copilot integration
-
-The shipped installer configures the SuperLocalMemory MCP server and additive
-agent instructions for VS Code with GitHub Copilot:
-
-```bash
-slm connect vscode-copilot --here
-```
-
-Run it from the project root. It semantically merges the SLM server into
-`.vscode/mcp.json` and adds SLM-owned guidance inside
-`.github/copilot-instructions.md`, preserving unrelated servers and existing
-instructions. The generated `copilot-plugin/` source bundle is maintained for
-parity checks, but v3.8.1 does not claim that `slm connect` installs its prompt,
-agent, or hook files.
-
----
+For the other three, replace the directory from the tag you are on.
 
 ## Privacy controls and operating modes
 

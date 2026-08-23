@@ -30,6 +30,8 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CHECK = process.argv.includes('--check');
 
 const SRC_SKILLS = join(ROOT, 'plugin-src', 'skills');
+const SRC_AGENTS = join(ROOT, 'plugin-src', 'agents');
+const SRC_COMMANDS = join(ROOT, 'plugin-src', 'commands');
 const MANIFEST = join(ROOT, 'plugin-src', 'manifest.json');
 const OUT = join(ROOT, 'codex-plugin');
 
@@ -80,6 +82,78 @@ for (const name of skillNames) {
 for (const rel of ['AGENTS.md', 'README.md']) {
   const abs = join(OUT, rel);
   if (existsSync(abs)) files.set(rel, nl(stamp(readFileSync(abs, 'utf8'))));
+}
+
+// 1b. agents/ and commands/ — SLM is not only skills.
+//
+// codex-plugin/ shipped twelve skills and NEITHER of these, so a Codex user got
+// a third of the plugin: no sub-agents to delegate to, and no slash commands.
+// Both have a single source in plugin-src/ and are copied here with the same
+// retargeting the skills get, so they cannot drift from the Claude copies.
+for (const [srcDir, outDir] of [[SRC_AGENTS, 'agents'], [SRC_COMMANDS, 'commands']]) {
+  if (!existsSync(srcDir)) continue;
+  for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
+    files.set(
+      `${outDir}/${entry.name}`,
+      nl(stamp(retarget(readFileSync(join(srcDir, entry.name), 'utf8')))),
+    );
+  }
+}
+
+// 3b. .codex-plugin/plugin.json — the manifest Codex reads to LIST this plugin.
+//
+// Without it Codex has nothing to register, so the plugin is installed and
+// invisible: it never appears under Plugins, and there is no way to enable it
+// from the UI. That was the state until 4.1.2 -- codex-plugin/ shipped skills,
+// hooks, scripts and a config.toml, and no manifest naming any of it.
+//
+// The `interface` block is what the Plugins list renders. Generated rather than
+// hand-written so its version can never drift from the package's, which is the
+// failure this whole file exists to prevent.
+{
+  files.set('.codex-plugin/plugin.json', JSON.stringify({
+    name: 'superlocalmemory',
+    version: VERSION,
+    // Literal, not manifest.description -- that field does not exist in
+    // plugin-src/manifest.json, and JSON.stringify drops undefined, so the
+    // key vanished from the output without any error.
+    description:
+      'Local-first agent memory with auditable hybrid retrieval. Remember '
+      + 'decisions and recall them by asking, entirely on your machine.',
+    author: {
+      name: 'Qualixar',
+      email: 'varun.pratap.bhardwaj@gmail.com',
+      url: 'https://github.com/qualixar',
+    },
+    homepage: 'https://qualixar.com',
+    repository: 'https://github.com/qualixar/superlocalmemory',
+    license: 'AGPL-3.0-or-later',
+    keywords: ['memory', 'mcp', 'agents', 'local-first', 'context-compression'],
+    skills: './skills/',
+    agents: './agents/',
+    commands: './commands/',
+    hooks: './hooks/hooks.json',
+    mcpServers: './.codex/config.toml',
+    interface: {
+      displayName: 'SuperLocalMemory',
+      shortDescription: 'Local-first agent memory with auditable retrieval',
+      longDescription:
+        'Remember decisions, constraints and gotchas across sessions, and ' +
+        'recall them by asking a question rather than by remembering where you ' +
+        'put them. Runs entirely on this machine.',
+      developerName: 'Varun Pratap Bhardwaj',
+      category: 'Developer Tools',
+      capabilities: ['Interactive', 'Write'],
+      websiteURL: 'https://qualixar.com',
+      defaultPrompt: [
+        'What did we decide about this?',
+        'Remember this decision for later.',
+        'What am I working on?',
+      ],
+      brandColor: '#7C3AED',
+    },
+  }, null, 2) + '\n');
 }
 
 // 4. _GENERATED.md — says what is derived and what is not.

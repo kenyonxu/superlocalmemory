@@ -25,6 +25,7 @@ const CHECK = process.argv.includes('--check');
 const SRC_SKILLS = join(ROOT, 'plugin-src', 'skills');
 const SRC_AGENTS = join(ROOT, 'plugin-src', 'agents');
 const SRC_SCRIPTS = join(ROOT, 'plugin-src', 'scripts');
+const SRC_COMMANDS = join(ROOT, 'plugin-src', 'commands');
 const MCP_SRC = join(ROOT, 'ide', 'configs', 'vscode-copilot-mcp.json');
 const RULES_SRC = join(ROOT, 'plugin', 'CLAUDE.md');
 const MANIFEST = join(ROOT, 'plugin-src', 'manifest.json');
@@ -91,6 +92,27 @@ for (const fname of readdirSync(SRC_AGENTS).filter((f) => f.endsWith('.md')).sor
   const newFm = fm.trimEnd() + '\ntarget: vscode\nversion: "' + VERSION + '"';
   const af = '---\n' + newFm + '\n---\n' + (body.startsWith('\n') ? body : '\n' + body);
   files.set('.github/agents/' + name + '.agent.md', nl(af).replace(/\n*$/, '\n'));
+}
+
+// 3b. .github/prompts/<command>.prompt.md — the slash commands.
+//
+// VS Code has no separate "commands" concept; a command is a prompt file, the
+// same shape as a skill. They were simply not being copied, so the one command
+// SLM ships existed for Claude Code and Codex and not here.
+if (existsSync(SRC_COMMANDS)) {
+  for (const fname of readdirSync(SRC_COMMANDS).filter((f) => f.endsWith('.md')).sort()) {
+    const name = fname.replace(/\.md$/, '');
+    const out = '.github/prompts/' + name + '.prompt.md';
+    // Do NOT clobber a skill of the same name. `slm-loop` is both a skill and a
+    // command, VS Code has ONE prompt namespace, and copying commands blindly
+    // replaced the skill's prompt with the command's -- silently changing what
+    // already shipped. The skill version wins because it is what users have.
+    if (files.has(out)) continue;
+    files.set(
+      out,
+      nl(readFileSync(join(SRC_COMMANDS, fname), 'utf8')).replace(/\n*$/, '\n'),
+    );
+  }
 }
 
 // 4. .github/hooks/slm-hooks.json — Copilot schema (bash/timeoutSec). Stable on

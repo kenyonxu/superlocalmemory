@@ -2,7 +2,7 @@
 
 Built by `scripts/build-codex-plugin.mjs` from the single source in `plugin-src/`. Version stamped from `plugin-src/manifest.json`.
 
-Version: **4.1.1**
+Version: **4.1.2**
 
 ## Derived — do not edit by hand
 
@@ -11,8 +11,14 @@ Version: **4.1.1**
 | `skills/*/SKILL.md` | `plugin-src/skills/*/SKILL.md`, with `SLM_AGENT_ID` retargeted to `codex` |
 | version footers | `plugin-src/manifest.json` |
 
+- `.codex-plugin/plugin.json`
 - `AGENTS.md`
 - `README.md`
+- `agents/slm-governance-advisor.md`
+- `agents/slm-loop-runner.md`
+- `agents/slm-memory-advisor.md`
+- `agents/slm-optimize-advisor.md`
+- `commands/slm-loop.md`
 - `skills/slm-cache/SKILL.md`
 - `skills/slm-compress/SKILL.md`
 - `skills/slm-governance/SKILL.md`

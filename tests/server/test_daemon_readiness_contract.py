@@ -83,6 +83,10 @@ def test_health_ready_requires_engine_migrations_writer_and_retrieval(
         # other people's monitoring parses, so a field appearing in it should
         # have to be added here deliberately rather than slipping in.
         "migration_failure_reasons": {},
+        # 4.1.2: which of the failures actually stop this daemon serving.
+        # A data invariant that ordinary use re-violated is reported and
+        # served through; a missing table still refuses.
+        "migration_blocking": [],
     }
     assert payload["state"] == "ready"
     assert payload["runtime_state"] == "serving_full"

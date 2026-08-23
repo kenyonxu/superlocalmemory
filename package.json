@@ -1,6 +1,6 @@
 {
   "name": "superlocalmemory",
-  "version": "4.1.1",
+  "version": "4.1.2",
   "description": "Local-first agent memory with MCP and an agent-native CLI. Documented clients include Claude Code, Cursor, and Windsurf.",
   "keywords": [
     "ai-memory",
@@ -55,7 +55,8 @@
     "prepack": "node scripts/build-plugin.mjs && node scripts/build-copilot-plugin.mjs && node scripts/build-codex-plugin.mjs && node scripts/prepack.js",
     "postinstall": "node scripts/postinstall.js",
     "preuninstall": "node scripts/preuninstall.js",
-    "test": "node scripts/run-ui-tests.mjs"
+    "test": "node scripts/run-ui-tests.mjs",
+    "build:antigravity-plugin": "node scripts/build-antigravity-plugin.mjs"
   },
   "engines": {
     "node": ">=18.0.0",

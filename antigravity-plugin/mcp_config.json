@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "superlocalmemory": {
+      "command": "slm",
+      "args": [
+        "mcp"
+      ],
+      "env": {
+        "SLM_AGENT_ID": "antigravity",
+        "SLM_MCP_PROFILE": "code"
+      }
+    }
+  }
+}

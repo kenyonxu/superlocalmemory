@@ -281,13 +281,31 @@ class TestMarketplaceJson:
             f"source must be './plugin' (DOC-CORRECT), got {plugin['source']!r}"
         )
 
-    def test_marketplace_plugin_entry_has_no_version_key(self) -> None:
-        """Per LLD §5 AC-3: version is ONLY in plugin.json; marketplace plugin entry has NO version."""
+    def test_marketplace_plugin_entry_states_its_version(self) -> None:
+        """REVERSED in 4.1.2. This asserted the opposite — no version key, "per
+        LLD §5 AC-3: version lives only in plugin.json".
+
+        That rule was ours, not the editor's, and it is what made every release
+        look like no release. A client compares what it has installed against
+        what the marketplace advertises; with nothing to compare, an installed
+        plugin never appears out of date, however many releases pass. Reported
+        after a release that changed 76 files across the plugin trees and showed
+        up nowhere.
+
+        The evidence for reversing it is a plugin that works: `bounded-loops`
+        carries a version in its marketplace entry, installs, lists and updates
+        correctly. So the editor does not object; only our rule did.
+
+        The reason the rule existed — two places stating a version can drift — is
+        real, and is handled rather than avoided: `scripts/bump_version.py` owns
+        both stamps, and `tests/test_packaging/test_every_editor_can_see_the_plugin.py`
+        fails if any manifest disagrees with `pyproject.toml`.
+        """
         data = _load_json(REPO_CLAUDE_DIR / "marketplace.json")
         plugin = data["plugins"][0]
-        assert "version" not in plugin, (
-            "marketplace plugin entry must NOT have 'version' key "
-            "(version lives only in plugin.json)"
+        assert plugin.get("version"), (
+            "the marketplace entry needs a version or a client has nothing to "
+            "compare, and an installed plugin never looks out of date"
         )
 
     def test_marketplace_owner_is_qualixar(self) -> None:

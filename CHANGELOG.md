@@ -5,6 +5,63 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.2] — The monitor that was watching nothing
+
+### Fixed
+- **A killed embedding worker was never brought back, and nothing said so.** The
+  worker is stopped on an idle timeout roughly every hour, by design, and a
+  background monitor exists to revive it. That monitor decided whether anything
+  was wrong by looking at a probe search: results with no meaning-score meant a
+  broken embedder. But it explicitly did not count *no results at all* — and no
+  results is what a dead embedder produces, because the meaning channel returns
+  nothing and the probe phrase appears in nobody's memories. So the one symptom
+  that should have started a repair was read as proof that none was needed, and
+  because a clean verdict is silent, it left no trace. Observed on a machine that
+  sat for over an hour, across two restarts, with searching by meaning switched
+  off, no explanation in the log, and a manual restart the only cure. The monitor
+  now asks the embedder directly, which is a question a search cannot answer.
+- **There was no way to tell a quiet monitor from a dead one.** A check that
+  finds nothing wrong writes nothing, which is right — a monitor that narrates
+  every success is one whose warnings get skimmed past. But it left "is it even
+  running?" unanswerable except by waiting for something to break. The time of
+  the last check is now reported, so it can be looked at instead of inferred.
+- **A failing repair would not say what it was failing.** When a completed
+  upgrade step stops holding, the report named the step and not the condition —
+  and that step checks five separate things. Anyone who hit it had to come back
+  and ask which. It now says which.
+- **One drifted row could make the whole store unreachable.** Any failed upgrade
+  step made every request return "service unavailable". That is right when a
+  table is missing. It is wrong for the checks that guard *data* rather than
+  structure — ordinary use can undo those, a single background pass being
+  enough — and it left people restarting a daemon to fix something a restart
+  could not fix. Structural failures still refuse; a data check that drifted now
+  reports itself and keeps serving while it is repaired. Anything that does not
+  say which kind it is still refuses, so nothing became more permissive by
+  accident.
+
+### Changed
+- **The plugin now installs and lists everywhere it should.** It is the main way
+  to get SLM, and it was only half-delivered:
+  - **Codex could not see it at all.** Codex reads `.codex-plugin/plugin.json` to
+    register a plugin and that file did not exist, so twelve skills, the hooks,
+    the launcher and the server config were all installed and none of it appeared
+    under Plugins. There was nothing to enable.
+  - **Codex was also missing two thirds of the product.** It shipped skills and
+    neither the four sub-agents nor the slash command. Both come from the same
+    single source as the Claude Code copies now, so they cannot drift.
+  - **Antigravity had no plugin at all.** It has one now, with the same skills,
+    agents, commands and hooks as every other surface.
+  - **VS Code was missing the slash command.**
+  - **Every release looked like no release.** The marketplace entry carried no
+    version, so a client had nothing to compare and an installed plugin never
+    appeared out of date. This reverses a rule of our own making; the version is
+    now stated, and one script owns every place that states it.
+- **`slm doctor` now says whether your skills are as new as your install.** The
+  skills, agents and commands are delivered by your editor, not by `pip`, so
+  upgrading the package leaves them untouched — and nothing had ever mentioned
+  that. This release changed 76 files across them. Doctor now reports the plugin
+  version beside the package version and names the command that updates it.
+
 ## [4.1.1] — A store older than its own indexes
 
 ### Fixed

@@ -511,6 +511,49 @@ _MIGRATION_EXEMPT_PATH_PREFIXES: tuple[str, ...] = (
 )
 
 
+def _serving_blocked_by(migration_result: dict) -> list[str]:
+    """Failed migrations that should stop this daemon serving. Fail-closed.
+
+    A failed migration used to 503 every route without asking what had failed.
+    For a missing table that is right. For a data invariant that ordinary use can
+    re-violate it is not: one drifted row made the whole store unreachable until
+    somebody restarted it by hand, and the restart fixed nothing that a
+    background repair would not have fixed on its own.
+
+    A migration may answer for itself by exposing ``blocks_serving(conn)``.
+    Anything that does not is treated as blocking, so this cannot quietly open a
+    door for a migration nobody has thought about.
+    """
+    failed = list(migration_result.get("failed") or [])
+    if not failed:
+        return []
+    try:
+        import sqlite3
+
+        from superlocalmemory.infra.data_root import state_path
+        from superlocalmemory.storage._migration_internals import _MODULES
+    except Exception:  # noqa: BLE001 — never let this decide by crashing
+        return failed
+
+    blocking: list[str] = []
+    for name in failed:
+        decide = getattr(_MODULES.get(name), "blocks_serving", None)
+        if not callable(decide):
+            blocking.append(name)
+            continue
+        try:
+            db = state_path("memory.db")
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                if decide(conn):
+                    blocking.append(name)
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 — unknown means blocking
+            blocking.append(name)
+    return blocking
+
+
 def _is_migration_exempt_path(path: str) -> bool:
     """Return True for health, status, and repair paths that must stay reachable
     even when the daemon reports a schema migration failure.
@@ -4009,7 +4052,7 @@ def _register_dashboard_routes(application: FastAPI) -> None:
     @application.middleware("http")
     async def _migration_readiness_gate(request, call_next):
         migration_result = getattr(application.state, "migration_result", None)
-        if migration_result and migration_result.get("failed"):
+        if migration_result and _serving_blocked_by(migration_result):
             if not _is_migration_exempt_path(request.url.path):
                 from fastapi.responses import JSONResponse
                 return JSONResponse(
@@ -4278,7 +4321,14 @@ def _register_daemon_routes(application: FastAPI) -> None:
             (migration_result or {}).get("failed", []) or []
         )
         migration_details = (migration_result or {}).get("details", {}) or {}
-        migrations_ready = bool(migration_result) and not migration_failures
+        # Ready means "can serve", so it keys off the failures that actually
+        # stop this daemon serving -- not off every failure. A data invariant
+        # that ordinary use re-violated leaves every route working; reporting
+        # not-ready for it told operators to restart, which fixed nothing a
+        # background repair would not have fixed. Everything still shows up in
+        # migration_failures and migration_failure_reasons below, named.
+        migration_blocking = _serving_blocked_by(migration_result or {})
+        migrations_ready = bool(migration_result) and not migration_blocking
         if migration_details.get("_crash"):
             migrations_ready = False
         writer_runtime = getattr(
@@ -4296,6 +4346,9 @@ def _register_daemon_routes(application: FastAPI) -> None:
             "embedding": embedding_ready,
             "recall_health": recall_health.get("recall_healthy") is True,
             "migration_failures": migration_failures,
+            # Which of those are the reason this daemon will not serve, as
+            # opposed to the ones it is reporting while serving normally.
+            "migration_blocking": migration_blocking,
             # WHY each one failed, not just which. The runner already produces
             # a precise sentence per migration -- "safe repair did not restore
             # M043_...", "schema verification failed ... : <sqlite error>" --

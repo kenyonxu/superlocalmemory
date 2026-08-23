@@ -409,45 +409,31 @@ def _sync_lifecycle_mirror(conn: sqlite3.Connection) -> None:
     """)
 
 
-def verify(conn: sqlite3.Connection) -> bool:
-    """Whether the repair's end-state holds.
+def unmet(conn: sqlite3.Connection) -> str:
+    """Which check does not hold, named. Empty string when all of them do.
 
-    Called on every start for an already-complete migration. Returning False
-    routes to ``repair()``, which makes this a standing guard: if pollution ever
-    reappears, the next daemon start withholds it without anyone asking.
+    ``verify()`` returns a bare boolean, so when a completed migration stops
+    verifying the runner can only say "safe repair did not restore M043". This
+    checks five separate things, and that sentence names none of them -- a user
+    hitting it had to come back and ask which, and so did we. This is the same
+    gap that ``migration_failure_reasons`` closed one level up, left open one
+    level down.
     """
     if not _table_exists(conn, "atomic_facts"):
-        return True
+        return ""
     if not _has_column(conn, "atomic_facts", "quarantined"):
-        return False
+        return "atomic_facts has no 'quarantined' column"
     if not _table_exists(conn, "consolidated_summaries"):
-        return False
-
+        return "the consolidated_summaries display table is missing"
     if _table_exists(conn, "fact_consolidations"):
-        unwithheld = _count(
+        n = _count(
             conn,
             "SELECT COUNT(*) FROM atomic_facts WHERE COALESCE(quarantined, 0) = 0 "
             "  AND fact_id IN (" + _CONSOLIDATOR_ROWS + ")",
         )
-        if unwithheld:
-            return False
-
-        # Every withheld row must still be visible somewhere, or the repair has
-        # deleted the owner's view of it rather than moved it.
-        #
-        # BY IDENTITY *OR* CONTENT, and the "or" is what makes this an invariant
-        # rather than a trap. Matching on content alone could never become true
-        # once a row's content changed after being preserved: the display copy
-        # keeps the old text, verify stays false, repair() runs apply() again,
-        # apply() cannot change the past, and the migration is reported failed
-        # on every start for the rest of the store's life. Matching on identity
-        # alone fails the other way, because two withheld rows with identical
-        # text collapse into one display row under the unique triple, leaving the
-        # second with no row of its own id.
-        #
-        # Either match satisfies the guarantee that actually matters: nothing
-        # the owner could see has stopped being visible.
-        unpreserved = _count(conn, """
+        if n:
+            return f"{n} model-written summaries are not withheld from recall"
+        n = _count(conn, """
             SELECT COUNT(*) FROM atomic_facts af
              WHERE af.fact_id IN (""" + _CONSOLIDATOR_ROWS + """)
                AND NOT EXISTS (
@@ -457,13 +443,51 @@ def verify(conn: sqlite3.Connection) -> bool:
                              OR cs.content = af.content)
                    )
         """)
-        if unpreserved:
-            return False
-
+        if n:
+            return f"{n} withheld summaries have no display copy"
     if _table_exists(conn, "fact_retention"):
-        if _count(conn, "SELECT COUNT(*) FROM (" + _wrongly_hidden(conn) + ")"):
-            return False
-    return True
+        n = _count(conn, "SELECT COUNT(*) FROM (" + _wrongly_hidden(conn) + ")")
+        if n:
+            return f"{n} real memories are hidden from recall and should not be"
+    return ""
+
+
+def blocks_serving(conn: sqlite3.Connection) -> bool:
+    """Should a daemon refuse to serve while this check does not hold?
+
+    Only when the SCHEMA is missing. The two schema conditions here -- the
+    column and the display table -- mean queries would hit something that is not
+    there, so refusing is right. The other three are about DATA: a summary that
+    should be withheld is not withheld, or a real memory is hidden. Those make
+    some answers worse; they do not stop the store working.
+
+    The distinction matters because this ``verify()`` is a standing guard over
+    data that ordinary use can re-violate -- a consolidation pass hiding one more
+    memory is enough. Treating that like a missing table meant one drifted row
+    could return 503 on every route indefinitely, with a manual restart the only
+    way out. That is an outage caused by a quality check, which is worse than the
+    thing the check is for.
+
+    Reported as #125, where a user's daemon sat unusable on exactly this.
+    """
+    if not _table_exists(conn, "atomic_facts"):
+        return False
+    if not _has_column(conn, "atomic_facts", "quarantined"):
+        return True
+    return not _table_exists(conn, "consolidated_summaries")
+
+
+def verify(conn: sqlite3.Connection) -> bool:
+    """Whether the repair's end-state holds.
+
+    Called on every start for an already-complete migration. Returning False
+    routes to ``repair()``, which makes this a standing guard: if pollution ever
+    reappears, the next daemon start withholds it without anyone asking.
+
+    Thin wrapper over ``unmet()`` so the two can never disagree about what
+    "verified" means.
+    """
+    return not unmet(conn)
 
 
 def repair(conn: sqlite3.Connection) -> None:

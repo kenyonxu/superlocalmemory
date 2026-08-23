@@ -120,6 +120,27 @@ def _sub_glob(pattern_glob: str, pattern: str, replacement: str,
     return old, version
 
 
+def _read_json_at(rel: str, path: tuple):
+    """Read a nested JSON value by a path of keys and indexes."""
+    data = json.loads((_ROOT / rel).read_text(encoding="utf-8"))
+    for step in path:
+        data = data[step]
+    return str(data)
+
+
+def _sub_json_at(rel: str, path: tuple, version: str) -> tuple[str, str]:
+    """Set a nested JSON value, preserving the rest of the document."""
+    p = _ROOT / rel
+    data = json.loads(p.read_text(encoding="utf-8"))
+    node = data
+    for step in path[:-1]:
+        node = node[step]
+    old = str(node.get(path[-1]) if isinstance(node, dict) else node[path[-1]])
+    node[path[-1]] = version
+    p.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return old, version
+
+
 def _read_glob(pattern_glob: str, pattern: str) -> str:
     """The oldest version any file in the glob still claims."""
     found = set()
@@ -226,6 +247,15 @@ def _plan(version: str):
         # not know about any of them, so 4.1.0 was bumped everywhere the
         # consistency test looks and the front page still advertised 4.0.10.
         # The test does not read README, which is exactly why the script must.
+        # The version the marketplace advertises. Without it there is nothing
+        # for a client to compare, so an installed plugin never looks out of
+        # date -- which is exactly what "no upgrade in the plugins" meant. It is
+        # a separate stamp from plugin.json's and has to be bumped with it.
+        ("marketplace entry version",
+         lambda: _read_json_at(".claude-plugin/marketplace.json",
+                               ("plugins", 0, "version")),
+         lambda: _sub_json_at(".claude-plugin/marketplace.json",
+                              ("plugins", 0, "version"), version)),
         # Sixteen skill and agent files under plugin-src carry a version footer
         # and packaging copies them verbatim. tests/test_packaging walks exactly
         # this glob and fails on any that disagree with the package version.

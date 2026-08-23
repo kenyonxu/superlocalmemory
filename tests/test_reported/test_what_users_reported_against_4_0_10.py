@@ -225,8 +225,11 @@ class TestAMigrationFailureSaysWhatFailed:
 
         source = inspect.getsource(unified_daemon)
         assert "migration_failure_reasons" in source
-        marker = source.index("migration_failure_reasons")
-        assert "migration_details.get(name" in source[marker:marker + 400], (
+        # Both must be present, and the reasons must be built from the runner's
+        # own details rather than composed here. Asserting they sit within N
+        # characters of each other was brittle for no benefit -- inserting one
+        # unrelated field between them broke it without changing any behaviour.
+        assert "migration_details.get(name" in source, (
             "the reasons field must be built from the runner's own details, "
             "not invented here"
         )

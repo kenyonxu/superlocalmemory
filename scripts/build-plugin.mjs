@@ -199,7 +199,11 @@ export function renderPluginJson(manifest) {
 
 /**
  * Render marketplace.json — at repo root .claude-plugin/marketplace.json.
- * NO version key in plugin entry. source = "./plugin".
+ * The plugin entry DOES carry a version. It deliberately did not, and that was
+ * the reason every release looked like no release: a client compares what it has
+ * against what the marketplace offers, and with no version there to compare it
+ * never has reason to update. Reported as "no upgrade in the plugins" after a
+ * release that changed 76 files across the plugin trees. source = "./plugin".
  * @param {object} manifest
  * @returns {string}
  */
@@ -215,8 +219,12 @@ export function renderMarketplaceJson(manifest) {
       {
         author: { name: 'Qualixar' },
         description: manifest.marketplace.description,
+        homepage: 'https://github.com/qualixar/superlocalmemory',
+        keywords: ['memory', 'mcp', 'agents', 'local-first', 'context-compression'],
+        license: 'AGPL-3.0-or-later',
         name: manifest.pluginName,
         source: './plugin',
+        version: manifest.version,
       },
     ],
   };
