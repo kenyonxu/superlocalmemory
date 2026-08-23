@@ -37,4 +37,4 @@ env = { SLM_AGENT_ID = "codex" }
 [mcp_servers.superlocalmemory]
 command = "slm"
 args = ["mcp"]
-env = { SLM_MCP_PROFILE = "code", SLM_AGENT_ID = "codex", SLM_DATA_DIR = "~/.superlocalmemory" }
+env = { SLM_AGENT_ID = "codex" }

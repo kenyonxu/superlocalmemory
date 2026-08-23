@@ -5,6 +5,39 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.3] — Your install, your tools, your memories
+
+### Fixed
+- **Installing the plugin could point your editor at a different, empty set of
+  memories.** Its server configuration pinned a data directory of its own, so on
+  a machine already using SLM the editor read somewhere else entirely — measured
+  here, that directory held 28 KB while the real one held 611 MB and 5,370
+  memories. Nothing failed and nothing warned; it simply looked like everything
+  was gone. The plugin no longer says where your memories live.
+- **Installing the plugin could take away tools you had turned on.** Three of the
+  four editor builds forced a narrower tool set — 31 tools, without the eight for
+  coordinating between sessions. If you had deliberately enabled more, installing
+  something removed them. No build states an opinion about this any more.
+- **Installing the plugin could give you a second copy of SuperLocalMemory.** Two
+  launchers preferred a private environment of their own over the one you already
+  had from `pip`, `pipx` or `npm`. So a machine that had ever created one kept
+  using it — including after you upgraded properly — and two copies read the same
+  memories, with whichever started first deciding which one answered. Both now
+  use what you already have, in either install order, and fall back to their own
+  only on a machine with none. When a leftover copy is found beside a real
+  install, it is named, with both version numbers, instead of being used quietly.
+- **The plugin would not start at all outside Claude Code.** The path it built
+  came from a setting only Claude Code provides, so on Codex and Antigravity it
+  pointed nowhere and the server never came up — with no error explaining why.
+- **Codex reported itself as Claude Code.** The catalogue offered one build, the
+  Claude Code one, so Codex installed that and every memory written from Codex was
+  filed under the wrong tool. Codex now has its own entry and its own build,
+  with the Codex-shaped rules, hooks and launcher that were never being delivered.
+
+### Changed
+- **Antigravity is supported.** It had no plugin at all. It now has the same
+  twelve skills, four sub-agents, command and hooks as every other editor.
+
 ## [4.1.2] — The monitor that was watching nothing
 
 ### Fixed

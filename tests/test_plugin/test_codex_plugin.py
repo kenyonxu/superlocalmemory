@@ -155,12 +155,30 @@ class TestCodexConfigToml:
             "config.toml must contain [mcp_servers.superlocalmemory] section"
         )
 
-    def test_config_toml_has_slm_mcp_profile_code(self) -> None:
-        raw = CODEX_MCP_CONFIG.read_text(encoding="utf-8")
-        assert 'SLM_MCP_PROFILE' in raw, "config.toml must reference SLM_MCP_PROFILE"
-        assert '"code"' in raw or "'code'" in raw, (
-            "SLM_MCP_PROFILE must be set to 'code'"
-        )
+    def test_config_toml_does_not_pin_a_profile(self) -> None:
+        """INVERTED in 4.1.3. This required ``SLM_MCP_PROFILE = "code"``.
+
+        Pinning it from a plugin removed tools a user had deliberately enabled —
+        ``code`` is 34 tools and leaves out the eight for coordinating between
+        sessions. Unset resolves to the raw server, which exposes everything, so
+        saying nothing is strictly more capable than what was being forced.
+
+        Checked on the env assignment rather than the file text: the config now
+        carries a comment explaining the absence, and that comment contains the
+        name.
+        """
+        import re as _re
+
+        source = CODEX_MCP_CONFIG.read_text(encoding="utf-8")
+        for line in _re.findall(r"^env = \{.*\}\s*$", source, _re.MULTILINE):
+            assert "SLM_MCP_PROFILE" not in line, (
+                f"the plugin pins a profile: {line}"
+            )
+            assert "SLM_DATA_DIR" not in line, (
+                f"the plugin re-points the store: {line}"
+            )
+            assert "SLM_AGENT_ID" in line, f"attribution is missing: {line}"
+
 
     def test_config_toml_has_slm_data_dir(self) -> None:
         raw = CODEX_MCP_CONFIG.read_text(encoding="utf-8")

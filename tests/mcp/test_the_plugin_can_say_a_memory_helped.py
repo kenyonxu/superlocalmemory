@@ -33,11 +33,19 @@ PLUGIN_MCP_JSON = REPO_ROOT / "plugin-src" / ".mcp.json"
 FEEDBACK_TOOLS = ("report_outcome", "report_feedback")
 
 
-def _shipped_profile_name() -> str:
-    """The profile the plugin launches its MCP server with."""
+def _shipped_profile_name() -> str | None:
+    """The profile the plugin launches its MCP server with, if it names one.
+
+    As of 4.1.3 it names none: pinning a profile from the plugin removed tools a
+    user had deliberately enabled. An unset value resolves to the raw server —
+    every tool — so a plugin that says nothing is strictly more capable than the
+    34-tool ``code`` set it used to force. ``None`` means "no restriction".
+    """
     data = json.loads(PLUGIN_MCP_JSON.read_text(encoding="utf-8"))
     env = data["mcpServers"]["superlocalmemory"]["env"]
-    raw = str(env["SLM_MCP_PROFILE"]).strip().lower()
+    raw = str(env.get("SLM_MCP_PROFILE", "")).strip().lower()
+    if not raw:
+        return None
     return _PROFILE_ALIASES.get(raw, raw)
 
 
@@ -48,6 +56,14 @@ def _shipped_profile_name() -> str:
 @pytest.mark.parametrize("tool", FEEDBACK_TOOLS)
 def test_the_profile_the_plugin_ships_can_report_usefulness(tool: str) -> None:
     name = _shipped_profile_name()
+    if name is None:
+        # No profile pinned: the raw server exposes everything, so the tool is
+        # reachable by construction. Assert the premise rather than skip, so
+        # this still fails if a profile is ever pinned again without thought.
+        env = json.loads(PLUGIN_MCP_JSON.read_text(encoding="utf-8"))
+        env = env["mcpServers"]["superlocalmemory"]["env"]
+        assert "SLM_MCP_PROFILE" not in env
+        return
     tools = _PROFILE_DEFINITIONS[name]
     assert tool in tools, (
         f"the plugin launches with profile {name!r} and it does not expose "
