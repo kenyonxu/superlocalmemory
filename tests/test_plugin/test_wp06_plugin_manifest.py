@@ -237,21 +237,50 @@ class TestMcpJson:
             f"command must not reference superlocalmemory.mcp (non-runnable), got {full!r}"
         )
 
-    def test_mcp_env_slm_mcp_profile_is_code(self) -> None:
-        """The plugin must use the code profile (Brain + graph + bounded loops)."""
-        server = self._get_server()
-        env = server.get("env", {})
-        assert env.get("SLM_MCP_PROFILE") == "code", (
-            f"SLM_MCP_PROFILE must be 'code', got {env.get('SLM_MCP_PROFILE')!r}"
+    def test_mcp_env_does_not_force_a_profile(self) -> None:
+        """REVERSED in 4.1.2. This required ``SLM_MCP_PROFILE == "code"``.
+
+        ``code`` is 31 tools and drops the 8 mesh tools among others. Forcing it
+        from the plugin overrode a wider profile a user had chosen deliberately,
+        and took working tools away as the result of installing something. The
+        profile is the user's decision; the plugin states no opinion.
+        """
+        env = self._get_server().get("env", {})
+
+        assert "SLM_MCP_PROFILE" not in env, (
+            f"the plugin must not force a profile, got "
+            f"{env.get('SLM_MCP_PROFILE')!r} — it silently removes tools the "
+            f"user had configured"
         )
 
-    def test_mcp_env_slm_data_dir_is_set(self) -> None:
-        server = self._get_server()
-        env = server.get("env", {})
-        assert "SLM_DATA_DIR" in env, "env missing SLM_DATA_DIR"
-        assert "${CLAUDE_PLUGIN_DATA}" in env["SLM_DATA_DIR"], (
-            f"SLM_DATA_DIR must reference ${{CLAUDE_PLUGIN_DATA}}, got {env['SLM_DATA_DIR']!r}"
+    def test_mcp_env_does_not_repoint_the_data_directory(self) -> None:
+        """REVERSED in 4.1.2. This required ``SLM_DATA_DIR`` to reference
+        ``${CLAUDE_PLUGIN_DATA}``.
+
+        That is the plugin's own private directory. On a machine already using
+        SLM it means the editor talks to an empty store: measured on the author's
+        machine, ``${CLAUDE_PLUGIN_DATA}`` held 28 KB while the real store was
+        611 MB with 5,370 memories in it. Installing the plugin would have looked
+        exactly like losing every memory.
+
+        Omitted, SLM resolves its canonical data root — the same store every
+        other surface uses. On a fresh machine that is a new store anyway, so the
+        isolation this was reaching for costs nothing to give up.
+        """
+        env = self._get_server().get("env", {})
+
+        assert "SLM_DATA_DIR" not in env, (
+            f"the plugin must not re-point the store, got "
+            f"{env.get('SLM_DATA_DIR')!r} — an existing install would read an "
+            f"empty database"
         )
+
+    def test_mcp_env_still_identifies_the_agent(self) -> None:
+        """The control. Attribution is not configuration, and it is what lets a
+        memory written from Claude Code be told apart from every other agent."""
+        env = self._get_server().get("env", {})
+
+        assert env.get("SLM_AGENT_ID") == "claude_code"
 
 
 # ---------------------------------------------------------------------------
