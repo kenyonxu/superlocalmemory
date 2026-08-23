@@ -5,6 +5,23 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.1] — A store older than its own indexes
+
+### Fixed
+- **A store from an early version could not be opened at all, and there was no
+  way out of it.** Starting up creates the indexes, one of which is on a column
+  that arrives with a migration scheduled to run *after* the engine is up. On a
+  store old enough to predate that column, the index could not be created, so
+  startup failed — and the migration that would have added the column could not
+  run, because it runs after a startup that never finished. `slm db migrate` did
+  not help either: it reports nothing failed and skips that class of migration by
+  design. Any store in that state was stuck on the version it was already on.
+  The column is now added before the index that needs it, so those stores open
+  and finish upgrading on their own. Measured on a real 637 MB store: it went
+  from refusing to start to a complete upgrade in 19 seconds, with all 7,707
+  memories, 2,590 records and 848,945 connections unchanged and the integrity
+  check clean.
+
 ## [4.1.0] — Every door asks the same question
 
 ### Fixed

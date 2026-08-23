@@ -972,6 +972,18 @@ _DDL_ORDERED: Final[tuple[str, ...]] = (
 #: which SQLite offers no IF NOT EXISTS form of, so presence is checked first.
 _ADDITIVE_COLUMNS: Final[tuple[tuple[str, str, str], ...]] = (
     ("atomic_facts", "quarantined", "INTEGER NOT NULL DEFAULT 0"),
+    # ``pinned`` arrives with M015, which is a DEFERRED migration -- it runs
+    # after the engine is up. But the DDL below indexes it
+    # (``idx_facts_pinned``), and that DDL runs during engine start. On a store
+    # old enough to predate M015 the index therefore raised "no such column:
+    # pinned" before anything could add it, and every start failed the same way:
+    # the deferred pass could not run because the engine could not start, and
+    # the engine could not start because the deferred pass had not run.
+    # ``slm db migrate`` did not break the loop either -- it reports Failed=0
+    # and skips deferred migrations by definition.
+    # The column has to exist before its own index either way, so it belongs
+    # here, where a store gets it at start regardless of migration state.
+    ("atomic_facts", "pinned", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -1010,6 +1022,17 @@ def create_all_tables(conn: sqlite3.Connection) -> None:
         conn: An open SQLite connection. Caller manages commit.
     """
     _set_pragmas(conn)
+
+    # Before the DDL, not only after it. The DDL below indexes columns that an
+    # upgraded store may not have yet, and an index on a column that does not
+    # exist is a hard error, not a skipped statement -- so the whole of
+    # create_all_tables would raise and the engine would never start.
+    #
+    # On a fresh database this pass does nothing: the tables do not exist yet,
+    # which the helper treats as "nothing to alter". On an upgraded one the
+    # tables are already there and this is exactly where the columns are owed.
+    # It runs again at the end for tables created during this call.
+    _add_missing_columns(conn)
 
     for ddl in _DDL_ORDERED:
         conn.executescript(ddl)

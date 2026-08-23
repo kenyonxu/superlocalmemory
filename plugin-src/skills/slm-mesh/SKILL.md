@@ -279,4 +279,4 @@ mesh availability.
 
 ---
 
-*SuperLocalMemory v4.1.0 · Qualixar · AGPL-3.0-or-later*
+*SuperLocalMemory v4.1.1 · Qualixar · AGPL-3.0-or-later*
