@@ -76,9 +76,15 @@ results are reproducible by a reviewer with nothing but the published package.
 ## Running
 
 ```bash
-# From the product checkout, using the project venv (Python 3.13):
-cd experiments
-../../../.venv/bin/python run_all.py 200      # 200 trials per guarantee
+# From the product checkout. Run from this directory (benchmark/), because
+# run_all.py imports the experiment modules as top-level siblings.
+#
+# Use an interpreter that has the version under test installed. The repo's
+# ./.venv is NOT it -- that environment carries an old release, so running the
+# harness with it silently benchmarks the wrong code. Check first:
+#   <interpreter> -c "import importlib.metadata as m; print(m.version('superlocalmemory'))"
+cd benchmark
+~/.slm-venv/bin/python run_all.py 200          # 200 repetitions per guarantee
 ```
 
 Outputs land in `results/`: one JSON per experiment plus `SUMMARY.md`. The
