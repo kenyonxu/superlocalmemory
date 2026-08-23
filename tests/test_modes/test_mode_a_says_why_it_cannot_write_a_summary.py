@@ -162,3 +162,64 @@ class TestTheSummaryRouteReturnsIt:
         assert "cap.message" in js, (
             "the dashboard receives the explanation and does not show it"
         )
+
+
+class TestAHostedModelWithNoKeyIsNotAvailable:
+    """Naming a provider is not the same as having one.
+
+    Switching to Mode C sets a provider and a model name and leaves the key
+    empty until someone supplies it — the command-line switch says so at the
+    time. This description said the model was available and carried no message,
+    so every surface that shows it reported nothing wrong while every
+    model-backed feature was about to fall back to assembling from notes.
+    """
+
+    def _config_with(self, mode, provider, api_key=""):
+        """The real config objects are frozen, so this is the shape the
+        description reads, not a mutated copy of one."""
+        class _LLM:
+            def __init__(self, provider, api_key):
+                self.provider = provider
+                self.api_key = api_key
+
+        class _Config:
+            def __init__(self, mode, provider, api_key):
+                self.mode = mode
+                self.llm = _LLM(provider, api_key)
+
+        return _Config(mode, provider, api_key)
+
+    def test_a_cloud_provider_without_a_key_is_reported_unavailable(self):
+        from superlocalmemory.core.config import Mode
+
+        capability = llm_capability(self._config_with(Mode.C, "openrouter"))
+        assert capability["llm_available"] is False
+        assert "key" in capability["message"].lower()
+        assert "slm provider set" in capability["message"]
+
+    def test_a_cloud_provider_with_a_key_is_reported_available(self):
+        from superlocalmemory.core.config import Mode
+
+        capability = llm_capability(
+            self._config_with(Mode.C, "openrouter", api_key="a-key-value"),
+        )
+        assert capability["llm_available"] is True
+        assert capability["message"] == ""
+
+    def test_a_local_provider_needs_no_key(self):
+        """The control. A model on this machine has nothing to authenticate to,
+        and demanding a key there would report a working setup as broken."""
+        from superlocalmemory.core.config import Mode
+
+        capability = llm_capability(self._config_with(Mode.B, "ollama"))
+        assert capability["llm_available"] is True
+        assert capability["message"] == ""
+
+    def test_a_caller_that_already_tried_is_believed(self):
+        """A summary route has just tried and knows. Its answer wins."""
+        from superlocalmemory.core.config import Mode
+
+        capability = llm_capability(
+            self._config_with(Mode.C, "openrouter"), llm_reachable=True,
+        )
+        assert capability["llm_available"] is True

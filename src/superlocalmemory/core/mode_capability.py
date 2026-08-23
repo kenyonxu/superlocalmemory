@@ -53,6 +53,21 @@ _MODEL_CONFIGURED_BUT_ABSENT = (
     "settings, and that the local model server is running if you are using one."
 )
 
+_CLOUD_MODEL_HAS_NO_KEY = (
+    "This mode uses a hosted language model and no key has been set for it, so "
+    "summaries are assembled from your own notes rather than written. Run "
+    "`slm provider set` and supply your key, or switch to Mode "
+    f"{_MODE_WITH_LOCAL_MODEL} to use a model on this machine."
+)
+
+#: Providers that run on the machine and need no credential. Anything else is
+#: a hosted service, and naming one without a key is not a configured model --
+#: which is what this used to report, so the surfaces said everything was fine
+#: while every model-backed feature was about to fall back.
+_LOCAL_PROVIDERS = frozenset({
+    "ollama", "lmstudio", "llamacpp", "llama.cpp", "local", "vllm", "none", "",
+})
+
 
 def llm_capability(config: Any, *, llm_reachable: bool | None = None) -> dict:
     """Describe this mode's model support for a user-facing surface.
@@ -64,18 +79,25 @@ def llm_capability(config: Any, *, llm_reachable: bool | None = None) -> dict:
     """
     mode = ""
     provider = ""
+    api_key = ""
     try:
         mode = str(getattr(getattr(config, "mode", None), "value", "") or "").upper()
-        provider = str(getattr(getattr(config, "llm", None), "provider", "") or "")
+        llm = getattr(config, "llm", None)
+        provider = str(getattr(llm, "provider", "") or "")
+        api_key = str(getattr(llm, "api_key", "") or "").strip()
     except Exception as exc:  # noqa: BLE001 -- a description must not raise
         logger.debug("mode capability: cannot read config: %s", exc)
 
     mode_has_model = mode in (_MODE_WITH_LOCAL_MODEL, _MODE_WITH_CLOUD_MODEL)
-    configured = bool(provider) and mode_has_model
+    needs_a_key = provider.lower() not in _LOCAL_PROVIDERS
+    missing_key = mode_has_model and bool(provider) and needs_a_key and not api_key
+    configured = bool(provider) and mode_has_model and not missing_key
     available = configured if llm_reachable is None else bool(llm_reachable)
 
     if not mode_has_model:
         message = _NO_MODEL_MESSAGE
+    elif missing_key and llm_reachable is not True:
+        message = _CLOUD_MODEL_HAS_NO_KEY
     elif not available:
         message = _MODEL_CONFIGURED_BUT_ABSENT
     else:
