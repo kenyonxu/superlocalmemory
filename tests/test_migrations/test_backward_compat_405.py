@@ -142,7 +142,19 @@ import pytest
 #: about. M046 is not additive: it rebuilds atomic_facts with a constraint that
 #: rejects the value an older build writes planned events as. The ceiling is
 #: what converts that from a lost memory into a refusal to start.
-_EXPECTED_SCHEMA_VERSION: int = 48
+#:
+#: 49 as of 4.1.0: +M049_a_schema_version_marker_is_one_row. It is not additive
+#: either — it puts a UNIQUE index on schema_version(version) and collapses the
+#: duplicates that index forbids (234,348 rows down to 7 on one real store).
+#: This build's six writers were changed to INSERT OR IGNORE alongside it; an
+#: older build still issues a plain INSERT and would hit the constraint partway
+#: through its own migration run. Raising the ceiling turns that into a refusal
+#: to open rather than a half-migrated store.
+#:
+#: This constant sat at 48 while M049 shipped, so the whole file was failing —
+#: nothing noticed because the full suite had not been run since. Keep it equal
+#: to the trailing serial of the last migration.
+_EXPECTED_SCHEMA_VERSION: int = 49
 
 #: Total migrations in the MIGRATIONS + DEFERRED_MIGRATIONS catalogue.
 #: M001–M043 with M008 absent = 42 total.

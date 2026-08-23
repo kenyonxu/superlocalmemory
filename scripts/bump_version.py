@@ -97,6 +97,41 @@ def _sub_all(rel: str, pattern: str, replacement: str, version: str) -> tuple[st
     return old, version
 
 
+def _sub_glob(pattern_glob: str, pattern: str, replacement: str,
+              version: str) -> tuple[str, str]:
+    """Rewrite EVERY match in EVERY file matching a glob.
+
+    ``plugin-src`` carries a ``SuperLocalMemory vX.Y.Z`` footer in sixteen skill
+    and agent files, and packaging copies them verbatim, so a stale footer ships.
+    Listing them one by one is how the next new skill gets missed; the glob is
+    the same set ``tests/test_packaging`` walks.
+    """
+    old = "<none found>"
+    for path in sorted(_ROOT.glob(pattern_glob)):
+        text = path.read_text(encoding="utf-8")
+        m = re.search(pattern, text, re.MULTILINE)
+        if not m:
+            continue
+        old = m.group(1)
+        path.write_text(
+            re.sub(pattern, replacement.format(v=version), text, flags=re.MULTILINE),
+            encoding="utf-8",
+        )
+    return old, version
+
+
+def _read_glob(pattern_glob: str, pattern: str) -> str:
+    """The oldest version any file in the glob still claims."""
+    found = set()
+    for path in sorted(_ROOT.glob(pattern_glob)):
+        m = re.search(pattern, path.read_text(encoding="utf-8"), re.MULTILINE)
+        if m:
+            found.add(m.group(1))
+    if not found:
+        return "<not found>"
+    return sorted(found)[0]
+
+
 def _read(rel: str, pattern: str) -> str:
     m = re.search(pattern, (_ROOT / rel).read_text(encoding="utf-8"), re.MULTILINE)
     return m.group(1) if m else "<not found>"
@@ -191,6 +226,15 @@ def _plan(version: str):
         # not know about any of them, so 4.1.0 was bumped everywhere the
         # consistency test looks and the front page still advertised 4.0.10.
         # The test does not read README, which is exactly why the script must.
+        # Sixteen skill and agent files under plugin-src carry a version footer
+        # and packaging copies them verbatim. tests/test_packaging walks exactly
+        # this glob and fails on any that disagree with the package version.
+        ("plugin-src/**/*.md footers",
+         lambda: _read_glob("plugin-src/**/*.md",
+                            r"SuperLocalMemory v([0-9]+\.[0-9]+\.[0-9]+)"),
+         lambda: _sub_glob("plugin-src/**/*.md",
+                           r"SuperLocalMemory v([0-9]+\.[0-9]+\.[0-9]+)",
+                           "SuperLocalMemory v{v}", version)),
         # Three parts required. ``V([0-9.]+)`` also matches "SuperLocalMemory V4"
         # in the prose and the diagram alt text, where V4 is the product line and
         # not a stamp -- a sweep on that pattern rewrote both.

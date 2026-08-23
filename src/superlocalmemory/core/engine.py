@@ -66,14 +66,20 @@ def _embedder_is_warm(embedder: object) -> bool:
     measured. The deadline was spent proving the model was cold.
 
     ``EmbeddingService.is_warm`` answers the real question: a live worker that has
-    served at least one request. Embedders that do not offer it keep the old
-    check -- ``OllamaEmbedder`` talks to a server that is already running and has
-    no worker of its own to start, so availability is readiness there.
+    served at least one request. So both must hold, and availability is still
+    checked first: an embedder that reports itself unavailable is not a candidate
+    whatever else it says. Requiring only ``is_warm`` would call ``embed`` on a
+    dead embedder that happens to expose the attribute -- any mock, proxy or
+    duck-typed wrapper auto-creates one.
+
+    An embedder that offers no ``is_warm`` keeps availability as the whole answer:
+    ``OllamaEmbedder`` talks to a server that is already running and has no worker
+    of its own to start, so there readiness is availability.
     """
+    if getattr(embedder, "_available", None) is not True:
+        return False
     warm = getattr(embedder, "is_warm", None)
-    if warm is not None:
-        return bool(warm)
-    return getattr(embedder, "_available", None) is True
+    return True if warm is None else bool(warm)
 
 
 def _is_remote_embedder(embedder: object) -> bool:

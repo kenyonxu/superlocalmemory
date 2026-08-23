@@ -81,17 +81,51 @@ def test_every_named_fact_type_exists(skill: Path) -> None:
             )
 
 
-def test_the_stated_channel_count_is_the_real_one() -> None:
+def test_the_channels_the_skill_names_are_the_channels_that_exist() -> None:
+    """The skill must name every channel, and must not invent one.
+
+    This used to demand a spelled-out count -- "seven channels" -- and fail if
+    the skill did not carry one. That made a real improvement unshippable: the
+    skill stopped claiming seven because counting ``entity_graph`` among the
+    searchers is wrong. It returns no candidates of its own; it re-scores what
+    the others found, which is why it reports ``no_candidates`` when they come
+    back empty. A single number cannot say that, so the skill now describes the
+    three roles instead, and the test that insisted on the number was insisting
+    on the imprecision.
+
+    What actually matters is the set, not its cardinality: every channel a caller
+    will see in ``channel_status`` is described. A count, if one is ever stated
+    again, is checked below.
+
+    There is deliberately no "the skill invents no channel" assertion here. Any
+    regex loose enough to find one in prose also matches the status values and
+    tool names around it -- ``ok``, ``count``, ``recall`` -- so it would fail on
+    correct documentation. The names shown in the ``channel_scores`` and
+    ``channel_weights`` examples are already checked against ``CHANNEL_NAMES``
+    further up this file, where they appear as structured keys rather than prose.
+    """
     text = (REPO / "plugin-src" / "skills" / "slm-recall" / "SKILL.md").read_text("utf-8")
+
+    missing = [name for name in CHANNEL_NAMES if f"`{name}`" not in text]
+    assert not missing, (
+        f"the skill does not name {missing}; a caller reading channel_status "
+        f"will see them and find nothing about them here"
+    )
+
+    # A count is optional. If one is stated, it has to be right.
     words = {6: "six", 7: "seven", 8: "eight"}
-    expected = words[len(CHANNEL_NAMES)]
-    stated = re.findall(
-        r"\b(six|seven|eight)\b[^.\n]{0,40}channels|"
-        r"channels?[^.\n]{0,40}\b(six|seven|eight)\b",
-        text,
-    )
-    stated = [m for pair in stated for m in pair if m]
-    assert stated, "the skill no longer states a channel count"
-    assert set(stated) == {expected}, (
-        f"the skill says {set(stated)} channels; there are {len(CHANNEL_NAMES)}"
-    )
+    stated = [
+        m
+        for pair in re.findall(
+            r"\b(six|seven|eight)\b[^.\n]{0,40}channels|"
+            r"channels?[^.\n]{0,40}\b(six|seven|eight)\b",
+            text,
+        )
+        for m in pair
+        if m
+    ]
+    if stated:
+        assert set(stated) == {words[len(CHANNEL_NAMES)]}, (
+            f"the skill says {set(stated)} channels; there are "
+            f"{len(CHANNEL_NAMES)}: {sorted(CHANNEL_NAMES)}"
+        )

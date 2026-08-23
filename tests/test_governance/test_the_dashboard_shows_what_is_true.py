@@ -94,26 +94,82 @@ class TestTheHealthCardReportsRealReadiness:
                 f"has no label for it"
             )
 
-    def test_the_daemon_reports_how_far_behind_the_graph_copy_is(self):
+    def test_the_daemon_reports_how_far_behind_the_graph_copy_is(self, monkeypatch):
         """A drain that stops advancing is the failure that does not announce
-        itself: every other signal stays green while answers get worse."""
-        daemon_source = (
-            pathlib.Path(superlocalmemory.__file__).parent
-            / "server" / "unified_daemon.py"
-        ).read_text()
-        assert '"projection": _projection_health(application)' in daemon_source
-        assert "def _projection_health(" in daemon_source
+        itself: every other signal stays green while answers get worse.
 
-    def test_that_report_never_raises(self):
-        """A health endpoint that fails because one field could not be computed
-        is worse than the missing field."""
+        This used to assert that two strings appeared in the daemon's source,
+        which passes whatever the function does.
+        """
+        from superlocalmemory.core import backend_orchestrator
         from superlocalmemory.server.unified_daemon import _projection_health
 
-        class _Exploding:
-            class state:
-                def __getattr__(self, name):
-                    raise RuntimeError("nothing works")
+        class _Orchestrator:
+            @staticmethod
+            def outbox_health():
+                return {"depth": 41, "stalled": 3, "draining": True}
 
-        result = _projection_health(_Exploding())
+        monkeypatch.setattr(
+            backend_orchestrator, "get_orchestrator", lambda: _Orchestrator(),
+        )
+        report = _projection_health()
+
+        assert report["available"] is True
+        assert report["depth"] == 41
+        assert report["stalled"] == 3
+        assert report["behind"] is True, (
+            "an alert should not have to know what a healthy depth looks like "
+            "on this store"
+        )
+
+    def test_a_drained_queue_is_not_reported_as_behind(self, monkeypatch):
+        """The control. If ``behind`` were always true it would say nothing."""
+        from superlocalmemory.core import backend_orchestrator
+        from superlocalmemory.server.unified_daemon import _projection_health
+
+        class _Idle:
+            @staticmethod
+            def outbox_health():
+                return {"depth": 0, "stalled": 0, "draining": False}
+
+        monkeypatch.setattr(
+            backend_orchestrator, "get_orchestrator", lambda: _Idle(),
+        )
+        report = _projection_health()
+
+        assert report["available"] is True
+        assert report["behind"] is False
+
+    def test_that_report_never_raises(self, monkeypatch):
+        """A health endpoint that fails because one field could not be computed
+        is worse than the missing field.
+
+        The failure has to be *arranged*. This test used to hand the function a
+        deliberately broken application object -- but the function reads a
+        process singleton and never touched it, so the assertion was really about
+        whatever the process happened to have built already. Alone that was
+        nothing, so it passed; behind a test that had started an orchestrator it
+        failed, and the whole suite went red on a test that never tested this.
+        """
+        from superlocalmemory.core import backend_orchestrator
+        from superlocalmemory.server.unified_daemon import _projection_health
+
+        def _explode():
+            raise RuntimeError("nothing works")
+
+        monkeypatch.setattr(backend_orchestrator, "get_orchestrator", _explode)
+        result = _projection_health()
+
         assert isinstance(result, dict)
         assert result.get("available") is False
+        assert "nothing works" in result.get("error", "")
+
+    def test_no_orchestrator_at_all_is_reported_as_unavailable(self, monkeypatch):
+        """Before the first write there is nothing to be behind on, and that is
+        not the same as a healthy empty queue."""
+        from superlocalmemory.core import backend_orchestrator
+        from superlocalmemory.server.unified_daemon import _projection_health
+
+        monkeypatch.setattr(backend_orchestrator, "get_orchestrator", lambda: None)
+
+        assert _projection_health() == {"available": False}

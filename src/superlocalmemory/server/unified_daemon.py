@@ -4379,7 +4379,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
             # other signal here stays green while the graph quietly diverges
             # from the record, and the only symptom is answers that are subtly
             # worse. A depth that does not fall is the thing to alert on.
-            "projection": _projection_health(application),
+            "projection": _projection_health(),
         }
 
     @application.get("/recall")
@@ -5696,11 +5696,19 @@ def _terminalize_orphan_operation(engine, operation_id: str) -> None:
         )
 
 
-def _projection_health(application) -> dict:
+def _projection_health() -> dict:
     """Queue depth, stall count, and whether the worker is running.
 
     Never raises: a health endpoint that fails because one of its fields could
     not be computed is worse than the missing field.
+
+    Takes no application. It used to accept one and never read it -- the
+    orchestrator is a process singleton -- which made the signature claim a
+    dependency the body did not have, and made a test that handed it a broken
+    application look like it was exercising the failure path when it was only
+    observing whatever the process had already built. Compare
+    ``_ops_failure_counts`` directly below, which takes an application because it
+    genuinely reads one.
     """
     try:
         from superlocalmemory.core.backend_orchestrator import get_orchestrator
