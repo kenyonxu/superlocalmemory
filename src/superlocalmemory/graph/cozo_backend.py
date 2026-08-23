@@ -12,7 +12,9 @@ release: the walk lives once in ``retrieval/spreading``, as a pure function of a
 adjacency snapshot, and is numpy rather than NetworkX either way. What this
 module supplies is the snapshot's edges, read by
 ``graph/cozo_adjacency.CozoAdjacencySource`` -- measured at 395 ms against
-SQLite's 2,477 ms on a 208,151-edge store.
+SQLite's 2,477 ms on a 208,151-edge store. Both figures come from a hand run on a
+copy of that store, recorded in ``cozo_adjacency``; nothing in the test suite
+reproduces them.
 
 All Datalog queries are private to this module.
 External code calls Python methods only — never raw Datalog strings.

@@ -932,9 +932,16 @@ class MemoryEngine:
 
         store_fast inserts a verbatim AtomicFact (+ memory row) synchronously.
         The FTS5 ``atomic_facts_fts`` trigger auto-populates on INSERT, so the
-        memory is **keyword/BM25-recallable the instant this returns** (~ms, no
-        LLM, no embedding). Embedding + entities + graph are enriched async by
-        the materializer (which detects facts with NULL embedding).
+        memory is **keyword/BM25-recallable the instant this returns**, with no
+        LLM call. Entities and graph are enriched async by the materializer.
+
+        The embedding is no longer purely async: ``_warm_guard_embed`` computes it
+        inline **when the model is already loaded**, because a fact with no vector
+        is invisible to the semantic channel and a memory written moments ago is
+        then the hardest thing in the store to find by asking about it. Measured
+        on a copy of a real store: **75 ms** with the model loaded, vector
+        attached; **34 ms** when it is not, deferring to the materializer. This
+        docstring used to say "~ms, no embedding" and that had stopped being true.
 
         Returns real fact_ids immediately. Quality gate rejects template junk.
         """

@@ -297,7 +297,8 @@ class EntityGraphChannel:
             return
         adj: dict[str, list[tuple[str, float]]] = defaultdict(list)
         # The graph projection, when there is one, answers this in 395 ms where
-        # SQLite takes 2,477 ms on the same 208k-edge store -- and this rebuild
+        # SQLite takes 2,477 ms on the same 208k-edge store (hand-measured, see
+        # graph/cozo_adjacency for the run; no test reproduces it) -- and this rebuild
         # sits on the recall path, triggered by any edge-count change or a TTL
         # expiry. It declines global and shared scope, because it stores one
         # profile per edge and a short answer here would silently shrink the

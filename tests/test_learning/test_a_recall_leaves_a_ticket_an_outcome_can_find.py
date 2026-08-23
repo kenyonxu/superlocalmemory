@@ -24,8 +24,18 @@ Recall is read-path work under a two-second budget, and a user notices latency
 long before they notice that ranking has stopped improving. So the ticket is one
 ``put_nowait`` on a bounded in-memory queue: measured at **1.57 microseconds**,
 0.0001% of a 1,449 ms recall. It drops rather than blocks when full and never
-raises. A/B over 30 warmed queries moved p50 by −3.5 ms with the change ON,
-which is to say it moved by nothing.
+raises.
+
+``test_the_enqueue_is_cheap_enough_to_ignore`` below re-measures that cost on
+whatever machine runs it and holds it under 100 microseconds; 1.57 is what this
+machine returned, not a threshold anything enforces.
+
+The other figure here has no harness and cannot get one: an A/B over 30 warmed
+queries against a 640 MB copy of the author's store moved p50 by −3.5 ms with the
+change ON, which is to say it moved by nothing. Reproducing it needs that store,
+a loaded model and a warm page cache, so it was **measured by hand and is not
+reproducible from this repository**. Treat it as the author's observation rather
+than as a guarantee this suite checks.
 
 WHAT IT DELIBERATELY DOES NOT DO
 

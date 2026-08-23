@@ -48,7 +48,9 @@ is a cost decision and may be revisited by measurement, not by argument.
 
 The graph engine still earns its keep, just not here: reading the adjacency for
 one recall measured 395 ms against SQLite's 2,477 ms on the same store, 6.3x, and
-the gap widens with edge count. That is a latency win on the recall path; this
+the gap widens with edge count. Those two figures were measured by hand on a copy
+of a 208,151-edge store and no test reproduces them -- see the table in
+``graph/cozo_adjacency`` for what was run. That is a latency win on the recall path; this
 pass is background work where 2 s versus 5 s buys nothing.
 
 Its ``pagerank()``/``community_detect()`` helpers are NOT used and could not have

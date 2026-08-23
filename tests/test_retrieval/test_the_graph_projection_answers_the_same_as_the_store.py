@@ -17,8 +17,14 @@ sources, and an exhaustive comparison of all 4,034 nodes' adjacency sets found
 the projection missing exactly 57 entries -- every one of them a weaker duplicate
 of an edge it kept, so a walk that takes the maximum cannot observe them.
 
-These tests pin the boundary in code: same answer, and an honest refusal for the
-scopes the projection cannot answer.
+Every number in the paragraph above -- the two latencies, the fifteen probes, the
+4,034 nodes, the 57 missing entries -- comes from a **hand run against a copy of
+that one store**, and none of it is reproducible from this repository: the store
+is not distributable and the comparison took minutes. Read them as what the
+author observed once, not as a property this suite enforces.
+
+What the tests below do enforce, on stores they build themselves: same answer from
+either source, and an honest refusal for the scopes the projection cannot answer.
 """
 
 from __future__ import annotations
