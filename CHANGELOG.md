@@ -5,7 +5,7 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.1.0] — Every door asks the same question
 
 ### Fixed
 - **Nothing was recording which memories a recall actually returned, so nothing
@@ -67,6 +67,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be relied on. A write that would move an entry from one workspace to another
   is now refused, and says which workspace owns it.
 
+- **Restricting someone to read-only did not restrict every way in.** Per-user
+  access was applied where a memory is written, and not where one is deleted or
+  corrected over the network, not on four of the compliance controls, and not on
+  bulk import — which established who was calling and then never asked whether
+  they were allowed to write. Three ways of reading stored memories back asked
+  nothing at all. Every entrance now asks the same question of the same setting.
+- **A workspace that could not answer "what is this person allowed to do?"
+  assumed the most permissive answer.** If that lookup failed — a busy store, a
+  locked file — the caller was treated as able to write. A lookup that fails is
+  not a lookup that said yes; it is now refused outright and says so, and the
+  caller can retry.
+- **Deleting a memory left its connections behind.** The connections were
+  expected to be removed along with it and nothing removed them, so recall kept
+  walking links to memories that no longer existed. Both kinds of connection are
+  now removed with the memory. Erasing a person had the same shape: their entry
+  was removed from the store and left in the copy that search reads, name and
+  all, which is not what an erasure request means.
+- **Housekeeping could remove connections it had no way to announce.** If the
+  copy that search reads could not be told what had gone, the removal was
+  committed anyway and the two drifted apart silently. It is now undone and
+  retried instead. `slm db regraph` rebuilds that copy from the store if they
+  have already drifted.
+- **A request to be told what is held about you left out what had been learned
+  about how you work.** Erasure removed it; the export did not include it. Both
+  now cover the same ground.
+- **Storing a memory waited on a model that was still loading.** A write
+  computes the memory's vector on the spot so it can be found by asking a
+  question rather than only by quoting its own words, and gives that one second
+  before handing the job to the background worker. It started that wait even
+  when the model had not loaded, which it could never win — loading takes about
+  ten seconds. On a copy of a real store the first twelve writes after a fresh
+  start took a median of 1,055 ms and eleven stored no vector; they now take
+  34 ms. Writes against a loaded model are unchanged at about 75 ms. The service
+  now loads the model on startup, in the background, so the wait is not simply
+  moved onto whoever searches first.
+- **The dashboard reported "Healthy" whenever the service answered at all**, and
+  the page never reloaded after an upgrade because the version it looked for was
+  never filled in — so an upgraded install kept showing the previous version's
+  page until someone cleared their cache by hand. Both fixed; the card now
+  reports what the service is actually doing, including how far the search copy
+  is behind.
+- **An unrecognised result was recorded as a mildly positive one.** A client
+  reporting "ok" instead of one of the three accepted words had that counted as
+  partial success and fed to the ranking as though somebody had meant it. It is
+  now refused. An answer can also be reported on by name: recall returns an
+  identifier and a result quoting it is matched to that exact answer rather than
+  guessed at from overlap within a time window.
+- **A hosted model was reported as available before a key was set for it.**
+  Switching to Mode C names a provider and leaves the key empty until you supply
+  one, and every surface said nothing was wrong while each model-backed feature
+  was about to fall back to assembling from your notes. It now says which step
+  is missing.
+- **Repeated failures in a background task looked the same as one hiccup.** A
+  step failing every cycle for days reported exactly what a single transient
+  failure reported. It now says how long it has been failing.
+- **Upgrading a large store could appear to hang.** Collapsing duplicated
+  schema-version records compared every record against every other of the same
+  version; on a store with 234,348 of them that had not finished after 25
+  minutes. It now takes 324 ms, and the whole upgrade of that store takes 40
+  seconds with every memory, fact and connection preserved.
+- **A refusal from the service was reported as a crash.** Commands that were
+  correctly denied printed a stack trace instead of the reason, and one denial
+  told users to run a command that does not exist.
 ### Changed
 - **Every table that only grows now has a stated limit, or states why it has
   none.** Three of them had a cleanup routine, each written and wired

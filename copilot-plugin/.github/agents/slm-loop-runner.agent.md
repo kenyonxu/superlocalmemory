@@ -11,7 +11,7 @@ description: >
 tools: Bash, recall, remember, Read
 model: inherit
 target: vscode
-version: "4.0.10"
+version: "4.1.0"
 ---
 
 # Role

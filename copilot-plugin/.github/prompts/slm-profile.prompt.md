@@ -1,7 +1,7 @@
 ---
 name: slm-profile
 description: Workspace isolation and runtime profile switching for SuperLocalMemory. Each profile is a fully independent memory namespace — separate facts, code graphs, and tool sets. Use switch_profile (MCP, requires code/full/power profile) to change the active workspace without restarting. Check the active profile with slm status. Required when working across multiple projects, clients, or tenants.
-version: "4.0.10"
+version: "4.1.0"
 agent: agent
 tools:
   - switch_profile

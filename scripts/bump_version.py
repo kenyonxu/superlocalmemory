@@ -186,6 +186,31 @@ def _plan(version: str):
          lambda: _read("plugin-src/rules/AGENTS.md", r"SuperLocalMemory v([0-9.]+)"),
          lambda: _sub_regex("plugin-src/rules/AGENTS.md", r"SuperLocalMemory v([0-9.]+)",
                             "SuperLocalMemory v{v}", version)),
+        # The first thing anyone sees. It states the version three times — the
+        # title, the summary line, and the release badge — and this script did
+        # not know about any of them, so 4.1.0 was bumped everywhere the
+        # consistency test looks and the front page still advertised 4.0.10.
+        # The test does not read README, which is exactly why the script must.
+        # Three parts required. ``V([0-9.]+)`` also matches "SuperLocalMemory V4"
+        # in the prose and the diagram alt text, where V4 is the product line and
+        # not a stamp -- a sweep on that pattern rewrote both.
+        ("README.md title",
+         lambda: _read("README.md", r"SuperLocalMemory V([0-9]+\.[0-9]+\.[0-9]+)"),
+         lambda: _sub_all("README.md",
+                          r"SuperLocalMemory V([0-9]+\.[0-9]+\.[0-9]+)",
+                          "SuperLocalMemory V{v}", version)),
+        # Each construct is matched exactly. A sweep of every ``vX.Y.Z`` in this
+        # file would also rewrite its references to v3.8.1, v3.6.7 and v3.6.15,
+        # which are history and not this release.
+        ("README.md summary",
+         lambda: _read("README.md", r"<code>v([0-9.]+)</code>"),
+         lambda: _sub_regex("README.md", r"<code>v([0-9.]+)</code>",
+                            "<code>v{v}</code>", version)),
+        ("README.md release badge",
+         lambda: _read("README.md", r"badge/v([0-9.]+)-Current_Release"),
+         lambda: _sub_all("README.md",
+                          r"v([0-9.]+)(-Current_Release| — Current Release)",
+                          "v{v}\\2", version)),
     ]
 
 
