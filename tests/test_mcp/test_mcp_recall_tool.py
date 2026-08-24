@@ -115,9 +115,15 @@ class TestRecallTool:
         # S9-DASH-10: registry lookup must return None in tests so the
         # final fallback ``mcp:<agent_id>`` is used. Without the patch
         # the test picks up a real live session from the CI/dev registry.
+        # S9-DASH-10 + 2026-08-24: registry lookup AND every SESSION_ENV_VARS
+        # name must be cleared, or the test picks up a real live session from
+        # the CI/dev registry or from the host process's own environment
+        # (e.g. CLAUDE_CODE_SESSION_ID when tests run inside a live Claude
+        # Code session — see mcp/session_binding.py's four-step ladder).
         with patch("superlocalmemory.mcp._daemon_proxy.choose_pool", return_value=pool), \
              patch("superlocalmemory.hooks.session_registry.lookup_by_parent", return_value=None), \
-             patch("superlocalmemory.hooks.session_registry.most_recent_active", return_value=None):
+             patch("superlocalmemory.hooks.session_registry.most_recent_active", return_value=None), \
+             patch.dict("os.environ", {"SLM_SESSION_ID": "", "CLAUDE_SESSION_ID": "", "CLAUDE_CODE_SESSION_ID": ""}):
             asyncio.run(recall("architecture patterns", limit=5))
 
         # The response shape preserves session_id forwarding for transport
@@ -139,9 +145,15 @@ class TestRecallTool:
 
         recall, _ = _get_recall_tool()
 
+        # S9-DASH-10 + 2026-08-24: registry lookup AND every SESSION_ENV_VARS
+        # name must be cleared, or the test picks up a real live session from
+        # the CI/dev registry or from the host process's own environment
+        # (e.g. CLAUDE_CODE_SESSION_ID when tests run inside a live Claude
+        # Code session — see mcp/session_binding.py's four-step ladder).
         with patch("superlocalmemory.mcp._daemon_proxy.choose_pool", return_value=pool), \
              patch("superlocalmemory.hooks.session_registry.lookup_by_parent", return_value=None), \
-             patch("superlocalmemory.hooks.session_registry.most_recent_active", return_value=None):
+             patch("superlocalmemory.hooks.session_registry.most_recent_active", return_value=None), \
+             patch.dict("os.environ", {"SLM_SESSION_ID": "", "CLAUDE_SESSION_ID": "", "CLAUDE_CODE_SESSION_ID": ""}):
             asyncio.run(recall("architecture patterns", limit=5, fast=True))
 
         pool.recall.assert_called_once_with(
@@ -201,9 +213,15 @@ class TestRecallEdgeCases:
 
         recall, _ = _get_recall_tool()
 
+        # S9-DASH-10 + 2026-08-24: registry lookup AND every SESSION_ENV_VARS
+        # name must be cleared, or the test picks up a real live session from
+        # the CI/dev registry or from the host process's own environment
+        # (e.g. CLAUDE_CODE_SESSION_ID when tests run inside a live Claude
+        # Code session — see mcp/session_binding.py's four-step ladder).
         with patch("superlocalmemory.mcp._daemon_proxy.choose_pool", return_value=pool), \
              patch("superlocalmemory.hooks.session_registry.lookup_by_parent", return_value=None), \
-             patch("superlocalmemory.hooks.session_registry.most_recent_active", return_value=None):
+             patch("superlocalmemory.hooks.session_registry.most_recent_active", return_value=None), \
+             patch.dict("os.environ", {"SLM_SESSION_ID": "", "CLAUDE_SESSION_ID": "", "CLAUDE_CODE_SESSION_ID": ""}):
             result = asyncio.run(recall(""))
 
         assert result["success"] is True
@@ -224,9 +242,15 @@ class TestRecallEdgeCases:
 
         recall, _ = _get_recall_tool()
 
+        # S9-DASH-10 + 2026-08-24: registry lookup AND every SESSION_ENV_VARS
+        # name must be cleared, or the test picks up a real live session from
+        # the CI/dev registry or from the host process's own environment
+        # (e.g. CLAUDE_CODE_SESSION_ID when tests run inside a live Claude
+        # Code session — see mcp/session_binding.py's four-step ladder).
         with patch("superlocalmemory.mcp._daemon_proxy.choose_pool", return_value=pool), \
              patch("superlocalmemory.hooks.session_registry.lookup_by_parent", return_value=None), \
-             patch("superlocalmemory.hooks.session_registry.most_recent_active", return_value=None):
+             patch("superlocalmemory.hooks.session_registry.most_recent_active", return_value=None), \
+             patch.dict("os.environ", {"SLM_SESSION_ID": "", "CLAUDE_SESSION_ID": "", "CLAUDE_CODE_SESSION_ID": ""}):
             asyncio.run(recall("limit test", limit=5))
 
         pool.recall.assert_called_once_with(

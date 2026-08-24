@@ -34,7 +34,13 @@ __all__ = ["resolve_session_id", "SESSION_ENV_VARS"]
 
 #: Checked in order. Hosts set one or the other; SLM's own takes precedence so a
 #: user can override a host that sets its variable to something unhelpful.
-SESSION_ENV_VARS = ("SLM_SESSION_ID", "CLAUDE_SESSION_ID")
+#: ``CLAUDE_CODE_SESSION_ID`` is the actual variable Claude Code's MCP
+#: subprocess environment carries — verified on a live daemon 2026-08-24,
+#: this pipeline settled 6013/6039 outcomes at the neutral 0.5 fallback
+#: because the old two-name list never matched it, and every recall fell
+#: through to the synthetic ``mcp:<agent_id>`` id that step 4 deliberately
+#: excludes from matching.
+SESSION_ENV_VARS = ("SLM_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID")
 
 
 def resolve_session_id(

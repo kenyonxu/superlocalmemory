@@ -3113,7 +3113,7 @@ wheels = [
 
 [[package]]
 name = "superlocalmemory"
-version = "4.1.5"
+version = "4.1.6"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

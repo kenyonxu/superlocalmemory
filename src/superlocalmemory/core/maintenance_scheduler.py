@@ -77,10 +77,42 @@ class MaintenanceScheduler:
         )
         self._initial_metrics_timer.daemon = True
         self._initial_metrics_timer.start()
+        # M048's re-read pass is idempotent and safe to replay (see its
+        # verify() docstring), but the migration runner never replays a
+        # completed migration and the cycle above only reaches it every
+        # ``scheduler_interval_minutes`` (360 by default). A store that
+        # drifted since the last cycle stays blocking — ready=false,
+        # migrations=false — for up to that whole interval after every
+        # restart, not because the fix is slow, but because nothing asks
+        # for it sooner. Staggered behind the other two so none of the
+        # three one-shots contend for the write lock.
+        self._initial_reclassify_timer = threading.Timer(
+            210.0, self._initial_reclassify_upcoming,
+        )
+        self._initial_reclassify_timer.daemon = True
+        self._initial_reclassify_timer.start()
         logger.info(
             "Maintenance scheduler started (interval=%dm)",
             self._config.forgetting.scheduler_interval_minutes,
         )
+
+    def _initial_reclassify_upcoming(self) -> None:
+        """Best-effort one-shot M048 re-read shortly after boot.
+
+        Runs the same pass the periodic cycle already runs (see below) so a
+        store that drifted before this restart converges within seconds
+        instead of waiting up to a full maintenance interval with the
+        daemon reporting itself not ready.
+        """
+        if not self._running:
+            return
+        try:
+            from superlocalmemory.storage.migrations import (
+                M048_upcoming_holds_only_what_is_upcoming as _reclassify,
+            )
+            _reclassify.apply(open_connection=self._db.raw_connection)
+        except Exception as exc:
+            logger.debug("Startup plan re-read skipped: %s", exc)
 
     def _initial_cache_gc(self) -> None:
         """Best-effort one-shot activation-cache GC shortly after boot."""
@@ -133,6 +165,10 @@ class MaintenanceScheduler:
         if _metrics_timer is not None:
             _metrics_timer.cancel()
             self._initial_metrics_timer = None
+        _reclassify_timer = getattr(self, "_initial_reclassify_timer", None)
+        if _reclassify_timer is not None:
+            _reclassify_timer.cancel()
+            self._initial_reclassify_timer = None
         logger.info("Maintenance scheduler stopped")
 
     def _schedule_next(self) -> None:

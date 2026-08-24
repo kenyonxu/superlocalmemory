@@ -5,6 +5,42 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.6] — A learning loop that never learns looks identical to one that works
+
+### Fixed
+- **The engagement-learning loop settled every outcome at neutral, regardless of
+  real usage.** `SESSION_ENV_VARS` checked `SLM_SESSION_ID` and `CLAUDE_SESSION_ID`
+  but not `CLAUDE_CODE_SESSION_ID` — the variable Claude Code's own MCP subprocess
+  actually sets. Every recall from Claude Code fell through to the synthetic
+  `mcp:<agent_id>` id, which step 4 of the resolution ladder deliberately excludes
+  from ever matching a pending outcome, by design — a real session should never be
+  confused with a placeholder. The result: measured on a live store, 6,013 of 6,039
+  settled outcomes carried exactly `reward=0.5`, and all 414 bandit arms held
+  `alpha == beta` at every play count. Adding the missing name is what closes the
+  loop; two test files that had never isolated session resolution from the ambient
+  environment were also hardened, since a live Claude Code session now genuinely
+  satisfies the check they'd only ever run without.
+- **Auto-captured facts could assert a date nothing in the source text contained.**
+  The fact-extraction system prompt taught relative-date resolution with a fixed
+  worked example — `'Yesterday' with session date 2024-01-15 becomes '2024-01-14'`
+  — sent identically on every extraction call. A smaller local model under
+  uncertainty would echo that literal example date back as if it were extracted
+  content, rather than resolving against the real conversation date already present
+  in the same prompt. Reproduced live and fixed by removing the concrete date from
+  the instruction entirely, teaching the same rule without anything to leak.
+  Several existing memories carrying this exact signature — including one date
+  claim accessed 28 times — were identified and quarantined.
+- **A store that drifted from M048's classification rule stayed unready for up to a
+  full maintenance interval (6 hours) after every restart.** The migration itself
+  is idempotent and safe to replay — its own `verify()` docstring says so — but the
+  migration runner never replays a completed migration, and the periodic
+  maintenance cycle that's supposed to reconcile it only runs once every
+  `scheduler_interval_minutes`. A restart landing between cycles reported
+  `ready=false, migrations=false` with "automatic replay is disabled" and stayed
+  that way until the next scheduled tick. A third staggered one-shot startup timer,
+  matching the two that already exist for the same reason (cache GC, graph
+  metrics), now runs the same reconciliation pass within seconds of boot instead.
+
 ## [4.1.5] — Ask whether a feature is working, not whether it is present
 
 ### Added

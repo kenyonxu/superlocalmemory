@@ -188,6 +188,23 @@ async def test_core_registered_callables_work_in_each_product_mode(
     monkeypatch.setattr("superlocalmemory.mcp._daemon_proxy.choose_pool", lambda: pool)
     monkeypatch.setattr("superlocalmemory.mcp.tools_core._emit_event", lambda *a, **k: None)
     monkeypatch.setattr("superlocalmemory.mcp.tools_active._emit_event", lambda *a, **k: None)
+    # 2026-08-24: this test never isolated session resolution, so it only
+    # "worked" because nothing in the ambient environment matched either the
+    # SESSION_ENV_VARS check or a live session-registry entry. It now does —
+    # CLAUDE_CODE_SESSION_ID is genuinely set when tests run inside a live
+    # Claude Code session — so both must be cleared for the same reason
+    # test_mcp_recall_tool.py already clears them (see S9-DASH-10).
+    monkeypatch.delenv("SLM_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setattr(
+        "superlocalmemory.hooks.session_registry.lookup_by_parent",
+        lambda within_seconds=60: None,
+    )
+    monkeypatch.setattr(
+        "superlocalmemory.hooks.session_registry.most_recent_active",
+        lambda agent_type="claude", within_seconds=60: None,
+    )
     from superlocalmemory.hooks.rules_engine import RulesEngine
 
     monkeypatch.setattr(RulesEngine, "should_recall", lambda self, event: True)
