@@ -20,13 +20,26 @@
         ]
       }
     ],
-    "UserPromptSubmit": [
+    "PreToolUse": [
       {
+        "matcher": "WebSearch|WebFetch",
         "hooks": [
           {
             "type": "command",
-            "command": "slm hook topic_shift 2>/dev/null || true",
-            "timeout": 3000
+            "command": "slm hook before_web 2>/dev/null || true",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Read|Write|Edit|Glob|Grep|Agent|WebFetch|WebSearch|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "slm hook post_tool_outcome 2>/dev/null || true",
+            "timeout": 5000
           }
         ]
       }
@@ -34,11 +47,6 @@
     "Stop": [
       {
         "hooks": [
-          {
-            "type": "command",
-            "command": "slm hook stop 2>/dev/null || true",
-            "timeout": 10000
-          },
           {
             "type": "command",
             "command": "slm hook stop_outcome 2>/dev/null || true",
