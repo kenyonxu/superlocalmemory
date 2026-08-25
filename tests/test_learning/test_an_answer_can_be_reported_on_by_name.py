@@ -50,19 +50,54 @@ def test_a_later_unnamed_call_stays_in_the_session_it_was_told_about():
     assert _resolve(engine, "   ") == "agent-42"
 
 
-def test_the_queue_accepts_what_the_rule_produces():
+def test_the_queue_refuses_a_name_only_the_engine_uses():
+    """The rule produces a name; that is not the same as producing a join key.
+
+    This asserted acceptance until the store was measured. ``engine:<pid>``
+    names the daemon, so every client that reaches one daemon shares it and a
+    restart replaces it. Nothing else writes it, so no tool event ever carried
+    a matching id and no signal was ever registered against one. Accepting it
+    produced a row that could never be
+    matched, which the proxy settler then defaulted to a neutral 0.5 — and a
+    neutral update tightens a Beta posterior around its prior rather than
+    leaving it free to move.
+
+    The drop is counted, not silent: recording nothing invisibly is the failure
+    this file was written to prevent, and it still is.
+    """
     from superlocalmemory.learning.outcome_queue import (
         RecallEvent,
         enqueue_recall,
         get_counters,
     )
 
-    before = get_counters()["recall_enqueued"]
+    before = get_counters()
     enqueue_recall(RecallEvent(
         session_id=_resolve(_Engine(), None), profile_id="default",
         query="anything", fact_ids=("f1",), query_id="qid",
     ))
-    assert get_counters()["recall_enqueued"] == before + 1
+    after = get_counters()
+
+    assert after.get("recall_enqueued", 0) == before.get("recall_enqueued", 0)
+    assert after.get("recall_dropped_synthetic_session", 0) == (
+        before.get("recall_dropped_synthetic_session", 0) + 1
+    )
+
+
+def test_the_queue_accepts_a_name_the_caller_actually_gave():
+    """The counterpart: a real conversation id is still recorded."""
+    from superlocalmemory.learning.outcome_queue import (
+        RecallEvent,
+        enqueue_recall,
+        get_counters,
+    )
+
+    before = get_counters().get("recall_enqueued", 0)
+    enqueue_recall(RecallEvent(
+        session_id="01a01bba-5f09-7a61-86f5-d67511c89283", profile_id="default",
+        query="anything", fact_ids=("f1",), query_id="qid",
+    ))
+    assert get_counters().get("recall_enqueued", 0) == before + 1
 
 
 def test_an_unnamed_record_is_still_refused():

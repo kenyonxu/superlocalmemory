@@ -183,8 +183,16 @@ def test_proxy_no_signals_and_young_skips(env):
     assert kind is None
 
 
-def test_default_uncertain_after_120s(env):
-    """No hit, no requery, > 120 s → reward=0.5, kind=default."""
+def test_nothing_observed_does_not_settle(env):
+    """No hit, no requery, nothing observed → abstain, posterior untouched.
+
+    A neutral 0.5 is not an absence of judgement. ``alpha += 0.5`` with
+    ``beta += 0.5`` holds the posterior mean at 0.5 while shrinking its
+    variance, so each empty settlement makes the arm more confident it is
+    average and harder for real evidence to move, which is how every arm
+    ended up sitting on its prior. The play is left open while
+    the window is still usable, then closed unjudged.
+    """
     now = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
     played = now - timedelta(seconds=200)
     play_id = _seed_play(env["learning"], "q-default", played)
@@ -194,10 +202,27 @@ def test_default_uncertain_after_120s(env):
         PROFILE, env["learning"], env["memory"],
         now=now, bandit=env["bandit"],
     )
-    assert settled == 1
+    assert settled == 0
+    reward, _kind = _read_play(env["learning"], play_id)
+    assert reward is None, "an unobserved play was given a reward anyway"
+
+
+def test_an_unobservable_play_is_eventually_closed_unjudged(env):
+    """Abstaining must not leak rows: past the expiry the play is closed with
+    no reward, so the settler stops rescanning it and the arm stays free."""
+    now = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
+    played = now - timedelta(seconds=2000)
+    play_id = _seed_play(env["learning"], "q-expire", played)
+    _seed_signals(env["learning"], "q-expire", ["f1"])
+
+    settled = settle_stale_plays(
+        PROFILE, env["learning"], env["memory"],
+        now=now, bandit=env["bandit"],
+    )
+    assert settled == 0
     reward, kind = _read_play(env["learning"], play_id)
-    assert reward == pytest.approx(0.5)
-    assert kind == "default"
+    assert reward is None
+    assert kind == "unobserved"
 
 
 def test_proxy_in_window_no_evidence_waits(env):
@@ -273,10 +298,9 @@ def test_requery_not_detected_when_topic_differs(env):
         PROFILE, env["learning"], env["memory"],
         now=now, bandit=env["bandit"],
     )
-    assert settled == 1
-    reward, kind = _read_play(env["learning"], play_id)
-    assert reward == pytest.approx(0.5)
-    assert kind == "default"
+    assert settled == 0
+    reward, _kind = _read_play(env["learning"], play_id)
+    assert reward is None, "a non-requery with no evidence was scored anyway"
 
 
 # ---------------------------------------------------------------------------
@@ -295,11 +319,12 @@ def test_missing_tool_events_db_defaults_safely(tmp_path: Path, env):
         PROFILE, env["learning"], ghost,
         now=now, bandit=env["bandit"],
     )
-    # With no evidence DB, age > 120 s → default reward.
-    assert settled == 1
-    reward, kind = _read_play(env["learning"], play_id)
-    assert reward == pytest.approx(0.5)
-    assert kind == "default"
+    # With no evidence DB nothing can be observed, so nothing is claimed.
+    # "Defaults safely" now means the posterior is left alone, not that a
+    # number is invented for it.
+    assert settled == 0
+    reward, _kind = _read_play(env["learning"], play_id)
+    assert reward is None
 
 
 def test_settle_stale_plays_on_missing_learning_db(tmp_path: Path):

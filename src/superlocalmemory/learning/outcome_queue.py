@@ -26,6 +26,8 @@ by ``unified_daemon.py``'s lifespan hook.
 
 from __future__ import annotations
 
+
+from superlocalmemory.core.session_identity import is_conversation
 import logging
 import queue
 import threading
@@ -111,6 +113,18 @@ def enqueue_recall(event: RecallEvent) -> None:
         # S9-DASH-02: session_id is mandatory — hooks key by it.
         # If the caller can't name a session, we silently drop: this
         # is a recall whose outcome cannot match to a signal anyway.
+        return
+    if not is_conversation(event.session_id, event.profile_id):
+        # Same reason, one step further. A front that invents an id names
+        # itself, not a caller: ``engine:<pid>`` is the daemon every client
+        # shares, ``cli:<pid>`` a process that exits before any follow-on
+        # action, ``http:<ms>`` a single request. No tool event can ever
+        # carry one, so the outcome is unmatchable the moment it is written.
+        # Recording it anyway is not free: a play that is never settled from
+        # evidence is eventually settled from nothing, and a neutral update
+        # tightens a Beta posterior around its prior instead of leaving it
+        # movable.
+        _bump("recall_dropped_synthetic_session")
         return
     try:
         _queue.put_nowait(event)

@@ -49,7 +49,20 @@ __all__ = [
 #:
 #: The colon is deliberate: a real client id is a uuid or a hex string and does
 #: not contain one, so a genuine id cannot be mistaken for an invented one.
-SYNTHETIC_PREFIXES: tuple[str, ...] = ("http:", "mcp:", "cli:", "probe:")
+#: ``engine:`` names the daemon process itself, not a caller.  It is shared by
+#: every client that reaches one daemon and changes on every restart, so it is
+#: synthetic in exactly the way this module exists to catch: it was minted by
+#: hand in ``core/engine.py`` rather than through ``synthetic_session_id``, and
+#: so passed ``is_conversation`` for as long as it existed.  While it did, every
+#: recall that named no session filed its outcome under a process id that no
+#: tool event could ever carry, and the reward pipeline had nothing to join on.
+#: ``agent:`` and ``api:`` name the calling agent and the workspace, and are
+#: shared by every request from either — ``agent:mcp_client`` alone held 24
+#: outcomes from unrelated callers. Both were hand-minted in
+#: ``server/routes/v3_api.py``, which is why neither was listed here.
+SYNTHETIC_PREFIXES: tuple[str, ...] = (
+    "http:", "mcp:", "cli:", "probe:", "engine:", "agent:", "api:",
+)
 
 
 def synthetic_session_id(kind: str, discriminator: str = "") -> str:

@@ -140,9 +140,18 @@ class TestItCannotHurtTheReader:
 
         engine.recall("without a session", limit=5)
 
-        (event,) = _events()
-        assert event.session_id, "the recall left a record with no name on it"
-        assert event.query_id, "the record cannot be joined to an outcome"
+        # No ticket, because there is nothing an outcome could match it to.
+        # The name the engine falls back to is its own process id: shared by
+        # every client of one daemon, replaced on restart, and written by
+        # nothing else, so no tool event ever carried a matching id and no
+        # signal was ever registered against one. A ticket that cannot be
+        # matched is not a
+        # weaker link than the caller's own id, it is not a link at all — and
+        # it costs something, because the settler defaults it to a neutral
+        # 0.5 and a neutral update makes the arm harder to move later.
+        assert _events() == [], (
+            "a recall that cannot be attributed left a ticket anyway"
+        )
 
     def test_a_ticket_with_no_name_is_still_refused(self) -> None:
         """The control for the rule above. The name has to come from somewhere;
@@ -198,18 +207,25 @@ class TestItCannotHurtTheReader:
 
 
 class TestItRecordsWithoutActing:
-    def test_wiring_the_ticket_did_not_turn_ranking_on(self) -> None:
-        """Recording what happened and letting it reorder results are separate
-        decisions. The second stays off unless an operator sets it, so a store
-        that upgrades starts gathering evidence without its answers moving."""
+    def test_recording_and_reordering_remain_separate_switches(self) -> None:
+        """Recording what happened and letting it reorder results are still two
+        decisions, and an operator can still refuse the second.
+
+        The default answer changed. It was ``off`` so that a stored signal gone
+        stale could not start moving answers on upgrade — a risk that depended
+        on a settler scoring recalls it could not observe, which no longer
+        happens: an unobserved recall now leaves the ranking untouched. A
+        ranking layer nobody switches on never learns, so it defaults on.
+        """
         from superlocalmemory.core.recall_pipeline import _resolve_ranking_mode
 
-        assert _resolve_ranking_mode({}) == "off"
-        assert _resolve_ranking_mode({"SLM_RANKING": "v2-ensemble"}) == "v2-ensemble"
+        assert _resolve_ranking_mode({}) == "v2-ensemble"
+        assert _resolve_ranking_mode({"SLM_RANKING": "off"}) == "off"
+        assert _resolve_ranking_mode({"SLM_RANKING": "v1"}) == "v1"
 
     def test_exposure_rows_are_still_not_written(self) -> None:
-        """The twenty-per-query exposure enqueue is what inflated the ranking
-        phase counter 2,675x. It stays off; the ticket above is one row."""
+        """The per-displayed-memory exposure enqueue badly inflated the
+        ranking phase counter. It stays off; the ticket above is one row."""
         import inspect
 
         from superlocalmemory.core import recall_pipeline

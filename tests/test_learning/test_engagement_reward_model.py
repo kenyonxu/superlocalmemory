@@ -115,6 +115,21 @@ def _fetch_pending(db: Path, outcome_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def _pending_status(db, outcome_id):
+    """Status of the pending row, to assert a reap finalized it."""
+    import sqlite3 as _sqlite3
+
+    conn = _sqlite3.connect(str(db))
+    try:
+        row = conn.execute(
+            "SELECT status FROM pending_outcomes WHERE outcome_id = ?",
+            (outcome_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
+
+
 def _fetch_action(db: Path, outcome_id: str) -> dict | None:
     with sqlite3.connect(db) as conn:
         conn.row_factory = sqlite3.Row
@@ -422,11 +437,40 @@ def test_reap_stale_finalizes_expired_pending(memory_db) -> None:
     reaped = m.reap_stale(older_than_ms=60 * 60 * 1000)
     assert reaped == 1
 
+    # The pending row is finalized so it stops being rescanned — but no
+    # outcome is manufactured for it. It accumulated no signal, and the label
+    # formula's base term is exactly 0.5, so writing one out marked "settled"
+    # asserted a judgement nobody made. Rows written that way all carried the
+    # same neutral value, and the bandit applied each one: alpha += 0.5 with
+    # beta += 0.5 moves both together, so no arm ever left its prior.
+    assert _fetch_action(memory_db, outcome_id) is None
+    assert _pending_status(memory_db, outcome_id) == "settled"
+
+
+def test_reap_stale_does_write_an_outcome_when_a_signal_arrived(memory_db) -> None:
+    """The counterpart: a row with real engagement still produces evidence."""
+    from superlocalmemory.learning.reward import EngagementRewardModel
+
+    now = {"ms": 1_000_000}
+    m = EngagementRewardModel(memory_db, clock_ms=lambda: now["ms"])
+
+    outcome_id = m.record_recall(
+        profile_id="default", session_id="s", recall_query_id="q",
+        fact_ids=["f"], query_text="x",
+    )
+    m.register_signal(
+        outcome_id=outcome_id, signal_name="cite", signal_value=True,
+    )
+    now["ms"] += 2 * 60 * 60 * 1000
+
+    assert m.reap_stale(older_than_ms=60 * 60 * 1000) == 1
+
     row = _fetch_action(memory_db, outcome_id)
     assert row is not None
     assert row["settled"] == 1
     # Profile_id carried through — SEC-C-05.
     assert row["profile_id"] == "default"
+    assert row["reward"] > 0.5
 
 
 def test_reap_stale_respects_older_than_ms(memory_db) -> None:
@@ -539,10 +583,11 @@ def test_crash_recovery_reaper_on_daemon_restart(memory_db) -> None:
     reaped = m2.reap_stale(older_than_ms=60 * 60 * 1000)
     assert reaped == 3
 
+    # All three are finalized so the backlog drains; none is turned into an
+    # outcome, because none of them carried a signal.
     for outcome_id in ids:
-        row = _fetch_action(memory_db, outcome_id)
-        assert row is not None
-        assert row["settled"] == 1
+        assert _fetch_action(memory_db, outcome_id) is None
+        assert _pending_status(memory_db, outcome_id) == "settled"
 
 
 # ---------------------------------------------------------------------------

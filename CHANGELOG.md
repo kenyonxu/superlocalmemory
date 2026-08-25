@@ -5,6 +5,25 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.7] — Recall that improves with use
+
+### Added
+- **Adaptive ranking is on by default.** Recall now learns which memories
+  actually helped and ranks accordingly. Set `SLM_RANKING=off` to opt out.
+
+### Fixed
+- **Ranking never learned anything.** Recalls were not attributed to the
+  conversation they came from, so nothing could tell whether a memory had been
+  useful, and every result was scored the same regardless. Recalls are now
+  attributed correctly and scored from real use.
+- **Unused results are no longer scored as average.** When there is no evidence
+  either way, a result is left unscored instead of being recorded as
+  middling — which had made the ranking progressively harder to change.
+- **Frequently shown memories no longer reinforce themselves.** A memory that
+  was going to be shown regardless now counts for less than one that was not.
+- **Codex subagents install complete.** Installing from a published package
+  produced one-line advisor definitions instead of the full ones.
+
 ## [4.1.6] — A learning loop that never learns looks identical to one that works
 
 ### Fixed

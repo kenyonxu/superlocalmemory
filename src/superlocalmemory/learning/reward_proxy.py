@@ -34,6 +34,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from superlocalmemory.learning.engagement_features import (
+    EngagementFeatures,
+    extract_features,
+)
+from superlocalmemory.learning.reward_model import score
 from superlocalmemory.core.topic_signature import compute_topic_signature
 from superlocalmemory.learning.bandit import ContextualBandit
 
@@ -105,10 +110,10 @@ def _shown_fact_ids(
     """The fact_ids this play recorded at recall time (M044), or [].
 
     Preferred over the ``learning_signals`` lookup below because it does not
-    depend on the exposure enqueue, which is off: twenty rows per query, and
-    the source of a 2,675x inflation in the ranking-phase counter. With no
-    signals rows there was nothing to look for, so every play settled as the
-    120-second default and 165 arms sat at alpha == beta.
+    depend on the exposure enqueue, which is off because it wrote a row per
+    displayed memory per query and badly inflated the ranking-phase counter.
+    With no signals rows there is nothing to look for, so plays fell through to
+    the age-based default and arms stayed on their priors.
 
     Returns [] on a store where M044 has not run — "no such column" is an
     ``sqlite3.Error`` and is caught, so an unmigrated install falls back to the
@@ -366,6 +371,98 @@ def _default_deadline(
     )
 
 
+#: Once a play is older than this with nothing observed, it is closed without
+#: touching the posterior. Leaving it open forever would make every settler
+#: pass rescan it; settling it at a neutral value is what this module stopped
+#: doing. Closed-and-unjudged is the third option that was missing.
+_ABSTAIN_EXPIRY_SEC = 900
+
+
+def _expire_play(learning_conn: sqlite3.Connection, play_id: int) -> bool:
+    """Close a play without applying any reward.
+
+    The posterior is deliberately untouched: nothing was observed, so there is
+    nothing to learn, and a neutral update would shrink the arm's variance
+    around its prior and make it harder to move once evidence does arrive.
+    """
+    try:
+        learning_conn.execute(
+            "UPDATE bandit_plays SET settled_at = ?, settlement_type = ? "
+            "WHERE play_id = ? AND settled_at IS NULL",
+            (datetime.now(timezone.utc).isoformat(), "unobserved", int(play_id)),
+        )
+        learning_conn.commit()
+        return True
+    except sqlite3.Error as exc:
+        logger.debug("reward_proxy: expire play %s: %s", play_id, exc)
+        return False
+
+
+def _session_for_play(
+    memory_conn: sqlite3.Connection | None,
+    query_id: str,
+    played_at: datetime,
+    profile_id: str,
+) -> str:
+    """The conversation this play happened in, or "" when it cannot be named.
+
+    The play and its outcome ticket are minted with different uuids on the same
+    recall, so the query_id is tried first and a time-and-profile match is the
+    fallback. An empty answer means no observation is possible, which the
+    caller turns into an abstention rather than a guess.
+    """
+    if memory_conn is None:
+        return ""
+    try:
+        row = memory_conn.execute(
+            "SELECT session_id FROM pending_outcomes WHERE recall_query_id = ? "
+            "LIMIT 1", (str(query_id),),
+        ).fetchone()
+        if row and row[0]:
+            return str(row[0])
+        window_ms = 5000
+        centre = int(played_at.timestamp() * 1000)
+        row = memory_conn.execute(
+            "SELECT session_id FROM pending_outcomes "
+            "WHERE profile_id = ? AND created_at_ms BETWEEN ? AND ? "
+            "ORDER BY ABS(created_at_ms - ?) LIMIT 1",
+            (str(profile_id), centre - window_ms, centre + window_ms, centre),
+        ).fetchone()
+        return str(row[0]) if row and row[0] else ""
+    except sqlite3.Error:
+        return ""
+
+
+def _ips_for_play(
+    learning_conn: sqlite3.Connection, play_id: int, stratum: str, profile_id: str,
+):
+    """Inverse-propensity weight for this play against its stratum's arms."""
+    from superlocalmemory.learning.propensity import ips_weight
+
+    try:
+        row = learning_conn.execute(
+            "SELECT arm_id FROM bandit_plays WHERE play_id = ?", (int(play_id),),
+        ).fetchone()
+        if not row or not row[0]:
+            return ips_weight(None, None)
+        arm_id = str(row[0])
+        rows = learning_conn.execute(
+            "SELECT arm_id, alpha, beta FROM bandit_arms "
+            "WHERE profile_id = ? AND stratum = ?",
+            (str(profile_id), str(stratum or "")),
+        ).fetchall()
+    except sqlite3.Error:
+        return ips_weight(None, None)
+
+    mine, others = None, []
+    for candidate, alpha, beta in rows:
+        if str(candidate) == arm_id:
+            mine = (float(alpha), float(beta))
+        else:
+            others.append((float(alpha), float(beta)))
+    return ips_weight(mine, others)
+
+
 def settle_stale_plays(
     profile_id: str,
     db_path: Path | str,
@@ -406,27 +503,56 @@ def settle_stale_plays(
                 _shown_fact_ids(learning_conn, row["play_id"])
                 or _top3_fact_ids(learning_conn, row["query_id"])
             )
-            reward: float | None = None
-            kind = "default"
-            if memory_conn is not None and _tool_event_hit(
-                memory_conn, played, top3, profile_id=str(profile_id),
-            ):
-                reward = 1.0
-                kind = "proxy_position"
-            elif memory_conn is not None and _requery_detected(
-                memory_conn, played, row["query_id"], profile_id=str(profile_id),
-            ):
-                reward = 0.0
-                kind = "proxy_requery"
-            elif age > _default_deadline(learning_conn, row):
-                # P1: uncertain default once the window closes.
-                reward = 0.5
-                kind = "default"
+            # The ladder this replaces asked one question — did a recalled
+            # fact_id appear verbatim in a later tool event — and answered 0.5
+            # whenever it could not tell. Both halves failed: nothing makes an
+            # agent echo the marker, and 0.5 is not an absence of judgement but
+            # a confident one, tightening the posterior around its prior.
+            requeried = bool(
+                memory_conn is not None and _requery_detected(
+                    memory_conn, played, row["query_id"],
+                    profile_id=str(profile_id),
+                )
+            )
+            marker_hit = bool(
+                memory_conn is not None and _tool_event_hit(
+                    memory_conn, played, top3, profile_id=str(profile_id),
+                )
+            )
+            session_id = _session_for_play(
+                memory_conn, str(row["query_id"] or ""), played, str(profile_id),
+            )
+            if memory_conn is not None and session_id:
+                features = extract_features(
+                    memory_conn,
+                    session_id=session_id,
+                    profile_id=str(profile_id),
+                    fact_ids=top3,
+                    recalled_at=played,
+                    requeried=requeried,
+                    marker_hit=marker_hit,
+                )
             else:
-                # Between 60 and 120 s with no evidence yet — wait.
+                features = EngagementFeatures(
+                    requeried=requeried, marker_hit=marker_hit,
+                )
+
+            decision = score(features)
+            if decision.reward is None:
+                # Nothing observed. Wait while the window is still open, then
+                # close the play unjudged rather than inventing a number.
+                if age > _ABSTAIN_EXPIRY_SEC:
+                    _expire_play(learning_conn, int(row["play_id"]))
                 continue
 
-            if bandit.update(int(row["play_id"]), reward, kind=kind):
+            estimate = _ips_for_play(
+                learning_conn, int(row["play_id"]),
+                str(row["stratum"] or ""), str(profile_id),
+            )
+            if bandit.update(
+                int(row["play_id"]), decision.reward,
+                kind=decision.kind, weight=estimate.weight,
+            ):
                 settled += 1
     finally:
         try:

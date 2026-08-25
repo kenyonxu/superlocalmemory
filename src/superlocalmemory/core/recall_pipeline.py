@@ -340,16 +340,23 @@ class _ReadOnlyLearningView:
 def _resolve_ranking_mode(env: "dict[str, str] | os._Environ[str]") -> str:
     """Map the ``SLM_RANKING`` env var to a canonical mode.
 
-    ``SLM_RANKING`` is an explicit operator policy.  In 4.0.5 the absence of
-    that policy is deliberately ``off``: old learning signals must not begin
-    altering recall merely because a user upgrades.  The legacy disable flags
-    remain harmless compatibility inputs, but cannot implicitly enable a
-    ranking mode.
+    ``SLM_RANKING`` is an explicit operator policy. Absence of that policy now
+    means the full pipeline, not ``off``.
+
+    It defaulted to ``off`` because a stored signal that had gone stale must
+    not start reordering results merely because someone upgraded. That risk
+    depended on a settler that scored a recall it could not observe, which no
+    longer happens: an unobserved recall leaves the ranking untouched instead
+    of being recorded as an average one, and each observation counts for less
+    the more predictable it was. A ranking layer nobody switches on is a
+    ranking layer that never learns, so the default now enables it.
+
+    Set ``SLM_RANKING=off`` to opt out.
     """
     raw = (env.get("SLM_RANKING", "") or "").strip().lower()
     if raw in _RANKING_MODES:
         return raw
-    return "off"
+    return "v2-ensemble"
 
 
 def apply_ranking(

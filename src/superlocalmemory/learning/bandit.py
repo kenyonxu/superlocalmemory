@@ -326,8 +326,19 @@ class ContextualBandit:
         play_id: int,
         reward: float,
         kind: str = "proxy_position",
+        weight: float = 1.0,
     ) -> bool:
         """Apply the reward to the (profile, stratum, arm) posterior.
+
+        ``weight`` scales how much this one observation counts, and exists for
+        inverse-propensity correction: the policy chose what was shown, so an
+        arm it almost always shows produces weak evidence whatever happens to
+        it, while one it rarely shows produces strong evidence. Weighting by
+        the inverse of that probability is what keeps the posterior from
+        recording popularity the policy manufactured. See ``propensity.py``.
+
+        A weight of 1.0 is the uncorrected update and the default, so a caller
+        with no competitor posteriors to estimate against changes nothing.
 
         Returns True on success. Never raises — DB failures logged at WARN.
         Cache invalidated on success (B5).
@@ -342,6 +353,15 @@ class ContextualBandit:
             reward_f = 0.0
         elif reward_f > 1.0:
             reward_f = 1.0
+
+        try:
+            weight_f = float(weight)
+        except (TypeError, ValueError):
+            weight_f = 1.0
+        # A non-positive weight would either freeze the arm or subtract
+        # evidence; neither is a meaningful observation.
+        if weight_f <= 0.0:
+            weight_f = 1.0
 
         try:
             conn = _conn_for(self._db_path)
@@ -389,8 +409,8 @@ class ContextualBandit:
                 "    plays = plays + 1, "
                 "    last_played_at = ? "
                 "WHERE profile_id = ? AND stratum = ? AND arm_id = ?",
-                (cap, reward_f, cap, 1.0 - reward_f, now,
-                 profile_id, stratum, arm_id),
+                (cap, weight_f * reward_f, cap, weight_f * (1.0 - reward_f),
+                 now, profile_id, stratum, arm_id),
             )
             conn.execute(
                 "UPDATE bandit_plays "

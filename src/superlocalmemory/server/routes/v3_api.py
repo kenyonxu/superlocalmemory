@@ -12,6 +12,7 @@ from pathlib import Path
 import os
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+from superlocalmemory.core.session_identity import synthetic_session_id
 from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
 from superlocalmemory.core.status_contract import (
     COUNT_QUERIES,
@@ -36,15 +37,15 @@ def _signal_session_id() -> str:
 
         agent = str(get_current_agent_id() or "").strip()
         if agent:
-            return f"agent:{agent}"
+            return synthetic_session_id("agent", agent)
     except Exception:  # noqa: BLE001 -- naming the caller must never fail a read
         pass
     try:
         from superlocalmemory.server.routes.helpers import get_active_profile
 
-        return f"api:{get_active_profile()}"
+        return synthetic_session_id("api", str(get_active_profile()))
     except Exception:  # noqa: BLE001
-        return "api:default"
+        return synthetic_session_id("api", "default")
 
 
 router = APIRouter(prefix="/api/v3", tags=["v3"])

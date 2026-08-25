@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from superlocalmemory.core.session_identity import synthetic_session_id
 from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT, SLMConfig
 from superlocalmemory.core.engine_capabilities import Capabilities, CapabilityError
 from superlocalmemory.core.modes import get_capabilities
@@ -138,7 +139,12 @@ class MemoryEngine:
         # one is dropped by the queue, which is how 34 of 35 recall paths came
         # to leave no record at all.
         self._last_session_id: str = ""
-        self._ambient_session_id: str = f"engine:{os.getpid()}"
+        # Minted through the shared helper so this id is registered as
+        # invented rather than received; continuity and the reward pipeline
+        # both ask session_identity, and a hand-built prefix is invisible to it.
+        self._ambient_session_id: str = synthetic_session_id(
+            "engine", str(os.getpid()),
+        )
         self._initialized = False
 
         self._db = None

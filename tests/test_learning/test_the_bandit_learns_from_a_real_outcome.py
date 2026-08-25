@@ -293,10 +293,17 @@ class TestTheDefaultDoesNotWinTheRace:
         ) == 0, "the neutral default claimed a play that could still be settled"
         assert _play_row(learning, play_id)["settled_at"] is None
 
-    def test_a_play_with_no_evidence_still_defaults_at_120_seconds(
+    def test_a_play_with_no_evidence_is_closed_without_being_scored(
         self, store,
     ) -> None:
-        """Holding open a play nothing can settle just leaks rows."""
+        """Holding open a play nothing can settle just leaks rows — but the
+        answer to a leak is to close the row, not to invent a reward for it.
+
+        Settling at a neutral 0.5 moves alpha and beta together, which keeps
+        the mean at 0.5 and shrinks the variance: the arm grows more certain it
+        is average with every empty settlement. The play is closed as
+        ``unobserved`` instead, leaving the posterior exactly as it was.
+        """
         from superlocalmemory.learning.reward_proxy import settle_stale_plays
 
         learning, memory = store
@@ -307,12 +314,20 @@ class TestTheDefaultDoesNotWinTheRace:
         played = datetime.fromisoformat(
             _play_row(learning, choice.play_id)["played_at"]
         )
+        # Inside the abstention window: still open, still unscored.
         assert settle_stale_plays(
             _PROFILE, learning, memory, now=played + timedelta(seconds=180),
-        ) == 1
+        ) == 0
+        assert _play_row(learning, choice.play_id)["reward"] is None
+
+        # Past it: closed, still unscored, so the row does not leak.
+        assert settle_stale_plays(
+            _PROFILE, learning, memory, now=played + timedelta(seconds=2000),
+        ) == 0
         row = _play_row(learning, choice.play_id)
-        assert row["settlement_type"] == "default"
-        assert row["reward"] == pytest.approx(0.5)
+        assert row["reward"] is None
+        assert row["settled_at"] is not None
+        assert row["settlement_type"] == "unobserved"
 
 
 class TestItDegradesRatherThanFailing:

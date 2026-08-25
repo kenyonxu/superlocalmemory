@@ -735,6 +735,20 @@ class EngagementRewardModel:
                 signals = json.loads(row["signals_json"] or "{}")
             except json.JSONDecodeError:  # pragma: no cover
                 signals = {}
+            # A row that accumulated no signal has nothing to say. It used to
+            # be written out as an outcome anyway, carrying the label
+            # formula's base term of exactly 0.5 and marked ``settled`` as
+            # though a judgement had been reported. That value is not a
+            # harmless placeholder: ``alpha += 0.5`` with ``beta += 0.5`` moves
+            # both sides together, so the posterior keeps its mean and loses
+            # spread, and an arm settled this way repeatedly never leaves its
+            # prior.
+            #
+            # The row is still finalized, so it stops being rescanned; it is
+            # simply not turned into evidence it never was.
+            if not signals:
+                settle_ids.append(row["outcome_id"])
+                continue
             reward = _compute_label(signals)
             insert_batch.append(
                 (
@@ -756,7 +770,11 @@ class EngagementRewardModel:
         _CHUNK = 500
         written = 0
         try:
-            for i in range(0, len(insert_batch), _CHUNK):
+            # insert_batch and settle_ids are no longer parallel: a row with
+            # no signals is finalized without producing an outcome. Pad the
+            # insert side so each burst still pairs a write with the right
+            # finalizations, and never index one by the other's length.
+            for i in range(0, max(len(insert_batch), len(settle_ids)), _CHUNK):
                 i_chunk = insert_batch[i:i + _CHUNK]
                 s_chunk = settle_ids[i:i + _CHUNK]
                 placeholders = ",".join("?" * len(s_chunk))
@@ -764,22 +782,30 @@ class EngagementRewardModel:
                     conn = self._get_conn()
                     conn.execute("BEGIN IMMEDIATE")
                     try:
-                        conn.executemany(
-                            "INSERT OR REPLACE INTO action_outcomes "
-                            "(outcome_id, profile_id, query, fact_ids_json,"
-                            " outcome, context_json, timestamp, reward,"
-                            " settled, settled_at, recall_query_id) "
-                            "VALUES "
-                            "(?, ?, '', ?, 'settled', '{}', ?, ?, 1, ?, ?)",
-                            i_chunk,
-                        )
-                        conn.execute(
-                            "UPDATE pending_outcomes "
-                            f"SET status = 'settled' WHERE outcome_id IN ({placeholders})",
-                            s_chunk,
-                        )
+                        if i_chunk:
+                            conn.executemany(
+                                "INSERT OR REPLACE INTO action_outcomes "
+                                "(outcome_id, profile_id, query, fact_ids_json,"
+                                " outcome, context_json, timestamp, reward,"
+                                " settled, settled_at, recall_query_id) "
+                                "VALUES "
+                                "(?, ?, '', ?, 'settled', '{}', ?, ?, 1, ?, ?)",
+                                i_chunk,
+                            )
+                        if s_chunk:
+                            conn.execute(
+                                "UPDATE pending_outcomes "
+                                f"SET status = 'settled' "
+                                f"WHERE outcome_id IN ({placeholders})",
+                                s_chunk,
+                            )
                         conn.execute("COMMIT")
-                        written += len(i_chunk)
+                        # Count what was FINALIZED, not what was written. A row
+                        # with no signals is finalized without producing an
+                        # outcome, and callers use this number to know the
+                        # backlog drained — counting inserts would report 0
+                        # forever and make the reaper look dead.
+                        written += len(s_chunk)
                     except sqlite3.Error:
                         conn.execute("ROLLBACK")
                         raise
