@@ -5,6 +5,33 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.8] — The same question, answered the same way
+
+### Fixed
+- **Recall could return the same memories in a different order each time it was
+  asked.** Adaptive ranking became the default in 4.1.7, which let a contextual
+  bandit choose how much to weigh each retrieval channel per query. That choice
+  is sampled from what an arm has learned, and arms that have settled no rewards
+  yet hold only their starting assumption — so the sample varied, and two
+  identical questions could weigh semantic against keyword evidence quite
+  differently for no reason drawn from anything observed. Adaptive ranking is
+  opt-in again: set `SLM_RANKING=v2-ensemble` to enable it. Nothing else about
+  retrieval changed, and no stored memory is affected.
+- **One out-of-date label could make the whole store refuse to answer.** A
+  memory filed as a plan stops reading as a plan once its date passes — ordinary
+  use, and the maintenance pass re-reads those on its own. That check was
+  treated like a missing table: every route answered `503 Service unavailable`
+  until the daemon was restarted, and because the readiness answer was decided
+  once at startup, the repair that had already run could not lift it. The check
+  now reports what it is, a data quality signal, and the store keeps serving
+  while the next maintenance pass settles it.
+- **Tool usage stopped being recorded.** Behavioural patterns, per-skill
+  performance, and the engagement measures that tell a recall whether it helped
+  all read the same record of which tools ran. Nothing on a normal install was
+  writing it, so those readings kept reporting from progressively older activity
+  and eventually stood still. Each completed tool call is recorded again, with
+  credential-shaped text removed and summaries capped before they are stored.
+
 ## [4.1.7] — Recall that improves with use
 
 ### Added

@@ -340,23 +340,26 @@ class _ReadOnlyLearningView:
 def _resolve_ranking_mode(env: "dict[str, str] | os._Environ[str]") -> str:
     """Map the ``SLM_RANKING`` env var to a canonical mode.
 
-    ``SLM_RANKING`` is an explicit operator policy. Absence of that policy now
-    means the full pipeline, not ``off``.
+    ``SLM_RANKING`` is an explicit operator policy, and the absence of one
+    means ``off``: an upgrade must not start reordering results on its own.
 
-    It defaulted to ``off`` because a stored signal that had gone stale must
-    not start reordering results merely because someone upgraded. That risk
-    depended on a settler that scored a recall it could not observe, which no
-    longer happens: an unobserved recall leaves the ranking untouched instead
-    of being recorded as an average one, and each observation counts for less
-    the more predictable it was. A ranking layer nobody switches on is a
-    ranking layer that never learns, so the default now enables it.
+    Fixing the settlement path was necessary for the ensemble to be worth
+    enabling, but it is not sufficient. Settlement decides what an arm learns
+    *after* a query; the channel weights come from sampling that arm's
+    posterior *before* it. Until arms have posteriors shaped by real
+    observations, that sample is drawn from the prior, so two identical
+    queries can be weighted differently for no reason the store can justify —
+    variance with nothing bought by it. A memory system's answers should move
+    because the evidence moved.
 
-    Set ``SLM_RANKING=off`` to opt out.
+    So the ensemble stays opt-in until arms carry settled rewards. Set
+    ``SLM_RANKING=v2-ensemble`` to enable it, or ``v1``/``v2`` for the
+    narrower passes.
     """
     raw = (env.get("SLM_RANKING", "") or "").strip().lower()
     if raw in _RANKING_MODES:
         return raw
-    return "v2-ensemble"
+    return "off"
 
 
 def apply_ranking(

@@ -213,3 +213,48 @@ def test_it_leaves_the_pre_rename_spelling_alone(store) -> None:
     assert store.execute(
         "SELECT fact_type FROM atomic_facts WHERE fact_id='t1'"
     ).fetchone()[0] == "temporal"
+
+
+# --- A label that drifted is not an outage ---------------------------------
+# ``verify()`` going False here means some memories are filed as plans that no
+# longer read as plans. Ordinary use produces that on its own -- a plan whose
+# date passes stops being upcoming -- so it must not be answered the way a
+# missing table is answered.
+
+
+def test_a_drifted_label_does_not_take_the_store_offline(store) -> None:
+    """The check can fail and the daemon must still serve every route."""
+    store.execute(
+        "INSERT INTO atomic_facts VALUES"
+        " ('p1','The appointment was cancelled yesterday','prospective')"
+    )
+    store.commit()
+
+    assert M048.verify(store) is False, "precondition: the invariant is violated"
+    assert M048.blocks_serving(store) is False
+
+
+def test_a_holding_invariant_also_does_not_block(store) -> None:
+    store.execute(
+        "INSERT INTO atomic_facts VALUES"
+        " ('p2','The weekly review is next Tuesday','prospective')"
+    )
+    store.commit()
+
+    assert M048.verify(store) is True
+    assert M048.blocks_serving(store) is False
+
+
+def test_the_readiness_gate_can_actually_find_the_answer() -> None:
+    """The gate looks the migration up by name, so registration is the contract.
+
+    A ``blocks_serving`` the module registry cannot reach is the same as not
+    having written one: ``_serving_blocked_by`` treats anything without a
+    callable as blocking.
+    """
+    from superlocalmemory.storage._migration_internals import _MODULES
+
+    name = "M048_upcoming_holds_only_what_is_upcoming"
+    module = _MODULES.get(name)
+    assert module is not None, f"{name} is not registered"
+    assert callable(getattr(module, "blocks_serving", None))

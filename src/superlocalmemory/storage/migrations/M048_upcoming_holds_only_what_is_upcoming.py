@@ -205,3 +205,25 @@ def verify(conn: sqlite3.Connection) -> bool:
         )
         return False
     return True
+
+
+def blocks_serving(conn: sqlite3.Connection) -> bool:
+    """Should a daemon refuse to serve while this check does not hold? No.
+
+    Nothing here is about schema. ``verify()`` reads ``content`` and compares
+    today's reading of it against the ``fact_type`` already stored, so a False
+    means some memories are filed as plans that no longer read as plans. Every
+    table and column a query needs is present either way; the store answers
+    normally, and at worst a handful of memories carry a stale label until the
+    next maintenance pass re-reads them.
+
+    The distinction matters because this is a standing guard over data that
+    ordinary use re-violates by design: a plan whose date passes stops reading
+    as upcoming, which is the rule working, not a fault. Treating that like a
+    missing table let one drifted row answer 503 on every route for as long as
+    the process lived — and because the readiness snapshot is taken once at
+    startup, the background pass that repairs the data could not lift the
+    refusal it caused. An outage produced by a quality check is worse than the
+    thing the check is for. Same reasoning as ``M043.blocks_serving``.
+    """
+    return False
