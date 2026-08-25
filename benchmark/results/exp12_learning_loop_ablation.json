@@ -20,9 +20,9 @@
       "rounds": 120,
       "outcome_tickets_written": 120,
       "plays_settled": 120,
-      "arms_total": 79,
-      "arms_moved_off_prior_mean": 79,
-      "max_abs_mean_shift": 0.347251,
+      "arms_total": 82,
+      "arms_moved_off_prior_mean": 82,
+      "max_abs_mean_shift": 0.342879,
       "settlement_types": {
         "artifact_overlap": 120
       }

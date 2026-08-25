@@ -3,44 +3,44 @@
   "method": "direct component timing inside the real governed write; no comparand pipeline is constructed and no subtraction is performed",
   "governed_write_total": {
     "n": 400,
-    "p50_ms": 12.045,
-    "p99_ms": 60.8143,
-    "mean_ms": 16.1613
+    "p50_ms": 11.001,
+    "p99_ms": 21.8725,
+    "mean_ms": 11.517
   },
   "envelope_components": {
     "generation_fence": {
       "n": 400,
-      "p50_ms": 0.0021,
-      "p99_ms": 0.0036,
-      "mean_ms": 0.0021
+      "p50_ms": 0.0019,
+      "p99_ms": 0.0047,
+      "mean_ms": 0.002
     },
     "journal_commit": {
       "n": 400,
-      "p50_ms": 3.4532,
-      "p99_ms": 31.8619,
-      "mean_ms": 4.9181
+      "p50_ms": 3.1373,
+      "p99_ms": 7.8742,
+      "mean_ms": 3.3099
     },
     "journal_dispatch": {
       "n": 400,
-      "p50_ms": 1.6429,
-      "p99_ms": 14.6753,
-      "mean_ms": 2.1455
+      "p50_ms": 1.4804,
+      "p99_ms": 2.9157,
+      "mean_ms": 1.5425
     },
     "journal_prepare": {
       "n": 400,
-      "p50_ms": 3.376,
-      "p99_ms": 27.8782,
-      "mean_ms": 4.806
+      "p50_ms": 3.1094,
+      "p99_ms": 8.4013,
+      "mean_ms": 3.2566
     },
     "projection_obligations": {
       "n": 400,
-      "p50_ms": 0.0435,
-      "p99_ms": 0.0759,
-      "mean_ms": 0.0457
+      "p50_ms": 0.0418,
+      "p99_ms": 0.0656,
+      "mean_ms": 0.0428
     }
   },
-  "envelope_p50_ms": 8.5177,
-  "envelope_share_of_p50": 0.7072,
+  "envelope_p50_ms": 7.7708,
+  "envelope_share_of_p50": 0.7064,
   "caveats": [
     "In-process. HTTP transport, request parsing and the trust hook are excluded.",
     "Temporary filesystem; a persistent disk raises the journal fsync component.",
