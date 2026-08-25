@@ -1,0 +1,50 @@
+{
+  "experiment": "exp13_governance_envelope_cost",
+  "method": "direct component timing inside the real governed write; no comparand pipeline is constructed and no subtraction is performed",
+  "governed_write_total": {
+    "n": 400,
+    "p50_ms": 12.045,
+    "p99_ms": 60.8143,
+    "mean_ms": 16.1613
+  },
+  "envelope_components": {
+    "generation_fence": {
+      "n": 400,
+      "p50_ms": 0.0021,
+      "p99_ms": 0.0036,
+      "mean_ms": 0.0021
+    },
+    "journal_commit": {
+      "n": 400,
+      "p50_ms": 3.4532,
+      "p99_ms": 31.8619,
+      "mean_ms": 4.9181
+    },
+    "journal_dispatch": {
+      "n": 400,
+      "p50_ms": 1.6429,
+      "p99_ms": 14.6753,
+      "mean_ms": 2.1455
+    },
+    "journal_prepare": {
+      "n": 400,
+      "p50_ms": 3.376,
+      "p99_ms": 27.8782,
+      "mean_ms": 4.806
+    },
+    "projection_obligations": {
+      "n": 400,
+      "p50_ms": 0.0435,
+      "p99_ms": 0.0759,
+      "mean_ms": 0.0457
+    }
+  },
+  "envelope_p50_ms": 8.5177,
+  "envelope_share_of_p50": 0.7072,
+  "caveats": [
+    "In-process. HTTP transport, request parsing and the trust hook are excluded.",
+    "Temporary filesystem; a persistent disk raises the journal fsync component.",
+    "Component timings include the timing wrapper itself (sub-microsecond).",
+    "Sum of component p50s is not the p50 of the sum; reported as an indicative share."
+  ]
+}

@@ -46,7 +46,7 @@ def _seed_pending_row(
     memory_db: Path, *, profile_id: str = "default",
     session_id: str = "s1", recall_query_id: str = "q1",
     fact_ids: list[str] | None = None,
-    signals: str = '{"cited": true}',
+    signals: str = '{"cite": true}',   # must be a name in VALID_SIGNALS
 ) -> str:
     """Insert one pending_outcomes row; return the outcome_id."""
     outcome_id = uuid.uuid4().hex

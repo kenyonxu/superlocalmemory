@@ -113,6 +113,30 @@ _MAX_CLOCK_SKEW_MS: Final[int] = 60_000
 # ---------------------------------------------------------------------------
 
 
+#: Dwell below this is not engagement; the label formula uses the same bound.
+_DWELL_THRESHOLD_MS: Final[int] = 2000
+
+
+def _carries_evidence(signals: Mapping[str, object]) -> bool:
+    """Did anything actually happen after this recall?
+
+    ``_compute_label`` is built as ``0.5 + bonuses - penalties``, so a signal
+    set with nothing in it evaluates to exactly one half. That number is not an
+    absence of judgement, it is a confident one: it becomes a mid-strength
+    positive training label and a Beta update that tightens a posterior around
+    its prior. An empty dict and a dict of falsy values mean the same thing here
+    and must both be refused.
+    """
+    if not signals:
+        return False
+    if signals.get("cite") or signals.get("edit") or signals.get("requery"):
+        return True
+    try:
+        return int(signals.get("dwell_ms", 0) or 0) >= _DWELL_THRESHOLD_MS
+    except (TypeError, ValueError):
+        return False
+
+
 def _compute_label(signals: Mapping[str, object]) -> float:
     """Deterministic label in ``[0.0, 1.0]`` per the manifest A.1 formula.
 
@@ -141,8 +165,9 @@ def _compute_label(signals: Mapping[str, object]) -> float:
         dwell_int = 0
 
     dwell_bonus = 0.0
-    if dwell_int >= 2000:
-        dwell_bonus = min(0.15, 0.05 + (dwell_int - 2000) / 80_000.0)
+    if dwell_int >= _DWELL_THRESHOLD_MS:
+        dwell_bonus = min(
+            0.15, 0.05 + (dwell_int - _DWELL_THRESHOLD_MS) / 80_000.0)
 
     label = (
         0.5
@@ -585,9 +610,19 @@ class EngagementRewardModel:
                     signals = json.loads(pending["signals_json"] or "{}")
                 except json.JSONDecodeError:  # pragma: no cover — defensive
                     signals = {}
-                reward = _compute_label(signals)
                 now_ms = self._clock_ms()
                 timestamp_iso = _iso_from_ms(now_ms)
+                if not _carries_evidence(signals):
+                    # Finalize so it stops being rescanned, but record no
+                    # outcome: nothing was observed, and a score here would
+                    # be invented rather than measured. Mirrors reap_stale.
+                    conn.execute(
+                        "UPDATE pending_outcomes "
+                        "SET status = 'settled' WHERE outcome_id = ?",
+                        (outcome_id,),
+                    )
+                    return _FALLBACK_REWARD
+                reward = _compute_label(signals)
 
                 # NOTE: Split INSERT across lines so the Stage-5b CI
                 # gate's single-line regex (LLD-00 §13) does not fire.
@@ -746,7 +781,7 @@ class EngagementRewardModel:
             #
             # The row is still finalized, so it stops being rescanned; it is
             # simply not turned into evidence it never was.
-            if not signals:
+            if not _carries_evidence(signals):
                 settle_ids.append(row["outcome_id"])
                 continue
             reward = _compute_label(signals)

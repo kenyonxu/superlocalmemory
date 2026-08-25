@@ -5,6 +5,25 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.9] — Silence is not a verdict
+
+### Fixed
+- **A recall nobody engaged with was scored as an average one.** How useful a recall
+  was is worked out from what happened next — whether a memory was quoted, edited, or
+  asked about again. When nothing at all had happened, that calculation still landed
+  on a middling score, and it was saved as if it had been measured. That is not a
+  blank: downstream it reads as mild approval, nudging results toward whatever was
+  shown and making the system steadily more certain it has no preference either way.
+  Recalls with nothing observed are now closed without a score, which is what the
+  batch pass already did — the two paths simply disagreed. On a store in daily use,
+  every one of 492 saved scores turned out to be this value, so nothing recorded there
+  reflected real use.
+- **Signals recorded as explicitly absent were counted as present.** A recall whose
+  signals were all recorded as "did not happen" was treated as having something to
+  say, and scored, because the record existed even though everything in it was empty.
+  Both paths now ask whether anything actually happened rather than whether a record
+  was written.
+
 ## [4.1.8] — The same question, answered the same way
 
 ### Fixed
