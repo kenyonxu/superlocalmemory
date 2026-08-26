@@ -150,3 +150,29 @@ class TestSchemaCreation:
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
         assert len(tables) == 0
+
+
+class TestVec0EmbeddingTable:
+    """Regression: vec0 DDL ran on connections without sqlite-vec loaded,
+    so code_node_embeddings was silently never created (warned as
+    'no such module: vec0' on every schema apply since 4.0.7)."""
+
+    def test_vec0_embeddings_table_created(self, conn: sqlite3.Connection):
+        tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "code_node_embeddings" in tables
+
+    def test_vec0_table_roundtrip(self, conn: sqlite3.Connection):
+        conn.execute(
+            "INSERT INTO code_node_embeddings (node_id, embedding) "
+            "VALUES ('n1', ?)",
+            (bytes(768 * 4),),  # 768-dim float32 zeros
+        )
+        row = conn.execute(
+            "SELECT node_id FROM code_node_embeddings WHERE node_id = 'n1'"
+        ).fetchone()
+        assert row["node_id"] == "n1"

@@ -248,16 +248,36 @@ def create_all_tables(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError as exc:
             logger.warning("FTS5 setup failed (non-fatal): %s", exc)
 
-    # vec0 virtual table for embeddings (may fail if sqlite-vec not loaded)
+    # vec0 virtual table for embeddings. The extension must be loaded on THIS
+    # connection first — CREATE VIRTUAL TABLE ... USING vec0 fails with
+    # "no such module: vec0" otherwise. Loading stays non-fatal: environments
+    # without sqlite-vec degrade to no code-graph embeddings, same as before.
+    vec0_available = False
     try:
-        cursor.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS code_node_embeddings USING vec0(
-                node_id TEXT PRIMARY KEY,
-                embedding float[768] distance_metric=cosine
-            )
-        """)
-    except sqlite3.OperationalError as exc:
-        logger.warning("vec0 setup failed (non-fatal, embeddings disabled): %s", exc)
+        import sqlite_vec
+
+        conn.enable_load_extension(True)
+        try:
+            sqlite_vec.load(conn)
+        finally:
+            conn.enable_load_extension(False)
+        vec0_available = True
+    except Exception as exc:
+        logger.warning(
+            "sqlite-vec unavailable (non-fatal, code-graph embeddings disabled): %s",
+            exc,
+        )
+
+    if vec0_available:
+        try:
+            cursor.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS code_node_embeddings USING vec0(
+                    node_id TEXT PRIMARY KEY,
+                    embedding float[768] distance_metric=cosine
+                )
+            """)
+        except sqlite3.OperationalError as exc:
+            logger.warning("vec0 setup failed (non-fatal, embeddings disabled): %s", exc)
 
     conn.commit()
     logger.info("CodeGraph schema initialized (%d tables, %d indexes)",
