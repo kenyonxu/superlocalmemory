@@ -364,6 +364,14 @@ class DaemonRefused(RuntimeError):
         )
 
 
+class DaemonConflict(RuntimeError):
+    """A deterministic daemon conflict that the caller must resolve."""
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail or "daemon request conflicted with current state"
+        super().__init__(self.detail)
+
+
 def daemon_request(
     method: str,
     path: str,
@@ -463,6 +471,15 @@ def daemon_request(
         # locally as the machine owner.
         if exc.code in (401, 403):
             raise DaemonRefused(exc.code, path) from exc
+        if exc.code == 409:
+            detail = "daemon request conflicted with current state"
+            try:
+                payload = json.loads(exc.read().decode())
+                if isinstance(payload, dict) and payload.get("detail"):
+                    detail = str(payload["detail"])
+            except Exception:
+                pass
+            raise DaemonConflict(detail) from exc
         return None
     except Exception:
         return None

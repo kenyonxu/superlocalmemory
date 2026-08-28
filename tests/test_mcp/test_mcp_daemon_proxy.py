@@ -176,6 +176,27 @@ class TestDaemonPoolProxy:
         out = proxy.store("x")
         assert out["ok"] is False
 
+    def test_store_surfaces_profile_conflict_as_non_retryable(self, monkeypatch):
+        from superlocalmemory.cli.daemon import DaemonConflict
+
+        def _conflict(*args, **kwargs):
+            raise DaemonConflict("profile mismatch: expected work")
+
+        monkeypatch.setattr(
+            "superlocalmemory.cli.daemon.daemon_request", _conflict,
+        )
+
+        out = DaemonPoolProxy(port=9999).store(
+            "x", metadata={"profile_id": "work"},
+        )
+
+        assert out == {
+            "ok": False,
+            "code": "PROFILE_MISMATCH",
+            "retryable": False,
+            "error": "profile mismatch: expected work",
+        }
+
 
 class TestChoosePool:
     def test_prefers_daemon_proxy_when_running(self, monkeypatch):

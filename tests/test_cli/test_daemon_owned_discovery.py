@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import json
+import io
 import os
+import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -265,6 +267,26 @@ def test_daemon_request_sends_private_capability_after_identity_match() -> None:
     normalized = {key.lower(): value for key, value in seen_headers[0].items()}
     assert normalized["x-slm-daemon-capability"] == descriptor.capability
     assert normalized["x-slm-target-instance"] == descriptor.instance_id
+
+
+def test_daemon_request_preserves_profile_conflict() -> None:
+    from superlocalmemory.cli import daemon
+
+    descriptor = _owned_descriptor(port=43134)
+    health = {"status": "ok", **descriptor.public_health_fields()}
+    conflict = urllib.error.HTTPError(
+        "http://127.0.0.1:43134/remember",
+        409,
+        "Conflict",
+        {},
+        io.BytesIO(b'{"detail":"profile mismatch: expected work"}'),
+    )
+
+    with patch("urllib.request.urlopen", side_effect=[_HealthResponse(health), conflict]):
+        with pytest.raises(daemon.DaemonConflict) as caught:
+            daemon.daemon_request("POST", "/remember", {"content": "bound"})
+
+    assert "profile mismatch" in str(caught.value)
 
 
 def test_daemon_request_forwards_explicit_user_session_after_identity_match(

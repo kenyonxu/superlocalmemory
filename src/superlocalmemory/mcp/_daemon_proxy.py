@@ -152,9 +152,16 @@ class DaemonPoolProxy:
             # capability delivery, and exact-instance targeting.  A raw urllib
             # POST here previously became unauthenticated when /remember was
             # hardened and could also attach to a stale/foreign port.
-            from superlocalmemory.cli.daemon import daemon_request
+            from superlocalmemory.cli.daemon import DaemonConflict, daemon_request
 
             data = daemon_request("POST", "/remember", body)
+        except DaemonConflict as exc:
+            return {
+                "ok": False,
+                "code": "PROFILE_MISMATCH",
+                "retryable": False,
+                "error": str(exc),
+            }
         except Exception as exc:
             logger.warning("daemon /remember failed: %s", exc)
             return self._unavailable_response()
