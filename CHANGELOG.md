@@ -5,6 +5,14 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.10] — MCP loops use the owned writer
+
+### Fixed
+- MCP bounded loops now persist their ledger through the daemon/worker writer
+  instead of calling a write method on the intentionally LIGHT MCP engine.
+- The benchmark bundle now runs experiments 12 and 13; the emergency-recall
+  fixture no longer expires as the calendar advances.
+
 ## [4.1.9] — Silence is not a verdict
 
 ### Fixed

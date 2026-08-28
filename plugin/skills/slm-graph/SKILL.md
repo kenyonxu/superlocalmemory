@@ -312,4 +312,4 @@ profile. See `slm-profile` for the full profile switching workflow.
 
 ---
 
-SuperLocalMemory v4.1.9 · Qualixar · AGPL-3.0-or-later
+SuperLocalMemory v4.1.10 · Qualixar · AGPL-3.0-or-later
