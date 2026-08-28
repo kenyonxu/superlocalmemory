@@ -145,6 +145,7 @@ class DaemonPoolProxy:
             "metadata": metadata or {},
             "session_id": (metadata or {}).get("session_id", ""),
             "idempotency_key": (metadata or {}).get("idempotency_key") or None,
+            "profile_id": (metadata or {}).get("profile_id", ""),
         }
         try:
             # One identity-aware daemon client owns descriptor validation,

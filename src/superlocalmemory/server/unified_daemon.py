@@ -630,6 +630,10 @@ class RememberRequest(BaseModel):
     metadata: dict | None = None  # v3.4.26: pass-through from MCP pool_store
     idempotency_key: str | None = None
     session_id: str = ""
+    # Optional compare-and-write guard for profile-sensitive clients. The
+    # daemon remains single-profile, so a stale MCP client must fail instead
+    # of silently writing into whichever profile another client selected.
+    profile_id: str = ""
     #: WHEN this memory is about, as distinct from when it was written.
     #:
     #: The internal admission record has carried this field all along and this
@@ -691,6 +695,18 @@ class RememberRequest(BaseModel):
     # profile_ids for scope='shared'.
     scope: str | None = None
     shared_with: list[str] | None = None
+
+
+def _require_remember_profile(requested: str, active: str) -> None:
+    """Reject a stale profile-bound write before any durable mutation."""
+    if requested and requested != active:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"profile mismatch: request is bound to '{requested}' but "
+                f"the daemon currently serves '{active}'"
+            ),
+        )
 
 
 class SessionOpenRequest(BaseModel):
@@ -4671,6 +4687,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
         trusted_actor_id = _require_write_actor(request)
         _update_activity()
         engine = _get_engine_or_503()
+        _require_remember_profile(req.profile_id, engine._profile_id)
 
         # v3.6.15 multi-scope: resolve the write scope. ``None`` (not specified
         # by the caller) → the configured default_scope (personal). Shared

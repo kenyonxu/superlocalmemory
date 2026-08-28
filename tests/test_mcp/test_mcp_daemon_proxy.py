@@ -126,7 +126,11 @@ class TestDaemonPoolProxy:
 
         out = DaemonPoolProxy(port=9999).store(
             "identity-bound content",
-            metadata={"tags": "audit", "agent_id": "caller-label"},
+            metadata={
+                "tags": "audit",
+                "agent_id": "caller-label",
+                "profile_id": "work",
+            },
         )
 
         assert out["fact_ids"] == ["owned-fact"]
@@ -136,9 +140,14 @@ class TestDaemonPoolProxy:
             "body": {
                 "content": "identity-bound content",
                 "tags": "audit",
-                "metadata": {"tags": "audit", "agent_id": "caller-label"},
+                "metadata": {
+                    "tags": "audit",
+                    "agent_id": "caller-label",
+                    "profile_id": "work",
+                },
                 "session_id": "",
                 "idempotency_key": None,
+                "profile_id": "work",
             },
         }
 

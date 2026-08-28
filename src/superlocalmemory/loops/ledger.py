@@ -240,7 +240,11 @@ class _PoolLedgerStore(_EngineLedgerStore):
     def add(self, content: str, *, session_id: str, metadata: dict) -> None:
         result = self._pool.store(
             content,
-            metadata={**metadata, "session_id": session_id},
+            metadata={
+                **metadata,
+                "session_id": session_id,
+                "profile_id": self._engine.profile_id,
+            },
         )
         accepted = bool(result.get("ok") or result.get("success"))
         if not accepted:

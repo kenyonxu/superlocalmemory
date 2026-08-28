@@ -35,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Callable
+from typing import Callable
 
 from mcp.types import ToolAnnotations
 
@@ -256,11 +256,7 @@ def register_loop_tools(
                 return {"ok": False, "error": "name is required"}
             lim = max(1, min(int(limit), 200))
             engine = get_engine()
-            ledger = (
-                pool_backed_ledger(get_pool(), engine)
-                if get_pool is not None
-                else engine_backed_ledger(engine)
-            )
+            ledger = engine_backed_ledger(engine)
 
             def _collect() -> list[dict]:
                 run_ids = ledger.runs(name)[:lim]
@@ -301,11 +297,7 @@ def register_loop_tools(
                 return {"ok": False, "error": "run_id is required"}
             lim = max(1, min(int(limit), 1000))
             engine = get_engine()
-            ledger = (
-                pool_backed_ledger(get_pool(), engine)
-                if get_pool is not None
-                else engine_backed_ledger(engine)
-            )
+            ledger = engine_backed_ledger(engine)
 
             def _collect() -> list[dict]:
                 return [

@@ -243,13 +243,30 @@ def run(n_trials: int = ROUNDS, seed: int = SEED) -> ExperimentResult:
         for name, held in checks.items()
         if not held
     )
-    held = sum(1 for value in checks.values() if value)
+    # ``n_trials`` is the number of rounds per arm. The shared runner promises
+    # that flag as trials per guarantee, so account for every round in all
+    # three arms instead of presenting the three aggregate conditions as only
+    # three trials regardless of N.
+    defect_held = rounds if checks["defect_does_not_learn"] else 0
+    repaired_held = (
+        min(
+            rounds,
+            int(by_name["repaired"]["outcome_tickets_written"]),
+            int(by_name["repaired"]["plays_settled"]),
+        )
+        if (
+            by_name["repaired"]["arms_moved_off_prior_mean"] > 0
+            and by_name["repaired"]["max_abs_mean_shift"] > 0
+        )
+        else 0
+    )
+    negative_held = rounds if checks["negative_control_does_not_learn"] else 0
     return ExperimentResult(
         name="exp12_learning_loop_ablation",
         guarantee="only a real conversation plus observed engagement moves the posterior",
         metric_name="max_abs_posterior_mean_shift",
-        trials=len(checks),
-        held=held,
+        trials=rounds * len(checks),
+        held=defect_held + repaired_held + negative_held,
         metric_value=float(by_name["repaired"]["max_abs_mean_shift"]),
         method="single-factor three-arm session-identity ablation",
         failures=failures,

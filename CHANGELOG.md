@@ -9,9 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - MCP bounded loops now persist their ledger through the daemon/worker writer
-  instead of calling a write method on the intentionally LIGHT MCP engine.
+  instead of calling a write method on the intentionally LIGHT MCP engine, and
+  reject stale cross-profile writes rather than misplacing audit records.
 - The benchmark bundle now runs experiments 12 and 13; the emergency-recall
-  fixture no longer expires as the calendar advances.
+  fixture no longer expires as the calendar advances, and trial totals reflect
+  every executed ablation round.
 
 ## [4.1.9] — Silence is not a verdict
 

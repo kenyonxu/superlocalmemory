@@ -206,6 +206,28 @@ def test_mcp_loop_routes_ledger_writes_away_from_the_light_engine(monkeypatch):
     assert out["status"] == "DONE"
     assert len(pool.stored) == 1
     assert pool.stored[0][1]["session_id"].startswith("loop:mcp-light-")
+    assert pool.stored[0][1]["profile_id"] == "default"
+
+
+def test_read_only_loop_queries_never_construct_the_writer_pool():
+    engine = _FakeEngine()
+
+    def fail_if_called():
+        raise AssertionError("read-only loop query constructed the writer pool")
+
+    cap = _Capture()
+    register_loop_tools(cap, lambda: engine, fail_if_called)
+
+    history = _run(cap.fns["slm_loop_history"](name="read-only"))
+    show = _run(cap.fns["slm_loop_show"](run_id="read-only-run"))
+
+    assert history == {"ok": True, "name": "read-only", "count": 0, "runs": []}
+    assert show == {
+        "ok": True,
+        "run_id": "read-only-run",
+        "count": 0,
+        "laps": [],
+    }
 
 
 # ── Persistence test (real engine, store-then-match keeps recall fast) ───────
