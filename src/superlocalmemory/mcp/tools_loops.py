@@ -47,6 +47,7 @@ from superlocalmemory.loops import (
     LedgerEntry,
     Verdict,
     engine_backed_ledger,
+    pool_backed_ledger,
     run_bounded_loop,
 )
 
@@ -69,7 +70,11 @@ _MAX_NAME_CHARS = 128
 _MAX_QUERY_CHARS = 2000
 
 
-def register_loop_tools(server, get_engine: Callable) -> None:
+def register_loop_tools(
+    server,
+    get_engine: Callable,
+    get_pool: Callable | None = None,
+) -> None:
     """Register the 3 bounded-loop tools on *server*.
 
     *server* is duck-typed: must support the ``@server.tool()`` decorator.
@@ -187,7 +192,11 @@ def register_loop_tools(server, get_engine: Callable) -> None:
                     time.sleep(poll)
                 return LapResult(changed=False, tokens=0)
 
-            ledger = engine_backed_ledger(engine)
+            ledger = (
+                pool_backed_ledger(get_pool(), engine)
+                if get_pool is not None
+                else engine_backed_ledger(engine)
+            )
 
             # The loop blocks (sleeps between laps); run it off the event loop.
             # The engine's per-call WAL connection model makes this thread-safe.
@@ -247,7 +256,11 @@ def register_loop_tools(server, get_engine: Callable) -> None:
                 return {"ok": False, "error": "name is required"}
             lim = max(1, min(int(limit), 200))
             engine = get_engine()
-            ledger = engine_backed_ledger(engine)
+            ledger = (
+                pool_backed_ledger(get_pool(), engine)
+                if get_pool is not None
+                else engine_backed_ledger(engine)
+            )
 
             def _collect() -> list[dict]:
                 run_ids = ledger.runs(name)[:lim]
@@ -288,7 +301,11 @@ def register_loop_tools(server, get_engine: Callable) -> None:
                 return {"ok": False, "error": "run_id is required"}
             lim = max(1, min(int(limit), 1000))
             engine = get_engine()
-            ledger = engine_backed_ledger(engine)
+            ledger = (
+                pool_backed_ledger(get_pool(), engine)
+                if get_pool is not None
+                else engine_backed_ledger(engine)
+            )
 
             def _collect() -> list[dict]:
                 return [

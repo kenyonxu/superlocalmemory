@@ -193,7 +193,7 @@ def test_mcp_loop_routes_ledger_writes_away_from_the_light_engine(monkeypatch):
     pool = _FakePool()
     monkeypatch.setattr(tools_loops, "choose_pool", lambda: pool, raising=False)
     cap = _Capture()
-    register_loop_tools(cap, lambda: engine)
+    register_loop_tools(cap, lambda: engine, lambda: pool)
 
     out = _run(cap.fns["slm_loop_run"](
         name="mcp-light",
