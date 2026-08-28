@@ -147,13 +147,16 @@ class DaemonPoolProxy:
             "idempotency_key": (metadata or {}).get("idempotency_key") or None,
             "profile_id": (metadata or {}).get("profile_id", ""),
         }
+        # One identity-aware daemon client owns descriptor validation,
+        # capability delivery, and exact-instance targeting. A raw urllib POST
+        # here previously became unauthenticated when /remember was hardened
+        # and could also attach to a stale/foreign port.
         try:
-            # One identity-aware daemon client owns descriptor validation,
-            # capability delivery, and exact-instance targeting.  A raw urllib
-            # POST here previously became unauthenticated when /remember was
-            # hardened and could also attach to a stale/foreign port.
             from superlocalmemory.cli.daemon import DaemonConflict, daemon_request
-
+        except Exception as exc:
+            logger.warning("daemon client import failed: %s", exc)
+            return self._unavailable_response()
+        try:
             data = daemon_request("POST", "/remember", body)
         except DaemonConflict as exc:
             return {

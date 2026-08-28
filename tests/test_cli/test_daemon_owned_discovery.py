@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-import json
 import io
+import json
 import os
 import urllib.error
 from pathlib import Path
