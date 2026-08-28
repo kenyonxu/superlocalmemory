@@ -79,6 +79,9 @@ class _FakeEngine:
 class _LightOnlyEngine(_FakeEngine):
     """Matches the shipped MCP engine: readable, but never a local writer."""
 
+    def recall(self, *args, **kwargs):
+        raise RuntimeError("recall requires a FULL MemoryEngine but this instance is LIGHT")
+
     def store_fast(self, *args, **kwargs):
         raise RuntimeError(
             "store_fast requires a FULL MemoryEngine but this instance is LIGHT"
@@ -90,10 +93,20 @@ class _FakePool:
 
     def __init__(self) -> None:
         self.stored: list[tuple[str, dict]] = []
+        self.recalled: list[tuple[str, int, bool]] = []
 
     def store(self, content, metadata=None):
         self.stored.append((content, dict(metadata or {})))
         return {"ok": True, "fact_ids": ["loop-ledger-fact"]}
+
+    def recall(self, query, limit=3, fast=True):
+        self.recalled.append((query, limit, fast))
+        return {
+            "ok": True,
+            "results": ([{"content": "external checkpoint", "score": 0.5}]
+                        if "MATCH" in query else []),
+            "no_confident_match": "MATCH" not in query,
+        }
 
 
 @pytest.fixture
@@ -204,6 +217,7 @@ def test_mcp_loop_routes_ledger_writes_away_from_the_light_engine(monkeypatch):
 
     assert out["ok"] is True
     assert out["status"] == "DONE"
+    assert pool.recalled == [("MATCH external checkpoint", 3, True)]
     assert len(pool.stored) == 1
     assert pool.stored[0][1]["session_id"].startswith("loop:mcp-light-")
     assert pool.stored[0][1]["profile_id"] == "default"

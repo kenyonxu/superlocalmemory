@@ -139,9 +139,12 @@ class DaemonPoolProxy:
     ) -> dict[str, Any]:
         if self._unavailable:
             return self._unavailable_response()
+        tags = (metadata or {}).get("tags", "")
+        if isinstance(tags, (list, tuple, set)):
+            tags = ",".join(str(tag) for tag in tags)
         body = {
             "content": content,
-            "tags": (metadata or {}).get("tags", ""),
+            "tags": tags,
             "metadata": metadata or {},
             "session_id": (metadata or {}).get("session_id", ""),
             "idempotency_key": (metadata or {}).get("idempotency_key") or None,

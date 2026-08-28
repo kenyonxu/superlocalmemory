@@ -5,6 +5,12 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.11] — MCP loops use the owned runtime
+
+### Fixed
+- MCP bounded loops now route both recall gates and ledger writes through the
+  daemon, and normalize ledger tags at the HTTP boundary.
+
 ## [4.1.10] — MCP loops use the owned writer
 
 ### Fixed

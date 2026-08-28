@@ -104,13 +104,13 @@ class TestDaemonPoolProxy:
         )
 
         proxy = DaemonPoolProxy(port=9999)
-        out = proxy.store("hello", metadata={"tags": "tag1"})
+        out = proxy.store("hello", metadata={"tags": ["tag1", "tag2"]})
         assert out["fact_ids"] == ["f1", "f2"]
         assert captured["method"] == "POST"
         assert captured["path"] == "/remember"
         body = captured["body"]
         assert body["content"] == "hello"
-        assert body["tags"] == "tag1"
+        assert body["tags"] == "tag1,tag2"
 
     def test_store_delegates_to_owned_daemon_client(self, monkeypatch):
         captured = {}
