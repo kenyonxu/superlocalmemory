@@ -38,6 +38,8 @@ import exp5_multitenant_isolation as exp5  # noqa: E402
 import exp6_temporal_micro_eval as exp6  # noqa: E402
 import exp7_generation_fence as exp7  # noqa: E402
 import exp8_policy_registry as exp8  # noqa: E402
+import exp12_learning_loop_ablation as exp12  # noqa: E402
+import exp13_governance_envelope_cost as exp13  # noqa: E402
 import exp_governed_latency as exp_lat  # noqa: E402
 from _harness import environment, summarize, write_result  # noqa: E402
 
@@ -91,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
         *exp6.run(n_trials=n),
         exp7.run(n_trials=n),
         exp8.run(n_trials=n),
+        exp12.run(n_trials=n),
+        exp13.run(n_trials=n),
     ]
 
     out_dir.mkdir(parents=True, exist_ok=True)

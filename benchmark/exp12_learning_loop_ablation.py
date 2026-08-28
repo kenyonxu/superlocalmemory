@@ -45,6 +45,7 @@ from superlocalmemory.core.session_identity import is_conversation  # noqa: E402
 from superlocalmemory.learning.bandit import ContextualBandit  # noqa: E402
 from superlocalmemory.learning.reward import EngagementRewardModel  # noqa: E402
 from superlocalmemory.learning.reward_proxy import settle_stale_plays  # noqa: E402
+from _harness import ExperimentResult  # noqa: E402
 
 ROUNDS = 120
 PROFILE = "default"
@@ -113,9 +114,15 @@ def _mk_learning_db(path: Path) -> None:
     conn.commit(); conn.close()
 
 
-def run_arm(arm: str, workdir: Path) -> dict:
+def run_arm(
+    arm: str,
+    workdir: Path,
+    *,
+    rounds: int = ROUNDS,
+    seed: int = SEED,
+) -> dict:
     """One condition. Returns the measured posterior state."""
-    random.seed(SEED)          # identical draw sequence in every arm
+    random.seed(seed)          # identical draw sequence in every arm
     mem = workdir / f"memory-{arm}.db"
     learn = workdir / f"learning-{arm}.db"
     _mk_memory_db(mem)
@@ -127,7 +134,7 @@ def run_arm(arm: str, workdir: Path) -> dict:
 
     conn = sqlite3.connect(mem)
     recorded = 0
-    for i in range(ROUNDS):
+    for i in range(rounds):
         played = t0 + timedelta(seconds=i)
         query_id = str(uuid.uuid4())
         # The ONLY difference between the two arms:
@@ -194,7 +201,7 @@ def run_arm(arm: str, workdir: Path) -> dict:
     ).fetchall())
     lc.close()
     return {
-        "arm": arm, "rounds": ROUNDS, "outcome_tickets_written": recorded,
+        "arm": arm, "rounds": rounds, "outcome_tickets_written": recorded,
         "plays_settled": settled, "arms_total": arms_total,
         "arms_moved_off_prior_mean": moved,
         "max_abs_mean_shift": round(float(spread), 6),
@@ -202,24 +209,74 @@ def run_arm(arm: str, workdir: Path) -> dict:
     }
 
 
-def main() -> int:
+def run(n_trials: int = ROUNDS, seed: int = SEED) -> ExperimentResult:
+    """Run the three-arm ablation under the shared benchmark contract."""
+    rounds = max(1, int(n_trials))
     with tempfile.TemporaryDirectory(prefix="slm-exp12-") as td:
         work = Path(td)
-        out = {
-            "experiment": "exp12_learning_loop_ablation",
+        arms = [
+            run_arm("defect", work, rounds=rounds, seed=seed),
+            run_arm("repaired", work, rounds=rounds, seed=seed),
+            run_arm("no-engagement", work, rounds=rounds, seed=seed),
+        ]
+
+    by_name = {arm["arm"]: arm for arm in arms}
+    checks = {
+        "defect_does_not_learn": (
+            by_name["defect"]["outcome_tickets_written"] == 0
+            and by_name["defect"]["arms_moved_off_prior_mean"] == 0
+        ),
+        "repaired_loop_closes": (
+            by_name["repaired"]["outcome_tickets_written"] == rounds
+            and by_name["repaired"]["plays_settled"] == rounds
+            and by_name["repaired"]["arms_moved_off_prior_mean"] > 0
+            and by_name["repaired"]["max_abs_mean_shift"] > 0
+        ),
+        "negative_control_does_not_learn": (
+            by_name["no-engagement"]["outcome_tickets_written"] == rounds
+            and by_name["no-engagement"]["plays_settled"] == 0
+            and by_name["no-engagement"]["arms_moved_off_prior_mean"] == 0
+        ),
+    }
+    failures = tuple(
+        {"condition": name, "arms": arms}
+        for name, held in checks.items()
+        if not held
+    )
+    held = sum(1 for value in checks.values() if value)
+    return ExperimentResult(
+        name="exp12_learning_loop_ablation",
+        guarantee="only a real conversation plus observed engagement moves the posterior",
+        metric_name="max_abs_posterior_mean_shift",
+        trials=len(checks),
+        held=held,
+        metric_value=float(by_name["repaired"]["max_abs_mean_shift"]),
+        method="single-factor three-arm session-identity ablation",
+        failures=failures,
+        extra={
             "ablated_factor": "session identifier namespace at recall time",
-            "seed": SEED,
-            "arms": [
-                run_arm("defect", work),
-                run_arm("repaired", work),
-                run_arm("no-engagement", work),
-            ],
-        }
+            "seed": seed,
+            "rounds_per_arm": rounds,
+            "conditions": checks,
+            "arms": arms,
+        },
+    )
+
+
+def main() -> int:
+    result = run()
+    out = {
+        "experiment": result.name,
+        "ablated_factor": result.extra["ablated_factor"],
+        "seed": result.extra["seed"],
+        "arms": result.extra["arms"],
+        "passed": result.passed,
+    }
     print(json.dumps(out, indent=2))
     res = Path(__file__).resolve().parent / "results"
     res.mkdir(exist_ok=True)
     (res / "exp12_learning_loop_ablation.json").write_text(json.dumps(out, indent=2))
-    return 0
+    return 0 if result.passed else 1
 
 
 if __name__ == "__main__":

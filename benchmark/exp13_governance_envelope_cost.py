@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from _harness import TempWorkspace, add_profile, fresh_db  # noqa: E402
+from _harness import ExperimentResult  # noqa: E402
 
 from superlocalmemory.core import remember_runtime as rr  # noqa: E402
 from superlocalmemory.core.remember_runtime import CanonicalRememberRuntime  # noqa: E402
@@ -62,7 +63,8 @@ def _timed(component: str, fn):
     return wrapper
 
 
-def main() -> int:
+def _measure(n_measure: int) -> dict:
+    _acc.clear()
     with TempWorkspace() as ws:
         db = fresh_db(ws, "envelope.db")
         add_profile(db, PROFILE_ID)
@@ -92,12 +94,13 @@ def main() -> int:
             assert runtime.ready, "runtime did not become ready"
             actor = _actor()
 
-            for i in range(N_WARMUP):
+            n_warmup = min(N_WARMUP, max(1, n_measure // 4))
+            for i in range(n_warmup):
                 runtime.remember(_governed_request(-(i + 1)), actor)
             _acc.clear()   # discard warmup
 
             totals: list[float] = []
-            for i in range(N_MEASURE):
+            for i in range(n_measure):
                 t0 = time.perf_counter()
                 runtime.remember(_governed_request(i), actor)
                 totals.append((time.perf_counter() - t0) * 1_000)
@@ -137,11 +140,48 @@ def main() -> int:
             "Sum of component p50s is not the p50 of the sum; reported as an indicative share.",
         ],
     }
+    return out
+
+
+def run(n_trials: int = N_MEASURE, seed: int = 0) -> ExperimentResult:
+    """Measure the governance envelope under the shared benchmark contract."""
+    del seed  # deterministic work; no random sampling
+    n_measure = max(1, int(n_trials))
+    out = _measure(n_measure)
+    component_counts = {
+        name: stats["n"] for name, stats in out["envelope_components"].items()
+    }
+    complete = (
+        out["governed_write_total"]["n"] == n_measure
+        and len(component_counts) == 5
+        and all(count == n_measure for count in component_counts.values())
+    )
+    failures = () if complete else ({
+        "expected": n_measure,
+        "governed_write_total": out["governed_write_total"]["n"],
+        "component_counts": component_counts,
+    },)
+    return ExperimentResult(
+        name="exp13_governance_envelope_cost",
+        guarantee="every governed write records every declared envelope component",
+        metric_name="envelope_p50_ms",
+        trials=n_measure,
+        held=n_measure if complete else 0,
+        metric_value=float(out["envelope_p50_ms"]),
+        method=out["method"],
+        failures=failures,
+        extra=out,
+    )
+
+
+def main() -> int:
+    result = run()
+    out = {**result.extra, "passed": result.passed}
     print(json.dumps(out, indent=2))
     res = Path(__file__).resolve().parent / "results"
     res.mkdir(exist_ok=True)
     (res / "exp13_governance_envelope_cost.json").write_text(json.dumps(out, indent=2))
-    return 0
+    return 0 if result.passed else 1
 
 
 if __name__ == "__main__":
