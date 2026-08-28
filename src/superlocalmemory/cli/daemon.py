@@ -381,6 +381,7 @@ def daemon_request(
     expected_descriptor=_EXPECTED_DESCRIPTOR_UNSET,
     expected_legacy: dict | None = None,
     verify_health: bool = True,
+    preserve_conflict: bool = False,
 ) -> dict | None:
     """Send a request only after validating the owned daemon identity.
 
@@ -471,7 +472,7 @@ def daemon_request(
         # locally as the machine owner.
         if exc.code in (401, 403):
             raise DaemonRefused(exc.code, path) from exc
-        if exc.code == 409:
+        if exc.code == 409 and preserve_conflict:
             detail = "daemon request conflicted with current state"
             try:
                 payload = json.loads(exc.read().decode())

@@ -157,7 +157,12 @@ class DaemonPoolProxy:
             logger.warning("daemon client import failed: %s", exc)
             return self._unavailable_response()
         try:
-            data = daemon_request("POST", "/remember", body)
+            data = daemon_request(
+                "POST",
+                "/remember",
+                body,
+                preserve_conflict=True,
+            )
         except DaemonConflict as exc:
             return {
                 "ok": False,

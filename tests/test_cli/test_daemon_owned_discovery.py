@@ -284,7 +284,12 @@ def test_daemon_request_preserves_profile_conflict() -> None:
 
     with patch("urllib.request.urlopen", side_effect=[_HealthResponse(health), conflict]):
         with pytest.raises(daemon.DaemonConflict) as caught:
-            daemon.daemon_request("POST", "/remember", {"content": "bound"})
+            daemon.daemon_request(
+                "POST",
+                "/remember",
+                {"content": "bound"},
+                preserve_conflict=True,
+            )
 
     assert "profile mismatch" in str(caught.value)
 

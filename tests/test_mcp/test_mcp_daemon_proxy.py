@@ -94,8 +94,8 @@ class TestDaemonPoolProxy:
     def test_store_forwards_http_post(self, monkeypatch):
         captured = {}
 
-        def _owned_request(method, path, body=None):
-            captured.update(method=method, path=path, body=body)
+        def _owned_request(method, path, body=None, **kwargs):
+            captured.update(method=method, path=path, body=body, kwargs=kwargs)
             return {"ok": True, "fact_ids": ["f1", "f2"], "count": 2}
 
         monkeypatch.setattr(
@@ -115,8 +115,8 @@ class TestDaemonPoolProxy:
     def test_store_delegates_to_owned_daemon_client(self, monkeypatch):
         captured = {}
 
-        def _owned_request(method, path, body=None):
-            captured.update(method=method, path=path, body=body)
+        def _owned_request(method, path, body=None, **kwargs):
+            captured.update(method=method, path=path, body=body, kwargs=kwargs)
             return {"ok": True, "fact_ids": ["owned-fact"], "count": 1}
 
         monkeypatch.setattr(
@@ -137,6 +137,7 @@ class TestDaemonPoolProxy:
         assert captured == {
             "method": "POST",
             "path": "/remember",
+            "kwargs": {"preserve_conflict": True},
             "body": {
                 "content": "identity-bound content",
                 "tags": "audit",
