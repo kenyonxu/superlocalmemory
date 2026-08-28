@@ -142,7 +142,12 @@ def _sub_json_at(rel: str, path: tuple, version: str) -> tuple[str, str]:
 
 
 def _read_glob(pattern_glob: str, pattern: str) -> str:
-    """The oldest version any file in the glob still claims."""
+    """The one version every matching file claims, or an explicit mixed set.
+
+    Returning the lexicographically first value hid drift once ``4.1.10`` and
+    ``4.1.9`` coexisted: ``4.1.10`` sorts first and made ``--check`` report the
+    target even though sixteen files were stale.
+    """
     found = set()
     for path in sorted(_ROOT.glob(pattern_glob)):
         m = re.search(pattern, path.read_text(encoding="utf-8"), re.MULTILINE)
@@ -150,7 +155,9 @@ def _read_glob(pattern_glob: str, pattern: str) -> str:
             found.add(m.group(1))
     if not found:
         return "<not found>"
-    return sorted(found)[0]
+    if len(found) == 1:
+        return next(iter(found))
+    return f"<mixed: {', '.join(sorted(found))}>"
 
 
 def _read(rel: str, pattern: str) -> str:
