@@ -18,6 +18,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import hashlib
 import json
@@ -403,7 +404,7 @@ class LearningSignals:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
+        apply_journal_mode(conn)
         conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
         return conn

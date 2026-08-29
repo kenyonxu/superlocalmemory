@@ -8,6 +8,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import hashlib
 import json
@@ -118,7 +119,7 @@ class RecallQueue:
         self._lock = threading.RLock()
         self._conn = _safe_open_db(self._db_path)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._apply_journal_mode(conn)
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")

@@ -13,6 +13,7 @@ Contract (hard rules, enforced by tests):
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import logging
 import queue
@@ -118,7 +119,7 @@ class SignalWorker:
             timeout=10,
             check_same_thread=True,
         )
-        conn.execute("PRAGMA journal_mode=WAL")
+        apply_journal_mode(conn)
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=10000")
         conn.execute("PRAGMA foreign_keys=ON")

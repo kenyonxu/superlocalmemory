@@ -9,6 +9,7 @@ retry with backoff, transaction support. Points at a separate SQLite file.
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import json
 import logging
@@ -67,7 +68,7 @@ class CodeGraphDatabase:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=_BUSY_TIMEOUT_MS / 1000)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        apply_journal_mode(conn)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn

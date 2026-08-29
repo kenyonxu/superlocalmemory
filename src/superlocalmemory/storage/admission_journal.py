@@ -12,6 +12,7 @@ Canonical facts, FTS, graph, vectors, and model work stay outside this module.
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import base64
 import binascii
@@ -548,7 +549,7 @@ class AdmissionJournal:
 
     def _initialize(self) -> None:
         with self._connection() as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
+            apply_journal_mode(conn)
             if self._has_legacy_global_idempotency_key(conn):
                 self._upgrade_legacy_schema(conn)
             else:

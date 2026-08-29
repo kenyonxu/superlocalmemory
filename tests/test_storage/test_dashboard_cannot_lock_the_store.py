@@ -169,12 +169,13 @@ class TestWritesProceedDuringDashboardReads:
             t.join(timeout=2)
 
 
-class TestRealStoreIsInWalMode:
-    """Properties 1-2 are not enough without WAL. If the shipped store ever
-    reverts to the default rollback journal, dashboard reads WOULD stall
-    commits — so assert the mode the code depends on."""
+class TestRealStoreFollowsJournalPolicy:
+    """Journal mode is policy-driven (default DELETE since the 2026-08-13
+    global-VFS-mutex postmortem; SLM_JOURNAL_MODE=wal opts back in). The
+    dashboard-no-lock property this suite cares about is asserted
+    behaviorally by the tests above, under whichever mode is active."""
 
-    def test_new_databases_are_created_in_wal(self, tmp_path):
+    def test_new_databases_follow_journal_policy(self, tmp_path):
         from superlocalmemory.storage.database import DatabaseManager
         from superlocalmemory.storage import schema as _schema
 
@@ -185,7 +186,7 @@ class TestRealStoreIsInWalMode:
             mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         finally:
             conn.close()
-        assert str(mode).lower() == "wal", (
-            f"store created in {mode!r} journal mode; dashboard reads would "
-            f"block agent writes"
+        assert str(mode).lower() == "delete", (
+            f"store created in {mode!r} journal mode; expected the policy "
+            f"default (delete)"
         )

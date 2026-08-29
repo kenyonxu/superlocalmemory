@@ -25,6 +25,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import json
 import logging
@@ -188,7 +189,7 @@ def consolidate_facts(
         "DatabaseManager instead (Fix A backward-compat shim active)"
     )
     conn = sqlite3.connect(str(db_or_path))
-    wal_mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+    wal_mode = apply_journal_mode(conn).fetchone()
     if wal_mode and wal_mode[0] != "wal":
         logger.warning("WAL mode not active, got: %s", wal_mode[0])
     conn.execute("PRAGMA busy_timeout=10000")

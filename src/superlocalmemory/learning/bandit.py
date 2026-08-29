@@ -21,6 +21,7 @@ All SQL is parameterised — grep guard in CI ensures no f-string SQL here.
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import logging
 import os
@@ -162,7 +163,7 @@ def _conn_for(db_path: Path) -> sqlite3.Connection:
             pass
     conn = sqlite3.connect(path_str, timeout=10.0, isolation_level=None)
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
+        apply_journal_mode(conn)
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
     except sqlite3.Error:  # pragma: no cover — best-effort
@@ -542,7 +543,7 @@ def retention_sweep(
     conn = sqlite3.connect(str(path), timeout=10.0, isolation_level=None)
     try:
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
+            apply_journal_mode(conn)
             conn.execute("PRAGMA busy_timeout=5000")
         except sqlite3.Error:  # pragma: no cover
             pass

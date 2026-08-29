@@ -99,12 +99,15 @@ def test_durability_survives_close_without_checkpoint(tmp_path) -> None:
     not hasattr(sqlite3.Connection, "setconfig"),
     reason="Connection.setconfig requires Python 3.12+",
 )
-def test_no_ckpt_on_close_is_actually_active(tmp_path) -> None:
+def test_no_ckpt_on_close_is_actually_active(tmp_path, monkeypatch) -> None:
     """On a supported interpreter the guard must be installed, not skipped.
 
     The production fix swallows AttributeError/OperationalError for portability;
     this asserts that on 3.12+ the swallow path is NOT the one taken.
+    WAL-only machinery: opt the store into WAL for this test (the default
+    journal mode is DELETE since the 2026-08-13 postmortem).
     """
+    monkeypatch.setenv("SLM_JOURNAL_MODE", "wal")
     db = tmp_path / "memory.db"
     mgr = DatabaseManager(db)
     mgr.execute("CREATE TABLE IF NOT EXISTS t (id INTEGER)")

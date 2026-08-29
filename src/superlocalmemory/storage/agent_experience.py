@@ -6,6 +6,7 @@ these short transactions before its cross-store erasure saga continues.
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import hashlib
 import json
@@ -292,7 +293,7 @@ class AgentExperienceStore:
                 try:
                     conn = sqlite3.connect(str(self._path), timeout=0, isolation_level=None)
                     conn.row_factory = sqlite3.Row
-                    conn.execute("PRAGMA journal_mode=WAL")
+                    apply_journal_mode(conn)
                     conn.execute("PRAGMA synchronous=NORMAL")
                     conn.execute("PRAGMA busy_timeout=0")
                     conn.execute("BEGIN IMMEDIATE")
@@ -322,7 +323,7 @@ class AgentExperienceStore:
     def _read_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._path), timeout=0.5)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        apply_journal_mode(conn)
         conn.execute("PRAGMA busy_timeout=500")
         return conn
 

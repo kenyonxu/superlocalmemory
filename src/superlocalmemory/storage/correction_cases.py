@@ -6,6 +6,7 @@ transaction that changes the predecessor's temporal lifecycle.
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import sqlite3
 from dataclasses import dataclass, replace
@@ -540,7 +541,7 @@ class _CorrectionTransaction:
         try:
             conn = sqlite3.connect(str(self._path), timeout=5, isolation_level=None)
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
+            apply_journal_mode(conn)
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("BEGIN IMMEDIATE")
             self._conn = conn

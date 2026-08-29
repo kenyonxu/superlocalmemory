@@ -20,6 +20,7 @@ Hot-path contract (``read_entry_fast``):
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import hashlib
 import hmac
@@ -196,7 +197,7 @@ class ContextCache:
         conn = sqlite3.connect(
             str(self._db_path), isolation_level=None, timeout=5.0,
         )
-        conn.execute("PRAGMA journal_mode=WAL")
+        apply_journal_mode(conn)
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA temp_store=MEMORY")
         conn.execute("PRAGMA cache_size=-32768")

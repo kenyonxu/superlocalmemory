@@ -22,6 +22,7 @@ License: AGPL-3.0-or-later
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import json
 import sqlite3
@@ -69,7 +70,7 @@ def _get_db(base_dir: Path | None = None) -> sqlite3.Connection:
     d.mkdir(parents=True, exist_ok=True)
     db_path = d / _PENDING_DB
     conn = sqlite3.connect(str(db_path), timeout=5)
-    conn.execute("PRAGMA journal_mode=WAL")
+    apply_journal_mode(conn)
     # C4: pending queue can hold not-yet-materialized memory content owner-only.
     try:
         from superlocalmemory.core.security_primitives import harden_db_perms

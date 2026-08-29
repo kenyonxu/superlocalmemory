@@ -54,13 +54,23 @@ def _store_fact_with_parent(db: DatabaseManager, profile_id: str = "default", n:
 # WAL mode verification
 # ---------------------------------------------------------------------------
 
-class TestWALMode:
-    """Verify WAL mode is enabled."""
+class TestJournalPolicy:
+    """Journal mode is policy-driven: default DELETE (postmortem
+    2026-08-13 — WAL close can convoy the whole process on the global VFS
+    mutex), with SLM_JOURNAL_MODE=wal opting back in."""
 
-    def test_wal_enabled(self, db: DatabaseManager) -> None:
-        rows = db.execute("PRAGMA journal_mode")
-        mode = dict(rows[0])["journal_mode"]
-        assert mode == "wal"
+    def test_journal_mode_follows_policy(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.delenv("SLM_JOURNAL_MODE", raising=False)
+        db = DatabaseManager(tmp_path / "policy_default.db")
+        db.initialize(schema)
+        mode = dict(db.execute("PRAGMA journal_mode")[0])["journal_mode"]
+        assert mode == "delete"
+
+        monkeypatch.setenv("SLM_JOURNAL_MODE", "wal")
+        db2 = DatabaseManager(tmp_path / "policy_wal.db")
+        db2.initialize(schema)
+        mode2 = dict(db2.execute("PRAGMA journal_mode")[0])["journal_mode"]
+        assert mode2 == "wal"
 
     def test_busy_timeout_set(self, db: DatabaseManager) -> None:
         rows = db.execute("PRAGMA busy_timeout")

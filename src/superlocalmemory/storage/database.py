@@ -11,6 +11,7 @@ Multiple processes (MCP, CLI, integrations) can read/write safely.
 Part of Qualixar | Author: Varun Pratap Bhardwaj
 """
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import json
 import logging
@@ -179,13 +180,13 @@ class DatabaseManager:
         # an uncommitted foreign connection. Keep the active connection local
         # to the thread that owns the transaction.
         self._txn_state = threading.local()
-        self._enable_wal()
+        self._apply_journal_policy()
 
-    def _enable_wal(self) -> None:
+    def _apply_journal_policy(self) -> None:
         conn = sqlite3.connect(str(self.db_path))
         try:
             conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")  # FIRST — so WAL pragma below uses configured timeout
-            conn.execute("PRAGMA journal_mode=WAL")
+            apply_journal_mode(conn)
             conn.execute("PRAGMA foreign_keys=ON")
             # Fix D: synchronous=NORMAL is safe under WAL — the WAL ensures
             # atomicity independently of the fsync level.  Removing the

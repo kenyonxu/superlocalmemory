@@ -22,6 +22,7 @@ Storage:
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import json
 import logging
@@ -155,7 +156,7 @@ class SourceQualityScorer:
         # Install the busy handler before journal negotiation. On a fresh
         # database, PRAGMA journal_mode itself may contend with another scorer.
         conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("PRAGMA journal_mode=WAL")
+        apply_journal_mode(conn)
         conn.row_factory = sqlite3.Row
         return conn
 

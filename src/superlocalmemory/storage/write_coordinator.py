@@ -13,6 +13,7 @@ removes their direct writes.
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import json
 import os
@@ -635,7 +636,7 @@ class WriteCoordinator:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=1000")
-        conn.execute("PRAGMA journal_mode=WAL")
+        apply_journal_mode(conn)
         return conn
 
     def _next_item(self) -> _Execution | None:

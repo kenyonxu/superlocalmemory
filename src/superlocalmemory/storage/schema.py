@@ -20,6 +20,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import sqlite3
 from typing import Final
@@ -72,7 +73,7 @@ _FTS_TABLES: Final[tuple[str, ...]] = (
 
 def _set_pragmas(conn: sqlite3.Connection) -> None:
     """Set SQLite pragmas for performance and integrity."""
-    conn.execute("PRAGMA journal_mode = WAL")
+    apply_journal_mode(conn)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 5000")
 

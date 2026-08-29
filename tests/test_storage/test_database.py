@@ -500,18 +500,18 @@ class TestContextManager:
 # WAL PRAGMA ordering
 # ---------------------------------------------------------------------------
 
-class TestEnableWal:
-    def test_enable_wal_sets_busy_timeout(self, tmp_path: Path) -> None:
-        """_enable_wal() sets busy_timeout so subsequent connections inherit WAL mode safely."""
+class TestJournalPolicy:
+    def test_policy_sets_busy_timeout(self, tmp_path: Path) -> None:
+        """_apply_journal_policy() sets busy_timeout so the mode pragma resolves safely."""
         db_path = tmp_path / "test.db"
         db = DatabaseManager(db_path)
         db.initialize(__import__("superlocalmemory.storage.schema", fromlist=["schema"]))
         # Verify busy_timeout is correctly configured on DatabaseManager-managed connections
         timeout = db.execute("PRAGMA busy_timeout")[0][0]
         assert timeout == 10000, f"Expected busy_timeout=10000, got {timeout}"
-        # Verify WAL mode is active
+        # Verify the configured (default) journal mode is active
         journal = db.execute("PRAGMA journal_mode")[0][0]
-        assert journal.lower() == "wal", f"Expected wal, got {journal}"
+        assert journal.lower() == "delete", f"Expected delete, got {journal}"
 
 
 # ---------------------------------------------------------------------------

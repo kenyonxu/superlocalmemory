@@ -13,6 +13,7 @@ for independence — audit must survive even if the main DB is corrupted.
 """
 
 from __future__ import annotations
+from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
 import hashlib
 import json
@@ -96,7 +97,7 @@ class AuditChain:
     def _make_conn_from_path(path: str) -> sqlite3.Connection:
         """Create a configured SQLite connection."""
         conn = sqlite3.connect(path)
-        conn.execute("PRAGMA journal_mode=WAL")
+        apply_journal_mode(conn)
         conn.row_factory = sqlite3.Row
         # C4: audit chain holds a tamper-evident record — keep it owner-only.
         try:
