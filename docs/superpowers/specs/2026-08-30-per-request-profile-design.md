@@ -1,7 +1,7 @@
 # per-request profile 规格设计
 
 - 日期:2026-08-30
-- 状态:设计已批准(四节逐节确认),待 spec 审阅
+- 状态:设计已批准(四节逐节确认);2026-08-30 增补:hermes provider pin 适配纳入范围(§7,用户确认)
 - 需求书:`docs/deepmaid-per-request-profile-需求书-2026-08-30.md`(R1–R6;deepmaid 侧消费验收见其 §6)
 - 关联:方案 B(EmbeddingService daemon fallback)同模式的 fork 先行 → 上游 PR 路线
 - 上游基线:本 fork 落后 upstream/main 120 提交;实施前必须先 merge upstream(实施计划 Task 0)
@@ -96,18 +96,28 @@ recall(profile_id="")   ──write-thru──▶ GET /recall?profile_id=...
 
 回归门:全量套件 + hermes 92(hermes 不带参数,是兼容性活体样本)。
 
-## 7. 上游 PR 打包
+## 7. hermes provider pin 适配(消费侧,本仓)
+
+per-request 穿透落地后,本仓自有的消费方同步适配,消除"隐式跟全局指针"的残余耦合:
+
+- **机制**:hermes provider(`integrations/hermes/__init__.py`)新增 `pin_profile` 配置,**默认开启**。开启时,provider 从其既有 MSLM profile 配置读取 profile 名(现有 `self._mslm_profile`),在**每个** daemon 路由的 recall/store 调用(7 个调用点,方案 A daemon-first 路由时接线)的 query/body 中携带 `profile_id`;daemon 离线回落本进程引擎时同样传参(`engine.recall` 已支持,`engine.store` 由本 spec §4 补齐)。
+- **关闭时**:`pin_profile: false` 省略参数,provider 跟随活跃指针(保留"多人格复用同一 agent 进程、用 dashboard 切换"的既有能力)。
+- **语义效果**:pin 开启后,知惠对任何其他客户端的 `switch_profile` 完全免疫;deepmaid 侧无需此开关(其架构每女仆一命名空间,无跟随语义,需求书 §6 直接全量携带)。
+- **部署顺序约束**:pin 默认开启要求 daemon 先具备路由能力(同批发布,无窗口期问题);对旧 daemon 的行为退路——GET 未知 query 参数被忽略,POST body 的 `profile_id` 在 4.1.x 守卫下若与活跃不符会 409(显式失败优于静默改道,可接受)。
+- **测试**:provider 单测断言 pin 开启时 daemon 调用含 `profile_id`、关闭时不含;既有 92 项套件回归(pin 默认值变化不得破坏现有断言,必要时以显式 pin=false 适配既有用例)。
+
+## 8. 上游 PR 打包
 
 - 叙事三支点:①引擎读路径上游已参数化,本 PR 补完写路径与 daemon/MCP 面;②409 守卫使命被路由取代("stale client must fail"→"writes correctly");③双客户端交错实测证据(知惠/Doris 即复现)。
 - 邻接 LRU 为独立价值点,可拆单独 PR。
 - 预期 review 焦点:materializer 的 profile 归属验证结论(写进 PR 描述);per-request 是否需要新 generation 字段(倾向不需要,`profile_generation` 保持只描述全局切换)。
 
-## 8. 实施前置
+## 9. 实施前置
 
 - **Task 0:merge upstream(120 提交,4.1.11)**——守卫、`_runtime_profile`、`RememberRequest.profile_id` 均在缺口内,大分叉上做三层穿透冲突面不可控。merge 流程沿用 2026-08-21 的既定模式(策略表 + 存活核查 + 测试门)。
 
-## 9. 后续(不在本 spec 范围)
+## 10. 后续(不在本 spec 范围)
 
-- deepmaid 侧消费回归(需求书 §6:provider 显式携带 profile_id、删除 profile dance、交错契约用例)
+- deepmaid 侧消费回归(需求书 §6:provider 显式携带 profile_id、删除 profile dance、交错契约用例——跨仓验收,依赖本仓先行落地)
 - profile 级 ACL(独立需求)
 - reranker daemon 路由、`test_enrich_new_facts_now` 守卫上游报告(既有 backlog)
