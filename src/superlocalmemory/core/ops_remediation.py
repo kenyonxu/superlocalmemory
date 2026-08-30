@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 
-"""Operational Recovery & Admin Remediation helpers (Wave-3 resilience slice).
+"""Operational Recovery & Admin Remediation helpers (resilience slice).
 
 Provides two primary functions used by HTTP endpoints, MCP tools, and CLI:
 
@@ -22,7 +22,7 @@ Design constraints (NON-NEGOTIABLE):
     - Additive & backward-compatible — healthy-path unaffected
     - Immutable return dicts; explicit error handling; no silent swallowing
 
-Part of SuperLocalMemory V4 | Wave-3: Operational Recovery
+Part of SuperLocalMemory V4 | Operational Recovery
 """
 
 from __future__ import annotations

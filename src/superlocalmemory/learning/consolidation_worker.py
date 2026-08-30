@@ -96,6 +96,41 @@ __all__ = (
 # ---------------------------------------------------------------------------
 
 
+#: Distinct informative labels required before a retrain is worth running.
+#:
+#: Measured on a live production store: ``learning_features`` holds 5,352 rows, of
+#: which **5,350 carry label 0.0** and exactly two are non-zero (0.6 and 1.0) —
+#: the two real feedback events in the whole database. The active model was
+#: trained on 972 such rows and reorders results at random; the heuristic it
+#: displaced was better.
+#:
+#: An earlier design proposed gating on ``len(set(labels)) <= 1``. That check PASSES
+#: here — three distinct values exist — and would train on a 2,675:1 imbalance
+#: while reporting success, which is worse than not training at all because it
+#: looks like progress. A count of informative labels is the honest gate.
+MIN_INFORMATIVE_LABELS = 50
+
+
+def _count_informative_labels(rows: list[dict]) -> int:
+    """Rows whose outcome says something other than "nothing happened".
+
+    A reward of exactly 0.5 is the neutral default the settlement path applies
+    when no outcome was reported, and ``None`` means the outcome column is
+    absent. Neither is evidence. Everything else is.
+    """
+    seen = 0
+    for row in rows:
+        reward = row.get("outcome_reward")
+        if reward is None:
+            continue
+        try:
+            value = float(reward)
+        except (TypeError, ValueError):
+            continue
+        if abs(value - 0.5) > 1e-9:
+            seen += 1
+    return seen
+
 def _run_shadow_cycle(
     *,
     memory_db_path: str,
@@ -135,6 +170,25 @@ def _run_shadow_cycle(
 
     if len(rows) < 20:
         out["aborted"] = "insufficient_data"
+        return out
+
+    informative = _count_informative_labels(rows)
+    if informative < MIN_INFORMATIVE_LABELS:
+        # Honest refusal. See _count_informative_labels for why a row count is
+        # not a substitute for this, and why the answer must not be to lower
+        # the threshold until training starts.
+        logger.info(
+            "retrain skipped: %d informative label(s) of %d rows "
+            "(need %d). Rewards accumulate from reported outcomes; there is "
+            "nothing to learn from a corpus of one label.",
+            informative, len(rows), MIN_INFORMATIVE_LABELS,
+        )
+        out["aborted"] = "insufficient_label_signal"
+        out["metrics"] = {
+            "rows": len(rows),
+            "informative_labels": informative,
+            "required": MIN_INFORMATIVE_LABELS,
+        }
         return out
 
     # Load prior active for in-sample shadow.

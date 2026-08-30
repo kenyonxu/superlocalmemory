@@ -419,8 +419,19 @@ class CanonicalRememberRuntime:
             OwnershipRequiredError,
             WriteCoordinatorError,
         ) as exc:
+            # Name which of the three it was. They are not interchangeable and
+            # they call for different responses: an unavailable journal is I/O
+            # or lock contention and worth retrying, lost ownership means
+            # another writer holds the lease, and a coordinator error is the
+            # same type the generation fence raises to reject a stale epoch.
+            # Collapsing all three into one string makes a spurious fence
+            # rejection indistinguishable from a transient disk stall, for the
+            # operator reading a log and for a caller deciding whether to
+            # retry. Only the class name is included: it is the whole of the
+            # discriminating information and carries no request content.
             raise CanonicalRememberUnavailable(
-                "canonical remember is temporarily unavailable"
+                "canonical remember is temporarily unavailable "
+                f"({type(exc).__name__})"
             ) from exc
         finally:
             clear_admission_epoch(request.profile_id, request.idempotency_key)

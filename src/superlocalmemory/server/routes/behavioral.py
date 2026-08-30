@@ -29,6 +29,66 @@ _MAX_OUTCOME_FACT_IDS = 100
 _MAX_FACT_ID_LENGTH = 200
 
 
+def _outcome_insert(
+    conn,
+    *,
+    outcome_id: str,
+    profile: str,
+    fact_ids_json: str,
+    outcome: str,
+    context_json: str,
+    now_iso: str,
+    reward: float,
+    recall_query_id: str,
+) -> tuple[str, tuple]:
+    """Build the ``action_outcomes`` INSERT from the columns that exist.
+
+    ``reward``, ``settled``, ``settled_at`` and ``recall_query_id`` all arrive
+    with M006, which is a DEFERRED migration — it runs after engine init, not
+    during ``apply_all``. This handler has always named them unconditionally, so
+    on a store where M006 has not run it raised ``no such column`` and returned
+    ``success: false`` for a write that could perfectly well have been recorded
+    without them.
+
+    ``recall_query_id`` is the one that matters for learning: it is what lets a
+    bandit play be settled from this report. The column has existed since M006
+    and was never written — 0 of 162 rows on a live store carry one — so
+    every play fell through to the neutral 120-second default and 165 arms sat
+    at alpha == beta. Recording it is the join key that closes the loop.
+
+    Degrading per column rather than per statement means an unmigrated store
+    still records the outcome; it just cannot attribute it to a play, which is
+    the honest reduction in capability.
+    """
+    columns = ["outcome_id", "profile_id", "query", "fact_ids_json",
+               "outcome", "context_json", "timestamp"]
+    values: list = [outcome_id, profile, "", fact_ids_json, outcome,
+                    context_json, now_iso]
+    try:
+        present = {
+            row[1] for row in conn.execute("PRAGMA table_info(action_outcomes)")
+        }
+    except Exception:  # pragma: no cover — defensive
+        present = set()
+
+    for name, value in (
+        ("reward", reward),
+        ("settled", 1),
+        ("settled_at", now_iso),
+        ("recall_query_id", recall_query_id),
+    ):
+        if name in present:
+            columns.append(name)
+            values.append(value)
+
+    placeholders = ", ".join("?" * len(columns))
+    sql = (
+        f"INSERT INTO action_outcomes ({', '.join(columns)}) "
+        f"VALUES ({placeholders})"
+    )
+    return sql, tuple(values)
+
+
 class ReportOutcomeRequest(BaseModel):
     """Bounded explicit outcome payload accepted from dashboard clients."""
 
@@ -41,6 +101,11 @@ class ReportOutcomeRequest(BaseModel):
     outcome: Literal["success", "failure", "partial"]
     action_type: StrictStr = Field(default="other", max_length=80)
     context: StrictStr = Field(default="", max_length=1000)
+    #: Which recall this outcome judges, if the caller knows. Optional because
+    #: recall does not currently return its query_id to callers, so nothing can
+    #: supply one yet; when it is absent the settler falls back to overlap
+    #: between ``memory_ids`` and the memories a play recorded showing.
+    recall_query_id: StrictStr = Field(default="", max_length=64)
 
     @field_validator("memory_ids")
     @classmethod
@@ -394,16 +459,16 @@ def report_outcome(request: Request, data: ReportOutcomeRequest):
                 fact_ids=memory_ids,
             )
             conn.execute(
-                "INSERT INTO action_outcomes "
-                "(outcome_id, profile_id, query, fact_ids_json, outcome, "
-                " context_json, timestamp, reward, settled, settled_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
-                (
-                    outcome_id, profile, "",
-                    json.dumps(memory_ids),
-                    outcome,
-                    json.dumps(context_dict),
-                    now_iso, reward, now_iso,
+                *_outcome_insert(
+                    conn,
+                    outcome_id=outcome_id,
+                    profile=profile,
+                    fact_ids_json=json.dumps(memory_ids),
+                    outcome=outcome,
+                    context_json=json.dumps(context_dict),
+                    now_iso=now_iso,
+                    reward=reward,
+                    recall_query_id=data.recall_query_id,
                 ),
             )
 

@@ -35,6 +35,59 @@ def _resolve_paths(args: Namespace) -> tuple[Path, Path]:
     return Path(learning), Path(memory)
 
 
+def _end_state_disagreements(learning_db, memory_db) -> dict[str, str]:
+    """Migrations recorded complete whose own verification no longer passes.
+
+    ``--status`` reads ``migration_log``, which records what was *done*. The
+    daemon re-runs each completed migration's ``verify()`` on every start, which
+    checks whether what was done still *holds*. When those two answers differ
+    the log says ``complete`` and the health endpoint says the migration failed,
+    and until now nothing on any surface showed the two were even asking
+    different questions -- so the only available reading was that one of them
+    was lying. Reported as #125.
+
+    Read-only and fail-quiet: this is a diagnostic printed beside a status line,
+    and it must never be the reason a status command exits non-zero.
+    """
+    import sqlite3
+
+    from superlocalmemory.storage._migration_internals import _MODULES
+    from superlocalmemory.storage.migration_runner import MIGRATIONS
+
+    try:
+        from superlocalmemory.storage.migration_runner import DEFERRED_MIGRATIONS
+    except ImportError:  # pragma: no cover — older layouts
+        DEFERRED_MIGRATIONS = ()
+
+    out: dict[str, str] = {}
+    for migration in list(MIGRATIONS) + list(DEFERRED_MIGRATIONS):
+        verify_fn = getattr(_MODULES.get(migration.name), "verify", None)
+        if not callable(verify_fn):
+            continue
+        db_path = memory_db if migration.db_target != "learning" else learning_db
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            continue
+        try:
+            row = conn.execute(
+                "SELECT status FROM migration_log WHERE name = ? LIMIT 1",
+                (migration.name,),
+            ).fetchone()
+            if not row or row[0] != "complete":
+                continue
+            if not bool(verify_fn(conn)):
+                out[migration.name] = "  <- recorded complete, end-state no longer holds"
+        except Exception:  # noqa: BLE001 — a diagnostic must not break status
+            pass
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:  # pragma: no cover
+                pass
+    return out
+
+
 def cmd_db_migrate(args: Namespace) -> int:
     """Apply pending migrations or report status.
 
@@ -57,8 +110,25 @@ def cmd_db_migrate(args: Namespace) -> int:
         if not report:
             print("(no migrations registered)")
         else:
+            disagreements = _end_state_disagreements(learning_db, memory_db)
             for name, state in report.items():
-                print(f"  {name}: {state}")
+                note = disagreements.get(name, "")
+                print(f"  {name}: {state}{note}")
+            if disagreements:
+                print()
+                print(
+                    "  A migration marked complete is re-checked on every start "
+                    "by its own\n"
+                    "  verification. The ones flagged above are recorded as done "
+                    "and their\n"
+                    "  end-state no longer holds, which is what the daemon "
+                    "reports as a\n"
+                    "  migration failure while this log still reads complete. "
+                    "Run `slm db\n"
+                    "  migrate` to let each one try to repair itself, and see "
+                    "`migration_failure_reasons`\n"
+                    "  in `slm health --json` for what specifically did not hold."
+                )
         return 0
 
     dry_run = bool(getattr(args, "dry_run", False))

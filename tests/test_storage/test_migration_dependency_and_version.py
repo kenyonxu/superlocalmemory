@@ -11,6 +11,7 @@ than run against a base schema it assumes is present.
 from __future__ import annotations
 
 import sqlite3
+import re
 from pathlib import Path
 
 import pytest
@@ -47,7 +48,21 @@ def test_v4_ports_mainline_migrations_under_unique_serials() -> None:
     assert targets["M040_agent_experience_receipts"] == "learning"
     assert targets["M041_external_evidence_receipts"] == "learning"
     assert targets["M042_correction_case_ledger"] == "memory"
-    assert SUPPORTED_SCHEMA_VERSION == 42
+    # The ceiling tracks the trailing serial of the LAST migration. It stayed at
+    # 42 while M043 through M045 shipped, which is how it came to sit three
+    # migrations behind the schema it was meant to guard — so it is derived
+    # here rather than typed, and adding a migration without raising the ceiling
+    # now fails on its own.
+    serials = sorted(
+        int(re.match(r"M(\d+)_", name).group(1))
+        for name in all_names
+        if re.match(r"M\d+_", name)
+    )
+    assert SUPPORTED_SCHEMA_VERSION == serials[-1], (
+        f"the newest migration is M{serials[-1]:03d} and the ceiling is "
+        f"{SUPPORTED_SCHEMA_VERSION}; a store that migration has touched would "
+        f"be openable by a build that cannot read it"
+    )
 
 
 def test_schema_42_is_stamped_only_after_correction_storage_completes(tmp_path: Path) -> None:

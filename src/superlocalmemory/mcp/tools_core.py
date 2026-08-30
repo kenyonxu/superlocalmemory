@@ -20,13 +20,26 @@ from typing import Callable
 from mcp.types import ToolAnnotations
 
 from superlocalmemory.core.admission import admits
-from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
+from superlocalmemory.core.config import CANONICAL_LIST_LIMIT, CANONICAL_RECALL_LIMIT
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.infra.data_root import state_path
 from superlocalmemory.mcp._daemon_proxy import daemon_unavailable_error
 from superlocalmemory.mcp.shared import authorize_mcp_mutation
 
 logger = logging.getLogger(__name__)
+
+
+def _projection_queue_depth(db: object) -> int:
+    """Facts queued for the graph and vector projections, or 0 when there are none.
+
+    Imported inside the function: this module is loaded on every MCP start over
+    stdio, where import cost is startup latency a user feels.
+    """
+    try:
+        from superlocalmemory.storage import projection_outbox
+        return projection_outbox.depth(db)
+    except Exception:
+        return 0
 
 
 async def _runtime_profile(get_engine: Callable, explicit: str = "") -> str:
@@ -73,6 +86,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
         scope: str | None = None,
         shared_with: str = "",
         idempotency_key: str = "",
+        session_date: str = "",
     ) -> dict:
         """Store content to memory with intelligent indexing.
 
@@ -82,11 +96,35 @@ def register_core_tools(server, get_engine: Callable) -> None:
         Multi-scope: ``scope`` sets visibility (personal/shared/global).
         ``shared_with`` is a comma-separated list of profile_ids for
         shared scope.
+
+        ``session_date`` says WHEN the memory is about, as opposed to when it
+        was written. Omit it and the memory is dated today, which is what every
+        memory got before 4.0.10 because there was no way to say otherwise.
+        Accepts YYYY-MM-DD or a full ISO 8601 timestamp.
         """
         # v3.6.10: resolve "mcp_client" sentinel → URL path (HTTP) or env var (stdio)
         if agent_id == "mcp_client":
             from superlocalmemory.mcp.agent_context import get_current_agent_id
             agent_id = get_current_agent_id()
+        # Bind the write to a session the same way the read path does.
+        #
+        # recall has resolved this through a four-step ladder since S9-DASH-10;
+        # remember stored whatever it was handed, which for a caller that does
+        # not pass one is nothing. Result on the author's store: 192 of 3,894
+        # facts carry a session_id (4.9%). The engine's session-diversity
+        # promotion cannot promote a fact with no session, so it was running
+        # against a corpus where 95% of rows looked like the same session.
+        #
+        # allow_agent_fallback is OFF here, unlike recall. `mcp:<agent_id>` is a
+        # useful key for settling one outcome; as a stored session_id it would
+        # file every memory an agent ever wrote under one session, and diversity
+        # promotion would then treat a whole history as a single conversation —
+        # worse than the empty string it replaces.
+        from superlocalmemory.mcp.session_binding import resolve_session_id
+
+        session_id = resolve_session_id(
+            session_id, agent_id=agent_id, allow_agent_fallback=False,
+        )
         meta = {
             "project": project,
             "importance": importance,
@@ -141,6 +179,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
                         "content": content, "tags": tags, "metadata": meta,
                         "scope": scope, "shared_with": _shared_list,
                         "session_id": session_id,
+                        "session_date": session_date,
                         "idempotency_key": effective_idempotency_key or None,
                     })
                     if resp and (resp.get("fact_ids") is not None or resp.get("ok")):
@@ -320,45 +359,20 @@ def register_core_tools(server, get_engine: Callable) -> None:
         import asyncio
         try:
             from superlocalmemory.mcp._daemon_proxy import choose_pool
-            # S9-DASH-10: priority for session_id, so engagement
-            # signals land on the right pending_outcome:
-            #   1. Explicit ``session_id`` tool-call argument.
-            #   2. ``SLM_SESSION_ID`` / ``CLAUDE_SESSION_ID`` env var.
-            #   3. Most-recent-active Claude session from the hook
-            #      registry (last 60s). This catches the common case
-            #      where Claude Code's hooks ran the UserPromptSubmit
-            #      hook right before invoking the MCP tool.
-            #   4. Stable per-agent fallback ``mcp:<agent_id>`` — the
-            #      Stop hook will NOT match this, so the reaper
-            #      settles it at neutral 0.5.
-            effective_sid = session_id
-            if not effective_sid:
-                import os as _os
-                effective_sid = (
-                    _os.environ.get("SLM_SESSION_ID")
-                    or _os.environ.get("CLAUDE_SESSION_ID")
-                    or ""
-                )
-            if not effective_sid:
-                try:
-                    from superlocalmemory.hooks.session_registry import (
-                        lookup_by_parent,
-                        most_recent_active,
-                    )
-                    # Parent-PID lookup is collision-free across multiple
-                    # parallel Claude sessions (each MCP server's parent
-                    # is the IDE that spawned it).
-                    effective_sid = (
-                        lookup_by_parent(within_seconds=60)
-                        or most_recent_active(
-                            agent_type="claude", within_seconds=60,
-                        )
-                        or ""
-                    )
-                except Exception:
-                    pass
-            if not effective_sid:
-                effective_sid = f"mcp:{agent_id}"
+            from superlocalmemory.mcp.session_binding import resolve_session_id
+
+            # S9-DASH-10's four-step ladder, now shared with remember() so the
+            # read path and the write path cannot disagree about which session
+            # they are in. remember() had no ladder at all, which is why 95% of
+            # stored facts carry no session_id. See mcp/session_binding.py.
+            #
+            # The per-agent fallback stays ON here: this id settles a pending
+            # outcome, and `mcp:<agent_id>` is deliberately not matched by the
+            # Stop hook, so the reaper settles it at a neutral 0.5 rather than
+            # attributing engagement to a session that never existed.
+            effective_sid = resolve_session_id(
+                session_id, agent_id=agent_id, allow_agent_fallback=True,
+            )
             # Resolve the daemon proxy inside the worker too. ``choose_pool``
             # verifies daemon ownership through a synchronous /health request;
             # when this tool is served by the daemon's mounted HTTP MCP app,
@@ -424,6 +438,9 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     "score_contract_version": result.get("score_contract_version", "2"),
                     "calibration_status": result.get("calibration_status", "uncalibrated"),
                     "calibration_id": result.get("calibration_id"),
+                    # Quote this back to report_outcome and the report ties to
+                    # this exact answer instead of being matched by guesswork.
+                    "query_id": result.get("query_id", ""),
                     "answer_confidence": result.get("answer_confidence"),
                     "abstained": result.get("abstained", False),
                     "abstention_reason": result.get("abstention_reason"),
@@ -435,7 +452,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     @admits(OperationKind.RECALL)
-    async def search(query: str, limit: int = 10) -> dict:
+    async def search(query: str, limit: int = CANONICAL_RECALL_LIMIT) -> dict:
         """Full-text search across memories using FTS5 with BM25 ranking."""
         try:
             engine = get_engine()
@@ -456,6 +473,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @admits(OperationKind.RECALL)
     async def fetch(fact_ids: str) -> dict:
         """Fetch full details for specific fact IDs (comma-separated)."""
         try:
@@ -483,7 +501,8 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def list_recent(limit: int = 20) -> dict:
+    @admits(OperationKind.RECALL)
+    async def list_recent(limit: int = CANONICAL_LIST_LIMIT) -> dict:
         """List most recently stored memories, newest first."""
         try:
             engine = get_engine()
@@ -510,6 +529,10 @@ def register_core_tools(server, get_engine: Callable) -> None:
     async def get_status() -> dict:
         """Get memory system status: fact count, entity count, mode, profile, db size."""
         try:
+            # Same source the HTTP surface reads, imported here rather than at
+            # module scope: that module costs ~260ms and MCP starts over stdio.
+            from superlocalmemory.server.routes.helpers import SLM_VERSION
+
             import asyncio
             import os
 
@@ -538,6 +561,10 @@ def register_core_tools(server, get_engine: Callable) -> None:
                         "edge_count": int(daemon_status.get("edge_count", 0)),
                         "profile_generation": int(
                             daemon_status.get("profile_generation", 0)
+                        ),
+                        "version": SLM_VERSION,
+                        "projection_queue_depth": int(
+                            daemon_status.get("projection_queue_depth", 0)
                         ),
                     }
 
@@ -575,6 +602,8 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 "entity_count": entity_count,
                 "edge_count": edge_count,
                 "profile_generation": 0,
+                "version": SLM_VERSION,
+                "projection_queue_depth": _projection_queue_depth(engine._db),
             }
         except Exception as exc:
             logger.exception("get_status failed")

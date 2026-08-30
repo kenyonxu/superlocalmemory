@@ -81,6 +81,14 @@ async def ingest(req: IngestRequest, request: Request):
             request,
             actor_kind="http-ingest",
         )
+        # Machine authentication says which process is calling. It does not say
+        # whether that caller's user may write to this workspace. Every other
+        # write route asks that question; this one did not, so a viewer could
+        # write through it in a workspace that requires a login.
+        from superlocalmemory.access.rbac import Permission
+        from superlocalmemory.server.rbac_enforce import require_permission
+
+        require_permission(request, Permission.WRITE, profile=engine._profile_id)
         command = build_engine_ingestion_command(engine)
         receipt, created = command.submit_with_status(IngestionRequest(
             content=req.content,

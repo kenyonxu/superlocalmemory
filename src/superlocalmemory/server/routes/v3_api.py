@@ -8,13 +8,45 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 import os
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+from superlocalmemory.core.session_identity import synthetic_session_id
+from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
+from superlocalmemory.core.status_contract import (
+    COUNT_QUERIES,
+    counts_from_sqlite,
+    projection_queue_depth,
+    store_size_mb,
+)
 from superlocalmemory.server.routes.helpers import SLM_VERSION, get_read_connection
 from superlocalmemory.server.route_mutations import authorize_route_mutation
 
 logger = logging.getLogger(__name__)
+
+def _signal_session_id() -> str:
+    """A name for the caller, for matching an outcome back to this recall.
+
+    The agent id the request arrived under, when it arrived under one. Falls
+    back to the workspace, which keeps dashboard and scripted traffic separable
+    from an agent's. Never empty: an unnamed recall leaves no record.
+    """
+    try:
+        from superlocalmemory.mcp.agent_context import get_current_agent_id
+
+        agent = str(get_current_agent_id() or "").strip()
+        if agent:
+            return synthetic_session_id("agent", agent)
+    except Exception:  # noqa: BLE001 -- naming the caller must never fail a read
+        pass
+    try:
+        from superlocalmemory.server.routes.helpers import get_active_profile
+
+        return synthetic_session_id("api", str(get_active_profile()))
+    except Exception:  # noqa: BLE001
+        return synthetic_session_id("api", "default")
+
 
 router = APIRouter(prefix="/api/v3", tags=["v3"])
 
@@ -102,20 +134,15 @@ async def dashboard(request: Request):
 
         # Read stats directly from SQLite (dashboard doesn't load engine)
         memory_count = 0
-        fact_count = 0
+        counts = dict.fromkeys(COUNT_QUERIES, 0)
+        queue_depth = 0
         db_path = config.base_dir / "memory.db"
         if db_path.exists():
             try:
                 conn = get_read_connection(db_path)
+                counts = counts_from_sqlite(conn, active_profile)
+                queue_depth = projection_queue_depth(conn)
                 cursor = conn.cursor()
-                try:
-                    cursor.execute(
-                        "SELECT COUNT(*) FROM atomic_facts WHERE profile_id = ?",
-                        (active_profile,),
-                    )
-                    fact_count = cursor.fetchone()[0]
-                except Exception:
-                    pass
                 try:
                     try:
                         cursor.execute(
@@ -143,10 +170,23 @@ async def dashboard(request: Request):
             "provider": config.llm.provider or "none",
             "model": config.llm.model or "",
             "memory_count": memory_count,
-            "fact_count": fact_count,
             "profile": active_profile,
             "base_dir": str(config.base_dir),
             "version": SLM_VERSION,
+            # The counts and the store's own address were missing here while
+            # every other status surface carried them, so the one surface a
+            # person actually looks at could not answer "is the graph healthy".
+            "db_path": str(db_path),
+            "db_size_mb": store_size_mb(db_path),
+            "profile_generation": get_profile_runtime(
+                request.app.state,
+            ).snapshot.generation,
+            # Facts stored but not yet in the graph and vector projections. A
+            # number that does not fall is a projection that has stopped
+            # keeping up, which is otherwise invisible: nothing errors, the
+            # memory is safely in SQLite, and recall just quietly gets worse.
+            "projection_queue_depth": queue_depth,
+            **counts,
         }
         payload.update(dashboard_mode_fields(config.mode))
         return payload
@@ -266,7 +306,7 @@ def apply_settings_update(config: "SLMConfig", payload: dict) -> "SLMConfig":
     This is the SINGLE authoritative place where incoming dashboard save payloads
     are merged onto the stored config.  The POST /api/v3/mode/set handler calls
     this function after its HTTP-layer concerns (SSRF guard, auth) are settled,
-    so the acceptance gate (test_wave2_acceptance.py::P3) tests real product
+    so the test suite (test_acceptance_core.py::P3) tests real product
     behaviour — not a reimplementation.
 
     SEC-L-01 PRESERVED:
@@ -444,7 +484,7 @@ async def set_full_config(request: Request):
         # Resolve the effective endpoint value before SSRF validation.
         # Only the Ollama default injection happens here; the fallback to the
         # stored URL (and redacted-echo detection) live inside
-        # apply_settings_update so that the P3 acceptance gate exercises
+        # apply_settings_update so that the P3 test exercises
         # the same code path as the HTTP handler — not a reimplementation.
         _raw_ep: str = "" if clear_base_url else (base_url_input or endpoint_input or "")
         if (
@@ -495,12 +535,45 @@ async def set_full_config(request: Request):
         _emb_fields = ("embedding_provider", "embedding_endpoint", "embedding_key",
                        "embedding_model", "embedding_dimension")
         if any(k in body for k in _emb_fields):
+            _old_emb = config.embedding
+            _new_provider = body.get("embedding_provider", "")
+            _new_model = body.get("embedding_model", "")
+            _new_dim = int(body.get("embedding_dimension", 0) or 0)
+            # The same range the other save route enforces. Without it a
+            # dashboard save with no dimension field stored a width of zero.
+            if _new_dim and not (64 <= _new_dim <= 8192):
+                return JSONResponse(
+                    {"error": f"Dimension must be 64-8192, got {_new_dim}"},
+                    status_code=400,
+                )
+            # The SECOND way to change the embedding model, and it was
+            # unguarded. Switching mode from the dashboard carries the embedding
+            # fields, so a width that the store cannot hold arrived here
+            # untouched while the other route refused it — one door bolted, the
+            # other open.
+            if not bool(body.get("force")):
+                _refusal = _refuse_incompatible_embedding(
+                    config, config.embedding, _new_model, _new_dim,
+                    new_provider=_new_provider,
+                )
+                if _refusal is not None:
+                    return _refusal
             config.embedding = EmbeddingConfig(
-                provider=body.get("embedding_provider", ""),
+                provider=_new_provider,
                 api_endpoint=body.get("embedding_endpoint", ""),
                 api_key=body.get("embedding_key", ""),
-                model_name=body.get("embedding_model", ""),
-                dimension=int(body.get("embedding_dimension", 0) or 0),
+                model_name=_new_model,
+                dimension=_new_dim or _old_emb.dimension,
+                # Not naming these reset them to defaults, so every embedding
+                # save from the dashboard silently put the local model back to
+                # whatever ships — the exact defect the other route had.
+                ollama_model=(
+                    _new_model if _new_provider == "ollama" and _new_model
+                    else _old_emb.ollama_model
+                ),
+                ollama_base_url=_old_emb.ollama_base_url,
+                api_version=_old_emb.api_version,
+                deployment_name=_old_emb.deployment_name,
             )
 
         # When the mode actually changed, apply the new mode's structural presets
@@ -571,6 +644,85 @@ async def get_embedding_config(request: Request):
         return _internal_error()
 
 
+def _refuse_incompatible_embedding(
+    config, old_emb, new_model, new_dim, new_provider=None,
+):
+    """None when the change is safe, otherwise the 409 to return instead.
+
+    Fail-open on anything it cannot determine: a store with no vectors yet, a
+    model server that is not running, an unreadable database. Refusing on
+    "I could not tell" would block a legitimate first-time setup, and the
+    dimension a caller declares is still checked against the store either way.
+    """
+    from fastapi.responses import JSONResponse as _JSON
+
+    try:
+        from superlocalmemory.core.ollama_validator import (
+            EMBEDDING,
+            stored_embedding_dimension,
+            validate_ollama_model,
+        )
+
+        db_path = Path(config.base_dir) / "memory.db"
+        stored = stored_embedding_dimension(db_path)
+        if stored is None:
+            return None
+
+        # The provider being SAVED, falling back to the current one when the
+        # caller is not changing it. Reading only the current provider meant
+        # that SWITCHING to a local model never probed at all — and switching
+        # is exactly when the width changes.
+        effective_provider = (
+            new_provider
+            if new_provider is not None
+            else getattr(old_emb, "provider", "")
+        )
+        measured = None
+        if effective_provider == "ollama" or getattr(old_emb, "provider", "") == "ollama":
+            # The model being SAVED, not the one already configured. Probing the
+            # old one always matched the stored width and therefore always
+            # allowed the change — the guard measured the thing it was not
+            # protecting against.
+            probe = validate_ollama_model(
+                new_model or getattr(old_emb, "ollama_model", ""),
+                EMBEDDING,
+                base_url=getattr(old_emb, "ollama_base_url", "")
+                or "http://localhost:11434",
+            )
+            measured = probe.dimension if probe.ok else None
+
+        declared = int(new_dim or 0)
+        if measured is None and declared <= 0:
+            # Nothing to compare: the server could not be asked and the caller
+            # named no width. Allowing is the fail-open the first-time setup
+            # needs; the other route's probe still guards the common path.
+            return None
+        effective = measured if measured is not None else declared
+        if effective == stored:
+            return None
+
+        return _JSON(
+            {
+                "error": "embedding_width_mismatch",
+                "stored_dimension": stored,
+                "requested_dimension": effective,
+                "model_name": new_model,
+                "detail": (
+                    f"{new_model} produces {effective}-dimensional vectors and "
+                    f"this store holds {stored}-dimensional ones. Vectors of "
+                    f"different widths cannot be compared, so every memory "
+                    f"already stored would become unfindable by meaning. "
+                    f"Rebuild them first with: slm db migrate — or resend with "
+                    f"force=true if they have already been rebuilt."
+                ),
+            },
+            status_code=409,
+        )
+    except Exception:  # noqa: BLE001 - never block a save on the check failing
+        logger.exception("embedding width pre-check failed; allowing the save")
+        return None
+
+
 @router.put("/embedding/config")
 async def set_embedding_config(request: Request):
     """Update embedding configuration independently of mode switch."""
@@ -591,13 +743,34 @@ async def set_embedding_config(request: Request):
         new_key = body.get("api_key", config.embedding.api_key)
 
         old_emb = config.embedding
+
+        # A width that disagrees with what the store already holds is refused
+        # here, at the moment of writing, not merely offered as a check the
+        # caller may or may not have run. Vectors of different widths cannot be
+        # compared, so the store would keep answering similarity questions and
+        # every answer would be noise. ``force=true`` is the escape hatch for
+        # somebody who has already re-embedded.
+        if not bool(body.get("force")):
+            refusal = _refuse_incompatible_embedding(
+                config, old_emb, new_model, new_dim, new_provider=new_provider,
+            )
+            if refusal is not None:
+                return refusal
+
         config.embedding = EmbeddingConfig(
             model_name=new_model,
             dimension=new_dim,
             provider=new_provider,
             api_endpoint=new_endpoint,
             api_key=new_key,
-            ollama_model=old_emb.ollama_model,
+            # In Ollama mode the embedder resolves its model from
+            # ``ollama_model``, so keeping the old value here made a rename a
+            # no-op that still answered "success". A caller naming a model gets
+            # that model.
+            ollama_model=(
+                new_model if new_provider == "ollama" and new_model
+                else old_emb.ollama_model
+            ),
             ollama_base_url=old_emb.ollama_base_url,
             api_version=old_emb.api_version,
             deployment_name=old_emb.deployment_name,
@@ -1018,7 +1191,7 @@ async def recall_trace(request: Request):
     try:
         body = await request.json()
         query = body.get("query", "")
-        limit = body.get("limit", 10)
+        limit = body.get("limit", CANONICAL_RECALL_LIMIT)
         window = body.get("window", "") or ""
         as_of_raw = (body.get("as_of", "") or "").strip()
         raw_known_as_of = body.get("known_as_of", "")
@@ -1073,6 +1246,10 @@ async def recall_trace(request: Request):
                 window=window or None, as_of=_as_of,
                 known_as_of=_known_as_of, valid_at=_valid_at,
                 include_unknown=include_unknown,
+                # Whoever asked, by the name they arrived under. Without a name
+                # the record of this recall is discarded and no outcome
+                # reported afterwards can be matched back to it.
+                session_id=_signal_session_id(),
             ),
         )
         elapsed_ms = round((_time.monotonic() - t0) * 1000, 1)

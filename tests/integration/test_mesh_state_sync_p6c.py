@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 #
-# Integration tests: SLM V4 sub-wave 3c — LWW remote state convergence (3c-1)
+# Integration tests: LWW remote state convergence
 #
 # Serial-safe (all tests operate on isolated temp SQLite DBs; no shared state).
 # Run: pytest tests/integration/test_mesh_state_sync_p6c.py -p no:cacheprovider -x -v

@@ -23,7 +23,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Generator
+from typing import Any, Generator, NoReturn
 
 from superlocalmemory.storage.models import (
     AtomicFact,
@@ -41,12 +41,32 @@ from superlocalmemory.storage.models import (
     TemporalEvent,
     TrustScore,
 )
-from superlocalmemory.storage.embedding_codec import decode_embedding, encode_embedding
+from superlocalmemory.storage.embedding_codec import (
+    decode_embedding,
+    decode_float_vector,
+    encode_embedding,
+    encode_float_vector,
+)
 from superlocalmemory.storage.write_lock import get_write_lock
+from superlocalmemory.storage import projection_outbox
 
 logger = logging.getLogger(__name__)
 
 _MISSING = object()
+
+
+class ProfileOwnershipConflict(ValueError):
+    """A store tried to hand one profile's existing row to another profile.
+
+    ``memories.memory_id`` and ``atomic_facts.fact_id`` are bare
+    ``TEXT PRIMARY KEY`` — global, not per-profile — while every row carries a
+    ``profile_id``. So two profiles on one store can be handed the same
+    caller-chosen id (an importer keyed on an external record id syncing one
+    source into two workspaces does exactly this), and the upsert would
+    otherwise rewrite the owner and the content: the first profile's memory
+    silently became the second's.
+    """
+
 
 def _jl(raw: Any, default: Any = _MISSING) -> Any:
     """JSON-load a value, returning *default* on None/empty.
@@ -145,6 +165,92 @@ def _scope_where(
 
     where = "(" + " OR ".join(clauses) + ")"
     return where, params
+
+
+def _compose_visible_clause(
+    prefix: str,
+    *,
+    has_archive: bool,
+    has_quarantine: bool,
+    include_quarantined: bool = False,
+) -> str:
+    """Build the AND-clause from what the store actually has.
+
+    Split out from ``DatabaseManager.visible_fact_clause`` so that callers
+    holding a bare ``sqlite3.Connection`` produce a byte-identical predicate
+    rather than a second, drifting copy.
+    """
+    table = f"{prefix}." if prefix else ""
+    clause = ""
+    if has_archive:
+        clause += f" AND COALESCE({table}archive_status, 'live') != 'archived'"
+    if not include_quarantined and has_quarantine:
+        clause += f" AND COALESCE({table}quarantined, 0) = 0"
+    return clause
+
+
+def visible_fact_clause_for_connection(
+    conn: sqlite3.Connection,
+    prefix: str = "",
+    *,
+    include_quarantined: bool = False,
+) -> str:
+    """``visible_fact_clause`` for a caller that hand-rolls its SQL.
+
+    WHY THIS EXISTS. 4.0.10 put the withheld-row filter on every
+    ``DatabaseManager`` read path and every retrieval channel, and enumerated
+    them in a test. The enumeration was of *methods*, and two HTTP routes never
+    call one: ``/api/memories`` and ``/api/v3/timeline/`` build their own SQL
+    against ``atomic_facts``. Measured against the author's store on 4.0.10,
+    ``/api/memories?limit=50`` served **24 withheld rows on page one** and
+    reported a total of 5,218 against 3,919 real memories -- the release's
+    central claim, false on the dashboard's main list.
+
+    So the rule is not "read paths go through DatabaseManager"; plenty of
+    reasonable code will not. The rule is that anything answering "what does my
+    memory contain" resolves its predicate from here. Presence-guarded on the
+    passed connection, because a route may be pointed at a store the engine has
+    never opened, and filtering on an absent column would turn a cosmetic gap
+    into a 500 on every request.
+
+    Grep is not a sufficient test for this: ``mcp/tools_active.py`` also selects
+    from ``atomic_facts`` directly and was already clean, while these two routes
+    were not. The test that matters calls the surface and inspects what it
+    served -- tests/test_server/test_a_listed_memory_belongs_to_its_profile.py
+    """
+    def _column_name(row: object) -> str:
+        """PRAGMA row -> column name, whatever row_factory the caller set.
+
+        Not paranoia: ``server/routes/memories.py`` -- the first caller and the
+        route that was leaking -- sets ``row_factory = dict_factory``, so a
+        positional ``row[1]`` raises KeyError there, and the except below would
+        have swallowed it into "no such column" and silently dropped the filter.
+        That is the same shape of failure this function exists to close.
+        """
+        if isinstance(row, dict):
+            return str(row.get("name", ""))
+        try:
+            return str(row["name"])          # sqlite3.Row
+        except (TypeError, IndexError, KeyError):
+            pass
+        try:
+            return str(row[1])               # plain tuple
+        except (TypeError, IndexError, KeyError):
+            return ""
+
+    def _has(column: str) -> bool:
+        try:
+            rows = list(conn.execute("PRAGMA table_info(atomic_facts)"))
+        except sqlite3.Error:
+            return False
+        return any(_column_name(r) == column for r in rows)
+
+    return _compose_visible_clause(
+        prefix,
+        has_archive=_has("archive_status"),
+        has_quarantine=_has("quarantined"),
+        include_quarantined=include_quarantined,
+    )
 
 
 class DatabaseManager:
@@ -443,21 +549,101 @@ class DatabaseManager:
             # Read-only path: concurrent reads are safe in WAL mode.
             return self._execute_one(sql, params)
 
+    # The two tables whose primary key is global but whose rows are owned by a
+    # profile. Literal, internal, and closed — never built from caller input.
+    _OWNED_ROWS: dict[str, str] = {"memories": "memory_id", "atomic_facts": "fact_id"}
+
+    def _refuse_cross_profile_reown(
+        self, table: str, row_id: str, profile_id: str,
+    ) -> NoReturn:
+        """Raise ``ProfileOwnershipConflict``, naming the profile that owns it.
+
+        Called only when an upsert below returned no row. Both statements carry
+        ``WHERE <table>.profile_id = excluded.profile_id`` on their
+        ``DO UPDATE``, so SQLite skips a conflicting row owned by a different
+        profile and ``RETURNING`` yields nothing — which makes the ownership
+        check part of the write instead of a read in front of it. That costs no
+        extra query on the ordinary path and leaves no window between deciding
+        and writing. The lookup here runs only on the refusal, to say whose row
+        it is; a refusal nobody can read gets worked around.
+
+        Taking a row away from the profile that owns it is not last-write-wins,
+        it is a different tenant's write, so it is refused rather than merged.
+        Before this the outcome depended on something unrelated:
+        ``scene_fact_members`` carries a composite
+        ``(profile_id, fact_id) -> atomic_facts (profile_id, fact_id)`` foreign
+        key, so where a scene referenced the fact the ownership change orphaned
+        it and SQLite raised a bare ``FOREIGN KEY constraint failed`` — and
+        where no scene did, the identical write succeeded in silence and the
+        second profile kept the fact. Isolation cannot rest on whether a
+        projection happens to exist.
+        """
+        # Interpolated, not parameterised: SQLite takes no parameter in a table
+        # or column position. Both come from _OWNED_ROWS, a closed literal map,
+        # and the row id stays bound.
+        id_column = self._OWNED_ROWS[table]
+        rows = self.execute(
+            f"SELECT profile_id FROM {table} WHERE {id_column} = ?",
+            (row_id,),
+        )
+        owner = dict(rows[0])["profile_id"] if rows else "<unknown>"
+        raise ProfileOwnershipConflict(
+            f"{id_column} {row_id!r} in {table} belongs to profile {owner!r}; "
+            f"refusing to re-own it as {profile_id!r}"
+        )
+
     def store_memory(self, record: MemoryRecord) -> str:
-        """Persist a raw memory record. Returns memory_id."""
+        """Persist a raw memory record. Returns memory_id.
+
+        Upserts in place rather than replacing. ``INSERT OR REPLACE`` is a
+        DELETE followed by an INSERT, and ``atomic_facts.memory_id`` is a
+        foreign key with ``ON DELETE CASCADE`` — so storing a record whose
+        ``memory_id`` already existed silently deleted every fact extracted from
+        it. Reproduced in isolation: three facts stored, one re-store of the same
+        memory_id, zero facts left, no error raised.
+
+        Most callers pass a freshly generated id, which is why this never fired.
+        But ``cognitive_consolidator`` supplies its own ``block_id``, and the
+        queryable-promotion path in ``run_store`` deliberately avoids calling
+        this at all for an existing memory — a rule that has to be remembered
+        rather than enforced. ``ON CONFLICT DO UPDATE`` keeps the same
+        last-write-wins semantics and takes the loaded gun out of the room.
+
+        ``created_at`` is deliberately not overwritten: the row's first
+        observation is a historical fact, and a re-store is not a new one.
+        ``profile_id`` is not in the update list either, and a store that would
+        change it is refused outright — the ``DO UPDATE`` is conditioned on the
+        owner matching, so SQLite skips the row and ``RETURNING`` comes back
+        empty. See ``_refuse_cross_profile_reown``.
+        """
         _scope = getattr(record, 'scope', None) or 'personal'
         _shared = _jd(getattr(record, 'shared_with', None))
-        self.execute(
-            """INSERT OR REPLACE INTO memories
+        written = self.execute(
+            """INSERT INTO memories
                (memory_id, profile_id, content, session_id, speaker,
                 role, session_date, created_at, metadata_json,
                 scope, shared_with)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(memory_id) DO UPDATE SET
+                   content       = excluded.content,
+                   session_id    = excluded.session_id,
+                   speaker       = excluded.speaker,
+                   role          = excluded.role,
+                   session_date  = excluded.session_date,
+                   metadata_json = excluded.metadata_json,
+                   scope         = excluded.scope,
+                   shared_with   = excluded.shared_with
+               WHERE memories.profile_id = excluded.profile_id
+               RETURNING profile_id""",
             (record.memory_id, record.profile_id, record.content,
              record.session_id, record.speaker, record.role,
              record.session_date, record.created_at,
              json.dumps(record.metadata), _scope, _shared),
         )
+        if not written:
+            self._refuse_cross_profile_reown(
+                "memories", record.memory_id, record.profile_id,
+            )
         return record.memory_id
 
     def update_memory_summary(self, memory_id: str, summary: str) -> None:
@@ -486,6 +672,22 @@ class DatabaseManager:
             pass
         return ""
 
+    def _atomically(self, work: Any) -> Any:
+        """Run ``work`` in one transaction, joining an open one rather than nesting.
+
+        A caller already inside ``transaction()`` must not start a second one:
+        the lock is re-entrant but ``_connect`` is not, so a nested attempt opens
+        a separate connection to the same file while the first still holds its
+        write. ``store_fact`` carried this check inline; it is here because
+        three more methods now need the same thing, and a projection intent that
+        commits in a different transaction from the row it describes is exactly
+        the window this whole mechanism exists to close.
+        """
+        if getattr(self._txn_state, "conn", None) is not None:
+            return work()
+        with self.transaction():
+            return work()
+
     def store_fact(self, fact: AtomicFact) -> str:
         """Persist an atomic fact. Returns fact_id.
 
@@ -500,6 +702,39 @@ class DatabaseManager:
         twice is one fact" — preventing the duplicate explosion that poisons
         importance ranking and core-memory promotion. Empty/whitespace
         content is exempt (handled by placeholder filtering, not dedup).
+
+        The insert below upserts rather than replaces, for the reason
+        ``store_memory`` does. ``INSERT OR REPLACE`` is a DELETE followed by an
+        INSERT, and eight tables hold
+        ``FOREIGN KEY (fact_id) REFERENCES atomic_facts (fact_id) ON DELETE
+        CASCADE`` — so re-storing a fact under an occupied id dropped its
+        retention row, access history, context and importance, and raised
+        nothing.
+
+        The dedup above does not close this: it matches on *content*, so a
+        second store of the same id with *different* content falls straight
+        through to the insert. ``MemoryEngine.store_fact_direct`` reaches it —
+        ``canonical_store_fact`` exists to persist a caller-chosen id and
+        raises if that id is not preserved. Within one profile an idempotency
+        key of ``prebuilt:<fact_id>`` catches the second store, but that key is
+        scoped ``(profile_id, source_type, idempotency_key)`` while
+        ``atomic_facts.fact_id`` is a bare ``TEXT PRIMARY KEY``. Reproduced
+        across two profiles on one store: the first profile's fact was replaced
+        outright — new owner, new content — and its associations were gone.
+
+        ``created_at`` is deliberately not overwritten: the row's first
+        observation is a historical fact, and a re-store is not a new one.
+        ``pinned`` is not in the column list at all, so the upsert now leaves it
+        alone where the replace silently reset it to 0 — pinning is user intent,
+        not something a re-store gets to revoke. ``profile_id`` is out of the
+        update list for a stronger reason: a store that would change it is
+        refused rather than applied, because it is one profile taking another's
+        fact rather than a re-store at all. The refusal is a condition on the
+        ``DO UPDATE`` itself, so there is no window between checking the owner
+        and writing the row.
+
+        ``insert_fact_immutable`` remains the right call for a known-new fact
+        that must abort on a collision rather than win it.
         """
         if fact.content and fact.content.strip():
             # Dedup across all LIVE lifecycle zones (active/warm/cold). Excludes
@@ -534,12 +769,17 @@ class DatabaseManager:
                 # trustworthy observation that the anchor was missing.
                 if self.get_temporal_validity(canonical_id, fact.profile_id) is None:
                     self.store_temporal_validity(canonical_id, fact.profile_id)
+                # Re-storing known content is the natural moment to notice a
+                # projection that was never written — an upgraded store whose
+                # graph predates the migration reaches this branch, not the
+                # insert below.
+                projection_outbox.enqueue(self, canonical_id, fact.profile_id)
                 return canonical_id
         _scope = getattr(fact, 'scope', None) or 'personal'
         _shared = _jd(getattr(fact, 'shared_with', None))
         def _insert_with_knowledge_anchor() -> None:
-            self.execute(
-                """INSERT OR REPLACE INTO atomic_facts
+            written = self.execute(
+                """INSERT INTO atomic_facts
                (fact_id, memory_id, profile_id, content, fact_type,
                 entities_json, canonical_entities_json,
                 observation_date, referenced_date, interval_start, interval_end,
@@ -549,7 +789,35 @@ class DatabaseManager:
                 lifecycle, langevin_position,
                 emotional_valence, emotional_arousal, signal_type, created_at,
                 scope, shared_with)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(fact_id) DO UPDATE SET
+                   memory_id               = excluded.memory_id,
+                   content                 = excluded.content,
+                   fact_type               = excluded.fact_type,
+                   entities_json           = excluded.entities_json,
+                   canonical_entities_json = excluded.canonical_entities_json,
+                   observation_date        = excluded.observation_date,
+                   referenced_date         = excluded.referenced_date,
+                   interval_start          = excluded.interval_start,
+                   interval_end            = excluded.interval_end,
+                   confidence              = excluded.confidence,
+                   importance              = excluded.importance,
+                   evidence_count          = excluded.evidence_count,
+                   access_count            = excluded.access_count,
+                   source_turn_ids_json    = excluded.source_turn_ids_json,
+                   session_id              = excluded.session_id,
+                   embedding               = excluded.embedding,
+                   fisher_mean             = excluded.fisher_mean,
+                   fisher_variance         = excluded.fisher_variance,
+                   lifecycle               = excluded.lifecycle,
+                   langevin_position       = excluded.langevin_position,
+                   emotional_valence       = excluded.emotional_valence,
+                   emotional_arousal       = excluded.emotional_arousal,
+                   signal_type             = excluded.signal_type,
+                   scope                   = excluded.scope,
+                   shared_with             = excluded.shared_with
+               WHERE atomic_facts.profile_id = excluded.profile_id
+               RETURNING profile_id""",
                 (fact.fact_id, fact.memory_id, fact.profile_id, fact.content,
                  fact.fact_type.value,
                  json.dumps(fact.entities), json.dumps(fact.canonical_entities),
@@ -557,15 +825,29 @@ class DatabaseManager:
                  fact.interval_start, fact.interval_end,
                  fact.confidence, fact.importance, fact.evidence_count, fact.access_count,
                  json.dumps(fact.source_turn_ids), fact.session_id,
-                 encode_embedding(fact.embedding), _jd(fact.fisher_mean), _jd(fact.fisher_variance),
+                 encode_embedding(fact.embedding),
+                 encode_float_vector(fact.fisher_mean),
+                 encode_float_vector(fact.fisher_variance),
                  fact.lifecycle.value, _jd(fact.langevin_position),
                  fact.emotional_valence, fact.emotional_arousal,
                  fact.signal_type.value, fact.created_at, _scope, _shared),
             )
+            if not written:
+                self._refuse_cross_profile_reown(
+                    "atomic_facts", fact.fact_id, fact.profile_id,
+                )
             # Every fact written after 4.0.2 has an explicit transaction-time
             # anchor. Absence deliberately represents pre-4.0.2
             # ``legacy_unknown``; never backfill it from ``created_at``.
             self.store_temporal_validity(fact.fact_id, fact.profile_id)
+            # The graph and the vectors live in other storage engines, so the
+            # intent to project this fact is queued here, in this transaction.
+            # Enqueueing in the storage layer rather than at each pipeline call
+            # site is deliberate: ingestion, the background materializer, the
+            # consolidator and the CLI all write facts through this method, and
+            # a call site that forgets would produce a memory that is stored
+            # and unrecallable.
+            projection_outbox.enqueue(self, fact.fact_id, fact.profile_id)
 
         # The fact and its transaction-time anchor are one logical write. Do
         # not open a nested transaction when an owner already holds one.
@@ -594,8 +876,12 @@ class DatabaseManager:
             source_turn_ids=_jl(d.get("source_turn_ids_json")),
             session_id=d.get("session_id", ""),
             embedding=decode_embedding(d.get("embedding"), fact_id=d.get("fact_id", "<unknown>")),
-            fisher_mean=_jl(d.get("fisher_mean"), None),
-            fisher_variance=_jl(d.get("fisher_variance"), None),
+            fisher_mean=decode_float_vector(
+                d.get("fisher_mean"), field="fisher_mean",
+                fact_id=d.get("fact_id", "<unknown>")),
+            fisher_variance=decode_float_vector(
+                d.get("fisher_variance"), field="fisher_variance",
+                fact_id=d.get("fact_id", "<unknown>")),
             lifecycle=MemoryLifecycle(d["lifecycle"]) if d.get("lifecycle") else MemoryLifecycle.ACTIVE,
             langevin_position=_jl(d.get("langevin_position"), None),
             emotional_valence=d.get("emotional_valence", 0.0),
@@ -648,8 +934,8 @@ class DatabaseManager:
                 json.dumps(fact.source_turn_ids),
                 fact.session_id,
                 encode_embedding(fact.embedding),
-                _jd(fact.fisher_mean),
-                _jd(fact.fisher_variance),
+                encode_float_vector(fact.fisher_mean),
+                encode_float_vector(fact.fisher_variance),
                 fact.lifecycle.value,
                 _jd(fact.langevin_position),
                 fact.emotional_valence,
@@ -661,6 +947,7 @@ class DatabaseManager:
             ),
         )
         self.store_temporal_validity(fact.fact_id, fact.profile_id)
+        projection_outbox.enqueue(self, fact.fact_id, fact.profile_id)
         return fact.fact_id
 
     def set_pinned(self, fact_id: str, pinned: bool) -> None:
@@ -687,8 +974,12 @@ class DatabaseManager:
             include_shared=include_shared,
             prefix="f",
         )
+        # Pins are injected straight into an agent's context, which makes this
+        # the most consequential display path in the class: a withheld row here
+        # is not merely shown, it is asserted as background truth.
         rows = self.execute(
             f"SELECT f.* FROM atomic_facts f WHERE {where} AND f.pinned = 1 "
+            f"{self.visible_fact_clause('f')} "
             "AND NOT EXISTS ("
             "    SELECT 1 FROM fact_temporal_validity tv "
             "    WHERE tv.fact_id = f.fact_id "
@@ -734,6 +1025,64 @@ class DatabaseManager:
             self._archive_col_present = True
         return present
 
+    def _has_quarantine_column(self) -> bool:
+        """Whether atomic_facts carries the ``quarantined`` column.
+
+        Same shape as ``_has_archive_status``: cached once True (a column never
+        disappears), re-checked while absent so a later schema pass is picked
+        up. ``storage.schema.create_all_tables`` adds the column at every engine
+        init, so on any store the daemon has opened this is True — the guard
+        exists for a bare DatabaseManager pointed at a store that engine init
+        never touched, where filtering on the column would raise instead of
+        returning results.
+        """
+        if getattr(self, "_quarantine_col_present", False):
+            return True
+        present = any(
+            dict(row).get("name") == "quarantined"
+            for row in self.execute("PRAGMA table_info(atomic_facts)")
+        )
+        if present:
+            self._quarantine_col_present = True
+        return present
+
+    def visible_fact_clause(
+        self, prefix: str = "", *, include_quarantined: bool = False,
+    ) -> str:
+        """AND-clause excluding rows no caller should be shown as a memory.
+
+        Two exclusions, one definition: soft-deleted (``archive_status``) and
+        withheld (``quarantined``). Both are presence-guarded, because each
+        column arrives with a migration and may be absent on a store the engine
+        has not opened.
+
+        WHY THIS EXISTS AS A FUNCTION. 4.0.10 first put the quarantine filter in
+        ``get_facts_by_ids`` alone, reasoning that every retrieval channel
+        re-authorises through it and the engine drops what it cannot hydrate.
+        That reasoning was correct and the conclusion was wrong: it covered the
+        RECALL pipeline, and ``search``, ``list_recent``, ``fetch``, the MCP
+        resources and the dashboard's own search are not the recall pipeline.
+        Measured on a copy of the author's store, ``search_facts_fts`` returned
+        20 withheld rows out of 50 and ``get_all_facts`` 66 out of 400 — the
+        exact defect the design was meant to prevent, in the paths the design
+        never looked at.
+
+        There is no single SQL choke point in this codebase; ``_scope_where`` is
+        spliced against six other tables and cannot carry a fact column. So the
+        honest form of "one place" is one CLAUSE with an enumerable set of call
+        sites, and a test that fails when a read path does not use it:
+        tests/test_storage/test_no_read_path_shows_a_withheld_row.py
+
+        ``include_quarantined=True`` is for repair, erasure and export — paths
+        that must reach a withheld row to act on it.
+        """
+        return _compose_visible_clause(
+            prefix,
+            has_archive=self._has_archive_status(),
+            has_quarantine=self._has_quarantine_column(),
+            include_quarantined=include_quarantined,
+        )
+
     def get_all_facts(
         self, profile_id: str, limit: int | None = None,
         *,
@@ -756,14 +1105,10 @@ class DatabaseManager:
         # hard, env-tunable ceiling even when the caller passes limit=None.
         if limit is None:
             limit = _unbounded_facts_ceiling()
-        # Archived facts are not live; never surface them in direct reads.
-        archive_clause = (
-            " AND COALESCE(archive_status, 'live') != 'archived'"
-            if self._has_archive_status()
-            else ""
-        )
+        # Soft-deleted and withheld rows are not memories a caller may see.
         rows = self.execute(
-            f"SELECT * FROM atomic_facts WHERE {where}{archive_clause} "
+            f"SELECT * FROM atomic_facts WHERE {where}"
+            f"{self.visible_fact_clause()} "
             "ORDER BY created_at DESC LIMIT ?",
             (*params, int(limit)),
         )
@@ -791,14 +1136,12 @@ class DatabaseManager:
             include_global=include_global,
             include_shared=include_shared,
         )
-        archive_clause = (
-            " AND COALESCE(archive_status, 'live') != 'archived'"
-            if self._has_archive_status()
-            else ""
-        )
+        # Crossing a profile boundary is the last place a withheld row should
+        # appear: it would be a model's non-answer presented to somebody else
+        # as one of this profile's shared memories.
         rows = self.execute(
             f"SELECT * FROM atomic_facts WHERE {where} AND profile_id != ?"
-            f"{archive_clause} ORDER BY created_at DESC",
+            f"{self.visible_fact_clause()} ORDER BY created_at DESC",
             (*params, profile_id),
         )
         return [self._row_to_fact(r) for r in rows]
@@ -881,6 +1224,10 @@ class DatabaseManager:
                 # converted store, one fact at a time, undoing the conversion
                 # wherever a fact is updated.
                 clean[k] = encode_embedding(v) if v is not None else None
+            elif k in ("fisher_mean", "fisher_variance"):
+                # Same hazard, same answer: these are float vectors of the same
+                # width as the embedding and are stored the same way.
+                clean[k] = encode_float_vector(v) if v is not None else None
             elif isinstance(v, (list, dict)):
                 clean[k] = json.dumps(v)
             elif isinstance(v, (MemoryLifecycle, FactType, SignalType)):
@@ -888,24 +1235,48 @@ class DatabaseManager:
             else:
                 clean[k] = v
         set_clause = ", ".join(f"{k} = ?" for k in clean)
-        if profile_id is not None:
-            self.execute(
-                f"UPDATE atomic_facts SET {set_clause} WHERE fact_id = ? AND profile_id = ?",
-                (*clean.values(), fact_id, profile_id),
-            )
-        else:
-            self.execute(
-                f"UPDATE atomic_facts SET {set_clause} WHERE fact_id = ?",
-                (*clean.values(), fact_id),
-            )
+
+        def _write() -> None:
+            if profile_id is not None:
+                self.execute(
+                    f"UPDATE atomic_facts SET {set_clause} "
+                    "WHERE fact_id = ? AND profile_id = ?",
+                    (*clean.values(), fact_id, profile_id),
+                )
+            else:
+                self.execute(
+                    f"UPDATE atomic_facts SET {set_clause} WHERE fact_id = ?",
+                    (*clean.values(), fact_id),
+                )
+            # Only an update that changes something a projection is derived
+            # from needs re-projecting. Recall bumps access_count on every hit,
+            # so queueing on any update at all would hand the drain worker one
+            # row per returned memory per recall, for a column neither Cozo nor
+            # Lance holds.
+            if set(updates) & projection_outbox.PROJECTED_FACT_COLUMNS:
+                if profile_id is not None:
+                    projection_outbox.enqueue(self, fact_id, profile_id)
+                else:
+                    projection_outbox.enqueue_for_fact(self, fact_id)
+
+        self._atomically(_write)
 
     def delete_fact(self, fact_id: str, profile_id: str | None = None) -> None:
         """Hard-delete a fact.
 
         DatabaseManager connections enforce FKs (PRAGMA foreign_keys=ON), so
-        embedding_metadata / fact_retention / edges cascade. The explicit
+        embedding_metadata / fact_retention cascade. The explicit
         embedding_metadata delete below is belt-and-suspenders for the case a
         future caller routes through a connection without FK enforcement.
+
+        ``graph_edges`` does NOT cascade, whatever this docstring used to say.
+        Its only foreign key is to ``profiles``; there is none to
+        ``atomic_facts``, because an edge's endpoints can be entity ids as well
+        as fact ids and a single column cannot reference two tables. So the
+        edges are deleted here, explicitly. Without that, deleting a memory left
+        its connections behind pointing at nothing, and the graph tidy-up pass
+        would not reach them until its next run -- during which a search could
+        still follow an edge into a memory that no longer exists.
 
         Tenant safety: when ``profile_id`` is supplied the delete is constrained
         to that tenant (the fact must belong to it), so a fact_id from another
@@ -918,14 +1289,37 @@ class DatabaseManager:
             )
             if not row:
                 return  # not this tenant's fact — no-op
-        self.execute("DELETE FROM embedding_metadata WHERE fact_id = ?", (fact_id,))
-        if profile_id is not None:
+        # A forgotten memory that survives in the graph or the vector index is
+        # still recallable, which makes an erasure receipt a false statement. So
+        # the deletes and the queued removal are one transaction: the process
+        # can die immediately afterwards and the projections still get cleaned.
+        def _write() -> None:
+            # Read the tenant while the fact is still there. After the DELETE
+            # there is nothing left to resolve it from, and a queued removal
+            # filed under the wrong tenant is a fact id that outlives that
+            # tenant's erasure.
+            owner = profile_id or projection_outbox.resolve_profile(self, fact_id)
             self.execute(
-                "DELETE FROM atomic_facts WHERE fact_id = ? AND profile_id = ?",
-                (fact_id, profile_id),
+                "DELETE FROM embedding_metadata WHERE fact_id = ?", (fact_id,),
             )
-        else:
-            self.execute("DELETE FROM atomic_facts WHERE fact_id = ?", (fact_id,))
+            if profile_id is not None:
+                self.execute(
+                    "DELETE FROM atomic_facts WHERE fact_id = ? AND profile_id = ?",
+                    (fact_id, profile_id),
+                )
+            else:
+                self.execute("DELETE FROM atomic_facts WHERE fact_id = ?", (fact_id,))
+            # Both directions: an edge naming this fact at either end is now an
+            # edge to nothing.
+            self.execute(
+                "DELETE FROM graph_edges WHERE source_id = ? OR target_id = ?",
+                (fact_id, fact_id),
+            )
+            projection_outbox.enqueue(
+                self, fact_id, owner or "default", projection_outbox.OP_DELETE,
+            )
+
+        self._atomically(_write)
 
     def gc_orphaned_embedding_metadata(self) -> int:
         """Remove embedding_metadata rows whose parent atomic_fact is gone.
@@ -954,14 +1348,21 @@ class DatabaseManager:
         include_global: bool = False,
         include_shared: bool = False,
     ) -> int:
-        """Total fact count for a profile."""
+        """Memories this profile has, as the owner would count them.
+
+        Counts what a caller can be shown, which is why it applies
+        ``visible_fact_clause``. It fed the dashboard's "All memories 5,093" and
+        was counting 1,195 withheld summaries and every soft-deleted row into
+        that figure -- a number the owner reads as "how much do I remember".
+        """
         where, params = _scope_where(
             profile_id,
             include_global=include_global,
             include_shared=include_shared,
         )
         rows = self.execute(
-            f"SELECT COUNT(*) AS c FROM atomic_facts WHERE {where}", (*params,),
+            f"SELECT COUNT(*) AS c FROM atomic_facts WHERE {where}"
+            f"{self.visible_fact_clause()}", (*params,),
         )
         return int(rows[0]["c"]) if rows else 0
 
@@ -1074,30 +1475,59 @@ class DatabaseManager:
         duplicate we keep the MAX weight (strongest association wins) and
         return the existing edge_id.
         """
-        existing = self.execute(
-            "SELECT edge_id FROM graph_edges "
-            "WHERE profile_id = ? AND source_id = ? AND target_id = ? AND edge_type = ? "
-            "LIMIT 1",
-            (edge.profile_id, edge.source_id, edge.target_id, edge.edge_type.value),
-        )
-        if existing:
-            canonical_id = dict(existing[0])["edge_id"]
-            self.execute(
-                "UPDATE graph_edges SET weight = MAX(weight, ?) WHERE edge_id = ?",
-                (edge.weight, canonical_id),
+        # The edge and the re-projection of its endpoints are one logical write.
+        # Left as separate statements they were three separate commits, which
+        # cost three fsyncs on a path the materializer runs tens of thousands of
+        # times, and left a window where the edge was durable and the intent to
+        # project it was not.
+        def _write() -> str:
+            existing = self.execute(
+                "SELECT edge_id FROM graph_edges "
+                "WHERE profile_id = ? AND source_id = ? AND target_id = ? AND edge_type = ? "
+                "LIMIT 1",
+                (edge.profile_id, edge.source_id, edge.target_id, edge.edge_type.value),
             )
-            return canonical_id
-        _scope = getattr(edge, 'scope', None) or 'personal'
-        _shared = _jd(getattr(edge, 'shared_with', None))
-        self.execute(
-            """INSERT OR REPLACE INTO graph_edges
-               (edge_id, profile_id, source_id, target_id, edge_type, weight, created_at,
-                scope, shared_with)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
-            (edge.edge_id, edge.profile_id, edge.source_id, edge.target_id,
-             edge.edge_type.value, edge.weight, edge.created_at, _scope, _shared),
+            if existing:
+                canonical_id = dict(existing[0])["edge_id"]
+                self.execute(
+                    "UPDATE graph_edges SET weight = MAX(weight, ?) WHERE edge_id = ?",
+                    (edge.weight, canonical_id),
+                )
+                self._enqueue_edge_endpoints(edge)
+                return canonical_id
+            _scope = getattr(edge, 'scope', None) or 'personal'
+            _shared = _jd(getattr(edge, 'shared_with', None))
+            self.execute(
+                """INSERT OR REPLACE INTO graph_edges
+                   (edge_id, profile_id, source_id, target_id, edge_type, weight, created_at,
+                    scope, shared_with)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (edge.edge_id, edge.profile_id, edge.source_id, edge.target_id,
+                 edge.edge_type.value, edge.weight, edge.created_at, _scope, _shared),
+            )
+            self._enqueue_edge_endpoints(edge)
+            return edge.edge_id
+
+        return self._atomically(_write)
+
+    def _enqueue_edge_endpoints(self, edge: GraphEdge) -> None:
+        """Re-queue both ends of an edge for projection.
+
+        Ingestion is queryable-first: a fact commits immediately and its edges
+        arrive afterwards, from the background materializer. A projection
+        queued only when the fact was inserted would therefore be written
+        before a single edge existed, leaving the node in the graph with none
+        of its connections — which is precisely the adjacency the graph is
+        consulted for.
+
+        An endpoint may be an entity id rather than a fact id. Those are queued
+        too and the drain skips whatever it cannot find as a fact; filtering
+        here would mean a lookup per endpoint on every edge write, which the
+        materializer does tens of thousands of times.
+        """
+        projection_outbox.enqueue_many(
+            self, (edge.source_id, edge.target_id), edge.profile_id,
         )
-        return edge.edge_id
 
     def get_edges_for_node(
         self, node_id: str, profile_id: str,
@@ -1231,16 +1661,15 @@ class DatabaseManager:
             include_shared=include_shared,
             prefix="f",
         )
-        # Archived facts must not surface via full-text search either.
-        archive_clause = (
-            " AND COALESCE(f.archive_status, 'live') != 'archived'"
-            if self._has_archive_status()
-            else ""
-        )
+        # Full-text search is a display path: the dashboard search box, the
+        # `search` tool and `fetch` all land here, and none of them go through
+        # the recall engine. Before 4.0.10 put the clause here it returned 20
+        # withheld rows out of 50 on the author's store.
         rows = self.execute(
             f"""SELECT f.* FROM atomic_facts_fts AS fts
                JOIN atomic_facts AS f ON f.fact_id = fts.fact_id
-               WHERE fts.atomic_facts_fts MATCH ? AND {where}{archive_clause}
+               WHERE fts.atomic_facts_fts MATCH ? AND {where}
+                     {self.visible_fact_clause('f')}
                ORDER BY fts.rank LIMIT ?""",
             (match_expr, *params, limit),
         )
@@ -1271,12 +1700,22 @@ class DatabaseManager:
     # ------------------------------------------------------------------
 
     def get_fact(self, fact_id: str, profile_id: str | None = None) -> AtomicFact | None:
-        """Get a single fact by ID.
+        """Get a single row by ID, exactly as stored. NOT a display path.
 
         C4 defense-in-depth: when ``profile_id`` is provided the lookup is
         tenant-scoped so a fact_id from another profile cannot resolve. Left
         optional (fact_id is a random UUID sourced from already-scoped queries)
         to avoid destabilizing the core store/consolidation write path.
+
+        DELIBERATELY UNFILTERED, and this is load-bearing. It applies neither
+        ``archive_status`` nor ``quarantined`` because it is the primitive that
+        write paths, correction handling and the 4.0.10 repair use to read a row
+        they already hold the id of — including a withheld one, which they must
+        be able to see in order to act on it. ``visible_fact_clause`` is for the
+        paths that answer a question; this one answers "what is in that row".
+
+        A caller taking a fact_id from user input and rendering the result wants
+        ``get_facts_by_ids`` instead.
         """
         if profile_id is not None:
             rows = self.execute(
@@ -1293,8 +1732,36 @@ class DatabaseManager:
         self, fact_ids: list[str], profile_id: str,
         include_global: bool = False,
         include_shared: bool = False,
+        *,
+        include_quarantined: bool = False,
     ) -> list[AtomicFact]:
-        """Get multiple facts by their IDs, scoped to a profile."""
+        """Get multiple facts by their IDs, scoped to a profile.
+
+        THIS IS THE PLACE QUARANTINE IS ENFORCED, and the only one.
+
+        Every retrieval channel re-authorises its candidates through here
+        (``retrieval/scope_policy.py`` — "candidate generators may use caches,
+        approximate indexes, or graph stores that are not the authorization
+        source of truth"), and the engine hydrates the fused set from here too.
+        A fact this method does not return has no content to show, and
+        ``retrieval/engine.py`` drops it: ``if fact is None: continue``. So one
+        clause here covers bm25, semantic, temporal, entity, hopfield and
+        spreading activation, in normal and deep recall alike, whether or not
+        the forgetting filter is registered.
+
+        The alternatives were checked and rejected. ``_scope_where`` looks like
+        the natural home but is spliced against ``graph_edges``,
+        ``temporal_events``, ``memories``, ``bm25_tokens``,
+        ``fact_temporal_validity`` and ``correction_cases`` as well as
+        ``atomic_facts``, so a column reference there breaks eight call sites.
+        ``ForgettingFilter`` is optional (it no-ops when forgetting is
+        disabled) and excludes nothing in deep recall.
+
+        ``include_quarantined=True`` is for repair, export and erasure — paths
+        that must be able to see a withheld row in order to act on it. It is
+        keyword-only and greppable on purpose: every caller that opts in is
+        meant to be found in one search.
+        """
         if not fact_ids:
             return []
         where, params = _scope_where(
@@ -1302,18 +1769,67 @@ class DatabaseManager:
             include_global=include_global,
             include_shared=include_shared,
         )
-        archive_clause = (
-            " AND COALESCE(archive_status, 'live') != 'archived'"
-            if self._has_archive_status()
-            else ""
-        )
         placeholders = ",".join("?" for _ in fact_ids)
         rows = self.execute(
             f"SELECT * FROM atomic_facts WHERE fact_id IN ({placeholders}) "
-            f"AND {where}{archive_clause} ORDER BY created_at DESC",
+            f"AND {where}"
+            f"{self.visible_fact_clause(include_quarantined=include_quarantined)} "
+            "ORDER BY created_at DESC",
             (*fact_ids, *params),
         )
         return [self._row_to_fact(r) for r in rows]
+
+    def visible_fact_ids(
+        self, fact_ids: list[str] | tuple[str, ...], profile_id: str,
+        include_global: bool = False,
+        include_shared: bool = False,
+        *,
+        include_quarantined: bool = False,
+    ) -> set[str]:
+        """Which of *fact_ids* this profile may see. Same rule, no hydration.
+
+        ``get_facts_by_ids`` is the authorization source of truth and every
+        retrieval channel re-authorises through it — but a channel deciding
+        *which* of its candidates are allowed does not need their content, and
+        paying for the content is most of what recall costs.
+
+        Measured on the author's store: the entity channel authorised 3,659
+        candidates to return 20, and that single call was **374 ms of a 430 ms
+        recall — 87%**. Not the graph walk, which is 3.8 ms. The cost is
+        ``_row_to_fact`` decoding a 768-float embedding and two 768-float Fisher
+        vectors per row: about 8.4 million floats deserialised to answer a
+        yes/no question about 3,659 ids. The same trap is recorded a few
+        hundred lines up, where loading full facts "turned one new fact into a
+        5-second recall stall".
+
+        The predicate is built by the same two calls as ``get_facts_by_ids``, in
+        the same order, so the two cannot answer differently. A test asserts
+        that on the same inputs. Batched because the id list is unbounded and a
+        single ``IN`` clause is not.
+        """
+        if not fact_ids:
+            return set()
+        where, params = _scope_where(
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+        )
+        visible = self.visible_fact_clause(include_quarantined=include_quarantined)
+        unique = list(dict.fromkeys(fact_ids))
+        allowed: set[str] = set()
+        # Well inside SQLITE_MAX_VARIABLE_NUMBER once the scope parameters are
+        # added, on every build this ships against.
+        chunk = 800
+        for start in range(0, len(unique), chunk):
+            batch = unique[start:start + chunk]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.execute(
+                f"SELECT fact_id FROM atomic_facts WHERE fact_id IN ({placeholders}) "
+                f"AND {where}{visible}",
+                (*batch, *params),
+            )
+            allowed.update(dict(row)["fact_id"] for row in rows)
+        return allowed
 
     def store_entity_profile(self, ep: EntityProfile) -> str:
         """Persist an entity profile. Returns profile_entry_id."""

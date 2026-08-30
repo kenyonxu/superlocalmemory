@@ -17,7 +17,7 @@ from __future__ import annotations
 # Named profile definitions (introduced in v3.6.14)
 # ---------------------------------------------------------------------------
 
-_PROFILE_CORE: frozenset[str] = frozenset({  # 17
+_PROFILE_CORE: frozenset[str] = frozenset({  # 18
     "remember", "recall", "search", "fetch", "list_recent", "update_memory", "forget",
     "session_init", "close_session",
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
@@ -28,6 +28,13 @@ _PROFILE_CORE: frozenset[str] = frozenset({  # 17
     # natural caller is the agent holding the conversation — an assistant
     # asked "what did I work on yesterday" should not need a power profile.
     "get_memory_summary",
+    # v4.1.0: every memory operation is scoped to a profile, so a surface that
+    # can read or write memory must also be able to say which profile it means.
+    # Without this, the smallest profile can store and recall but can never
+    # leave the profile it happened to start in, and a second workspace is
+    # unreachable from the surface most hosts ship. The route stays RBAC
+    # member-gated, so company-mode isolation is unaffected.
+    "switch_profile",
 })
 
 # Portable Brain evidence must reach the coding-host profile shipped by the
@@ -48,6 +55,11 @@ _PROFILE_CODE: frozenset[str] = _PROFILE_CORE | _PROFILE_BRAIN | frozenset({  # 
     # v3.8.0: bounded loops on the MCP surface. Coding agents (the /slm-loop
     # command's audience) run gated, bounded loops and inspect the ledger.
     "slm_loop_run", "slm_loop_history", "slm_loop_show",
+    # Retrieval ranks a memory partly on whether it has actually helped, and
+    # the only evidence of that comes from the assistant that used it. The
+    # plugin ships SLM_MCP_PROFILE=code, so without these two the ranker has
+    # no input at all for the audience it exists to serve.
+    "report_outcome", "report_feedback",
 })
 
 _PROFILE_FULL_MESH: frozenset[str] = frozenset({  # 8
@@ -74,7 +86,7 @@ _PROFILE_FULL: frozenset[str] = frozenset({
     # prestage_context remains registered but deliberately raw-server-only.
 }) | _PROFILE_FULL_MESH  # 50
 
-_PROFILE_POWER: frozenset[str] = _PROFILE_FULL | frozenset({  # 61
+_PROFILE_POWER: frozenset[str] = _PROFILE_FULL | frozenset({  # 62
     "get_version", "get_mode", "health", "consistency_check", "recall_trace",
     "get_lifecycle_status", "set_retention_policy", "compact_memories",
     "get_behavioral_patterns", "audit_trail", "quantize", "get_retention_stats",

@@ -222,6 +222,71 @@
   }
 
   /* ── Layout ───────────────────────────────────────────────── */
+  /* Decay preview — three curves, one per source-trust level.
+     Shows what the kappa setting actually does before it is saved: the same
+     memory strength fading at three different rates depending on where the
+     memory came from. At kappa 0 the three curves coincide, which is the
+     honest picture of trust-modulation being off. */
+  var DECAY_TRUSTS = [
+    { trust: 0.0, color: '#e0245e', label: 'low trust' },
+    { trust: 0.5, color: '#f59e0b', label: 'medium' },
+    { trust: 1.0, color: '#10b981', label: 'trusted' }
+  ];
+
+  function buildDecayPreview() {
+    var wrap = el('div', null, { display:'flex', flexDirection:'column', gap:'6px' });
+    var cvs = el('canvas', { id: P + '-forg-decay' });
+    cvs.width = 300; cvs.height = 96;
+    Object.assign(cvs.style, {
+      border:'1px solid var(--border)', borderRadius:'4px', display:'block'
+    });
+    wrap.appendChild(cvs);
+    var key = el('div', null, { display:'flex', gap:'10px' });
+    DECAY_TRUSTS.forEach(function (t) {
+      key.appendChild(el('span', { text: t.label },
+        { fontSize:'10.5px', color: t.color, fontFamily:'var(--font-mono)' }));
+    });
+    wrap.appendChild(key);
+    return wrap;
+  }
+
+  /* The decay rate is per HOUR, and the window is chosen so the three curves
+     are actually distinguishable. At a strong memory's strength (100, the
+     configured maximum) retention over sixty days is indistinguishable from
+     zero for every trust level, so a two-month preview would draw three flat
+     lines along the bottom and say nothing. Three days separates them. */
+  var DECAY_HOURS = 72;
+  var DECAY_STRENGTH = 100.0;
+
+  function retentionAt(hours, kappa, trust) {
+    // Mirrors math/ebbinghaus.trust_modulated_retention exactly:
+    //   lambda_eff = (1 / S) * (1 + kappa * (1 - trust))
+    //   retention  = exp(-lambda_eff * hours)
+    var lambdaEff = (1.0 / DECAY_STRENGTH) * (1.0 + kappa * (1.0 - trust));
+    return Math.exp(-lambdaEff * hours);
+  }
+
+  function drawDecayCurve(kappa) {
+    var cvs = q('forg-decay');
+    if (!cvs || !cvs.getContext) return;
+    var ctx = cvs.getContext('2d');
+    var W = cvs.width, H = cvs.height, STEPS = 72;
+    ctx.clearRect(0, 0, W, H);
+    DECAY_TRUSTS.forEach(function (t) {
+      ctx.beginPath();
+      for (var i = 0; i <= STEPS; i++) {
+        var hours = (i / STEPS) * DECAY_HOURS;
+        var retention = retentionAt(hours, kappa, t.trust);
+        var x = (i / STEPS) * (W - 2) + 1;
+        var y = H - 2 - retention * (H - 4);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = t.color;
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+    });
+  }
+
   function makeRow(lbl, desc, key, ctrl) {
     var d = el('div', { 'data-set':'', 'data-txt':(lbl + ' ' + key).toLowerCase() });
     Object.assign(d.style, { display:'flex', alignItems:'center',
@@ -719,10 +784,16 @@
     intInp.style.minWidth = '80px'; intInp.style.maxWidth = '100px';
     var statsEl = el('span', { id: P + '-forg-stats', text:'Loading…' },
       { fontSize:'12px', color:'var(--fg-2)', fontFamily:'var(--font-mono)' });
+    var kapR = makeRange('forg-kap', '0', '5', '0.1', '2.0');
+    var decayEl = buildDecayPreview();
     var saveBtn = makeBtn('forg-save', 'Save Forgetting', true);
     var st = makeSt('forg');
     var restNote = makeRestartNote('forg');
     saveBtn.addEventListener('click', saveForgetting);
+    kapR.querySelector('input').addEventListener('input', function () {
+      drawDecayCurve(parseFloat(this.value));
+    });
+    kapR.querySelector('input').addEventListener('change', saveForgetting);
     onSw.addEventListener('od-toggle',  saveForgetting);
     immSw.addEventListener('od-toggle', saveForgetting);
     arcR.querySelector('input').addEventListener('change', saveForgetting);
@@ -734,6 +805,11 @@
       makeRow('Archive threshold', 'Memories below this strength move to cold archive', 'forgetting.archive_threshold', arcR),
       makeRow('Forget threshold', 'Memories below this strength are permanently deleted', 'forgetting.forget_threshold', fgtR),
       makeRow('Run every (minutes)', 'How often the forgetting engine runs in the background', 'forgetting.scheduler_interval_minutes', intInp),
+      makeRow('Fade untrusted sources faster (\u03ba)',
+              'Memories from sources you trust less decay quicker. 0 = every memory fades at the same rate.',
+              'forgetting.trust_kappa', kapR),
+      makeRow('Decay preview', 'Retention over 3 days at three source-trust levels',
+              '', decayEl),
       makeRow('Memory zone stats', '', 'forgetting.stats', statsEl),
       makeRow('Actions', '', '', bRow(saveBtn, st, restNote))
     ]);
@@ -751,6 +827,15 @@
         var fgt = q('forg-fgt');
         if (fgt) { fgt.value = d.forget_threshold || 0.05; var dF = q('forg-fgt-disp'); if (dF) dF.textContent = Number(d.forget_threshold || 0.05).toFixed(2); }
         var it = q('forg-int'); if (it) it.value = d.scheduler_interval_minutes || 30;
+        // == null, not ||: kappa 0 is a real setting (trust-modulation off) and
+        // a falsy check would silently redraw it as the 2.0 default.
+        var kap = q('forg-kap');
+        var kv = (d.trust_kappa == null) ? 2.0 : Number(d.trust_kappa);
+        if (kap) {
+          kap.value = kv;
+          var dK = q('forg-kap-disp'); if (dK) dK.textContent = kv.toFixed(2);
+        }
+        drawDecayCurve(kv);
       }).catch(function () {});
     fetch('/api/v3/forgetting/stats').then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
@@ -773,7 +858,8 @@
       core_memory_immune:         q('forg-imm') ? q('forg-imm').classList.contains('on') : true,
       archive_threshold:  parseFloat(q('forg-arc') ? q('forg-arc').value : '0.20'),
       forget_threshold:   parseFloat(q('forg-fgt') ? q('forg-fgt').value : '0.05'),
-      scheduler_interval_minutes: parseInt(q('forg-int') ? q('forg-int').value : '30') || 30
+      scheduler_interval_minutes: parseInt(q('forg-int') ? q('forg-int').value : '30') || 30,
+      trust_kappa: q('forg-kap') ? parseFloat(q('forg-kap').value) : 2.0
     }).then(function (r) { return r.json(); })
       .then(function (d) {
         setSt('forg', 'Saved', true);

@@ -20,10 +20,31 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-#: Highest schema_version this runner can write.  Matches the trailing serial
-#: of the latest migration (M042).  Increment when adding new migrations or
+#: Highest schema_version this runner can write.  Matches the trailing serial of
+#: the latest migration (M049).  Increment when adding new migrations or
 #: table-level breaking changes.
-SUPPORTED_SCHEMA_VERSION: int = 42
+#:
+#: This sat at 42 while M043, M044 and M045 shipped, so for three migrations the
+#: ceiling did not move and nothing prevented an older build from opening a
+#: newer store.  That was tolerable only because those three were additive: a
+#: build that did not know about a new column or table simply never read it.
+#:
+#: M046 is not additive.  It rebuilds ``atomic_facts`` with a constraint that
+#: rejects the value an older build classifies planned events as, so an older
+#: writer against a migrated store fails its INSERT.  The ceiling is what turns
+#: that from a lost memory into a refusal to start, which is why it moves here
+#: and why it moves to the trailing serial rather than to 43.
+#:
+#: M049 is additive — a unique index on ``schema_version`` plus the removal of
+#: the duplicate rows that index could not otherwise be created over — so an
+#: older build could in principle read a store it has touched.  The ceiling
+#: still moves, because the convention is "trailing serial, always": the cost of
+#: moving it for an additive migration is an older build declining a store it
+#: could have read, and the cost of NOT moving it for one that turns out not to
+#: be additive is a silent bad write.  Those are not comparable, and judging
+#: additivity per migration is exactly the judgement that let it fall three
+#: behind.
+SUPPORTED_SCHEMA_VERSION: int = 49
 
 
 class SchemaVersionError(RuntimeError):

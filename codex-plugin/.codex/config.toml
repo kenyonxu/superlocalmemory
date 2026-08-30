@@ -24,7 +24,12 @@
 #
 #   command = "/absolute/path/to/superlocalmemory/codex-plugin/scripts/slm-launch"
 #   args = []
-#   env = { SLM_MCP_PROFILE = "code", SLM_AGENT_ID = "codex", SLM_DATA_DIR = "~/.superlocalmemory" }
+#   # Only the agent id. That is attribution, not configuration.
+# No SLM_MCP_PROFILE: which tools you expose is your decision, and a plugin
+# that narrows it takes away tools you configured. No SLM_DATA_DIR: SLM
+# resolves its own canonical store, which is the one every other surface
+# uses -- pinning it here would override a user who had moved theirs.
+env = { SLM_AGENT_ID = "codex" }
 #
 # The slm-launch script resolves the venv binary from SLM_DATA_DIR (default:
 # ~/.superlocalmemory) and falls back to the PATH `slm` binary automatically.
@@ -32,4 +37,4 @@
 [mcp_servers.superlocalmemory]
 command = "slm"
 args = ["mcp"]
-env = { SLM_MCP_PROFILE = "code", SLM_AGENT_ID = "codex", SLM_DATA_DIR = "~/.superlocalmemory" }
+env = { SLM_AGENT_ID = "codex" }

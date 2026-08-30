@@ -5,6 +5,19 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## mslm 4.2.0+upstream — merged upstream SuperLocalMemory 4.0.10–4.1.11 (2026-08-30)
+- Merge of 120 upstream commits (merge-base dcbdc850, upstream 4.0.9):
+  profile-scoped loop ledgers, recall engagement learning (on by default),
+  working memory, prospective memory markers, reward/propensity learning,
+  diagnostics join-coverage checks, antigravity + codex plugin surfaces,
+  M043–M046 migrations.
+- Brand layer (mslm-memory / 4.2.0 / torch>=2.11.0), journal-policy default
+  DELETE, embeddings daemon fallback, hermes integration kept fork-side.
+- Pre-merge repair bbef9b22: completed the journal-policy conversion missed
+  by f4dd873c (RecallQueue init, fact_consolidator read-back, WAL-specific
+  test opt-ins) — the 2026-08-29 hotfix had been committed without a full
+  test run and left the baseline red (64 failed / 6 errors).
+
 ## mslm 4.2.0+ — EmbeddingService daemon fallback (2026-08-21)
 - Embedded FULL-engine hosts (gateway, any embedded consumer) now recover
   full-channel recall via the daemon's /api/v3/embed when the machine-wide

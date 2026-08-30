@@ -38,6 +38,49 @@ _MAX_RETRIES = 5
 _RETRY_BASE_SECONDS = 0.1
 
 
+def _load_vector_extension(conn: sqlite3.Connection) -> bool:
+    """Make vector search available on this connection. Returns whether it loaded.
+
+    Without this the vector table cannot be created, so every semantic lookup
+    over the code graph returned nothing — not an error, just an empty result,
+    with one line in the maintenance log saying embeddings were disabled. The
+    extension was installed and working the whole time; no connection ever asked
+    for it.
+
+    Loaded per connection because that is the only scope SQLite offers: an
+    extension is bound to a connection, not to a database file, and this class
+    opens a fresh connection per statement.
+
+    The import stays inside the function. At module level it would make the
+    whole code graph unimportable wherever the wheel is unavailable, which is a
+    platform detail and not a reason to lose the rest of the feature.
+    """
+    try:
+        import sqlite_vec
+    except Exception as exc:  # ImportError, or a broken native build
+        logger.debug("vector search unavailable: %s", exc)
+        return False
+    try:
+        conn.enable_load_extension(True)
+    except AttributeError as exc:
+        # Python built against a SQLite without extension support.
+        logger.debug("this SQLite cannot load extensions: %s", exc)
+        return False
+    try:
+        sqlite_vec.load(conn)
+        return True
+    except Exception as exc:
+        logger.debug("vector extension failed to load: %s", exc)
+        return False
+    finally:
+        # Closed again either way. Leaving extension loading enabled on a
+        # connection widens what any later SQL on it is allowed to do.
+        try:
+            conn.enable_load_extension(False)
+        except Exception:  # pragma: no cover — defensive
+            pass
+
+
 class CodeGraphDatabase:
     """SQLite database manager for code_graph.db.
 
@@ -71,6 +114,7 @@ class CodeGraphDatabase:
         apply_journal_mode(conn)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA synchronous=NORMAL")
+        _load_vector_extension(conn)
         return conn
 
     def execute(

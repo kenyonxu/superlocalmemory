@@ -737,7 +737,7 @@ a { color: #00D4AA; }
 <p class="sub">Back up your memories to a private GitHub repository.</p>
 
 <label>Personal Access Token</label>
-<input type="password" id="pat" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx">
+<input type="password" id="pat" placeholder="GitHub personal access token">
 
 <label>Repository Name</label>
 <input type="text" id="repo" value="slm-backup" placeholder="slm-backup">

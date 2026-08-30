@@ -17,7 +17,7 @@ the majority of benchmark score differences.
 Key patterns implemented:
   - Conversation chunking (5-10 turns, 2-turn overlap)
   - Three-date temporal model (observation, referenced, interval)
-  - Typed fact classification (episodic / semantic / opinion / temporal)
+  - Typed fact classification (episodic / semantic / opinion / prospective)
   - Importance scoring (entity frequency + emotional markers + recency)
   - Narrative fact extraction in LLM modes (self-contained, context-rich)
 
@@ -34,6 +34,7 @@ import uuid
 from typing import Any, Protocol, runtime_checkable
 
 from superlocalmemory.core.config import EncodingConfig
+from superlocalmemory.encoding.prospective_markers import looks_prospective
 from superlocalmemory.storage.models import AtomicFact, FactType, Mode, SignalType
 
 logger = logging.getLogger(__name__)
@@ -107,13 +108,6 @@ _EXPERIENCE_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
-_TEMPORAL_MARKERS = re.compile(
-    r"\b(?:deadline|due date|expires?|scheduled|appointment|meeting|"
-    r"on \w+day|at \d{1,2}:\d{2}|by \w+|until|before|after|"
-    r"in \d+ (?:days?|weeks?|months?|years?)|"
-    r"next week|next month|this weekend|tomorrow|yesterday)\b",
-    re.IGNORECASE,
-)
 
 _EMOTIONAL_KEYWORDS = frozenset({
     "love", "hate", "amazing", "terrible", "wonderful", "awful", "excited",
@@ -140,9 +134,13 @@ _SYSTEM_PROMPT = (
     "must name the subject explicitly.\n"
     "2. Each fact must be a COMPLETE, STANDALONE statement understandable "
     "without the original conversation.\n"
-    "3. Convert ALL relative time to ABSOLUTE dates when possible. "
-    "'Yesterday' with session date 2024-01-15 becomes '2024-01-14'. "
-    "'Next month' becomes the actual month and year.\n"
+    "3. Convert ALL relative time to ABSOLUTE dates when possible, using "
+    "ONLY the conversation date given in the user message below as your "
+    "reference point — never invent or assume a date. 'Yesterday' resolves "
+    "to one calendar day before that conversation date; 'next month' "
+    "resolves to the following calendar month of that same date. If no "
+    "conversation date is given, leave the date unresolved rather than "
+    "guessing one.\n"
     "4. Resolve ALL coreferences. 'He went there' must become "
     "'[Person name] went to [Place name]'.\n"
     "5. Extract relationships between people when mentioned.\n"
@@ -153,7 +151,7 @@ _SYSTEM_PROMPT = (
     "- episodic: personal event or experience (visited, attended, did)\n"
     "- semantic: objective fact about the world (jobs, locations, relations)\n"
     "- opinion: subjective belief or preference (likes, thinks, prefers)\n"
-    "- temporal: time-bound fact with dates or deadlines\n\n"
+    "- prospective: something planned for later, with a date or deadline\n\n"
     "Respond ONLY with a JSON array. Example:\n"
     '[{"text":"Alice works at Google as a software engineer",'
     '"fact_type":"semantic","entities":["Alice","Google"],'
@@ -320,11 +318,18 @@ def _extract_entities(text: str) -> list[str]:
 
 
 def _classify_sentence(sentence: str) -> FactType:
-    """Classify a sentence into a FactType using keyword markers."""
-    if _TEMPORAL_MARKERS.search(sentence):
-        return FactType.TEMPORAL
+    """Classify a sentence into a FactType using keyword markers.
+
+    Opinion is asked first, and the router asks in the same order. They used to
+    differ, so "I think we should ship next week" was a plan on one path and an
+    opinion on the other, for the same sentence. Opinion wins because an opinion
+    about a plan is not a commitment, and the list of what is coming up should
+    hold commitments.
+    """
     if _OPINION_MARKERS.search(sentence):
         return FactType.OPINION
+    if looks_prospective(sentence):
+        return FactType.PROSPECTIVE
     if _EXPERIENCE_MARKERS.search(sentence):
         return FactType.EPISODIC
     return FactType.SEMANTIC
@@ -370,7 +375,7 @@ def _signal_from_fact_type(ft: FactType) -> SignalType:
         FactType.EPISODIC: SignalType.FACTUAL,
         FactType.SEMANTIC: SignalType.FACTUAL,
         FactType.OPINION: SignalType.OPINION,
-        FactType.TEMPORAL: SignalType.TEMPORAL,
+        FactType.PROSPECTIVE: SignalType.TEMPORAL,
     }
     return mapping.get(ft, SignalType.FACTUAL)
 
@@ -770,7 +775,10 @@ class FactExtractor:
             "semantic": FactType.SEMANTIC,
             "world": FactType.SEMANTIC,
             "opinion": FactType.OPINION,
-            "temporal": FactType.TEMPORAL,
+            "prospective": FactType.PROSPECTIVE,
+            # Kept alongside the current word for the reason given in
+            # type_router: an unrecognised type falls through to SEMANTIC.
+            "temporal": FactType.PROSPECTIVE,
         }
         fact_type = type_map.get(raw_type, FactType.SEMANTIC)
 

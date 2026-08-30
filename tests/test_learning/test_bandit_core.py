@@ -35,7 +35,7 @@ def bandit_db(tmp_path: Path) -> Path:
     """Create a learning.db with M005 applied and return its path.
 
     Note: M001/M002 depend on tables owned by Wave 2B — those failures are
-    expected in this Wave 3 Stream A isolation harness. We only require
+    expected in this isolation harness. We only require
     M003 (migration_log) and M005 (bandit tables) to succeed.
     """
     learning_db = tmp_path / "learning.db"

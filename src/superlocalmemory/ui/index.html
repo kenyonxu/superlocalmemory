@@ -113,27 +113,19 @@
             </div>
         </div>
 
-        <!-- Main content tabs — Bootstrap nav-tabs row removed (v3.4.21,
-             Domain 2). Sidebar (built by ng-shell.js) is the sole
-             navigation. Hidden tab buttons below keep the Bootstrap
-             ``shown.bs.tab`` event contract alive — ng-shell's
-             ``activateTab`` dispatches on them, and brain.js / other
-             listeners fire normally. No visual output on initial paint. -->
+        <!-- The visible navigation is the sidebar, built by od-shell.js.
+             These hidden buttons exist only so od-shell's ``activateTab`` can
+             dispatch Bootstrap's ``shown.bs.tab`` on a real element for panes
+             it does not render itself — today that is dashboard-pane alone,
+             whose data reload hangs off that event. Every button here must
+             target a pane that exists: nine did not, and clicking one did
+             nothing at all. -->
         <ul class="nav nav-tabs d-none" id="mainTabs" role="tablist" aria-hidden="true">
             <li class="nav-item"><button class="nav-link active" id="dashboard-tab" data-bs-toggle="tab" data-bs-target="#dashboard-pane" type="button"></button></li>
             <li class="nav-item"><button class="nav-link" id="graph-tab" data-bs-toggle="tab" data-bs-target="#graph-pane" type="button"></button></li>
             <li class="nav-item"><button class="nav-link" id="memories-tab" data-bs-toggle="tab" data-bs-target="#memories-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="recall-lab-tab" data-bs-toggle="tab" data-bs-target="#recall-lab-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="clusters-tab" data-bs-toggle="tab" data-bs-target="#clusters-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="timeline-tab" data-bs-toggle="tab" data-bs-target="#timeline-pane" type="button"></button></li>
             <li class="nav-item"><button class="nav-link" id="brain-tab" data-bs-toggle="tab" data-bs-target="#brain-pane" type="button" role="tab" aria-controls="brain-pane"></button></li>
-            <li class="nav-item"><button class="nav-link" id="events-tab" data-bs-toggle="tab" data-bs-target="#events-pane" type="button"></button></li>
             <li class="nav-item"><button class="nav-link" id="agents-tab" data-bs-toggle="tab" data-bs-target="#agents-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="trust-tab" data-bs-toggle="tab" data-bs-target="#trust-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="lifecycle-tab" data-bs-toggle="tab" data-bs-target="#lifecycle-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="compliance-tab" data-bs-toggle="tab" data-bs-target="#compliance-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="math-health-tab" data-bs-toggle="tab" data-bs-target="#math-health-pane" type="button"></button></li>
-            <li class="nav-item"><button class="nav-link" id="ide-tab" data-bs-toggle="tab" data-bs-target="#ide-pane" type="button"></button></li>
             <li class="nav-item"><button class="nav-link" id="settings-tab" data-bs-toggle="tab" data-bs-target="#settings-pane" type="button"></button></li>
         </ul>
 
@@ -956,7 +948,7 @@
                         <h5 class="mb-0"><i class="bi bi-shield-lock text-success"></i> Compliance &amp; audit</h5>
                         <span class="badge bg-secondary" id="compliance-profile-badge">default</span>
                     </div>
-                    <p class="text-muted small mb-3">Set retention policies and access controls. In Mode A, all data stays on your device &mdash; EU AI Act compliant by default.</p>
+                    <p class="text-muted small mb-3">Set retention policies and access controls. In Mode A nothing leaves your device, which is a control your compliance programme can rely on &mdash; it is not a compliance certification, and this product does not issue one.</p>
                     <div class="row g-3 mb-3">
                         <div class="col-md-4"><div class="border rounded p-2 text-center"><div class="fw-bold fs-4" id="cp-audit-count">-</div><small class="text-muted">Audit events</small></div></div>
                         <div class="col-md-4"><div class="border rounded p-2 text-center"><div class="fw-bold fs-4" id="cp-retention-count">-</div><small class="text-muted">Retention policies</small></div></div>
@@ -1084,7 +1076,7 @@
                             <div class="btn-group w-100" role="group">
                                 <input type="radio" class="btn-check" name="settings-mode-radio" id="mode-a-radio" value="a" checked>
                                 <label class="btn btn-outline-success" for="mode-a-radio">
-                                    <strong>Mode A</strong><br><small>Zero Cloud — EU AI Act</small>
+                                    <strong>Mode A</strong><br><small>Zero Cloud</small>
                                 </label>
                                 <input type="radio" class="btn-check" name="settings-mode-radio" id="mode-b-radio" value="b">
                                 <label class="btn btn-outline-info" for="mode-b-radio">
@@ -1585,7 +1577,6 @@
     <!-- Neural Glass shell (v3.4.21 restructured) -->
     <script src="static/js/ng-health.js?v=345"></script>
     <script src="static/js/ng-ingestion.js?v=345"></script>
-    <script src="static/js/ng-entities.js?v=3410"></script>
     <script src="static/js/ng-skills.js?v=3411"></script>
     <script src="static/js/ng-mesh.js?v=345"></script>
     <!-- OD Shell v1.0 — replaces ng-shell.js; CSP-safe single-page tab switching -->
@@ -1596,7 +1587,7 @@
     <script src="static/js/event-delegation.js?v=379"></script>
     <!-- OD screen modules (v3.7.9): approved-design panes wired to live data.
          Load LAST so their window.load<Screen> overrides win over the legacy loaders. -->
-    <script src="static/js/od-brain.js?v=4f233c96"></script>
+    <script src="static/js/od-brain.js?v=77369272"></script>
     <script src="static/js/od-components.js?v=382"></script>
     <script src="static/js/od-health.js?v=382"></script>
     <script src="static/js/od-operations.js?v=380"></script>
@@ -1604,7 +1595,7 @@
     <script src="static/js/od-ops-health.js?v=400"></script>
     <script src="static/js/od-team.js?v=379"></script>
     <script src="static/js/od-graph.js?v=6812bf6c"></script>
-    <script src="static/js/od-memories.js?v=022ff653"></script>
+    <script src="static/js/od-memories.js?v=30ac32ed"></script>
     <script src="static/js/od-entities.js?v=379"></script>
     <!-- Multi-Agent Memory pane (v3.8.0): visualises memory written by multiple agents -->
     <script src="static/js/od-agents.js?v=c75ff3c2"></script>

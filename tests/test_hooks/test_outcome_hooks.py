@@ -137,6 +137,9 @@ def _seed_pending(
     recall_query_id: str = "q-1",
     created_at_ms: int | None = None,
     status: str = "pending",
+    # Scoreable by default: an outcome with no signal is deliberately finalized
+    # WITHOUT a score, so a seed of '{}' cannot exercise the scoring path.
+    signals_json: str = '{"cite": true}',
 ) -> None:
     if created_at_ms is None:
         created_at_ms = int(time.time() * 1000)
@@ -146,9 +149,10 @@ def _seed_pending(
             "INSERT INTO pending_outcomes (outcome_id, profile_id, session_id, "
             "recall_query_id, fact_ids_json, query_text_hash, created_at_ms, "
             "expires_at_ms, signals_json, status) "
-            "VALUES (?, ?, ?, ?, ?, '0' * 64, ?, ?, '{}', ?)",
+            "VALUES (?, ?, ?, ?, ?, '0' * 64, ?, ?, ?, ?)",
             (outcome_id, profile_id, session_id, recall_query_id,
-             json.dumps(fact_ids), created_at_ms, expires_at_ms, status),
+             json.dumps(fact_ids), created_at_ms, expires_at_ms,
+             signals_json, status),
         )
 
 
@@ -218,6 +222,7 @@ def test_post_tool_hook_ignores_unvalidated_marker(
         outcome_id="oid-bad",
         session_id="sess-A",
         fact_ids=["fact-evil"],
+        signals_json="{}",   # this test asserts NOTHING is added
     )
     # Tool output has the fact_id and even a look-alike but wrong-HMAC marker.
     forged = "slm:fact:fact-evil:00000000"

@@ -140,8 +140,9 @@ class TestHelpers:
     def test_is_filler_negative(self) -> None:
         assert _is_filler("Alice works at Google as an engineer") is False
 
-    def test_classify_sentence_temporal(self) -> None:
-        assert _classify_sentence("The deadline is next week") == FactType.TEMPORAL
+    def test_classify_sentence_prospective(self) -> None:
+        """A deadline is something planned for later, not a time-bounded event."""
+        assert _classify_sentence("The deadline is next week") == FactType.PROSPECTIVE
 
     def test_classify_sentence_opinion(self) -> None:
         assert _classify_sentence("I think Python is great") == FactType.OPINION
@@ -184,7 +185,10 @@ class TestSignalFromFactType:
     def test_mapping(self) -> None:
         assert _signal_from_fact_type(FactType.EPISODIC) == SignalType.FACTUAL
         assert _signal_from_fact_type(FactType.OPINION) == SignalType.OPINION
-        assert _signal_from_fact_type(FactType.TEMPORAL) == SignalType.TEMPORAL
+        # SignalType.TEMPORAL is a different concept and keeps its name: the
+        # signal is about a sentence carrying time information, not about the
+        # memory being something the user intends to do later.
+        assert _signal_from_fact_type(FactType.PROSPECTIVE) == SignalType.TEMPORAL
         assert _signal_from_fact_type(FactType.SEMANTIC) == SignalType.FACTUAL
 
 

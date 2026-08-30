@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+
+from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
 from fastapi.testclient import TestClient
 
 _CANONICAL_RUNTIMES = []
@@ -706,7 +708,7 @@ def test_mcp_profile_defaults_resolve_from_daemon_runtime(monkeypatch) -> None:
 
     assert result["success"] is True
     engine._db.search_facts_fts.assert_called_once_with(
-        "runtime-token", "beta", limit=10,
+        "runtime-token", "beta", limit=CANONICAL_RECALL_LIMIT,
     )
 
 

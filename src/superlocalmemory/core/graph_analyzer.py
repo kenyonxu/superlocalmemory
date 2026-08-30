@@ -41,126 +41,90 @@ class GraphAnalyzer:
         self._db = db
 
     def compute_and_store(self, profile_id: str) -> dict[str, Any]:
-        """Run all analyses and persist to fact_importance.
+        """Recompute structural importance for a profile and persist it.
 
-        v3.4.1: Now uses Leiden (falls back to Label Propagation),
-        generates TF-IDF community labels, computes bridge scores.
+        The computation and the write now live in ``core/graph_metrics``, which
+        is the only thing that writes ``fact_importance``. This method keeps its
+        shape for its three callers and adds the community labels the dashboard
+        reads, which are a presentation concern and not part of the ranking
+        signal.
 
-        Returns summary dict with node_count, community_count, top_5_nodes,
-        bridge_count, top_bridge_nodes, community_labels.
+        Two behaviours changed with the move, both deliberate. Isolated facts now
+        get a row instead of being skipped, so "no position in the graph" stops
+        looking like "not computed yet" to the ranker. And the graph is the
+        *visible* graph: the previous version read ``atomic_facts`` and
+        ``graph_edges`` raw, so on the author's store it ranked 1,299 facts the
+        store is not allowed to return, diluting every real score.
         """
+        from superlocalmemory.core.graph_metrics import compute_graph_metrics
+
+        report = compute_graph_metrics(self._db, profile_id)
+        if not report.ok:
+            logger.warning("Graph metrics: %s", report.summary())
+            return {
+                "node_count": 0,
+                "edge_count": report.edges,
+                "community_count": 0,
+                "top_5_nodes": [],
+                "error": report.error,
+            }
+
+        communities: dict[str, int] = {}
+        top_5: list[tuple[str, float]] = []
+        bridge_count = 0
+        top_bridges: list[tuple[str, float]] = []
         try:
-            graph = self._build_networkx_graph(profile_id)
-            if graph.number_of_nodes() == 0:
-                return {
-                    "node_count": 0,
-                    "edge_count": 0,
-                    "community_count": 0,
-                    "top_5_nodes": [],
-                }
+            rows = self._db.execute(
+                "SELECT fact_id, pagerank_score, community_id, bridge_score "
+                "FROM fact_importance WHERE profile_id = ? "
+                "ORDER BY pagerank_score DESC",
+                (profile_id,),
+            )
+            ranked = [dict(row) for row in rows]
+            for row in ranked:
+                if row.get("community_id") is not None:
+                    communities[row["fact_id"]] = int(row["community_id"])
+            top_5 = [
+                (row["fact_id"], round(float(row["pagerank_score"] or 0.0), 4))
+                for row in ranked[:5]
+            ]
+            bridges = [
+                (row["fact_id"], float(row.get("bridge_score") or 0.0))
+                for row in ranked
+            ]
+            bridge_count = len([1 for _fid, score in bridges if score > 0.1])
+            top_bridges = sorted(bridges, key=lambda item: -item[1])[:5]
+        except Exception as exc:
+            logger.debug("Reading back graph metrics failed: %s", exc)
 
-            pagerank = self.compute_pagerank(graph)
-            communities = self.detect_communities_leiden(graph, profile_id)
-            centrality = self._compute_degree_centrality(graph)
-            bridge_scores = self.compute_bridge_scores(graph)
-            labels = self.compute_community_labels(profile_id, communities)
-
-            # v3.4.1: Ensure bridge_score column exists (idempotent migration)
+        labels: dict[int, str] = {}
+        if communities:
             try:
-                columns = self._db.execute(
-                    "PRAGMA table_info(fact_importance)", (),
-                )
-                has_bridge = any(
-                    dict(c).get("name") == "bridge_score" for c in columns
-                )
-                if not has_bridge:
-                    self._db.execute(
-                        "ALTER TABLE fact_importance "
-                        "ADD COLUMN bridge_score REAL DEFAULT 0.0",
-                        (),
-                    )
-            except Exception:
-                pass
-
-            # Persist to fact_importance (with bridge_score)
-            for node_id in graph.nodes():
-                pr_score = pagerank.get(node_id, 0.0)
-                comm_id = communities.get(node_id)
-                deg_cent = centrality.get(node_id, 0.0)
-                br_score = bridge_scores.get(node_id, 0.0)
-                try:
-                    self._db.execute(
-                        "INSERT OR REPLACE INTO fact_importance "
-                        "(fact_id, profile_id, pagerank_score, community_id, "
-                        " degree_centrality, bridge_score, computed_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
-                        (node_id, profile_id, round(pr_score, 6),
-                         comm_id, round(deg_cent, 4),
-                         round(br_score, 6)),
-                    )
-                except Exception:
-                    # Fallback without bridge_score if column doesn't exist
-                    self._db.execute(
-                        "INSERT OR REPLACE INTO fact_importance "
-                        "(fact_id, profile_id, pagerank_score, community_id, "
-                        " degree_centrality, computed_at) "
-                        "VALUES (?, ?, ?, ?, ?, datetime('now'))",
-                        (node_id, profile_id, round(pr_score, 6),
-                         comm_id, round(deg_cent, 4)),
-                    )
-
-            # v3.4.1: Persist community labels to JSON sidecar
-            try:
+                labels = self.compute_community_labels(profile_id, communities)
                 from superlocalmemory.infra.data_root import canonical_data_root
                 labels_dir = canonical_data_root()
                 labels_dir.mkdir(parents=True, exist_ok=True)
-                labels_path = labels_dir / f"{profile_id}_community_labels.json"
-                labels_path.write_text(json.dumps(labels, indent=2))
-            except Exception:
-                pass
+                (labels_dir / f"{profile_id}_community_labels.json").write_text(
+                    json.dumps(labels, indent=2),
+                )
+            except Exception as exc:
+                logger.debug("Community labels skipped: %s", exc)
 
-            top_5 = sorted(
-                pagerank.items(), key=lambda x: x[1], reverse=True,
-            )[:5]
-            unique_communities = len(
-                set(c for c in communities.values() if c is not None),
-            )
-
-            bridge_count = len(
-                [s for s in bridge_scores.values() if s > 0.1],
-            )
-            top_bridges = sorted(
-                bridge_scores.items(), key=lambda x: -x[1],
-            )[:5]
-
-            logger.info(
-                "GraphAnalyzer: %d nodes, %d communities, %d bridges, "
-                "labels=%s",
-                graph.number_of_nodes(), unique_communities,
-                bridge_count, labels,
-            )
-
-            return {
-                "node_count": graph.number_of_nodes(),
-                "edge_count": graph.number_of_edges(),
-                "community_count": unique_communities,
-                "top_5_nodes": [
-                    (nid, round(score, 4)) for nid, score in top_5
-                ],
-                "bridge_count": bridge_count,
-                "top_bridge_nodes": [
-                    (nid, round(s, 4)) for nid, s in top_bridges
-                ],
-                "community_labels": labels,
-            }
-        except Exception as exc:
-            logger.debug("GraphAnalyzer.compute_and_store failed: %s", exc)
-            return {
-                "node_count": 0,
-                "edge_count": 0,
-                "community_count": 0,
-                "top_5_nodes": [],
-            }
+        logger.info("GraphAnalyzer: %s", report.summary())
+        return {
+            "node_count": report.written,
+            "edge_count": report.edges,
+            "community_count": report.communities,
+            "top_5_nodes": top_5,
+            "bridge_count": bridge_count,
+            "top_bridge_nodes": [
+                (fid, round(score, 4)) for fid, score in top_bridges
+            ],
+            "community_labels": labels,
+            "engine": report.engine,
+            "isolated_facts": report.isolated,
+            "duration_ms": report.duration_ms,
+        }
 
     def compute_pagerank(
         self,

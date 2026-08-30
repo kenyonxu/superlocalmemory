@@ -145,8 +145,23 @@ def test_persisted_bytes_sha256_matches_stored_digest(tmp_path):
 def test_phase3_requires_active_and_verified_model(tmp_path):
     db = make_db_with_migrations(tmp_path)
     _seed_training_rows(db)
+    # The 400 rows above are EXPOSURES (signal_type='candidate') — training
+    # data, which is what _seed_training_rows models. As of 4.1.0 the phase
+    # gate counts feedback only, so exposures no longer advance it: counting
+    # them reported 5,352 signals on a store with two real feedback events and
+    # unlocked Phase 3 for a model trained entirely on zero labels.
+    #
+    # This test is about a model needing to be ACTIVE AND VERIFIED, so it needs
+    # the phase to be reachable — which now takes real feedback. Seeding it
+    # here rather than in the shared helper keeps the two ideas separate:
+    # training data exists, and enough feedback exists to trust a model.
+    for i in range(250):
+        db.store_signal(
+            profile_id="p1", query="q", fact_id=f"fb-{i}",
+            signal_type="legacy_feedback", value=1.0,
+        )
 
-    # (a) No model yet → phase 2 (we seeded 400 signals).
+    # (a) No model yet → phase 2.
     assert db.load_active_model("p1") is None
     sig_count = db.count_signals("p1")
     assert sig_count >= 200
@@ -332,7 +347,7 @@ def test_no_fstring_sql_in_lld02_new_modules():
     Pre-existing f-string SQL with hard-coded values (e.g. iterating a tuple
     of known table names in ``database.reset()`` or ``IN``-clause
     placeholders in ``_generate_patterns``) is out of scope for LLD-02
-    Wave 2 Stream B; the rule in §7 targets user-data interpolation.
+    this stream; the rule in §7 targets user-data interpolation.
     """
     import re
     new_modules = [

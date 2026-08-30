@@ -1,62 +1,131 @@
 #!/usr/bin/env bash
-# slm-launch — WP-F SuperLocalMemory MCP launcher (POSIX)
+# slm-launch — SuperLocalMemory MCP launcher (POSIX)
 #
 # Cross-platform counterpart: slm-launch.bat (Windows)
-# Referenced by plugin/.mcp.json as the MCP server command.
+# Referenced by .mcp.json as the MCP server command.
 #
-# Resolves the correct slm binary for POSIX and joins the namespace daemon
-# before opening the MCP stdio transport. This preserves one writer for all
-# parallel Claude sessions that share CLAUDE_PLUGIN_DATA.
+# WHAT THIS RESOLVES, AND WHY THE DEFAULT CHANGED
 #
-# On Windows, Claude Code invokes slm-launch.bat instead (same-stem, .bat extension).
+# It used to default to a venv the plugin owns:
+# "${CLAUDE_PLUGIN_DATA}/venv/bin/slm". So anyone who already had SuperLocalMemory
+# — from pip, pipx or npm — got a SECOND installation the moment they installed
+# the plugin, on its own schedule, upgraded separately, and easy to leave behind
+# a release. Installing a plugin should not fork your installation.
 #
-# Environment:
-#   CLAUDE_PLUGIN_DATA — persistent data dir where the plugin venv lives
-#   SLM_DATA_DIR       — optional; SLM data dir (default: ~/.superlocalmemory)
-#   SLM_LAUNCHER       — optional; which slm binary to use:
-#                          plugin (default) — the plugin venv binary
-#                          system           — the system `slm` on PATH
-#                          <path>           — an explicit slm binary (leading ~ expanded)
+# It was also Claude-Code-only. ${CLAUDE_PLUGIN_DATA} is set by Claude Code and
+# by nothing else, so on Codex or Antigravity the path collapsed to
+# "/venv/bin/slm" and the server simply did not start.
+#
+# The default is now: USE THE SLM THAT IS ALREADY INSTALLED. A plugin-owned venv
+# is the fallback for a machine that has none, not the first choice.
+#
+# Environment (all optional):
+#   SLM_LAUNCHER       auto (default) — prefer an installed slm, else the plugin venv
+#                      system         — require the slm on PATH
+#                      plugin         — require the plugin's own venv
+#                      <path>         — an explicit slm binary (leading ~ expanded)
+#   SLM_DATA_DIR       SLM data dir (default: ~/.superlocalmemory)
+#   CLAUDE_PLUGIN_DATA where a plugin-owned venv lives, when there is one
+#
+# Deliberately NOT set here: the MCP profile. Which tools a host exposes is the
+# user's decision, and a plugin that narrows it takes away tools they configured.
 
 _SLM_DATA="${SLM_DATA_DIR:-$HOME/.superlocalmemory}"
+_PLUGIN_BIN="${CLAUDE_PLUGIN_DATA:+${CLAUDE_PLUGIN_DATA}/venv/bin/slm}"
 
-# If a system daemon is already running (its pidfile points at a live process),
-# there is no need to boot the plugin's own venv daemon — we can open an MCP
-# writer against the daemon that is already up. This skips a redundant, slow
-# venv bootstrap on every session start.
+# Is a daemon already up for this data dir? If so we join it rather than boot a
+# second one — one writer for every session that shares the store.
 _daemon_running=0
 if [ -f "${_SLM_DATA}/daemon.pid" ] \
    && kill -0 "$(cat "${_SLM_DATA}/daemon.pid" 2>/dev/null)" 2>/dev/null; then
     _daemon_running=1
 fi
 
-case "${SLM_LAUNCHER:-plugin}" in
-    plugin)
-        SLM_BIN="${CLAUDE_PLUGIN_DATA}/venv/bin/slm"
-        # Only bootstrap the owned daemon when one is not already running.
-        if [ "${_daemon_running}" -eq 0 ]; then
-            if ! "${SLM_BIN}" serve start >&2; then
+# Expand a leading ~ WITHOUT eval — eval on an environment value is a
+# command-injection foot-gun. Only tilde expansion; pass expanded paths for vars.
+_expand_tilde() {
+    case "$1" in
+        "~"*) printf '%s' "${HOME}${1#\~}" ;;
+        *)    printf '%s' "$1" ;;
+    esac
+}
+
+# Start a daemon with the chosen binary unless one is already serving.
+_ensure_daemon() {
+    [ "${_daemon_running}" -eq 1 ] && return 0
+    "$1" serve start >&2
+}
+
+case "${SLM_LAUNCHER:-auto}" in
+    auto)
+        # 1. An slm already on PATH — the pip, pipx or npm install the user has.
+        #    This is the common case and the one that must not be forked.
+        if command -v slm >/dev/null 2>&1; then
+            # Both orderings end up here, and both must converge on ONE
+            # environment:
+            #   installed first, plugin second -> nothing was ever forked;
+            #   plugin first, installed second -> the plugin venv is now the
+            #     older copy and must stop being used.
+            # They already share one store, because this launcher sets no
+            # SLM_DATA_DIR and both resolve ~/.superlocalmemory. What is left to
+            # go wrong is two DIFFERENT VERSIONS serving that one store: whoever
+            # starts the daemon first decides which code the other one talks to.
+            # So when a leftover plugin venv is found beside a real install, say
+            # so, with both versions named. Silent duplication is how a store
+            # ends up served by a release nobody thinks they are running.
+            if [ -n "${_PLUGIN_BIN}" ] && [ -x "${_PLUGIN_BIN}" ]; then
+                _sys_v="$(slm --version 2>/dev/null | awk '{print $NF}')"
+                _plg_v="$("${_PLUGIN_BIN}" --version 2>/dev/null | awk '{print $NF}')"
+                if [ -n "${_plg_v}" ] && [ "${_sys_v}" != "${_plg_v}" ]; then
+                    echo "SLM plugin: using the installed slm ${_sys_v:-?} and IGNORING a leftover plugin venv at ${_PLUGIN_BIN} (${_plg_v})." >&2
+                    echo "  One store, one version. Remove the venv to stop it drifting:  rm -rf \"${CLAUDE_PLUGIN_DATA}/venv\"" >&2
+                fi
+            fi
+            _ensure_daemon "$(command -v slm)" || \
+                echo "SLM plugin: daemon did not start; continuing as a direct MCP writer." >&2
+            exec slm mcp
+        fi
+        # 2. No system install. Use the plugin's own venv if this host gave us
+        #    somewhere to keep one.
+        if [ -n "${_PLUGIN_BIN}" ] && [ -x "${_PLUGIN_BIN}" ]; then
+            if ! _ensure_daemon "${_PLUGIN_BIN}"; then
                 echo "SLM plugin: unable to start the owned daemon; refusing a direct MCP writer." >&2
                 exit 1
             fi
+            exec "${_PLUGIN_BIN}" mcp
         fi
-        exec "${SLM_BIN}" mcp
+        # 3. Neither. Say which two things were looked for, so the fix is obvious.
+        echo "SLM plugin: no SuperLocalMemory found." >&2
+        echo "  Looked for: 'slm' on PATH, and ${_PLUGIN_BIN:-a plugin venv (this host sets no plugin data dir)}." >&2
+        echo "  Install it with:  pipx install superlocalmemory" >&2
+        exit 1
         ;;
     system)
+        if ! command -v slm >/dev/null 2>&1; then
+            echo "SLM_LAUNCHER=system but no 'slm' on PATH." >&2
+            exit 1
+        fi
+        _ensure_daemon "$(command -v slm)" || true
         exec slm mcp
         ;;
+    plugin)
+        if [ -z "${_PLUGIN_BIN}" ]; then
+            echo "SLM_LAUNCHER=plugin but this host sets no CLAUDE_PLUGIN_DATA." >&2
+            exit 1
+        fi
+        if ! _ensure_daemon "${_PLUGIN_BIN}"; then
+            echo "SLM plugin: unable to start the owned daemon; refusing a direct MCP writer." >&2
+            exit 1
+        fi
+        exec "${_PLUGIN_BIN}" mcp
+        ;;
     *)
-        # Explicit binary path. Expand a leading ~ to $HOME WITHOUT eval — eval
-        # on an environment value is a command-injection foot-gun. Only tilde
-        # expansion is supported here; pass an already-expanded path for $VARs.
-        case "${SLM_LAUNCHER}" in
-            "~"*) _SLM_BIN="${HOME}${SLM_LAUNCHER#\~}" ;;
-            *)    _SLM_BIN="${SLM_LAUNCHER}" ;;
-        esac
+        _SLM_BIN="$(_expand_tilde "${SLM_LAUNCHER}")"
         if [ ! -x "${_SLM_BIN}" ]; then
             echo "SLM_LAUNCHER is not an executable slm binary: ${_SLM_BIN}" >&2
             exit 1
         fi
+        _ensure_daemon "${_SLM_BIN}" || true
         exec "${_SLM_BIN}" mcp
         ;;
 esac

@@ -2,24 +2,56 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
-"""SuperLocalMemory V3.4.11 "Scale-Ready" — Fact Consolidation Engine.
+"""Fact consolidation — writes a DISPLAY summary, never a memory.
 
-Merges clusters of related facts about the same entity into single
-comprehensive summary facts. Original facts move to 'archived' tier
-but are NEVER deleted — searchable via deep recall.
+Groups warm/cold facts that share an entity and writes one summary per cluster
+into ``consolidated_summaries``, a display-only table. Nothing in the retrieval
+corpus is created, modified or hidden by this module.
 
-Uses Mode B (Ollama LLM) for summarization, with Mode A (extractive)
-fallback if LLM is unavailable.
+WHAT CHANGED AND WHY IT HAD TO
+------------------------------
+From v3.6.4 to 4.0.9 this module ended each cluster with a raw
+``INSERT INTO atomic_facts`` carrying ``memory_id=''``, ``importance=0.8`` and
+``entities_json`` holding *every* entity in the cluster. Three consequences, all
+measured on the author's 5,089-fact store:
 
-CRITICAL RULES:
-  1. NEVER delete original facts
-  2. Original facts → lifecycle='archived' (not deleted)
-  3. Consolidated fact links back to originals via fact_consolidations table
-  4. Only consolidates facts that are already 'warm' or 'cold' tier
-  5. Never touches 'active' or 'pinned' facts
-  6. All writes per cluster wrapped in SAVEPOINT for atomicity
-  7. Entity ID LIKE patterns use JSON-boundary quoting to prevent
-     substring false positives
+  * 1,195 model-written rows entered the retrieval corpus, and because each
+    carried its whole cluster's entity list they had more entity links than any
+    real memory, so the entity channel ranked them first. Asked "what am I
+    working on", the store answered "Unfortunately, there is no information
+    available about 'Gateway', 'State', 'Bounded', or 'Claude' in the provided
+    text." at ranks 1, 2 and 3.
+  * The rows had no ``temporal_events`` at all (0 of 1,195), so they won the
+    temporal channel through its ``created_at`` recency fallback as well.
+  * Their entity clusters made them eligible for consolidation in turn: 353 of
+    them are summaries of summaries. A store summarising its own summaries
+    drifts away from what the user actually said, one pass at a time.
+
+Bypassing ``DatabaseManager`` also bypassed the constraint that would have
+refused the row outright — ``atomic_facts`` declares
+``FOREIGN KEY (memory_id) REFERENCES memories(memory_id)`` and ``memories`` has
+no ``''`` row, but ``storage/memory_write.py`` sets only ``busy_timeout``, not
+``PRAGMA foreign_keys=ON``.
+
+So the boundary this module now keeps is the one v3.6 intended: a summary is a
+*view* of memory, shown on the dashboard and to Mode B/C readers, and it is not
+a thing recall can return. ``community_summaries`` is the precedent.
+
+CONTRACT
+--------
+  1. NEVER writes to ``atomic_facts`` — not the summary, not the sources.
+  2. NEVER archives the source facts. Archiving them made sense only while a
+     retrievable summary stood in for them; a display-only summary does not, so
+     archiving would replace ten reachable memories with nothing.
+  3. Model output is cleaned (``clean_llm_summary``) and then rejected if it is
+     a non-answer (``is_non_answer``) — checked before any write, with the
+     reason logged.
+  4. Only clusters warm/cold facts; never touches 'active' or 'pinned'.
+  5. All writes per cluster wrapped in SAVEPOINT for atomicity.
+  6. Entity ID LIKE patterns use JSON-boundary quoting to prevent substring
+     false positives.
+
+Modes: A extractive, B Ollama, C cloud LLM with fallbacks down to extractive.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
 """
@@ -27,6 +59,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -37,6 +70,9 @@ from typing import TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from superlocalmemory.storage.database import DatabaseManager
+
+from superlocalmemory.summaries.base import clean_llm_summary
+from superlocalmemory.summaries.non_answer import MIN_USEFUL_CHARS, is_non_answer
 
 logger = logging.getLogger("superlocalmemory.fact_consolidator")
 
@@ -70,10 +106,13 @@ def consolidate_facts(
 
     Mode behavior:
       - Mode A: Extractive only (no LLM). Always available.
-      - Mode B: Ollama LLM summarization. Falls back to extractive if Ollama down.
-      - Mode C: Cloud LLM (user's configured provider). Falls back to extractive.
+      - Mode B: Ollama LLM summarization. Falls back to extractive if Ollama is
+        down OR if the model answers with a non-answer.
+      - Mode C: Cloud LLM (user's configured provider), then Ollama, then
+        extractive, with the same non-answer rejection at each step.
 
-    Returns stats: consolidated, clusters_found, facts_archived, errors.
+    Returns stats: consolidated, clusters_found, facts_summarized,
+    rejected, errors.
     """
     from superlocalmemory.storage.database import DatabaseManager
     from superlocalmemory.storage.memory_write import memory_read, memory_write
@@ -81,7 +120,19 @@ def consolidate_facts(
     stats: dict = {
         "clusters_found": 0,
         "consolidated": 0,
-        "facts_archived": 0,
+        # Renamed from facts_archived. Nothing is archived any more, and a key
+        # that keeps reporting a count for an action no longer taken is how a
+        # behaviour change hides from whoever reads the numbers.
+        "facts_summarized": 0,
+        # Clusters whose summary was a non-answer and was refused. Counted
+        # separately from `errors`: refusing junk is the guard working, not a
+        # failure, but a run where every cluster is refused means the model is
+        # misbehaving and that has to be visible.
+        "rejected": 0,
+        # Clusters whose summary already existed over the same sources, so no
+        # model call was made. On a settled store this becomes the whole count.
+        "unchanged": 0,
+        "facts_archived": 0,  # retained at 0 for callers that still read it
         "errors": 0,
         "error_detail": "",
         "mode": "a",
@@ -120,15 +171,37 @@ def consolidate_facts(
                     if len(facts) < _MIN_CLUSTER_SIZE:
                         continue
 
+                    # Step 2b: has this exact cluster already been summarised?
+                    #
+                    # Necessary because 4.0.10 stopped archiving the sources. The
+                    # old code made a cluster ineligible by archiving it; now the
+                    # same warm facts are eligible on every maintenance pass, so
+                    # without this the summarizer is re-run for an unchanged
+                    # cluster every 30 minutes forever. Measured over five
+                    # consecutive passes on one cluster before this check:
+                    # consolidated_summaries converged at 1, but
+                    # fact_consolidations grew 1, 2, 3, 4, 5 -- and in Mode B/C
+                    # each of those passes paid for a model call to regenerate
+                    # text it already had.
+                    #
+                    # Checked before generation, not after, because the cost
+                    # being avoided IS the generation.
+                    if _already_summarised(db_path, profile_id, entity_id, fact_ids):
+                        stats["unchanged"] += 1
+                        continue
+
                     # Step 3: generate summary OUTSIDE any write lock.
                     # Ollama (Mode B) or Cloud LLM (Mode C) may take 30 s here.
-                    summary = _generate_summary(entity_name, facts, config)
+                    summary, generated_by = _generate_summary(
+                        entity_name, facts, config,
+                    )
                     if not summary:
+                        stats["rejected"] += 1
                         continue
 
                     if dry_run:
                         stats["consolidated"] += 1
-                        stats["facts_archived"] += len(fact_ids)
+                        stats["facts_summarized"] += len(fact_ids)
                         continue
 
                     # Step 4: short per-cluster write — hold lock only for SQL.
@@ -137,11 +210,13 @@ def consolidate_facts(
                         result = _consolidate_cluster(
                             conn, profile_id, entity_id, entity_name,
                             fact_ids, dry_run=False, config=None,
-                            _presummary=summary,
+                            _presummary=summary, _generated_by=generated_by,
                         )
                     if result:
                         stats["consolidated"] += 1
-                        stats["facts_archived"] += len(fact_ids)
+                        stats["facts_summarized"] += len(fact_ids)
+                    else:
+                        stats["rejected"] += 1
                 except Exception as exc:
                     logger.warning(
                         "Consolidation failed for %s: %s",
@@ -151,8 +226,10 @@ def consolidate_facts(
 
             if stats["consolidated"] > 0:
                 logger.info(
-                    "Fact consolidation: %d clusters merged, %d facts archived",
-                    stats["consolidated"], stats["facts_archived"],
+                    "Fact consolidation: %d display summaries written over "
+                    "%d facts, %d clusters refused",
+                    stats["consolidated"], stats["facts_summarized"],
+                    stats["rejected"],
                 )
         except Exception as exc:
             logger.error("Fact consolidation failed: %s", exc, exc_info=True)
@@ -232,7 +309,9 @@ def _run_consolidation(
             )
             if result:
                 stats["consolidated"] += 1
-                stats["facts_archived"] += len(fact_ids)
+                stats["facts_summarized"] += len(fact_ids)
+            else:
+                stats["rejected"] += 1
         except Exception as exc:
             logger.warning(
                 "Consolidation failed for %s: %s",
@@ -242,9 +321,49 @@ def _run_consolidation(
 
     if stats["consolidated"] > 0:
         logger.info(
-            "Fact consolidation: %d clusters merged, %d facts archived",
-            stats["consolidated"], stats["facts_archived"],
+            "Fact consolidation: %d display summaries written over %d facts",
+            stats["consolidated"], stats["facts_summarized"],
         )
+
+
+def _already_summarised(
+    db_path: "str | Path",
+    profile_id: str,
+    entity_id: str,
+    fact_ids: list[str],
+) -> bool:
+    """Whether this exact cluster already has a display summary.
+
+    Compares SORTED source ids, because cluster order comes from an
+    ``ORDER BY confidence DESC, created_at DESC`` that two equal-confidence
+    facts can swap between passes -- comparing the raw lists would report
+    "changed" on a cluster that did not.
+
+    Any error means "not summarised", which costs one redundant generation and
+    never skips work that was needed. Read-only.
+    """
+    from superlocalmemory.storage.memory_write import memory_read
+
+    wanted = sorted(fact_ids)
+    try:
+        with memory_read(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT source_fact_ids FROM consolidated_summaries "
+                " WHERE profile_id = ? AND entity_id = ?",
+                (profile_id, entity_id),
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001 -- never block consolidation
+        logger.debug("cluster-unchanged check skipped: %s", exc)
+        return False
+
+    for row in rows:
+        try:
+            if sorted(json.loads(row["source_fact_ids"] or "[]")) == wanted:
+                return True
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return False
 
 
 def _find_consolidation_clusters(
@@ -312,8 +431,13 @@ def _consolidate_cluster(
     config: object | None = None,
     *,
     _presummary: str | None = None,
+    _generated_by: str = "extractive",
 ) -> dict | None:
-    """Merge a cluster of facts into one consolidated fact.
+    """Write one display summary for a cluster of facts.
+
+    Touches ``consolidated_summaries`` and ``fact_consolidations`` and nothing
+    else. In particular it does not write, update or archive any row in
+    ``atomic_facts`` — see the module docstring.
 
     All writes are wrapped in a SAVEPOINT for atomicity — if any step fails,
     the entire cluster consolidation is rolled back.
@@ -323,6 +447,10 @@ def _consolidate_cluster(
     This is the short-lock path used by the DatabaseManager branch of
     consolidate_facts().  The str | Path backward-compat path still calls
     _generate_summary() inline (legacy behaviour, no regression).
+
+    _generated_by records which mode produced the text ('extractive',
+    'ollama', 'cloud'), so a reader can tell a local extractive digest from
+    model prose without inspecting the words.
     """
     c = conn.cursor()
 
@@ -345,8 +473,28 @@ def _consolidate_cluster(
         summary = _presummary
     else:
         # Legacy path (str | Path caller) — may call Ollama with write lock held.
-        summary = _generate_summary(entity_name, facts, config)
+        summary, _generated_by = _generate_summary(entity_name, facts, config)
     if not summary:
+        return None
+
+    # Last line of defence, on BOTH paths. _generate_summary already cleans and
+    # vets its own output, but this function is reachable with a caller-supplied
+    # _presummary, and "the caller checked" is exactly the assumption that let
+    # 1,195 non-answers into the store.
+    #
+    # Cleaning runs here too, not just judging. A first draft of this guard
+    # only judged, and a test supplying "Sure! Here is a concise summary:
+    # <real content>" as a _presummary stored the scaffolding verbatim -- the
+    # text passed the non-answer check because it does contain a real summary,
+    # and nothing had stripped the two sentences in front of it.
+    # clean_llm_summary is idempotent, so running it on both paths is free.
+    summary = clean_llm_summary(summary)
+    _rejected, _why = is_non_answer(summary, min_chars=MIN_USEFUL_CHARS)
+    if _rejected:
+        logger.info(
+            "Consolidation summary for '%s' rejected before write (%s)",
+            entity_name, _why,
+        )
         return None
 
     if dry_run:
@@ -359,7 +507,6 @@ def _consolidate_cluster(
     try:
         new_fact_id = uuid.uuid4().hex[:16]
         now = datetime.now(timezone.utc).isoformat()
-        avg_confidence = sum(f["confidence"] or 0.5 for f in facts) / len(facts)
 
         # v3.6.15 multi-scope: a summary must never be MORE visible than its
         # sources, or it would leak a private fact into a shared/global summary.
@@ -376,84 +523,77 @@ def _consolidate_cluster(
         else:
             _sum_scope, _sum_shared = "personal", None
 
-        # Collect entities from ALL source facts (already in the SELECT)
-        all_entities = set()
-        raw_entities = set()
-        for f in facts:
-            cej = f["canonical_entities_json"]
-            if cej:
-                try:
-                    all_entities.update(json.loads(cej))
-                except (json.JSONDecodeError, TypeError):
-                    pass
+        # The cluster's pooled entity list is deliberately NOT carried onto the
+        # summary. Pooling ten facts' entities gave the old row more entity
+        # links than any single real memory, which is precisely how these rows
+        # came to out-rank the user's own words in the entity channel. The
+        # summary is identified by the one entity that seeded the cluster.
 
-        # P0-3 (dedup-complete-01): apply the SAME content-idempotency invariant
-        # as storage.database.store_fact — but on THIS cursor so it stays inside
-        # the cluster SAVEPOINT. Previously this raw INSERT bypassed dedup, so a
-        # consolidated summary identical to an existing live fact created a
-        # duplicate row and never reinforced evidence. Now: reinforce-or-insert.
-        # (Excludes 'archived' = soft-deleted, mirroring store_fact.)
-        _existing = c.execute(
-            "SELECT fact_id FROM atomic_facts "
-            "WHERE profile_id = ? AND content = ? "
-            "AND lifecycle IN ('active', 'warm', 'cold') "
-            "ORDER BY created_at LIMIT 1",
-            (profile_id, summary),
-        ).fetchone()
-        if _existing:
-            new_fact_id = _existing["fact_id"]
-            c.execute(
-                "UPDATE atomic_facts "
-                "SET evidence_count = evidence_count + ?, access_count = access_count + 1 "
-                "WHERE fact_id = ?",
-                (len(facts), new_fact_id),
-            )
-        else:
-            c.execute("""
-                INSERT INTO atomic_facts
-                (fact_id, memory_id, profile_id, content, fact_type,
-                 entities_json, canonical_entities_json,
-                 confidence, importance, evidence_count, access_count,
-                 created_at, lifecycle, scope, shared_with)
-                VALUES (?, '', ?, ?, 'semantic', ?, ?, ?, 0.8, ?, 0, ?, 'active', ?, ?)
-            """, (
-                new_fact_id, profile_id, summary,
-                json.dumps(list(all_entities)),
-                json.dumps(list(all_entities)),
-                round(avg_confidence, 3), len(facts), now,
-                _sum_scope, _sum_shared,
-            ))
-
-        # Record the consolidation
-        consolidation_id = uuid.uuid4().hex[:16]
+        # The summary goes in the DISPLAY table. Not atomic_facts — see the
+        # module docstring for the 1,195 rows that taught us why.
+        #
+        # UNIQUE (profile_id, entity_id, content) makes a repeated pass
+        # idempotent: re-summarising an unchanged cluster refreshes the
+        # coverage window instead of accumulating a near-duplicate every time
+        # maintenance runs. The old code's reinforce-or-insert dance against
+        # atomic_facts existed for the same reason and is no longer needed.
+        _dates = [f["created_at"] for f in facts if f["created_at"]]
         c.execute("""
-            INSERT INTO fact_consolidations
+            INSERT INTO consolidated_summaries
+            (summary_id, profile_id, entity_id, entity_name, content,
+             source_fact_ids, source_count, char_count, generated_by,
+             scope, shared_with, source_earliest, source_latest, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (profile_id, entity_id, content) DO UPDATE SET
+                source_fact_ids = excluded.source_fact_ids,
+                source_count    = excluded.source_count,
+                source_earliest = excluded.source_earliest,
+                source_latest   = excluded.source_latest,
+                created_at      = excluded.created_at
+        """, (
+            new_fact_id, profile_id, entity_id, entity_name, summary,
+            json.dumps(fact_ids), len(facts), len(summary),
+            _generated_by, _sum_scope, _sum_shared,
+            min(_dates) if _dates else None,
+            max(_dates) if _dates else None,
+            now,
+        ))
+
+        # Provenance ledger, kept for the repair pass and for auditability.
+        # `strategy` distinguishes a display summary from the retrieval-corpus
+        # rows the old path wrote, so 'entity_cluster' remains an exact
+        # selector for what has to be quarantined.
+        # Deterministic id + INSERT OR IGNORE, so re-running over the same
+        # cluster does not append a row. fact_consolidations carries no unique
+        # constraint, so a random uuid grew the ledger by one row per
+        # maintenance pass per cluster with nothing to show for it -- roughly a
+        # thousand rows a day on a store with twenty clusters.
+        consolidation_id = hashlib.sha256(
+            "\0".join((
+                profile_id, new_fact_id, "display_summary",
+                *sorted(fact_ids),
+            )).encode("utf-8")
+        ).hexdigest()[:16]
+        c.execute("""
+            INSERT OR IGNORE INTO fact_consolidations
             (consolidation_id, profile_id, consolidated_fact_id,
              source_fact_ids, strategy, created_at)
-            VALUES (?, ?, ?, ?, 'entity_cluster', ?)
+            VALUES (?, ?, ?, ?, 'display_summary', ?)
         """, (consolidation_id, profile_id, new_fact_id,
               json.dumps(fact_ids), now))
 
-        # Archive the original facts (NEVER delete) through the canonical
-        # lifecycle writer so missing retention rows are created too.
-        from superlocalmemory.core.lifecycle_state import set_fact_lifecycle_zone
-        set_fact_lifecycle_zone(
-            conn, fact_ids, "archive", profile_id=profile_id,
-        )
-
-        # P1-4 (graph-integrity-01): archived facts must stop influencing
-        # graph-based ranking. The association_edges FK is ON DELETE CASCADE
-        # only (no ON UPDATE), so archiving via UPDATE leaves orphaned edges
-        # that spreading_activation still reads. Remove edges touching the
-        # archived facts, and set their retention zone so ForgettingFilter
-        # excludes them. Inside the SAVEPOINT for atomicity.
-        c.execute(
-            f"DELETE FROM association_edges "
-            f"WHERE profile_id = ? "
-            f"AND (source_fact_id IN ({placeholders}) "
-            f"     OR target_fact_id IN ({placeholders}))",
-            (profile_id, *fact_ids, *fact_ids),
-        )
+        # NO archiving, and NO association_edge deletion.
+        #
+        # Both were correct while a retrievable summary replaced the facts it
+        # merged. A display-only summary replaces nothing, so archiving the
+        # sources would take ten reachable memories out of recall and put
+        # nothing in their place. Measured cost of the old behaviour on the
+        # author's store: 528 genuine memories sitting in retention zone
+        # 'archive', every one of them put there by this function and by
+        # nothing else, all unreachable in normal recall.
+        #
+        # This module is now purely additive to the store. A test asserts it:
+        # tests/test_core/test_consolidation_writes_no_memories.py
         c.execute(f"RELEASE SAVEPOINT {savepoint_name}")
 
     except Exception:
@@ -461,8 +601,8 @@ def _consolidate_cluster(
         raise
 
     logger.info(
-        "Consolidated %d facts about '%s' → %s (%d chars)",
-        len(facts), entity_name, new_fact_id[:8], len(summary),
+        "Display summary for '%s' from %d facts → %s (%d chars, %s)",
+        entity_name, len(facts), new_fact_id[:8], len(summary), _generated_by,
     )
 
     return {"entity": entity_name, "facts": len(facts), "new_fact_id": new_fact_id}
@@ -472,8 +612,29 @@ def _generate_summary(
     entity_name: str,
     facts: list,
     config: object | None = None,
-) -> str | None:
-    """Generate a consolidated summary based on the user's configured mode.
+) -> tuple[str | None, str]:
+    """Generate a display summary for the user's configured mode.
+
+    Returns ``(summary_or_None, generated_by)`` where ``generated_by`` is
+    'extractive', 'ollama' or 'cloud'. It used to return the text alone, which
+    left no way to tell a local digest from model prose after the fact — and
+    since only the model paths can produce a non-answer, that distinction is
+    what makes a bad batch traceable to its source.
+
+    Model output goes through two stages before it is offered to the caller:
+
+      1. ``clean_llm_summary`` strips chat scaffolding *around* the answer.
+         This stripper has existed in ``summaries/base.py`` since 3.6 and this
+         module referenced it zero times, which is why 20 of the author's
+         stored summaries begin "Here is a concise summary paragraph".
+      2. ``is_non_answer`` rejects text that is scaffolding *all the way
+         through* — a refusal, a request for more input, a report that the
+         input was empty. Order matters: step 1 rescues "Here is a summary:
+         <real content>", and running step 2 first would discard it.
+
+    A rejected model summary falls back to extractive, which is derived
+    mechanically from the facts and so cannot refuse. Falling back beats
+    writing nothing: the user still gets a digest.
 
     All modes cap output at _MAX_CONSOLIDATED_CHARS.
     """
@@ -483,28 +644,58 @@ def _generate_summary(
         if m:
             mode = getattr(m, 'value', str(m)).lower()
 
-    result = None
+    def _vet(
+        text: str | None, source: str, *, model_written: bool = True,
+    ) -> str | None:
+        """Clean, then reject a non-answer. Returns None if unusable."""
+        if not text:
+            return None
+        cleaned = clean_llm_summary(text)
+        rejected, why = is_non_answer(
+            cleaned, min_chars=MIN_USEFUL_CHARS, model_written=model_written,
+        )
+        if rejected:
+            logger.info(
+                "%s summary for '%s' discarded (%s); falling back",
+                source, entity_name, why,
+            )
+            return None
+        return cleaned
 
-    if mode == "a":
-        result = _summarize_extractive(entity_name, facts)
-    elif mode == "b":
-        result = _summarize_with_ollama(entity_name, facts, config)
-        if not result:
-            result = _summarize_extractive(entity_name, facts)
+    result: str | None = None
+    generated_by = "extractive"
+
+    if mode == "b":
+        result = _vet(_summarize_with_ollama(entity_name, facts, config), "Ollama")
+        if result:
+            generated_by = "ollama"
     elif mode == "c":
-        result = _summarize_with_cloud_llm(entity_name, facts, config)
-        if not result:
-            result = _summarize_with_ollama(entity_name, facts, config)
-        if not result:
-            result = _summarize_extractive(entity_name, facts)
-    else:
-        result = _summarize_extractive(entity_name, facts)
+        result = _vet(_summarize_with_cloud_llm(entity_name, facts, config), "Cloud LLM")
+        if result:
+            generated_by = "cloud"
+        else:
+            result = _vet(_summarize_with_ollama(entity_name, facts, config), "Ollama")
+            if result:
+                generated_by = "ollama"
+
+    if not result:
+        # Extractive is assembled from the facts' own sentences, so it has no
+        # opinion to refuse with — and applying the refusal rules to it would
+        # reject a summary because the owner's own memory happened to contain a
+        # phrase like "the facts provided". Still checked for the two things
+        # that do apply: length, and tool-call markup, which a cluster of
+        # markup-carrying facts would otherwise reassemble verbatim.
+        result = _vet(
+            _summarize_extractive(entity_name, facts), "Extractive",
+            model_written=False,
+        )
+        generated_by = "extractive"
 
     # Uniform cap across all modes
     if result and len(result) > _MAX_CONSOLIDATED_CHARS:
         result = result[:_MAX_CONSOLIDATED_CHARS - 3] + "..."
 
-    return result
+    return result, generated_by
 
 
 def _summarize_with_ollama(

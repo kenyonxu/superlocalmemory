@@ -38,7 +38,18 @@
     'load-agents': () => loadAgents(),
     'load-clusters': () => loadClusters(),
     'load-compliance': () => loadCompliance(),
-    'load-entity-explorer': () => loadEntityExplorer(),
+    // Re-renders through the current renderer. The button used to call a
+    // function from a superseded implementation of this pane, which was
+    // removed; naming it directly would have made Refresh throw.
+    'load-entity-explorer': () => {
+      const pane = document.getElementById('entities-pane');
+      if (pane && typeof window.odRenderEntities === 'function') {
+        pane.innerHTML = '';
+        window.odRenderEntities(pane);
+        return;
+      }
+      if (typeof window.loadEntityExplorer === 'function') window.loadEntityExplorer();
+    },
     'load-graph': () => loadGraph(),
     'load-health-monitor': () => loadHealthMonitor(),
     'load-ingestion-status': () => loadIngestionStatus(),

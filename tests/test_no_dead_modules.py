@@ -142,7 +142,7 @@ _KNOWN_DEAD_PACKAGES: dict[str, str] = {
 _DYNAMIC_PREFIXES = ("storage/migrations/",)
 
 #: Interpreter entry points. `__main__.py` is executed by `python -m pkg` and is
-#: never imported by anything — that is the idiom, not dead code. Wave 3's
+#: never imported by anything — that is the idiom, not dead code. an earlier stage's
 #: compliance CLI gate invokes `python -m superlocalmemory.cli` directly.
 _ENTRYPOINT_NAMES = ("__main__.py",)
 

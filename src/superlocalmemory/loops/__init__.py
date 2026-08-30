@@ -21,6 +21,7 @@ from superlocalmemory.loops.ledger import (
     SLMMemoryLedger,
     engine_backed_ledger,
     open_engine_store,
+    pool_backed_ledger,
 )
 from superlocalmemory.loops.models import (
     Bounds,
@@ -49,6 +50,7 @@ __all__ = [
     "InMemoryLedger",
     "SLMMemoryLedger",
     "engine_backed_ledger",
+    "pool_backed_ledger",
     "open_engine_store",
     "no_progress",
     "rung_requires_approval",

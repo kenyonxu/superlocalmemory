@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 
@@ -67,6 +68,17 @@ class RecallHealth:
     checks: int = 0
     last_semantic_score: float = 0.0
     last_error: str = ""
+    #: When the last tick finished, as a unix timestamp. A tick that finds
+    #: nothing wrong logs nothing, which is correct -- a monitor that narrates
+    #: every success is a monitor whose real warnings get skimmed past. But it
+    #: left no way to tell a monitor that is ticking quietly from a thread that
+    #: died or never started, and that ambiguity cost someone an hour of looking
+    #: for log lines that were never going to appear. So the fact of the tick is
+    #: recorded here and surfaced on /health, where it can be checked instead of
+    #: inferred.
+    last_tick_at: float = 0.0
+    #: Whether the embedder could produce a vector at the last tick.
+    embedder_alive: bool = True
 
 
 def _max_semantic(results) -> float:
@@ -89,6 +101,38 @@ def _get_embedder(engine):
         re_eng = getattr(engine, "_retrieval_engine", None)
         emb = getattr(re_eng, "_embedder", None) if re_eng is not None else None
     return emb
+
+
+def _embedder_is_dead(engine) -> bool:
+    """Can the embedder produce a vector right now?
+
+    Asked directly, because it cannot be inferred from a recall. The monitor
+    used to decide the embedder was fine whenever the probe recall came back
+    with no results at all -- and a dead embedder is one of the reasons a recall
+    comes back with no results, so the one symptom that should have triggered a
+    heal was read as proof that none was needed.
+
+    That is not hypothetical. An idle-timeout kill leaves no worker; the next
+    probe finds nothing by meaning, finds nothing by keyword either because the
+    probe phrase appears in nobody's memories, and returns zero results. The
+    monitor then recorded "healthy", logged nothing, and never respawned the
+    worker -- so ``readiness.embedding`` stayed false and the daemon sat in
+    ``warming`` until someone restarted it by hand, with not one line in the log
+    to say why.
+
+    Fails safe in the opposite direction from before: an embedder this cannot
+    reach is reported dead, so the worst case is one unnecessary re-warm rather
+    than a silent outage.
+    """
+    emb = _get_embedder(engine)
+    if emb is None:
+        return False  # BM25-only by configuration; nothing to heal.
+    warm = getattr(emb, "is_warm", None)
+    if warm is not None and not warm:
+        return True
+    if getattr(emb, "_available", True) is False:
+        return True
+    return False
 
 
 def _heal_embedder(engine, *, log) -> bool:
@@ -169,10 +213,27 @@ def run_health_tick(engine, state: RecallHealth, *, probe: str = DEFAULT_PROBE,
     results = list(getattr(resp, "results", []) or [])
     sem = _max_semantic(results)
     state.last_semantic_score = sem
+    state.last_tick_at = time.time()
 
-    # Tier 2: readiness. Rows present but semantic never fired == warm-but-broken.
-    # Zero results is NOT this signature (could be an empty/filtered corpus).
-    broken = bool(results) and sem <= 0.0
+    # Tier 2: readiness. Two independent signatures, and the second one is why
+    # this monitor exists.
+    #
+    #   * rows present but semantic never fired  -> warm-but-broken
+    #   * the embedder cannot produce a vector   -> dead, whatever the recall said
+    #
+    # The second used to be missing, and its absence was load-bearing: zero
+    # results was treated as "not this signature", so the case where the embedder
+    # is dead AND the probe matches nothing by keyword -- which is the normal
+    # shape of an idle-timeout kill -- came out as healthy, silently.
+    dead = _embedder_is_dead(engine)
+    state.embedder_alive = not dead
+    broken = dead or (bool(results) and sem <= 0.0)
+    if dead:
+        log.critical(
+            "recall-health: embedder cannot produce a vector (%d probe results) "
+            "— attempting self-heal",
+            len(results),
+        )
     if not broken:
         if not state.healthy:
             log.warning(
@@ -184,12 +245,16 @@ def run_health_tick(engine, state: RecallHealth, *, probe: str = DEFAULT_PROBE,
         state.last_error = ""
         return state
 
-    # Tier 3: self-heal.
-    log.critical(
-        "recall-health: semantic channel DEAD (%d results, max semantic=0.0) "
-        "— embedder returning None; attempting self-heal",
-        len(results),
-    )
+    # Tier 3: self-heal. The dead-embedder case already said so above; saying
+    # "semantic channel DEAD (max semantic=0.0)" as well would be a second,
+    # differently-worded CRITICAL about the same tick, and one of the two would
+    # be describing a symptom the reader does not have.
+    if not dead:
+        log.critical(
+            "recall-health: semantic channel DEAD (%d results, max semantic=0.0) "
+            "— embedder returning None; attempting self-heal",
+            len(results),
+        )
     if _heal_embedder(engine, log=log):
         state.total_heals += 1
         state.healthy = True
@@ -256,6 +321,7 @@ def start_recall_health_monitor(engine, *, interval_s: int = DEFAULT_INTERVAL_S,
 def get_recall_health() -> dict:
     """Snapshot for /health surfacing (visibility — never silent degradation)."""
     s = _GLOBAL_STATE
+    now = time.time()
     return {
         "recall_healthy": s.healthy,
         "consecutive_failures": s.consecutive_failures,
@@ -263,4 +329,15 @@ def get_recall_health() -> dict:
         "checks": s.checks,
         "last_semantic_score": round(s.last_semantic_score, 4),
         "last_error": s.last_error,
+        # Proof of life. A tick that finds nothing wrong logs nothing, so there
+        # was no way to tell this monitor apart from a thread that never started
+        # -- someone spent an hour reading logs for lines that were never going
+        # to be written. These two answer that without needing the log at all:
+        # if seconds_since_last_tick keeps climbing past the interval, the thread
+        # is gone.
+        "last_tick_at": round(s.last_tick_at, 3) if s.last_tick_at else None,
+        "seconds_since_last_tick": (
+            round(now - s.last_tick_at, 1) if s.last_tick_at else None
+        ),
+        "embedder_alive": s.embedder_alive,
     }

@@ -2,14 +2,23 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
-"""P0-3 (dedup-complete-01): the fact consolidator must obey the same
-content-idempotency invariant as storage.database.store_fact.
+"""Re-consolidating an unchanged cluster must converge, not accumulate.
 
-Before v3.6.4 the consolidator wrote consolidated summary facts via a raw
-`INSERT INTO atomic_facts`, bypassing dedup entirely — re-consolidating an
-equivalent cluster spawned duplicate summary facts and never reinforced
-evidence. These tests pin the corrected behaviour using deterministic
-extractive summarisation (mode 'a', config=None — no LLM).
+HISTORY, because it explains the shape of this file. Before v3.6.4 the
+consolidator wrote its summary into ``atomic_facts`` with a raw INSERT that
+bypassed dedup, so an equivalent cluster spawned a duplicate summary fact on
+every pass. v3.6.4 fixed the duplication by adding a reinforce-or-insert dance
+against ``atomic_facts`` — and left the summary in the retrieval corpus, which
+was the larger mistake and cost 1,195 model-written rows before anyone noticed.
+
+4.0.10 removes the corpus write entirely. The idempotency requirement these
+tests were written to protect is unchanged and still worth protecting; only its
+target moved, to ``consolidated_summaries`` and its
+``UNIQUE (profile_id, entity_id, content)`` constraint.
+
+Deterministic extractive summarisation throughout (mode 'a', config=None — no
+LLM), so a second pass over an unchanged cluster produces byte-identical text
+and the constraint is actually exercised.
 """
 
 from __future__ import annotations
@@ -69,72 +78,86 @@ def _insert_warm_fact(mgr: DatabaseManager, fid: str, content: str) -> None:
     )
 
 
-def _live_count(mgr: DatabaseManager, content: str) -> int:
-    rows = mgr.execute(
-        "SELECT COUNT(*) AS c FROM atomic_facts "
-        "WHERE content = ? AND lifecycle IN ('active','warm','cold')",
-        (content,),
-    )
-    return dict(rows[0])["c"]
 
 
-def test_consolidator_dedups_identical_summary(consolidator_db) -> None:
+def test_an_unchanged_cluster_yields_one_summary_however_often_it_runs(
+    consolidator_db,
+) -> None:
+    """Maintenance runs on a schedule. Convergence is the whole requirement."""
     path, mgr = consolidator_db
 
-    # Cluster A → consolidate → exactly one active summary fact, originals archived.
     for i, c in enumerate(_CLUSTER):
         _insert_warm_fact(mgr, f"a{i}", c)
     consolidate_facts(path, profile_id="default", config=None)
 
-    active = mgr.execute(
-        "SELECT content, evidence_count FROM atomic_facts "
-        "WHERE lifecycle='active' AND profile_id='default'"
+    summaries = mgr.execute(
+        "SELECT summary_id, content FROM consolidated_summaries "
+        "WHERE profile_id='default'"
     )
-    assert len(active) == 1, "run 1 must create exactly one consolidated summary"
-    summary = dict(active[0])["content"]
+    assert len(summaries) == 1, "run 1 must write exactly one display summary"
+    summary = dict(summaries[0])["content"]
     assert summary, "summary should be non-empty"
 
-    # Cluster B: identical fresh warm facts → identical extractive summary.
+    # A second identical cluster produces byte-identical extractive text, which
+    # is what the UNIQUE constraint has to absorb.
     for i, c in enumerate(_CLUSTER):
         _insert_warm_fact(mgr, f"b{i}", c)
     consolidate_facts(path, profile_id="default", config=None)
 
-    # The identical summary must DEDUP, not duplicate.
-    assert _live_count(mgr, summary) == 1, \
-        "consolidator created a duplicate summary fact (dedup bypassed)"
+    again = mgr.execute(
+        "SELECT COUNT(*) AS c FROM consolidated_summaries "
+        "WHERE profile_id='default' AND content=?", (summary,),
+    )
+    assert dict(again[0])["c"] == 1, \
+        "an identical summary was stored twice; the display table must converge"
 
 
-def test_consolidator_reinforces_evidence_on_dedup(consolidator_db) -> None:
+def test_a_repeat_pass_refreshes_the_coverage_window(consolidator_db) -> None:
+    """Convergence must not mean the row goes stale.
+
+    The second pass covers more facts than the first, and a reader needs to see
+    that rather than a snapshot frozen at whatever the first pass happened to
+    find.
+    """
     path, mgr = consolidator_db
     for i, c in enumerate(_CLUSTER):
         _insert_warm_fact(mgr, f"a{i}", c)
     consolidate_facts(path, profile_id="default", config=None)
-    summary = dict(mgr.execute(
-        "SELECT content FROM atomic_facts WHERE lifecycle='active' AND profile_id='default'"
-    )[0])["content"]
-    ev_before = dict(mgr.execute(
-        "SELECT evidence_count AS e FROM atomic_facts WHERE content=?", (summary,)
-    )[0])["e"]
+    first = dict(mgr.execute(
+        "SELECT source_count, source_fact_ids FROM consolidated_summaries "
+        "WHERE profile_id='default'"
+    )[0])
 
     for i, c in enumerate(_CLUSTER):
         _insert_warm_fact(mgr, f"b{i}", c)
     consolidate_facts(path, profile_id="default", config=None)
+    second = dict(mgr.execute(
+        "SELECT source_count, source_fact_ids FROM consolidated_summaries "
+        "WHERE profile_id='default'"
+    )[0])
 
-    ev_after = dict(mgr.execute(
-        "SELECT evidence_count AS e FROM atomic_facts WHERE content=? "
-        "AND lifecycle IN ('active','warm','cold')", (summary,)
-    )[0])["e"]
-    assert ev_after > ev_before, "dedup on a consolidated summary must reinforce evidence"
+    assert second["source_count"] > first["source_count"], (
+        "the refreshed summary still reports the first pass's source count, "
+        "so the ON CONFLICT update is not firing"
+    )
+    assert second["source_fact_ids"] != first["source_fact_ids"]
 
 
-def test_archival_removes_edges_and_sets_retention_zone(consolidator_db) -> None:
-    # P1-4 (graph-integrity-01): when consolidation archives the source facts,
-    # their association_edges must be removed (so spreading_activation stops
-    # ranking on them) and fact_retention.lifecycle_zone set to 'archive'.
+def test_consolidation_leaves_edges_and_retention_zones_alone(
+    consolidator_db,
+) -> None:
+    """The inverse of the rule this test used to assert.
+
+    Removing an archived fact's association edges was right while a retrievable
+    summary stood in for it — spreading activation would otherwise have kept
+    ranking on a fact the user could no longer reach. A display-only summary
+    stands in for nothing, so the sources stay live, and taking their edges or
+    pushing them into retention zone 'archive' would delete a retrieval signal
+    and hide a real memory for no gain.
+    """
     path, mgr = consolidator_db
     for i, c in enumerate(_CLUSTER):
         _insert_warm_fact(mgr, f"a{i}", c)
-    # An association edge between two cluster facts + a retention row.
     mgr.execute(
         "INSERT INTO association_edges "
         "(edge_id, profile_id, source_fact_id, target_fact_id, association_type, weight) "
@@ -151,13 +174,14 @@ def test_archival_removes_edges_and_sets_retention_zone(consolidator_db) -> None
         "SELECT COUNT(*) AS c FROM association_edges "
         "WHERE source_fact_id='a0' OR target_fact_id='a0'"
     )
-    assert dict(edges[0])["c"] == 0, "archived fact's association edges not removed"
-    zone = mgr.execute("SELECT lifecycle_zone AS z FROM fact_retention WHERE fact_id='a0'")
-    assert dict(zone[0])["z"] == "archive", "retention zone not set to archive"
-    archived = mgr.execute(
-        "SELECT COUNT(*) AS c FROM atomic_facts af "
-        "JOIN fact_retention fr ON fr.fact_id = af.fact_id "
-        "WHERE af.fact_id IN ('a0','a1','a2') "
-        "AND af.lifecycle = 'archived' AND fr.lifecycle_zone = 'archive'"
+    assert dict(edges[0])["c"] == 1, "a live fact's association edge was deleted"
+    zone = mgr.execute(
+        "SELECT lifecycle_zone AS z FROM fact_retention WHERE fact_id='a0'"
     )
-    assert dict(archived[0])["c"] == 3, "every archived source needs a retention row"
+    assert dict(zone[0])["z"] == "warm", \
+        "a live fact was pushed into retention zone 'archive'"
+    still_live = mgr.execute(
+        "SELECT COUNT(*) AS c FROM atomic_facts "
+        "WHERE fact_id IN ('a0','a1','a2') AND lifecycle='warm'"
+    )
+    assert dict(still_live[0])["c"] == 3, "source facts were archived"

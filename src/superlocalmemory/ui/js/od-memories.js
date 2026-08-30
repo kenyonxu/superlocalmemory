@@ -189,6 +189,18 @@
             '</select>' +
           '</div>' +
           '<div id="' + id + '-sum-out" style="font-size:13px;color:var(--fg-2)">Pick a summary above.</div>' +
+          // Knowledge Overview.
+          //
+          // The Today/Yesterday buttons above are a date filter over
+          // atomic_facts and have never had any link to a cluster, so the
+          // Summaries tab could not show what the store actually knows ABOUT
+          // anything. This card fills that: cluster summaries, read from the
+          // display-only table, which is where they belong now that they are
+          // out of the retrieval corpus.
+          '<div id="' + id + '-kover" style="margin-top:26px;' +
+            'border-top:1px solid var(--border);padding-top:20px">' +
+            _loading('Loading what your memory knows…') +
+          '</div>' +
         '</div>' +
         // Recall Lab pane — exact IDs required by recall-lab.js:
         //   #recall-lab-query (input), #recall-lab-search (button — click check),
@@ -363,7 +375,7 @@
     if (pane) pane.classList.add('active');
     if (tab === 'timeline') _loadTimeline(id);
     if (tab === 'clusters')  _loadClusters(id);
-    if (tab === 'summary')   _loadProjectOptions(id);
+    if (tab === 'summary') { _loadProjectOptions(id); _loadKnowledgeOverview(id); }
   }
 
   /* Populate the project picker from projects SLM has actually recorded.
@@ -446,6 +458,25 @@
         meta.style.cssText = 'margin-top:10px;font-size:12px;color:var(--fg-3);line-height:1.6';
         meta.textContent = _summaryProvenance(d);
         out.appendChild(meta);
+
+        /* Why it came out this way, and what to do about it.
+         *
+         * The provenance line above says a summary was assembled from the
+         * user's own notes rather than written. It never said why. Someone in
+         * Mode A — which has no language model by design — saw a plainer
+         * result than they expected with no way to learn that a written one
+         * needs a model, and would reasonably read the feature as broken.
+         */
+        var cap = d.capability;
+        if (cap && cap.message) {
+          var hint = document.createElement('div');
+          hint.style.cssText = 'margin-top:10px;font-size:12px;line-height:1.6;' +
+            'color:var(--fg-2);background:var(--card-2);border:1px solid var(--border);' +
+            'border-left:3px solid var(--accent, var(--border));' +
+            'border-radius:var(--r-md);padding:10px 12px';
+          hint.textContent = cap.message;
+          out.appendChild(hint);
+        }
       })
       .catch(function (e) {
         out.textContent = 'Could not build summary: ' + (e && e.message ? e.message : 'error');
@@ -814,6 +845,183 @@
   }
 
   // ── Clusters fetch & render ──────────────────────────────────────────────────
+
+  /* Knowledge Overview — cluster summaries, plus an honest health line.
+   *
+   * Two rules this card exists to obey.
+   *
+   * IT READS ONLY THE DISPLAY TABLE. These summaries were in the retrieval
+   * corpus until 4.0.10, where they out-ranked the user's own words. Moving
+   * them out is only worth anything if exactly one surface shows them, and
+   * this is that surface.
+   *
+   * IT DOES NOT DRESS UP JUNK AS INSIGHT. Some stored summaries are a model's
+   * non-answer -- "Unfortunately, there is no information available about
+   * 'State'..." -- and rendering those as a heading called Knowledge Overview
+   * makes the product look broken. The endpoint labels each row's quality; the
+   * usable ones are shown and the rest are counted in one plain sentence. Not
+   * hidden: hiding them would hide the very problem the release fixes, and a
+   * reader who is told "3 could not be generated" trusts the other 47 more.
+   */
+  function _loadKnowledgeOverview(id) {
+    var box = document.getElementById(id + '-kover');
+    if (!box) return;
+    // Guarded on the element, not a module flag — same reason as
+    // _loadProjectOptions: a stale "already loaded" boolean outlives the DOM
+    // it described and leaves a permanent spinner after a re-render.
+    if (box.dataset.loaded === '1') return;
+
+    Promise.all([
+      fetch('/api/v3/abstraction/consolidated?limit=24')
+        .then(function (r) { return r.ok ? r.json() : { summaries: [], unusable: 0 }; })
+        .catch(function () { return { summaries: [], unusable: 0 }; }),
+      fetch('/api/v3/abstraction/health')
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .catch(function () { return null; })
+    ]).then(function (res) {
+      box.dataset.loaded = '1';
+      box.innerHTML = _koverHtml(res[0] || {}, res[1]);
+    });
+  }
+
+  function _koverHtml(data, health) {
+    var all = data.summaries || [];
+    var usable = all.filter(function (s) { return s.quality === 'ok'; });
+    var unusable = typeof data.unusable === 'number' ? data.unusable
+                 : (all.length - usable.length);
+
+    var html = '<h3 style="font-size:15px;margin:0 0 4px">What your memory knows</h3>' +
+      '<p style="font-size:12px;color:var(--fg-2);margin:0 0 14px">' +
+        'Written by the summarizer from groups of your memories. These are a ' +
+        'view of your memory, not memories themselves — they are never returned ' +
+        'as answers.' +
+      '</p>';
+
+    if (health) html += _koverHealth(health);
+
+    if (usable.length === 0) {
+      html += '<div style="padding:20px;color:var(--fg-2);font-size:13px">' +
+        (all.length === 0
+          ? 'No summaries yet. They are written in the background as related ' +
+            'memories accumulate.'
+          : 'None of the ' + all.length + ' stored summaries came back usable. ' +
+            'That usually means the summarizer had nothing in common to merge.') +
+        '</div>';
+      return html;
+    }
+
+    html += '<div style="display:grid;gap:12px;' +
+      'grid-template-columns:repeat(auto-fill,minmax(280px,1fr))">';
+    usable.forEach(function (s) { html += _koverCard(s); });
+    html += '</div>';
+
+    var notes = [];
+    if (unusable > 0) {
+      notes.push(unusable + (unusable === 1 ? ' summary' : ' summaries') +
+        ' could not be generated and are not shown. The memories they were ' +
+        'built from are unaffected.');
+    }
+    if (data.near_duplicates > 0) {
+      notes.push(data.near_duplicates + ' near-identical ' +
+        (data.near_duplicates === 1 ? 'summary was' : 'summaries were') +
+        ' collapsed into the ones above.');
+    }
+    if (notes.length) {
+      html += '<p style="font-size:12px;color:var(--fg-2);margin-top:12px">' +
+        notes.map(_esc).join(' ') + '</p>';
+    }
+    return html;
+  }
+
+  function _koverCard(s) {
+    // Every field is escaped. Anything in a memory can reach this screen: the
+    // summarizer merges fact content verbatim, so a memory containing markup
+    // would otherwise render as markup.
+    var body = _koverPlain(s.content);
+    var clipped = body.length > 320;
+    var shown = clipped ? body.slice(0, 320).replace(/\s+\S*$/, '') + '…' : body;
+
+    var meta = [];
+    if (s.source_count) {
+      meta.push(s.source_count + (s.source_count === 1 ? ' memory' : ' memories'));
+    }
+    var span = _koverSpan(s.source_earliest, s.source_latest);
+    if (span) meta.push(span);
+
+    return '<div style="background:var(--card-2);border:1px solid var(--border);' +
+        'border-radius:var(--r-md);padding:14px">' +
+      (s.entity_name
+        ? '<div style="font-size:13px;font-weight:600;margin-bottom:6px">' +
+            _esc(s.entity_name) + '</div>'
+        : '') +
+      '<div style="font-size:13px;line-height:1.5">' + _esc(shown) + '</div>' +
+      (meta.length
+        ? '<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">' +
+            meta.map(_koverChip).join('') +
+          '</div>'
+        : '') +
+    '</div>';
+  }
+
+  /* Flatten a summary to plain prose for display.
+   *
+   * Mode B/C summaries come back with markdown in them — "**Audit Round**",
+   * "**Findings**:" — because a chat-tuned model formats for a chat window.
+   * Rendered as text those asterisks read as broken output to exactly the
+   * reader this card is for. Escaping is still what protects the page; this
+   * only removes the emphasis marks that carry no meaning here.
+   */
+  function _koverPlain(text) {
+    return String(text || '')
+      .replace(/```[\s\S]*?```/g, ' ')     // fenced blocks: no room for them
+      .replace(/`([^`]*)`/g, '$1')          // inline code marks
+      .replace(/\*\*([^*]+)\*\*/g, '$1')   // bold
+      .replace(/(^|\s)\*([^*\s][^*]*)\*/g, '$1$2')  // italic, not bullets
+      .replace(/^#{1,6}\s+/gm, '')          // headings
+      .replace(/^\s*[-*+]\s+/gm, '')        // list bullets
+      .replace(/\s+/g, ' ')                 // collapse whitespace + newlines
+      .trim();
+  }
+
+  /* A chip, not a keyword dump.
+   *
+   * The neighbouring community-summary API returns its `summary` field as
+   * "Topics: CCQ, Resume, P07…", which printed verbatim reads as a broken
+   * page. Counts and date spans are rendered as discrete labels instead.
+   */
+  function _koverChip(text) {
+    return '<span style="font-size:11px;padding:2px 8px;border-radius:999px;' +
+      'background:var(--card);border:1px solid var(--border);color:var(--fg-2)">' +
+      _esc(text) + '</span>';
+  }
+
+  function _koverSpan(earliest, latest) {
+    var a = String(earliest || '').slice(0, 10);
+    var b = String(latest || '').slice(0, 10);
+    if (!a && !b) return '';
+    if (!a || !b || a === b) return a || b;
+    return a + ' to ' + b;
+  }
+
+  /* Whether the memories behind all this can actually be found.
+   *
+   * The one question no screen answered before. A machine ran for months with
+   * 43.7% of its store unreachable by meaning while every status line it showed
+   * said healthy, because nothing counted the reachable share.
+   */
+  function _koverHealth(h) {
+    var lines = h.summary || [];
+    if (!lines.length) return '';
+    var bad = h.healthy === false;
+    return '<div style="margin:0 0 16px;padding:12px 14px;border-radius:var(--r-md);' +
+        'background:var(--card-2);border-left:3px solid ' +
+        (bad ? 'var(--warn)' : 'var(--ok)') + '">' +
+      lines.map(function (l) {
+        return '<div style="font-size:12px;color:var(--fg-2);line-height:1.5">' +
+          _esc(l) + '</div>';
+      }).join('') +
+    '</div>';
+  }
 
   function _loadClusters(id) {
     if (_st.cluLoaded) return;

@@ -794,7 +794,7 @@ class TestAuditEmission:
 # ---------------------------------------------------------------------------
 
 class TestAuditRemediations:
-    """Locks the delivery-lead fixes for the Wave-2 P2 audit findings."""
+    """Locks the delivery-lead fixes for the P2 findings."""
 
     @pytest.fixture
     def activator(self, tmp_path):

@@ -109,6 +109,47 @@ class TestDegreeCap:
 # --- gi-04: prune_graph removes orphaned association_edges ----------------------
 
 class TestAssociationOrphanPrune:
+    def test_prune_removes_orphan_graph_edges(self, db: DatabaseManager) -> None:
+        """The knowledge-graph edges, not just the association edges.
+
+        The sweep covers both tables and only the association half was named in a
+        test, so a change that dropped the graph_edges clause would have gone
+        through green. Measured on a real store: 215 of 208,464 edges pointed at
+        a memory that no longer existed, and the walk would have spread
+        activation through every one of them.
+        """
+        from superlocalmemory.core.graph_pruner import prune_graph
+
+        db.store_memory(MemoryRecord(memory_id="mg", profile_id="default", content="p"))
+        db.store_fact(AtomicFact(fact_id="here", memory_id="mg", content="a memory",
+                                 fact_type=FactType.SEMANTIC))
+        db.store_fact(AtomicFact(fact_id="also", memory_id="mg", content="another",
+                                 fact_type=FactType.SEMANTIC))
+        raw = sqlite3.connect(str(db.db_path))
+        raw.execute(
+            "INSERT INTO graph_edges (edge_id, profile_id, source_id, target_id, "
+            "edge_type, weight) VALUES ('g1','default','here','also','semantic',0.9)"
+        )
+        raw.execute(
+            "INSERT INTO graph_edges (edge_id, profile_id, source_id, target_id, "
+            "edge_type, weight) VALUES ('g2','default','here','vanished','semantic',0.9)"
+        )
+        raw.execute(
+            "INSERT INTO graph_edges (edge_id, profile_id, source_id, target_id, "
+            "edge_type, weight) VALUES ('g3','default','vanished','also','semantic',0.9)"
+        )
+        raw.commit(); raw.close()
+
+        prune_graph(db.db_path, profile_id="default")
+
+        surviving = [
+            dict(row)["edge_id"]
+            for row in db.execute("SELECT edge_id FROM graph_edges ORDER BY edge_id")
+        ]
+        assert surviving == ["g1"], (
+            "an edge is orphaned by EITHER endpoint being gone, in either column"
+        )
+
     def test_prune_removes_orphan_association_edges(self, db: DatabaseManager) -> None:
         from superlocalmemory.core.graph_pruner import prune_graph
         db.store_memory(MemoryRecord(memory_id="m0", profile_id="default", content="p"))

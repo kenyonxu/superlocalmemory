@@ -60,6 +60,10 @@ _EXPECTED_CORE = frozenset({
     # belongs in the smallest profile — an agent asking "what did I do
     # yesterday" should not need the full surface to get an answer.
     "get_memory_summary",
+    # 4.1.0: memory operations are profile-scoped, so a surface that can read or
+    # write memory has to be able to name the profile it means. Without this the
+    # smallest surface can never leave the profile it started in.
+    "switch_profile",
 })
 
 
@@ -69,11 +73,12 @@ def test_profile_core_exact():
     assert core == _EXPECTED_CORE, (
         f"core diff — extra: {core - _EXPECTED_CORE}, missing: {_EXPECTED_CORE - core}"
     )
-    assert len(core) == 17, f"core must be 17 names, got {len(core)}"
+    assert len(core) == 18, f"core must be 18 names, got {len(core)}"
 
 
 # ---------------------------------------------------------------------------
-# RED-3: code == core | Brain + code-graph + switch_profile + loops (==32)
+# RED-3: code == core | Brain + code-graph + switch_profile + loops
+# + the two usefulness reports (==34)
 # ---------------------------------------------------------------------------
 
 _CODE_EXTRA = frozenset({
@@ -86,6 +91,9 @@ _CODE_EXTRA = frozenset({
     "switch_profile",
     # 3.8.0: bounded-loop tools on the MCP surface (CLI + command + MCP).
     "slm_loop_run", "slm_loop_history", "slm_loop_show",
+    # 4.1.0: ranking reads whether a memory helped, and only the assistant
+    # that used it can say so. The plugin runs this profile.
+    "report_outcome", "report_feedback",
 })
 
 
@@ -96,7 +104,7 @@ def test_profile_code_exact():
     assert code == expected, (
         f"code diff — extra: {code - expected}, missing: {expected - code}"
     )
-    assert len(code) == 32, f"code must be 32 names, got {len(code)}"
+    assert len(code) == 34, f"code must be 34 names, got {len(code)}"
 
 
 # ---------------------------------------------------------------------------

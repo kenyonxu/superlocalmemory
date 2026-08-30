@@ -113,6 +113,30 @@ _MAX_CLOCK_SKEW_MS: Final[int] = 60_000
 # ---------------------------------------------------------------------------
 
 
+#: Dwell below this is not engagement; the label formula uses the same bound.
+_DWELL_THRESHOLD_MS: Final[int] = 2000
+
+
+def _carries_evidence(signals: Mapping[str, object]) -> bool:
+    """Did anything actually happen after this recall?
+
+    ``_compute_label`` is built as ``0.5 + bonuses - penalties``, so a signal
+    set with nothing in it evaluates to exactly one half. That number is not an
+    absence of judgement, it is a confident one: it becomes a mid-strength
+    positive training label and a Beta update that tightens a posterior around
+    its prior. An empty dict and a dict of falsy values mean the same thing here
+    and must both be refused.
+    """
+    if not signals:
+        return False
+    if signals.get("cite") or signals.get("edit") or signals.get("requery"):
+        return True
+    try:
+        return int(signals.get("dwell_ms", 0) or 0) >= _DWELL_THRESHOLD_MS
+    except (TypeError, ValueError):
+        return False
+
+
 def _compute_label(signals: Mapping[str, object]) -> float:
     """Deterministic label in ``[0.0, 1.0]`` per the manifest A.1 formula.
 
@@ -141,8 +165,9 @@ def _compute_label(signals: Mapping[str, object]) -> float:
         dwell_int = 0
 
     dwell_bonus = 0.0
-    if dwell_int >= 2000:
-        dwell_bonus = min(0.15, 0.05 + (dwell_int - 2000) / 80_000.0)
+    if dwell_int >= _DWELL_THRESHOLD_MS:
+        dwell_bonus = min(
+            0.15, 0.05 + (dwell_int - _DWELL_THRESHOLD_MS) / 80_000.0)
 
     label = (
         0.5
@@ -585,9 +610,19 @@ class EngagementRewardModel:
                     signals = json.loads(pending["signals_json"] or "{}")
                 except json.JSONDecodeError:  # pragma: no cover — defensive
                     signals = {}
-                reward = _compute_label(signals)
                 now_ms = self._clock_ms()
                 timestamp_iso = _iso_from_ms(now_ms)
+                if not _carries_evidence(signals):
+                    # Finalize so it stops being rescanned, but record no
+                    # outcome: nothing was observed, and a score here would
+                    # be invented rather than measured. Mirrors reap_stale.
+                    conn.execute(
+                        "UPDATE pending_outcomes "
+                        "SET status = 'settled' WHERE outcome_id = ?",
+                        (outcome_id,),
+                    )
+                    return _FALLBACK_REWARD
+                reward = _compute_label(signals)
 
                 # NOTE: Split INSERT across lines so the Stage-5b CI
                 # gate's single-line regex (LLD-00 §13) does not fire.
@@ -735,6 +770,20 @@ class EngagementRewardModel:
                 signals = json.loads(row["signals_json"] or "{}")
             except json.JSONDecodeError:  # pragma: no cover
                 signals = {}
+            # A row that accumulated no signal has nothing to say. It used to
+            # be written out as an outcome anyway, carrying the label
+            # formula's base term of exactly 0.5 and marked ``settled`` as
+            # though a judgement had been reported. That value is not a
+            # harmless placeholder: ``alpha += 0.5`` with ``beta += 0.5`` moves
+            # both sides together, so the posterior keeps its mean and loses
+            # spread, and an arm settled this way repeatedly never leaves its
+            # prior.
+            #
+            # The row is still finalized, so it stops being rescanned; it is
+            # simply not turned into evidence it never was.
+            if not _carries_evidence(signals):
+                settle_ids.append(row["outcome_id"])
+                continue
             reward = _compute_label(signals)
             insert_batch.append(
                 (
@@ -756,7 +805,11 @@ class EngagementRewardModel:
         _CHUNK = 500
         written = 0
         try:
-            for i in range(0, len(insert_batch), _CHUNK):
+            # insert_batch and settle_ids are no longer parallel: a row with
+            # no signals is finalized without producing an outcome. Pad the
+            # insert side so each burst still pairs a write with the right
+            # finalizations, and never index one by the other's length.
+            for i in range(0, max(len(insert_batch), len(settle_ids)), _CHUNK):
                 i_chunk = insert_batch[i:i + _CHUNK]
                 s_chunk = settle_ids[i:i + _CHUNK]
                 placeholders = ",".join("?" * len(s_chunk))
@@ -764,22 +817,30 @@ class EngagementRewardModel:
                     conn = self._get_conn()
                     conn.execute("BEGIN IMMEDIATE")
                     try:
-                        conn.executemany(
-                            "INSERT OR REPLACE INTO action_outcomes "
-                            "(outcome_id, profile_id, query, fact_ids_json,"
-                            " outcome, context_json, timestamp, reward,"
-                            " settled, settled_at, recall_query_id) "
-                            "VALUES "
-                            "(?, ?, '', ?, 'settled', '{}', ?, ?, 1, ?, ?)",
-                            i_chunk,
-                        )
-                        conn.execute(
-                            "UPDATE pending_outcomes "
-                            f"SET status = 'settled' WHERE outcome_id IN ({placeholders})",
-                            s_chunk,
-                        )
+                        if i_chunk:
+                            conn.executemany(
+                                "INSERT OR REPLACE INTO action_outcomes "
+                                "(outcome_id, profile_id, query, fact_ids_json,"
+                                " outcome, context_json, timestamp, reward,"
+                                " settled, settled_at, recall_query_id) "
+                                "VALUES "
+                                "(?, ?, '', ?, 'settled', '{}', ?, ?, 1, ?, ?)",
+                                i_chunk,
+                            )
+                        if s_chunk:
+                            conn.execute(
+                                "UPDATE pending_outcomes "
+                                f"SET status = 'settled' "
+                                f"WHERE outcome_id IN ({placeholders})",
+                                s_chunk,
+                            )
                         conn.execute("COMMIT")
-                        written += len(i_chunk)
+                        # Count what was FINALIZED, not what was written. A row
+                        # with no signals is finalized without producing an
+                        # outcome, and callers use this number to know the
+                        # backlog drained — counting inserts would report 0
+                        # forever and make the reaper look dead.
+                        written += len(s_chunk)
                     except sqlite3.Error:
                         conn.execute("ROLLBACK")
                         raise

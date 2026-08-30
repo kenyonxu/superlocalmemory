@@ -159,11 +159,25 @@ from superlocalmemory.storage.migrations import (
 from superlocalmemory.storage.migrations import (
     M042_correction_case_ledger as _M042,
 )
+from superlocalmemory.storage.migrations import (
+    M044_play_carries_its_own_evidence as _M044,
+)
+from superlocalmemory.storage.migrations import (
+    M045_fact_outcome_score as _M045,
+    M046_prospective_memory_has_its_own_name as _M046,
+    M047_fisher_vectors_are_stored_like_every_other_vector as _M047,
+    M048_upcoming_holds_only_what_is_upcoming as _M048,
+    M049_a_schema_version_marker_is_one_row as _M049,
+)
+from superlocalmemory.storage.migrations import (
+    M043_quarantine_display_summaries as _M043,
+)
 from superlocalmemory.storage._schema_version import (
     SUPPORTED_SCHEMA_VERSION,
     SchemaVersionError,
     check_version_or_raise as _check_version_or_raise,
     ensure_schema_version_table as _ensure_schema_version_table,
+    read_schema_version as _read_schema_version,
     write_schema_version as _write_schema_version,
 )
 from superlocalmemory.storage._migration_internals import (
@@ -249,6 +263,13 @@ MIGRATIONS: list[Migration] = [
     # contains identifiers only and does not alter temporal fact state.
     Migration(name=_M042.NAME, db_target="memory", ddl=_M042.DDL,
               dependencies=(_M032.NAME,)),
+    # M044 lets a bandit play record which memories it showed, so the reward
+    # proxy can settle it from evidence instead of always falling through to
+    # the 120-second neutral default. Additive column on M005's bandit_plays,
+    # and eager on purpose: nothing bootstraps that table at engine init, so
+    # there is no reason to defer it.
+    Migration(name=_M044.NAME, db_target="learning", ddl=_M044.DDL,
+              dependencies=(_M005.NAME,)),
     # M006 + M011 are deliberately NOT here — see DEFERRED_MIGRATIONS below.
 ]
 
@@ -312,6 +333,47 @@ DEFERRED_MIGRATIONS: list[Migration] = [
     # Main-line M034 is renumbered in V4. It must remain deferred because its
     # backfill joins engine-bootstrapped memory_scenes and atomic_facts.
     Migration(name=_M039.NAME, db_target="memory", ddl=_M039.DDL),
+    # M043 withholds model-written summaries from the retrieval corpus and
+    # un-hides the memories they displaced. Deferred because it reads and
+    # writes atomic_facts + fact_retention, both bootstrapped at engine init —
+    # the same reason M011/M013/M015/M016 are deferred. apply_deferred takes a
+    # verified snapshot before the first migration it actually applies, so the
+    # store is recoverable.
+    Migration(name=_M043.NAME, db_target="memory", ddl=_M043.DDL,
+              dependencies=(_M011.NAME,)),
+    # M045 holds the per-fact outcome score. Deferred because its backfill
+    # reads action_outcomes, which engine init bootstraps — the same reason
+    # M006 and M011 are deferred. Depends on M006 for the reward column it
+    # averages.
+    Migration(name=_M045.NAME, db_target="memory", ddl=_M045.DDL,
+              dependencies=(_M006.NAME,)),
+    # M046 renames the fact type used for planned future events, which means
+    # rebuilding atomic_facts to widen a CHECK constraint SQLite cannot alter.
+    # Deferred for the same reason as M043: atomic_facts is bootstrapped at
+    # engine init, and apply_deferred takes a verified snapshot before the first
+    # migration it applies, so a table rebuild has something to fall back to.
+    # Depends on M043 so the two never contend for the same table in one pass.
+    Migration(name=_M046.NAME, db_target="memory", ddl=_M046.DDL,
+              dependencies=(_M043.NAME,)),
+    # M047 rewrites the two Fisher vectors on each fact as float32 rather than
+    # as decimal text. Deferred because it walks every fact in atomic_facts,
+    # which engine init bootstraps. It changes no schema and both forms stay
+    # readable, so it is resumable and an interrupted store still works.
+    # Depends on M046 so a table rebuild and a full-table update never run in
+    # the same pass over the same table.
+    Migration(name=_M047.NAME, db_target="memory", ddl=_M047.DDL,
+              dependencies=(_M046.NAME,)),
+    # M048 finishes what M046 started: M046 renamed the type used for planned
+    # events without re-reading a single one of them, so the same wrongly-filed
+    # rows now carry a more confident name. Depends on M046 for the rename.
+    Migration(name=_M048.NAME, db_target="memory", ddl=_M048.DDL,
+              dependencies=(_M046.NAME,)),
+    # M049 gives schema_version the unique constraint its six writers all
+    # assumed it had. Every one uses INSERT OR IGNORE, which ignores nothing
+    # without a constraint, so each appended a duplicate per run: seven distinct
+    # versions held as 3,496 rows on one store and 234,348 on another. No
+    # dependency -- it touches a bookkeeping table no other migration reads.
+    Migration(name=_M049.NAME, db_target="memory", ddl=_M049.DDL),
 ]
 
 
@@ -579,6 +641,60 @@ def _deferred_already_applied(conn: sqlite3.Connection, name: str) -> bool:
         return False
 
 
+def _breaking_floor(learning_db: Path, memory_db: Path) -> int:
+    """Highest floor declared by a migration that is recorded complete.
+
+    A migration declares ``BREAKING_VERSION`` when a store it has touched must
+    not be opened by an older build. Only completed ones count: a migration that
+    failed has not changed anything an older build would trip over.
+    """
+    from superlocalmemory.storage._migration_internals import _MODULES
+
+    logs = {"learning": _read_log(learning_db), "memory": _read_log(memory_db)}
+    floor = 0
+    for migration in (*MIGRATIONS, *DEFERRED_MIGRATIONS):
+        module = _MODULES.get(migration.name)
+        declared = getattr(module, "BREAKING_VERSION", 0) if module else 0
+        if not declared:
+            continue
+        if logs.get(migration.db_target, {}).get(migration.name) == "complete":
+            floor = max(floor, int(declared))
+    return floor
+
+
+def _stamp_breaking_floor(
+    learning_db: Path, memory_db: Path, details: dict[str, str],
+) -> None:
+    """Raise the recorded version to the highest completed breaking floor.
+
+    Monotonic: never lowers a stored version, so it cannot undo the completion
+    certificate on an already-current store. Never fatal — a store that cannot
+    be stamped is reported, because failing the whole run here would block an
+    upgrade over a guard that only matters to older builds.
+    """
+    floor = _breaking_floor(learning_db, memory_db)
+    if floor <= 0:
+        return
+    for db_path in (learning_db, memory_db):
+        try:
+            current = _read_schema_version(db_path)
+            if current >= floor:
+                continue
+            conn = _connect(db_path)
+            try:
+                _ensure_schema_version_table(conn)
+                _write_schema_version(conn, floor)
+            finally:
+                try:
+                    conn.close()
+                except sqlite3.Error:  # pragma: no cover
+                    pass
+        except sqlite3.Error as exc:  # pragma: no cover — reported, not fatal
+            details["schema_version_floor"] = (
+                f"cannot raise the floor on {db_path}: {exc}"
+            )
+
+
 def apply_deferred(
     learning_db: Path,
     memory_db: Path,
@@ -682,6 +798,20 @@ def apply_deferred(
                 conn.close()
             except sqlite3.Error:  # pragma: no cover
                 pass
+
+    # A migration that makes the store unusable by an older build declares a
+    # floor, and that floor is written as soon as the migration is recorded
+    # complete — BEFORE and independent of the completion certificate below.
+    #
+    # The certificate is all-or-nothing across both databases by design. That is
+    # right for "is this store fully migrated" and wrong for "may an older build
+    # write to it": an unrelated failure on the other database would otherwise
+    # leave a rebuilt table guarded by the old ceiling, and the first planned
+    # event an older build stored would be rejected by the new constraint and
+    # lost. Raising the floor turns that into a refusal to start, which is what
+    # the ceiling is for.
+    if not dry_run:
+        _stamp_breaking_floor(learning_db, memory_db, details)
 
     # The version ceiling is a completion certificate, not an intent marker.
     # M039 is deferred until engine-owned tables exist, so apply_all must not

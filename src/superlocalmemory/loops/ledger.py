@@ -223,6 +223,36 @@ class _EngineLedgerStore:
             self._engine.close()
 
 
+class _PoolLedgerStore(_EngineLedgerStore):
+    """Write through the owned daemon/worker; read through the LIGHT engine.
+
+    MCP intentionally keeps a LIGHT engine in-process.  That engine owns a
+    read-only database view but refuses ``store``/``store_fast``.  The pool is
+    the admitted writer and shares the same canonical store, so loop laps stay
+    immediately queryable without turning every MCP process into a heavy
+    writer.
+    """
+
+    def __init__(self, pool: Any, reader_engine: Any) -> None:
+        super().__init__(reader_engine, owns_engine=False)
+        self._pool = pool
+
+    def add(self, content: str, *, session_id: str, metadata: dict) -> None:
+        result = self._pool.store(
+            content,
+            metadata={
+                **metadata,
+                "session_id": session_id,
+                "profile_id": self._engine.profile_id,
+            },
+        )
+        accepted = bool(result.get("ok") or result.get("success"))
+        if not accepted:
+            raise RuntimeError(
+                result.get("error", "owned SLM writer rejected loop ledger entry")
+            )
+
+
 def engine_backed_ledger(engine: Any) -> SLMMemoryLedger:
     """Build an SLM-backed ledger over an ALREADY-OPEN engine.
 
@@ -234,6 +264,11 @@ def engine_backed_ledger(engine: Any) -> SLMMemoryLedger:
     from a worker thread.
     """
     return SLMMemoryLedger(_EngineLedgerStore(engine, owns_engine=False))
+
+
+def pool_backed_ledger(pool: Any, reader_engine: Any) -> SLMMemoryLedger:
+    """Build an MCP-safe ledger: admitted pool writes, LIGHT engine reads."""
+    return SLMMemoryLedger(_PoolLedgerStore(pool, reader_engine))
 
 
 def open_engine_store(db_path: str | Path) -> _EngineLedgerStore:

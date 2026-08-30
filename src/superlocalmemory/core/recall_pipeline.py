@@ -14,6 +14,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+from dataclasses import replace
+
+from superlocalmemory.core.session_identity import is_conversation
 import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -253,6 +256,8 @@ def _behavioral_entities(results: list[Any], limit: int = 20) -> list[str]:
 _RANKING_MODES: frozenset[str] = frozenset({"off", "v1", "v2", "v2-ensemble"})
 
 
+from superlocalmemory.learning.signal_kinds import FEEDBACK_ONLY_SQL
+
 class _ReadOnlyLearningView:
     """Minimal learning-model reader that cannot initialise or mutate a DB."""
 
@@ -271,11 +276,19 @@ class _ReadOnlyLearningView:
         return connection
 
     def count_signals(self, profile_id: str) -> int:
+        """Count FEEDBACK rows only — an exposure is not feedback.
+
+        Must agree with ``LearningDatabase.count_signals``: a phase resolved
+        from one of these is compared against a threshold resolved from the
+        other, so a difference between them is a phase that flickers. Both
+        share ``FEEDBACK_ONLY_SQL``; a test asserts neither carries its own
+        copy of the predicate.
+        """
         connection = self._connection()
         try:
             row = connection.execute(
                 "SELECT COUNT(*) AS count FROM learning_signals "
-                "WHERE profile_id = ?",
+                f"WHERE profile_id = ?{FEEDBACK_ONLY_SQL}",
                 (profile_id,),
             ).fetchone()
             return int(row["count"]) if row else 0
@@ -327,11 +340,21 @@ class _ReadOnlyLearningView:
 def _resolve_ranking_mode(env: "dict[str, str] | os._Environ[str]") -> str:
     """Map the ``SLM_RANKING`` env var to a canonical mode.
 
-    ``SLM_RANKING`` is an explicit operator policy.  In 4.0.5 the absence of
-    that policy is deliberately ``off``: old learning signals must not begin
-    altering recall merely because a user upgrades.  The legacy disable flags
-    remain harmless compatibility inputs, but cannot implicitly enable a
-    ranking mode.
+    ``SLM_RANKING`` is an explicit operator policy, and the absence of one
+    means ``off``: an upgrade must not start reordering results on its own.
+
+    Fixing the settlement path was necessary for the ensemble to be worth
+    enabling, but it is not sufficient. Settlement decides what an arm learns
+    *after* a query; the channel weights come from sampling that arm's
+    posterior *before* it. Until arms have posteriors shaped by real
+    observations, that sample is drawn from the prior, so two identical
+    queries can be weighted differently for no reason the store can justify —
+    variance with nothing bought by it. A memory system's answers should move
+    because the evidence moved.
+
+    So the ensemble stays opt-in until arms carry settled rewards. Set
+    ``SLM_RANKING=v2-ensemble`` to enable it, or ``v1``/``v2`` for the
+    narrower passes.
     """
     raw = (env.get("SLM_RANKING", "") or "").strip().lower()
     if raw in _RANKING_MODES:
@@ -348,6 +371,9 @@ def apply_ranking(
     config: Any = None,
     pipeline_version: str = "v2-ensemble",
     record_signals: bool = False,
+    record_plays: bool = True,
+    memory_db_path: Any = None,
+    play_sink: dict | None = None,
 ) -> "RecallResponse":
     """Run the ranking pipeline at the requested version.
 
@@ -383,6 +409,9 @@ def apply_ranking(
         response = apply_v2_bandit_ensemble(
             response, query, profile_id, query_id,
             record_signals=record_signals,
+            record_plays=record_plays,
+            memory_db_path=memory_db_path,
+            play_sink=play_sink,
         )
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("apply_ranking ensemble step skipped: %s", exc)
@@ -605,6 +634,267 @@ def apply_v2_adaptive_ranking(
 # ---------------------------------------------------------------------------
 
 
+def _rank_key(result) -> tuple[float, str]:
+    """Descending ordering key for the score-bias passes.
+
+    Falls back to ``score`` exactly as the writes do. Falling back to 0.0
+    instead — which is what a bare ``ranking_score or 0.0`` does — sorts every
+    result that no bias touched as if it scored nothing, collapsing the whole
+    un-adjusted tail to the bottom in fact_id order and discarding the ordering
+    retrieval worked for. ``ensemble_rerank`` populates ``ranking_score`` on
+    every candidate, so that only bites when the ensemble is disabled or has
+    fallen back — which is precisely when a bias must still behave.
+
+    One function rather than the same expression at each call site: two passes
+    that sort by different keys silently overwrite each other's ordering.
+
+    ``is None`` rather than a falsy test, because 0.0 is a real score. A
+    cross-encoder that judges a candidate irrelevant returns exactly that, and
+    ``x or y`` would then discard the model's verdict and rank the candidate on
+    its retrieval score instead — quietly promoting the thing the model just
+    ruled out.
+    """
+    utility = result.ranking_score
+    if utility is None:
+        utility = result.score
+    if utility is None:
+        utility = 0.0
+    return (-float(utility), result.fact.fact_id)
+
+
+def _apply_outcome_bonus(
+    results: list, profile_id: str, memory_db_path: Any = None,
+) -> list:
+    """Nudge ranking by whether each memory has demonstrably helped before.
+
+    Bounded to ``pcos.MAX_BONUS`` (0.15) and weighted by how often the fact has
+    actually settled, so history breaks ties between similar-looking memories
+    and cannot drag a poor match to the top.
+
+    Order is recomputed here rather than left to the caller: a bonus that does
+    not reorder anything is a number nobody reads, which is the failure mode
+    this whole wave exists to fix.
+
+    Never raises. On a store where M045 has not run, ``fetch_scores`` returns
+    ``{}`` and this is the identity function.
+    """
+    if not results:
+        return results
+    try:
+        import sqlite3 as _sq
+
+        from superlocalmemory.infra.data_root import state_path
+        from superlocalmemory.learning.pcos import (
+            RECENT_TOPS,
+            bonus_for,
+            fetch_scores,
+        )
+
+        ids = [r.fact.fact_id for r in results if getattr(r, "fact", None)]
+        if not ids:
+            return results
+        # The store the RECALL used, not whichever one the data-root default
+        # resolves to. Hardcoding state_path("memory.db") worked on a default
+        # install and silently read another store's scores — or nothing at all —
+        # anywhere the engine was pointed elsewhere: a second data root, a test
+        # store, a config whose db_path diverges. Both fail modes are silent,
+        # because this function is fail-open by design.
+        db_file = Path(memory_db_path) if memory_db_path else state_path("memory.db")
+        conn = _sq.connect(f"file:{db_file}?mode=ro", uri=True, timeout=0.5)
+        try:
+            scores = fetch_scores(conn, profile_id, ids)
+        finally:
+            conn.close()
+        if not scores:
+            return results
+
+        adjusted = []
+        for r in results:
+            entry = scores.get(r.fact.fact_id)
+            if not entry:
+                adjusted.append(r)
+                continue
+            # A fact that has been winning first place lately stops EARNING the
+            # bonus. It keeps everything retrieval gave it — the alternative
+            # considered was a 10x demotion, which would bury a memory whose
+            # only offence is having been useful.
+            if RECENT_TOPS.capped(profile_id, r.fact.fact_id):
+                adjusted.append(r)
+                continue
+            delta = bonus_for(*entry)
+            if delta == 0.0:
+                adjusted.append(r)
+                continue
+            adjusted.append(replace(
+                r,
+                ranking_score=float(
+                    r.ranking_score if r.ranking_score is not None else r.score
+                ) + delta,
+            ))
+        adjusted.sort(key=_rank_key)
+        if adjusted:
+            RECENT_TOPS.record_top(profile_id, adjusted[0].fact.fact_id)
+        return adjusted
+    except Exception as exc:  # pragma: no cover — advisory, never fatal
+        logger.debug("outcome bonus skipped: %s", exc)
+        return results
+
+
+#: Largest lift a memory can earn purely from having been in the last few
+#: turns. Additive on ``ranking_score``, deliberately not a multiplier.
+#:
+#: A multiplier was the first design and it is scale-dependent, which makes the
+#: same constant mean different things on two installs. Measured: with a
+#: cross-encoder loaded, ranking scores land near [0, 1] and 1.5x is worth about
+#: +0.45; with no reranker configured, raw fusion scores top out at
+#: ``n_channels/(rrf_k+1)`` — 0.08 at k=60 — and the same 1.5x is worth +0.03.
+#: One constant, a fifteen-fold difference in effect, decided by installed
+#: optional components. An additive cap behaves the same everywhere.
+#:
+#: 0.20 sits just above the ceiling on the outcome bonus (0.15), so continuity
+#: of attention outranks historical usefulness when the two disagree. Both are
+#: bounded, so neither can drag a genuinely poor match to the top.
+WM_MAX_BONUS = 0.20
+
+#: Everything the ranking passes may add to one result, summed.
+#:
+#: Each pass caps its own contribution, which says nothing about the total —
+#: and the total is what decides whether a genuinely better match can be
+#: displaced. Two passes at 0.15 and 0.20 already reach 0.35; a third added
+#: later would raise the ceiling with nothing to notice.
+#:
+#: Stated here so the invariant is one number rather than an emergent property
+#: of however many passes exist, and asserted by test: a result ahead by more
+#: than this cannot be overtaken by bias alone, and the sum of the individual
+#: caps must not exceed it.
+MAX_TOTAL_BIAS = 0.35
+
+
+def _apply_working_memory_bias(
+    results: list, profile_id: str, session_id: str,
+) -> list:
+    """Lift memories this session was just looking at.
+
+    Retrieval still runs in full and this changes nothing about what was
+    retrieved — it reorders what came back. A memory absent from the working
+    set is untouched, so an empty working set is exactly the identity function
+    and the first turn of every session behaves as before.
+
+    Reads only in-process state: no query, no connection, no file. Deliberately
+    does not create a working set — a bias that ran on every recall would
+    otherwise register an entry for every session id that ever appears.
+
+    Never raises. Attention is advisory; a recall that cannot be biased is
+    still a correct recall.
+
+    WHAT OUTRANKS WHAT
+    ------------------
+    This is not the last word on the order. An exact lexical hit is promoted to
+    the top after every learned layer, including this one, so the full precedence
+    is:
+
+        exact lexical match  >  continuity  >  demonstrated usefulness  >  retrieval
+
+    That ordering is deliberate — a memory containing the caller's exact words
+    should not sit behind a merely similar one — but it means a boosted memory
+    can be moved back off position 1 by a guard that runs later. Two independent
+    reviewers raised it as a bug, which is what an undocumented precedence looks
+    like from outside, so it is written down here rather than left to be
+    rediscovered.
+    """
+    if not results or not is_conversation(session_id, profile_id):
+        return results
+    try:
+        from superlocalmemory.core.working_memory import peek
+
+        wm = peek(profile_id, session_id)
+        if wm is None:
+            return results
+        held = wm.boost_set()
+        if not held:
+            return results
+
+        adjusted = []
+        for r in results:
+            fact = getattr(r, "fact", None)
+            if fact is None or fact.fact_id not in held:
+                adjusted.append(r)
+                continue
+            adjusted.append(replace(
+                r,
+                ranking_score=float(
+                    r.ranking_score if r.ranking_score is not None else r.score
+                ) + WM_MAX_BONUS,
+            ))
+        # Same ordering key as the outcome bonus, so the two compose instead of
+        # one silently overwriting the other's sort.
+        adjusted.sort(key=_rank_key)
+        return adjusted
+    except Exception as exc:  # pragma: no cover — advisory, never fatal
+        logger.debug("working-memory bias skipped: %s", exc)
+        return results
+
+
+def _resettle_shown_after_bias(
+    play_sink: dict, profile_id: str, results: list, shown_before: list[str],
+) -> None:
+    """Correct the play's evidence when the bias changed what was shown.
+
+    A play is settled later by asking whether anything downstream referenced one
+    of the memories this query surfaced. That question is answered against a
+    stored list, and the list was written before the continuity bias ran — so a
+    memory the bias lifted into the answer was absent from it, and an outcome
+    citing that memory settled nothing.
+
+    Rewritten only when the set actually differs, which is the uncommon case: a
+    cold session, or a warm one whose held memories were already at the top,
+    costs nothing. Never raises — a play whose evidence cannot be corrected
+    settles on the old list, which is the behaviour before this existed.
+    """
+    play_id = play_sink.get("play_id")
+    learning_db = play_sink.get("learning_db")
+    if not play_id or not learning_db:
+        return
+    try:
+        from superlocalmemory.core.working_memory import ADMIT_TOP_N
+        from superlocalmemory.learning.bandit import ContextualBandit
+
+        shown_now = [
+            r.fact.fact_id for r in results[:ADMIT_TOP_N]
+            if getattr(r, "fact", None) is not None
+        ]
+        if set(shown_now) == set(shown_before):
+            return
+        ContextualBandit(Path(learning_db), profile_id).record_shown(
+            play_id, shown_now,
+        )
+    except Exception as exc:  # pragma: no cover — advisory
+        logger.debug("shown-set correction skipped: %s", exc)
+
+
+def _admit_to_working_memory(
+    results: list, profile_id: str, session_id: str,
+) -> None:
+    """Remember what this answer showed, so the next turn is not cold.
+
+    Runs last, on the order the caller will actually see. Admitting the
+    pre-rerank order would teach the session something it was never shown.
+    """
+    if not results or not is_conversation(session_id, profile_id):
+        return
+    try:
+        from superlocalmemory.core.working_memory import ADMIT_TOP_N, get_or_create
+
+        shown = [
+            r.fact.fact_id for r in results[:ADMIT_TOP_N]
+            if getattr(r, "fact", None) is not None and r.fact.fact_id
+        ]
+        if shown:
+            get_or_create(profile_id, session_id).admit(shown)
+    except Exception as exc:  # pragma: no cover — advisory, never fatal
+        logger.debug("working-memory admit skipped: %s", exc)
+
+
 def apply_v2_bandit_ensemble(
     response: RecallResponse,
     query: str,
@@ -613,8 +903,40 @@ def apply_v2_bandit_ensemble(
     *,
     learning_db_path: Any = None,
     record_signals: bool = False,
+    record_plays: bool = True,
+    memory_db_path: Any = None,
+    play_sink: dict | None = None,
 ) -> RecallResponse:
-    """Apply contextual bandit + optional LGBM ensemble rerank. Safe on error."""
+    """Apply contextual bandit + optional LGBM ensemble rerank. Safe on error.
+
+    ``play_sink``, when given, receives the play this call recorded and the store
+    it went to. The caller needs both because the answer is not final here: a
+    continuity bias runs afterwards and can change which memories end up in
+    front of the user, and the play's evidence has to describe what was actually
+    shown. Caller-owned rather than returned on the response, matching how the
+    retrieval engine hands back its dropped-channel set.
+
+    ``record_signals`` and ``record_plays`` are separate because they are
+    separate things, and conflating them is what stopped the bandit learning.
+
+    * A **play** is "the bandit chose arm X for this query". It carries no
+      reward — ``bandit_plays.reward`` stays NULL until an authenticated
+      outcome settles it. One INSERT.
+    * A **signal** is an exposure row per displayed fact, twenty per query. Those
+      are what inflated the ranking-phase counter 2,675x, and the enqueue also
+      writes canonical/learning state, which is the contention the comment
+      below describes.
+
+    ``record_signals=False`` was hardcoded at the only caller on 2026-07-27
+    (commit ``cbf7929f``, release 3.8.6). That is the same day
+    ``MAX(bandit_arms.last_played_at)`` stops. It took the play recording down
+    with the exposure enqueue, so nothing was ever written for the reward proxy
+    to settle, and 165 arms have sat at alpha == beta ever since.
+
+    Recording a play is not feedback. It is the ticket the settlement path
+    later resolves against evidence, and without it there is no learning loop
+    at all.
+    """
     import os as _os
 
     if _os.environ.get("SLM_BANDIT_DISABLED", "0") == "1":
@@ -651,9 +973,13 @@ def apply_v2_bandit_ensemble(
             "query_type": response.query_type,
             "entity_count": entity_count,
         }
+        # Record the play unless explicitly told not to. ``choose_readonly``
+        # samples the same arm from a read-only snapshot and returns
+        # ``play_id=None``, so taking that branch means this query can never be
+        # settled and the arm can never move off its prior.
         choice = (
             bandit.choose(context, query_id)
-            if record_signals
+            if record_plays
             else bandit.choose_readonly(context)
         )
 
@@ -688,10 +1014,42 @@ def apply_v2_bandit_ensemble(
             logger.debug("v2 bandit ensemble_rerank skipped: %s", exc)
             final_results = weighted
 
+        # --- 4b. outcome bonus -------------------------------------------
+        # Applied AFTER the model score, never as a model feature. The wave
+        # plan proposed adding "outcome_score" to FEATURE_NAMES for inference
+        # and excluding it from training; that is a shape mismatch —
+        # booster.predict needs the columns the model was trained on, and
+        # features.py asserts len(FEATURE_NAMES) == FEATURE_DIM == 20 against a
+        # live 20-feature model. Applying it here also makes it
+        # true by construction: the model cannot learn from a signal it
+        # never sees, so there is no self-reinforcing loop to exclude.
+        final_results = _apply_outcome_bonus(
+            final_results, profile_id, memory_db_path,
+        )
+
+        # Give the play its evidence: which memories this query actually
+        # surfaced, so the reward proxy can settle it from a downstream
+        # reference instead of falling through to the neutral default. Written
+        # after the rerank because that is when the shown order is final.
+        if choice.play_id:
+            try:
+                bandit.record_shown(
+                    choice.play_id, [r.fact.fact_id for r in final_results[:5]],
+                )
+            except Exception as exc:  # pragma: no cover — never break a recall
+                logger.debug("v2 bandit record_shown skipped: %s", exc)
+            if play_sink is not None:
+                # So the caller can correct this record if the order changes
+                # after this function returns.
+                play_sink["play_id"] = choice.play_id
+                play_sink["learning_db"] = str(db_path)
+
         # Recall is a query.  Implicit learning signals are deliberately
         # disabled on this path: even a non-blocking enqueue eventually writes
         # canonical/learning state and turns dashboard polling into contention.
         # An explicit feedback command owns durable learning signals instead.
+        # NOTE: this gates the twenty-row exposure enqueue ONLY. The play above
+        # is recorded regardless — see this function's docstring.
         if record_signals:
             try:
                 top20 = final_results[:20]
@@ -768,6 +1126,7 @@ def run_recall(
     mode: Mode | None = None,
     limit: int = 20,
     agent_id: str = "unknown",
+    session_id: str | None = None,
     *,
     config: SLMConfig,
     retrieval_engine: Any,
@@ -916,12 +1275,45 @@ def run_recall(
         import uuid as _uuid
         query_id = _uuid.uuid4().hex
         mode = _resolve_ranking_mode(_os.environ)
+        play_sink: dict = {}
         response = apply_ranking(
             response, query, profile_id, query_id,
             config=config, pipeline_version=mode, record_signals=False,
+            # the store THIS recall read from, so the outcome bonus
+            # cannot resolve a different one
+            memory_db_path=getattr(db, "db_path", None),
+            play_sink=play_sink,
         )
     except Exception as exc:
         logger.debug("Ranking pipeline skipped: %s", exc)
+
+    # Continuity of attention, applied after every learned layer and outside
+    # the ranking-version switch: a session's recent memories bias this answer
+    # whether or not the bandit and the model are enabled, because they are
+    # unrelated features and coupling them would make one disappear with the
+    # other. In-process only — no query is added to the recall path.
+    # Only an id that names a conversation drives continuity. The fronts invent
+    # one per request (HTTP) or per client (MCP) for bookkeeping, and neither is
+    # a conversation: the first would register a working set per dashboard
+    # search and evict real ones, the second would pool unrelated clients into
+    # a shared set. See core.session_identity.
+    _sid = session_id if is_conversation(session_id, profile_id) else ""
+    if _sid and response.results:
+        from superlocalmemory.core.working_memory import ADMIT_TOP_N as _TOP
+
+        _shown_before = [
+            r.fact.fact_id for r in response.results[:_TOP]
+            if getattr(r, "fact", None) is not None
+        ]
+        response.results = _apply_working_memory_bias(
+            response.results, profile_id, _sid,
+        )
+        # The play was recorded with the order as it stood before the line
+        # above. If that order changed, its evidence now describes an answer
+        # nobody saw.
+        _resettle_shown_after_bias(
+            play_sink, profile_id, response.results, _shown_before,
+        )
 
     _preserve_exact_lexical_evidence(response, query)
     _mark("learning+ranking")
@@ -935,6 +1327,11 @@ def run_recall(
     # LLD-00 §3 — stamp HMAC markers on every result so post_tool_outcome_hook
     # can validate fact_ids observed in downstream tool output.
     _apply_markers_to_response(response)
+
+    # Last, on the order the caller receives, so the next turn of this session
+    # starts from what was actually shown.
+    if _sid:
+        _admit_to_working_memory(response.results, profile_id, _sid)
 
     _mark("TOTAL(fisher+trust+markers)")
     return response

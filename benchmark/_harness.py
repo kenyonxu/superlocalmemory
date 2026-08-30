@@ -263,7 +263,11 @@ def summarize(results: list[ExperimentResult]) -> str:
     """Render a markdown summary table across all experiments."""
     env = environment()
     lines = [
-        "# SLM 4.0 — Reliability Evaluation Results",
+        # Derived, not typed. This read "SLM 4.0" through eleven releases while
+        # the line below it reported the real version, so the heading and the
+        # body of the same file disagreed about which release was measured.
+        f"# SLM {'.'.join(str(env['version']).split('.')[:2])}"
+        " — Reliability Evaluation Results",
         "",
         f"- Package version: **{env['version']}**",
         f"- Python: {env['python']}",

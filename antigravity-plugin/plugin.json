@@ -1,0 +1,25 @@
+{
+  "name": "superlocalmemory",
+  "version": "4.2.0",
+  "description": "Local-first agent memory with auditable hybrid retrieval. Remember decisions and recall them by asking, entirely on your machine.",
+  "author": {
+    "name": "Qualixar",
+    "email": "varun.pratap.bhardwaj@gmail.com",
+    "url": "https://github.com/qualixar"
+  },
+  "homepage": "https://qualixar.com",
+  "repository": "https://github.com/qualixar/superlocalmemory",
+  "license": "AGPL-3.0-or-later",
+  "keywords": [
+    "memory",
+    "mcp",
+    "agents",
+    "local-first",
+    "context-compression"
+  ],
+  "skills": "./skills/",
+  "agents": "./agents/",
+  "commands": "./commands/",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./mcp_config.json"
+}

@@ -29,6 +29,7 @@ from superlocalmemory.core.config import (
 )
 from superlocalmemory.hooks.auto_invoker import AutoInvoker
 from superlocalmemory.math.fisher import FisherRaoMetric
+from superlocalmemory.storage.embedding_codec import decode_float_vector
 
 
 # ============================================================================
@@ -231,7 +232,7 @@ class TestFisherPosteriorWiring:
             (fact_id,),
         )
         assert rows, "Fact must still exist after maintenance"
-        stored = json.loads(rows[0]["fisher_variance"])
+        stored = decode_float_vector(rows[0]["fisher_variance"], field="fisher_variance")
 
         assert len(stored) == 8, "Variance dimensions must be preserved"
         assert all(
@@ -258,7 +259,7 @@ class TestFisherPosteriorWiring:
             (fact_id,),
         )
         assert rows
-        stored = json.loads(rows[0]["fisher_variance"])
+        stored = decode_float_vector(rows[0]["fisher_variance"], field="fisher_variance")
         assert stored == pytest.approx(initial_var, abs=1e-9), (
             "Unaccessed fact's fisher_variance must remain unchanged"
         )
@@ -288,7 +289,7 @@ class TestFisherPosteriorWiring:
             (fact_id,),
         )
         assert rows
-        stored = json.loads(rows[0]["fisher_variance"])
+        stored = decode_float_vector(rows[0]["fisher_variance"], field="fisher_variance")
         assert stored == pytest.approx(initial_var, abs=1e-9), (
             "When fisher_bayesian_update=False, variance must be unchanged"
         )
@@ -315,7 +316,7 @@ class TestFisherPosteriorWiring:
                 "SELECT fisher_variance FROM atomic_facts WHERE fact_id = ?",
                 (fact_id,),
             )
-            return json.loads(rows[0]["fisher_variance"])
+            return decode_float_vector(rows[0]["fisher_variance"], field="fisher_variance")
 
         # Run 1: access_count=1, last_applied=0, delta=1 → tightens
         run_maintenance(db, config, profile_id=profile_id)
@@ -623,14 +624,14 @@ class TestFisherPerAccessDelta:
         rows = db.execute(
             "SELECT fisher_variance FROM atomic_facts WHERE fact_id = ?", (fact_id,)
         )
-        var_after_1 = json.loads(rows[0]["fisher_variance"])
+        var_after_1 = decode_float_vector(rows[0]["fisher_variance"], field="fisher_variance")
 
         # Second run with no new access → variance must be identical
         run_maintenance(db, config, profile_id="default")
         rows = db.execute(
             "SELECT fisher_variance FROM atomic_facts WHERE fact_id = ?", (fact_id,)
         )
-        var_after_2 = json.loads(rows[0]["fisher_variance"])
+        var_after_2 = decode_float_vector(rows[0]["fisher_variance"], field="fisher_variance")
 
         assert all(var_after_1[i] < initial_var[i] for i in range(8)), \
             "First run must tighten"
@@ -658,7 +659,7 @@ class TestFisherPerAccessDelta:
                 "SELECT fisher_variance FROM atomic_facts WHERE fact_id = ?",
                 (fact_id,),
             )
-            return json.loads(rows[0]["fisher_variance"])
+            return decode_float_vector(rows[0]["fisher_variance"], field="fisher_variance")
 
         # Run 1: delta = 1 → tightens
         run_maintenance(db, config, profile_id="default")

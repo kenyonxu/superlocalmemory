@@ -27,7 +27,27 @@ def _bounded(value: object, default: float = 0.0) -> float:
 
 
 def finalize_score_contract(response: RecallResponse) -> RecallResponse:
-    """Finalize aliases, rank positions, and response abstention metadata."""
+    """Finalize aliases, rank positions, and response abstention metadata.
+
+    ``score`` IS NOT THE ORDERING KEY, and a caller that sorts by it will get a
+    different answer than the one this returns. That is deliberate, and it is
+    load-bearing:
+
+    * ``score`` answers "how well does this match the query" — a property of the
+      result and the query alone.
+    * ``rank_position``, assigned here from the order of the list, answers "what
+      is recommended, and in what order". Ranking also weighs whether a memory
+      has helped before and whether the session was just looking at it, neither
+      of which is a property of the query.
+
+    So the two can disagree, and the top result can legitimately carry a lower
+    ``score`` than the one beneath it. Consumers should present the list in the
+    order given, or sort by ``rank_position``; ``ranking_score`` carries the
+    internal utility for anyone who needs to re-derive it.
+
+    This ordering is NOT recomputed here. Re-sorting by ``score`` at this point
+    would silently undo every ranking pass that ran before it.
+    """
     for position, result in enumerate(response.results or (), start=1):
         relevance = _bounded(
             result.relevance_score

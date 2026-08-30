@@ -103,8 +103,10 @@ remember(
   project: str = "",  # project scope, e.g. "superlocalmemory"
   importance: int = 5,# 1–10; see scale below
   session_id: str = "",# from session_init; attributes the write to this session
+  session_date: str = "",# when the memory is ABOUT, if not today
   scope: str = None,   # v3.6.15 multi-scope: "personal" (default) | "shared" | "global"
   shared_with: str = "",# comma-separated profile_ids for scope="shared"
+  idempotency_key: str = "",# replaying the same key will not store a second copy
 )
 ```
 
@@ -121,14 +123,44 @@ remember(
 
 Use 7–10 only for facts that would cause real damage if forgotten.
 
-### 4. One fact per call
+### 4. Date a memory to when it happened
+
+`session_date` says **when the memory is about**, as distinct from when you
+wrote it. Omit it and the memory is dated today.
+
+```
+remember(
+  content="The outage on the payments queue was caused by a stale DNS entry",
+  tags="incident,payments,postmortem",
+  project="platform",
+  session_date="2026-08-14",       # YYYY-MM-DD, or a full ISO 8601 timestamp
+  session_id="<sid>",
+)
+```
+
+Use it whenever you are writing something down after the fact — a postmortem, a
+decision taken in a meeting last week, a migration that ran on a known date.
+Time-filtered recall (`window="7d"`, `window="2026-07-01..2026-07-31"`) reads
+event time, so a mis-dated memory is one a time-scoped question cannot find.
+
+`session_date` does not change what **kind** of memory it is. A memory that
+describes something planned — "the migration is scheduled for Tuesday", "the
+certificate expires on 2026-09-01" — is stored as a **prospective** memory, and
+recall reports it as `"fact_type": "prospective"`. That is inferred from how the
+content reads, not from the date you pass. Stores written before 4.1.0 spelled
+this type `"temporal"`; that value still reads correctly and needs nothing from
+you.
+
+---
+
+### 5. One fact per call
 
 Store one atomic fact per `remember` call. Do not concatenate multiple unrelated
 points into a single content string — they will be hard to update individually
 and harder to retrieve cleanly. If you have three separate decisions, make three
 calls.
 
-### 5. Always set tags and project
+### 6. Always set tags and project
 
 Untagged, unscoped facts are harder to retrieve and harder to manage. Minimum:
 set `tags` to one or two relevant terms and `project` to the repo/product name.
@@ -238,4 +270,4 @@ different workspace, use `switch_profile` first. See `slm-profile`.
 
 ---
 
-*SuperLocalMemory v4.0.4 · Qualixar · AGPL-3.0-or-later*
+*SuperLocalMemory v4.2.0 · Qualixar · AGPL-3.0-or-later*

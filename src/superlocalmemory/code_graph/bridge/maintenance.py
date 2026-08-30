@@ -103,6 +103,14 @@ def _fact_rows(
         # the pass linked happily in tests and would have linked NOTHING for any
         # actual user — 3,608 of 3,608 facts filtered out on this machine.
         sql += "AND COALESCE(archive_status, 'live') != 'archived' "
+    # Same reasoning for withheld rows: a model's non-answer has no code
+    # entities worth resolving, and a link from one would surface it in the
+    # bridge's enrichment text.
+    try:
+        if memory_db._has_quarantine_column():
+            sql += "AND COALESCE(quarantined, 0) = 0 "
+    except Exception:  # pragma: no cover - helper absent on an unusual manager
+        pass
 
     params: list[Any] = [profile_id]
     if since:

@@ -34,6 +34,31 @@ _DEFAULT_ALPHA = 1.0
 _DEFAULT_BETA = 1.0
 _DEFAULT_TRUST = 0.5
 
+#: Identities that are the absence of an identity. A caller that does not say
+#: who it is lands in one of these, and on a real store the ``unknown`` bucket
+#: had accumulated 1,708 pieces of evidence and a trust of 1.000 — the highest
+#: of any agent in the store, higher than the named agents doing the actual
+#: work. That number is the sum of everybody's behaviour, and it was being
+#: handed to whoever arrived next without a name.
+#:
+#: It matters twice over. The trust gate lets a write through at 0.3 and a
+#: delete at 0.5, so a caller with no identity cleared both by the widest
+#: margin available. And a fact with no trust record of its own inherits the
+#: trust of whoever created it, so 39 facts on that store were being ranked at
+#: the maximum promotion for having no author.
+#:
+#: A catch-all is not an identity. It reads as the neutral prior every time and
+#: accumulates nothing, which leaves the gate exactly where it was for an
+#: anonymous caller (0.5 clears both thresholds) while removing the escalation.
+ANONYMOUS_IDENTITIES: frozenset[str] = frozenset({
+    "", "unknown", "unspecified", "anonymous", "none", "null",
+})
+
+
+def is_anonymous(agent_id: str) -> bool:
+    """Whether this identifier names nobody in particular."""
+    return (agent_id or "").strip().lower() in ANONYMOUS_IDENTITIES
+
 # Signal strengths (how much each event shifts alpha/beta)
 _SIGNAL_WEIGHTS: dict[str, tuple[float, float]] = {
     # (delta_alpha, delta_beta)
@@ -68,7 +93,14 @@ class TrustScorer:
     # ------------------------------------------------------------------
 
     def get_agent_trust(self, agent_id: str, profile_id: str) -> float:
-        """Get trust score for an agent. Returns 0.5 if unknown."""
+        """Get trust score for an agent. Returns the neutral prior if unknown.
+
+        An identifier that names nobody in particular always reads as the
+        prior, whatever has been written against that bucket. See
+        ``ANONYMOUS_IDENTITIES``.
+        """
+        if is_anonymous(agent_id):
+            return _DEFAULT_TRUST
         alpha, beta = self._get_beta_params("agent", agent_id, profile_id)
         return self._compute_trust(alpha, beta)
 
@@ -131,6 +163,16 @@ class TrustScorer:
         Returns:
             Updated trust score for the agent.
         """
+        if is_anonymous(agent_id):
+            # Reputation belongs to somebody. Accumulating it against the
+            # catch-all is how that bucket reached the highest trust in the
+            # store while naming no one.
+            logger.debug(
+                "trust signal ignored: %r names nobody (signal=%s)",
+                agent_id, signal_type,
+            )
+            return _DEFAULT_TRUST
+
         weights = _SIGNAL_WEIGHTS.get(signal_type, (0.0, 0.0))
         delta_alpha, delta_beta = weights
 

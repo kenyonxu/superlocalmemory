@@ -52,7 +52,7 @@ os.environ.setdefault("SLM_MCP_EMBEDDED", "1")
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
 from superlocalmemory.infra.daemon_identity import (
@@ -511,6 +511,49 @@ _MIGRATION_EXEMPT_PATH_PREFIXES: tuple[str, ...] = (
 )
 
 
+def _serving_blocked_by(migration_result: dict) -> list[str]:
+    """Failed migrations that should stop this daemon serving. Fail-closed.
+
+    A failed migration used to 503 every route without asking what had failed.
+    For a missing table that is right. For a data invariant that ordinary use can
+    re-violate it is not: one drifted row made the whole store unreachable until
+    somebody restarted it by hand, and the restart fixed nothing that a
+    background repair would not have fixed on its own.
+
+    A migration may answer for itself by exposing ``blocks_serving(conn)``.
+    Anything that does not is treated as blocking, so this cannot quietly open a
+    door for a migration nobody has thought about.
+    """
+    failed = list(migration_result.get("failed") or [])
+    if not failed:
+        return []
+    try:
+        import sqlite3
+
+        from superlocalmemory.infra.data_root import state_path
+        from superlocalmemory.storage._migration_internals import _MODULES
+    except Exception:  # noqa: BLE001 — never let this decide by crashing
+        return failed
+
+    blocking: list[str] = []
+    for name in failed:
+        decide = getattr(_MODULES.get(name), "blocks_serving", None)
+        if not callable(decide):
+            blocking.append(name)
+            continue
+        try:
+            db = state_path("memory.db")
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                if decide(conn):
+                    blocking.append(name)
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 — unknown means blocking
+            blocking.append(name)
+    return blocking
+
+
 def _is_migration_exempt_path(path: str) -> bool:
     """Return True for health, status, and repair paths that must stay reachable
     even when the daemon reports a schema migration failure.
@@ -587,11 +630,83 @@ class RememberRequest(BaseModel):
     metadata: dict | None = None  # v3.4.26: pass-through from MCP pool_store
     idempotency_key: str | None = None
     session_id: str = ""
+    # Optional compare-and-write guard for profile-sensitive clients. The
+    # daemon remains single-profile, so a stale MCP client must fail instead
+    # of silently writing into whichever profile another client selected.
+    profile_id: str = ""
+    #: WHEN this memory is about, as distinct from when it was written.
+    #:
+    #: The internal admission record has carried this field all along and this
+    #: model never had it, so every memory arriving over HTTP — which is every
+    #: memory, from the CLI, the tool interface and the dashboard alike — was
+    #: stamped with its ingestion date. Measured on the author's store: 200 of
+    #: the 200 most recent facts have an observation_date, and 196 of them are
+    #: the day they were written. A store that cannot be told "this happened in
+    #: March" cannot answer a question about March.
+    #:
+    #: Empty means "today", the previous behaviour. Format is YYYY-MM-DD or a
+    #: full ISO 8601 timestamp.
+    session_date: str = ""
+
+    @field_validator("session_date")
+    @classmethod
+    def _session_date_is_a_date(cls, value: str) -> str:
+        """Reject a malformed date rather than ignore it.
+
+        Dropping it silently would leave the caller believing the date was
+        recorded while the memory quietly filed itself under today — which is
+        the exact failure this field exists to fix, reintroduced one layer up.
+        Rejecting is recoverable: the caller sees the error and resends.
+
+        ISO ONLY, DELIBERATELY, even though this system ships a parser that is
+        far more permissive. ``encoding/temporal_parser.parse_session_date``
+        accepts "May 8, 2026", "1:56 pm on 8 May, 2026", "14/03/2026", and also
+        "last tuesday" and "March 2026" — and those last two are why it is not
+        used here. Asked on 2026-08-21 it resolves "last tuesday" to
+        **2026-08-25**, four days into the future, and "March 2026" to the 21st,
+        a day it invents. Accepting either at this boundary would file a memory
+        under a confidently wrong date, silently, which is precisely the class
+        of defect this field was added to remove.
+
+        The caller here is a program — the command line, the tool interface, the
+        dashboard — not a person typing. ISO is the right contract for a
+        program, and a caller holding a human-typed date can run it through the
+        parser itself and send the result.
+        """
+        if not value:
+            return value
+        from datetime import datetime as _dt
+
+        text = value.strip()
+        try:
+            _dt.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError(
+                "session_date must be YYYY-MM-DD or a full ISO 8601 timestamp; "
+                f"got {value!r}. To accept looser human phrasing, parse it "
+                "first with TemporalParser.parse_session_date and send the ISO "
+                "result — but check what it returns, because it resolves "
+                "relative phrases against today and can answer with a future "
+                "date."
+            ) from None
+        return text
     # v3.6.15 multi-scope: visibility of the new memory. ``None`` scope means
     # "use the configured default_scope" (personal). shared_with is the list of
     # profile_ids for scope='shared'.
     scope: str | None = None
     shared_with: list[str] | None = None
+
+
+def _require_remember_profile(requested: str, active: str) -> None:
+    """Reject a stale profile-bound write before any durable mutation."""
+    if requested and requested != active:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"profile mismatch: request is bound to '{requested}' but "
+                f"the daemon currently serves '{active}'"
+            ),
+        )
 
 
 class SessionOpenRequest(BaseModel):
@@ -1748,6 +1863,41 @@ def _stop_deployment_retention(application) -> bool:
     return True
 
 
+def _start_embedder_warmup(engine: object) -> "threading.Thread | None":
+    """Load the embedding model in the background. Never blocks startup.
+
+    Returns the thread so a test can join it; ``None`` when there is nothing to
+    warm. Every failure is "not warmed", never a failed startup: a daemon that
+    cannot embed still serves keyword recall and still stores memories, and the
+    materializer fills the vectors in afterwards either way.
+    """
+    embedder = getattr(engine, "_embedder", None)
+    if embedder is None or not hasattr(embedder, "embed"):
+        return None
+
+    from superlocalmemory.core.engine import _is_remote_embedder
+
+    if _is_remote_embedder(embedder):
+        # A hosted embedder has no model to load and warming it would spend a
+        # request, and money, on a sentence nobody asked about.
+        return None
+
+    def _warm() -> None:
+        started = time.time()
+        try:
+            embedder.embed("slm embedder warm-up")
+        except Exception as exc:  # pragma: no cover — warming is best effort
+            logger.debug("embedder warm-up failed (%s) — writes will defer", exc)
+            return
+        logger.info(
+            "Embedding model warm and ready (%.1fs)", time.time() - started,
+        )
+
+    thread = threading.Thread(target=_warm, daemon=True, name="slm-embed-warmup")
+    thread.start()
+    return thread
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Initialize engine, workers, and optional services on startup."""
@@ -2032,6 +2182,40 @@ async def lifespan(application: FastAPI):
         engine = MemoryEngine(config)
         engine.initialize()
 
+        # Load the embedding model now, off the request path, the way the
+        # cross-encoder is already warmed at startup.
+        #
+        # A write embeds inline so the memory it stores can be found by asking a
+        # question rather than only by quoting its own words, and it gives that
+        # one second before deferring to the materializer. Loading the model
+        # takes 9.9-11.0 s here; once loaded an embed is 42 ms. So on a daemon
+        # that had not embedded yet, the first writes each waited the full second
+        # and stored no vector regardless -- and the model only ever loaded
+        # because some *recall* eventually paid for it. Whoever recalled first
+        # wore the cold start.
+        #
+        # This belongs to the daemon and not to engine wiring: the worker is a
+        # subprocess per engine, so warming from wiring would have every `slm
+        # status` spawn one and load a model it will never use.
+        _start_embedder_warmup(engine)
+
+        # Tell the hook subprocesses that skill evolution is on. The hook reads
+        # this env var as its fast-path signal and nothing ever set it, so the
+        # feature was off for everyone who had switched it on in config: the
+        # hook checked, found nothing, and returned False. Hooks are launched as
+        # children of this process and inherit its environment, which is the
+        # only channel between the two.
+        try:
+            if getattr(getattr(config, "evolution", None), "enabled", False):
+                os.environ["SLM_EVOLUTION_ENABLED"] = "1"
+            else:
+                # Cleared as well as set: a daemon restarted with the setting
+                # turned off must not leave the previous run's answer behind in
+                # an environment the next hook inherits.
+                os.environ.pop("SLM_EVOLUTION_ENABLED", None)
+        except Exception as _evo_exc:  # pragma: no cover — never block startup
+            logger.debug("evolution flag not exported: %s", _evo_exc)
+
         # Refresh migration state now that the engine is initialised.  Any
         # schema work the engine's own bootstrap may have applied (e.g.
         # runtime-table creation) is captured here so the dashboard and
@@ -2118,6 +2302,30 @@ async def lifespan(application: FastAPI):
             logger.warning(
                 "deferred migration runner crashed (non-fatal): %s", _dexc,
             )
+
+        # Move an existing store onto the graph and vector backends on the
+        # first start after an upgrade. They have shipped as required
+        # dependencies since 3.7 and sat unused, because building the
+        # projections was three manual commands almost nobody ran. Runs after
+        # the deferred migrations so it projects the converted store, and never
+        # fatal: if the libraries will not import or the projection does not
+        # match, the daemon serves from SQLite and says so.
+        try:
+            from superlocalmemory.core.scale_autopromote import (
+                auto_promote_scale_backends,
+            )
+            _promotion = auto_promote_scale_backends(config)
+            application.state.scale_autopromotion = _promotion.as_dict()
+            if _promotion.promoted and _promotion.restart_required:
+                logger.info(
+                    "graph and vector backends are promoted and serve after the "
+                    "next restart",
+                )
+        except Exception as _pexc:  # pragma: no cover — defensive
+            logger.warning("automatic backend promotion crashed (non-fatal): %s", _pexc)
+            application.state.scale_autopromotion = {
+                "attempted": True, "promoted": False, "reason": str(_pexc),
+            }
 
         # S9-DASH-02: start the outcome-queue worker so recall →
         # pending_outcomes is actually produced. Before v3.4.22 this
@@ -2399,6 +2607,10 @@ async def lifespan(application: FastAPI):
                 "state": "checking_components", "embeddings_backfilled": 0,
                 "expansion_backfilled": 0, "null_remaining": None,
                 "components": None,
+                # Declared here so /status carries the same keys whatever
+                # happens; a field that only appears on failure is a field
+                # nobody's dashboard renders.
+                "incomplete_reason": None,
                 "started_at": _t.time(), "finished_at": None,
             }
             # Step 0 (v3.8.2 "whole self-healer"): repair components that
@@ -2507,9 +2719,42 @@ async def lifespan(application: FastAPI):
                     _backfill_vector_store()
                 except Exception as exc:
                     logger.warning("Self-heal vector index failed (non-fatal): %s", exc)
-                _SELF_HEAL_STATUS["state"] = "complete"
+
+                # "complete" has to mean complete.
+                #
+                # This line used to set "complete" unconditionally, so a
+                # backfill that gave up after five no-progress attempts, or ran
+                # out its 500-iteration budget, reported success with facts
+                # still unembedded — and an unembedded fact cannot be found by
+                # meaning at all. That is how a machine sat at 56.3% of its
+                # memory reachable while its own status endpoint said the heal
+                # had finished. Nobody was going to look past a green light.
+                #
+                # Now the state is derived from the remaining count, and the
+                # gap is named in plain language for the dashboard, so an
+                # incomplete heal is visible and gets retried on next start
+                # instead of being declared done forever.
+                _remaining = _SELF_HEAL_STATUS.get("null_remaining")
                 _SELF_HEAL_STATUS["finished_at"] = _t.time()
-                logger.info("Self-heal complete: %s", _SELF_HEAL_STATUS)
+                if _remaining is None:
+                    _SELF_HEAL_STATUS["state"] = "complete"
+                elif int(_remaining) > 0:
+                    _SELF_HEAL_STATUS["state"] = "incomplete"
+                    _SELF_HEAL_STATUS["incomplete_reason"] = (
+                        f"{int(_remaining)} memories still have no meaning "
+                        f"vector, so they cannot be found by asking a question. "
+                        f"This retries automatically next time the service "
+                        f"starts. It usually means the embedding model was "
+                        f"unavailable."
+                    )
+                    logger.warning(
+                        "Self-heal INCOMPLETE: %d facts still unembedded and "
+                        "therefore unreachable by meaning; will retry on next "
+                        "start. %s", int(_remaining), _SELF_HEAL_STATUS,
+                    )
+                else:
+                    _SELF_HEAL_STATUS["state"] = "complete"
+                    logger.info("Self-heal complete: %s", _SELF_HEAL_STATUS)
             except Exception as exc:
                 _SELF_HEAL_STATUS["state"] = "error"
                 logger.warning("Self-heal failed (non-fatal): %s", exc)
@@ -2947,6 +3192,18 @@ async def lifespan(application: FastAPI):
         finally:
             await _cancel_fact_entity_association_repair(application)
             await _cancel_source_quality_repair(application)
+
+    # Stop the projection drain. Its queue is durable, so an interrupted pass
+    # costs a repeat of idempotent work and nothing else — but a live worker
+    # writing into RocksDB and Lance while the process tears down around it has
+    # no upside.
+    try:
+        from superlocalmemory.core.backend_orchestrator import get_orchestrator
+        _orch = get_orchestrator()
+        if _orch is not None:
+            _orch.stop()
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("projection drain shutdown failed: %s", exc)
 
     # Cancel the cross-platform sync loop (H-CONC-2) so adapter file I/O does
     # not outlive the daemon.
@@ -3811,7 +4068,7 @@ def _register_dashboard_routes(application: FastAPI) -> None:
     @application.middleware("http")
     async def _migration_readiness_gate(request, call_next):
         migration_result = getattr(application.state, "migration_result", None)
-        if migration_result and migration_result.get("failed"):
+        if migration_result and _serving_blocked_by(migration_result):
             if not _is_migration_exempt_path(request.url.path):
                 from fastapi.responses import JSONResponse
                 return JSONResponse(
@@ -3975,8 +4232,30 @@ def _register_dashboard_routes(application: FastAPI) -> None:
         # v3.4.23: substitute version placeholder so the dashboard can detect
         # upgrades and auto-reload. Read fresh each request (daemon uptime is
         # days, but we want zero caching surprises during development).
-        html = index_path.read_text()
-        return html.replace("__SLM_VERSION__", _SLM_VERSION)
+        #
+        # 4.0.10: asset ?v= strings are now derived from file content instead of
+        # being hand-written literals that tracked nothing. See
+        # server/asset_versions.py — including what that does and does not fix.
+        # Asset versioning is cosmetic. It must never be why this page 500s.
+        #
+        # The import is deferred (house style, keeps startup lean), which means
+        # it resolves at REQUEST time — so when `pip install -e .` replaced the
+        # installed package underneath a running daemon, this route began
+        # answering "Internal Server Error" on the dashboard while every other
+        # endpoint was fine. A stale hand-written version string is a trifle; a
+        # blank page is not. Fall back to the file as written.
+        try:
+            from superlocalmemory.server.asset_versions import render_index
+
+            return render_index(
+                index_path, UI_DIR, substitutions={"__SLM_VERSION__": _SLM_VERSION},
+            )
+        except Exception as exc:  # noqa: BLE001 — serve the page regardless
+            logger.warning(
+                "asset version rewrite unavailable, serving index.html as "
+                "written: %s: %s", type(exc).__name__, exc,
+            )
+            return index_path.read_text().replace("__SLM_VERSION__", _SLM_VERSION)
 
     @application.get("/favicon.ico", include_in_schema=False)
     async def favicon():
@@ -4058,7 +4337,14 @@ def _register_daemon_routes(application: FastAPI) -> None:
             (migration_result or {}).get("failed", []) or []
         )
         migration_details = (migration_result or {}).get("details", {}) or {}
-        migrations_ready = bool(migration_result) and not migration_failures
+        # Ready means "can serve", so it keys off the failures that actually
+        # stop this daemon serving -- not off every failure. A data invariant
+        # that ordinary use re-violated leaves every route working; reporting
+        # not-ready for it told operators to restart, which fixed nothing a
+        # background repair would not have fixed. Everything still shows up in
+        # migration_failures and migration_failure_reasons below, named.
+        migration_blocking = _serving_blocked_by(migration_result or {})
+        migrations_ready = bool(migration_result) and not migration_blocking
         if migration_details.get("_crash"):
             migrations_ready = False
         writer_runtime = getattr(
@@ -4076,6 +4362,23 @@ def _register_daemon_routes(application: FastAPI) -> None:
             "embedding": embedding_ready,
             "recall_health": recall_health.get("recall_healthy") is True,
             "migration_failures": migration_failures,
+            # Which of those are the reason this daemon will not serve, as
+            # opposed to the ones it is reporting while serving normally.
+            "migration_blocking": migration_blocking,
+            # WHY each one failed, not just which. The runner already produces
+            # a precise sentence per migration -- "safe repair did not restore
+            # M043_...", "schema verification failed ... : <sqlite error>" --
+            # and this endpoint computed it and then dropped it on the floor.
+            # A migration recorded ``complete`` in migration_log can still be
+            # reported failed here, because a completed migration is re-checked
+            # by its own verify() on every start; with only a name to go on,
+            # that reads as the health check contradicting the database. It is
+            # not: they are answering different questions, and this is the
+            # sentence that says which. Reported as #125.
+            "migration_failure_reasons": {
+                name: str(migration_details.get(name, "(no detail recorded)"))
+                for name in migration_failures
+            },
         }
         readiness["retrieval"] = bool(
             readiness["embedding"] and readiness["recall_health"]
@@ -4146,7 +4449,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
             "runtime_state": runtime_state,
             "active_profile": profile_snapshot.profile_id,
             "profile_generation": profile_snapshot.generation,
-            # Wave-3: operational failure counts (visible to all team members)
+            # operational failure counts (visible to all team members)
             **_ops_failure_counts(engine, application),
             # issue #107: does this daemon's *imported* code still match the
             # installed distribution? ``version`` above reports what this
@@ -4154,6 +4457,12 @@ def _register_daemon_routes(application: FastAPI) -> None:
             # reveal staleness on its own. Loopback-only, alongside the other
             # operational metadata.
             "version_integrity": _version_integrity_payload(),
+            # How far behind the second graph store is. A drain that stops
+            # advancing is the failure that does not announce itself: every
+            # other signal here stays green while the graph quietly diverges
+            # from the record, and the only symptom is answers that are subtly
+            # worse. A depth that does not fall is the thing to alert on.
+            "projection": _projection_health(),
         }
 
     @application.get("/recall")
@@ -4378,6 +4687,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
         trusted_actor_id = _require_write_actor(request)
         _update_activity()
         engine = _get_engine_or_503()
+        _require_remember_profile(req.profile_id, engine._profile_id)
 
         # v3.6.15 multi-scope: resolve the write scope. ``None`` (not specified
         # by the caller) → the configured default_scope (personal). Shared
@@ -4513,6 +4823,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 shared_with=tuple(shared_with or ()),
                 trusted_actor_id=trusted_actor_id,
                 session_id=req.session_id,
+                session_date=req.session_date,
             )
             actor = Actor(
                 principal_id=trusted_actor_id,
@@ -4807,6 +5118,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
         fact_count = 0
         entity_count = 0
         edge_count = 0
+        projection_queue_depth = 0
         if engine is not None:
             try:
                 fact_count = engine._db.get_fact_count(profile_snapshot.profile_id)
@@ -4823,6 +5135,11 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 edge_count = int(dict(edges[0])["c"]) if edges else 0
             except Exception:
                 logger.debug("daemon status count query failed", exc_info=True)
+            try:
+                from superlocalmemory.storage import projection_outbox
+                projection_queue_depth = projection_outbox.depth(engine._db)
+            except Exception:
+                logger.debug("projection queue depth unavailable", exc_info=True)
         db_path = getattr(config, "db_path", None)
         db_size_mb = (
             round(db_path.stat().st_size / 1024 / 1024, 2)
@@ -4848,6 +5165,10 @@ def _register_daemon_routes(application: FastAPI) -> None:
             "legacy_port": _LEGACY_PORT,
             "profile": profile_snapshot.profile_id,
             "profile_generation": profile_snapshot.generation,
+            # Facts stored but not yet in the graph and vector projections. The
+            # CLI and MCP read their own status from here, so this is where the
+            # number has to be for all three surfaces to agree.
+            "projection_queue_depth": projection_queue_depth,
             # F2 fix: expose M028 backfill progress so operators can monitor
             # the post-upgrade fact/entity association repair state.
             "m028_backfill": getattr(
@@ -4859,7 +5180,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
             # index backfill after an upgrade). Dashboard renders a plain
             # "Optimizing memory…" line from this. Defaults to idle before start.
             "self_heal": globals().get("_SELF_HEAL_STATUS", {"state": "idle"}),
-            # Wave-3: operational failure counts (dead-letter, degraded, stalled)
+            # operational failure counts (dead-letter, degraded, stalled)
             **_ops_failure_counts(engine, application),
         }
 
@@ -4913,7 +5234,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
         return {"status": "started"}
 
     # ------------------------------------------------------------------
-    # Wave-3: Operational Recovery & Admin Remediation  (V4 resilience slice)
+    # Operational Recovery & Admin Remediation  (V4 resilience slice)
     # ------------------------------------------------------------------
 
     @application.get("/operations/failed")
@@ -5459,8 +5780,40 @@ def _terminalize_orphan_operation(engine, operation_id: str) -> None:
         )
 
 
+def _projection_health() -> dict:
+    """Queue depth, stall count, and whether the worker is running.
+
+    Never raises: a health endpoint that fails because one of its fields could
+    not be computed is worse than the missing field.
+
+    Takes no application. It used to accept one and never read it -- the
+    orchestrator is a process singleton -- which made the signature claim a
+    dependency the body did not have, and made a test that handed it a broken
+    application look like it was exercising the failure path when it was only
+    observing whatever the process had already built. Compare
+    ``_ops_failure_counts`` directly below, which takes an application because it
+    genuinely reads one.
+    """
+    try:
+        from superlocalmemory.core.backend_orchestrator import get_orchestrator
+
+        orchestrator = get_orchestrator()
+        if orchestrator is None:
+            return {"available": False}
+        health = dict(orchestrator.outbox_health())
+        health["available"] = True
+        # One boolean an alert can key on without knowing what a healthy depth
+        # looks like on this store.
+        health["behind"] = bool(health.get("depth", 0)) or bool(
+            health.get("stalled", 0)
+        )
+        return health
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "error": str(exc)[:120]}
+
+
 def _ops_failure_counts(engine, application) -> dict:
-    """Return Wave-3 operational failure counts for /status and /health.
+    """Return operational failure counts for /status and /health.
 
     Always returns a dict (never raises). Counts default to 0 on any error.
     Includes: dead_letter_count, degraded_operations, exhausted_obligations,

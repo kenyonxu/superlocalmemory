@@ -291,6 +291,10 @@ def recall_response_metadata(response: Any) -> dict:
         "score_contract_version": getattr(response, "score_contract_version", "2"),
         "calibration_status": getattr(response, "calibration_status", "uncalibrated"),
         "calibration_id": getattr(response, "calibration_id", None),
+        # The name of this answer. A caller that reports back how the answer
+        # went can quote it, and the report then joins to this exact recall
+        # instead of being matched by overlapping memory ids.
+        "query_id": getattr(response, "query_id", "") or "",
         "answer_confidence": getattr(response, "answer_confidence", None),
         "abstained": bool(getattr(response, "abstained", False)),
         "abstention_reason": getattr(response, "abstention_reason", None),
@@ -308,4 +312,9 @@ def recall_response_metadata(response: Any) -> dict:
         "incomplete_channels": list(
             getattr(response, "incomplete_channels", ()) or ()
         ),
+        # What became of every channel. Travels with the answer for the same
+        # reason as the field above: a caller comparing two runs, or an
+        # operator looking at a thin result set, otherwise cannot tell a store
+        # with nothing to say from a retrieval path that is partly down.
+        "channel_status": dict(getattr(response, "channel_status", {}) or {}),
     }

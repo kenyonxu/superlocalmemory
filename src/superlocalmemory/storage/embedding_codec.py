@@ -37,6 +37,8 @@ __all__ = [
     "EMBEDDING_BYTES",
     "encode_embedding",
     "decode_embedding",
+    "encode_float_vector",
+    "decode_float_vector",
 ]
 
 EMBEDDING_DIM: int = 768
@@ -125,5 +127,74 @@ def decode_embedding(
 
     raise ValueError(
         f"Unexpected embedding type {type(raw).__name__!r} for fact {fact_id!r}; "
+        f"expected bytes or str"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The same treatment for the other float vectors stored on a fact
+# ---------------------------------------------------------------------------
+#
+# A fact carries two more 768-wide vectors besides its embedding: the diagonal
+# Fisher mean and variance that the memory dynamics read. They were written as
+# JSON text, which costs about 17 KB each against 3 KB for the same numbers as
+# float32. Measured on a real 447 MB store: 116.5 MB of Fisher text describing
+# 3.6 MB of memories — thirty-two times the size of the content itself, and
+# more than a quarter of the whole file.
+#
+# The read path accepts both forms for the same reason the embedding one does:
+# a store converts when a migration reaches it, and everything has to keep
+# working in the meantime.
+
+
+def encode_float_vector(vec: list[float] | None) -> bytes | None:
+    """Serialise any float vector to a little-endian float32 BLOB."""
+    if vec is None:
+        return None
+    return np.asarray(vec, dtype=np.float32).tobytes()
+
+
+def decode_float_vector(
+    raw: bytes | str | None,
+    *,
+    field: str = "vector",
+    fact_id: str = "<unknown>",
+) -> list[float] | None:
+    """Read a float vector written as either JSON text or a float32 BLOB.
+
+    Raises rather than returning ``None`` for a malformed value: a caller
+    cannot tell a legitimately absent vector from a lost one, and these feed
+    the decay dynamics, where a silently empty vector reads as "no evidence"
+    instead of "evidence missing".
+    """
+    if raw is None or raw == "":
+        return None
+
+    if isinstance(raw, (bytes, bytearray)):
+        if len(raw) == 0 or len(raw) % 4 != 0:
+            raise ValueError(
+                f"Corrupt {field} buffer for fact {fact_id!r}: {len(raw)} bytes "
+                f"is not a multiple of 4 (float32)"
+            )
+        return np.frombuffer(raw, dtype=np.float32).tolist()
+
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValueError(
+                f"Corrupt JSON {field} for fact {fact_id!r}: {exc}"
+            ) from exc
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise ValueError(
+                f"{field} for fact {fact_id!r} decoded to "
+                f"{type(value).__name__}, expected a list"
+            )
+        return [float(v) for v in value]
+
+    raise ValueError(
+        f"Unexpected {field} type {type(raw).__name__!r} for fact {fact_id!r}; "
         f"expected bytes or str"
     )

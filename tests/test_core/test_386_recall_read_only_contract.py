@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 from superlocalmemory.storage.models import AtomicFact, RecallResponse, RetrievalResult
@@ -267,8 +268,8 @@ def test_386_emergency_session_recall_opens_memory_db_read_only(tmp_path, monkey
         bootstrap.execute(
             "INSERT INTO atomic_facts "
             "(fact_id, content, memory_id, created_at, profile_id) "
-            "VALUES ('fact-386', 'read only contract', 'memory-386', "
-            "'2026-07-27T00:00:00Z', 'default')"
+            "VALUES ('fact-386', 'read only contract', 'memory-386', ?, 'default')",
+            (datetime.now(UTC).isoformat(),),
         )
         bootstrap.execute(
             "INSERT INTO atomic_facts_fts(fact_id, content) "

@@ -8,4 +8,6 @@
 [mcp_servers.superlocalmemory]
 command = "slm"
 args = ["mcp"]
-env = { SLM_MCP_PROFILE = "code", SLM_AGENT_ID = "codex" }
+# Agent id only. Pinning a profile here would remove tools you had enabled;
+# unset resolves to the full tool set.
+env = { SLM_AGENT_ID = "codex" }

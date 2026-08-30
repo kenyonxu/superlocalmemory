@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
+import sqlite3
 from typing import TYPE_CHECKING, FrozenSet
 
 from superlocalmemory.core.actor_context import ActorContext, ActorRole, Transport
@@ -122,6 +124,9 @@ _REQUIRED_MCP_GATES: frozenset[str] = frozenset({
     "link_memory_to_code",
     # Tranche G — mesh_inbox marks messages as read (POST to mesh broker)
     "mesh_inbox",
+    "fetch",
+    "list_recent",
+    "session_init",
 })
 
 
@@ -187,9 +192,17 @@ def _resolve_deployment() -> "DeploymentConfig":
     try:
         from superlocalmemory.core.config import load_deployment_config
         result = load_deployment_config(config_toml_path=config_path)
-    except Exception as exc:
-        logger.debug("admission: load_deployment_config raised (unexpected): %s", exc)
-        return DEPLOYMENT_PERSONAL
+    except Exception as exc:  # noqa: BLE001
+        # config.toml exists and parsed as TOML; only its interpretation failed.
+        # Returning PERSONAL here would hand owner access to a store that may
+        # well be enterprise. Step 2 already returned PERSONAL for the fresh
+        # install with no config at all, which is the case that needs to stay
+        # frictionless.
+        logger.warning(
+            "admission: config.toml is present but could not be interpreted "
+            "(%s) -- fail-closed (treating as enterprise).", exc,
+        )
+        return DEPLOYMENT_ENTERPRISE
 
     # D1 fail-closed: [deployment] section present but mode is unrecognized or
     # absent means someone tried to configure enterprise and a typo/omission
@@ -326,6 +339,173 @@ def admit(
 # @admits decorator for async MCP tools
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# Company mode has two switches, and this is where they become one
+# ---------------------------------------------------------------------------
+
+#: Environment variable carrying the caller's user session over a transport that
+#: has no request to put a header on. The dashboard issues the same token, so
+#: this is not a second credential system -- it is the only channel the MCP
+#: surface offers for presenting the one that already exists.
+_SESSION_ENV = "SLM_USER_SESSION"
+
+_RBAC_ROLE_TO_ACTOR = {
+    "admin": ActorRole.ADMIN,
+    "member": ActorRole.MEMBER,
+    "viewer": ActorRole.VIEWER,
+}
+
+
+def _rbac_engine():
+    """The workspace's role store, or None when there is not one.
+
+    Built from the data root rather than from an HTTP app state, because the
+    callers here have no request. Failures return None, which then reads as
+    "personal mode" -- safe, because a workspace with no role store has no roles
+    to enforce.
+    """
+    try:
+        from superlocalmemory.access.rbac import RbacEngine
+        from superlocalmemory.infra.data_root import canonical_data_root
+
+        path = canonical_data_root() / "memory.db"
+        if not path.exists():
+            return None
+        return RbacEngine(str(path))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("admission: no role store available: %s", exc)
+        return None
+
+
+def _company_mode_active(deployment) -> bool:
+    """Whether a login is required, by EITHER of the two switches.
+
+    THE DEFECT THIS CLOSES
+
+    "Company mode" was two independent settings that nobody had joined up:
+    ``deployment`` in config.toml, which this module read, and ``require_login``
+    in the workspace's own settings, which the dashboard toggle writes and which
+    the HTTP routes read. Turning company mode on from the dashboard therefore
+    changed what HTTP would allow and changed nothing here.
+
+    Measured on a real store: with ``require_login`` on, two users configured,
+    and the viewer's role denying WRITE, an MCP write resolved to
+    ``local-operator`` with role ``owner`` and succeeded -- while the same write
+    over HTTP returned 401. The role check was not bypassed by a missing call;
+    it was bypassed because this path was still being told the workspace was
+    personal.
+
+    Either switch now means the same thing on every transport.
+    """
+    if getattr(deployment, "is_enterprise", False):
+        return True
+    rbac = _rbac_engine()
+    if rbac is None:
+        return False
+    try:
+        return bool(rbac.require_login())
+    except sqlite3.OperationalError as exc:
+        # "No such table" means the role tables were never created, which means
+        # roles were never set up, which is a personal install. Failing closed on
+        # THIS is not caution -- it is refusing every write on every store that
+        # has never used company mode, which is nearly all of them. It was caught
+        # by an existing test whose second MCP write started failing once a store
+        # file appeared in the data root.
+        if "no such table" in str(exc).lower():
+            logger.debug("admission: no role tables; personal workspace")
+            return False
+        logger.warning(
+            "admission: the login policy is unreadable (%s); treating the "
+            "workspace as requiring one", exc,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 -- an unreadable policy is not a licence
+        logger.warning(
+            "admission: cannot read the login policy (%s); treating the "
+            "workspace as requiring one", exc,
+        )
+        return True
+
+
+def _target_profile(explicit: str = "") -> str:
+    """The workspace a call will actually touch.
+
+    An explicit argument wins when the caller supplies one. Otherwise this reads
+    the same ``profiles.json`` the engine and the HTTP layer read, because that
+    is where the write is going to land.
+
+    THE DEFECT THIS CLOSES
+
+    The role check used to key off ``kwargs.get("profile_id")``. ``remember``
+    has no such parameter, so every role lookup resolved against ``default``
+    while the write went to whichever workspace was active. A user who is an
+    admin on ``default`` and a viewer on ``team`` passed the check on
+    ``default`` and wrote to ``team`` -- which HTTP would have refused.
+    """
+    name = (explicit or "").strip()
+    if name:
+        return name
+    try:
+        from superlocalmemory.server.profile_runtime import current_request_profile
+
+        runtime = current_request_profile()
+        if runtime:
+            return str(runtime)
+    except Exception as exc:  # noqa: BLE001 -- no request context is normal off HTTP
+        logger.debug("admission: no request profile in scope: %s", exc)
+    try:
+        import json as _json
+
+        from superlocalmemory.infra.data_root import canonical_data_root
+
+        config_file = canonical_data_root() / "profiles.json"
+        if config_file.exists():
+            data = _json.loads(config_file.read_text(encoding="utf-8"))
+            active = str(data.get("active_profile", "") or "").strip()
+            if active:
+                return active
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("admission: cannot read the active workspace: %s", exc)
+    return "default"
+
+
+def _session_principal(profile: str) -> tuple[str, str, FrozenSet[ActorRole] | None]:
+    """Resolve the caller from a session token in the environment.
+
+    Returns ``(principal_id, raw_token, roles)``. An empty principal means the
+    caller could not be identified, which ``resolve_actor`` turns into ANONYMOUS
+    and ``admit`` then denies -- so an unset or expired token fails closed.
+    """
+    token = os.environ.get(_SESSION_ENV, "").strip()
+    if not token:
+        return "", "", None
+    rbac = _rbac_engine()
+    if rbac is None:
+        return "", "", None
+    try:
+        user = rbac.resolve_session(token)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("admission: session lookup failed: %s", exc)
+        return "", "", None
+    if not user:
+        return "", "", None
+    role = None
+    try:
+        role = rbac.get_role(user["user_id"], profile or "default")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("admission: role lookup failed: %s", exc)
+    # No membership on this workspace is not the same as MEMBER. Falling back to
+    # a write-capable default here would hand every authenticated user write
+    # access to every workspace on the machine.
+    actor_role = _RBAC_ROLE_TO_ACTOR.get(
+        getattr(role, "value", role) if role is not None else "", None,
+    )
+    if actor_role is None:
+        return user["user_id"], token, frozenset({ActorRole.ANONYMOUS})
+    return user["user_id"], token, frozenset({actor_role})
+
+
 def admits(kind: OperationKind):
     """Decorator that gates an async MCP tool function via the policy registry.
 
@@ -348,9 +528,21 @@ def admits(kind: OperationKind):
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
             deployment = _resolve_deployment()
-            tier = "enterprise" if deployment.is_enterprise else "personal"
-            mode = "company" if deployment.is_enterprise else "local"
-            actor = resolve_actor(Transport.MCP, tier=tier, mode=mode)
+            # Either switch means company mode. Reading only the config file is
+            # what let a dashboard toggle change HTTP and leave this transport
+            # writing as the machine owner.
+            company = _company_mode_active(deployment)
+            tier = "enterprise" if company else "personal"
+            mode = "company" if company else "local"
+            principal, token, roles = ("", "", None)
+            if company:
+                principal, token, roles = _session_principal(
+                    _target_profile(kwargs.get("profile_id", "") or ""),
+                )
+            actor = resolve_actor(
+                Transport.MCP, tier=tier, mode=mode,
+                principal=principal, session=token, roles=roles,
+            )
             try:
                 admit(kind, actor, mode=mode)
             except AdmissionDenied as exc:
@@ -373,6 +565,7 @@ def gate_cli_mutation(
     *,
     principal: str = "",
     roles: FrozenSet[ActorRole] | None = None,
+    profile: str = "",
 ) -> None:
     """Gate a CLI mutation command. Exits with code 1 if denied.
 
@@ -385,25 +578,48 @@ def gate_cli_mutation(
     kind      : Operation being performed.
     principal : Authenticated CLI principal (from session store / login token).
     roles     : Explicit roles for an authenticated enterprise user.
+    profile   : Workspace the command will touch. Empty means the active one.
     """
     import sys
     deployment = _resolve_deployment()
-    tier = "enterprise" if deployment.is_enterprise else "personal"
-    mode = "company" if deployment.is_enterprise else "local"
+    # Either switch means company mode -- the same rule the MCP gate uses. This
+    # gate used to read config.toml alone, so turning per-user access on from
+    # the dashboard changed HTTP and MCP and left every CLI write running as the
+    # machine owner.
+    company = _company_mode_active(deployment)
+    tier = "enterprise" if company else "personal"
+    mode = "company" if company else "local"
+    session = ""
+    if company and not principal:
+        # A CLI caller identifies itself the same way an MCP caller does. With
+        # no token the principal stays empty, resolve_actor returns ANONYMOUS,
+        # and admit denies -- which is the intended answer for an unauthenticated
+        # write on a workspace that requires a login.
+        principal, session, resolved_roles = _session_principal(
+            _target_profile(profile),
+        )
+        if roles is None:
+            roles = resolved_roles
     actor = resolve_actor(
         Transport.CLI,
         tier=tier,
         mode=mode,
         principal=principal,
+        session=session,
         roles=roles,
     )
     try:
         admit(kind, actor, mode=mode)
     except AdmissionDenied as exc:
+        # Name something the reader can actually do. This used to say
+        # "log in with 'slm login'", and there is no such command -- so the one
+        # instruction the message gave was a dead end.
         print(
             f"[slm] Operation denied ({exc.decision.reason}). "
-            "This workspace requires authentication. "
-            "Log in with 'slm login' or contact your workspace administrator.",
+            "This workspace requires a signed-in user. Sign in on the dashboard "
+            "(slm dashboard), copy your session token, and put it in the "
+            "SLM_USER_SESSION environment variable -- or ask whoever "
+            "administers this workspace for access.",
             flush=True,
         )
         sys.exit(1)
@@ -515,7 +731,11 @@ def enforce_read_scope(
     is left alone so the server default applies.
     """
     deployment = _resolve_deployment()
-    if not deployment.is_enterprise:
+    # Both switches, for the same reason the write gates read both: a dashboard
+    # toggle used to leave this path unclamped, so a viewer could ask for
+    # include_global=True over MCP and pull another workspace's facts into the
+    # candidate set while HTTP refused the same request.
+    if not _company_mode_active(deployment):
         return include_global, include_shared
 
     reg = registry if registry is not None else _DEFAULT_REGISTRY

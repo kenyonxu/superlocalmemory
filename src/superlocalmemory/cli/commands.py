@@ -21,6 +21,27 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _cli_projection_queue_depth(db_path: object) -> int:
+    """Facts queued for the graph and vector projections, read straight from disk.
+
+    The no-daemon branch of ``slm status`` has no engine, so it opens the store
+    read-only rather than building one. A store that predates the queue reports
+    zero, which is the truth for it.
+    """
+    import sqlite3
+
+    from superlocalmemory.core.status_contract import projection_queue_depth
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return 0
+    try:
+        return projection_queue_depth(conn)
+    finally:
+        conn.close()
+
+
 def _daemon_unavailable(command: str, use_json: bool) -> None:
     """Exit a mutation client without opening a process-local writer.
 
@@ -70,12 +91,125 @@ def _cmd_db_dispatch(args: Namespace) -> None:
     if sub == "reembed":
         _cmd_db_reembed(args)
         return
+    if sub == "regraph":
+        _cmd_db_regraph(args)
+        return
     print(
         "Usage: slm db migrate [--status] [--dry-run] "
         "| slm db scale <action> "
+        "| slm db regraph [--check] [--profile NAME] "
         "| slm db reembed [--missing-only] [--all-profiles] [--limit N]"
     )
     sys.exit(2)
+
+
+def _cmd_db_regraph(args: Namespace) -> None:
+    """Re-derive the graph copy of your memories from the store.
+
+    Your memories live in one place; a second copy of the connections between
+    them is kept in a graph store so that searching them is fast. The two are
+    kept in step by a queue. If the queue is empty and the two still disagree
+    -- after a crash, a disk problem, or a copy restored from elsewhere --
+    nothing notices, because "the queue is empty" is what "in step" looks like.
+
+    This is how you say so out loud. ``--check`` reports the difference and
+    changes nothing; without it, every memory is queued to be re-derived and
+    the background worker rebuilds the copy from the store, which is the one
+    that is authoritative.
+    """
+    from superlocalmemory.core.config import SLMConfig
+    from superlocalmemory.storage import projection_outbox
+    from superlocalmemory.storage.database import DatabaseManager
+    from superlocalmemory.storage.logical_edges import count_logical_edges
+
+    config = SLMConfig.load()
+    db = DatabaseManager(config.db_path)
+    wanted = str(getattr(args, "profile", "") or "").strip()
+    try:
+        rows = db.execute(
+            "SELECT DISTINCT profile_id FROM atomic_facts ORDER BY profile_id"
+        )
+        profiles = [dict(r)["profile_id"] for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        print(f"[slm] could not list workspaces: {exc}")
+        sys.exit(1)
+    if wanted:
+        profiles = [p for p in profiles if p == wanted]
+        if not profiles:
+            print(f"[slm] no workspace named {wanted!r}")
+            sys.exit(1)
+
+    backend = None
+    try:
+        from superlocalmemory.core.backend_orchestrator import get_orchestrator
+
+        orchestrator = get_orchestrator()
+        backend = orchestrator.get_graph_backend() if orchestrator else None
+    except Exception as exc:  # noqa: BLE001
+        print(f"[slm] no graph copy is configured on this store ({exc}).")
+        return
+    if backend is None:
+        print("[slm] no graph copy is configured on this store; nothing to do.")
+        return
+
+    total_queued = 0
+    for profile_id in profiles:
+        with db.raw_connection() as conn:
+            stored = count_logical_edges(conn, profile_id)
+        try:
+            result = backend._db.run(
+                "?[count(a)] := *edge{from_id: a, profile_id: $pid}",
+                {"pid": profile_id},
+            )
+            copied = int(result.values.tolist()[0][0]) if len(result) else 0
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {profile_id}: the graph copy could not be read ({exc})")
+            continue
+        drift = abs(copied - stored) / float(stored) if stored else 0.0
+        pending = 0
+        try:
+            pending_rows = db.execute(
+                "SELECT COUNT(*) AS c FROM projection_outbox WHERE profile_id = ?",
+                (profile_id,),
+            )
+            pending = int(dict(pending_rows[0])["c"]) if pending_rows else 0
+        except Exception:  # noqa: BLE001
+            pending = -1
+        print(
+            f"  {profile_id}: {stored} connections stored, {copied} in the "
+            f"graph copy ({drift:.1%} apart), {pending} waiting to be applied"
+        )
+        if getattr(args, "check", False):
+            continue
+
+        fact_rows = db.execute(
+            "SELECT fact_id FROM atomic_facts WHERE profile_id = ?", (profile_id,)
+        )
+        fact_ids = [dict(r)["fact_id"] for r in fact_rows]
+        if not fact_ids:
+            continue
+        if not projection_outbox.is_available(db):
+            print("  (this store has no queue to rebuild through)")
+            continue
+        for start in range(0, len(fact_ids), 500):
+            projection_outbox.enqueue_many(
+                db, fact_ids[start:start + 500], profile_id,
+                op=projection_outbox.OP_UPSERT,
+            )
+        total_queued += len(fact_ids)
+        print(f"  {profile_id}: queued {len(fact_ids)} memories to re-derive")
+
+    db.close()
+    if getattr(args, "check", False):
+        return
+    if total_queued:
+        print(
+            f"[slm] {total_queued} memories queued. The background worker "
+            f"rebuilds the copy from the store; watch `slm status` until the "
+            f"waiting count reaches zero."
+        )
+    else:
+        print("[slm] nothing to re-derive.")
 
 
 def _cmd_db_reembed(args: Namespace) -> None:
@@ -271,7 +405,7 @@ def _cmd_loop(args: Namespace) -> None:
 
 
 def _cmd_ops(args: Namespace) -> None:
-    """Wave-3: operational recovery & admin remediation commands."""
+    """Operational recovery & admin remediation commands."""
     from superlocalmemory.cli.ops_cmd import cmd_ops
     cmd_ops(args)
 
@@ -416,7 +550,7 @@ def dispatch(args: Namespace) -> None:
         "loop": _cmd_loop,
         # V3.8.2 super-help — grouped overview of every command + topics
         "help": cmd_help,
-        # Wave-3: operational recovery & admin remediation
+        # Operational recovery & admin remediation
         "ops": _cmd_ops,
         # V4.0.6: GDPR subject-rights CLI (Art.15/17/20)
         "gdpr": _cmd_gdpr_dispatch,
@@ -424,7 +558,21 @@ def dispatch(args: Namespace) -> None:
     }
     handler = handlers.get(args.command)
     if handler:
-        handler(args)
+        from superlocalmemory.cli.daemon import DaemonRefused
+
+        try:
+            handler(args)
+        except DaemonRefused as refusal:
+            # One place, because a command added next year will not remember to
+            # do this. A refusal is an answer: say so and stop, rather than
+            # printing a traceback or -- worse -- letting a command fall back to
+            # writing locally what the workspace has just declined.
+            print(
+                f"[slm] {refusal}. This workspace requires authentication; "
+                "set SLM_USER_SESSION or log in, then try again.",
+                flush=True,
+            )
+            sys.exit(1)
     else:
         print(f"Unknown command: {args.command}")
         sys.exit(1)
@@ -606,13 +754,19 @@ def cmd_restart(args: Namespace) -> None:
     # Step 1: stop only the descriptor-owned daemon. Its graceful shutdown
     # owns worker termination; process-name-wide scans are forbidden.
     from superlocalmemory.cli.daemon import (
-        is_daemon_running,
+        owned_daemon_process_alive,
         read_descriptor,
         stop_daemon,
         wait_for_owned_daemon_shutdown,
     )
 
-    was_running = is_daemon_running()
+    # v4.1.4: process liveness, not HTTP health-readiness, decides whether a
+    # stop is owed. is_daemon_running() additionally requires a live /health
+    # response, which a daemon busy inside /maintenance/run or
+    # /consolidate/cognitive cannot give for the duration of that call even
+    # though it is fully alive and holding the port — see stop_daemon()'s
+    # docstring for the reproduced failure this fixes.
+    was_running = owned_daemon_process_alive()
     owned_descriptor = read_descriptor() if was_running else None
     stopped = stop_daemon() if was_running else True
     if stopped and was_running:
@@ -821,7 +975,13 @@ def cmd_config(args: Namespace) -> None:
             "evolution.mutation_model", "evolution.verify_model",
             "evolution.confirm_model",
             "mesh_enabled", "daemon_idle_timeout", "entity_compilation_enabled",
-            "graph_backend", "vector_backend", "scale_engine_state",
+            "graph_backend", "vector_backend",
+            # scale_engine_state is deliberately NOT settable. It is a record of
+            # what has been done to the store, not a preference: writing
+            # "promoted" by hand makes the daemon skip projecting a store that
+            # was never projected, and writing "local_core" onto a promoted one
+            # makes it project again over live backends. A real installation was
+            # found declaring two backends it had never built.
             "scope.default_scope", "scope.recall_include_global",
             "scope.recall_include_shared",
         }
@@ -1339,7 +1499,7 @@ def cmd_migrate(args: Namespace) -> None:
 
 def cmd_list(args: Namespace) -> None:
     """List recent memories chronologically."""
-    from superlocalmemory.core.config import SLMConfig
+    from superlocalmemory.core.config import CANONICAL_LIST_LIMIT, SLMConfig
     from superlocalmemory.core.engine import MemoryEngine
 
     use_json = getattr(args, 'json', False)
@@ -1348,10 +1508,10 @@ def cmd_list(args: Namespace) -> None:
         engine = MemoryEngine(config)
         engine.initialize()
 
-        limit = getattr(args, "limit", 20)
-        facts = engine._db.get_all_facts(engine.profile_id)
-        facts.sort(key=lambda f: f.created_at or "", reverse=True)
-        facts = facts[:limit]
+        limit = getattr(args, "limit", CANONICAL_LIST_LIMIT)
+        # The query already returns newest-first; pushing the bound into SQL
+        # keeps this from deserializing the whole table to show twenty rows.
+        facts = engine._db.get_all_facts(engine.profile_id, limit=limit)
     except Exception as exc:
         if use_json:
             from superlocalmemory.cli.json_output import json_print
@@ -1879,6 +2039,9 @@ def cmd_review_correction(args: Namespace) -> None:
 def cmd_status(args: Namespace) -> None:
     """Show system status."""
     from superlocalmemory.core.config import SLMConfig
+    # Same source the other two status surfaces read, so all three cannot
+    # disagree about which version answered.
+    from superlocalmemory.server.routes.helpers import SLM_VERSION
 
     config = SLMConfig.load()
     daemon_status = None
@@ -1903,7 +2066,10 @@ def cmd_status(args: Namespace) -> None:
 
         if daemon_status is not None:
             data = {
-                "mode": str(daemon_status.get("mode", "unknown")).upper(),
+                # Lowercase is what the daemon, the HTTP surface and MCP all
+                # report. Uppercasing it here made one field disagree across
+                # surfaces for anyone comparing the two answers.
+                "mode": str(daemon_status.get("mode", "unknown")),
                 "provider": daemon_status.get("provider", "none"),
                 "profile": daemon_status["profile"],
                 "base_dir": daemon_status.get("base_dir", str(config.base_dir)),
@@ -1914,6 +2080,10 @@ def cmd_status(args: Namespace) -> None:
                 "edge_count": int(daemon_status.get("edge_count", 0)),
                 "profile_generation": int(
                     daemon_status.get("profile_generation", 0)
+                ),
+                "version": SLM_VERSION,
+                "projection_queue_depth": int(
+                    daemon_status.get("projection_queue_depth", 0)
                 ),
             }
             json_print("status", data=data, next_actions=[
@@ -1965,7 +2135,7 @@ def cmd_status(args: Namespace) -> None:
                         pass
 
         data = {
-            "mode": config.mode.value.upper(),
+            "mode": config.mode.value,
             "provider": config.llm.provider or "none",
             "profile": config.active_profile,
             "base_dir": str(config.base_dir),
@@ -1975,6 +2145,8 @@ def cmd_status(args: Namespace) -> None:
             "entity_count": entity_count,
             "edge_count": edge_count,
             "profile_generation": 0,
+            "version": SLM_VERSION,
+            "projection_queue_depth": _cli_projection_queue_depth(config.db_path),
         }
         json_print("status", data=data, next_actions=[
             {"command": "slm health --json", "description": "Check math layer health"},
@@ -2068,7 +2240,7 @@ def cmd_health(args: Namespace) -> None:
             "total_facts": len(facts),
             "similarity_indexed": fisher_count,
             "lifecycle_positioned": langevin_count,
-            "mode": config.mode.value.upper(),
+            "mode": config.mode.value,
         }, next_actions=[
             {"command": "slm status --json", "description": "Check system status"},
             {"command": "slm recall '<query>' --json", "description": "Test retrieval"},
@@ -2411,6 +2583,56 @@ def _migration_error_logs() -> list:
         return []
 
 
+def _slm_version() -> str:
+    """The installed package version, or "unknown"."""
+    try:
+        from importlib.metadata import version
+        return version("superlocalmemory")
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _installed_plugin_versions() -> dict:
+    """Version of each editor plugin found on this machine, by install name.
+
+    The skills, agents and commands live in the editor's plugin channel rather
+    than in the Python package, so upgrading with pip leaves them exactly where
+    they were. This looks for them where each editor puts them, and returns an
+    empty mapping when none is installed -- which is itself the answer worth
+    reporting, because it means pip is the only thing being upgraded.
+
+    Best effort by design: an editor this does not know about should produce
+    "not detected", never an error.
+    """
+    import json
+    from pathlib import Path
+
+    found: dict[str, str] = {}
+    roots = (
+        # Claude Code: marketplace installs and directly-added plugins.
+        Path.home() / ".claude" / "plugins",
+        # Codex and VS Code copies, when placed by hand.
+        Path.home() / ".codex" / "plugins",
+        Path.home() / ".vscode" / "extensions",
+    )
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for manifest in list(root.glob("*/.claude-plugin/plugin.json")) + \
+                list(root.glob("*/plugin.json")) + \
+                list(root.glob("*/*/.claude-plugin/plugin.json")):
+            try:
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 — a sibling plugin's bad json is not ours
+                continue
+            if str(data.get("name", "")) != "superlocalmemory":
+                continue
+            found[str(manifest.parent.parent.name)] = str(
+                data.get("version", "unknown")
+            )
+    return found
+
+
 def _detect_all_installs() -> list:
     """Thin shim so cmd_doctor can be tested without importing install_detector."""
     try:
@@ -2567,14 +2789,22 @@ def cmd_doctor(args: Namespace) -> None:
                "pip install " + " ".join(core_modules[m] for m in missing))
 
     # 3. Search deps
+    #
+    # Presence only. Importing these executes torch, which cost ~4 s of every
+    # doctor run — a quarter of the whole command — to learn something the
+    # embedding-worker check below already proves by actually running them.
+    # find_spec answers "is it installed" without executing a line of it.
+    # A package that is present but broken on import is caught by check 7,
+    # which spawns the worker and waits for it to answer.
     search_mods = {"sentence_transformers": "sentence-transformers", "torch": "torch",
                    "sklearn": "scikit-learn"}
     search_ok = []
     for mod, pkg in search_mods.items():
         try:
-            __import__(mod)
-            search_ok.append(mod)
-        except Exception:  # dependency import may fail after module discovery
+            import importlib.util as _ilu
+            if _ilu.find_spec(mod) is not None:
+                search_ok.append(mod)
+        except Exception:  # a broken meta-path finder must not fail the check
             pass
     if len(search_ok) == len(search_mods):
         _check("Search deps", "PASS", "sentence-transformers, torch, sklearn")
@@ -2761,18 +2991,73 @@ def cmd_doctor(args: Namespace) -> None:
         try:
             from superlocalmemory.storage.memory_write import memory_read
 
+            # integrity_check reads every page. On a 610 MB store that is
+            # 10-15 s — over half of this command — and it ran on every
+            # invocation, including the ones a user makes twice in a row while
+            # fixing something else. quick_check walks the same B-trees and
+            # catches structural damage; what it skips is page-level checksum
+            # work that only finds hardware bit rot, which surfaces as read
+            # errors long before anyone runs a doctor.
+            #
+            # The trade is named rather than hidden: the output says which
+            # check ran, and --deep runs the exhaustive one.
+            deep = bool(getattr(args, "deep", False))
+            pragma = "integrity_check" if deep else "quick_check"
             with memory_read(db_path) as conn:
-                result = conn.execute("PRAGMA integrity_check").fetchone()
+                result = conn.execute(f"PRAGMA {pragma}").fetchone()
             if result and result[0] == "ok":
                 size_mb = db_path.stat().st_size / (1024 * 1024)
-                _check("Database", "PASS", f"OK ({size_mb:.2f} MB)")
+                detail = f"OK ({size_mb:.2f} MB, {pragma})"
+                if not deep:
+                    detail += " — run `slm doctor --deep` for a full page scan"
+                _check("Database", "PASS", detail)
             else:
-                _check("Database", "FAIL", f"integrity check: {result}",
+                _check("Database", "FAIL", f"{pragma}: {result}",
                        "Backup and recreate database")
         except Exception as exc:
             _check("Database", "FAIL", str(exc))
     else:
         _check("Database", "PASS", "not yet created (will initialize on first use)")
+
+    # 10b. Projection queue. The graph and the vectors live in other storage
+    # engines, and a queue that stops draining is the one failure that produces
+    # no error at all: the memory is safely in SQLite, nothing raises, and
+    # recall quietly stops finding it. Depth alone cannot distinguish a busy
+    # queue from a wedged one, so the check keys on attempts — a row that has
+    # been tried and refused is a defect with a fact id attached.
+    if db_path.exists():
+        try:
+            from superlocalmemory.storage.memory_write import memory_read
+            from superlocalmemory.storage.projection_outbox import DEPTH_SQL
+
+            with memory_read(db_path) as conn:
+                depth = int(conn.execute(DEPTH_SQL).fetchone()[0])
+                stalled = [
+                    row[0] for row in conn.execute(
+                        "SELECT fact_id FROM projection_outbox "
+                        "WHERE attempts >= 3 ORDER BY attempts DESC LIMIT 5"
+                    )
+                ]
+            if stalled:
+                _check(
+                    "Projection queue", "FAIL",
+                    f"{len(stalled)}+ memories refused by the graph or vector "
+                    f"store (e.g. {', '.join(f[:12] for f in stalled)})",
+                    "Check `slm logs` for the projection error, then restart "
+                    "the daemon to retry",
+                )
+            elif depth:
+                _check(
+                    "Projection queue", "PASS",
+                    f"{depth} memory/memories queued — the worker drains these "
+                    "in the background",
+                )
+            else:
+                _check("Projection queue", "PASS", "empty (graph is up to date)")
+        except Exception:
+            # No table means a store that predates the queue. Nothing is
+            # pending on it by definition, so this is not a finding.
+            _check("Projection queue", "PASS", "not applicable to this store")
 
     # 11. PEP 668 advisory: detect EXTERNALLY-MANAGED marker and
     #     recommend pipx when the system Python is managed by the OS package
@@ -2864,6 +3149,50 @@ def cmd_doctor(args: Namespace) -> None:
     except Exception as _inst_exc:  # noqa: BLE001 — never break doctor
         _check("install_versions", "WARN", f"could not probe installs: {_inst_exc}")
 
+    # 14. The skills, agents and commands are NOT in the Python package.
+    #     They ship through the editor's own plugin channel -- `plugin/` in the
+    #     repository -- so `pip install --upgrade` cannot move them, and until now
+    #     nothing said so. 4.1 changed 76 files across those trees; a user who
+    #     upgraded the package and read a clean `slm doctor` had every reason to
+    #     believe they had all of it, and no way to find out otherwise.
+    try:
+        _pkg_version = _slm_version()
+        _pl = _installed_plugin_versions()
+        if not _pl:
+            _check(
+                "plugin_skills",
+                "WARN",
+                f"package is {_pkg_version}; no editor plugin detected, so the "
+                f"skills, agents and commands are not installed or updated by "
+                f"pip",
+                fix="Claude Code:  claude plugin marketplace add "
+                    "qualixar/superlocalmemory  &&  claude plugin install "
+                    "superlocalmemory@qualixar     "
+                    "Codex / VS Code: copy codex-plugin/ or copilot-plugin/ "
+                    "from the tag you are on",
+            )
+        else:
+            _stale = {n: v for n, v in _pl.items() if v != _pkg_version}
+            if _stale:
+                _check(
+                    "plugin_skills",
+                    "WARN",
+                    "package is %s; plugin content still at %s" % (
+                        _pkg_version,
+                        ", ".join(f"{n}={v}" for n, v in sorted(_stale.items())),
+                    ),
+                    fix="claude plugin marketplace update qualixar && "
+                        "claude plugin update superlocalmemory@qualixar",
+                )
+            else:
+                _check(
+                    "plugin_skills",
+                    "PASS",
+                    f"plugin content matches the package ({_pkg_version})",
+                )
+    except Exception as _pl_exc:  # noqa: BLE001 — never break doctor
+        _check("plugin_skills", "WARN", f"could not probe plugins: {_pl_exc}")
+
     # 14. Migration error logs — surface any unresolved failure from a previous
     #     upgrade attempt. The daemon writes these and they persist until the
     #     user takes action; doctor is the right place to surface them.
@@ -2949,6 +3278,48 @@ def cmd_doctor(args: Namespace) -> None:
                 f"enabled [{_surface_str}] {_stats}",
             )
 
+    # Memory answer-ability.
+    #
+    # Every other check here asks whether a component is installed. None of
+    # them asked the only question that matters to the owner: can my memories
+    # actually be found? One machine ran for months with 43.7% of its store
+    # unreachable while doctor reported everything green, because the reachable
+    # share was never counted.
+    memory_health_data: dict | None = None
+    try:
+        from superlocalmemory.core.config import SLMConfig as _HealthCfg
+        from superlocalmemory.core.memory_health import describe, measure
+        _h = measure(_HealthCfg.load().db_path)
+        memory_health_data = {
+            "live_facts": _h.live_facts,
+            "findable_by_meaning": _h.findable_by_meaning,
+            "missing_vector": _h.missing_vector,
+            "withheld_summaries": _h.withheld_summaries,
+            "display_summaries": _h.display_summaries,
+            "hidden_by_forgetting": _h.hidden_by_forgetting,
+            "inconsistently_hidden": _h.inconsistently_hidden,
+            "reachability": round(_h.reachability, 4),
+            "healthy": _h.healthy,
+            "unavailable": list(_h.unavailable),
+            "summary": describe(_h),
+        }
+        _detail = " ".join(describe(_h))
+        if _h.healthy:
+            _check("Memory answer-ability", "PASS", _detail)
+        elif _h.inconsistently_hidden or _h.reachability < 0.9:
+            _check(
+                "Memory answer-ability", "FAIL", _detail,
+                fix="slm restart",
+            )
+        else:
+            _check("Memory answer-ability", "WARN", _detail,
+                   fix="slm db reembed --missing-only")
+    except Exception as _mh_exc:  # noqa: BLE001 — a report must not break doctor
+        _check(
+            "Memory answer-ability", "WARN",
+            f"could not be measured: {_mh_exc}",
+        )
+
     # Summary
     if use_json:
         from superlocalmemory.cli.json_output import json_print
@@ -2959,6 +3330,7 @@ def cmd_doctor(args: Namespace) -> None:
         json_print("doctor", data={
             "checks": checks,
             "summary": {"passed": passed, "warned": warned, "failed": failed},
+            "memory_health": memory_health_data,
         }, next_actions=next_actions)
     else:
         print(f"\nSummary: {passed} passed, {warned} warnings, {failed} failed")
@@ -3344,7 +3716,12 @@ def cmd_profile(args: Namespace) -> None:
     if action in ("switch", "create"):
         from superlocalmemory.core.admission import gate_cli_mutation
         from superlocalmemory.core.operation_request import OperationKind
-        gate_cli_mutation(OperationKind.PROFILE_SWITCH)
+        # The role that decides this is the one held on the workspace being
+        # switched to or created, not on whichever one happens to be active.
+        gate_cli_mutation(
+            OperationKind.PROFILE_SWITCH,
+            profile=str(getattr(args, "name", "") or ""),
+        )
 
     from superlocalmemory.core.config import SLMConfig
     from superlocalmemory.storage.database import DatabaseManager
@@ -3858,7 +4235,7 @@ def cmd_session_context(args: Namespace) -> None:
                 json_print("session-context", data={
                     "context": context,
                     "memory_count": len(inj_mems),
-                    "mode": config.mode.value.upper(),
+                    "mode": config.mode.value,
                 }, next_actions=[
                     {"command": "slm recall --json <query>", "description": "Search memories"},
                 ])
@@ -3946,6 +4323,7 @@ def cmd_observe(args: Namespace) -> None:
 
     # V3.3.28: Route through daemon (singleton engine, single embedding worker).
     # This is the P0 fix for the memory blast incident of April 7, 2026.
+    from superlocalmemory.cli.daemon import DaemonRefused
     try:
         from superlocalmemory.cli.daemon import is_daemon_running, daemon_request, ensure_daemon
         if is_daemon_running() or ensure_daemon():
@@ -3959,6 +4337,16 @@ def cmd_observe(args: Namespace) -> None:
                     reason = result.get("reason", "no patterns matched")
                     print(f"Not captured: {reason}")
                 return
+    except DaemonRefused as refusal:
+        # The workspace declined this write. The fallback below exists for a
+        # daemon that is not running -- not for one that answered no.
+        print(
+            f"[slm] Not captured: {refusal}. "
+            "This workspace requires authentication; set SLM_USER_SESSION or "
+            "log in, then try again.",
+            flush=True,
+        )
+        sys.exit(1)
     except Exception:
         pass  # Fall through to direct engine
 

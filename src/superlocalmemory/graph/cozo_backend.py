@@ -5,7 +5,16 @@
 """SuperLocalMemory v3.4.5 — CozoDB Graph Backend.
 
 Embedded graph database backend powered by CozoDB (MPL-2.0).
-Replaces NetworkX for entity graph storage and traversal.
+
+It stores the graph. It does not traverse it, and the line that used to claim it
+replaced NetworkX "for storage and traversal" outlived the traversal by a
+release: the walk lives once in ``retrieval/spreading``, as a pure function of an
+adjacency snapshot, and is numpy rather than NetworkX either way. What this
+module supplies is the snapshot's edges, read by
+``graph/cozo_adjacency.CozoAdjacencySource`` -- measured at 395 ms against
+SQLite's 2,477 ms on a 208,151-edge store. Both figures come from a hand run on a
+copy of that store, recorded in ``cozo_adjacency``; nothing in the test suite
+reproduces them.
 
 All Datalog queries are private to this module.
 External code calls Python methods only — never raw Datalog strings.
@@ -277,6 +286,64 @@ class CozoDBGraphBackend:
             :rm edge {from_id, to_id, edge_type => weight, metadata, profile_id, created_at}
         """, {"fact_id": fact_id})
 
+    def remove_entity(self, entity_id: str) -> None:
+        """Remove an entity node and every bridge that reaches it.
+
+        ``remove_fact`` clears a fact's bridges and edges and leaves the entity
+        nodes alone, which is right when a fact is deleted -- the entity is
+        still real and other facts still reference it. It is wrong when the
+        entity itself is erased: the node stayed behind with its name in it,
+        so a graph query could still name somebody after their record had been
+        removed from the store.
+
+        The id is bound as a parameter, so an entity name containing a quote
+        cannot become query text.
+        """
+        self._db.run("""
+            ?[fact_id, entity_id, profile_id] :=
+                *fact_entity{fact_id, entity_id, profile_id}, entity_id = $entity_id
+            :rm fact_entity {fact_id, entity_id => profile_id}
+        """, {"entity_id": entity_id})
+        self._db.run("""
+            ?[from_id, to_id, edge_type, weight, metadata, profile_id, created_at] :=
+                *edge{from_id, to_id, edge_type, weight, metadata, profile_id, created_at},
+                (from_id = $entity_id or to_id = $entity_id)
+            :rm edge {from_id, to_id, edge_type => weight, metadata, profile_id, created_at}
+        """, {"entity_id": entity_id})
+        self._db.run("""
+            ?[id, name, entity_type, tier, properties, profile_id,
+              created_at, updated_at] :=
+                *entity{id, name, entity_type, tier, properties, profile_id,
+                        created_at, updated_at},
+                id = $entity_id
+            :rm entity {id => name, entity_type, tier, properties, profile_id,
+                        created_at, updated_at}
+        """, {"entity_id": entity_id})
+
+    def remove_fact_candidacy(self, fact_id: str) -> None:
+        """Stop a fact being *offered* as a candidate, without touching the graph.
+
+        Removes only the ``fact_entity`` bridge. The fact's edges stay.
+
+        The two are not the same thing and the SQLite channel already treats them
+        differently. Its entity map filters on ``visible_fact_clause()`` — a
+        withheld row must never enter it, because it carries its whole cluster's
+        pooled entity list and out-ranks real memories. Its edge walk filters on
+        scope only, with no visibility predicate at all, so it traverses edges to
+        withheld and archived facts and lets hydration drop them at the end.
+
+        So a projection that deleted a hidden fact's edges would hold a smaller
+        adjacency than the walk it is meant to replace, and give different
+        answers for every fact that happened to neighbour a withheld one. Use
+        this for a fact that has become invisible; use ``remove_fact`` only for
+        one that is genuinely gone.
+        """
+        self._db.run("""
+            ?[fact_id, entity_id, profile_id] :=
+                *fact_entity{fact_id, entity_id, profile_id}, fact_id = $fact_id
+            :rm fact_entity {fact_id, entity_id => profile_id}
+        """, {"fact_id": fact_id})
+
     def record_shadow_comparison(
         self,
         *,
@@ -346,9 +413,24 @@ class CozoDBGraphBackend:
 
         # Step 2: Export fact-to-canonical-entity mappings.  This relation is
         # what allows a canonical query seed to enter the fact graph.
-        facts_sql = """
+        #
+        # Withheld and archived facts are excluded, with the same predicate the
+        # SQLite entity map uses and for the reason it records: such a row
+        # carries its whole cluster's pooled entity list, so it out-ranks real
+        # memories, takes the top-k budget, and is then discarded at hydration.
+        # This export predated that fix. Measured on a copy of the author's
+        # store, it had put 1,257 unreturnable facts into the bridge, and the
+        # Cozo graph search diverged from SQLite on every query tried — one
+        # returned 9 results against SQLite's 20. The projection failed closed
+        # each time, so recall stayed correct and the projection was useless.
+        from superlocalmemory.storage.database import (
+            visible_fact_clause_for_connection,
+        )
+
+        facts_sql = f"""
             SELECT fact_id, canonical_entities_json
             FROM atomic_facts WHERE profile_id = ?
+            {visible_fact_clause_for_connection(conn)}
         """
         fact_entity_dicts: list[dict[str, str]] = []
         for fact_id, raw_entities in conn.execute(facts_sql, (profile_id,)).fetchall():
@@ -386,142 +468,25 @@ class CozoDBGraphBackend:
 
         return len(edge_dicts)
 
-    def recall_facts(
-        self,
-        seed_entity_ids: list[str],
-        *,
-        profile_id: str = "default",
-        depth: int = 4,
-        decay: float = 0.7,
-        threshold: float = 0.05,
-        top_k: int = 50,
-    ) -> list[tuple[str, float]]:
-        """Mirror SLM's entity-to-fact/fact-graph activation in Cozo storage.
-
-        Query values never enter Datalog source.  Cozo is used as the durable
-        projection; activation runs in Python so the algorithm stays aligned
-        with the SQLite in-memory channel and can be shadow-compared exactly.
-        """
-        if not seed_entity_ids:
-            return []
-        entity_rows = self._db.run(
-            "?[fact_id, entity_id] := *fact_entity{fact_id, entity_id, profile_id}, profile_id = $profile_id",
-            {"profile_id": profile_id},
-        )
-        edge_rows = self._db.run(
-            "?[from_id, to_id, weight] := *edge{from_id, to_id, weight, profile_id}, profile_id = $profile_id",
-            {"profile_id": profile_id},
-        )
-        entity_to_facts: dict[str, list[str]] = {}
-        fact_to_entities: dict[str, list[str]] = {}
-        for fact_id, entity_id in entity_rows.values.tolist() if len(entity_rows) else []:
-            entity_to_facts.setdefault(str(entity_id), []).append(str(fact_id))
-            fact_to_entities.setdefault(str(fact_id), []).append(str(entity_id))
-        adjacency: dict[str, list[tuple[str, float]]] = {}
-        for source_id, target_id, weight in edge_rows.values.tolist() if len(edge_rows) else []:
-            source, target = str(source_id), str(target_id)
-            # Match EntityGraphChannel: graph edges are bidirectional during
-            # activation even when stored as directed rows.
-            adjacency.setdefault(source, []).append((target, float(weight)))
-            adjacency.setdefault(target, []).append((source, float(weight)))
-
-        activation: dict[str, float] = {}
-        visited_entities = set(seed_entity_ids)
-        for entity_id in seed_entity_ids:
-            for fact_id in entity_to_facts.get(entity_id, ()):
-                activation[fact_id] = max(activation.get(fact_id, 0.0), 1.0)
-        frontier = set(activation)
-        for hop in range(1, depth):
-            hop_decay = decay ** hop
-            if hop_decay < threshold:
-                break
-            next_frontier: set[str] = set()
-            for fact_id in frontier:
-                for neighbor_id, _weight in adjacency.get(fact_id, ()):
-                    # SQLite intentionally ignores edge weights when graph
-                    # metrics are unavailable; use that same baseline here.
-                    score = activation[fact_id] * decay
-                    if score >= threshold and score > activation.get(neighbor_id, 0.0):
-                        activation[neighbor_id] = score
-                        next_frontier.add(neighbor_id)
-            for fact_id in frontier:
-                for entity_id in fact_to_entities.get(fact_id, ()):
-                    if entity_id in visited_entities:
-                        continue
-                    visited_entities.add(entity_id)
-                    for related_fact_id in entity_to_facts.get(entity_id, ()):
-                        if hop_decay > activation.get(related_fact_id, 0.0):
-                            activation[related_fact_id] = hop_decay
-                            next_frontier.add(related_fact_id)
-            frontier = next_frontier
-            if not frontier:
-                break
-        results = [(fact_id, score) for fact_id, score in activation.items() if score >= threshold]
-        if not results:
-            return []
-        maximum = max(score for _, score in results)
-        results = [(fact_id, score / maximum) for fact_id, score in results]
-        return sorted(results, key=lambda item: item[1], reverse=True)[:top_k]
-
-    # ------------------------------------------------------------------
-    # Spreading Activation (Python BFS over CozoDB edges)
-    # ------------------------------------------------------------------
-
-    def spreading_activation(
-        self,
-        seed_entities: list[str],
-        depth: int = 3,
-        decay: float = 0.5,
-        top_k: int = 50,
-    ) -> list[tuple[str, float]]:
-        """BFS from seed nodes with weight decay per hop.
-
-        Uses CozoDB as fast edge store, Python for BFS logic.
-        Returns [(entity_id, activation_score), ...] sorted by score desc.
-        """
-        if not seed_entities:
-            return []
-
-        scores: dict[str, float] = {}
-        current_frontier: set[str] = set(seed_entities)
-        for s in seed_entities:
-            scores[s] = 1.0
-
-        for d in range(depth):
-            if not current_frontier:
-                break
-            next_frontier: set[str] = set()
-            hop_multiplier = decay ** (d + 1)
-
-            for entity_id in current_frontier:
-                # Query all outgoing edges from this entity
-                try:
-                    result = self._db.run("""
-                        ?[to_id, weight] :=
-                            *edge{from_id, to_id, weight}, from_id = $entity_id
-                    """, {"entity_id": entity_id})
-                    df = result if hasattr(result, "values") else result
-                    if df is None or len(df) == 0:
-                        continue
-                    rows = df.values.tolist() if hasattr(df, "values") else []
-                    for to_id, weight in rows:
-                        to_id_str = str(to_id)
-                        score = hop_multiplier * float(weight)
-                        if to_id_str not in scores or score > scores[to_id_str]:
-                            scores[to_id_str] = score
-                        next_frontier.add(to_id_str)
-                except Exception:
-                    continue
-
-            current_frontier = next_frontier
-
-        # Sort by score desc, return top_k
-        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        return ranked[:top_k]
-
-    # ------------------------------------------------------------------
-    # PageRank (Python iterative over CozoDB edges)
-    # ------------------------------------------------------------------
+    # recall_facts() and spreading_activation() were here, and they were a
+    # second implementation of the walk in retrieval/entity_channel.py. They did
+    # not compute the same function: the channel multiplies activation by a
+    # PageRank factor every hop and these did not, so on a real store 3,567 of
+    # 3,667 shared facts came out with different scores, the result sets
+    # differed, and the projected path failed its shadow comparison on every
+    # query and fell back to SQLite. The projection was correct data that
+    # nothing could use.
+    #
+    # spreading_activation() also queried Cozo once per frontier node: 200
+    # single-node queries measured 18,125 ms against 303 ms for one batched
+    # query returning the identical 6,046 rows. With a mean degree of 228 over
+    # four hops that is minutes per recall.
+    #
+    # The walk now lives in retrieval/spreading.py, once, as a pure function of
+    # an AdjacencySnapshot. A storage backend supplies adjacency, not answers —
+    # which is also why there is no longer anything to shadow-compare. Do not
+    # reintroduce a traversal here; add an AdjacencySource adapter instead
+    # (retrieval/graph_adjacency.py).
 
     def pagerank(
         self, damping: float = 0.85, max_iter: int = 100

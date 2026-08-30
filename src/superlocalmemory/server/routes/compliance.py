@@ -40,9 +40,33 @@ except ImportError:
     logger.info("V3 compliance engine not available")
 
 
+def _require_manage(request) -> None:
+    """Require MANAGE on the active workspace, where the workspace has roles.
+
+    A store with no roles configured has nobody to check against, and refusing
+    there would break every personal install; the loopback boundary is the
+    control in that case.
+    """
+    try:
+        from superlocalmemory.access.rbac import Permission
+        from superlocalmemory.server.rbac_enforce import require_permission
+
+        require_permission(request, Permission.MANAGE, profile=get_active_profile())
+    except ImportError:  # pragma: no cover -- roles are always present in-tree
+        return
+
+
 @router.get("/api/compliance/status")
-async def compliance_status():
+async def compliance_status(request: Request):
     """Get compliance engine status for active profile."""
+    # This returns which operations ran and what categories of memory exist.
+    # That is operational metadata about someone's store; it had no gate at all.
+    from superlocalmemory.server.write_identity import require_http_mutation_actor
+
+    require_http_mutation_actor(
+        request, getattr(request.app.state, "daemon_descriptor", None),
+        actor_kind="compliance-read",
+    )
     if not COMPLIANCE_AVAILABLE:
         return {"available": False, "message": "Compliance engine not available"}
 
@@ -132,8 +156,43 @@ async def query_audit_trail(
         return {"available": False, "error": "Internal server error"}
 
 
+def _erasure_succeeded(result: dict) -> bool:
+    """One place that decides, so the surfaces cannot disagree.
+
+    The erasure reports two things, because they are two questions: whether the
+    data is gone, and whether that can be shown afterwards. This route used to
+    inline its own list of failure markers and the CLI used a different one, so
+    the API could say failure while the command line printed COMPLETE for the
+    same erasure.
+
+    Anything that leaves either question unanswered is a failure here. A caller
+    that wants the finer distinction reads ``erasure_complete`` and
+    ``erasure_provable`` from the body, which are both in it.
+    """
+    markers = (
+        "vector_store_failures",
+        "audit_completion_failed",
+        "audit_request_failed",
+        "receipt_persist_failed",
+        "table_delete_failures",
+        "code_graph_failed",
+        "fact_expansion_fts_failed",
+        "working_sets_failed",
+        "residue_recount_failed",
+        "backup_scan_failed",
+    )
+    if any(result.get(marker) for marker in markers):
+        return False
+    # Present on the profile path; absent on the entity path, where its absence
+    # must not be read as a failure.
+    for verdict in ("erasure_complete", "erasure_provable"):
+        if verdict in result and not result.get(verdict):
+            return False
+    return True
+
+
 @router.post("/api/compliance/retention-policy")
-async def create_retention_policy(data: dict):
+async def create_retention_policy(request: Request, data: dict):
     """Create a compliance retention policy.
 
     Body: {
@@ -144,6 +203,17 @@ async def create_retention_policy(data: dict):
         applies_to: dict (optional)
     }
     """
+    # A retention rule decides what is kept and for how long, so changing one
+    # is a persistent configuration change on someone else's data. It is gated
+    # on the same loopback-trusted boundary the audit read uses, and on MANAGE
+    # in a workspace that has roles -- it had neither.
+    from superlocalmemory.server.write_identity import require_http_mutation_actor
+
+    require_http_mutation_actor(
+        request, getattr(request.app.state, "daemon_descriptor", None),
+        actor_kind="retention-policy",
+    )
+    _require_manage(request)
     if not COMPLIANCE_AVAILABLE:
         return {"success": False, "error": "Compliance engine not available"}
 
@@ -183,8 +253,19 @@ async def create_retention_policy(data: dict):
 
 
 @router.delete("/api/compliance/retention-policy")
-async def delete_retention_policy(name: str = Query(...)):
+async def delete_retention_policy(request: Request, name: str = Query(...)):
     """Delete a retention policy by name for the active profile."""
+    # A retention rule decides what is kept and for how long, so changing one
+    # is a persistent configuration change on someone else's data. It is gated
+    # on the same loopback-trusted boundary the audit read uses, and on MANAGE
+    # in a workspace that has roles -- it had neither.
+    from superlocalmemory.server.write_identity import require_http_mutation_actor
+
+    require_http_mutation_actor(
+        request, getattr(request.app.state, "daemon_descriptor", None),
+        actor_kind="retention-policy",
+    )
+    _require_manage(request)
     if not COMPLIANCE_AVAILABLE:
         return {"success": False, "error": "Compliance engine not available"}
     try:
@@ -202,12 +283,23 @@ async def delete_retention_policy(name: str = Query(...)):
 
 
 @router.post("/api/compliance/retention/enforce")
-async def enforce_retention():
+async def enforce_retention(request: Request):
     """Run all retention policies for the active profile now.
 
     Moves expired facts to their rule's terminal lifecycle zone (archive/
     tombstone) or counts them (notify). Soft-state only — never a raw delete.
     """
+    # A retention rule decides what is kept and for how long, so changing one
+    # is a persistent configuration change on someone else's data. It is gated
+    # on the same loopback-trusted boundary the audit read uses, and on MANAGE
+    # in a workspace that has roles -- it had neither.
+    from superlocalmemory.server.write_identity import require_http_mutation_actor
+
+    require_http_mutation_actor(
+        request, getattr(request.app.state, "daemon_descriptor", None),
+        actor_kind="retention-policy",
+    )
+    _require_manage(request)
     if not COMPLIANCE_AVAILABLE:
         return {"success": False, "error": "Compliance engine not available"}
     try:
@@ -302,13 +394,7 @@ async def gdpr_erase(request: Request, data: dict = {}):
         result = GDPRCompliance(engine._db, engine=engine).forget_profile(profile)
         authorization.complete()
         result = result or {}
-        failure_markers = (
-            "vector_store_failures",
-            "audit_completion_failed",
-            "audit_request_failed",
-            "receipt_persist_failed",
-        )
-        success = not any(result.get(marker) for marker in failure_markers)
+        success = _erasure_succeeded(result)
         return {"success": success, "active_profile": profile, **result}
     except Exception:
         logger.exception("gdpr_erase error")
@@ -361,13 +447,7 @@ async def gdpr_erase_entity(request: Request, data: dict = {}):
         result = GDPRCompliance(engine._db, engine=engine).forget_entity(entity_name, profile)
         authorization.complete()
         result = result or {}
-        failure_markers = (
-            "vector_store_failures",
-            "audit_completion_failed",
-            "audit_request_failed",
-            "receipt_persist_failed",
-        )
-        success = not any(result.get(marker) for marker in failure_markers)
+        success = _erasure_succeeded(result)
         return {
             "success": success, "active_profile": profile,
             "entity_name": entity_name, **result,

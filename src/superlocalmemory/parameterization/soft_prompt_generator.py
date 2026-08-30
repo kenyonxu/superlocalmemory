@@ -53,6 +53,11 @@ CATEGORY_TEMPLATES: dict[str, str] = {
         "Current active project: {project_name}. "
         "Key context: {context_summary}."
     ),
+    # Says only what is actually known — that these subjects recur — rather
+    # than inferring a preference, a project or a tool choice from them.
+    "topic_interest": (
+        "Subjects that come up often in the user's notes: {topics}."
+    ),
     "decision_history": (
         "Recent key decisions: {decisions}. "
         "These reflect the user's current direction."
@@ -75,6 +80,7 @@ CATEGORY_PRIORITY_ORDER: list[str] = [
     "behavioral",  # v3.4.7: behavioral assertions after communication style
     "workflow_pattern",
     "project_context",
+    "topic_interest",
     "decision_history",
     "avoidance",
 ]
@@ -104,6 +110,82 @@ class SoftPromptTemplate:
 # ---------------------------------------------------------------------------
 # SoftPromptGenerator class
 # ---------------------------------------------------------------------------
+
+def _empty_words() -> frozenset[str]:
+    """Words that say nothing about a person when listed as a preference.
+
+    Read from the list the miner already filters on, so there is one definition
+    to extend rather than two that drift.
+    """
+    try:
+        from superlocalmemory.learning.pattern_miner_constants import STOPWORDS
+
+        return frozenset(STOPWORDS)
+    except Exception:  # pragma: no cover — the check degrades to "keep it"
+        return frozenset()
+
+
+_EMPTY_WORDS = _empty_words()
+
+
+def _is_substantive(category: str, values: dict[str, str]) -> bool:
+    """Whether a rendered prompt says anything at all about the user.
+
+    Deliberately weak, and it got that way by being wrong in the other
+    direction first. The original version required a ``tech_preference`` claim to
+    name something from a fixed vocabulary of technologies — which discarded
+    ``Node.js``, ``Git``, ``pip``, ``npm``, ``zig`` and every stack the list did
+    not happen to enumerate. Those were the GENUINE rows on a live store. A
+    filter that silently drops real preferences to catch fake ones is a worse
+    failure than the one it was added for, because nothing reports it.
+
+    What it was actually added for no longer arrives here. The live nonsense —
+    "preferred technology stack includes: test, gate, practices, compliance,
+    projects, while, their, processing, data" — came from word-frequency topics
+    being mapped onto this category, and they are now their own category, where
+    the same words form a true statement. This is the remaining floor: a prompt
+    built entirely out of words that appear in most English sentences says
+    nothing, whatever category it lands in.
+
+    Length is checked per TERM and only against that word list, never as a
+    minimum: "CTO", "AWS", "npm" and "R" are all shorter than a threshold would
+    allow and all mean something.
+    """
+    filled = [
+        v.strip() for v in values.values()
+        if isinstance(v, str) and v.strip()
+    ]
+    if not filled:
+        return False
+    terms = [
+        t.strip().lower()
+        for value in filled
+        for t in value.replace(";", ",").split(",")
+        if t.strip()
+    ]
+    if not terms:
+        return False
+    return any(term not in _EMPTY_WORDS for term in terms)
+
+
+def _fix_stutter(content: str) -> str:
+    """Remove the duplicated conjunction where a template meets its value.
+
+    ``"The user typically {workflow_description}"`` was rendering as "The user
+    typically When when using X" — the template supplies the lead-in and the
+    value already starts with its own. Observed on 19 of 34 stored prompts.
+    """
+    import re as _re
+
+    for word in ("when", "typically", "prefers", "often", "usually"):
+        content = _re.sub(
+            rf"\b({word})\s+{word}\b", r"\1", content, flags=_re.IGNORECASE,
+        )
+    # "typically When when" collapses to "typically When"; then the lead-in and
+    # the value's own opener are adjacent duplicates of different case.
+    content = _re.sub(r"\btypically\s+When\b", "typically, when", content)
+    return content
+
 
 class SoftPromptGenerator:
     """Convert extracted pattern assertions into natural language soft prompts.
@@ -243,10 +325,23 @@ class SoftPromptGenerator:
 
         # Clean up
         content = self._clean_content(content)
+        content = _fix_stutter(content)
 
         # Filter PII
         content = self._pii_filter.filter_text(content)
         if not content.strip():
+            return None
+
+        # A prompt that says nothing must not be injected. These go into the
+        # model's context on every turn, so an empty claim is not neutral — it
+        # spends the budget and asserts something false. Measured on a live
+        # store: 15 of 34 stored prompts read "the user's preferred technology
+        # stack includes: data, processing, their, projects, test", built from
+        # common words that happened to appear near a technology keyword.
+        if not _is_substantive(category, values):
+            logger.debug(
+                "soft prompt for %r dropped: no substantive values", category,
+            )
             return None
 
         # Trim to 100 tokens per category
@@ -304,6 +399,9 @@ class SoftPromptGenerator:
 
         elif category == "workflow_pattern":
             values["workflow_description"] = "; ".join(pat_values)
+
+        elif category == "topic_interest":
+            values["topics"] = ", ".join(pat_values)
 
         elif category == "project_context":
             values["project_name"] = pat_values[0] if pat_values else ""

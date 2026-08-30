@@ -94,8 +94,8 @@ class TestDaemonPoolProxy:
     def test_store_forwards_http_post(self, monkeypatch):
         captured = {}
 
-        def _owned_request(method, path, body=None):
-            captured.update(method=method, path=path, body=body)
+        def _owned_request(method, path, body=None, **kwargs):
+            captured.update(method=method, path=path, body=body, kwargs=kwargs)
             return {"ok": True, "fact_ids": ["f1", "f2"], "count": 2}
 
         monkeypatch.setattr(
@@ -104,19 +104,19 @@ class TestDaemonPoolProxy:
         )
 
         proxy = DaemonPoolProxy(port=9999)
-        out = proxy.store("hello", metadata={"tags": "tag1"})
+        out = proxy.store("hello", metadata={"tags": ["tag1", "tag2"]})
         assert out["fact_ids"] == ["f1", "f2"]
         assert captured["method"] == "POST"
         assert captured["path"] == "/remember"
         body = captured["body"]
         assert body["content"] == "hello"
-        assert body["tags"] == "tag1"
+        assert body["tags"] == "tag1,tag2"
 
     def test_store_delegates_to_owned_daemon_client(self, monkeypatch):
         captured = {}
 
-        def _owned_request(method, path, body=None):
-            captured.update(method=method, path=path, body=body)
+        def _owned_request(method, path, body=None, **kwargs):
+            captured.update(method=method, path=path, body=body, kwargs=kwargs)
             return {"ok": True, "fact_ids": ["owned-fact"], "count": 1}
 
         monkeypatch.setattr(
@@ -126,19 +126,29 @@ class TestDaemonPoolProxy:
 
         out = DaemonPoolProxy(port=9999).store(
             "identity-bound content",
-            metadata={"tags": "audit", "agent_id": "caller-label"},
+            metadata={
+                "tags": "audit",
+                "agent_id": "caller-label",
+                "profile_id": "work",
+            },
         )
 
         assert out["fact_ids"] == ["owned-fact"]
         assert captured == {
             "method": "POST",
             "path": "/remember",
+            "kwargs": {"preserve_conflict": True},
             "body": {
                 "content": "identity-bound content",
                 "tags": "audit",
-                "metadata": {"tags": "audit", "agent_id": "caller-label"},
+                "metadata": {
+                    "tags": "audit",
+                    "agent_id": "caller-label",
+                    "profile_id": "work",
+                },
                 "session_id": "",
                 "idempotency_key": None,
+                "profile_id": "work",
             },
         }
 
@@ -166,6 +176,27 @@ class TestDaemonPoolProxy:
         proxy = DaemonPoolProxy(port=9999)
         out = proxy.store("x")
         assert out["ok"] is False
+
+    def test_store_surfaces_profile_conflict_as_non_retryable(self, monkeypatch):
+        from superlocalmemory.cli.daemon import DaemonConflict
+
+        def _conflict(*args, **kwargs):
+            raise DaemonConflict("profile mismatch: expected work")
+
+        monkeypatch.setattr(
+            "superlocalmemory.cli.daemon.daemon_request", _conflict,
+        )
+
+        out = DaemonPoolProxy(port=9999).store(
+            "x", metadata={"profile_id": "work"},
+        )
+
+        assert out == {
+            "ok": False,
+            "code": "PROFILE_MISMATCH",
+            "retryable": False,
+            "error": "profile mismatch: expected work",
+        }
 
 
 class TestChoosePool:

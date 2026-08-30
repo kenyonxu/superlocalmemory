@@ -106,9 +106,12 @@ def _handle_recall(
         memory_map=memory_map,
         per_fact_max=getattr(_rc, "recall_per_fact_max_chars", 2400),
         total_max=getattr(_rc, "recall_total_max_chars", 12000),
-        # Option B: markers only on session-bearing recalls. A marker can
-        # only buy a learning signal when a pending_outcomes row exists
-        # to settle, and those exist only when session_id is present.
+        # Markers only on session-bearing recalls: a marker exists to let a
+        # downstream reference be traced back to the recall that produced it,
+        # and only a session-bearing recall has something to trace back to.
+        # (An earlier comment here justified the condition by a
+        # ``pending_outcomes`` row that no code path writes; settlement reads
+        # the evidence recorded with the play instead.)
         include_marker=bool(session_id),
     )
     return {

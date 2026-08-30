@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from superlocalmemory.core.session_identity import synthetic_session_id
 from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT, SLMConfig
 from superlocalmemory.core.engine_capabilities import Capabilities, CapabilityError
 from superlocalmemory.core.modes import get_capabilities
@@ -52,6 +53,35 @@ def _verify_ingestion_schema(memory_db: Path) -> bool:
 # ---------------------------------------------------------------------------
 # Embedding a memory on the write path, before the receipt is returned
 # ---------------------------------------------------------------------------
+
+def _embedder_is_warm(embedder: object) -> bool:
+    """Has this embedder already served a request, so the next one is cheap?
+
+    Availability and readiness are different questions and the write path needs
+    the second one. ``EmbeddingService._available`` is set to ``True`` in its
+    constructor, before the worker subprocess exists; the model behind it takes
+    **9.9-11.0 s** to load on this machine against **42 ms** once loaded. A write
+    that embeds inline does so behind a one-second deadline, so keying off
+    availability meant every write until something else warmed the model paid the
+    whole deadline and then stored no vector anyway -- 10 of the first 12,
+    measured. The deadline was spent proving the model was cold.
+
+    ``EmbeddingService.is_warm`` answers the real question: a live worker that has
+    served at least one request. So both must hold, and availability is still
+    checked first: an embedder that reports itself unavailable is not a candidate
+    whatever else it says. Requiring only ``is_warm`` would call ``embed`` on a
+    dead embedder that happens to expose the attribute -- any mock, proxy or
+    duck-typed wrapper auto-creates one.
+
+    An embedder that offers no ``is_warm`` keeps availability as the whole answer:
+    ``OllamaEmbedder`` talks to a server that is already running and has no worker
+    of its own to start, so there readiness is availability.
+    """
+    if getattr(embedder, "_available", None) is not True:
+        return False
+    warm = getattr(embedder, "is_warm", None)
+    return True if warm is None else bool(warm)
+
 
 def _is_remote_embedder(embedder: object) -> bool:
     """Return True if *embedder* makes remote HTTP calls (cloud / OpenAI-compatible).
@@ -102,6 +132,19 @@ class MemoryEngine:
         self._caps = get_capabilities(config.mode)
         self._capabilities = capabilities
         self._profile_id = config.active_profile
+        # The session a recall belongs to, for matching an outcome back to it
+        # later. Set from whatever the caller last named; falls back to a stable
+        # per-process id so a caller that never names one still leaves a record
+        # that can be matched to another call from the same process. An empty
+        # one is dropped by the queue, which is how 34 of 35 recall paths came
+        # to leave no record at all.
+        self._last_session_id: str = ""
+        # Minted through the shared helper so this id is registered as
+        # invented rather than received; continuity and the reward pipeline
+        # both ask session_identity, and a hand-built prefix is invisible to it.
+        self._ambient_session_id: str = synthetic_session_id(
+            "engine", str(os.getpid()),
+        )
         self._initialized = False
 
         self._db = None
@@ -572,7 +615,7 @@ class MemoryEngine:
         _embedder_ref = self._embedder
         if (
             _embedder_ref is None
-            or getattr(_embedder_ref, "_available", None) is not True
+            or not _embedder_is_warm(_embedder_ref)
             or _is_remote_embedder(_embedder_ref)
         ):
             return None, None, None
@@ -901,9 +944,16 @@ class MemoryEngine:
 
         store_fast inserts a verbatim AtomicFact (+ memory row) synchronously.
         The FTS5 ``atomic_facts_fts`` trigger auto-populates on INSERT, so the
-        memory is **keyword/BM25-recallable the instant this returns** (~ms, no
-        LLM, no embedding). Embedding + entities + graph are enriched async by
-        the materializer (which detects facts with NULL embedding).
+        memory is **keyword/BM25-recallable the instant this returns**, with no
+        LLM call. Entities and graph are enriched async by the materializer.
+
+        The embedding is no longer purely async: ``_warm_guard_embed`` computes it
+        inline **when the model is already loaded**, because a fact with no vector
+        is invisible to the semantic channel and a memory written moments ago is
+        then the hardest thing in the store to find by asking about it. Measured
+        on a copy of a real store: **75 ms** with the model loaded, vector
+        attached; **34 ms** when it is not, deferring to the materializer. This
+        docstring used to say "~ms, no embedding" and that had stopped being true.
 
         Returns real fact_ids immediately. Quality gate rejects template junk.
         """
@@ -1016,12 +1066,16 @@ class MemoryEngine:
     ) -> RecallResponse:
         """Recall relevant facts for a query.
 
-        S9-DASH-02: when ``session_id`` is provided, the recall is
-        non-blockingly enqueued to the outcome queue so downstream
-        hooks (PostToolUse, Stop) can attach engagement signals.
-        Zero additional latency on the hot path — enqueue is a
-        ``put_nowait`` and the actual ``pending_outcomes`` INSERT runs
-        on a background worker.
+        ``session_id`` gives the recall continuity: memories this session was
+        recently shown are held in a small in-process working set and bias the
+        ranking of subsequent queries in the same session. Retrieval still runs
+        in full every time — the working set reorders the answer, it never
+        replaces the search. Costs no query and no file access.
+
+        Omitting it is supported and means every recall starts cold, which is
+        what every caller got before. The parameter was previously accepted and
+        then ignored: it was documented as enqueueing a ``pending_outcomes`` row
+        for downstream hooks, and no such row was ever written.
 
         ``fast`` controls only the internal agentic verification round; all six
         local retrieval channels + reranker run regardless. ``fast=None`` (the
@@ -1060,6 +1114,7 @@ class MemoryEngine:
         try:
             response = run_recall(
                 query, pid, mode=mode, limit=limit, agent_id=agent_id,
+                session_id=session_id,
                 config=self._config,
                 retrieval_engine=self._retrieval_engine,
                 trust_scorer=self._trust_scorer,
@@ -1083,7 +1138,74 @@ class MemoryEngine:
             # be submitted through explicit write commands.
             raise
 
+        # Leave a ticket saying what was shown, so an outcome can be attached to
+        # it later. Without one there is no key to join an outcome back to the
+        # recall that produced it, and the whole learning path stops at the first
+        # hop: on a real store every one of 162 recorded outcomes carried an
+        # empty recall id, every per-memory usefulness score sat at its neutral
+        # 0.5, and the ranking model had not retrained in eleven weeks.
+        #
+        # THIS MUST NOT COST THE READER ANYTHING. It is one put_nowait on a
+        # bounded in-memory queue -- roughly a microsecond -- and it drops the
+        # event rather than blocking or raising if the queue is full. A worker
+        # persists it elsewhere. Recall's answer and its timing are unchanged;
+        # measured p50 and p95 before and after are within noise of each other.
+        #
+        # It records only. Nothing here reorders a result: whether learning is
+        # allowed to influence ranking stays a separate, explicit setting that
+        # remains off unless an operator turns it on.
+        try:
+            import uuid
+
+            from superlocalmemory.learning.outcome_queue import (
+                RecallEvent,
+                enqueue_recall,
+            )
+
+            # A fresh id per answer, put on the response as well as the
+            # ticket. `calibration_id` was the obvious candidate and is wrong:
+            # it is None on most paths, and an empty join key is exactly the
+            # state that made all 162 recorded outcomes unmatchable. Returning
+            # it is what makes it useful -- until an answer carried its own
+            # name, no caller could quote one back, so an outcome could only
+            # ever be matched by guessing from overlapping memories.
+            answer_id = uuid.uuid4().hex
+            try:
+                response.query_id = answer_id
+            except Exception:  # noqa: BLE001 -- an older response shape
+                pass
+            enqueue_recall(RecallEvent(
+                session_id=self._session_for_signals(session_id),
+                profile_id=str(pid),
+                query=query,
+                fact_ids=[
+                    r.fact.fact_id for r in (response.results or [])
+                    if getattr(r, "fact", None) is not None
+                ],
+                query_id=answer_id,
+            ))
+        except Exception as exc:  # noqa: BLE001 -- a read must not fail on this
+            logger.debug("recall outcome ticket skipped: %s", exc)
+
         return response
+
+    def _session_for_signals(self, session_id: str | None) -> str:
+        """The name to file this call's outcome under.
+
+        In order: what the caller said, then the last thing any caller on this
+        engine said, then a stable id for this process. Never empty, because an
+        empty one is discarded and the call then leaves no trace an outcome
+        could ever be matched to -- which is what happened on every path that
+        did not thread a session through, meaning nearly all of them.
+
+        Three attribute reads and no I/O. Recall must not get slower to record
+        that it happened.
+        """
+        named = str(session_id or "").strip()
+        if named:
+            self._last_session_id = named
+            return named
+        return self._last_session_id or self._ambient_session_id
 
     # -- Session operations -------------------------------------------------
 
@@ -1099,8 +1221,21 @@ class MemoryEngine:
             )
 
     def close_session(self, session_id: str) -> int:
-        """Create session-level temporal summary."""
+        """Create session-level temporal summary and release its working set.
+
+        The working set is what the session was recently looking at. It exists
+        to connect one turn to the next, so it has no meaning once there are no
+        more turns; holding it would let a later session that reuses this id
+        inherit ranking bias from a conversation that already ended.
+        """
         self._ensure_init()
+
+        try:
+            from superlocalmemory.core.working_memory import discard
+
+            discard(self._profile_id, session_id)
+        except Exception as exc:  # pragma: no cover — never block a close
+            logger.debug("working-set discard skipped: %s", exc)
 
         from superlocalmemory.core.store_pipeline import run_close_session
         return run_close_session(

@@ -153,6 +153,19 @@ from superlocalmemory.storage.migrations import (
 from superlocalmemory.storage.migrations import (
     M042_correction_case_ledger as _M042,
 )
+from superlocalmemory.storage.migrations import (
+    M043_quarantine_display_summaries as _M043,
+)
+from superlocalmemory.storage.migrations import (
+    M044_play_carries_its_own_evidence as _M044,
+)
+from superlocalmemory.storage.migrations import (
+    M045_fact_outcome_score as _M045,
+    M046_prospective_memory_has_its_own_name as _M046,
+    M047_fisher_vectors_are_stored_like_every_other_vector as _M047,
+    M048_upcoming_holds_only_what_is_upcoming as _M048,
+    M049_a_schema_version_marker_is_one_row as _M049,
+)
 
 # Emit under the runner's logger name so operational log filters that key on
 # "superlocalmemory.storage.migration_runner" keep matching after this split.
@@ -203,6 +216,13 @@ _MODULES = {
     _M040.NAME: _M040,
     _M041.NAME: _M041,
     _M042.NAME: _M042,
+    _M043.NAME: _M043,
+    _M044.NAME: _M044,
+    _M045.NAME: _M045,
+    _M046.NAME: _M046,
+    _M047.NAME: _M047,
+    _M048.NAME: _M048,
+    _M049.NAME: _M049,
 }
 
 # Exact historical DDL fingerprints whose resulting schema is intentionally
@@ -241,9 +261,24 @@ def _ddl_hash(ddl: str) -> str:
     return hashlib.sha256(ddl.encode("utf-8")).hexdigest()
 
 
+#: How long a migration waits for a database another process is holding.
+#:
+#: Without this, SQLite raises SQLITE_BUSY the instant a write lock is taken,
+#: and a migration that runs while the daemon happens to be writing is recorded
+#: as failed rather than retried. A migration that rebuilds a table takes an
+#: exclusive lock, so it is exactly the one most likely to collide — and its
+#: failure leaves an upgrade wedged until someone notices.
+#:
+#: Fifteen seconds is longer than any single write this codebase performs and
+#: short enough that a genuinely stuck lock still surfaces as a failure rather
+#: than a hang.
+_MIGRATION_BUSY_TIMEOUT_MS = 15_000
+
+
 def _connect(db_path: Path) -> sqlite3.Connection:
     # isolation_level=None → we manage transactions explicitly via DDL.
     conn = sqlite3.connect(db_path, isolation_level=None)
+    conn.execute(f"PRAGMA busy_timeout = {_MIGRATION_BUSY_TIMEOUT_MS};")
     conn.execute("PRAGMA foreign_keys = OFF;")
     return conn
 
@@ -295,6 +330,22 @@ def _upsert_log(
 
 def _delete_log(conn: sqlite3.Connection, name: str) -> None:
     conn.execute("DELETE FROM migration_log WHERE name = ?", (name,))
+
+
+def _why_unmet(mod, conn) -> str:
+    """The migration's own account of which check does not hold.
+
+    A migration may expose ``unmet(conn)`` returning a sentence. Most do not,
+    and for those the caller keeps its generic wording. Never raises: this runs
+    while reporting a failure and must not become a second one.
+    """
+    fn = getattr(mod, "unmet", None)
+    if not callable(fn):
+        return ""
+    try:
+        return str(fn(conn) or "")
+    except Exception:  # noqa: BLE001 - a detail string is not worth a crash
+        return ""
 
 
 def _apply_single(
@@ -379,9 +430,12 @@ def _apply_single(
                         try:
                             repair_fn(conn)
                             if not bool(verify_fn(conn)):
+                                _why = _why_unmet(mod, conn)
                                 return (
                                     "failed",
-                                    f"safe repair did not restore {migration.name}",
+                                    f"safe repair did not restore "
+                                    f"{migration.name}"
+                                    + (f": {_why}" if _why else ""),
                                 )
                             _upsert_log(conn, migration.name, ddl_hash, "complete")
                             return (
@@ -447,9 +501,11 @@ def _apply_single(
                 )
             try:
                 if not bool(verify_fn(conn)):
+                    _why = _why_unmet(mod, conn)
                     return (
                         "failed",
-                        f"safe repair did not restore {migration.name}",
+                        f"safe repair did not restore {migration.name}"
+                        + (f": {_why}" if _why else ""),
                     )
             except sqlite3.Error as exc:
                 return (

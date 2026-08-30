@@ -12,7 +12,7 @@ Layout verified:
     scripts/slm-launch.bat      (Windows launcher)
     scripts/ensure-venv.sh      (POSIX venv bootstrap, +x)
     scripts/ensure-venv.bat     (Windows venv bootstrap)
-    skills/<7>/SKILL.md         (identical to Claude Code plugin skills)
+    skills/<12>/SKILL.md        (from plugin-src/skills, retargeted to this host)
 
 Tests verify:
   - All expected files exist
@@ -27,6 +27,7 @@ Tests verify:
 from __future__ import annotations
 
 import json
+import re
 import os
 import stat
 import sys
@@ -154,12 +155,30 @@ class TestCodexConfigToml:
             "config.toml must contain [mcp_servers.superlocalmemory] section"
         )
 
-    def test_config_toml_has_slm_mcp_profile_code(self) -> None:
-        raw = CODEX_MCP_CONFIG.read_text(encoding="utf-8")
-        assert 'SLM_MCP_PROFILE' in raw, "config.toml must reference SLM_MCP_PROFILE"
-        assert '"code"' in raw or "'code'" in raw, (
-            "SLM_MCP_PROFILE must be set to 'code'"
-        )
+    def test_config_toml_does_not_pin_a_profile(self) -> None:
+        """INVERTED in 4.1.3. This required ``SLM_MCP_PROFILE = "code"``.
+
+        Pinning it from a plugin removed tools a user had deliberately enabled —
+        ``code`` is 34 tools and leaves out the eight for coordinating between
+        sessions. Unset resolves to the raw server, which exposes everything, so
+        saying nothing is strictly more capable than what was being forced.
+
+        Checked on the env assignment rather than the file text: the config now
+        carries a comment explaining the absence, and that comment contains the
+        name.
+        """
+        import re as _re
+
+        source = CODEX_MCP_CONFIG.read_text(encoding="utf-8")
+        for line in _re.findall(r"^env = \{.*\}\s*$", source, _re.MULTILINE):
+            assert "SLM_MCP_PROFILE" not in line, (
+                f"the plugin pins a profile: {line}"
+            )
+            assert "SLM_DATA_DIR" not in line, (
+                f"the plugin re-points the store: {line}"
+            )
+            assert "SLM_AGENT_ID" in line, f"attribution is missing: {line}"
+
 
     def test_config_toml_has_slm_data_dir(self) -> None:
         raw = CODEX_MCP_CONFIG.read_text(encoding="utf-8")
@@ -392,12 +411,32 @@ class TestScripts:
             "codex-plugin/scripts/slm-launch must use SLM_DATA_DIR (portable)"
         )
 
-    def test_posix_launcher_has_fallback_to_path_slm(self) -> None:
-        """Codex launcher must fall back to PATH `slm` if venv binary not found."""
+    def test_posix_launcher_prefers_path_slm_over_its_own_venv(self) -> None:
+        """INVERTED in 4.1.2. This required PATH to be the FALLBACK, checked only
+        when the venv binary was absent.
+
+        That order meant a machine which had once bootstrapped a venv kept using
+        it forever — including after the user installed or upgraded SLM properly
+        — so two copies read one store and whichever started first decided which
+        code served it. Installing a plugin should not fork your installation.
+
+        Behaviour is covered by
+        ``tests/test_packaging/test_no_plugin_hijacks_your_install.py``, which
+        RUNS both launchers against a stubbed slm. This one only holds the shape:
+        PATH is consulted, and a venv remains available as the fallback for a
+        machine with no install at all.
+        """
         source = (CODEX_SCRIPTS / "slm-launch").read_text(encoding="utf-8")
-        # Check for a fallback assignment like: SLM_BIN="slm"
-        assert 'SLM_BIN="slm"' in source or "SLM_BIN='slm'" in source, (
-            "slm-launch must fall back to PATH 'slm' when venv binary is not present"
+
+        assert "command -v slm" in source, (
+            "the launcher must look for an installed slm"
+        )
+        assert "/venv/bin/slm" in source, (
+            "the venv fallback must remain for a machine with no install"
+        )
+        assert 'SLM_BIN="slm"' not in source, (
+            "assigning the bare name as a fallback is the inverted order this "
+            "release removed"
         )
 
     def test_ensure_venv_sh_uses_slm_data_dir_not_claude_plugin_data(self) -> None:
@@ -488,3 +527,56 @@ class TestBackwardCompat:
             f"build-plugin.mjs --check failed (codex-plugin must be additive-only):\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
+
+
+class TestCodexPluginStaysInSyncWithItsSource:
+    """Everything derivable is derived, so it cannot quietly go stale.
+
+    This directory was maintained by hand and carried a v4.0.4 footer across six
+    releases. Two of its twelve skills had also drifted, because a Claude-only
+    line was deleted locally instead of the build being taught about Codex.
+    """
+
+    def test_the_committed_tree_matches_a_fresh_build(self) -> None:
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not available")
+        repo = Path(__file__).resolve().parents[2]
+        result = subprocess.run(
+            [node, "scripts/build-codex-plugin.mjs", "--check"],
+            cwd=repo, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            f"codex-plugin drift: {result.stderr or result.stdout}"
+        )
+
+    def test_every_source_skill_reaches_codex(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        source = {p.name for p in (repo / "plugin-src" / "skills").iterdir() if p.is_dir()}
+        shipped = {p.name for p in (repo / "codex-plugin" / "skills").iterdir() if p.is_dir()}
+        assert source <= shipped, f"missing from codex-plugin: {sorted(source - shipped)}"
+
+    def test_memories_are_attributed_to_this_host(self) -> None:
+        """A Codex session should not record its memories as Claude Code's."""
+        repo = Path(__file__).resolve().parents[2]
+        for skill in (repo / "codex-plugin" / "skills").glob("*/SKILL.md"):
+            text = skill.read_text("utf-8")
+            assert "claude_code" not in text, (
+                f"{skill.relative_to(repo)} still identifies the host as Claude Code"
+            )
+
+    def test_the_version_matches_the_manifest(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        version = json.loads(
+            (repo / "plugin-src" / "manifest.json").read_text("utf-8")
+        )["version"]
+        for rel in ("AGENTS.md", "README.md", "_GENERATED.md",
+                    "skills/slm-recall/SKILL.md"):
+            text = (repo / "codex-plugin" / rel).read_text("utf-8")
+            stale = re.findall(r"SuperLocalMemory v(\d+\.\d+\.\d+)", text)
+            assert all(v == version for v in stale), (
+                f"{rel} states {sorted(set(stale))}, manifest says {version}"
+            )

@@ -67,10 +67,52 @@ class MaintenanceScheduler:
         self._initial_gc_timer = threading.Timer(90.0, self._initial_cache_gc)
         self._initial_gc_timer.daemon = True
         self._initial_gc_timer.start()
+        # An upgrade arrives with whatever backlog the previous version left.
+        # Waiting a full interval for the first graph-metrics pass would mean
+        # half an hour of ranking memories as though they had no position in the
+        # graph, on exactly the store that just gained the fix. Staggered behind
+        # the cache GC so the two never contend for the write lock.
+        self._initial_metrics_timer = threading.Timer(
+            150.0, self._initial_graph_metrics,
+        )
+        self._initial_metrics_timer.daemon = True
+        self._initial_metrics_timer.start()
+        # M048's re-read pass is idempotent and safe to replay (see its
+        # verify() docstring), but the migration runner never replays a
+        # completed migration and the cycle above only reaches it every
+        # ``scheduler_interval_minutes`` (360 by default). A store that
+        # drifted since the last cycle stays blocking — ready=false,
+        # migrations=false — for up to that whole interval after every
+        # restart, not because the fix is slow, but because nothing asks
+        # for it sooner. Staggered behind the other two so none of the
+        # three one-shots contend for the write lock.
+        self._initial_reclassify_timer = threading.Timer(
+            210.0, self._initial_reclassify_upcoming,
+        )
+        self._initial_reclassify_timer.daemon = True
+        self._initial_reclassify_timer.start()
         logger.info(
             "Maintenance scheduler started (interval=%dm)",
             self._config.forgetting.scheduler_interval_minutes,
         )
+
+    def _initial_reclassify_upcoming(self) -> None:
+        """Best-effort one-shot M048 re-read shortly after boot.
+
+        Runs the same pass the periodic cycle already runs (see below) so a
+        store that drifted before this restart converges within seconds
+        instead of waiting up to a full maintenance interval with the
+        daemon reporting itself not ready.
+        """
+        if not self._running:
+            return
+        try:
+            from superlocalmemory.storage.migrations import (
+                M048_upcoming_holds_only_what_is_upcoming as _reclassify,
+            )
+            _reclassify.apply(open_connection=self._db.raw_connection)
+        except Exception as exc:
+            logger.debug("Startup plan re-read skipped: %s", exc)
 
     def _initial_cache_gc(self) -> None:
         """Best-effort one-shot activation-cache GC shortly after boot."""
@@ -86,6 +128,29 @@ class MaintenanceScheduler:
         except Exception as exc:
             logger.debug("Startup activation-cache GC skipped: %s", exc)
 
+    def _initial_graph_metrics(self) -> None:
+        """One-shot catch-up so an upgrade does not rank on stale metrics."""
+        if not self._running:
+            return
+        try:
+            from superlocalmemory.core.graph_metrics import (
+                compute_graph_metrics,
+                metrics_are_stale,
+            )
+            for profile_id in self._profile_ids():
+                stale, why = metrics_are_stale(self._db, profile_id)
+                if not stale:
+                    continue
+                report = compute_graph_metrics(self._db, profile_id)
+                if report.ok:
+                    logger.info(
+                        "Graph metrics at startup (%s): %s", why, report.summary(),
+                    )
+                else:
+                    logger.warning("Graph metrics at startup: %s", report.summary())
+        except Exception as exc:
+            logger.debug("Startup graph metrics skipped: %s", exc)
+
     def stop(self) -> None:
         """Stop the scheduler. Idempotent."""
         self._running = False
@@ -96,6 +161,14 @@ class MaintenanceScheduler:
         if _gc_timer is not None:
             _gc_timer.cancel()
             self._initial_gc_timer = None
+        _metrics_timer = getattr(self, "_initial_metrics_timer", None)
+        if _metrics_timer is not None:
+            _metrics_timer.cancel()
+            self._initial_metrics_timer = None
+        _reclassify_timer = getattr(self, "_initial_reclassify_timer", None)
+        if _reclassify_timer is not None:
+            _reclassify_timer.cancel()
+            self._initial_reclassify_timer = None
         logger.info("Maintenance scheduler stopped")
 
     def _schedule_next(self) -> None:
@@ -105,6 +178,47 @@ class MaintenanceScheduler:
         self._timer = threading.Timer(self._interval, self._run)
         self._timer.daemon = True
         self._timer.start()
+
+    #: Consecutive failures of one step before it stops being a hiccup.
+    _ESCALATE_AFTER = 3
+
+    def _record_step(self, step: str, ok: bool, detail: str = "") -> None:
+        """Remember whether a maintenance step worked, and say so when it has
+        stopped working."""
+        counts = getattr(self, "_step_failures", None)
+        if counts is None:
+            counts = self._step_failures = {}
+        if ok:
+            if counts.pop(step, 0):
+                logger.info("maintenance: %s is working again", step)
+            return
+        counts[step] = counts.get(step, 0) + 1
+        if counts[step] >= self._ESCALATE_AFTER:
+            logger.error(
+                "maintenance: %s has failed %d cycles in a row (%s). This is "
+                "not a transient failure; the work it does is not being done.",
+                step, counts[step], detail or "no detail",
+            )
+        else:
+            logger.warning("maintenance: %s failed (%s)", step, detail or "")
+
+    def failing_steps(self) -> dict[str, int]:
+        """Steps that have failed on consecutive cycles, and how many.
+
+        Read by the status surfaces, so an operator can see a persistently
+        broken maintenance step instead of having to find it in the log.
+        """
+        return dict(getattr(self, "_step_failures", {}) or {})
+
+    def _note_step_outcomes(self) -> None:
+        """Escalate anything still failing after this cycle's steps."""
+        failing = self.failing_steps()
+        if failing:
+            logger.warning(
+                "maintenance: %d step(s) still failing: %s",
+                len(failing),
+                ", ".join(f"{name} x{count}" for name, count in sorted(failing.items())),
+            )
 
     def _run(self) -> None:
         """Execute maintenance + auto-backup check, then schedule next run."""
@@ -183,6 +297,66 @@ class MaintenanceScheduler:
             except Exception as exc:
                 logger.debug("Graph pruning skipped for %s: %s", profile_id, exc)
 
+            # Pruning the graph orphans the lineage of every edge it removed,
+            # and nothing had ever deleted from that table — on a real store it
+            # had grown to 39% rows describing edges that no longer existed.
+            # This runs immediately after so the rows the pass just orphaned are
+            # collected in the same pass.
+            try:
+                from superlocalmemory.storage.lineage_retention import (
+                    prune_orphan_lineage,
+                )
+                report = prune_orphan_lineage(self._db, profile_id=profile_id)
+                if report.total:
+                    logger.info(
+                        "Lineage retention for %s: %d row(s) removed (%s)",
+                        profile_id, report.total, report.deleted,
+                    )
+            except Exception as exc:
+                logger.debug("Lineage retention skipped for %s: %s", profile_id, exc)
+
+            # Structural metrics. Recall multiplies a candidate's activation by
+            # its PageRank at every hop and biases it toward its query seeds'
+            # communities, and both numbers live in fact_importance -- so a
+            # memory missing from that table is found by the walk and then
+            # ranked as though it had no position in the graph.
+            #
+            # Nothing scheduled this. It ran only when a consolidation happened
+            # to fire or someone called the HTTP endpoint by hand, and on the
+            # author's store that meant one run in nine days: 1,036 of 4,034
+            # visible memories had no score and no community, and the newest
+            # four days of memories had none at all. This runs after pruning so
+            # it describes the graph that pruning left behind.
+            try:
+                from superlocalmemory.core.graph_metrics import (
+                    compute_graph_metrics,
+                    metrics_are_stale,
+                )
+                stale, why = metrics_are_stale(self._db, profile_id)
+                if stale:
+                    backend = None
+                    try:
+                        from superlocalmemory.core.backend_orchestrator import (
+                            get_orchestrator,
+                        )
+                        orchestrator = get_orchestrator()
+                        if orchestrator is not None:
+                            backend = orchestrator.get_graph_backend()
+                    except Exception:  # noqa: BLE001 -- in-process is the default anyway
+                        backend = None
+                    report = compute_graph_metrics(
+                        self._db, profile_id, backend=backend,
+                    )
+                    if report.ok:
+                        logger.info("Graph metrics (%s): %s", why, report.summary())
+                    else:
+                        logger.warning("Graph metrics: %s", report.summary())
+                else:
+                    logger.debug("Graph metrics up to date for %s", profile_id)
+                self._record_step("graph metrics", True)
+            except Exception as exc:  # noqa: BLE001
+                self._record_step("graph metrics", False, str(exc))
+
             # Lifecycle evaluation must cover every stored profile, not only
             # whichever profile was active when the engine started.
             try:
@@ -200,6 +374,73 @@ class MaintenanceScheduler:
                 _recompile_core_blocks(self._db, self._config, profile_id)
             except Exception as exc:
                 logger.debug("Core-block recompile skipped for %s: %s", profile_id, exc)
+
+        # Re-read what is filed as a plan. The one-time pass runs as a
+        # migration; the rule it uses keeps getting sharper, and a completed
+        # migration is never replayed — so without this the store drifts
+        # further from the rule with every release and nothing repairs it. The
+        # pass is a pure function of the text and idempotent, so this is a no-op
+        # once the store has converged.
+        #
+        # Once per cycle, not once per profile: it reads the whole table in one
+        # sweep with no profile predicate, so running it per profile did the
+        # identical global work N times over and took the write lock N times to
+        # do it. It also takes and releases that lock per batch, so a memory
+        # being saved waits for one batch rather than the whole sweep.
+        #
+        # An earlier version reached for `_conn` and then `.connection`, and the
+        # database manager has neither, so the guard was always False and this
+        # had never run once -- the store drifted further from the rule with
+        # every release while a block that looks like it repairs that sat here
+        # doing nothing.
+        try:
+            from superlocalmemory.storage.migrations import (
+                M048_upcoming_holds_only_what_is_upcoming as _reclassify,
+            )
+            _reclassify.apply(open_connection=self._db.raw_connection)
+            self._record_step("re-reading plans", True)
+        except Exception as exc:  # noqa: BLE001
+            self._record_step("re-reading plans", False, str(exc))
+
+        # Anything that has failed on several cycles running is not a blip.
+        # Every step here logs and continues, which is right -- one broken step
+        # must not stop the rest -- but it meant a step that had been failing
+        # for a week looked exactly like one that had just hiccupped, and the
+        # daemon still reported itself healthy throughout.
+        self._note_step_outcomes()
+
+        # Retention. Three tables had a pruner each, written and wired
+        # separately; the fourth unbounded table was found by reading a
+        # disk-usage report and the fifth by reading the fourth. The policy for
+        # every append-shaped table now lives in one registry and this enforces
+        # all of them, so a table added without a policy is something the test
+        # suite can see rather than something a person has to remember.
+        #
+        # Once per cycle, not per profile: every rule is keyed either on a row's
+        # own age or on whether its referent still exists, and neither is
+        # profile-scoped. Placed after the per-profile work so it sweeps rows
+        # that pass orphaned -- pruning the graph and demoting tiers is what
+        # leaves a lineage or temporal row without a referent.
+        # In pieces, each taking and releasing the write lock. Entering
+        # ``raw_connection`` is what takes that lock, so entering it once for
+        # the whole sweep held it for the whole sweep: measured at 1,480 ms and
+        # 123,888 rows on a 1 GB store, which is most of the budget a save is
+        # allowed, spent waiting.
+        try:
+            from superlocalmemory.storage.retention_policy import (
+                run_retention_bounded,
+            )
+            removed = run_retention_bounded(self._db.raw_connection)
+            if removed:
+                logger.info(
+                    "Retention: %s",
+                    ", ".join(
+                        f"{table} -{count}" for table, count in sorted(removed.items())
+                    ),
+                )
+            self._record_step("retention", True)
+        except Exception as exc:  # noqa: BLE001
+            self._record_step("retention", False, str(exc))
 
         # V3.4.10: Check if auto-backup is due
         try:

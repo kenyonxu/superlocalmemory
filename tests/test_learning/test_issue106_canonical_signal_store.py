@@ -223,10 +223,16 @@ def test_recall_phase_gate_unlocks_on_canonical_signals(
 
     db_path = tmp_path / "learning.db"
     learning = LearningDatabase(db_path)
+    # signal_type matters as of 4.1.0: 'candidate' is an EXPOSURE (one row per
+    # fact displayed) and no longer counts toward the phase gate. Counting them
+    # is what reported 5,352 signals on a store with two real feedback events —
+    # a 2,675x inflation that held the ranker in Phase 3 on a model trained
+    # entirely on zero labels. The gate this test guards is the table split, not
+    # the signal type, so it seeds real feedback and keeps its point intact.
     for i in range(PHASE_2_THRESHOLD + 10):
         learning.store_signal(
             profile_id="p1", query="q", fact_id=f"f-{i}",
-            signal_type="candidate", value=1.0,
+            signal_type="legacy_feedback", value=1.0,
         )
     # The legacy table stays empty: only the canonical count may unlock.
     assert _count(db_path, "learning_signals") >= PHASE_2_THRESHOLD

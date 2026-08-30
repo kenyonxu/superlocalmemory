@@ -28,8 +28,21 @@ logger = logging.getLogger(__name__)
 
 #: Default number of results returned by recall across MCP, CLI, daemon, and
 #: engine.  All surfaces bind their ``limit`` defaults to this constant so a
-#: single change is sufficient to keep the full stack in sync.
+#: single change is sufficient to keep the full stack in sync.  Search is a
+#: retrieval operation too and binds here: asking the same question through
+#: ``recall`` and through ``search`` must not return differently sized answers.
 CANONICAL_RECALL_LIMIT: int = 20
+
+#: Default number of rows returned when listing the newest memories rather than
+#: answering a question — MCP ``list_recent`` and ``slm list``.  Separate from
+#: the recall limit because the two can legitimately diverge; equal today.
+CANONICAL_LIST_LIMIT: int = 20
+
+#: Page size for the HTTP memory browser (``GET /api/memories``), which is a
+#: paged table rather than an answer.  Deliberately larger than the list limit:
+#: a person scrolling a table wants a fuller page than an agent asking what
+#: happened recently.  The ceiling on that endpoint is enforced separately.
+BROWSE_PAGE_SIZE: int = 50
 
 
 # ---------------------------------------------------------------------------
@@ -767,8 +780,8 @@ class ParameterizationConfig:
     max_memory_tokens: int = 1500      # Token budget for regular memories
     categories_enabled: tuple[str, ...] = (
         "identity", "tech_preference", "communication_style",
-        "workflow_pattern", "project_context", "decision_history",
-        "avoidance",
+        "workflow_pattern", "project_context", "topic_interest",
+        "decision_history", "avoidance",
     )
 
     # Lifecycle
@@ -1152,14 +1165,26 @@ class SLMConfig:
     # stay on SQLite until a staged parity check promotes these projections.
     scale_engine_state: str = "local_core"  # local_core | prepared | verified | promoted
     # v3.8.5: auto-promote Cozo+LanceDB when a DB grows past the scale at which
-    # they actually help.  Below the threshold the well-indexed SQLite graph is
-    # faster (measured ~1.7ms/traversal at 208K edges), so normal installs stay
-    # on Local Core and never pay the projection/migration cost.  The threshold
-    # is deliberately high: the graph DB win appears at millions of edges, not
-    # hundreds of thousands.  Auto-promotion is background, uses the same staged
+    # they actually help.  Auto-promotion is background, uses the same staged
     # parity gate as the manual path, and falls back to SQLite on any failure.
+    #
+    # 100,000 (was 1,000,000, set by Varun 2026-08-22). The old value gated every
+    # store anyone actually has -- the author's is 140,000 edges -- so the
+    # projection was built for nobody and, being unexercised, was wrong: it
+    # carried 1,257 memories the store may not return and its graph search
+    # disagreed with SQLite on every query.  A threshold no real store crosses is
+    # not a safety margin, it is a feature nobody tests.
+    #
+    # What promotion now changes is narrow and measured.  The graph WALK does not
+    # move: SQLite loads 130k edges in 141 ms against CozoDB's 252 ms, so the
+    # adjacency read stays where it is fastest (retrieval/graph_adjacency.py
+    # holds the seam for the day that flips).  What promotion switches on is the
+    # LanceDB vector index, which is within noise of sqlite-vec at this size
+    # (18.3 ms against 18.7 ms over 5,324 vectors) and is the one built to keep
+    # going as the vector count grows.  So crossing this line is close to
+    # latency-neutral today and buys the projection real exercise.
     scale_auto_promote_enabled: bool = True
-    scale_auto_promote_min_edges: int = 1_000_000
+    scale_auto_promote_min_edges: int = 100_000
     evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
     health: HealthConfig = field(default_factory=HealthConfig)
     # v3.8.4-G: Graph thinning parameters (#84)
@@ -1318,10 +1343,10 @@ class SLMConfig:
         )
         try:
             config.scale_auto_promote_min_edges = int(
-                data.get("scale_auto_promote_min_edges", 1_000_000)
+                data.get("scale_auto_promote_min_edges", 100_000)
             )
         except (TypeError, ValueError):
-            config.scale_auto_promote_min_edges = 1_000_000
+            config.scale_auto_promote_min_edges = 100_000
 
         # V3.3 config fields (additive — defaults work if missing from JSON)
         fg = data.get("forgetting", {})
@@ -1405,6 +1430,44 @@ class SLMConfig:
                 k: v for k, v in rt.items()
                 if k in RetrievalConfig.__dataclass_fields__
             })
+
+        # 4.1.0 (#124): restore the two sections save() now writes. This runs
+        # AFTER for_mode() has applied its presets, so a value someone chose
+        # beats the mode default -- the same ordering retrieval already relies
+        # on. A malformed section falls back to the dataclass defaults rather
+        # than raising, matching quantization and sagq above: a corrupt config
+        # file must not make `slm` unrunnable.
+        mth = data.get("math")
+        if isinstance(mth, dict) and mth:
+            try:
+                fields = {
+                    k: v for k, v in mth.items()
+                    if k in MathConfig.__dataclass_fields__
+                }
+                # JSON has no tuple. Written as a list, it must come back a
+                # tuple or every reader that unpacks a pair gets a list and the
+                # difference surfaces somewhere far from here.
+                rng = fields.get("langevin_weight_range")
+                if isinstance(rng, list):
+                    fields["langevin_weight_range"] = tuple(rng)
+                config.math = MathConfig(**fields)
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Ignoring invalid math config (%s) — using defaults", exc
+                )
+
+        cw = data.get("channel_weights")
+        if isinstance(cw, dict) and cw:
+            try:
+                config.channel_weights = ChannelWeights(**{
+                    k: v for k, v in cw.items()
+                    if k in ChannelWeights.__dataclass_fields__
+                })
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Ignoring invalid channel_weights config (%s) — using defaults",
+                    exc,
+                )
 
         # V3.4.3 config fields (additive — missing keys get dataclass defaults)
         config.daemon_idle_timeout = data.get("daemon_idle_timeout", 0)
@@ -1668,11 +1731,20 @@ class SLMConfig:
         #
         # embedding_signature: has no typed in-memory model — it is an opaque blob
         # written by external tooling (see below).
+        # ``math`` and ``channel_weights`` join this loop as of 4.1.0. Both are
+        # read by engine wiring -- ``math.sheaf_contradiction_threshold`` by the
+        # consistency checker, ``channel_weights`` as the retrieval base weights
+        # -- and neither was ever written here or restored in ``load()``. Tuning
+        # either one, by hand or by switching mode, survived until the next
+        # restart and then silently reverted to the dataclass default, with
+        # nothing said. Reported as #124.
         for _section, _obj in (
             ("forgetting", self.forgetting),
             ("quantization", self.quantization),
             ("sagq", self.sagq),
             ("auto_invoke", self.auto_invoke),
+            ("math", self.math),
+            ("channel_weights", self.channel_weights),
         ):
             _base = existing.get(_section)
             _merged = dict(_base) if isinstance(_base, dict) else {}
@@ -1808,6 +1880,13 @@ class SLMConfig:
                 base_dir=_base,
                 embedding=_a_emb,
                 llm=LLMConfig(),  # No LLM
+                # Mode A's promise is that nothing puts a model on any path, and
+                # a subsystem should refuse because the mode says so, not because
+                # it happened to be handed llm=None. Three of the four places
+                # that build the consolidator pass only a database, so today the
+                # guard holds by accident of wiring; this makes it hold by
+                # configuration, which is the thing a reader can check.
+                ccq=CCQConfig(use_llm_gist=False),
                 temporal_validator=TemporalValidatorConfig(mode="a"),
                 retrieval=RetrievalConfig(
                     # V3.3.2: ONNX cross-encoder enabled for all modes (~200MB)

@@ -194,6 +194,11 @@ def test_readonly_bandit_preserves_ensemble_reranking_without_play(
         profile_id="readonly",
         query_id="qid-readonly",
         learning_db_path=bandit_db,
+        # Explicit now that recording a play is the DEFAULT. This test is about
+        # the read-only path still applying learned weights, which is a real
+        # supported mode; it is no longer what an ordinary recall does. The
+        # sibling test below pins the default.
+        record_plays=False,
     )
 
     assert result.results[1].ranking_score > result.results[0].ranking_score
@@ -203,6 +208,45 @@ def test_readonly_bandit_preserves_ensemble_reranking_without_play(
     finally:
         conn.close()
     assert plays == 0
+
+
+def test_recall_records_a_play_by_default(bandit_db: Path):
+    """The new contract, and the one that was missing for a month.
+
+    ``record_signals=False`` was hardcoded at the only caller on 2026-07-27
+    (commit cbf7929f, release 3.8.6) — the same day
+    ``MAX(bandit_arms.last_played_at)`` stops. One flag gated both the twenty-row
+    exposure enqueue (rightly off) and the single-row play insert (wrongly off).
+    Without a play there is nothing for the reward proxy to settle, so 165 arms
+    sat at alpha == beta.
+
+    A play carries no reward — ``bandit_plays.reward`` stays NULL until an
+    authenticated outcome settles it — so recording one is not feedback.
+    """
+    from superlocalmemory.core.recall_pipeline import apply_v2_bandit_ensemble
+
+    response = _mk_response(2)
+    apply_v2_bandit_ensemble(
+        response,
+        query="quality witness",
+        profile_id="default",
+        query_id="qid-default",
+        learning_db_path=bandit_db,
+    )
+    conn = sqlite3.connect(str(bandit_db))
+    try:
+        row = conn.execute(
+            "SELECT query_id, reward, settled_at, shown_fact_ids "
+            "FROM bandit_plays WHERE profile_id = 'default'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, "recall recorded no play, so nothing can ever settle"
+    query_id, reward, settled_at, shown = row
+    assert query_id == "qid-default"
+    assert reward is None, "a play must not carry a reward at recall time"
+    assert settled_at is None
+    assert shown, "the play recorded no shown memories, so nothing can match it"
 
 
 def test_recall_bandit_disabled_env_skips(bandit_db: Path, monkeypatch):

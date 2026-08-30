@@ -24,7 +24,10 @@ _os.environ.setdefault('TORCH_DEVICE', 'cpu')
 import argparse
 import sys
 
-from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
+from superlocalmemory.core.config import (
+    CANONICAL_LIST_LIMIT,
+    CANONICAL_RECALL_LIMIT,
+)
 
 _HELP_EPILOG = """\
 operating modes:
@@ -344,6 +347,19 @@ def main() -> None:
     db_scale_p.add_argument("--stage-id", help="Stage identifier required by verify/promote")
     db_scale_p.add_argument("--backup-id", help="Backup identifier required by rollback")
 
+    db_regraph_p = db_sub.add_parser(
+        "regraph",
+        help="Re-derive the graph copy of your memories from the store",
+    )
+    db_regraph_p.add_argument(
+        "--check", action="store_true",
+        help="Report how far the graph copy has drifted; change nothing",
+    )
+    db_regraph_p.add_argument(
+        "--profile", default="",
+        help="Workspace to re-derive. Default: all of them",
+    )
+
     db_reembed_p = db_sub.add_parser(
         "reembed",
         help="Backfill NULL embeddings (facts never embedded)",
@@ -503,7 +519,8 @@ def main() -> None:
 
     list_p = sub.add_parser("list", help="List recent memories chronologically (shows IDs for delete/update)")
     list_p.add_argument(
-        "--limit", "-n", type=int, default=20, help="Number of entries (default 20)",
+        "--limit", "-n", type=int, default=CANONICAL_LIST_LIMIT,
+        help=f"Number of entries (default {CANONICAL_LIST_LIMIT})",
     )
     list_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
@@ -529,6 +546,11 @@ def main() -> None:
     doctor_p.add_argument(
         "--quick", action="store_true",
         help="Run only the fast checks (deps + config); skip daemon/embedding probes",
+    )
+    doctor_p.add_argument(
+        "--deep", action="store_true",
+        help="Read every database page (PRAGMA integrity_check) instead of the "
+             "structural check; slow on a large store",
     )
     doctor_p.add_argument(
         "--fix", action="store_true",
@@ -853,6 +875,18 @@ def main() -> None:
         "export", help="Write a deterministic content-free JSON report",
     )
     diagnostics_export.add_argument("destination")
+    diagnostics_reliability = diagnostics_sub.add_parser(
+        "reliability",
+        help=(
+            "Ask whether wired mechanisms are actually effective: has each "
+            "Bayesian learner moved off its prior, and has each schema-guarded "
+            "path ever executed against this store"
+        ),
+    )
+    diagnostics_reliability.add_argument(
+        "--min-observations", type=int, default=None,
+        help="Observation floor below which an unmoved posterior is not reported",
+    )
     diagnostics_export.add_argument(
         "--json", action="store_true", help="Output structured JSON",
     )
@@ -977,7 +1011,7 @@ def main() -> None:
 
     register_summary_parser(sub)
 
-    # Wave-3 / V4.0.6: GDPR subject-rights CLI (Art.15/17/20)
+    # V4.0.6: GDPR subject-rights CLI (Art.15/17/20)
     gdpr_p = sub.add_parser(
         "gdpr",
         help="GDPR subject rights: status, export (Art.15/20), erase (Art.17), verify",
@@ -1051,7 +1085,7 @@ def main() -> None:
         "--json", action="store_true", help="Output structured JSON",
     )
 
-    # Wave-3: operational recovery & admin remediation
+    # Operational recovery & admin remediation
     ops_p = sub.add_parser(
         "ops",
         help="Operational recovery: list failures, resolve stuck ops, check status",

@@ -408,7 +408,7 @@ def send(req: SendRequest, request: Request):
         if sig_err is not None:
             raise HTTPException(401, detail=sig_err.get("error", "signature error"))
 
-        # Admission gate parity (closes Wave-1 P1 bypass for inbound remote send).
+        # Admission gate parity (closes the P1 bypass for inbound remote send).
         try:
             from superlocalmemory.core.admission import (
                 AdmissionDenied,

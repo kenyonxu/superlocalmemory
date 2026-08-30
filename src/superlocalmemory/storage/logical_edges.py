@@ -20,8 +20,49 @@ _LOGICAL_EDGE_SELECT = """
         profile_id
     FROM graph_edges
     WHERE profile_id = ?
+      AND NOT EXISTS (
+            SELECT 1 FROM atomic_facts f
+            WHERE f.fact_id IN (graph_edges.source_id, graph_edges.target_id)
+              AND NOT ({visible})
+      )
     GROUP BY profile_id, source_id, target_id, COALESCE(edge_type, 'related')
 """
+
+
+def _edge_select(conn: sqlite3.Connection) -> str:
+    """The logical-edge query, with the withheld-endpoint exclusion resolved.
+
+    WHY AN EDGE WITH A WITHHELD ENDPOINT IS NOT A LOGICAL EDGE
+    ----------------------------------------------------------
+    The retrieval channel this projection stands in for does not traverse them.
+    It loads ``graph_edges`` by scope and then prunes the result: "Edge scope
+    alone cannot authorize an endpoint. Prune both endpoints against the visible
+    fact corpus so denied facts cannot influence an allowed candidate indirectly
+    through propagation." Its entity map is filtered the same way, for a reason
+    it spells out — a withheld row carries its whole cluster's pooled entity
+    list, so it out-ranks real memories and then gets discarded at hydration,
+    spending the channel's budget on nothing.
+
+    The export predated that fix and kept the withheld endpoints. Measured on a
+    copy of the author's store: Cozo's bridge held 1,257 facts the store may not
+    return and its edges touched 805, and the graph search diverged from SQLite
+    on **every** query — three shadow checks, three mismatches. One query
+    returned 9 results against SQLite's 20, because withheld facts had taken the
+    top-k budget. The projection failed closed every time, so recall was correct
+    and the projection was dead weight.
+
+    The predicate is resolved against the passed connection because
+    ``archive_status`` and ``quarantined`` each arrive with a migration and may
+    be absent on a store the engine has not opened.
+    """
+    from superlocalmemory.storage.database import visible_fact_clause_for_connection
+
+    # The helper returns a leading-AND clause for appending; here it is needed as
+    # a standalone predicate, so strip the connective and default to "always
+    # visible" on a store that has neither column yet.
+    clause = visible_fact_clause_for_connection(conn, prefix="f").strip()
+    predicate = clause[4:].strip() if clause.upper().startswith("AND ") else clause
+    return _LOGICAL_EDGE_SELECT.format(visible=predicate or "1=1")
 
 
 def iter_logical_edges(
@@ -30,7 +71,7 @@ def iter_logical_edges(
     """Yield normalized graph edges in deterministic fingerprint order."""
     return iter(
         conn.execute(
-            _LOGICAL_EDGE_SELECT + " ORDER BY source_id, target_id, edge_type",
+            _edge_select(conn) + " ORDER BY source_id, target_id, edge_type",
             (profile_id,),
         )
     )
@@ -39,7 +80,7 @@ def iter_logical_edges(
 def count_logical_edges(conn: sqlite3.Connection, profile_id: str) -> int:
     """Count relationships using the canonical logical identity."""
     row = conn.execute(
-        "SELECT COUNT(*) FROM (" + _LOGICAL_EDGE_SELECT + ")",
+        "SELECT COUNT(*) FROM (" + _edge_select(conn) + ")",
         (profile_id,),
     ).fetchone()
     return int(row[0] if row else 0)

@@ -1,0 +1,43 @@
+{
+  "experiment": "exp12_learning_loop_ablation",
+  "ablated_factor": "session identifier namespace at recall time",
+  "seed": 20260825,
+  "arms": [
+    {
+      "arm": "defect",
+      "rounds": 120,
+      "outcome_tickets_written": 0,
+      "plays_settled": 0,
+      "arms_total": 0,
+      "arms_moved_off_prior_mean": 0,
+      "max_abs_mean_shift": 0.0,
+      "settlement_types": {
+        "unobserved": 120
+      }
+    },
+    {
+      "arm": "repaired",
+      "rounds": 120,
+      "outcome_tickets_written": 120,
+      "plays_settled": 120,
+      "arms_total": 82,
+      "arms_moved_off_prior_mean": 82,
+      "max_abs_mean_shift": 0.342879,
+      "settlement_types": {
+        "artifact_overlap": 120
+      }
+    },
+    {
+      "arm": "no-engagement",
+      "rounds": 120,
+      "outcome_tickets_written": 120,
+      "plays_settled": 0,
+      "arms_total": 0,
+      "arms_moved_off_prior_mean": 0,
+      "max_abs_mean_shift": 0.0,
+      "settlement_types": {
+        "unobserved": 120
+      }
+    }
+  ]
+}

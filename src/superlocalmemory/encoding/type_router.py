@@ -19,6 +19,7 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
+from superlocalmemory.encoding.prospective_markers import looks_prospective
 from superlocalmemory.storage.models import AtomicFact, FactType, Mode
 
 if TYPE_CHECKING:
@@ -73,12 +74,6 @@ _OPINION_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
-_TEMPORAL_MARKERS = re.compile(
-    r"\b(scheduled|deadline|appointment|planned|tomorrow|"
-    r"next week|next month|upcoming|due date|starts?|ends?|"
-    r"will happen|going to|plan to)\b",
-    re.IGNORECASE,
-)
 
 _EPISODIC_MARKERS = re.compile(
     r"\b(went|visited|traveled|attended|met|saw|did|"
@@ -91,7 +86,7 @@ class TypeRouter:
     """Route facts to typed stores based on content classification.
 
     Uses embedding similarity (Mode A) or LLM (Mode B/C) to classify
-    each fact as episodic, semantic, opinion, or temporal.
+    each fact as episodic, semantic, opinion, or prospective.
     """
 
     def __init__(
@@ -155,8 +150,8 @@ class TypeRouter:
 
         if _OPINION_MARKERS.search(text):
             return FactType.OPINION
-        if _TEMPORAL_MARKERS.search(text):
-            return FactType.TEMPORAL
+        if looks_prospective(text):
+            return FactType.PROSPECTIVE
         if _EPISODIC_MARKERS.search(text):
             return FactType.EPISODIC
         return FactType.SEMANTIC
@@ -199,7 +194,7 @@ class TypeRouter:
             f"- episodic: An event that happened (who did what when)\n"
             f"- semantic: A general fact about the world (X is Y)\n"
             f"- opinion: A subjective belief or preference\n"
-            f"- temporal: A scheduled/planned future event\n"
+            f"- prospective: A scheduled/planned future event\n"
             f"Reply with ONLY the category name (one word)."
         )
         try:
@@ -208,7 +203,12 @@ class TypeRouter:
                 "episodic": FactType.EPISODIC,
                 "semantic": FactType.SEMANTIC,
                 "opinion": FactType.OPINION,
-                "temporal": FactType.TEMPORAL,
+                "prospective": FactType.PROSPECTIVE,
+                # The prompt asked for "temporal" until 4.1.0. Both words are
+                # accepted because a model does not always echo the current
+                # prompt, and an unrecognised word falls through to SEMANTIC —
+                # a silently wrong type rather than a visible failure.
+                "temporal": FactType.PROSPECTIVE,
             }
             return type_map.get(response, FactType.SEMANTIC)
         except Exception:
@@ -223,7 +223,7 @@ class TypeRouter:
             FactType.EPISODIC: self._embedder.embed_batch(_EPISODIC_TEMPLATES),
             FactType.SEMANTIC: self._embedder.embed_batch(_SEMANTIC_TEMPLATES),
             FactType.OPINION: self._embedder.embed_batch(_OPINION_TEMPLATES),
-            FactType.TEMPORAL: self._embedder.embed_batch(_TEMPORAL_TEMPLATES),
+            FactType.PROSPECTIVE: self._embedder.embed_batch(_TEMPORAL_TEMPLATES),
         }
 
 

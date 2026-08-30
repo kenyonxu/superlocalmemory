@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "superlocalmemory": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/slm-launch",
+      "args": [],
+      "env": {
+        "SLM_AGENT_ID": "codex"
+      }
+    }
+  }
+}

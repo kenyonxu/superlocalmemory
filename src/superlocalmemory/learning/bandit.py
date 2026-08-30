@@ -23,6 +23,7 @@ All SQL is parameterised — grep guard in CI ensures no f-string SQL here.
 from __future__ import annotations
 from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
+import json
 import logging
 import os
 import secrets
@@ -31,6 +32,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 from superlocalmemory.learning.arm_catalog import ARM_CATALOG
@@ -40,6 +42,11 @@ from superlocalmemory.learning.bandit_cache import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: How many shown fact_ids a play records. The settler reads the top 3; the
+#: extra two are headroom for a reranker that reorders after the play is
+#: written, and a bound so this cannot become an unread blob on a hot path.
+_SHOWN_FACT_LIMIT = 5
 
 _FALLBACK_ARM_ID = "fallback_default"
 
@@ -320,8 +327,19 @@ class ContextualBandit:
         play_id: int,
         reward: float,
         kind: str = "proxy_position",
+        weight: float = 1.0,
     ) -> bool:
         """Apply the reward to the (profile, stratum, arm) posterior.
+
+        ``weight`` scales how much this one observation counts, and exists for
+        inverse-propensity correction: the policy chose what was shown, so an
+        arm it almost always shows produces weak evidence whatever happens to
+        it, while one it rarely shows produces strong evidence. Weighting by
+        the inverse of that probability is what keeps the posterior from
+        recording popularity the policy manufactured. See ``propensity.py``.
+
+        A weight of 1.0 is the uncorrected update and the default, so a caller
+        with no competitor posteriors to estimate against changes nothing.
 
         Returns True on success. Never raises — DB failures logged at WARN.
         Cache invalidated on success (B5).
@@ -336,6 +354,15 @@ class ContextualBandit:
             reward_f = 0.0
         elif reward_f > 1.0:
             reward_f = 1.0
+
+        try:
+            weight_f = float(weight)
+        except (TypeError, ValueError):
+            weight_f = 1.0
+        # A non-positive weight would either freeze the arm or subtract
+        # evidence; neither is a meaningful observation.
+        if weight_f <= 0.0:
+            weight_f = 1.0
 
         try:
             conn = _conn_for(self._db_path)
@@ -383,8 +410,8 @@ class ContextualBandit:
                 "    plays = plays + 1, "
                 "    last_played_at = ? "
                 "WHERE profile_id = ? AND stratum = ? AND arm_id = ?",
-                (cap, reward_f, cap, 1.0 - reward_f, now,
-                 profile_id, stratum, arm_id),
+                (cap, weight_f * reward_f, cap, weight_f * (1.0 - reward_f),
+                 now, profile_id, stratum, arm_id),
             )
             conn.execute(
                 "UPDATE bandit_plays "
@@ -402,6 +429,42 @@ class ContextualBandit:
         except Exception:  # pragma: no cover — defensive
             pass
         return True
+
+    def record_shown(self, play_id: int, fact_ids: Sequence[str]) -> bool:
+        """Record which memories this play surfaced, for later settlement.
+
+        A play is settled from evidence — did anything downstream reference a
+        memory this query returned? The settler used to answer "which memories"
+        by reading ``learning_signals`` for the same ``query_id``, and those
+        rows are written by an enqueue that is deliberately off (it costs twenty
+        rows per query and inflated the ranking-phase counter 2,675x). With no
+        evidence to look for, every settlement fell through to the 120-second
+        neutral default of 0.5, which is why 165 arms all read alpha == beta.
+
+        So the play carries its own evidence. Best-effort by design: the reward
+        is a nicety and a recall is not. A failure here means this one play
+        settles as ``default``, exactly as before.
+
+        Bounded to the first few ids because the settler only ever reads the
+        top of the list, and an unbounded JSON blob on the recall path is a
+        write cost with no reader.
+        """
+        if not play_id:
+            return False
+        ids = [str(f) for f in list(fact_ids)[:_SHOWN_FACT_LIMIT] if f]
+        if not ids:
+            return False
+        try:
+            conn = _conn_for(self._db_path)
+            conn.execute(
+                "UPDATE bandit_plays SET shown_fact_ids = ? WHERE play_id = ?",
+                (json.dumps(ids), int(play_id)),
+            )
+            return True
+        except sqlite3.Error as exc:
+            # Includes "no such column" on a store where M044 has not run.
+            logger.debug("bandit.record_shown: %s", exc)
+            return False
 
     # ------------------------------------------------------------------
     # snapshot (for dashboard — LLD-04 consumer)

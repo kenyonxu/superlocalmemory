@@ -76,6 +76,17 @@ def test_health_ready_requires_engine_migrations_writer_and_retrieval(
         "recall_health": True,
         "retrieval": True,
         "migration_failures": [],
+        # 4.1.0: the reason each failure happened, keyed by migration name, so
+        # that a failure here is diagnosable without the daemon's logs. Empty
+        # whenever migration_failures is, which is what a ready daemon looks
+        # like. Asserted by equality on purpose — this payload is a contract
+        # other people's monitoring parses, so a field appearing in it should
+        # have to be added here deliberately rather than slipping in.
+        "migration_failure_reasons": {},
+        # 4.1.2: which of the failures actually stop this daemon serving.
+        # A data invariant that ordinary use re-violated is reported and
+        # served through; a missing table still refuses.
+        "migration_blocking": [],
     }
     assert payload["state"] == "ready"
     assert payload["runtime_state"] == "serving_full"

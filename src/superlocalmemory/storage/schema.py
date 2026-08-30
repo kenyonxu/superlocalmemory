@@ -22,8 +22,11 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
+import logging
 import sqlite3
 from typing import Final
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -58,7 +61,9 @@ _TABLES: Final[tuple[str, ...]] = (
     "config",
     "entity_communities",
     "community_summaries",
+    "consolidated_summaries",
     "persona_summary",
+    "projection_outbox",
 )
 
 _FTS_TABLES: Final[tuple[str, ...]] = (
@@ -154,7 +159,7 @@ CREATE TABLE IF NOT EXISTS atomic_facts (
     content            TEXT NOT NULL,
     fact_type          TEXT NOT NULL DEFAULT 'semantic'
                             CHECK (fact_type IN (
-                                'episodic', 'semantic', 'opinion', 'temporal'
+                                'episodic', 'semantic', 'opinion', 'prospective'
                             )),
 
     -- Entities (JSON arrays)
@@ -191,6 +196,11 @@ CREATE TABLE IF NOT EXISTS atomic_facts (
                             CHECK (lifecycle IN (
                                 'active', 'warm', 'cold', 'archived'
                             )),
+    -- Withheld from retrieval without being destroyed. Set by repair, never
+    -- by a normal write; enforced in exactly one place,
+    -- DatabaseManager.get_facts_by_ids, which every channel's candidates are
+    -- re-authorised through and which the engine hydrates from.
+    quarantined        INTEGER NOT NULL DEFAULT 0,
     langevin_position  TEXT,
 
     -- Emotional
@@ -843,6 +853,51 @@ CREATE INDEX IF NOT EXISTS idx_comm_summ_profile
     ON community_summaries(profile_id);
 """
 
+# Display-only consolidated summaries.
+#
+# A summary of a cluster of facts is a VIEW of memory, not a memory. Between
+# v3.6.4 and 4.0.9 the fact consolidator wrote its summaries straight into
+# atomic_facts with a raw INSERT, which put model-authored prose into the
+# retrieval corpus alongside the user's own words — where it out-ranked them,
+# because those rows carried every entity in their cluster and so had more
+# entity links than any real fact.
+#
+# This table restores the boundary. community_summaries is the precedent to
+# read it by: written by one owner, read only after retrieval has finished, and
+# named by no channel. tests/test_retrieval/test_summaries_stay_out_of_recall.py
+# fails if a retrieval module so much as mentions it.
+#
+# source_earliest / source_latest are the honest dates for a derived row. A
+# summary has no observation_date of its own — it was never observed — but the
+# span of what it summarises is real, and it is what lets the dashboard say
+# which stretch of work a summary covers.
+CONSOLIDATED_SUMMARIES_DDL: Final[str] = """
+CREATE TABLE IF NOT EXISTS consolidated_summaries (
+    summary_id       TEXT PRIMARY KEY,
+    profile_id       TEXT NOT NULL,
+    entity_id        TEXT NOT NULL DEFAULT '',
+    entity_name      TEXT NOT NULL DEFAULT '',
+    content          TEXT NOT NULL,
+    source_fact_ids  TEXT NOT NULL DEFAULT '[]',
+    source_count     INTEGER NOT NULL DEFAULT 0,
+    char_count       INTEGER NOT NULL DEFAULT 0,
+    generated_by     TEXT NOT NULL DEFAULT 'extractive'
+                        CHECK (generated_by IN (
+                            'extractive', 'ollama', 'cloud', 'migrated'
+                        )),
+    scope            TEXT NOT NULL DEFAULT 'personal',
+    shared_with      TEXT,
+    source_earliest  TEXT,
+    source_latest    TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (profile_id, entity_id, content)
+);
+CREATE INDEX IF NOT EXISTS idx_consolidated_summaries_profile
+    ON consolidated_summaries(profile_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_consolidated_summaries_entity
+    ON consolidated_summaries(profile_id, entity_id);
+"""
+
 # Wave Q3: progressive-abstraction top tier — one persona roll-up per profile
 # consuming the top community summaries (additive; safe on existing DBs).
 # Recall-gated (never auto-injected into hot recall) and size-bounded to avoid
@@ -861,6 +916,10 @@ CREATE TABLE IF NOT EXISTS persona_summary (
 # ---------------------------------------------------------------------------
 # Ordered DDL list (tables before FTS, respects FK order)
 # ---------------------------------------------------------------------------
+
+#: Imported rather than restated so the table has exactly one definition; the
+#: module that owns the queue owns its shape.
+from superlocalmemory.storage.projection_outbox import DDL as _PROJECTION_OUTBOX_DDL
 
 _DDL_ORDERED: Final[tuple[str, ...]] = (
     _SQL_SCHEMA_VERSION,
@@ -894,14 +953,65 @@ _DDL_ORDERED: Final[tuple[str, ...]] = (
     _SQL_ENTITY_COMMUNITIES,
     # Wave Q2: community summaries (additive; safe on existing DBs)
     _SQL_COMMUNITY_SUMMARIES,
+    CONSOLIDATED_SUMMARIES_DDL,
     # Wave Q3: persona roll-up tier (additive; safe on existing DBs)
     _SQL_PERSONA_SUMMARY,
+    # The queue that makes a graph/vector projection write survive a crash.
+    # Created here, at every engine init, rather than only by its migration:
+    # if this table is missing, facts stop being projected and the only symptom
+    # is a memory that cannot be recalled. That invariant must not be
+    # contingent on a migration pass having succeeded.
+    _PROJECTION_OUTBOX_DDL,
 )
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+#: (table, column, column definition). Applied with ALTER TABLE ADD COLUMN,
+#: which SQLite offers no IF NOT EXISTS form of, so presence is checked first.
+_ADDITIVE_COLUMNS: Final[tuple[tuple[str, str, str], ...]] = (
+    ("atomic_facts", "quarantined", "INTEGER NOT NULL DEFAULT 0"),
+    # ``pinned`` arrives with M015, which is a DEFERRED migration -- it runs
+    # after the engine is up. But the DDL below indexes it
+    # (``idx_facts_pinned``), and that DDL runs during engine start. On a store
+    # old enough to predate M015 the index therefore raised "no such column:
+    # pinned" before anything could add it, and every start failed the same way:
+    # the deferred pass could not run because the engine could not start, and
+    # the engine could not start because the deferred pass had not run.
+    # ``slm db migrate`` did not break the loop either -- it reports Failed=0
+    # and skips deferred migrations by definition.
+    # The column has to exist before its own index either way, so it belongs
+    # here, where a store gets it at start regardless of migration state.
+    ("atomic_facts", "pinned", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Add columns that upgraded databases predate. Idempotent.
+
+    A missing table is not an error: this runs inside create_all_tables, so the
+    table is created moments earlier in the same call, and a database old enough
+    to lack it entirely has nothing to alter.
+    """
+    for table, column, definition in _ADDITIVE_COLUMNS:
+        try:
+            present = any(
+                row[1] == column
+                for row in conn.execute(f"PRAGMA table_info({table})")
+            )
+            if not present:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                )
+        except sqlite3.Error as exc:
+            # Never fatal. A store that cannot take the column keeps working;
+            # get_facts_by_ids checks for the column before filtering on it.
+            logger.warning(
+                "additive column %s.%s not applied: %s", table, column, exc,
+            )
+
 
 def create_all_tables(conn: sqlite3.Connection) -> None:
     """Create every table, index, trigger, and FTS virtual table.
@@ -914,6 +1024,17 @@ def create_all_tables(conn: sqlite3.Connection) -> None:
     """
     _set_pragmas(conn)
 
+    # Before the DDL, not only after it. The DDL below indexes columns that an
+    # upgraded store may not have yet, and an index on a column that does not
+    # exist is a hard error, not a skipped statement -- so the whole of
+    # create_all_tables would raise and the engine would never start.
+    #
+    # On a fresh database this pass does nothing: the tables do not exist yet,
+    # which the helper treats as "nothing to alter". On an upgraded one the
+    # tables are already there and this is exactly where the columns are owed.
+    # It runs again at the end for tables created during this call.
+    _add_missing_columns(conn)
+
     for ddl in _DDL_ORDERED:
         conn.executescript(ddl)
 
@@ -921,6 +1042,17 @@ def create_all_tables(conn: sqlite3.Connection) -> None:
     from superlocalmemory.storage.schema_v32 import V32_DDL
     for ddl in V32_DDL:
         conn.executescript(ddl)
+
+    # Additive columns on tables that predate them.
+    #
+    # CREATE TABLE IF NOT EXISTS cannot add a column to a table that already
+    # exists, so an upgraded database gets the column here rather than only from
+    # a migration. Doing it at every engine init makes the invariant "if
+    # atomic_facts exists then quarantined exists" hold even when the migration
+    # pass failed or was never reached — which matters because withholding a
+    # poisoned row from retrieval must not be contingent on a migration having
+    # succeeded.
+    _add_missing_columns(conn)
 
     # Seed schema version on first run.
     existing = conn.execute(

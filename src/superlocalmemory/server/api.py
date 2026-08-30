@@ -39,6 +39,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 import uvicorn
 
+from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
 from superlocalmemory.server.security_middleware import SecurityHeadersMiddleware
 from superlocalmemory.server.routes.helpers import SLM_VERSION
 from superlocalmemory.infra.data_root import DynamicStatePath
@@ -60,7 +61,7 @@ UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
 class SearchRequest(BaseModel):
     query: str
-    limit: int = 10
+    limit: int = CANONICAL_RECALL_LIMIT
     min_score: float = 0.3
 
 
@@ -246,7 +247,30 @@ def create_app() -> FastAPI:
                 "<p><a href='/docs'>API Documentation</a></p>"
                 "</body></html>"
             )
-        return index_path.read_text()
+        from superlocalmemory import __version__ as _v
+
+        # __SLM_VERSION__ was substituted only by the unified daemon, so the
+        # dashboard's upgrade detector did nothing when served from here.
+        # Asset versioning is cosmetic. It must never be why this page 500s.
+        #
+        # The import is deferred (house style, keeps startup lean), which means
+        # it resolves at REQUEST time — so when `pip install -e .` replaced the
+        # installed package underneath a running daemon, this route began
+        # answering "Internal Server Error" on the dashboard while every other
+        # endpoint was fine. A stale hand-written version string is a trifle; a
+        # blank page is not. Fall back to the file as written.
+        try:
+            from superlocalmemory.server.asset_versions import render_index
+
+            return render_index(
+                index_path, UI_DIR, substitutions={"__SLM_VERSION__": _v},
+            )
+        except Exception as exc:  # noqa: BLE001 — serve the page regardless
+            logger.warning(
+                "asset version rewrite unavailable, serving index.html as "
+                "written: %s: %s", type(exc).__name__, exc,
+            )
+            return index_path.read_text().replace("__SLM_VERSION__", _v)
 
     @application.get("/health")
     async def health_check():

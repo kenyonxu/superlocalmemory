@@ -83,6 +83,122 @@ def _validate(marker: str) -> str | None:
         return None
 
 
+# --- Behavioural telemetry -------------------------------------------------
+# ``tool_events`` is the record of what the agent did, and several readers
+# depend on it: assertion mining, skill-performance mining, and the engagement
+# features that settle a recall against the actions which followed it. Each of
+# those reads the table; none of them writes it. The only writers were an
+# explicit ``log_tool_event`` call and a bulk importer, so on an ordinary
+# install the table simply stopped receiving invocations and every reader
+# quietly aged out with it.
+#
+# This hook already runs on exactly the right edge -- after each tool completes,
+# with the session that ran it -- so it records the invocation here. It happens
+# before the marker scan and independently of it: whether a recalled memory was
+# named in the output decides what a *reward* is worth, not whether the action
+# occurred at all.
+_MAX_SUMMARY_LEN = 500
+
+# Compiled once at import. This path now runs on every tool call rather than
+# only on the ~1-in-5 that carry a marker, so per-call ``re`` compilation or a
+# module import would be paid on the hot path for no benefit.
+_SECRET_PATTERNS = (
+    (re.compile(r"\b(?:sk-|pk-|api[_-]?key[_-]?)[A-Za-z0-9_-]{10,}\b"),
+     "[REDACTED]"),
+    (re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b"), "[REDACTED]"),
+    (re.compile(r"password\s*[=:]\s*\S+", re.IGNORECASE),
+     "password=[REDACTED]"),
+)
+
+
+def _scrub(text: str) -> str:
+    """Strip credential-shaped substrings from telemetry text."""
+    for pattern, replacement in _SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _summary(raw: object) -> str:
+    """Truncate-then-scrub ``raw`` for a summary column.
+
+    Truncation comes first so the regex cost is bounded by
+    ``_MAX_SUMMARY_LEN`` and not by the size of a tool response.
+    """
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        try:
+            import json as _json
+            raw = _json.dumps(raw, default=str)
+        except Exception:
+            try:
+                raw = str(raw)
+            except Exception:
+                return ""
+    return _scrub(raw[:_MAX_SUMMARY_LEN])
+
+
+def _record_tool_event(
+    session_id: str,
+    tool_name: str,
+    payload: dict,
+    response_text: str,
+) -> bool:
+    """Append one ``tool_events`` row. Never raises; returns whether it wrote.
+
+    Failure is silent by design: telemetry must never be the reason a tool call
+    reports a problem to the user, and the hook contract is to exit 0 whatever
+    happens.
+    """
+    if not tool_name:
+        return False
+    try:
+        import sqlite3
+        from datetime import datetime, timezone
+
+        try:
+            from superlocalmemory.hooks.session_registry import (
+                resolve_active_profile,
+            )
+            profile_id = resolve_active_profile() or "default"
+        except Exception:
+            profile_id = "default"
+
+        project_path = ""
+        raw_cwd = payload.get("cwd")
+        if isinstance(raw_cwd, str):
+            project_path = raw_cwd[:_MAX_SUMMARY_LEN]
+
+        conn = sqlite3.connect(str(_memory_db_path()), timeout=0.05)
+        try:
+            conn.execute("PRAGMA busy_timeout=50")
+            conn.execute(
+                "INSERT INTO tool_events "
+                "(session_id, profile_id, project_path, tool_name, event_type,"
+                " input_summary, output_summary, duration_ms, metadata,"
+                " created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    profile_id,
+                    project_path,
+                    tool_name,
+                    "complete",
+                    _summary(payload.get("tool_input")),
+                    _summary(response_text),
+                    0,
+                    "{}",
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return True
+    except Exception:
+        return False
+
+
 def _inner_main() -> str:
     """Return an ``outcome`` string (for perf log); never raises."""
     payload = read_stdin_json()
@@ -119,6 +235,12 @@ def _inner_main() -> str:
 
     # Response scan — capped BEFORE regex (bound O(cap)).
     response_text = summarize_response(payload.get("tool_response"))
+
+    # The invocation is recorded before anything is decided about markers. An
+    # action the agent took is a fact about the session on its own terms; the
+    # marker only decides whether it also settles a pending recall.
+    _record_tool_event(session_id, tool_name, payload, response_text)
+
     if not response_text:
         return "no_response"
 

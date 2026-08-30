@@ -555,10 +555,24 @@ class ScaleEngineManager:
         projects them: dedup entity IDs per fact, drop empties. This bridge is
         what lets Cozo map a query seed into the fact graph; if its import
         silently fails, count parity on entities/edges/vectors still passes but
-        entity recall returns empty — so it must be verified explicitly."""
+        entity recall returns empty — so it must be verified explicitly.
+
+        Withheld and archived facts are excluded, because the import excludes
+        them. On this store that is not a rounding difference: 1,291 withheld
+        facts hold 379,591 of the 395,524 bridge rows — about 294 entity
+        references each, against roughly 4 for an ordinary memory. That is the
+        "pooled entity list" the retrieval channel refuses to let into its entity
+        map, and it is why a withheld row out-ranks a real one. Counting them
+        here made the parity check demand a projection the import must not build,
+        and promotion failed on it."""
+        from superlocalmemory.storage.database import (
+            visible_fact_clause_for_connection,
+        )
+
         total = 0
         for (raw,) in conn.execute(
-            "SELECT canonical_entities_json FROM atomic_facts WHERE profile_id=?",
+            "SELECT canonical_entities_json FROM atomic_facts WHERE profile_id=?"
+            + visible_fact_clause_for_connection(conn),
             (self.profile_id,),
         ):
             try:

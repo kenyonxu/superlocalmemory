@@ -12,7 +12,7 @@ import gzip
 import hashlib
 import json
 import logging
-from typing import Optional
+from typing import Any, Optional
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File
@@ -78,7 +78,22 @@ async def export_memories(
             use_v3 = False
 
         if use_v3:
+            # Withheld summaries are excluded, and this is about IMPORT, not
+            # tidiness. Import re-ingests every record through the normal
+            # pipeline, which mints a fresh memory with quarantined = 0 — so an
+            # export taken here and imported anywhere would resurrect all 1,195
+            # model-written rows as though the owner had written them, on a
+            # machine where nothing had gone wrong. The repair would then have
+            # to run again there.
+            #
+            # Nothing the owner wrote is lost: these are derived artefacts, the
+            # consolidator regenerates them from the facts that ARE exported,
+            # and their text is kept in consolidated_summaries. (That table is
+            # not in this export either — it is a view, not a memory. Worth
+            # revisiting when export covers derived state.)
             query = "SELECT * FROM atomic_facts WHERE profile_id = ?"
+            if _has_column(cursor, "atomic_facts", "quarantined"):
+                query += " AND COALESCE(quarantined, 0) = 0"
             params = [active_profile]
             if category:
                 query += " AND fact_type = ?"
@@ -152,6 +167,19 @@ async def export_memories(
 
     except Exception:
         raise _internal_error("Export error")
+
+
+def _has_column(cursor: Any, table: str, column: str) -> bool:
+    """Whether ``table`` carries ``column`` in this database.
+
+    Presence-guarded because ``quarantined`` arrives with a migration and this
+    route must keep working on a store the engine has not opened.
+    """
+    try:
+        cursor.execute(f"PRAGMA table_info({table})")
+        return any(row[1] == column for row in cursor.fetchall())
+    except Exception:  # noqa: BLE001 -- an export must not fail over a probe
+        return False
 
 
 @router.post("/api/import")

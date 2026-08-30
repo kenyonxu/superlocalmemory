@@ -17,6 +17,9 @@ import sqlite3
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 from superlocalmemory.server.routes.helpers import DB_PATH, get_active_profile, get_read_connection
+from superlocalmemory.storage.database import (
+    visible_fact_clause_for_connection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +85,7 @@ async def get_timeline(
             "confidence, session_id "
             "FROM atomic_facts "
             "WHERE profile_id = ? AND created_at >= ? AND lifecycle = 'active' "
+            f"{visible_fact_clause_for_connection(conn)} "
             "ORDER BY created_at DESC LIMIT ?",
             (pid, start_date, INTERNAL_CEILING),
         ).fetchall()

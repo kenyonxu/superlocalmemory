@@ -11,11 +11,19 @@ GOAL ANCHOR (verbatim from Varun):
 
 Release context
 ---------------
-The ONLY change from 4.0.5 → 4.0.6 is a WAL close-path deadlock fix in
+The ONLY change from 4.0.5 → 4.0.6 was a WAL close-path deadlock fix in
 ``storage/database.py`` (wal_autocheckpoint=400 + SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE).
-No new migrations were added; M001–M042 and SUPPORTED_SCHEMA_VERSION=42 are
+No new migrations were added; M001–M042 and SUPPORTED_SCHEMA_VERSION=42 were
 IDENTICAL in both releases. All 41 migration DDL files hash byte-for-byte
 identically against the installed 4.0.5 package.
+
+**4.1.0 deliberately ends that co-existence, and this suite now proves the
+ending rather than the compatibility.** M046 rebuilds ``atomic_facts`` with a
+constraint an older build's writes violate, so a store it has touched must not
+be opened by one. The tests below assert the ceiling ROSE and that an older
+ceiling now REFUSES such a store — the same properties, read the other way
+round. Everything about M001–M042 is unchanged and still checked: the DDL hash
+identity, the additive-only invariant over those files, and the drift guards.
 
 What this suite PROVES
 -----------------------
@@ -35,9 +43,11 @@ What this suite PROVES
        ``apply_all`` + ``apply_deferred`` run.
    Every detector carries a teeth check that injects the failure it is meant
    to catch.
-4. Backward tolerance: a 4.0.6-migrated DB (slm_schema_version=42) passes the
-   4.0.5 version gate (SUPPORTED_SCHEMA_VERSION=42 in both → 42 > 42 is False
-   → no SchemaVersionError raised). Residual risk documented.
+4. Backward REFUSAL, from 4.1.0 on: a store this build has migrated is stamped
+   46, so a build whose ceiling is 42 raises SchemaVersionError rather than
+   writing to it. Before 4.1.0 this section proved the opposite — that the
+   stamps matched and an older build could open the store safely. That was true
+   for an additive release and is the wrong guarantee for this one.
 
 What this suite CANNOT PROVE
 ------------------------------
@@ -126,11 +136,42 @@ import pytest
 # ---------------------------------------------------------------------------
 
 #: The schema version written after a complete 4.0.5 (and 4.0.6) migration run.
-_EXPECTED_SCHEMA_VERSION: int = 42
+#: 4.1.0 raises the ceiling to the trailing serial of its last migration. It sat
+#: at 42 while M043, M044 and M045 shipped — tolerable only because all three
+#: were additive, so an older build simply never read what it did not know
+#: about. M046 is not additive: it rebuilds atomic_facts with a constraint that
+#: rejects the value an older build writes planned events as. The ceiling is
+#: what converts that from a lost memory into a refusal to start.
+#:
+#: 49 as of 4.1.0: +M049_a_schema_version_marker_is_one_row. It is not additive
+#: either — it puts a UNIQUE index on schema_version(version) and collapses the
+#: duplicates that index forbids (234,348 rows down to 7 on one real store).
+#: This build's six writers were changed to INSERT OR IGNORE alongside it; an
+#: older build still issues a plain INSERT and would hit the constraint partway
+#: through its own migration run. Raising the ceiling turns that into a refusal
+#: to open rather than a half-migrated store.
+#:
+#: This constant sat at 48 while M049 shipped, so the whole file was failing —
+#: nothing noticed because the full suite had not been run since. Keep it equal
+#: to the trailing serial of the last migration.
+_EXPECTED_SCHEMA_VERSION: int = 49
 
 #: Total migrations in the MIGRATIONS + DEFERRED_MIGRATIONS catalogue.
-#: M001–M042 with M008 absent = 41 total.
-_EXPECTED_MIGRATION_COUNT: int = 41
+#: M001–M043 with M008 absent = 42 total.
+#:
+#: _EXPECTED_SCHEMA_VERSION deliberately stays at 42 while this went to 42.
+#: The two are not the same thing: the version is a DOWNGRADE CEILING, and
+#: M043's changes are additive (one column with a default, one new table,
+#: plus data moved between them). An older build opening the store reads it
+#: fine. It would show the withheld summaries again, because it has no filter
+#: for them — the behaviour the owner downgraded away from — but that is what
+#: downgrading means. Bumping the ceiling would instead make the older build
+#: refuse the store outright and strand anyone who needed to go back.
+# 44 as of 4.1.0: +M044_play_carries_its_own_evidence (learning.db,
+# bandit_plays.shown_fact_ids) and +M045_fact_outcome_score (memory.db, the
+# per-fact outcome score). Both additive columns/tables; neither rewrites an
+# existing row, so 4.0.5 forward-compat is unaffected.
+_EXPECTED_MIGRATION_COUNT: int = 48
 
 #: Path to an installed reference package's migrations directory, if one exists.
 #:
@@ -214,6 +255,26 @@ _DYNAMIC_DDL_WAIVERS: dict[str, str] = {
         "the same BEGIN IMMEDIATE transaction before the old copy is dropped. "
         "Net effect adds profile_id; no column is removed. "
         "Source-reviewed 2026-08-16 for release/4.0.6."
+    ),
+    "M046_prospective_memory_has_its_own_name": (
+        "_rebuild() issues literal-name DROP/RENAME against atomic_facts via "
+        "f-strings over the module constant _TABLE = 'atomic_facts', so the "
+        "scanner cannot resolve them. The replacement table is CREATEd from the "
+        "live table's own definition read out of sqlite_master — which is why "
+        "that statement cannot be a literal and why this waiver is needed: "
+        "reconstructing the DDL from PRAGMA table_info would silently drop "
+        "CHECK constraints and collations. The shape is the forward rebuild "
+        "dance (CREATE staging, copy, DROP original, RENAME staging into place) "
+        "inside one BEGIN IMMEDIATE, with the row count compared before COMMIT. "
+        "\n\n"
+        "IT REMOVES NO TABLE AND NO COLUMN, so the invariant this suite states "
+        "holds. It is NOT additive in a broader sense and must not be read as "
+        "such: it NARROWS the fact_type value domain, replacing 'temporal' with "
+        "'prospective'. An older build's SELECTs all still resolve; its INSERTs "
+        "of a planned event do not. That break is deliberate and is what the "
+        "schema-version ceiling exists to convert into a refusal to start — see "
+        "test_an_older_build_is_refused_by_the_gate. "
+        "Source-reviewed 2026-08-22 for release/4.1.0."
     ),
 }
 
@@ -661,18 +722,28 @@ class TestFixtureShape:
             "Investigate DDL changes before releasing."
         )
 
-    def test_supported_schema_version_identical_in_both_releases(self):
-        """SUPPORTED_SCHEMA_VERSION must be 42 in 4.0.6, matching 4.0.5.
+    def test_supported_schema_version_rose_above_the_405_ceiling(self):
+        """4.1.0's ceiling must be HIGHER than 4.0.5's, and that is the point.
 
-        A mismatch would mean the version gate could reject a 4.0.5 DB on 4.0.6
-        (if 4.0.6 ceiling is higher) or refuse a 4.0.6 DB on 4.0.5 (if lower).
+        Through 4.0.6 this asserted the two were identical, because an additive
+        release wants an older build to keep opening the store. M046 is not
+        additive — it rebuilds a table with a constraint an older build's writes
+        violate — so the ceilings must now differ in this direction:
+
+          higher here  → a store this build migrated is refused by the old one,
+                         which is the outcome we want.
+          equal        → the old build writes into a store whose constraint
+                         rejects its values, and the write is lost.
+          lower here   → this build refuses stores it produced itself.
         """
         from superlocalmemory.storage._schema_version import SUPPORTED_SCHEMA_VERSION
 
         assert SUPPORTED_SCHEMA_VERSION == _EXPECTED_SCHEMA_VERSION, (
-            f"4.0.6 SUPPORTED_SCHEMA_VERSION={SUPPORTED_SCHEMA_VERSION}, "
-            f"expected {_EXPECTED_SCHEMA_VERSION}. The version gate will misbehave "
-            "across the 4.0.5 ↔ 4.0.6 boundary."
+            f"SUPPORTED_SCHEMA_VERSION={SUPPORTED_SCHEMA_VERSION}, "
+            f"expected {_EXPECTED_SCHEMA_VERSION}. It must match the trailing "
+            "serial of the last migration, or the gate stops tracking what the "
+            "migrations actually did — which is how it came to sit three "
+            "migrations behind."
         )
 
         # Cross-reference against the installed 4.0.5 file if available.
@@ -687,10 +758,11 @@ class TestFixtureShape:
         )
         installed_version = int(m.group(1))
 
-        assert SUPPORTED_SCHEMA_VERSION == installed_version, (
-            f"SUPPORTED_SCHEMA_VERSION mismatch: "
-            f"4.0.6={SUPPORTED_SCHEMA_VERSION}, 4.0.5={installed_version}. "
-            "The version gate is broken across the 4.0.5 ↔ 4.0.6 boundary."
+        assert SUPPORTED_SCHEMA_VERSION > installed_version, (
+            f"SUPPORTED_SCHEMA_VERSION={SUPPORTED_SCHEMA_VERSION} is not above "
+            f"the installed older build's {installed_version}. A store migrated "
+            "here would then be opened and written by that build, whose values "
+            "the new constraint rejects."
         )
 
     def test_migration_count_matches_expected(self):
@@ -840,11 +912,15 @@ class TestForwardCompat:
         )
         assert row[0] == _FIXTURE_PROFILE_ID
 
-    def test_schema_version_is_42_after_fixture_build(self, tmp_path):
-        """The fixture's slm_schema_version must be 42 on both DBs after build.
+    def test_schema_version_is_stamped_after_fixture_build(self, tmp_path):
+        """The fixture's slm_schema_version must reach the current ceiling.
 
         If the deferred pass fails to stamp the version, this assertion catches
         the fixture builder's failure before any migration test runs.
+
+        The fixture is built from 4.0.5-shaped DDL and then migrated by THIS
+        build, so it ends at this build's ceiling, not at 4.0.5's. Asserting 42
+        here would be asserting that the migrations did nothing.
         """
         from superlocalmemory.storage._schema_version import read_schema_version
 
@@ -860,12 +936,12 @@ class TestForwardCompat:
             f"expected {_EXPECTED_SCHEMA_VERSION}."
         )
 
-    def test_schema_version_unchanged_after_406_apply_all(self, tmp_path):
-        """Running 4.0.6 apply_all() on a 4.0.5 DB must not alter the version stamp.
+    def test_schema_version_unchanged_after_apply_all(self, tmp_path):
+        """apply_all() on an already-migrated DB must not alter the version stamp.
 
         apply_all() does not re-stamp slm_schema_version — only apply_deferred()
         does, and only when all migrations complete. Re-running apply_all() on a
-        fully-migrated DB must leave the stamp at 42.
+        fully-migrated DB must leave the stamp where the deferred pass put it.
         """
         from superlocalmemory.storage._schema_version import read_schema_version
         from superlocalmemory.storage.migration_runner import apply_all
@@ -1367,16 +1443,12 @@ class TestBackwardTolerance:
     backward opening safe, and document residual risk explicitly.
     """
 
-    def test_406_db_version_passes_405_gate(self, tmp_path):
-        """A 4.0.6-migrated DB (slm_schema_version=42) passes the 4.0.5 gate.
+    def test_this_builds_own_gate_accepts_the_store_it_migrated(self, tmp_path):
+        """This build must open what this build produced.
 
-        The gate logic in both releases:
-          if stored_version > SUPPORTED_SCHEMA_VERSION: raise SchemaVersionError
-        With stored=42 and ceiling=42: 42 > 42 is False → no error → safe to open.
-
-        This test runs check_version_or_raise from the current (4.0.6) code,
-        which has the same gate logic as 4.0.5 (both at 42). If the logic or
-        threshold differs, a SchemaVersionError would be raised here.
+        The trivial direction, and worth asserting because the gate is a
+        strict inequality: a store stamped at the ceiling is not above it.
+        Getting this wrong would make the release refuse its own stores.
         """
         from superlocalmemory.storage._schema_version import (
             check_version_or_raise,
@@ -1385,20 +1457,58 @@ class TestBackwardTolerance:
 
         learning_db, memory_db = _build_405_fixture(tmp_path)
 
-        # Verify both DBs are at schema_version=42 (4.0.6 shape).
         assert read_schema_version(memory_db) == _EXPECTED_SCHEMA_VERSION
         assert read_schema_version(learning_db) == _EXPECTED_SCHEMA_VERSION
 
-        # Apply the gate: stored=42, ceiling=42 → must NOT raise.
         try:
             check_version_or_raise(memory_db)
             check_version_or_raise(learning_db)
         except Exception as exc:  # noqa: BLE001
             pytest.fail(
-                f"check_version_or_raise raised for a DB at schema_version="
-                f"{_EXPECTED_SCHEMA_VERSION}, ceiling={_EXPECTED_SCHEMA_VERSION}. "
-                f"The 4.0.5 version gate is BROKEN for 4.0.6 DBs: {exc}"
+                f"check_version_or_raise raised for a store at the ceiling "
+                f"({_EXPECTED_SCHEMA_VERSION}): {exc}"
             )
+
+    def test_an_older_build_is_refused_by_the_gate(self, tmp_path):
+        """The property this release actually needs, asserted against the store.
+
+        Through 4.0.6 the sibling test above proved the opposite — that an older
+        build could open a newer store, because every migration until then was
+        additive and an older reader simply never touched what it did not know
+        about.
+
+        M046 is not additive. It rebuilds ``atomic_facts`` with a constraint
+        that rejects the value an older build files planned events under, so an
+        older writer's INSERT fails against a store this build has migrated. The
+        version ceiling is what turns that into a refusal to start instead of a
+        lost memory, and this asserts the refusal happens.
+
+        The older ceiling is simulated by calling the gate with it directly.
+        Installing an old release inside this process is not possible, and the
+        gate's whole logic is the one comparison being exercised here.
+        """
+        from superlocalmemory.storage import _schema_version as sv
+
+        learning_db, memory_db = _build_405_fixture(tmp_path)
+        stored = sv.read_schema_version(memory_db)
+        assert stored == _EXPECTED_SCHEMA_VERSION
+
+        older_ceiling = 42  # 4.0.5 through 4.0.10
+        assert stored > older_ceiling, (
+            "the store this build migrated is not stamped above the older "
+            "ceiling, so nothing stops an older build from writing to it"
+        )
+
+        original = sv.SUPPORTED_SCHEMA_VERSION
+        sv.SUPPORTED_SCHEMA_VERSION = older_ceiling
+        try:
+            with pytest.raises(sv.SchemaVersionError):
+                sv.check_version_or_raise(memory_db)
+        finally:
+            sv.SUPPORTED_SCHEMA_VERSION = original
+
+        # And the gate is not simply always-raising: restored, it accepts.
+        sv.check_version_or_raise(memory_db)
 
     def test_version_gate_has_teeth_future_version(self, tmp_path):
         """Prove the gate FIRES for a DB stamped with a future schema version.

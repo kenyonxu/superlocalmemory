@@ -64,36 +64,49 @@ class TestLifecycle:
         assert health["edges"] == 3
 
 
-class TestSpreadingActivation:
-    """BFS traversal with decay."""
+class TestItSuppliesDataNotAnswers:
+    """The backend is a store. The traversal is not its job any more.
 
-    def test_seeds_get_score_one(self, populated):
-        results = populated.spreading_activation(["e1"], depth=2, top_k=10)
-        scores = dict(results)
-        assert scores["e1"] == 1.0
+    ``spreading_activation`` and ``recall_facts`` used to live here and were a
+    second implementation of the walk in ``retrieval/entity_channel.py``. They
+    computed a different function — no PageRank factor — so on a real store 3,567
+    of 3,667 shared facts scored differently, the result sets diverged, and the
+    projected path failed its shadow comparison on every query. The walk is now
+    one pure function over an ``AdjacencySnapshot``
+    (``retrieval/spreading.py``), and these tests pin the boundary that keeps it
+    that way.
+    """
 
-    def test_decay_per_hop(self, populated):
-        results = populated.spreading_activation(["e1"], depth=2, decay=0.5, top_k=10)
-        scores = dict(results)
-        assert scores["e1"] == 1.0
-        assert scores["e2"] < 1.0  # 1 hop → decay applied
-        assert scores.get("e3", 0) <= scores["e2"]  # 2 hops → more decay
+    def test_the_backend_exposes_no_traversal(self, populated):
+        """A traversal here is a second walk, and a second walk drifts."""
+        for banned in ("spreading_activation", "recall_facts"):
+            assert not hasattr(populated, banned), (
+                f"{banned} is back on the graph backend. Add an AdjacencySource "
+                "adapter in retrieval/graph_adjacency.py instead — the walk is "
+                "one function and it does not belong to a storage engine."
+            )
 
-    def test_empty_seeds(self, populated):
-        assert populated.spreading_activation([]) == []
+    def test_it_hands_over_its_edges_in_one_query(self, populated):
+        """What an adjacency source needs: every edge, in a single batch.
 
-    def test_depth_limit(self, populated):
-        results = populated.spreading_activation(["e1"], depth=1, top_k=10)
-        scores = dict(results)
-        # depth=1 means only e1+e2 (1 hop). e3 is 2 hops away, excluded.
-        assert "e2" in scores
-        # e3 may or may not appear depending on direct edge e1→e3
+        The retired traversal asked Cozo one question per frontier node, which
+        measured 18,125 ms for 200 nodes against 303 ms batched for the same
+        6,046 rows. A source reads the relation whole.
+        """
+        rows = populated._db.run(
+            "?[from_id, to_id, weight] := "
+            "*edge{from_id, to_id, edge_type, weight, profile_id}"
+        ).values.tolist()
+        assert len(rows) == populated.health_check()["edges"]
+        assert all(len(row) == 3 for row in rows)
 
-    def test_isolated_node(self, populated):
-        results = populated.spreading_activation(["e4"], depth=3, top_k=10)
-        scores = dict(results)
-        assert scores["e4"] == 1.0
-        assert len(scores) == 1  # Only e4, no edges
+    def test_it_hands_over_its_entity_bridge(self, populated):
+        """The bridge is how a query's entities enter the fact graph."""
+        populated.add_fact_entities("fact-1", ["e1"], "default")
+        rows = populated._db.run(
+            "?[fact_id, entity_id] := *fact_entity{fact_id, entity_id, profile_id}"
+        ).values.tolist()
+        assert ["fact-1", "e1"] in rows
 
 
 class TestCanonicalEntityProjection:
@@ -122,7 +135,13 @@ class TestCanonicalEntityProjection:
         health = backend.health_check()
         assert health["entities"] == 2
         assert health["edges"] == 1
-        assert [fact_id for fact_id, _ in backend.recall_facts(["entity-ada"])] == ["fact-1", "fact-2"]
+        # Assert the bridge, not a traversal over it: what this projection owes
+        # a caller is the mapping, and the walk that consumes it lives elsewhere.
+        bridge = backend._db.run(
+            "?[fact_id] := *fact_entity{fact_id, entity_id, profile_id}, "
+            "entity_id = $e", {"e": "entity-ada"},
+        ).values.tolist()
+        assert sorted(row[0] for row in bridge) == ["fact-1", "fact-2"]
 
     def test_bulk_projection_preserves_parallel_typed_fact_edges(self, backend):
         """Projection parity must not collapse distinct canonical edge types."""
@@ -183,15 +202,35 @@ class TestCanonicalEntityProjection:
         backend.add_fact_entities(unsafe_id, ["entity-ada"])
         backend.add_edge(unsafe_id, "fact-2", "related")
         backend.remove_fact(unsafe_id)
-        assert backend.recall_facts(["entity-ada"]) == []
+        bridge = backend._db.run(
+            "?[fact_id] := *fact_entity{fact_id, entity_id, profile_id}, "
+            "entity_id = $e", {"e": "entity-ada"},
+        ).values.tolist()
+        assert bridge == []
         assert backend.health_check()["edges"] == 0
 
-    def test_shadow_error_records_telemetry_without_mutating_graph(self, backend):
+    def test_withdrawing_a_fact_keeps_the_graph_shape(self, backend):
+        """Candidacy and adjacency are different things.
+
+        A withheld fact must stop being offered as a result while the edges its
+        visible neighbours are reached through stay put — the retrieval channel
+        prunes its entity map on visibility and its edge walk on scope alone, so
+        a projection that deleted the edges would answer differently from it.
+        """
+        backend.add_entity("entity-ada", "Ada", "person")
+        backend.add_fact_entities("fact-1", ["entity-ada"])
         backend.add_edge("fact-1", "fact-2", "related")
 
-        backend.record_shadow_error("simulated shadow failure")
+        backend.remove_fact_candidacy("fact-1")
 
-        assert backend.health_check()["edges"] == 1
+        bridge = backend._db.run(
+            "?[fact_id] := *fact_entity{fact_id, entity_id, profile_id}, "
+            "entity_id = $e", {"e": "entity-ada"},
+        ).values.tolist()
+        assert bridge == [], "the fact is still being offered as a candidate"
+        assert backend.health_check()["edges"] == 1, (
+            "withdrawing a fact deleted an edge its neighbour needs"
+        )
 
 
 class TestPageRank:

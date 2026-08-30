@@ -97,6 +97,69 @@ def _sub_all(rel: str, pattern: str, replacement: str, version: str) -> tuple[st
     return old, version
 
 
+def _sub_glob(pattern_glob: str, pattern: str, replacement: str,
+              version: str) -> tuple[str, str]:
+    """Rewrite EVERY match in EVERY file matching a glob.
+
+    ``plugin-src`` carries a ``SuperLocalMemory vX.Y.Z`` footer in sixteen skill
+    and agent files, and packaging copies them verbatim, so a stale footer ships.
+    Listing them one by one is how the next new skill gets missed; the glob is
+    the same set ``tests/test_packaging`` walks.
+    """
+    old = "<none found>"
+    for path in sorted(_ROOT.glob(pattern_glob)):
+        text = path.read_text(encoding="utf-8")
+        m = re.search(pattern, text, re.MULTILINE)
+        if not m:
+            continue
+        old = m.group(1)
+        path.write_text(
+            re.sub(pattern, replacement.format(v=version), text, flags=re.MULTILINE),
+            encoding="utf-8",
+        )
+    return old, version
+
+
+def _read_json_at(rel: str, path: tuple):
+    """Read a nested JSON value by a path of keys and indexes."""
+    data = json.loads((_ROOT / rel).read_text(encoding="utf-8"))
+    for step in path:
+        data = data[step]
+    return str(data)
+
+
+def _sub_json_at(rel: str, path: tuple, version: str) -> tuple[str, str]:
+    """Set a nested JSON value, preserving the rest of the document."""
+    p = _ROOT / rel
+    data = json.loads(p.read_text(encoding="utf-8"))
+    node = data
+    for step in path[:-1]:
+        node = node[step]
+    old = str(node.get(path[-1]) if isinstance(node, dict) else node[path[-1]])
+    node[path[-1]] = version
+    p.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return old, version
+
+
+def _read_glob(pattern_glob: str, pattern: str) -> str:
+    """The one version every matching file claims, or an explicit mixed set.
+
+    Returning the lexicographically first value hid drift once ``4.1.10`` and
+    ``4.1.9`` coexisted: ``4.1.10`` sorts first and made ``--check`` report the
+    target even though sixteen files were stale.
+    """
+    found = set()
+    for path in sorted(_ROOT.glob(pattern_glob)):
+        m = re.search(pattern, path.read_text(encoding="utf-8"), re.MULTILINE)
+        if m:
+            found.add(m.group(1))
+    if not found:
+        return "<not found>"
+    if len(found) == 1:
+        return next(iter(found))
+    return f"<mixed: {', '.join(sorted(found))}>"
+
+
 def _read(rel: str, pattern: str) -> str:
     m = re.search(pattern, (_ROOT / rel).read_text(encoding="utf-8"), re.MULTILINE)
     return m.group(1) if m else "<not found>"
@@ -186,6 +249,49 @@ def _plan(version: str):
          lambda: _read("plugin-src/rules/AGENTS.md", r"SuperLocalMemory v([0-9.]+)"),
          lambda: _sub_regex("plugin-src/rules/AGENTS.md", r"SuperLocalMemory v([0-9.]+)",
                             "SuperLocalMemory v{v}", version)),
+        # The first thing anyone sees. It states the version three times — the
+        # title, the summary line, and the release badge — and this script did
+        # not know about any of them, so 4.1.0 was bumped everywhere the
+        # consistency test looks and the front page still advertised 4.0.10.
+        # The test does not read README, which is exactly why the script must.
+        # The version the marketplace advertises. Without it there is nothing
+        # for a client to compare, so an installed plugin never looks out of
+        # date -- which is exactly what "no upgrade in the plugins" meant. It is
+        # a separate stamp from plugin.json's and has to be bumped with it.
+        ("marketplace entry version",
+         lambda: _read_json_at(".claude-plugin/marketplace.json",
+                               ("plugins", 0, "version")),
+         lambda: _sub_json_at(".claude-plugin/marketplace.json",
+                              ("plugins", 0, "version"), version)),
+        # Sixteen skill and agent files under plugin-src carry a version footer
+        # and packaging copies them verbatim. tests/test_packaging walks exactly
+        # this glob and fails on any that disagree with the package version.
+        ("plugin-src/**/*.md footers",
+         lambda: _read_glob("plugin-src/**/*.md",
+                            r"SuperLocalMemory v([0-9]+\.[0-9]+\.[0-9]+)"),
+         lambda: _sub_glob("plugin-src/**/*.md",
+                           r"SuperLocalMemory v([0-9]+\.[0-9]+\.[0-9]+)",
+                           "SuperLocalMemory v{v}", version)),
+        # Three parts required. ``V([0-9.]+)`` also matches "SuperLocalMemory V4"
+        # in the prose and the diagram alt text, where V4 is the product line and
+        # not a stamp -- a sweep on that pattern rewrote both.
+        ("README.md title",
+         lambda: _read("README.md", r"SuperLocalMemory V([0-9]+\.[0-9]+\.[0-9]+)"),
+         lambda: _sub_all("README.md",
+                          r"SuperLocalMemory V([0-9]+\.[0-9]+\.[0-9]+)",
+                          "SuperLocalMemory V{v}", version)),
+        # Each construct is matched exactly. A sweep of every ``vX.Y.Z`` in this
+        # file would also rewrite its references to v3.8.1, v3.6.7 and v3.6.15,
+        # which are history and not this release.
+        ("README.md summary",
+         lambda: _read("README.md", r"<code>v([0-9.]+)</code>"),
+         lambda: _sub_regex("README.md", r"<code>v([0-9.]+)</code>",
+                            "<code>v{v}</code>", version)),
+        ("README.md release badge",
+         lambda: _read("README.md", r"badge/v([0-9.]+)-Current_Release"),
+         lambda: _sub_all("README.md",
+                          r"v([0-9.]+)(-Current_Release| — Current Release)",
+                          "v{v}\\2", version)),
     ]
 
 

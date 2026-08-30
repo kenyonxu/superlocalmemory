@@ -1,4 +1,4 @@
-/* od-ops-health.js — Wave-3 Admin Operations & Health panel
+/* od-ops-health.js — Admin Operations & Health panel
  * Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar — AGPL-3.0-or-later
  *
  * Injects an "Admin: Ops Health" tab into the Governance pane tab bar

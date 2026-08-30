@@ -1,4 +1,4 @@
-"""Synthetic, redacted Wave 2 quality contracts for SLM 4.0.5.
+"""Synthetic, redacted an earlier stage quality contracts for SLM 4.0.5.
 
 These tests deliberately use generated identifiers and fixture text only.  They
 exercise the existing temporal and receipt boundaries without reading the live
@@ -288,11 +288,22 @@ def test_q08_native_host_assets_declare_distinct_identities_and_one_code_profile
     claude = (root / "plugin" / ".mcp.json").read_text()
 
     assert 'SLM_AGENT_ID = "codex"' in codex
-    assert 'SLM_MCP_PROFILE = "code"' in codex
+    # Checked on the env ASSIGNMENT, not the whole file: both configs now carry
+    # a comment explaining why the profile is absent, and a bare "not in" over
+    # the text matches that comment and fails on correct config.
+    import re as _re
+
+    def _env_line(text: str) -> str:
+        m = _re.search(r"^env = \{.*\}\s*$", text, _re.MULTILINE)
+        return m.group(0) if m else ""
+
+    assert "SLM_MCP_PROFILE" not in _env_line(codex), (
+        "4.1.3: the host chooses its own tool set; the plugin must not pin one"
+    )
     assert 'SLM_AGENT_ID = "codex"' in codex_template
-    assert 'SLM_MCP_PROFILE = "code"' in codex_template
+    assert "SLM_MCP_PROFILE" not in _env_line(codex_template)
     assert '"SLM_AGENT_ID": "claude_code"' in claude
-    assert '"SLM_MCP_PROFILE": "code"' in claude
+    assert '"SLM_MCP_PROFILE"' not in claude
 
 
 def test_q09_receipts_and_memory_activity_remain_separate(tmp_path: Path) -> None:

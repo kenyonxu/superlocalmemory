@@ -29,7 +29,33 @@ class FactType(str, Enum):
     EPISODIC = "episodic"      # Events: who did what when
     SEMANTIC = "semantic"      # World knowledge: X is Y
     OPINION = "opinion"        # Subjective with confidence
-    TEMPORAL = "temporal"      # Time-bounded events with intervals
+    # Something the user intends to do later: a deadline, an appointment, a
+    # plan. Named "temporal" until 4.1.0, which collided with the retrieval
+    # channel of the same name — that one scores every fact by date proximity
+    # and has nothing to do with this. EdgeType.TEMPORAL and
+    # SignalType.TEMPORAL below are also unrelated and deliberately unchanged.
+    PROSPECTIVE = "prospective"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "FactType | None":
+        """Read the old name for a planned event as the current one.
+
+        Renaming the type left every existing row spelled the old way until the
+        migration converts it, and a migration is allowed to have not run yet:
+        deferred migrations are applied after engine init and a failure there is
+        recorded, not raised. Without this, hydrating one of those rows raised
+        ``ValueError`` from the constructor and took the whole recall with it —
+        every channel, not just the fact. A store holding planned events lost
+        the ability to recall anything, which is precisely the population the
+        rename was for.
+
+        Reading the old spelling is therefore not a courtesy, it is what makes
+        the conversion safe to defer. Writing it is still impossible: a write
+        goes through the member, whose value is the new name.
+        """
+        if isinstance(value, str) and value.strip().lower() == "temporal":
+            return cls.PROSPECTIVE
+        return None
 
 
 class EdgeType(str, Enum):
@@ -441,6 +467,10 @@ class RecallResponse:
     score_contract_version: str = "2"
     calibration_status: str = "uncalibrated"
     calibration_id: str | None = None
+    #: Names this particular answer, so an outcome reported later can be tied
+    #: back to it exactly rather than guessed at from which memories overlap.
+    #: Empty means the answer was produced by a path that does not record one.
+    query_id: str = ""
     answer_confidence: float | None = None
     abstained: bool = False
     abstention_reason: str | None = None
@@ -459,3 +489,12 @@ class RecallResponse:
     # which two runs of one query are expected to agree. Sorted, so the field
     # is itself repeatable. Additive — backward compatible.
     incomplete_channels: tuple[str, ...] = ()
+    # What happened to each retrieval channel on this recall: ok / empty /
+    # error / timeout / disabled / not_configured / no_embedding. Absence and
+    # failure used to look identical from here — a channel that raises on every
+    # query and a channel that correctly found nothing both simply had no
+    # candidates, and the only trace was a log line. Keyed by channel name;
+    # ``retrieval.channel_status.CHANNEL_NAMES`` is the full set, so a missing
+    # key is a reporting gap and ``empty`` is an answer. Additive — backward
+    # compatible.
+    channel_status: dict[str, str] = field(default_factory=dict)

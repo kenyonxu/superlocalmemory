@@ -31,6 +31,10 @@ import pytest
 from superlocalmemory.core.config import EmbeddingConfig, SLMConfig
 from superlocalmemory.core.engine import MemoryEngine
 from superlocalmemory.storage.models import Mode
+from tests.helpers.env_capabilities import (
+    NO_VECTOR_SEARCH_REASON,
+    vector_search_available,
+)
 
 
 @pytest.fixture
@@ -93,7 +97,19 @@ def _state(engine: MemoryEngine, fact_id: str) -> tuple[str, int]:
         conn.close()
 
 
+@pytest.mark.skipif(
+    not vector_search_available(), reason=NO_VECTOR_SEARCH_REASON,
+)
 class TestTheVectorIsAttached:
+    """Requires a working vector store, which requires SQLite extensions.
+
+    Without them ``VectorStore.available`` is False, the engine's vector store
+    is None, and "is this findable by meaning" answers no for everything — so
+    these assertions fail on a count of 0 with nothing pointing at the cause.
+    That is an interpreter capability, not a product defect, and skipping with
+    the remedy named beats failing four frames from the reason.
+    """
+
     def test_both_representations_are_written(self, engine: MemoryEngine) -> None:
         """The column alone is not enough, and this is the trap worth pinning.
 

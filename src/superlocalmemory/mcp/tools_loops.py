@@ -47,6 +47,7 @@ from superlocalmemory.loops import (
     LedgerEntry,
     Verdict,
     engine_backed_ledger,
+    pool_backed_ledger,
     run_bounded_loop,
 )
 
@@ -69,7 +70,11 @@ _MAX_NAME_CHARS = 128
 _MAX_QUERY_CHARS = 2000
 
 
-def register_loop_tools(server, get_engine: Callable) -> None:
+def register_loop_tools(
+    server,
+    get_engine: Callable,
+    get_pool: Callable | None = None,
+) -> None:
     """Register the 3 bounded-loop tools on *server*.
 
     *server* is duck-typed: must support the ``@server.tool()`` decorator.
@@ -144,10 +149,46 @@ def register_loop_tools(server, get_engine: Callable) -> None:
             min_score = float(gate_min_score)
 
             engine = get_engine()
+            pool = get_pool() if get_pool is not None else None
 
             def gate(lap: int) -> Verdict:
-                resp = engine.recall(gate_query, limit=3, fast=True)
-                all_results = getattr(resp, "results", None) or []
+                if pool is not None:
+                    resp = pool.recall(gate_query, limit=3, fast=True)
+                    if not isinstance(resp, dict) or resp.get("ok") is False:
+                        raise RuntimeError(
+                            (resp or {}).get("error", "owned SLM reader rejected recall")
+                            if isinstance(resp, dict)
+                            else "owned SLM reader returned an invalid response"
+                        )
+                    all_results = resp.get("results", []) or []
+                    floored = bool(resp.get("no_confident_match", False))
+                else:
+                    resp = engine.recall(gate_query, limit=3, fast=True)
+                    all_results = getattr(resp, "results", None) or []
+                    floored = bool(getattr(resp, "no_confident_match", False))
+
+                def _content(result: Any) -> str:
+                    if isinstance(result, dict):
+                        fact = result.get("fact")
+                        if isinstance(fact, dict):
+                            return str(fact.get("content", "") or "")
+                        return str(result.get("content", "") or "")
+                    return str(
+                        getattr(getattr(result, "fact", None), "content", "") or ""
+                    )
+
+                def _score(result: Any) -> float:
+                    if isinstance(result, dict):
+                        value = result.get("score", result.get("relevance_score", 0.0))
+                    else:
+                        value = getattr(result, "score", None)
+                        if value is None:
+                            value = getattr(result, "relevance_score", 0.0) or 0.0
+                    try:
+                        return float(value)
+                    except (TypeError, ValueError):
+                        return 0.0
+
                 # Exclude the loop's own audit records from the gate evaluation.
                 # Each lap writes a LedgerEntry (JSON with "run_id" + "lap") into
                 # SLM via store_fast; the FTS5 trigger indexes every such insert.
@@ -157,20 +198,9 @@ def register_loop_tools(server, get_engine: Callable) -> None:
                 # can satisfy an independent gate.
                 results = [
                     r for r in all_results
-                    if LedgerEntry.from_json(
-                        getattr(getattr(r, "fact", None), "content", "") or ""
-                    ) is None
+                    if LedgerEntry.from_json(_content(r)) is None
                 ]
-                floored = bool(getattr(resp, "no_confident_match", False))
-                best: float = 0.0
-                for r in results:
-                    s = getattr(r, "score", None)
-                    if s is None:
-                        s = getattr(r, "relevance_score", 0.0) or 0.0
-                    try:
-                        best = max(best, float(s))
-                    except (TypeError, ValueError):
-                        pass
+                best = max((_score(result) for result in results), default=0.0)
                 passed = bool(results) and not floored and best >= min_score
                 return Verdict(
                     passed,
@@ -187,7 +217,11 @@ def register_loop_tools(server, get_engine: Callable) -> None:
                     time.sleep(poll)
                 return LapResult(changed=False, tokens=0)
 
-            ledger = engine_backed_ledger(engine)
+            ledger = (
+                pool_backed_ledger(pool, engine)
+                if pool is not None
+                else engine_backed_ledger(engine)
+            )
 
             # The loop blocks (sleeps between laps); run it off the event loop.
             # The engine's per-call WAL connection model makes this thread-safe.

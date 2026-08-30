@@ -191,15 +191,136 @@ def _batch_delete_by_ids(
     for start in range(0, len(ids), _BATCH_SIZE):
         batch = ids[start:start + _BATCH_SIZE]
         ph = ",".join("?" * len(batch))
+        endpoints = _endpoints_of(db, table, id_col, batch)
         with db.transaction():
             db.execute(
                 f"DELETE FROM {table} WHERE {id_col} IN ({ph})",
                 tuple(batch),
             )
+            # Inside the same transaction as the delete. The graph also lives in
+            # a second store, which no SQLite transaction can reach, so the
+            # durable record of "these facts need re-projecting" has to be as
+            # durable as the delete itself. Without it the second store keeps
+            # serving edges this function just removed, and a search walks a hop
+            # that no longer exists.
+            _enqueue_reprojection(db, endpoints)
         removed += len(batch)
         if start + _BATCH_SIZE < len(ids):
             time.sleep(_BATCH_YIELD_S)
     return removed
+
+
+#: The two columns naming an edge's ends, per table. ``association_edges``
+#: calls them ``source_fact_id``/``target_fact_id``, so a helper that assumed
+#: ``source_id``/``target_id`` raised there, returned nothing, and every
+#: association-edge deletion went unannounced to the graph store -- silently,
+#: because the failure looked exactly like "this table has no endpoints".
+_ENDPOINT_COLUMNS: dict[str, tuple[str, str]] = {
+    "graph_edges": ("source_id", "target_id"),
+    "association_edges": ("source_fact_id", "target_fact_id"),
+}
+
+
+def _endpoints_of(
+    db: "DatabaseManager", table: str, id_col: str, ids: list,
+) -> list[tuple[str, str]]:
+    """``(fact_id, profile_id)`` for both ends of the rows about to be deleted.
+
+    Read before the delete, because afterwards there is nothing to read. Only
+    the ends that are facts matter: an entity id here is projected as part of
+    whichever facts reference it, and those facts are re-derived anyway.
+    """
+    if not ids:
+        return []
+    columns = _ENDPOINT_COLUMNS.get(table)
+    if columns is None:
+        # A table nobody has named the endpoints of is one this pass must not
+        # guess at. Loudly, because guessing wrong is what produced the silent
+        # hole above.
+        logger.warning(
+            "prune: %s has no declared endpoint columns, so its deletions "
+            "cannot be announced to the graph projection", table,
+        )
+        return []
+    ph = ",".join("?" * len(ids))
+    try:
+        rows = db.execute(
+            f"SELECT {columns[0]}, {columns[1]}, profile_id FROM {table} "
+            f"WHERE {id_col} IN ({ph})",
+            tuple(ids),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("prune: cannot read endpoints from %s: %s", table, exc)
+        return []
+    seen: dict[tuple[str, str], None] = {}
+    for row in rows:
+        record = dict(row)
+        profile_id = str(record.get("profile_id") or "default")
+        for column in columns:
+            value = record.get(column)
+            if value:
+                seen[(str(value), profile_id)] = None
+    return list(seen)
+
+
+def _enqueue_reprojection(
+    db: "DatabaseManager", endpoints: list[tuple[str, str]],
+) -> None:
+    """Queue an upsert for each fact whose edges just changed.
+
+    The queue coalesces on fact id and the worker re-reads the fact's current
+    edges from SQLite, so queueing an endpoint twice, or queueing one whose
+    edges were already correct, costs one row and converges on the same answer.
+    An id that is an entity rather than a fact is filtered out here rather than
+    left for the worker, which would otherwise spend a lookup discovering the
+    same thing on every cycle.
+    """
+    if not endpoints:
+        return
+    try:
+        from superlocalmemory.storage import projection_outbox
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("prune: no projection queue module: %s", exc)
+        return
+    try:
+        if not projection_outbox.is_available(db):
+            return
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("prune: projection queue unavailable: %s", exc)
+        return
+    by_profile: dict[str, list[str]] = {}
+    for fact_id, profile_id in endpoints:
+        by_profile.setdefault(profile_id, []).append(fact_id)
+    for profile_id, fact_ids in by_profile.items():
+        ph = ",".join("?" * len(fact_ids))
+        try:
+            rows = db.execute(
+                f"SELECT fact_id FROM atomic_facts WHERE profile_id = ? "
+                f"AND fact_id IN ({ph})",
+                (profile_id, *fact_ids),
+            )
+            real = [dict(row)["fact_id"] for row in rows]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("prune: cannot confirm endpoints are facts: %s", exc)
+            continue
+        if not real:
+            continue
+        # Deliberately allowed to raise. This runs inside the same transaction
+        # as the delete, so a failure here rolls the delete back and the batch
+        # is simply retried on the next pass -- nothing is lost and nothing
+        # diverges.
+        #
+        # Swallowing it, as this once did, committed the delete with no record
+        # that the graph needed telling. The queue would then be empty, which
+        # is exactly what "the graph is up to date" looks like, and the graph
+        # would serve a link the store had removed with nothing anywhere
+        # recording that it happened. That is the failure this queue exists to
+        # make impossible, and it is the module's own stated policy: "a
+        # durability mechanism that silently degrades to best-effort is the
+        # defect it exists to remove."
+        projection_outbox.enqueue_many(
+            db, real, profile_id, op=projection_outbox.OP_UPSERT,
+        )
 
 
 def _remove_orphan_edges_batched(

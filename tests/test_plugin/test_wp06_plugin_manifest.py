@@ -237,21 +237,50 @@ class TestMcpJson:
             f"command must not reference superlocalmemory.mcp (non-runnable), got {full!r}"
         )
 
-    def test_mcp_env_slm_mcp_profile_is_code(self) -> None:
-        """The plugin must use the code profile (Brain + graph + bounded loops)."""
-        server = self._get_server()
-        env = server.get("env", {})
-        assert env.get("SLM_MCP_PROFILE") == "code", (
-            f"SLM_MCP_PROFILE must be 'code', got {env.get('SLM_MCP_PROFILE')!r}"
+    def test_mcp_env_does_not_force_a_profile(self) -> None:
+        """REVERSED in 4.1.2. This required ``SLM_MCP_PROFILE == "code"``.
+
+        ``code`` is 31 tools and drops the 8 mesh tools among others. Forcing it
+        from the plugin overrode a wider profile a user had chosen deliberately,
+        and took working tools away as the result of installing something. The
+        profile is the user's decision; the plugin states no opinion.
+        """
+        env = self._get_server().get("env", {})
+
+        assert "SLM_MCP_PROFILE" not in env, (
+            f"the plugin must not force a profile, got "
+            f"{env.get('SLM_MCP_PROFILE')!r} — it silently removes tools the "
+            f"user had configured"
         )
 
-    def test_mcp_env_slm_data_dir_is_set(self) -> None:
-        server = self._get_server()
-        env = server.get("env", {})
-        assert "SLM_DATA_DIR" in env, "env missing SLM_DATA_DIR"
-        assert "${CLAUDE_PLUGIN_DATA}" in env["SLM_DATA_DIR"], (
-            f"SLM_DATA_DIR must reference ${{CLAUDE_PLUGIN_DATA}}, got {env['SLM_DATA_DIR']!r}"
+    def test_mcp_env_does_not_repoint_the_data_directory(self) -> None:
+        """REVERSED in 4.1.2. This required ``SLM_DATA_DIR`` to reference
+        ``${CLAUDE_PLUGIN_DATA}``.
+
+        That is the plugin's own private directory. On a machine already using
+        SLM it means the editor talks to an empty store: measured on the author's
+        machine, ``${CLAUDE_PLUGIN_DATA}`` held 28 KB while the real store was
+        611 MB with 5,370 memories in it. Installing the plugin would have looked
+        exactly like losing every memory.
+
+        Omitted, SLM resolves its canonical data root — the same store every
+        other surface uses. On a fresh machine that is a new store anyway, so the
+        isolation this was reaching for costs nothing to give up.
+        """
+        env = self._get_server().get("env", {})
+
+        assert "SLM_DATA_DIR" not in env, (
+            f"the plugin must not re-point the store, got "
+            f"{env.get('SLM_DATA_DIR')!r} — an existing install would read an "
+            f"empty database"
         )
+
+    def test_mcp_env_still_identifies_the_agent(self) -> None:
+        """The control. Attribution is not configuration, and it is what lets a
+        memory written from Claude Code be told apart from every other agent."""
+        env = self._get_server().get("env", {})
+
+        assert env.get("SLM_AGENT_ID") == "claude_code"
 
 
 # ---------------------------------------------------------------------------
@@ -281,13 +310,31 @@ class TestMarketplaceJson:
             f"source must be './plugin' (DOC-CORRECT), got {plugin['source']!r}"
         )
 
-    def test_marketplace_plugin_entry_has_no_version_key(self) -> None:
-        """Per LLD §5 AC-3: version is ONLY in plugin.json; marketplace plugin entry has NO version."""
+    def test_marketplace_plugin_entry_states_its_version(self) -> None:
+        """REVERSED in 4.1.2. This asserted the opposite — no version key, "per
+        LLD §5 AC-3: version lives only in plugin.json".
+
+        That rule was ours, not the editor's, and it is what made every release
+        look like no release. A client compares what it has installed against
+        what the marketplace advertises; with nothing to compare, an installed
+        plugin never appears out of date, however many releases pass. Reported
+        after a release that changed 76 files across the plugin trees and showed
+        up nowhere.
+
+        The evidence for reversing it is a plugin that works: `bounded-loops`
+        carries a version in its marketplace entry, installs, lists and updates
+        correctly. So the editor does not object; only our rule did.
+
+        The reason the rule existed — two places stating a version can drift — is
+        real, and is handled rather than avoided: `scripts/bump_version.py` owns
+        both stamps, and `tests/test_packaging/test_every_editor_can_see_the_plugin.py`
+        fails if any manifest disagrees with `pyproject.toml`.
+        """
         data = _load_json(REPO_CLAUDE_DIR / "marketplace.json")
         plugin = data["plugins"][0]
-        assert "version" not in plugin, (
-            "marketplace plugin entry must NOT have 'version' key "
-            "(version lives only in plugin.json)"
+        assert plugin.get("version"), (
+            "the marketplace entry needs a version or a client has nothing to "
+            "compare, and an installed plugin never looks out of date"
         )
 
     def test_marketplace_owner_is_qualixar(self) -> None:

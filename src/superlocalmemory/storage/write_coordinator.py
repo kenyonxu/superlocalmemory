@@ -632,10 +632,27 @@ class WriteCoordinator:
             conn.close()
 
     def _open_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._db_path), timeout=1.0)
+        """The coordinator's own connection, on the same waiting policy as the rest.
+
+        It waited one second while every other writer waited ten. A caller
+        legitimately holding the write lock for longer than a second -- a large
+        batch, a store during maintenance -- made the coordinator's next write
+        raise "database is locked" and lose the item, while an ordinary write
+        issued at the same moment simply waited and succeeded.
+
+        Reproduced: a 3,010 ms hold blocked the coordinator for 1,004 ms and then
+        dropped its write. There was no reason for the two to disagree, and the
+        shorter one belonged to the path whose failure loses data rather than
+        retries.
+        """
+        from superlocalmemory.storage.database import _BUSY_TIMEOUT_MS
+
+        conn = sqlite3.connect(
+            str(self._db_path), timeout=_BUSY_TIMEOUT_MS / 1000.0,
+        )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=1000")
+        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         apply_journal_mode(conn)
         return conn
 

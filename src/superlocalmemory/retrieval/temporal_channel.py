@@ -231,6 +231,14 @@ class TemporalChannel:
         )
 
         for name in names[:3]:  # Limit to first 3 entity mentions
+            # An empty name would match the placeholder entity that dated
+            # facts with no resolved entity attach their temporal events to
+            # (core/store_pipeline.py::_ensure_unresolved_entity, whose
+            # canonical_name is ''). Entity extraction does not produce an
+            # empty name, so this guard costs nothing and removes the one way
+            # the placeholder could ever surface as a real entity match.
+            if not name or not name.strip():
+                continue
             # Resolve the entity and event in one scope-filtered query. Looking
             # up the entity only in the requester's profile made global events
             # owned by another profile undiscoverable before authorization was
@@ -370,10 +378,14 @@ class TemporalChannel:
             include_shared=include_shared,
             prefix="af",
         )
+        # The recency fallback is where these rows won before: they have no
+        # temporal_events at all, so they reached the top through created_at
+        # alone. Fifty slots, and 1,195 withheld rows all written recently.
         rows = self._db.execute(
             "SELECT af.fact_id, af.created_at "
             "FROM atomic_facts AS af "
-            f"WHERE {where} "
+            f"WHERE {where}"
+            f"{self._db.visible_fact_clause('af')} "
             "  AND af.created_at >= datetime('now', '-90 days') "
             "ORDER BY af.created_at DESC, af.fact_id ASC "
             "LIMIT 50",

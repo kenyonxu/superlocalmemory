@@ -51,7 +51,7 @@ from superlocalmemory.storage.models import (
 
 class TestFactType:
     def test_values_complete(self) -> None:
-        expected = {"episodic", "semantic", "opinion", "temporal"}
+        expected = {"episodic", "semantic", "opinion", "prospective"}
         assert {ft.value for ft in FactType} == expected
 
     def test_is_str_enum(self) -> None:

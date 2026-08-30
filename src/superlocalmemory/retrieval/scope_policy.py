@@ -32,6 +32,26 @@ def authorized_fact_ids(
     unique_ids = list(dict.fromkeys(fact_ids))
     if not unique_ids:
         return set()
+    # Ask for the ids, not the memories. The hydrating call below answers the
+    # same question by decoding a 768-float embedding and two Fisher vectors per
+    # candidate — measured at 374 ms of a 430 ms recall on the author's store,
+    # to authorise 3,659 candidates for a 20-result page. Both build their
+    # predicate from the same two calls, so they cannot disagree; a test asserts
+    # it. Kept as a probe rather than a hard requirement because the lightweight
+    # DB wrappers in maintenance paths do not implement every method.
+    id_only = getattr(db, "visible_fact_ids", None)
+    if callable(id_only):
+        try:
+            allowed = id_only(
+                unique_ids,
+                profile_id,
+                include_global=bool(include_global),
+                include_shared=bool(include_shared),
+            )
+            if isinstance(allowed, (set, frozenset)):
+                return set(allowed)
+        except Exception:
+            pass
     try:
         facts = db.get_facts_by_ids(
             unique_ids,
@@ -53,9 +73,30 @@ def authorized_fact_ids(
             include_shared=include_shared,
         )
         placeholders = ",".join("?" for _ in unique_ids)
+        # Mirror the primary path's visibility rule, not just its scope rule.
+        # This branch exists for lightweight wrappers that expose execute() but
+        # not get_facts_by_ids, and it was authorizing withheld and
+        # soft-deleted rows that the primary path refuses -- so any channel
+        # whose db object took this branch had a different idea of what is
+        # visible than the engine that hydrates its results.
+        # Resolved on the TYPE, not the instance. A MagicMock fabricates any
+        # attribute you ask for, so an instance check returns a callable that
+        # returns another MagicMock, whose repr then lands in the SQL string and
+        # makes the whole query a syntax error -- and this function's `except`
+        # turns that into an empty authorized set, i.e. every candidate silently
+        # dropped. tests/test_retrieval/test_spreading_activation.py caught it
+        # by passing exactly such a mock. The same reasoning is already written
+        # up in retrieval/engine.py for the reranker's optional contract.
+        visible = ""
+        clause_fn = getattr(type(db), "visible_fact_clause", None)
+        if callable(clause_fn):
+            try:
+                visible = clause_fn(db)
+            except Exception:  # noqa: BLE001 -- fall back to scope-only
+                visible = ""
         rows = db.execute(
             f"SELECT fact_id FROM atomic_facts WHERE fact_id IN ({placeholders}) "
-            f"AND {where}",
+            f"AND {where}{visible}",
             (*unique_ids, *params),
         )
         if not isinstance(rows, list):

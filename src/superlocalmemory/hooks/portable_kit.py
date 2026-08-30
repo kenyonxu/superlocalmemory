@@ -38,9 +38,17 @@ SLM_MARKER_END = "<!-- SLM-END -->"
 # "http-mcp-remote" — mcp-remote stdio bridge for stdio-only clients.
 VALID_TRANSPORTS: frozenset[str] = frozenset({"stdio", "http", "http-mcp-remote"})
 
+#: The commands below are Claude Code's own, not ours -- ``slm`` has no
+#: ``plugin`` subcommand and never has, so the instruction this used to print
+#: ended at ``invalid choice: 'plugin'`` with nothing else offered. The working
+#: path already existed in ``cli/setup_wizard.py``; it just was not the one
+#: anybody was told about.
 CLAUDE_CODE_PLUGIN_POINTER = (
-    "slm connect claude-code: Claude Code is configured via the SLM plugin (see plugin/ directory).\n"
-    "Run: slm plugin install  OR  see plugin-src/ for manual installation.\n"
+    "slm connect claude-code: Claude Code is configured via the SLM plugin, "
+    "which Claude Code installs itself.\n"
+    "Run:  claude plugin marketplace add qualixar/superlocalmemory\n"
+    "then: claude plugin install superlocalmemory@qualixar\n"
+    "Or run `slm setup` to do both, or see plugin-src/ to install by hand.\n"
     "No MCP config file is written by this command."
 )
 

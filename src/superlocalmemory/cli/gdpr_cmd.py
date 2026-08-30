@@ -427,9 +427,14 @@ def _cmd_gdpr_erase(args: Namespace) -> None:
         sys.exit(1)
 
     complete = counts.get("erasure_complete", 0)
+    # Whether it can be SHOWN to have happened is a separate answer, and
+    # printing COMPLETE while the tamper-evident receipt failed to persist is
+    # how the command line came to disagree with the API about the same erasure.
+    provable = counts.get("erasure_provable", complete)
     result_data = {
         "profile": profile,
         "erasure_complete": bool(complete),
+        "erasure_provable": bool(provable),
         "counts": counts,
         "note": (
             "Erasure recorded in audit_chain.db. "
@@ -441,7 +446,15 @@ def _cmd_gdpr_erase(args: Namespace) -> None:
     if use_json:
         _print_json(_json_envelope("gdpr-erase", data=result_data))
     else:
-        status_str = "COMPLETE" if complete else "INCOMPLETE (check counts)"
+        if not complete:
+            status_str = "INCOMPLETE (check counts)"
+        elif not provable:
+            status_str = (
+                "COMPLETE, BUT NOT PROVABLE — the data is gone and the "
+                "tamper-evident receipt did not persist"
+            )
+        else:
+            status_str = "COMPLETE"
         print(f"Art.17 erasure for profile '{profile}': {status_str}")
         for k, v in counts.items():
             print(f"  {k}: {v}")
@@ -449,7 +462,7 @@ def _cmd_gdpr_erase(args: Namespace) -> None:
         print("  Backups/ contain outstanding obligation — see C1 gap.")
         print("  Verify receipts: slm gdpr verify --profile", profile)
 
-    if not complete:
+    if not complete or not provable:
         sys.exit(1)
 
 

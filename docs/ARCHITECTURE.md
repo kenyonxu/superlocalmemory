@@ -139,7 +139,7 @@ V3 uses three mathematical layers. These are not academic additions — they sol
 
 **Problem:** Over time, you store contradictory memories. "We use PostgreSQL" and later "We migrated to MySQL." Simple retrieval returns both without flagging the conflict.
 
-**Solution:** Sheaf cohomology detects when memories attached to the same entity or topic contradict each other. When a contradiction is found, the system marks the older memory as superseded and surfaces the newer one.
+**Solution:** Sheaf cohomology detects when memories attached to the same entity or topic contradict each other. When a contradiction is found, the system records a *supersedes* link from the newer memory to the older one. That link is evidence, not a deletion: the older memory stays in the store and can still be recalled, and the link is what lets the graph and the lifecycle weigh the two against each other. Nothing is hidden from you on the strength of an automatic contradiction check.
 
 **Effect:** Recall returns consistent information. Contradictions are flagged for your review.
 

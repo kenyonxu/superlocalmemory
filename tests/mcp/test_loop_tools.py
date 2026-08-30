@@ -76,6 +76,39 @@ class _FakeEngine:
         return "fake"
 
 
+class _LightOnlyEngine(_FakeEngine):
+    """Matches the shipped MCP engine: readable, but never a local writer."""
+
+    def recall(self, *args, **kwargs):
+        raise RuntimeError("recall requires a FULL MemoryEngine but this instance is LIGHT")
+
+    def store_fast(self, *args, **kwargs):
+        raise RuntimeError(
+            "store_fast requires a FULL MemoryEngine but this instance is LIGHT"
+        )
+
+
+class _FakePool:
+    """Daemon/worker-shaped writer used by the MCP regression test."""
+
+    def __init__(self) -> None:
+        self.stored: list[tuple[str, dict]] = []
+        self.recalled: list[tuple[str, int, bool]] = []
+
+    def store(self, content, metadata=None):
+        self.stored.append((content, dict(metadata or {})))
+        return {"ok": True, "fact_ids": ["loop-ledger-fact"]}
+
+    def recall(self, query, limit=3, fast=True):
+        self.recalled.append((query, limit, fast))
+        return {
+            "ok": True,
+            "results": ([{"content": "external checkpoint", "score": 0.5}]
+                        if "MATCH" in query else []),
+            "no_confident_match": "MATCH" not in query,
+        }
+
+
 @pytest.fixture
 def fake_tools():
     cap = _Capture()
@@ -158,6 +191,57 @@ def test_run_validates_inputs(fake_tools):
 def test_reads_validate_inputs(fake_tools):
     assert _run(fake_tools["slm_loop_history"](name=""))["ok"] is False
     assert _run(fake_tools["slm_loop_show"](run_id=""))["ok"] is False
+
+
+def test_mcp_loop_routes_ledger_writes_away_from_the_light_engine(monkeypatch):
+    """Power is a tool-exposure profile; MCP still owns a LIGHT engine.
+
+    A loop ledger must therefore write through the daemon/worker pool. Routing
+    it through ``engine_backed_ledger`` calls ``store_fast`` on LIGHT and makes
+    every MCP loop fail before its independent gate can return a verdict.
+    """
+    from superlocalmemory.mcp import tools_loops
+
+    engine = _LightOnlyEngine()
+    pool = _FakePool()
+    monkeypatch.setattr(tools_loops, "choose_pool", lambda: pool, raising=False)
+    cap = _Capture()
+    register_loop_tools(cap, lambda: engine, lambda: pool)
+
+    out = _run(cap.fns["slm_loop_run"](
+        name="mcp-light",
+        gate_query="MATCH external checkpoint",
+        max_iterations=2,
+        poll_interval_s=0.25,
+    ))
+
+    assert out["ok"] is True
+    assert out["status"] == "DONE"
+    assert pool.recalled == [("MATCH external checkpoint", 3, True)]
+    assert len(pool.stored) == 1
+    assert pool.stored[0][1]["session_id"].startswith("loop:mcp-light-")
+    assert pool.stored[0][1]["profile_id"] == "default"
+
+
+def test_read_only_loop_queries_never_construct_the_writer_pool():
+    engine = _FakeEngine()
+
+    def fail_if_called():
+        raise AssertionError("read-only loop query constructed the writer pool")
+
+    cap = _Capture()
+    register_loop_tools(cap, lambda: engine, fail_if_called)
+
+    history = _run(cap.fns["slm_loop_history"](name="read-only"))
+    show = _run(cap.fns["slm_loop_show"](run_id="read-only-run"))
+
+    assert history == {"ok": True, "name": "read-only", "count": 0, "runs": []}
+    assert show == {
+        "ok": True,
+        "run_id": "read-only-run",
+        "count": 0,
+        "laps": [],
+    }
 
 
 # ── Persistence test (real engine, store-then-match keeps recall fast) ───────

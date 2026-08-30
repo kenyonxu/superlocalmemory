@@ -50,7 +50,7 @@ recall(
   query="authentication strategy decision",
   limit=20,            # default 20; reduce to 5 for quick pre-task checks
   session_id="<sid>",  # pass the session_id returned by session_init
-  fast=False,          # default False; True enables faster, reduced-channel retrieval
+  fast=None,           # leave unset; see "Fast mode" below for what it controls
 )
 ```
 
@@ -65,12 +65,12 @@ Real response shape (`--json` equivalent):
       "score": 0.87,
       "confidence": 0.91,
       "trust_score": 0.84,
-      "fact_type": "decision",
+      "fact_type": "semantic",
       "channel_scores": {
         "semantic": 0.88,
-        "lexical": 0.61,
+        "bm25": 0.61,
         "temporal": 0.72,
-        "structural": 0.55
+        "hopfield": 0.55
       }
     }
   ],
@@ -78,32 +78,92 @@ Real response shape (`--json` equivalent):
   "query_type": "semantic",
   "channel_weights": {
     "semantic": 0.4,
-    "lexical": 0.2,
+    "bm25": 0.2,
     "temporal": 0.2,
-    "structural": 0.2
+    "hopfield": 0.2
   },
+  "channel_status": {
+    "semantic": "ok",
+    "bm25": "ok",
+    "temporal": "empty",
+    "hopfield": "ok",
+    "spreading_activation": "no_candidates",
+    "entity_graph": "no_embedding",
+    "profile": "disabled"
+  },
+  "incomplete_channels": [],
   "retrieval_time_ms": 134,
   "no_confident_match": false
 }
 ```
 
+**Read `channel_status` before concluding that nothing is stored.** It reports
+what each retrieval channel did on this query. `channel_weights` says how much
+each channel counts; `channel_status` says whether it ran at all.
+
+| status | meaning |
+|---|---|
+| `ok` | the channel ran and contributed candidates |
+| `empty` | it ran and there was genuinely nothing to return |
+| `no_candidates` | it ran but nothing survived fusion |
+| `error` | it raised — **its results are missing from this answer** |
+| `timeout` | it exceeded its guard — **results missing** |
+| `no_embedding` | the query could not be embedded, so it could not run |
+| `disabled` | switched off by configuration |
+| `not_configured` | the backing service is not set up |
+
+`semantic`, `bm25`, `temporal`, `hopfield` and `spreading_activation` each
+search and return their own candidates. `profile` is a shortcut that runs before
+them and can answer directly. `entity_graph` produces nothing of its own — it
+re-scores what the others found, by how well each result connects to the
+entities in your question, which is why it reports `no_candidates` when the
+rest come back empty.
+
+`empty`, `no_candidates`, `disabled` and `not_configured` are normal. `error`,
+`timeout` and `no_embedding` mean the answer is **incomplete, not negative** —
+say so to the user rather than reporting "no memories found". `incomplete_channels`
+carries the same warning as a plain list.
+
 **Refine on low confidence.** `recall` returns confidence signals with every result. If `no_confident_match` is `true` (or `answer_confidence` is low / `abstained` is `true`), do NOT invent a memory — rewrite the query into 1–3 more specific sub-queries (split multi-hop questions; try entity names, synonyms, or broader phrasing) and call `recall` again before concluding nothing was found. A confident match → use it directly. SLM returns fast local results (~1–2s, no server-side LLM round on the hot path) and lets you, the calling model, drive this refinement.
 
 ### 2. Passing session_id
 
-Pass the `session_id` returned by `session_init`. It threads engagement signals
-through to the ranker so each recall contributes to improving retrieval for
-your project over time. Omitting it degrades the learning loop — recall works
-correctly, but feedback is not attributed to the session.
+Pass the `session_id` returned by `session_init`, on **every** recall in that
+session. It does two things.
+
+1. **It carries the conversation forward.** Each recall offers its five
+   best-ranked results to a small per-session working set of seven slots. A
+   memory that keeps coming back is reinforced rather than duplicated, and the
+   least-activated slot is the one evicted, so something referenced across
+   several turns is hard to lose. Later recalls in the same session rank the
+   held memories higher, and turn three is not as cold as turn one. The bias is
+   deliberately small — it nudges the order, it never overrides an exact match.
+2. **It attributes engagement to the session**, so a later `report_outcome`
+   can close the loop on the right recall.
+
+Omitting it costs both: recall still returns correct results, but every turn
+starts cold and no feedback is attributable.
+
+**Use the real id, not a made-up one.** An id beginning `http:`, `mcp:`, `cli:`
+or `probe:` is treated as a synthetic per-request label, not a conversation, and
+is excluded from the working set — inventing one per call would otherwise fill
+the registry and evict genuine conversations.
 
 ### 3. Fast mode
 
-Use `fast=True` for pre-tool-call checks where sub-second response matters.
-This enables a faster, reduced-channel mode. Core semantic and keyword channels
-always run; additional graph and contextual channels are skipped.
+`fast` controls **one** thing: whether the server runs its own internal LLM
+reformulation round. It does **not** disable any retrieval channel — every
+channel and the reranker run either way. There are four always: meaning,
+keyword, entity graph and time. Spreading activation and Hopfield register as a
+fifth and sixth when their prerequisites are present, so a store sees up to six.
+
+Leave it unset. Unset resolves to "skip the internal round", because you are the
+reasoner: you refine the query yourself using the confidence signals above, and
+you do it better than a local model would. Pass `fast=False` only when SLM is
+deployed with no capable client in front of it.
 
 ```
-recall(query="rate limiting approach", limit=5, session_id="<sid>", fast=True)
+recall(query="rate limiting approach", limit=5, session_id="<sid>")
 ```
 
 ### 4. Keyword fallback via search
@@ -135,6 +195,33 @@ list_recent(limit=20, profile_id="")
 
 Returns facts newest-first. Content is truncated to 120 chars. Use `fetch`
 once you have the `fact_id` for full content.
+
+---
+
+### 7. Close the loop — say which memories helped
+
+Retrieval ranks a memory partly on whether it has actually been useful before.
+That evidence only exists if you supply it.
+
+```
+report_outcome(
+  memory_ids="f8a2bc91,c31d0f77",   # the ids you actually used
+  outcome="success",                # "success" | "failure" | "partial"
+  context="used the JWT expiry decision to write the refresh handler",
+)
+```
+
+Call it when a recall visibly changed what you did: you applied the decision,
+followed the convention, or avoided the gotcha. Report `failure` when a
+confidently-returned memory turned out to be wrong or stale — a negative signal
+is worth as much as a positive one, and it is the only way a stale memory stops
+being promoted.
+
+Report only ids you genuinely used. Reporting every returned id marks the
+irrelevant ones useful and trains the ranker toward noise.
+
+`report_feedback(fact_id, feedback, query)` is the finer-grained form for a
+single fact and the query that surfaced it.
 
 ---
 
@@ -236,4 +323,4 @@ before recalling, then switch back. See `slm-profile` for workspace switching.
 
 ---
 
-*SuperLocalMemory v4.0.4 · Qualixar · AGPL-3.0-or-later*
+*SuperLocalMemory v4.2.0 · Qualixar · AGPL-3.0-or-later*

@@ -287,7 +287,7 @@ def _upcoming_scheduled_facts(engine, now: datetime.datetime) -> list[dict]:
             "SELECT fact_id, content, referenced_date"
             " FROM atomic_facts"
             " WHERE profile_id = ?"
-            "   AND fact_type = 'temporal'"
+            "   AND fact_type = 'prospective'"
             "   AND referenced_date IS NOT NULL"
             "   AND referenced_date >= ?"
             "   AND referenced_date < ?"
@@ -312,6 +312,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
     # 1. session_init — Auto-recall project context at session start
     # ------------------------------------------------------------------
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @admits(OperationKind.RECALL)
     async def session_init(
         project_path: str = "",
         query: str = "",

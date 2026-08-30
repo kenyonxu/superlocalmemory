@@ -13,6 +13,11 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from superlocalmemory.core.config import BROWSE_PAGE_SIZE
+from superlocalmemory.storage.database import (
+    visible_fact_clause_for_connection,
+)
+
 from .helpers import (
     SearchRequest,
     dict_factory,
@@ -131,10 +136,20 @@ def _admit_http_mutation(request: Request, operation: str) -> None:
         resolve_principal,
     )
 
+    from superlocalmemory.core.admission import _company_mode_active
+
+    # Both switches, the same rule the other entry points use. Reading
+    # config.toml alone left this path treating a workspace as personal after
+    # the dashboard toggle had turned per-user access on -- so a write refused
+    # everywhere else was admitted here.
     deployment = getattr(request.app.state, "deployment", None)
-    is_enterprise = bool(deployment and deployment.is_enterprise)
-    tier = "enterprise" if is_enterprise else "personal"
-    mode = "company" if is_enterprise else "local"
+    if deployment is None:
+        from superlocalmemory.core.admission import _resolve_deployment
+
+        deployment = _resolve_deployment()
+    company = _company_mode_active(deployment)
+    tier = "enterprise" if company else "personal"
+    mode = "company" if company else "local"
 
     principal_info = resolve_principal(request)
     principal = str(principal_info.get("user_id") or "")
@@ -388,7 +403,7 @@ async def get_memories(
     cluster_id: Optional[int] = None,
     min_importance: Optional[int] = None,
     tags: Optional[str] = None,
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(BROWSE_PAGE_SIZE, ge=1, le=200),
     offset: int = Query(0, ge=0),
     filter: Optional[str] = Query(
         None,
@@ -444,15 +459,24 @@ async def get_memories(
                 scope_where = "profile_id = ?"
                 scope_params = [active_profile]
 
+            # Withheld rows are excluded from BOTH the page and the total. On
+            # the author's store this list served 24 model-authored summaries
+            # in its first 50 rows and reported 5,218 memories against 3,919
+            # real ones -- the count a user reads, inflated by exactly the
+            # 1,299 rows 4.0.10 withheld.
+            visible = visible_fact_clause_for_connection(conn)
             query = (
                 "SELECT fact_id as id, memory_id, content, fact_type as category, "
                 "confidence as importance, access_count, "
                 "created_at, created_at as updated_at, "
                 "session_id as project_name, scope, shared_with "
-                f"FROM atomic_facts WHERE {scope_where}"
+                f"FROM atomic_facts WHERE {scope_where}{visible}"
             )
             params = list(scope_params)
-            count_base = f"SELECT COUNT(*) as total FROM atomic_facts WHERE {scope_where}"
+            count_base = (
+                "SELECT COUNT(*) as total FROM atomic_facts "
+                f"WHERE {scope_where}{visible}"
+            )
         else:
             query = """
                 SELECT id, content, summary, category, project_name, project_path,
@@ -656,6 +680,11 @@ async def search_memories(request: Request, body: SearchRequest):
                 lambda: engine.recall(
                     body.query, limit=body.limit, fast=True,
                     window=_window or None,
+                    # Name the surface. A recall with no name leaves no record
+                    # an outcome can be matched to, and a search typed into the
+                    # dashboard is one continuous thread of use, not a
+                    # conversation turn.
+                    session_id=f"dashboard:{get_active_profile()}",
                 ),
             )
             # A run_in_executor thread cannot be cancelled, and wait_for() on it
@@ -803,6 +832,13 @@ async def get_summary(request: Request, kind: str = "day", target: str = ""):
     except Exception:
         raise _internal_error("Summary generation error")
 
+    # Say why, not just what. The response already reported that a summary was
+    # assembled rather than written; someone seeing a plainer result than they
+    # expected still had no way to learn that a written one needs a model, and
+    # would reasonably read the feature as broken.
+    from superlocalmemory.core.mode_capability import llm_capability
+
+    generated = str(getattr(result, "generated_by", "") or "")
     return {
         "kind": result.kind,
         "profile_id": result.profile_id,
@@ -812,6 +848,12 @@ async def get_summary(request: Request, kind: str = "day", target: str = ""):
         "source_fact_ids": result.source_fact_ids,
         "source_count": len(result.source_fact_ids),
         "metadata": result.metadata,
+        "capability": llm_capability(
+            cfg,
+            # This call has just been made, so its outcome is the honest answer
+            # about availability -- better than asking the configuration again.
+            llm_reachable=generated.startswith("llm"),
+        ),
     }
 
 
@@ -992,7 +1034,7 @@ async def get_clusters(request: Request):
 async def get_cluster_detail(
     request: Request,
     cluster_id: str,
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(BROWSE_PAGE_SIZE, ge=1, le=200),
 ):
     """Get detailed view of a specific cluster (scene)."""
     try:

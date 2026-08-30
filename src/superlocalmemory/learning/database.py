@@ -73,6 +73,10 @@ CREATE INDEX IF NOT EXISTS idx_engagement_profile_metric
 """
 
 
+
+from superlocalmemory.learning.signal_kinds import FEEDBACK_ONLY_SQL
+
+
 class LearningDatabase:
     """Persistent storage for the adaptive ranker's training pipeline.
 
@@ -183,7 +187,8 @@ class LearningDatabase:
         conn = self._connect()
         try:
             row = conn.execute(
-                "SELECT COUNT(*) AS cnt FROM learning_signals WHERE profile_id = ?",
+                "SELECT COUNT(*) AS cnt FROM learning_signals "
+                f"WHERE profile_id = ?{FEEDBACK_ONLY_SQL}",
                 (profile_id,),
             ).fetchone()
             return int(row["cnt"]) if row else 0
@@ -365,15 +370,22 @@ class LearningDatabase:
     # ------------------------------------------------------------------
 
     def count_signals(self, profile_id: str) -> int:
-        """Count ``learning_signals`` rows for ``profile_id``.
+        """Count FEEDBACK rows in ``learning_signals`` for ``profile_id``.
 
         Used by ``_compute_ranker_phase`` + consolidation_worker training
         gate. Pure SELECT — thread-safe without lock.
+
+        Exposure rows are excluded. This counted every row until 4.1.0, which
+        on a live store meant 5,352 instead of 2 — a 2,675x inflation that
+        held the ranker in Phase 3 on two feedback events. See
+        ``learning/signal_kinds.py`` for why the predicate excludes exposures
+        rather than naming feedback kinds.
         """
         conn = self._connect()
         try:
             row = conn.execute(
-                "SELECT COUNT(*) AS cnt FROM learning_signals WHERE profile_id = ?",
+                "SELECT COUNT(*) AS cnt FROM learning_signals "
+                f"WHERE profile_id = ?{FEEDBACK_ONLY_SQL}",
                 (profile_id,),
             ).fetchone()
             return int(row["cnt"]) if row else 0
@@ -609,6 +621,19 @@ class LearningDatabase:
                     "learning_features",
                     "learning_model_state",
                     "engagement_metrics",
+                    # bandit_plays holds shown_fact_ids — the identifiers of the
+                    # memories a person was actually shown — and bandit_arms is
+                    # a derived behavioural profile. Both are personal data and
+                    # neither was erased: this list was hardcoded, so
+                    # forget_profile() reported success and left a row reading
+                    # ["alice-private-memory-1", ...] in place. Reproduced
+                    # before fixing.
+                    #
+                    # The retention sweep is not a substitute. It deletes only
+                    # SETTLED plays older than the horizon, so an unsettled row
+                    # would have survived indefinitely.
+                    "bandit_plays",
+                    "bandit_arms",
                 ]
                 receipt_tables = {
                     row[0]
@@ -620,7 +645,17 @@ class LearningDatabase:
                 }
                 if profile_id is None:
                     tables.extend(sorted(receipt_tables))
+                present = {
+                    row[0] for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
                 for table in tables:
+                    # A store predating any of these tables must not abort the
+                    # erasure of the rest — an Article 17 request that fails
+                    # halfway is worse than one that skips an absent table.
+                    if table not in present:
+                        continue
                     if profile_id:
                         conn.execute(
                             f"DELETE FROM {table} WHERE profile_id = ?",
@@ -629,6 +664,28 @@ class LearningDatabase:
                     else:
                         conn.execute(f"DELETE FROM {table}")
                 conn.commit()
+                # The in-process ranking counter holds this profile's recent
+                # winners. Ephemeral, but an erasure must not leave them in a
+                # live process for the rest of its lifetime.
+                try:
+                    from superlocalmemory.learning.pcos import RECENT_TOPS
+
+                    RECENT_TOPS.forget(profile_id or "")
+                except Exception:  # pragma: no cover — advisory
+                    pass
+                # The per-session working set is this profile's data too.
+                # Cleared here as well as in the compliance path, because this
+                # is reached directly — by the transaction owners and by tests —
+                # and a residue left behind goes on biasing any later session
+                # that reuses one of the erased profile's session ids.
+                try:
+                    from superlocalmemory.core.working_memory import (
+                        discard_profile,
+                    )
+
+                    discard_profile(profile_id or "")
+                except Exception:  # pragma: no cover — never block an erasure
+                    pass
                 logger.info(
                     "Learning data reset%s",
                     f" for profile {profile_id}" if profile_id else " (all)",

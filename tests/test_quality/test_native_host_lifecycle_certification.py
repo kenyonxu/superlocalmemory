@@ -1,4 +1,4 @@
-"""Wave 4 native-host certification for the *shipped* Codex and Claude assets.
+"""an earlier stage native-host certification for the *shipped* Codex and Claude assets.
 
 This is deliberately an isolated contract test, not a test of Varun's live
 host configuration.  It exercises the exact stdio environment shape used by
@@ -218,8 +218,11 @@ def test_shipped_codex_and_claude_assets_declare_the_same_native_lifecycle() -> 
     assert "slm" in str(codex_server["command"])
     assert claude_server["args"] == []
     assert "slm-launch" in str(claude_server["command"])
-    assert codex_server["env"]["SLM_MCP_PROFILE"] == "code"
-    assert claude_server["env"]["SLM_MCP_PROFILE"] == "code"
+    # 4.1.3: neither host pins a profile. Forcing one from a plugin removed
+    # tools the user had enabled; unset resolves to the raw server, so saying
+    # nothing exposes more than "code" ever did.
+    assert "SLM_MCP_PROFILE" not in codex_server["env"]
+    assert "SLM_MCP_PROFILE" not in claude_server["env"]
 
     for hooks in (CODEX_HOOKS, CLAUDE_HOOKS):
         starts = _hook_commands(hooks, "SessionStart")

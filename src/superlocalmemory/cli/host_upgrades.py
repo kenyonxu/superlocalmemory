@@ -145,13 +145,27 @@ def _upgrade_host(host: str, *, apply: bool, already_integrated: bool) -> dict[s
         if not assets.get("success") or not hooks.get("success"):
             return {"status": "blocked", "detail": "could not refresh SLM-owned Codex assets"}
         action = "would refresh" if not apply else "refreshed"
-        return {
-            "status": "updated" if apply else "preview",
-            "detail": (
-                f"{action} SLM-owned Codex skills, agents, and hooks; "
-                "MCP block preserved"
-            ),
-        }
+        # Name what is actually written.  Saying "refreshed skills" while the
+        # copies under ~/.agents/skills are not what this Codex reads turns a
+        # no-op into a success report.
+        written = assets.get("skills_written") or []
+        agents_written = assets.get("agents_written") or []
+        preserved = assets.get("agents_preserved") or []
+        elsewhere = assets.get("skills_read_elsewhere") or []
+
+        detail = f"{action} {len(written)} skill file(s) and {len(agents_written)} subagent file(s)"
+        if written:
+            detail += f" under {Path(written[0]).parent.parent}"
+        detail += "; hooks refreshed; MCP block preserved"
+        if preserved:
+            names = ", ".join(Path(x).name for x in preserved)
+            detail += f"; preserved {len(preserved)} subagent file(s) not written by SLM ({names})"
+        if elsewhere:
+            detail += (
+                f"; {len(elsewhere)} skill path(s) under ~/.codex/skills resolve outside "
+                f"the written location and were NOT refreshed ({Path(elsewhere[0]).parent})"
+            )
+        return {"status": "updated" if apply else "preview", "detail": detail}
 
     if already_integrated:
         return {

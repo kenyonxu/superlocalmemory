@@ -187,6 +187,33 @@ def _temporal_midpoint(dates: list[datetime]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _config_for_this_store() -> "CCQConfig":
+    """The settings this store is actually running under.
+
+    A caller that supplies only a database used to get the bare defaults, which
+    say a language model may be used to summarise. Three of the four places
+    that build this pass only a database, so on a store configured to use no
+    language model at all, the refusal below rested on nobody having handed one
+    in -- true today, and not a property of the mode. Reading the store's own
+    settings makes it a property of the mode.
+
+    Falls back to the defaults if the settings cannot be read, because a
+    consolidation pass that cannot start is worse than one that starts with the
+    documented defaults.
+    """
+    from superlocalmemory.core.config import CCQConfig as _CCQConfig
+
+    try:
+        from superlocalmemory.core.config import SLMConfig
+
+        resolved = getattr(SLMConfig.load(), "ccq", None)
+        if isinstance(resolved, _CCQConfig):
+            return resolved
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("consolidator: using default settings (%s)", exc)
+    return _CCQConfig()
+
+
 class CognitiveConsolidator:
     """CCQ engine: sleep-time consolidation with quantization.
 
@@ -203,12 +230,10 @@ class CognitiveConsolidator:
         llm: LLM | None = None,
         config: CCQConfig | None = None,
     ) -> None:
-        from superlocalmemory.core.config import CCQConfig as _CCQConfig
-
         self._db = db
         self._embedder = embedder
         self._llm = llm
-        self._config = config or _CCQConfig()
+        self._config = config if config is not None else _config_for_this_store()
 
     # ------------------------------------------------------------------
     # Public API
@@ -327,6 +352,17 @@ class CognitiveConsolidator:
               AND r.lifecycle_zone IN ('warm', 'cold')
               AND r.retention_score < ?
               AND f.lifecycle != 'forgotten'
+              -- Withheld rows are not candidates, and this is not tidiness.
+              -- 304 of them remain warm/cold in atomic_facts after 4.0.10
+              -- withholds them, and each still carries its cluster's POOLED
+              -- canonical_entities_json. CCQ clusters on entity overlap, so one
+              -- withheld summary naming ten entities joins a cluster of real
+              -- memories, contributes model prose to the gist, and then this
+              -- pass archives every source in the cluster -- including the real
+              -- memories, at scores M043's restore would not bring back.
+              -- Exactly the damage this release exists to stop, on a path the
+              -- release did not otherwise touch.
+              AND COALESCE(f.quarantined, 0) = 0
               AND f.fact_id NOT IN (
                   SELECT je.value
                   FROM ccq_consolidated_blocks ccb,
@@ -494,7 +530,10 @@ class CognitiveConsolidator:
             f"SELECT fact_id, content, importance, confidence, "
             f"       canonical_entities_json "
             f"FROM atomic_facts "
-            f"WHERE fact_id IN ({placeholders}) AND profile_id = ?",
+            f"WHERE fact_id IN ({placeholders}) AND profile_id = ? "
+            # Belt and braces with the identify query above: a cluster assembled
+            # before a row was withheld must not contribute its text to a gist.
+            f"  AND COALESCE(quarantined, 0) = 0",
             (*cluster.fact_ids, profile_id),
         )
 
@@ -516,10 +555,15 @@ class CognitiveConsolidator:
                 representative_fact_id="",
             )
 
-        # Try LLM mode (Mode B) if configured
+        # Configuration first, then availability. Mode A sets use_llm_gist=False,
+        # so this refuses because the mode says to — not because an LLM happened
+        # not to be passed in. The previous order tested availability first,
+        # which meant a caller that supplied a model to a Mode A engine would
+        # have got an LLM call on a mode whose whole promise is that nothing
+        # does.
         if (
-            self._llm is not None
-            and self._config.use_llm_gist
+            self._config.use_llm_gist
+            and self._llm is not None
         ):
             try:
                 gist = self._extract_gist_llm(

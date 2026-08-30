@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from superlocalmemory.learning.signal_kinds import FEEDBACK_ONLY_SQL
 
 logger = logging.getLogger("superlocalmemory.learning.feedback")
 
@@ -573,7 +574,8 @@ class FeedbackCollector:
         conn = self._connect()
         try:
             row = conn.execute(
-                "SELECT COUNT(*) FROM learning_signals WHERE profile_id = ?",
+                "SELECT COUNT(*) FROM learning_signals "
+                f"WHERE profile_id = ?{FEEDBACK_ONLY_SQL}",
                 (profile_id,),
             ).fetchone()
             return row[0] if row else 0

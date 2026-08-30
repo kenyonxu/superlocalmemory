@@ -21,6 +21,9 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from superlocalmemory.core.projection_drain import ProjectionDrain
+from superlocalmemory.storage import projection_outbox
+
 if TYPE_CHECKING:
     from superlocalmemory.core.config import SLMConfig
     from superlocalmemory.storage.database import DatabaseManager
@@ -80,6 +83,12 @@ class BackendOrchestrator:
         self._lancedb: Any = None
         self._tiers: Any = None
         self._backend_cache: dict[str, str] = {}
+        # Given accessors, not backends: a promotion or a rollback replaces
+        # them underneath the worker, and a reference captured here would keep
+        # writing into the projection that was just swapped out.
+        self._drain = ProjectionDrain(
+            db, self.get_graph_backend, self.get_vector_backend,
+        )
 
     # ------------------------------------------------------------------
     # Daemon Startup
@@ -107,6 +116,19 @@ class BackendOrchestrator:
 
         self._recover_interrupted_scale_promotion()
 
+        # Reconcile what the config CLAIMS against what is on disk, before
+        # anything reads either -- and before the early return below, because
+        # the stores that need reconciling are exactly the ones that take it.
+        #
+        # This used to sit after that return, so it ran only for a store already
+        # in the promoted state. The real case it was written for is a store
+        # whose settings name a graph and a vector backend, whose state is
+        # `verified` rather than `promoted`, and where neither directory exists:
+        # the settings kept the claim, the reconcile never ran, and every
+        # restart preserved it. The test asserted the call appeared before
+        # another call in the source text, which is true either way.
+        self._reconcile_backend_selection()
+
         # Backends may be installed with the product, but installing a wheel
         # is not authorization to mutate an existing data root.  Only a
         # verified, explicit promotion may initialize and migrate projections.
@@ -120,6 +142,11 @@ class BackendOrchestrator:
             # SQLite graph.  A no-op (and never even starts the build) for the
             # vast majority of installs, which sit far below the threshold.
             self._maybe_schedule_auto_promote()
+            # Started even with no projection open. A pass with no backend
+            # returns without touching a row, and starting it here means a
+            # promotion that completes mid-session has a worker waiting for it
+            # rather than a queue nobody is reading.
+            self._drain.start()
             return
 
         # 3. Initialize CozoDB if available
@@ -145,9 +172,14 @@ class BackendOrchestrator:
         except Exception as exc:
             logger.warning("TierManager backend registration failed (non-fatal): %s", exc)
 
-        logger.info("BackendOrchestrator: daemon ready (cozo=%s, lancedb=%s)",
-                     "active" if self._cozo and self._cozo_status() == "active" else "off",
-                     "active" if self._lancedb and self._lancedb_status() == "active" else "off")
+        self._drain.start()
+
+        logger.info(
+            "BackendOrchestrator: daemon ready (cozo=%s, lancedb=%s, queued=%d)",
+            "active" if self._cozo and self._cozo_status() == "active" else "off",
+            "active" if self._lancedb and self._lancedb_status() == "active" else "off",
+            projection_outbox.depth(self._db),
+        )
 
     def _maybe_schedule_auto_promote(self) -> None:
         """Schedule a delayed, one-shot scale auto-promote check (v3.8.5).
@@ -164,7 +196,23 @@ class BackendOrchestrator:
         cfg = self._config
         if not getattr(cfg, "scale_auto_promote_enabled", True):
             return
-        if getattr(cfg, "scale_engine_state", "local_core") != "local_core":
+        # Only a store that has finished promoting has nothing left to do.
+        #
+        # This used to skip every state except ``local_core``, which made
+        # ``prepared`` and ``verified`` terminal: the daemon above returns
+        # early for anything that is not ``promoted``, so the backends never
+        # started, and this refused to finish the promotion that would have
+        # started them. A store that got as far as building and checking its
+        # projection then sat on SQLite forever while its own config named Cozo
+        # and LanceDB as the backends — measured on a real store whose
+        # ``backend_status`` read lancedb=not_initialized under
+        # ``scale_engine_state=verified``.
+        #
+        # ``run_auto_promote`` already resumes a half-finished stage
+        # (``_resumable_stage``) and applies the size threshold and the
+        # repair-required check itself, so it is the right place for every
+        # decision except "there is nothing left to do".
+        if str(getattr(cfg, "scale_engine_state", "local_core")).lower() == "promoted":
             return
         try:
             delay = float(os.environ.get("SLM_AUTO_PROMOTE_DELAY_S", "300"))
@@ -198,11 +246,14 @@ class BackendOrchestrator:
             import os
 
             cfg = self._config
-            if getattr(cfg, "scale_engine_state", "local_core") != "local_core":
+            # Same rule as the scheduler that armed this timer: only a store
+            # that has finished has nothing left to do. Fixing the scheduler
+            # alone would have armed a timer whose callback still refused.
+            if str(getattr(cfg, "scale_engine_state", "local_core")).lower() == "promoted":
                 return
             threshold = int(
                 os.environ.get("SLM_AUTO_PROMOTE_MIN_EDGES", "")
-                or getattr(cfg, "scale_auto_promote_min_edges", 1_000_000)
+                or getattr(cfg, "scale_auto_promote_min_edges", 100_000)
             )
             edges = self._count_default_edges()
             if edges < threshold:
@@ -237,6 +288,75 @@ class BackendOrchestrator:
                 exc,
             )
 
+    def _reconcile_backend_selection(self) -> None:
+        """Stop the config claiming a backend the store does not have.
+
+        THE STATE THIS REPAIRS
+
+        On a real store: ``graph_backend='cozo'``, ``vector_backend='lancedb'``,
+        ``scale_engine_state='verified'`` -- and neither the ``cozo/`` nor the
+        ``lance/`` directory existed, with no promotion journal to explain it.
+        Something wrote the selection a completed promotion writes, without a
+        promotion having completed.
+
+        Nothing corrected it. ``recover_interrupted_promotion`` acts only when a
+        journal exists, so with no journal it returns immediately and the claim
+        survives every restart. The dashboard then reports the configured backend
+        while retrieval uses SQLite, which is the disagreement a person notices
+        last and trusts first.
+
+        WHAT THIS DOES NOT DO
+
+        It does not disable anything. ``auto`` still detects and initialises both
+        projections when their libraries are installed, so the only thing removed
+        is the false claim. It leaves ``verified`` alone -- that is a legitimate
+        waypoint meaning "parity checked, not yet promoted" -- and only resets
+        ``promoted``, which asserts a swap that plainly did not happen. And it
+        never touches a selection whose directory is present, nor one with a
+        journal still open, because those belong to the promotion lifecycle.
+        """
+        try:
+            from superlocalmemory.core.scale_engine import ScaleEngineManager
+
+            manager = ScaleEngineManager(self._config, profile_id="default")
+            if manager.promotion_journal_path.exists():
+                return  # the recovery path owns this
+            cozo_path, lance_path = manager.active_paths
+        except Exception as exc:  # noqa: BLE001 -- reconciliation is best effort
+            logger.debug("Backend reconciliation skipped: %s", exc)
+            return
+
+        corrections: list[str] = []
+        graph = getattr(self._config, "graph_backend", "auto") or "auto"
+        if graph not in ("auto", "sqlite") and not cozo_path.exists():
+            corrections.append(f"graph_backend {graph!r} -> 'auto' (no {cozo_path.name}/)")
+            self._config.graph_backend = "auto"
+        vector = getattr(self._config, "vector_backend", "auto") or "auto"
+        if vector not in ("auto", "sqlite-vec") and not lance_path.exists():
+            corrections.append(
+                f"vector_backend {vector!r} -> 'auto' (no {lance_path.name}/)"
+            )
+            self._config.vector_backend = "auto"
+        state = getattr(self._config, "scale_engine_state", "") or ""
+        if state == "promoted" and not (cozo_path.exists() or lance_path.exists()):
+            corrections.append("scale_engine_state 'promoted' -> 'local_core'")
+            self._config.scale_engine_state = "local_core"
+
+        if not corrections:
+            return
+        try:
+            self._config.save()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Backend selection is inconsistent with the data directory and "
+                "could not be corrected (%s): %s", exc, "; ".join(corrections),
+            )
+            return
+        logger.warning(
+            "Backend selection did not match the data directory; corrected: %s",
+            "; ".join(corrections),
+        )
+
     def _recover_interrupted_scale_promotion(self) -> None:
         """Repair an interrupted promotion; never auto-mutate a legacy root."""
         try:
@@ -261,90 +381,44 @@ class BackendOrchestrator:
     # ------------------------------------------------------------------
 
     def sync_new_fact(self, fact: Any) -> None:
-        """Sync a newly stored fact to CozoDB and LanceDB.
+        """Signal that a stored fact needs projecting.
 
-        Called AFTER SQLite write in store_pipeline.
-        Non-blocking, best-effort. Failures are logged, not raised.
+        The projection itself is not written here. It used to be — inline, on
+        the caller's thread, with every failure swallowed into a debug line —
+        and that is the defect the outbox replaced. The intent to project was
+        already committed to ``projection_outbox`` in the same SQLite
+        transaction as the fact, so all that is left to do is wake the worker
+        that owns the projections.
+
+        Kept as a method because callers name this operation, and because a
+        caller that reaches it without an outbox row (an old store, mid-upgrade)
+        should still get its fact projected rather than silently skipped.
         """
-        try:
-            tier = getattr(fact, "lifecycle", "active")
-        except Exception:
-            tier = "active"
-
-        if tier in ("active", "warm"):
-            if self._cozo and self._cozo_status() == "active":
-                self._sync_fact_entities(fact)
-
-            if self._lancedb and self._lancedb_status() == "active":
-                self._sync_fact_embedding(fact)
-
-    def _sync_fact_entities(self, fact: Any) -> None:
-        """Synchronize one fact's canonical entity bridge and fact edges."""
-        try:
-            # Retrying ingestion must not retain stale fact/entity links.
-            self._cozo.remove_fact(fact.fact_id)
-            entities = getattr(fact, "canonical_entities", []) or []
-            profile_id = getattr(fact, "profile_id", "default") or "default"
-            for eid in entities:
-                rows = self._db.execute(
-                    "SELECT canonical_name, entity_type, fact_count FROM canonical_entities "
-                    "WHERE entity_id = ? AND profile_id = ?",
-                    (eid, profile_id),
-                )
-                if rows:
-                    entity = dict(rows[0])
-                    self._cozo.add_entity(
-                        eid,
-                        entity.get("canonical_name") or eid,
-                        entity.get("entity_type") or "concept",
-                        {"fact_count": int(entity.get("fact_count") or 0)},
-                        profile_id,
-                    )
-            self._cozo.add_fact_entities(fact.fact_id, entities, profile_id)
-            for row in self._db.execute(
-                "SELECT source_id, target_id, edge_type, weight FROM graph_edges "
-                "WHERE profile_id = ? AND (source_id = ? OR target_id = ?)",
-                (profile_id, fact.fact_id, fact.fact_id),
-            ):
-                edge = dict(row)
-                self._cozo.add_edge(
-                    edge["source_id"], edge["target_id"], edge.get("edge_type") or "related",
-                    float(edge.get("weight") or 1.0), profile_id=profile_id,
-                )
-        except Exception as exc:
-            logger.debug("CozoDB incremental sync skipped: %s", exc)
-
-    def _sync_fact_embedding(self, fact: Any) -> None:
-        """Sync fact's embedding to LanceDB."""
-        try:
-            embedding = getattr(fact, "embedding", None)
-            if embedding:
-                tier = getattr(fact, "lifecycle", "active")
-                self._lancedb.add_vectors(
-                    [fact.fact_id], [embedding], [tier],
-                    getattr(fact, "profile_id", "default") or "default",
-                )
-        except Exception as exc:
-            logger.debug("LanceDB incremental sync skipped: %s", exc)
+        fact_id = getattr(fact, "fact_id", None)
+        if fact_id:
+            projection_outbox.enqueue(
+                self._db, fact_id, getattr(fact, "profile_id", None) or "default",
+            )
+        self._drain.notify()
 
     def sync_deleted_fact(self, fact_id: str) -> None:
-        """Remove a fact from derived projections after canonical deletion."""
-        if self._cozo and self._cozo_status() == "active":
-            try:
-                self._cozo.remove_fact(fact_id)
-            except Exception as exc:
-                logger.warning("Cozo deletion sync failed for %s: %s", fact_id[:16], exc)
-        if self._lancedb and self._lancedb_status() == "active":
-            try:
-                self._lancedb.remove_vector(fact_id)
-            except Exception as exc:
-                logger.warning("Lance deletion sync failed for %s: %s", fact_id[:16], exc)
+        """Signal that a deleted fact must leave the projections.
+
+        A forgotten memory still present in the graph or the vector index is
+        still recallable, so the removal is queued with the same durability as
+        the delete itself.
+        """
+        if fact_id:
+            projection_outbox.enqueue_for_fact(
+                self._db, fact_id, projection_outbox.OP_DELETE,
+            )
+        self._drain.notify()
 
     def sync_changed_fact(self, fact_id: str) -> None:
         """Refresh projections after an authorized canonical fact update."""
-        fact = self._db.get_fact(fact_id)
-        if fact is not None:
-            self.sync_new_fact(fact)
+        if fact_id:
+            projection_outbox.enqueue_for_fact(self._db, fact_id)
+        self._drain.notify()
 
     # ------------------------------------------------------------------
     # Backend Access
@@ -411,7 +485,39 @@ class BackendOrchestrator:
                 "LanceDB not active. Install: pip install superlocalmemory[lancedb]"
             )
 
+        outbox = projection_outbox.health(self._db)
+        outbox["draining"] = self._drain.running
+        result["projection_queue"] = outbox
+        if outbox["stalled"]:
+            result["warnings"].append(
+                f"{outbox['stalled']} memory/memories could not be projected into "
+                "the graph or vector store. Run `slm doctor` for the ids."
+            )
+
         return result
+
+    # ------------------------------------------------------------------
+    # Projection queue
+    # ------------------------------------------------------------------
+
+    def drain_projections(self, limit: int = 200) -> dict[str, Any]:
+        """Apply queued facts now, on the calling thread.
+
+        For the CLI, for a repair pass, and for any caller that needs the
+        projections current before it reads them rather than a few milliseconds
+        later. Ordinary writes do not need this — they signal the worker.
+        """
+        return self._drain.drain_once(limit=limit).as_dict()
+
+    def outbox_health(self) -> dict[str, Any]:
+        """Queue depth and stalled count, for the status surfaces."""
+        health = projection_outbox.health(self._db)
+        health["draining"] = self._drain.running
+        return health
+
+    def stop(self) -> None:
+        """Stop the drain worker. For daemon shutdown and for tests."""
+        self._drain.stop()
 
     # ------------------------------------------------------------------
     # Internal: Detection

@@ -78,10 +78,10 @@ class WorkerPool:
     ) -> dict:
         """Run recall in worker subprocess. Returns result dict.
 
-        S9-DASH-02: ``session_id`` threads through to ``engine.recall``
-        so the outcome-queue gets a pending_outcomes row for this
-        recall. Without it, hook-based signals have no outcome to
-        attach to.
+        ``session_id`` threads through to ``engine.recall``, where it gives
+        the recall continuity with earlier turns of the same session. It does
+        NOT create an outcome row — this docstring claimed one for several
+        releases and none was ever written.
 
         v3.6.15 multi-scope: ``include_global``/``include_shared`` are forwarded
         to the worker (and on to ``engine.recall``). ``None`` is sent verbatim

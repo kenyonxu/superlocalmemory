@@ -29,7 +29,29 @@ from tests.test_learning._signal_fixtures import (
 
 def _seed_signals(db, n_queries: int, per_query: int, *,
                    profile_id: str = "p1") -> None:
+    """Seed the phase counter with feedback, and the trainer with exposures.
+
+    As of 4.1.0 the ranking phase counts FEEDBACK only: ``candidate`` rows are
+    exposures, one per fact displayed, and counting them reported 5,352 signals
+    on a store holding two real feedback events — a 2,670x inflation that held
+    the ranker in Phase 3 on a model trained entirely on zero labels.
+
+    ``record_signal_batch`` writes exposures, which is right for the trainer and
+    no longer moves the phase. So the feedback rows are inserted FIRST, with the
+    exposures after them. The order is load-bearing:
+    ``test_active_model_but_below_200_signals_stays_phase2`` scrubs
+    ``WHERE id > 199`` to land on exactly 199 signals, and that only means 199
+    COUNTED signals if the low ids are the feedback rows.
+    """
     conn = open_conn(db)
+    for i in range(n_queries * per_query):
+        conn.execute(
+            "INSERT INTO learning_signals (profile_id, query, fact_id, "
+            " signal_type, value, created_at) "
+            "VALUES (?, 'q', ?, 'legacy_feedback', 1.0, '2026-01-01')",
+            (profile_id, f"fb-{i:05d}"),
+        )
+    conn.commit()
     for q in range(n_queries):
         record_signal_batch(
             conn,
