@@ -694,7 +694,9 @@ class MemoryEngine:
             emb = None
         return emb, fmean, fvar
 
-    def _projection_has(self, fact_id: str) -> bool:
+    def _projection_has(
+        self, fact_id: str, *, profile_id: str | None = None,
+    ) -> bool:
         """Can the meaning-based channel reach this fact?
 
         Answered by the vector store, which owns the question, and never from
@@ -706,6 +708,11 @@ class MemoryEngine:
         the store; duplicating it here is how the column and the projection
         drifted apart in the first place.
 
+        ``profile_id`` follows the ``recall`` convention: ``None`` asks about
+        the active profile, an explicit value asks about THAT profile's
+        projection — per-request routed writes own facts the active pointer
+        cannot see.
+
         Fails closed. A store that cannot answer is treated as "not reachable",
         which costs at most one redundant idempotent write and can never report
         a fact as findable when it is not.
@@ -715,7 +722,7 @@ class MemoryEngine:
         if not callable(answer):
             return False
         try:
-            return bool(answer(fact_id, self._profile_id))
+            return bool(answer(fact_id, profile_id or self._profile_id))
         except Exception:
             return False
 
@@ -851,6 +858,7 @@ class MemoryEngine:
 
     def enrich_new_facts_now(
         self, fact_ids: list[str], *, timeout_s: float | None = None,
+        profile_id: str | None = None,
     ) -> int:
         """Make just-written facts searchable by meaning, within a deadline.
 
@@ -867,6 +875,13 @@ class MemoryEngine:
         closes that window for whichever facts it can reach in time, and reports
         honestly how many it reached.
 
+        ``profile_id`` follows the ``recall``/``store`` convention: ``None``
+        enriches the active profile's facts; an explicit value enriches THAT
+        profile's. The lookups below are tenant-scoped, so a routed write's
+        fact_ids resolve to ``None`` against the active profile — silently
+        skipping enrichment and always reporting "findable by wording" —
+        unless the routed profile is threaded through.
+
         The durable write has already happened before this is called. Nothing here
         can fail it: on any error or timeout the fact simply keeps its place in the
         background queue.
@@ -878,6 +893,7 @@ class MemoryEngine:
         # looks exactly like "there was nothing to enrich".
         self._require_full("enrich_new_facts_now")
         self._ensure_init()
+        pid = profile_id or self._profile_id
         # Matches the default the write path uses for its own embedding attempt;
         # the two were allowed to drift apart, so a direct caller got half the
         # budget the daemon gives.
@@ -885,10 +901,10 @@ class MemoryEngine:
         enriched = 0
         for fact_id in fact_ids:
             try:
-                fact = self._db.get_fact(fact_id, self._profile_id)
+                fact = self._db.get_fact(fact_id, pid)
                 if fact is None:
                     continue
-                already = self._projection_has(fact_id)
+                already = self._projection_has(fact_id, profile_id=pid)
                 if already and getattr(fact, "embedding", None):
                     # Findable by meaning, and the two representations agree.
                     # Counting it keeps the caller's receipt truthful: saying
@@ -937,7 +953,7 @@ class MemoryEngine:
                     # vector already on the row skips that check entirely and the
                     # fetch above can itself be slow under write contention.
                     break
-                if self._attach_vector(fact_id, emb, fmean, fvar):
+                if self._attach_vector(fact_id, emb, fmean, fvar, profile_id=pid):
                     enriched += 1
             except Exception as exc:
                 # Warning, not debug. A run that enriches nothing returns 0 in a

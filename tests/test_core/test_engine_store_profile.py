@@ -239,3 +239,124 @@ class TestProfileIsolation:
         assert all(f.fact_id not in ids for f in active_facts), (
             "per-request write leaked into the active profile"
         )
+
+
+# ---------------------------------------------------------------------------
+# enrich_new_facts_now / _projection_has — the inline-enrichment seam
+# (final-review I-1: routed writes must enrich against THEIR profile)
+# ---------------------------------------------------------------------------
+
+class TestEnrichmentProfileSignatureContract:
+    """profile_id is keyword-only, defaults None, appended last — the same
+    convention the three store paths above established for Tasks 3/5."""
+
+    @pytest.mark.parametrize(
+        "method_name", ["enrich_new_facts_now", "_projection_has"],
+    )
+    def test_profile_id_is_keyword_only_last_and_defaults_none(
+        self, method_name: str,
+    ) -> None:
+        params = inspect.signature(
+            getattr(MemoryEngine, method_name),
+        ).parameters
+        assert "profile_id" in params, f"{method_name} lost profile_id"
+        param = params["profile_id"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert param.default is None
+        assert param is list(params.values())[-1], (
+            "profile_id must be appended last so existing positional "
+            "callers cannot shift"
+        )
+
+
+def _warm_mock_embedder(eng, monkeypatch):
+    """Make inline enrichment actually embed under mocked deps.
+
+    The fixture's mock embedder reports itself cold-and-remote (MagicMock
+    attributes), so the warm guard declines by design. Patching the guard is
+    the sanctioned seam: the embedding itself is orthogonal to the profile
+    routing under test, and this makes an enriched>0 outcome possible so the
+    assertions are not vacuously true.
+    """
+    monkeypatch.setattr(
+        eng, "_warm_guard_embed",
+        lambda text, *, timeout_s=None: ([0.01] * 768, [0.0] * 768, [1.0] * 768),
+    )
+
+
+class TestEnrichNewFactsNowProfile:
+    def _spy_get_fact(self, eng, monkeypatch):
+        """Record every (fact_id, profile_id) lookup, then serve the real row."""
+        real = eng._db.get_fact
+        seen: list[tuple[str, object]] = []
+
+        def _spy(fact_id, profile_id=None):
+            seen.append((fact_id, profile_id))
+            return real(fact_id, profile_id)
+
+        monkeypatch.setattr(eng._db, "get_fact", _spy)
+        return seen
+
+    def test_routed_facts_resolve_against_the_routed_profile(
+        self, engine_with_mock_deps, monkeypatch,
+    ):
+        eng = engine_with_mock_deps
+        _seed_profile(eng)
+        ids = eng.store(
+            "Wren logs the enrichment routing probe for the relay desk",
+            profile_id=TARGET,
+        )
+        assert ids
+        _warm_mock_embedder(eng, monkeypatch)
+        seen = self._spy_get_fact(eng, monkeypatch)
+
+        enriched = eng.enrich_new_facts_now(
+            ids, profile_id=TARGET, timeout_s=5.0,
+        )
+
+        lookups = [p for fid, p in seen if fid in ids]
+        assert lookups, "enrichment never looked up the routed facts"
+        assert set(lookups) == {TARGET}, (
+            f"routed enrichment must resolve facts against {TARGET!r}, "
+            f"got {set(lookups)!r} (active is {eng._profile_id!r})"
+        )
+        # The routed rows resolved, so enrichment ran to its honest outcome
+        # instead of skipping every fact as unfindable.
+        assert enriched == len(ids), (
+            f"expected all {len(ids)} routed fact(s) searchable by meaning, "
+            f"got {enriched}"
+        )
+
+    def test_without_the_anchor_routed_facts_are_invisible(
+        self, engine_with_mock_deps,
+    ):
+        """The lookups are tenant-scoped: this documents why the anchor must
+        be threaded. WITHOUT profile_id the routed rows resolve to None and
+        inline enrichment silently skips them — the exact pre-fix daemon
+        behaviour for every routed write."""
+        eng = engine_with_mock_deps
+        _seed_profile(eng)
+        ids = eng.store(
+            "Sable files the anchorless enrichment control note",
+            profile_id=TARGET,
+        )
+        assert ids
+        assert eng._profile_id != TARGET
+
+        assert eng.enrich_new_facts_now(ids, timeout_s=5.0) == 0
+
+    def test_legacy_facts_enrich_against_the_active_profile(
+        self, engine_with_mock_deps, monkeypatch,
+    ):
+        eng = engine_with_mock_deps
+        ids = eng.store("Orla enriches on the legacy active path")
+        assert ids
+        _warm_mock_embedder(eng, monkeypatch)
+        seen = self._spy_get_fact(eng, monkeypatch)
+
+        enriched = eng.enrich_new_facts_now(ids, timeout_s=5.0)
+
+        lookups = [p for fid, p in seen if fid in ids]
+        assert lookups
+        assert set(lookups) == {eng._profile_id}
+        assert enriched == len(ids)
