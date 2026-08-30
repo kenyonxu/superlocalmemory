@@ -6,6 +6,7 @@ import importlib
 import sys
 import time
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -1027,3 +1028,221 @@ class TestDaemonRouting:
         import json as _json
         assert _json.loads(out)["status"] == "stored"
         mock_engine.store.assert_not_called()
+
+
+class TestProfilePin:
+    """Per-request profile pinning (spec §7).
+
+    ``pin_profile`` 默认开启: every daemon-routed recall/store call and
+    every offline-fallback engine call carries ``profile_id`` anchored to
+    the provider's ``_mslm_profile``, so a mid-session active-pointer
+    switch (daemon-side profile switch) cannot silently redirect this
+    provider's traffic.
+
+    Pin off (``SLM_HERMES_PIN_PROFILE=0`` or config override) or an empty
+    ``_mslm_profile`` omits the parameter — the call then follows the
+    active pointer (legacy client behaviour).
+    """
+
+    _RECALL_JSON = {
+        "ok": True,
+        "query": "q",
+        "results": [
+            {"fact_id": "f1", "content": "pinned fact", "score": 0.9, "confidence": 0.8},
+        ],
+        "query_type": "factual",
+        "retrieval_time_ms": 12.0,
+    }
+
+    _STORE_JSON = {"ok": True, "fact_ids": ["f1"]}
+
+    def _setup(self, provider, mock_engine, *, pin=True, profile="zhihui"):
+        """Initialise with mocked engine, then set pin state + profile."""
+        with patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            MockEngine.return_value = mock_engine
+            provider.initialize("session_1", agent_identity="coder")
+        provider._pin_profile = pin
+        provider._mslm_profile = profile
+
+    @staticmethod
+    def _qs_of(call):
+        """Query-string dict of one routed GET /recall call."""
+        return parse_qs(urlsplit(call.args[1]).query)
+
+    # -- pin on: every routed call carries profile_id -------------------------
+
+    def test_pin_on_recall_query_carries_profile_id(self, provider, mock_engine):
+        """pin on 时 recall 的 query string 携带 profile_id."""
+        self._setup(provider, mock_engine)
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api",
+                   return_value=self._RECALL_JSON) as api:
+            provider._sync_recall("q")
+        assert self._qs_of(api.call_args).get("profile_id") == ["zhihui"]
+        mock_engine.recall.assert_not_called()
+
+    def test_pin_on_all_recall_entrypoints_carry_profile_id(self, provider, mock_engine):
+        """prefetch / slm_recall 工具 / queue_prefetch 三条 recall 路径全部携带."""
+        self._setup(provider, mock_engine)
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api",
+                   return_value=self._RECALL_JSON) as api:
+            provider.prefetch("first turn")          # cold start → sync recall
+            provider._tool_recall({"query": "q"})    # tool path
+            provider.queue_prefetch("next turn")     # background prefetch
+            provider._prefetch_thread.join(timeout=5.0)
+        assert api.call_count == 3
+        for call in api.call_args_list:
+            assert self._qs_of(call).get("profile_id") == ["zhihui"]
+        mock_engine.recall.assert_not_called()
+
+    def test_pin_on_store_body_carries_profile_id(self, provider, mock_engine):
+        """pin on 时 store 的 /remember body 携带 profile_id."""
+        self._setup(provider, mock_engine)
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api",
+                   return_value=self._STORE_JSON) as api:
+            out = provider._tool_remember({"content": "remember"})
+        assert api.call_count == 1
+        assert api.call_args.args[2].get("profile_id") == "zhihui"
+        assert '"stored"' in out
+        mock_engine.store.assert_not_called()
+
+    def test_pin_on_all_store_entrypoints_carry_profile_id(self, provider, mock_engine):
+        """sync_turn / on_memory_write / on_pre_compress / slm_remember 全部携带."""
+        self._setup(provider, mock_engine)
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api",
+                   return_value=self._STORE_JSON) as api:
+            provider.sync_turn("hello", "world")
+            provider._sync_thread.join(timeout=5.0)
+            provider.on_memory_write("add", "memory", "mirror me")
+            time.sleep(0.2)
+            provider.on_pre_compress([{"role": "user", "content": "compress me"}])
+            time.sleep(0.2)
+            provider._tool_remember({"content": "remember"})
+        assert api.call_count == 4
+        for call in api.call_args_list:
+            assert call.args[0] == "POST" and call.args[1] == "/remember"
+            assert call.args[2].get("profile_id") == "zhihui"
+        mock_engine.store.assert_not_called()
+
+    # -- pin off: parameter omitted, follows active pointer -------------------
+
+    def test_pin_off_recall_omits_profile_id(self, provider, mock_engine):
+        """pin off 时 recall 不携带 profile_id(跟随活跃指针)."""
+        self._setup(provider, mock_engine, pin=False)
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api",
+                   return_value=self._RECALL_JSON) as api:
+            provider._sync_recall("q")
+        assert "profile_id" not in self._qs_of(api.call_args)
+
+    def test_pin_off_store_omits_profile_id(self, provider, mock_engine):
+        """pin off 时 store body 不携带 profile_id(跟随活跃指针)."""
+        self._setup(provider, mock_engine, pin=False)
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api",
+                   return_value=self._STORE_JSON) as api:
+            provider._tool_remember({"content": "remember"})
+        assert "profile_id" not in api.call_args.args[2]
+
+    # -- empty profile: no anchor → no pin -------------------------------------
+
+    def test_empty_profile_pin_on_omits_profile_id(self, provider, mock_engine):
+        """_mslm_profile 为空时不 pin(无可锚点,回落现状)."""
+        self._setup(provider, mock_engine, pin=True, profile="")
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api",
+                   return_value=self._RECALL_JSON) as api:
+            provider._sync_recall("q")
+            provider._tool_remember({"content": "remember"})
+        assert api.call_count == 2
+        assert "profile_id" not in self._qs_of(api.call_args_list[0])
+        assert "profile_id" not in api.call_args_list[1].args[2]
+
+    # -- offline fallback: engine receives profile_id ---------------------------
+
+    def test_offline_fallback_engine_recall_gets_profile_id(self, provider, mock_engine):
+        """daemon 不可达时 engine.recall 收到 profile_id."""
+        self._setup(provider, mock_engine)
+        mock_engine.recall.return_value.results = []
+        provider._sync_recall("q")
+        provider._tool_recall({"query": "q"})
+        assert mock_engine.recall.call_count == 2
+        for call in mock_engine.recall.call_args_list:
+            assert call.kwargs.get("profile_id") == "zhihui"
+
+    def test_offline_fallback_engine_store_gets_profile_id(self, provider, mock_engine):
+        """daemon 不可达时 engine.store 收到 profile_id."""
+        self._setup(provider, mock_engine)
+        provider._tool_remember({"content": "remember"})
+        provider.sync_turn("hello", "world")
+        provider._sync_thread.join(timeout=5.0)
+        assert mock_engine.store.call_count == 2
+        for call in mock_engine.store.call_args_list:
+            assert call.kwargs.get("profile_id") == "zhihui"
+
+    def test_offline_fallback_pin_off_engine_gets_no_profile(self, provider, mock_engine):
+        """pin off 时离线回落的 engine 调用不带 profile(None=跟随活跃)."""
+        self._setup(provider, mock_engine, pin=False)
+        mock_engine.recall.return_value.results = []
+        provider._sync_recall("q")
+        provider._tool_remember({"content": "remember"})
+        assert mock_engine.recall.call_args.kwargs.get("profile_id") in (None, "")
+        assert mock_engine.store.call_args.kwargs.get("profile_id") in (None, "")
+
+    # -- config resolution: env fail-open, config.yaml override -----------------
+
+    def test_pin_defaults_on_without_env(self, monkeypatch):
+        """未设置 SLM_HERMES_PIN_PROFILE 时默认开启."""
+        monkeypatch.delenv("SLM_HERMES_PIN_PROFILE", raising=False)
+        assert SuperLocalMemoryProvider()._pin_profile is True
+
+    def test_env_default_token_keeps_pin_on(self, monkeypatch):
+        """SLM_HERMES_PIN_PROFILE=1(默认值)开启."""
+        monkeypatch.setenv("SLM_HERMES_PIN_PROFILE", "1")
+        assert SuperLocalMemoryProvider()._pin_profile is True
+
+    @pytest.mark.parametrize("raw", ["0", "false", "no", "FALSE", "No", " 0 "])
+    def test_env_opt_out_disables_pin(self, monkeypatch, raw):
+        """0/false/no(大小写、空白不敏感)关闭 pin."""
+        monkeypatch.setenv("SLM_HERMES_PIN_PROFILE", raw)
+        assert SuperLocalMemoryProvider()._pin_profile is False
+
+    @pytest.mark.parametrize("raw", ["", "garbage", "maybe", "2", "true"])
+    def test_env_unparseable_fails_open(self, monkeypatch, raw):
+        """解析失败视为 true(safe default)."""
+        monkeypatch.setenv("SLM_HERMES_PIN_PROFILE", raw)
+        assert SuperLocalMemoryProvider()._pin_profile is True
+
+    def test_config_yaml_pin_profile_false_overrides_default(self, provider, monkeypatch):
+        """config.yaml 的 pin_profile: false 等价关闭."""
+        monkeypatch.delenv("SLM_HERMES_PIN_PROFILE", raising=False)
+        with patch.object(provider, "_load_hermes_config", return_value={
+            "pin_profile": False,
+        }), patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            MockEngine.return_value = MagicMock()
+            provider.initialize("session_1", agent_identity="coder")
+        assert provider._pin_profile is False
+
+    def test_config_yaml_pin_profile_true_overrides_env_off(self, provider, monkeypatch):
+        """config.yaml 优先级高于 env: pin_profile: true 覆盖 env=0."""
+        monkeypatch.setenv("SLM_HERMES_PIN_PROFILE", "0")
+        with patch.object(provider, "_load_hermes_config", return_value={
+            "pin_profile": True,
+        }), patch("superlocalmemory.core.config.SLMConfig") as MockConfig, \
+             patch("superlocalmemory.core.engine.MemoryEngine") as MockEngine:
+            MockConfig.load.return_value = MagicMock()
+            MockEngine.return_value = MagicMock()
+            provider.initialize("session_1", agent_identity="coder")
+        assert provider._pin_profile is True
+
+    def test_config_schema_documents_pin_profile(self, provider):
+        """get_config_schema 暴露 pin_profile 开关."""
+        keys = {item["key"] for item in provider.get_config_schema()}
+        assert "pin_profile" in keys

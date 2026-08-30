@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import os
 import threading
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -63,6 +64,48 @@ _SEMANTIC_NOISE = frozenset({"", "ok", "yes", "thanks", "thx"})
 
 _DAEMON_RECALL_TIMEOUT = 8.0
 _DAEMON_STORE_TIMEOUT = 20.0
+
+# ---------------------------------------------------------------------------
+# Per-request profile pinning (spec §7)
+#
+# ``pin_profile`` defaults to ON: every daemon-routed recall/store (and every
+# offline-fallback engine call) carries ``profile_id`` anchored to the
+# provider's ``_mslm_profile``, so a mid-session active-pointer switch on the
+# daemon side cannot silently redirect this provider's traffic.  Opt-out via
+# ``SLM_HERMES_PIN_PROFILE=0`` (or the config.yaml ``pin_profile`` override)
+# omits the parameter and follows the active pointer (legacy client).
+# ---------------------------------------------------------------------------
+
+_PIN_ENV_VAR = "SLM_HERMES_PIN_PROFILE"
+_PIN_DISABLE_TOKENS = frozenset({"0", "false", "no"})
+
+
+def _parse_pin_bool(value: Any) -> bool:
+    """Fail-open boolean for the pin flag (spec §7: 解析失败视为 true).
+
+    Only an explicit opt-out disables pinning; ``None``, malformed and
+    unknown values all keep the provider pinned (safe default — an
+    unparseable config must not silently detach a provider from its
+    profile).
+    """
+    try:
+        if value is None:
+            return True
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value != 0
+        return str(value).strip().lower() not in _PIN_DISABLE_TOKENS
+    except Exception:
+        return True
+
+
+def _resolve_pin_profile() -> bool:
+    """Read ``SLM_HERMES_PIN_PROFILE`` (default ``"1"``, fail-open)."""
+    try:
+        return _parse_pin_bool(os.environ.get(_PIN_ENV_VAR, "1"))
+    except Exception:
+        return True
 
 
 def _daemon_available() -> bool:
@@ -113,6 +156,9 @@ class SuperLocalMemoryProvider(MemoryProvider):
         self._include_shared: bool = False
         self._cron_skipped: bool = False
         self._init_cancelled: bool = False
+        # Per-request profile pinning — default on, fail-open (spec §7);
+        # ``initialize`` applies the config.yaml ``pin_profile`` override.
+        self._pin_profile: bool = _resolve_pin_profile()
 
         # -- prefetch cache --------------------------------------------------
         self._prefetch_cache: str = ""
@@ -247,6 +293,16 @@ class SuperLocalMemoryProvider(MemoryProvider):
                 "type": "boolean",
                 "default": False,
             },
+            {
+                "key": "pin_profile",
+                "description": (
+                    "Pin every recall/store to mslm_profile via per-request "
+                    "profile_id (immune to mid-session active-profile "
+                    "switches). Disable to follow the active pointer."
+                ),
+                "type": "boolean",
+                "default": True,
+            },
         ]
 
     # -- Engine health check -------------------------------------------------
@@ -308,6 +364,11 @@ class SuperLocalMemoryProvider(MemoryProvider):
         self._include_shared = self._parse_bool(
             config_override.get("include_shared"), False,
         )
+
+        # 3b. Profile pinning — config.yaml override wins over the env
+        # default (same priority order as the other flags); fail-open.
+        if "pin_profile" in config_override:
+            self._pin_profile = _parse_pin_bool(config_override.get("pin_profile"))
 
         # 4. Cron / flush guard — skip model loading for non-interactive contexts
         agent_context = kwargs.get("agent_context", "primary")
@@ -401,6 +462,19 @@ class SuperLocalMemoryProvider(MemoryProvider):
 
     # -- Daemon-routed engine calls -------------------------------------------
 
+    def _pinned_profile_id(self) -> Optional[str]:
+        """The ``profile_id`` to pin on every recall/store, or ``None``.
+
+        Pinning is on by default (spec §7): the daemon-routed call carries
+        ``profile_id`` so traffic stays anchored to ``self._mslm_profile``
+        even if the daemon's active pointer switches mid-session.  Returns
+        ``None`` when pinning is disabled or the profile is unset — callers
+        then omit the parameter and follow the active pointer.
+        """
+        if self._pin_profile and self._mslm_profile:
+            return self._mslm_profile
+        return None
+
     def _engine_recall(self, query: str, limit: int) -> Any:
         """Recall via the unified daemon; ``None`` signals local fallback.
 
@@ -411,12 +485,16 @@ class SuperLocalMemoryProvider(MemoryProvider):
         """
         if not _daemon_available():
             return None
-        qs = urlencode({
+        params = {
             "q": query,
             "limit": limit,
             "include_global": "true" if self._include_global else "false",
             "include_shared": "true" if self._include_shared else "false",
-        })
+        }
+        profile_id = self._pinned_profile_id()
+        if profile_id:
+            params["profile_id"] = profile_id
+        qs = urlencode(params)
         resp = _daemon_api("GET", f"/recall?{qs}", timeout=_DAEMON_RECALL_TIMEOUT)
         if not resp or not resp.get("ok"):
             return None
@@ -456,18 +534,17 @@ class SuperLocalMemoryProvider(MemoryProvider):
         """
         if not _daemon_available():
             return None
-        resp = _daemon_api(
-            "POST",
-            "/remember",
-            {
-                "content": content,
-                "session_id": session_id,
-                "scope": scope,
-                "shared_with": shared_with,
-                "metadata": {"speaker": speaker, "source": "hermes-provider"},
-            },
-            timeout=_DAEMON_STORE_TIMEOUT,
-        )
+        body = {
+            "content": content,
+            "session_id": session_id,
+            "scope": scope,
+            "shared_with": shared_with,
+            "metadata": {"speaker": speaker, "source": "hermes-provider"},
+        }
+        profile_id = self._pinned_profile_id()
+        if profile_id:
+            body["profile_id"] = profile_id
+        resp = _daemon_api("POST", "/remember", body, timeout=_DAEMON_STORE_TIMEOUT)
         if not resp or not resp.get("ok"):
             return None
         return list(resp.get("fact_ids") or [])
@@ -503,6 +580,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
                 query, limit=limit, fast=fast,
                 include_global=self._include_global,
                 include_shared=self._include_shared,
+                profile_id=self._pinned_profile_id(),
             )
             return self._format_recall_results(response)
         except Exception as exc:
@@ -551,6 +629,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
                     query, limit=_PREFETCH_RECALL_LIMIT,
                     include_global=self._include_global,
                     include_shared=self._include_shared,
+                    profile_id=self._pinned_profile_id(),
                 )
                 formatted = self._format_recall_results(response)
                 with self._prefetch_lock:
@@ -613,6 +692,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
                             session_id=session,
                             speaker="user",
                             scope="personal",
+                            profile_id=self._pinned_profile_id(),
                         )
             except Exception as exc:
                 logger.debug("MSLM sync_turn failed: %s", exc)
@@ -650,6 +730,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
                         self._engine.store(
                             content, session_id=self._session_id,
                             scope="personal",
+                            profile_id=self._pinned_profile_id(),
                         )
             except Exception as exc:
                 logger.debug("MSLM on_memory_write failed: %s", exc)
@@ -690,6 +771,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
                         self._engine.store(
                             combined, session_id=self._session_id,
                             speaker="system", scope="personal",
+                            profile_id=self._pinned_profile_id(),
                         )
             except Exception as exc:
                 logger.debug("MSLM pre-compress store failed: %s", exc)
@@ -866,6 +948,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
                 query, limit=limit, fast=fast,
                 include_global=self._include_global,
                 include_shared=self._include_shared,
+                profile_id=self._pinned_profile_id(),
             )
         except Exception as exc:
             logger.debug("MSLM recall failed: %s", exc)
@@ -919,6 +1002,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
                     fact_ids = self._engine.store(
                         content, session_id=self._session_id, scope=scope,
                         shared_with=shared_with,
+                        profile_id=self._pinned_profile_id(),
                     )
         except Exception as exc:
             logger.debug("MSLM store failed: %s", exc)
