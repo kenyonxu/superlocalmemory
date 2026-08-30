@@ -337,7 +337,9 @@ def _open_enrichment_pool() -> None:
         _enrichment_semaphore = threading.Semaphore(_ENRICHMENT_WORKERS)
 
 
-def _enrich_and_release(engine, fact_ids: list[str], budget: float) -> int:
+def _enrich_and_release(
+    engine, fact_ids: list[str], budget: float, profile_id: str | None = None,
+) -> int:
     """Run inline enrichment, releasing the permit only when it is really done.
 
     The permit has to be released here rather than by the caller. A caller that
@@ -345,9 +347,18 @@ def _enrich_and_release(engine, fact_ids: list[str], budget: float) -> int:
     still holding a pool thread — so releasing on the caller's timeout would let
     the next request submit into a pool that is still fully occupied, which is
     the unbounded queueing this permit exists to prevent.
+
+    ``profile_id`` is the write-target of the request these facts came from: a
+    per-request routed write names a profile the engine's active pointer does
+    not point at, and the enrichment lookups are tenant-scoped — without the
+    routed profile the facts resolve to None and every routed write reports
+    "findable by wording" no matter what. ``None`` (legacy path) enriches the
+    active profile.
     """
     try:
-        return engine.enrich_new_facts_now(fact_ids, timeout_s=budget)
+        return engine.enrich_new_facts_now(
+            fact_ids, timeout_s=budget, profile_id=profile_id,
+        )
     finally:
         _enrichment_semaphore.release()
 
@@ -4541,6 +4552,14 @@ def _register_daemon_routes(application: FastAPI) -> None:
             return JSONResponse(
                 _unknown_profile_body(req_profile), status_code=404,
             )
+        if req_profile:
+            # Same one-line-per-routed-request contract as POST /remember:
+            # the recall served a named namespace, silently as far as the
+            # active pointer is concerned.
+            logger.info(
+                "per-request profile routing: %s %s profile=%s",
+                "GET", "/recall", req_profile,
+            )
         if not search_query:
             return {"results": [], "count": 0, "query_type": "none", "retrieval_time_ms": 0}
         # Phase 4b: normalize as_of at HTTP boundary. Invalid → return error.
@@ -4791,6 +4810,16 @@ def _register_daemon_routes(application: FastAPI) -> None:
             return JSONResponse(
                 _unknown_profile_body(req_profile), status_code=404,
             )
+        if req_profile:
+            # One line per routed request, nothing on the legacy path. A
+            # daemon serving a multi-client fleet is otherwise a black box
+            # about which namespace each write actually went to — the
+            # routing is invisible in both the response envelope and the
+            # pointer, which never moves.
+            logger.info(
+                "per-request profile routing: %s %s profile=%s",
+                "POST", "/remember", req_profile,
+            )
         runtime = getattr(application.state, "canonical_remember_runtime", None)
         if runtime is None:
             raise HTTPException(
@@ -4990,6 +5019,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
                         functools.partial(
                             _enrich_and_release,
                             engine, fact_ids, enrich_budget,
+                            profile_id=write_profile,
                         ),
                     )
                 except BaseException:

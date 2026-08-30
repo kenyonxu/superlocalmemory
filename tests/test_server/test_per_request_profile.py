@@ -577,3 +577,176 @@ class TestMcpSurface:
             assert required.count("profile_id") == 0, (
                 f"{name}.profile_id must be optional"
             )
+
+
+# ---------------------------------------------------------------------------
+# Final-review I-1: routed writes get inline enrichment against THEIR profile
+#
+# The daemon's post-write enrichment used the engine's ACTIVE profile for its
+# tenant-scoped lookups, so a routed write's fact_ids resolved to None: every
+# routed response said searchable_by="wording" no matter what the embedder
+# could have done. The write target must be threaded through
+# _enrich_and_release → engine.enrich_new_facts_now.
+# ---------------------------------------------------------------------------
+
+class TestRoutedInlineEnrichment:
+    @staticmethod
+    def _spy_enrich(engine, monkeypatch):
+        """Capture how the daemon calls engine.enrich_new_facts_now."""
+        import superlocalmemory.core.engine as _engine_mod
+
+        real = _engine_mod.MemoryEngine.enrich_new_facts_now
+        captured: dict = {}
+
+        def _spy(fact_ids, **kwargs):
+            captured["fact_ids"] = list(fact_ids)
+            captured["kwargs"] = kwargs
+            # Set on the instance, so no implicit self arrives here.
+            return real(engine, fact_ids, **kwargs)
+
+        monkeypatch.setattr(engine, "enrich_new_facts_now", _spy)
+        return captured
+
+    @staticmethod
+    def _warm_mock_embedder(engine, monkeypatch):
+        """Let the mocked-deps engine actually embed inline.
+
+        The fixture's mock embedder reads cold-and-remote, so the warm guard
+        declines by design; patching the guard is the sanctioned seam that
+        makes an enriched>0 outcome observable (same helper as the engine
+        test file).
+        """
+        monkeypatch.setattr(
+            engine, "_warm_guard_embed",
+            lambda text, *, timeout_s=None: ([0.01] * 768, [0.0] * 768, [1.0] * 768),
+        )
+
+    def test_routed_remember_enriches_against_the_routed_profile(
+        self, daemon, monkeypatch,
+    ) -> None:
+        client, app = daemon
+        engine = app.state.engine
+        active = client.get("/status").json()["profile"]
+        assert active != "b"
+        self._warm_mock_embedder(engine, monkeypatch)
+        captured = self._spy_enrich(engine, monkeypatch)
+
+        response = client.post(
+            "/remember",
+            json={
+                "content": (
+                    "Routed Rowan keeps the relay baton rota for the night "
+                    "shift and files the handover notes."
+                ),
+                "profile_id": "b",
+                "idempotency_key": "route-enrich-b-1",
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["profile"] == "b"
+        assert body["fact_ids"]
+
+        # The daemon threaded the write target into the enrichment call —
+        # before the fix this was always the active profile and the routed
+        # facts resolved to None inside the tenant-scoped lookup.
+        assert captured["kwargs"].get("profile_id") == "b", captured
+        assert captured["fact_ids"] == body["fact_ids"]
+
+        # And the routed rows were genuinely enriched: the receipt reports
+        # meaning-searchable instead of the permanent "wording" the routed
+        # path used to return.
+        assert body["enriched_now"] == body["count"], body
+        assert body["searchable_by"] == "meaning", body
+
+    def test_legacy_remember_enrichment_uses_the_active_profile(
+        self, daemon, monkeypatch,
+    ) -> None:
+        client, app = daemon
+        engine = app.state.engine
+        active = client.get("/status").json()["profile"]
+        self._warm_mock_embedder(engine, monkeypatch)
+        captured = self._spy_enrich(engine, monkeypatch)
+
+        response = client.post(
+            "/remember",
+            json={
+                "content": (
+                    "Legacy Lachlan enriches exactly as before the feature, "
+                    "against the active profile."
+                ),
+                "idempotency_key": "route-enrich-legacy-1",
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["profile"] == active
+        assert captured["kwargs"].get("profile_id") == active, captured
+        assert body["enriched_now"] == body["count"], body
+        assert body["searchable_by"] == "meaning", body
+
+    def test_routed_requests_leave_one_routing_log_line(
+        self, daemon, caplog,
+    ) -> None:
+        """M-2: routed requests are distinguishable in the daemon log.
+
+        One info line per routed request (method, path, profile), nothing on
+        the legacy path — the routing is otherwise invisible: the response
+        envelope names the profile, but the global pointer never moves.
+        """
+        import logging
+
+        client, _ = daemon
+        # The daemon module names its logger without the ".server." segment.
+        with caplog.at_level(
+            logging.INFO, logger="superlocalmemory.unified_daemon",
+        ):
+            routed_write = client.post(
+                "/remember",
+                json={
+                    "content": (
+                        "LogLine Lyra proves routed writes are visible in "
+                        "the daemon log."
+                    ),
+                    "profile_id": "b",
+                    "idempotency_key": "route-logline-b-1",
+                },
+            )
+            routed_read = client.get(
+                "/recall", params={"q": "LogLine Lyra", "profile_id": "b"},
+            )
+            legacy_write = client.post(
+                "/remember",
+                json={
+                    "content": (
+                        "LogLine Lena stays silent on the legacy path."
+                    ),
+                    "idempotency_key": "route-logline-legacy-1",
+                },
+            )
+            legacy_read = client.get(
+                "/recall", params={"q": "LogLine Lena"},
+            )
+
+        assert routed_write.status_code == 200, routed_write.text
+        assert routed_read.status_code == 200, routed_read.text
+        assert legacy_write.status_code == 200, legacy_write.text
+        assert legacy_read.status_code == 200, legacy_read.text
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "per-request profile routing: POST /remember profile=b" in m
+            for m in messages
+        ), f"no routed-write log line in {messages}"
+        assert any(
+            "per-request profile routing: GET /recall profile=b" in m
+            for m in messages
+        ), f"no routed-read log line in {messages}"
+        # Legacy requests stay silent: exactly two routing lines, both for b.
+        routing_lines = [
+            m for m in messages if "per-request profile routing" in m
+        ]
+        assert len(routing_lines) == 2, routing_lines
+        assert all(m.endswith("profile=b") for m in routing_lines), routing_lines
