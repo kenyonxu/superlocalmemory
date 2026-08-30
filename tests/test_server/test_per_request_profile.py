@@ -155,7 +155,7 @@ class TestRouting:
     def test_global_pointer_untouched(self, daemon) -> None:
         client, _ = daemon
         before = client.get("/status").json()
-        client.post(
+        write = client.post(
             "/remember",
             json={
                 "content": (
@@ -166,9 +166,15 @@ class TestRouting:
                 "idempotency_key": "route-pointer-b-1",
             },
         )
-        client.get("/recall", params={"q": "Quartz readiness review", "profile_id": "b"})
+        lookup = client.get(
+            "/recall", params={"q": "Quartz readiness review", "profile_id": "b"},
+        )
         after = client.get("/status").json()
 
+        # The routed calls must have actually succeeded, or the pointer
+        # comparison below would pass vacuously.
+        assert write.status_code == 200, write.text
+        assert lookup.status_code == 200, lookup.text
         assert after["profile"] == before["profile"]
         assert after["profile_generation"] == before["profile_generation"]
 
@@ -248,3 +254,115 @@ class TestRouting:
 
         assert response.status_code == 200, response.text
         assert response.json()["fact_ids"]
+
+    def test_routed_responses_report_the_routed_profile(self, daemon) -> None:
+        """The success envelopes echo the profile that served the request.
+
+        A routed b-profile answer reporting ``"profile": "default"`` (the
+        active snapshot) would tell the caller their memory came from a
+        profile that never saw it. profile_generation stays from the
+        snapshot: it describes global switch state, which per-request
+        routing never moves.
+        """
+        client, _ = daemon
+        status = client.get("/status").json()
+        active = status["profile"]
+
+        remembered = client.post(
+            "/remember",
+            json={
+                "content": (
+                    "Hazel tracks the harbor crane maintenance windows for "
+                    "the coastal crew."
+                ),
+                "profile_id": "b",
+                "idempotency_key": "route-echo-b-1",
+            },
+        )
+        assert remembered.status_code == 200, remembered.text
+        assert remembered.json()["profile"] == "b"
+
+        recalled = client.get(
+            "/recall",
+            params={"q": "Hazel crane maintenance", "profile_id": "b"},
+        )
+        assert recalled.status_code == 200, recalled.text
+        assert recalled.json()["profile"] == "b"
+        assert recalled.json()["profile_generation"] == status["profile_generation"]
+
+        legacy = client.post(
+            "/remember",
+            json={
+                "content": (
+                    "Ivory keeps the inland depot roster on the legacy path."
+                ),
+                "idempotency_key": "route-echo-legacy-1",
+            },
+        )
+        assert legacy.status_code == 200, legacy.text
+        assert legacy.json()["profile"] == active
+
+        legacy_recall = client.get(
+            "/recall", params={"q": "Ivory depot roster"},
+        )
+        assert legacy_recall.status_code == 200, legacy_recall.text
+        assert legacy_recall.json()["profile"] == active
+
+    def test_failed_rebind_rolls_back_routed_writers_and_limits(
+        self, daemon, monkeypatch,
+    ) -> None:
+        """A failed rebind restores the whole binding, not just the writer.
+
+        The routed-handler cache and the writer limits swapped in before
+        replay_pending() must not outlive a rebind that never completed.
+        """
+        from types import SimpleNamespace
+
+        client, app = daemon
+        engine = app.state.engine
+        runtime = app.state.canonical_remember_runtime
+
+        warmed = client.post(
+            "/remember",
+            json={
+                "content": (
+                    "Juniper anchors the joint readiness ledger before the "
+                    "rebind attempt."
+                ),
+                "profile_id": "b",
+                "idempotency_key": "route-rebind-warm-1",
+            },
+        )
+        assert warmed.status_code == 200, warmed.text
+        assert "b" in runtime._routed_writers, (
+            "a routed write must have cached a handler for profile b"
+        )
+        bound_profile = runtime._profile_id
+        bound_limits = (
+            runtime._max_verbatim_chars, runtime._max_ingest_bytes,
+        )
+        bound_generation = runtime._generation
+
+        def _fail_replay():
+            raise RuntimeError("replay failed after rebind")
+
+        monkeypatch.setattr(runtime, "replay_pending", _fail_replay)
+        rebinding = SimpleNamespace(
+            _db=engine._db,
+            _profile_id="a",
+            _config=SimpleNamespace(
+                store=SimpleNamespace(
+                    max_verbatim_chars=99, max_ingest_bytes=99,
+                ),
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="replay failed"):
+            runtime.rebind_engine(rebinding)
+
+        assert runtime._profile_id == bound_profile
+        assert (
+            runtime._max_verbatim_chars, runtime._max_ingest_bytes,
+        ) == bound_limits
+        assert runtime._routed_writers == {}
+        assert runtime._generation == bound_generation

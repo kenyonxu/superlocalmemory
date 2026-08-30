@@ -630,9 +630,13 @@ class RememberRequest(BaseModel):
     metadata: dict | None = None  # v3.4.26: pass-through from MCP pool_store
     idempotency_key: str | None = None
     session_id: str = ""
-    # Optional compare-and-write guard for profile-sensitive clients. The
-    # daemon remains single-profile, so a stale MCP client must fail instead
-    # of silently writing into whichever profile another client selected.
+    # Per-request profile routing (spec section 3/5): a non-empty profile_id
+    # routes THIS ONE write to that profile — pure routing, the ProfileRuntime
+    # active pointer never moves, and an unknown id is a 404 (never an
+    # implicit creation). Empty/absent keeps the legacy path: the active
+    # profile. The old 409 stale-client guard remains in place only for that
+    # empty legacy shape and is unreachable for routed requests (routing
+    # replaced the guard for them).
     profile_id: str = ""
     #: WHEN this memory is about, as distinct from when it was written.
     #:
@@ -4697,7 +4701,13 @@ def _register_daemon_routes(application: FastAPI) -> None:
             profile_snapshot = get_profile_runtime(application.state).snapshot
             return {
                 "ok": True,
-                "profile": profile_snapshot.profile_id,
+                # The profile that actually served this recall: the routed
+                # profile when ?profile_id= named one, else the active one.
+                # Reporting the active profile for a routed request would
+                # tell the caller their b-profile answer came from "default".
+                # profile_generation stays from the snapshot — it describes
+                # global switch state, which per-request routing never moves.
+                "profile": req_profile or profile_snapshot.profile_id,
                 "profile_generation": profile_snapshot.generation,
                 "query": search_query,
                 "query_type": response.query_type,
@@ -4743,14 +4753,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
         # guard keeps its legacy slot below for an empty profile_id, where it
         # is trivially satisfied and unreachable for routed requests.
         req_profile = (req.profile_id or "").strip()
-        if req_profile:
-            if not _daemon_profile_exists(engine, req_profile):
-                from starlette.responses import JSONResponse
-
-                return JSONResponse(
-                    _unknown_profile_body(req_profile), status_code=404,
-                )
-        else:
+        if not req_profile:
             _require_remember_profile(req.profile_id, engine._profile_id)
         # Single write-target id for everything below: the routed profile,
         # or the engine's active profile on the legacy path. Never a 409.
@@ -4777,6 +4780,17 @@ def _register_daemon_routes(application: FastAPI) -> None:
         require_permission(request, Permission.WRITE, profile=write_profile)
         if scope in {"shared", "global"}:
             require_permission(request, Permission.SHARE, profile=write_profile)
+        # Unknown-profile rejection comes AFTER the permission gate. With
+        # existence checked first, a company-mode caller without WRITE could
+        # probe which profile ids exist: 404 for an absent one vs 403 for a
+        # present-but-forbidden one. Permission first keeps both codes intact
+        # while closing the oracle.
+        if req_profile and not _daemon_profile_exists(engine, req_profile):
+            from starlette.responses import JSONResponse
+
+            return JSONResponse(
+                _unknown_profile_body(req_profile), status_code=404,
+            )
         runtime = getattr(application.state, "canonical_remember_runtime", None)
         if runtime is None:
             raise HTTPException(
@@ -5004,6 +5018,11 @@ def _register_daemon_routes(application: FastAPI) -> None:
             searchable = "meaning" if enriched == len(fact_ids) and fact_ids else "wording"
             return {
                 "ok": True,
+                # The profile this write actually landed in: the routed
+                # profile when the request named one, else the active one.
+                # A routed caller must not be told the daemon's active
+                # profile served their write.
+                "profile": write_profile,
                 "fact_ids": fact_ids,
                 "count": len(fact_ids),
                 # Storing a memory and being able to find it again are different

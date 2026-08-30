@@ -412,7 +412,10 @@ class CanonicalRememberRuntime:
             max_ingest_bytes=max_ingest_bytes,
         )
         with self._binding_lock:
-            previous = (self._db, self._profile_id, self._writer)
+            previous = (
+                self._db, self._profile_id, self._writer,
+                self._max_verbatim_chars, self._max_ingest_bytes,
+            )
             self._db = db
             self._profile_id = profile_id
             self._writer = writer
@@ -426,7 +429,15 @@ class CanonicalRememberRuntime:
             self.replay_pending()
         except BaseException:
             with self._binding_lock:
-                self._db, self._profile_id, self._writer = previous
+                # Roll back the WHOLE binding, not just the writer triple: a
+                # stale limits pair or a routed-handler cache built against
+                # the failed binding would outlive the rebind that never
+                # happened.
+                (
+                    self._db, self._profile_id, self._writer,
+                    self._max_verbatim_chars, self._max_ingest_bytes,
+                ) = previous
+                self._routed_writers.clear()
                 self._generation -= 1
             raise
 
