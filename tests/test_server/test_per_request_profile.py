@@ -15,6 +15,7 @@ guard slot, which is unreachable for routed requests.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -366,3 +367,213 @@ class TestRouting:
         ) == bound_limits
         assert runtime._routed_writers == {}
         assert runtime._generation == bound_generation
+
+
+# ---------------------------------------------------------------------------
+# Task 4: the MCP tool surface (spec section 4)
+#
+# remember/recall accept an optional ``profile_id`` and thread it to the
+# daemon's per-request routing (Task 3). Empty keeps the legacy call
+# byte-identical: the parameter must not appear in the daemon request at
+# all when it was not set, and it must be optional in the MCP schema.
+# ---------------------------------------------------------------------------
+
+class _ToolCaptureServer:
+    """Minimal @server.tool() capture, matching the tests/test_mcp convention."""
+
+    def __init__(self) -> None:
+        self.tools: dict[str, object] = {}
+
+    def tool(self, *args, **kwargs):
+        def register(fn):
+            self.tools[fn.__name__] = fn
+            return fn
+        return register
+
+
+def _core_tools() -> dict[str, object]:
+    from unittest.mock import MagicMock
+
+    from superlocalmemory.mcp.tools_core import register_core_tools
+
+    srv = _ToolCaptureServer()
+    register_core_tools(srv, MagicMock())
+    return srv.tools
+
+
+def _ok_pool() -> "MagicMock":
+    from unittest.mock import MagicMock
+
+    pool = MagicMock()
+    pool.store.return_value = {
+        "ok": True, "fact_ids": ["mcp-fact"], "count": 1,
+        "operation_id": "op-mcp", "pending_id": None,
+        "materialization_state": "complete",
+    }
+    pool.recall.return_value = {
+        "ok": True, "results": [{"fact_id": "mcp-fact", "content": "mcp fact",
+                                 "score": 0.9}],
+        "result_count": 1, "query_type": "sandbox",
+    }
+    return pool
+
+
+class TestMcpSurface:
+    def test_remember_tool_accepts_and_routes_profile_id(self, monkeypatch) -> None:
+        """remember(profile_id="b") puts the routing anchor in the daemon body."""
+        import asyncio
+
+        import superlocalmemory.cli.daemon as _d
+
+        captured: dict = {}
+
+        def _request(method, path, body=None, **kwargs):
+            captured.update(method=method, path=path, body=body)
+            return {"ok": True, "fact_ids": ["mcp-fact"], "count": 1,
+                    "status": "stored"}
+
+        monkeypatch.setattr(_d, "is_daemon_running", lambda *a, **k: True)
+        monkeypatch.setattr(_d, "daemon_request", _request)
+
+        remember = _core_tools()["remember"]
+        result = asyncio.run(remember("mcp fact", profile_id="b"))
+
+        assert result["success"] is True, result
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/remember"
+        assert captured["body"]["profile_id"] == "b"
+
+    def test_remember_tool_offline_fallback_threads_profile_id(
+        self, monkeypatch,
+    ) -> None:
+        """The pool.store fallback carries the anchor in worker metadata."""
+        import asyncio
+
+        import superlocalmemory.cli.daemon as _d
+
+        monkeypatch.setattr(_d, "is_daemon_running", lambda *a, **k: False)
+        pool = _ok_pool()
+
+        remember = _core_tools()["remember"]
+        with patch(
+            "superlocalmemory.mcp._daemon_proxy.choose_pool", return_value=pool,
+        ):
+            result = asyncio.run(remember("mcp fact", profile_id="b"))
+
+        assert result["success"] is True, result
+        pool.store.assert_called_once()
+        assert pool.store.call_args.args[1]["profile_id"] == "b"
+
+    def test_remember_tool_legacy_call_has_no_profile_anchor(
+        self, monkeypatch,
+    ) -> None:
+        """No profile_id → the daemon body is the legacy shape, key absent."""
+        import asyncio
+
+        import superlocalmemory.cli.daemon as _d
+
+        captured: dict = {}
+
+        def _request(method, path, body=None, **kwargs):
+            captured.update(method=method, path=path, body=body)
+            return {"ok": True, "fact_ids": ["mcp-fact"], "count": 1,
+                    "status": "stored"}
+
+        monkeypatch.setattr(_d, "is_daemon_running", lambda *a, **k: True)
+        monkeypatch.setattr(_d, "daemon_request", _request)
+
+        remember = _core_tools()["remember"]
+        result = asyncio.run(remember("mcp fact"))
+
+        assert result["success"] is True, result
+        assert "profile_id" not in captured["body"]
+
+    def test_recall_tool_accepts_and_routes_profile_id(self, monkeypatch) -> None:
+        """recall(profile_id="b") threads the anchor to pool.recall."""
+        import asyncio
+
+        import superlocalmemory.cli.daemon as _d
+
+        monkeypatch.setattr(_d, "is_daemon_running", lambda *a, **k: False)
+        pool = _ok_pool()
+
+        recall = _core_tools()["recall"]
+        with patch(
+            "superlocalmemory.mcp._daemon_proxy.choose_pool", return_value=pool,
+        ):
+            result = asyncio.run(recall("mcp fact", profile_id="b"))
+
+        assert result["success"] is True, result
+        assert result["results"], "recall must surface the sandbox hit"
+        assert pool.recall.call_args.kwargs["profile_id"] == "b"
+
+    def test_recall_tool_legacy_call_has_no_profile_anchor(
+        self, monkeypatch,
+    ) -> None:
+        """No profile_id → pool.recall is called without the parameter."""
+        import asyncio
+
+        import superlocalmemory.cli.daemon as _d
+
+        monkeypatch.setattr(_d, "is_daemon_running", lambda *a, **k: False)
+        pool = _ok_pool()
+
+        recall = _core_tools()["recall"]
+        with patch(
+            "superlocalmemory.mcp._daemon_proxy.choose_pool", return_value=pool,
+        ):
+            result = asyncio.run(recall("mcp fact"))
+
+        assert result["success"] is True, result
+        assert "profile_id" not in pool.recall.call_args.kwargs
+
+    def test_daemon_pool_proxy_recall_sends_profile_id_param(
+        self, monkeypatch,
+    ) -> None:
+        """DaemonPoolProxy serializes the anchor into the GET /recall query.
+
+        This is the brief's "verify the proxy passes it through" check made
+        executable: without the parameter the MCP tool's recall cannot reach
+        the daemon's per-request routing at all.
+        """
+        from superlocalmemory.mcp._daemon_proxy import DaemonPoolProxy
+
+        captured: dict = {}
+
+        def _request(method, path, body=None, **kwargs):
+            captured.update(method=method, path=path)
+            return {"ok": True, "results": [], "query_type": "sandbox"}
+
+        monkeypatch.setattr(
+            "superlocalmemory.cli.daemon.daemon_request", _request,
+        )
+
+        proxy = DaemonPoolProxy(port=9999)
+        assert proxy.recall("mcp fact", profile_id="b")["ok"] is True
+        assert captured["method"] == "GET"
+        assert "profile_id=b" in captured["path"]
+
+        # Legacy shape: unset anchor never appears on the wire.
+        assert proxy.recall("mcp fact")["ok"] is True
+        assert "profile_id=" not in captured["path"]
+
+    def test_tool_schema_allows_new_optional_param(self) -> None:
+        """The schema layer exposes profile_id as optional on both tools."""
+        from unittest.mock import MagicMock
+
+        from superlocalmemory.mcp.http_transport import SLMFastMCP
+        from superlocalmemory.mcp.tools_core import register_core_tools
+
+        srv = SLMFastMCP("schema probe")
+        register_core_tools(srv, MagicMock())
+        tools = {t.name: t for t in srv._tool_manager.list_tools()}
+
+        for name in ("remember", "recall"):
+            schema = tools[name].parameters
+            assert "profile_id" in schema["properties"], (
+                f"{name} must expose profile_id"
+            )
+            required = schema.get("required", [])
+            assert required.count("profile_id") == 0, (
+                f"{name}.profile_id must be optional"
+            )
