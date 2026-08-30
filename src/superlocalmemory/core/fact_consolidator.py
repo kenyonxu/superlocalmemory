@@ -189,9 +189,12 @@ def consolidate_facts(
         "DatabaseManager instead (Fix A backward-compat shim active)"
     )
     conn = sqlite3.connect(str(db_or_path))
-    wal_mode = apply_journal_mode(conn).fetchone()
-    if wal_mode and wal_mode[0] != "wal":
-        logger.warning("WAL mode not active, got: %s", wal_mode[0])
+    journal_mode = apply_journal_mode(conn)
+    if journal_mode and journal_mode != resolve_journal_mode():
+        logger.warning(
+            "Journal mode %r not active, got: %r",
+            resolve_journal_mode(), journal_mode,
+        )
     conn.execute("PRAGMA busy_timeout=10000")
     conn.row_factory = sqlite3.Row
 

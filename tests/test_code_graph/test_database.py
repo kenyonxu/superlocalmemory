@@ -71,9 +71,14 @@ class TestDatabaseInit:
         # but our init does create tables which bumps it. Let's check it's ≥ 0.
         assert db.version >= 0
 
-    def test_wal_mode(self, db: CodeGraphDatabase):
+    def test_journal_mode_follows_policy(self, db: CodeGraphDatabase):
+        """Journal mode is policy-driven: storage/journal_policy resolves
+        SLM_JOURNAL_MODE (default delete since the 2026-08-29 change; the
+        store opts back into wal via the env var)."""
+        from superlocalmemory.storage.journal_policy import resolve_journal_mode
+
         rows = db.execute("PRAGMA journal_mode")
-        assert rows[0]["journal_mode"] == "wal"
+        assert rows[0]["journal_mode"] == resolve_journal_mode()
 
 
 class TestNodeCRUD:

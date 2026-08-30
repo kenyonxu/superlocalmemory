@@ -233,7 +233,12 @@ def test_386_canonical_remember_survives_legacy_multiprocess_contention(
     The individual 2s remember deadline is the foreground service contract;
     legacy child processes have an 8s total cap.  Counts prove that contention
     caused neither duplicated work nor silently lost writes.
+
+    WAL-opt-in: concurrent canonical writes + legacy DML + strict RO FTS
+    snapshots is the WAL-era multiprocess design (strict readers never block
+    writers).  Spawned children inherit SLM_JOURNAL_MODE from os.environ.
     """
+    monkeypatch.setenv("SLM_JOURNAL_MODE", "wal")
     harness = _new_harness(tmp_path, monkeypatch)
     harness.runtime.start()
     context = multiprocessing.get_context("spawn")

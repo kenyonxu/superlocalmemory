@@ -130,13 +130,15 @@ CREATE INDEX idx_ao_profile ON action_outcomes(profile_id, settled_at);
 
 def _bootstrap_learning_db(path: Path) -> None:
     with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
+        # No journal_mode pragma: policy default (delete) — a WAL bootstrap
+        # here would force LearningDatabase's apply_journal_mode into a
+        # mode switch that needs an exclusive lock while this with-scoped
+        # connection is still open (closed only by the cycle collector).
         conn.executescript(_LEARNING_SCHEMA)
 
 
 def _bootstrap_memory_db(path: Path) -> None:
     with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_MEMORY_SCHEMA)
 
 

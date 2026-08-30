@@ -19,14 +19,18 @@ import sqlite3
 from superlocalmemory.storage.database import DatabaseManager
 
 
-def test_close_leaves_wal_uncheckpointed(tmp_path) -> None:
+def test_close_leaves_wal_uncheckpointed(tmp_path, monkeypatch) -> None:
     """With NO_CKPT_ON_CLOSE, close() must not checkpoint the WAL.
 
     Observable contract: after writes through the per-call connection model,
     the ``-wal`` sidecar still holds the frames (a checkpointing last-close
     would merge them into the main database file and remove/truncate the
     sidecar). This is the property that makes close() non-blocking.
+
+    WAL-only machinery: opt the store into WAL for this test (the default
+    journal mode is delete since the 2026-08-13 postmortem).
     """
+    monkeypatch.setenv("SLM_JOURNAL_MODE", "wal")
     db = tmp_path / "memory.db"
     mgr = DatabaseManager(db)
     mgr.execute("CREATE TABLE IF NOT EXISTS t (id INTEGER)")

@@ -163,7 +163,14 @@ def test_release_386_128_concurrent_remembers_are_exactly_once_and_queryable(
     The production deadline is the bounded coordination contract.  This test
     does not assert elapsed wall-clock time: each caller is instead subject to
     the same two-second API budget that the daemon exposes to clients.
+
+    WAL-opt-in: the 128-way concurrent submit/read contract is the WAL-era
+    concurrency design (readers never block the single writer).  Under the
+    default DELETE journal mode, contending readers can starve writers past
+    the API budget; the fork's production topology (single canonical writer)
+    does not exercise that fan-in.
     """
+    monkeypatch.setenv("SLM_JOURNAL_MODE", "wal")
     harness = _new_runtime(tmp_path, monkeypatch)
     harness.runtime.start()
     errors: list[BaseException] = []
