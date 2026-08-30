@@ -543,11 +543,17 @@ class MemoryEngine:
         *,
         scope: str = "personal",
         shared_with: list[str] | None = None,
+        profile_id: str | None = None,
     ) -> list[str]:
         """Store content and extract structured facts. Returns fact_ids.
 
         Multi-scope: ``scope`` sets the visibility (personal/shared/global).
         ``shared_with`` is a list of profile_ids for shared scope.
+
+        ``profile_id`` targets a single write at any profile without
+        switching the engine's active profile (same convention as
+        ``recall``): ``None``/``""`` means the active profile, and the
+        active pointer is never mutated by the call.
         """
         self._require_full("store")
         self._ensure_init()
@@ -569,10 +575,18 @@ class MemoryEngine:
             speaker=speaker,
             role=role,
             require_complete=False,
+            profile_id=profile_id,
         )
 
-    def store_fact_direct(self, fact: AtomicFact) -> str:
-        """Durably store a pre-built fact with full enrichment."""
+    def store_fact_direct(
+        self, fact: AtomicFact, *, profile_id: str | None = None,
+    ) -> str:
+        """Durably store a pre-built fact with full enrichment.
+
+        ``profile_id`` follows the ``recall`` convention: ``None``/``""``
+        targets the active profile; an explicit value routes this one
+        write without mutating the engine's active profile.
+        """
         self._require_full("store_fact_direct")
         self._ensure_init()
 
@@ -584,6 +598,7 @@ class MemoryEngine:
             self,
             fact,
             trusted_actor_id=local_trusted_actor_id("python-api-prebuilt"),
+            profile_id=profile_id,
         )
 
     def _warm_guard_embed(
@@ -707,6 +722,7 @@ class MemoryEngine:
     def _attach_vector(
         self, fact_id: str, emb: list[float],
         fmean: float | None, fvar: float | None,
+        *, profile_id: str | None = None,
     ) -> bool:
         """Attach a vector to a stored fact. True only if a search can now find it.
 
@@ -745,11 +761,12 @@ class MemoryEngine:
         whether to finish it. Callers check their budget immediately before
         calling. Bounding the pair itself is a property of the write lock.
         """
+        pid = profile_id or self._profile_id
         projected = False
         store = getattr(self, "_vector_store", None)
         if store is not None and getattr(store, "available", False):
             try:
-                projected = bool(store.upsert(fact_id, self._profile_id, emb))
+                projected = bool(store.upsert(fact_id, pid, emb))
                 if not projected:
                     logger.warning(
                         "vector projection refused for %s — stored but not "
@@ -772,7 +789,9 @@ class MemoryEngine:
                             exc_info=True,
                         )
 
-        if not self._write_canonical_vector(fact_id, emb, fmean, fvar):
+        if not self._write_canonical_vector(
+            fact_id, emb, fmean, fvar, profile_id=pid,
+        ):
             if projected:
                 logger.warning(
                     "canonical vector write failed for %s — undoing the "
@@ -786,13 +805,14 @@ class MemoryEngine:
     def _write_canonical_vector(
         self, fact_id: str, emb: list[float],
         fmean: float | None, fvar: float | None,
+        *, profile_id: str | None = None,
     ) -> bool:
         """Write the vector to ``atomic_facts``. False if it did not land."""
         try:
             self._db.update_fact(
                 fact_id,
                 {"embedding": emb, "fisher_mean": fmean, "fisher_variance": fvar},
-                profile_id=self._profile_id,
+                profile_id=profile_id or self._profile_id,
             )
             return True
         except Exception as exc:
@@ -932,7 +952,7 @@ class MemoryEngine:
         self, content: str, metadata: dict[str, Any] | None = None,
         *, scope: str = "personal", shared_with: list[str] | None = None,
         session_date: str | None = None, speaker: str = "", role: str = "user",
-        index_external: bool = True,
+        index_external: bool = True, profile_id: str | None = None,
     ) -> list[str]:
         """v3.5.5 WRITE-THROUGH: synchronous verbatim insert for IMMEDIATE recall.
 
@@ -956,9 +976,14 @@ class MemoryEngine:
         docstring used to say "~ms, no embedding" and that had stopped being true.
 
         Returns real fact_ids immediately. Quality gate rejects template junk.
+
+        ``profile_id`` follows the ``recall`` convention: ``None``/``""``
+        targets the active profile; an explicit value routes this one
+        write without mutating the engine's active profile.
         """
         self._require_full("store_fast")
         self._ensure_init()
+        pid = profile_id or self._profile_id
         import re as _re
         import uuid as _uuid
         from datetime import datetime, timezone
@@ -986,7 +1011,7 @@ class MemoryEngine:
             pass  # gate module missing → store verbatim (never block a write)
         now = datetime.now(timezone.utc).isoformat()
         record = MemoryRecord(
-            profile_id=self._profile_id, content=content,
+            profile_id=pid, content=content,
             session_date=session_date or now[:10],
             session_id=(metadata or {}).get("session_id", ""),
             speaker=speaker,
@@ -1019,7 +1044,7 @@ class MemoryEngine:
         emb, fmean, fvar = self._warm_guard_embed(fact_text)
         fact = AtomicFact(
             fact_id=_uuid.uuid4().hex[:16], memory_id=record.memory_id,
-            profile_id=self._profile_id, content=fact_text,
+            profile_id=pid, content=fact_text,
             fact_type=FactType.EPISODIC, entities=ents,
             observation_date=session_date or now[:10],
             confidence=0.7, importance=0.5,
@@ -1036,13 +1061,13 @@ class MemoryEngine:
         # Attach the vector so the meaning-based channel finds it now, through
         # the same ordering every other write path uses.
         if emb and index_external:
-            self._attach_vector(fact.fact_id, emb, fmean, fvar)
+            self._attach_vector(fact.fact_id, emb, fmean, fvar, profile_id=pid)
         # Persist BM25 tokens too (covers the in-memory rank_bm25 fallback path).
         if index_external:
             try:
                 bm25 = getattr(self._retrieval_engine, "_bm25", None)
                 if bm25:
-                    bm25.add(fact.fact_id, fact_text, self._profile_id)
+                    bm25.add(fact.fact_id, fact_text, pid)
             except Exception:
                 pass
         return [fact.fact_id]
