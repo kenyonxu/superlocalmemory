@@ -5,6 +5,13 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## mslm 4.2.0+ — per-request profile routing (2026-08-30)
+- remember/recall accept an optional profile_id: the operation routes to that
+  namespace with zero global-pointer side effects; omitting it is byte-for-byte
+  legacy behavior. Hermes provider pins to its configured profile by default
+  (SLM_HERMES_PIN_PROFILE=0 to follow the active pointer). Adjacency cache is
+  now a profile-keyed LRU (SLM_ADJ_CACHE_PROFILES, default 3).
+
 ## mslm 4.2.0+upstream — merged upstream SuperLocalMemory 4.0.10–4.1.11 (2026-08-30)
 - Merge of 120 upstream commits (merge-base dcbdc850, upstream 4.0.9):
   profile-scoped loop ledgers, recall engagement learning (on by default),

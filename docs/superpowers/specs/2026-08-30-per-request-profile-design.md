@@ -1,7 +1,7 @@
 # per-request profile 规格设计
 
 - 日期:2026-08-30
-- 状态:设计已批准(四节逐节确认);2026-08-30 增补:hermes provider pin 适配纳入范围(§7,用户确认)
+- 状态:已实施(2026-08-31),见 CHANGELOG
 - 需求书:`docs/deepmaid-per-request-profile-需求书-2026-08-30.md`(R1–R6;deepmaid 侧消费验收见其 §6)
 - 关联:方案 B(EmbeddingService daemon fallback)同模式的 fork 先行 → 上游 PR 路线
 - 上游基线:本 fork 落后 upstream/main 120 提交;实施前必须先 merge upstream(实施计划 Task 0)
