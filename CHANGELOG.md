@@ -5,6 +5,12 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## mslm 4.2.0+ — list_recent per-request profile + /list repair (2026-09-01)
+- list_recent and /list accept an optional profile_id (same semantics as remember/recall);
+  content is no longer truncated upstream; importance is included; empty namespaces return
+  {success:true, results:[], count:0} without abstain. Repairs the daemon /list endpoint
+  whose engine.list_facts call was missing since the 4.1.x engine refactor.
+
 ## mslm 4.2.0+ — per-request profile routing (2026-08-30)
 - remember/recall accept an optional profile_id: the operation routes to that
   namespace with zero global-pointer side effects; omitting it is byte-for-byte
