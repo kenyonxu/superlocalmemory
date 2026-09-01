@@ -534,23 +534,72 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     @admits(OperationKind.RECALL)
-    async def list_recent(limit: int = CANONICAL_LIST_LIMIT) -> dict:
-        """List most recently stored memories, newest first."""
+    async def list_recent(limit: int = CANONICAL_LIST_LIMIT, profile_id: str = "") -> dict:
+        """List most recently stored memories, newest first.
+
+        ``profile_id`` is an explicit namespace anchor: a non-empty value
+        serves this one list against that profile (which must already
+        exist); empty = the active profile, byte-identical to the legacy
+        call. The active-profile pointer is never read or moved by it.
+        Result items carry the complete (untruncated) content plus
+        ``importance`` — the same shape the daemon's ``GET /list`` returns.
+        """
         try:
+            import asyncio
+            import urllib.parse
+
+            from superlocalmemory.cli.daemon import (
+                daemon_request,
+                is_daemon_running,
+            )
+
+            # Daemon-first, same convention as remember/delete/update: the
+            # resident daemon owns the canonical read.
+            if await asyncio.to_thread(is_daemon_running):
+                params: dict[str, object] = {"limit": limit}
+                if profile_id:
+                    # Per-request profile routing (spec section 5): the anchor
+                    # is only put on the wire when the caller set it, so an
+                    # unset profile_id keeps the legacy request byte-identical.
+                    # An unknown id is the daemon's 404, which daemon_request
+                    # surfaces as None — a plain failure envelope here.
+                    params["profile_id"] = profile_id
+                result = await asyncio.to_thread(
+                    daemon_request,
+                    "GET",
+                    "/list?" + urllib.parse.urlencode(params),
+                )
+                if isinstance(result, dict) and result.get("success"):
+                    results = result.get("results", [])
+                    return {
+                        "success": True,
+                        "results": results,
+                        "count": int(result.get("count", len(results))),
+                        # Envelope honesty, same convention as the daemon:
+                        # echo the profile the read was actually served from.
+                        "profile": result.get("profile", ""),
+                    }
+                return {
+                    "success": False,
+                    "retryable": True,
+                    "error": "resident daemon rejected the list operation",
+                }
+
             engine = get_engine()
-            pid = await _runtime_profile(get_engine)
-            # v3.6.12 (search-2): push the limit into the query — was loading the
-            # ENTIRE facts table (deserializing every 768-float embedding) just
-            # to return the top N. get_all_facts preserves created_at DESC order.
-            facts = engine._db.get_all_facts(pid, limit=limit)
+            # Offline fallback (spec section 5): None/"" lists the engine's
+            # active profile — byte-identical to the pre-feature behaviour;
+            # an explicit id routes this one read without mutating engine
+            # state. engine.list_facts pushes the limit into SQL.
+            facts = engine.list_facts(limit=limit, profile_id=profile_id or None)
             items = []
             for f in facts:
                 items.append({
                     "fact_id": f.fact_id,
-                    "content": f.content[:120],
+                    "content": f.content,  # complete, never truncated
                     "fact_type": f.fact_type.value,
                     "created_at": f.created_at,
                     "session_id": f.session_id,
+                    "importance": round(f.importance, 3),
                 })
             return {"success": True, "results": items, "count": len(items)}
         except Exception as exc:

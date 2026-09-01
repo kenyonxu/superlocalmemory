@@ -16,6 +16,7 @@ namespace is a plain success with zero results, never an abstain.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 
 import pytest
@@ -198,3 +199,210 @@ class TestListRecentRouting:
         assert body["count"] == 0
         assert body["profile"] == "c"
         assert "abstain" not in body
+
+
+# ---------------------------------------------------------------------------
+# MCP tool surface: optional profile_id + result completeness
+# ---------------------------------------------------------------------------
+
+
+class _McpServerHarness:
+    """Real-MCPServer harness for the core tool surface.
+
+    Schema assertions read the live FastMCP-generated ``inputSchema`` (the
+    upstream convention: the schema is derived from the registered
+    signature); calls dispatch to the registered, admission-decorated
+    function exactly as a connected MCP client would invoke it.
+    """
+
+    def __init__(self, engine) -> None:
+        from mcp.server.mcpserver import MCPServer
+
+        from superlocalmemory.mcp.tools_core import register_core_tools
+
+        self._server = MCPServer("test-list-recent")
+        register_core_tools(self._server, lambda: engine)
+        self._tools = {
+            tool.name: tool
+            for tool in self._server._tool_manager.list_tools()
+        }
+
+    def call_tool(self, name: str, args: dict) -> dict:
+        return asyncio.run(self._tools[name].fn(**args))
+
+    def get_tool_schema(self, name: str) -> dict:
+        return {"inputSchema": self._tools[name].parameters}
+
+
+@pytest.fixture
+def mcp_server(engine_with_mock_deps, monkeypatch):
+    """Core tools registered against the mock-deps engine, daemon offline.
+
+    The daemon probe is pinned OFF by default so these tests can never
+    reach a resident daemon; daemon-path tests install their own double.
+    """
+    monkeypatch.setattr(
+        "superlocalmemory.cli.daemon.is_daemon_running", lambda: False,
+    )
+    return _McpServerHarness(engine_with_mock_deps)
+
+
+def _mcp_seed_profile(engine, name: str) -> None:
+    """FK on atomic_facts → profiles; same INSERT OR IGNORE convention as
+    tests/test_core/test_engine_list_facts.py."""
+    engine._db.execute(
+        "INSERT OR IGNORE INTO profiles (profile_id, name) VALUES (?, ?)",
+        (name, name),
+    )
+
+
+def _mcp_store(engine, fact_id: str, content: str,
+               profile_id: str | None = None) -> None:
+    from superlocalmemory.storage.models import AtomicFact, FactType
+
+    fact = AtomicFact(
+        fact_id=fact_id, memory_id="", content=content,
+        fact_type=FactType.SEMANTIC, entities=["Probe"], confidence=0.9,
+    )
+    engine.store_fact_direct(fact, profile_id=profile_id)
+
+
+class TestMcpListRecent:
+    def test_tool_accepts_profile_id(
+        self, mcp_server, engine_with_mock_deps,
+    ) -> None:
+        _mcp_seed_profile(engine_with_mock_deps, "b")
+        _mcp_store(
+            engine_with_mock_deps, "mcp-b-1", LONG_CONTENT, profile_id="b",
+        )
+        _mcp_store(
+            engine_with_mock_deps, "mcp-act-1", "active profile probe",
+        )
+
+        result = mcp_server.call_tool(
+            "list_recent", {"limit": 5, "profile_id": "b"},
+        )
+
+        assert result["success"] is True
+        assert result["results"]
+        assert "importance" in result["results"][0]
+        # Routing is real: only profile b's facts come back.
+        ids = {item["fact_id"] for item in result["results"]}
+        assert ids == {"mcp-b-1"}, (
+            f"profile_id='b' must list only b's facts, got {ids!r}"
+        )
+        # The engine's active pointer never moves.
+        assert engine_with_mock_deps._profile_id != "b"
+
+    def test_schema_allows_optional_param(self, mcp_server) -> None:
+        schema = mcp_server.get_tool_schema("list_recent")
+        assert "profile_id" in schema["inputSchema"]["properties"]
+        assert "profile_id" not in schema["inputSchema"].get("required", [])
+
+    def test_no_profile_id_legacy(
+        self, mcp_server, engine_with_mock_deps,
+    ) -> None:
+        _mcp_store(
+            engine_with_mock_deps, "mcp-leg-1", "legacy active probe",
+        )
+
+        result = mcp_server.call_tool("list_recent", {"limit": 5})
+
+        assert result["success"] is True
+        ids = {item["fact_id"] for item in result["results"]}
+        assert "mcp-leg-1" in ids
+
+    def test_content_not_truncated_and_fields_complete(
+        self, mcp_server, engine_with_mock_deps,
+    ) -> None:
+        # LONG_CONTENT is well past the pre-fix 120-char MCP truncation
+        # boundary, so a truncated result cannot accidentally equal it.
+        _mcp_store(engine_with_mock_deps, "mcp-long-1", LONG_CONTENT)
+
+        result = mcp_server.call_tool("list_recent", {"limit": 5})
+
+        assert result["success"] is True
+        item = next(
+            i for i in result["results"] if i["fact_id"] == "mcp-long-1"
+        )
+        assert item["content"] == LONG_CONTENT
+        assert "importance" in item
+        # Pre-existing fields are preserved, not dropped.
+        assert item["fact_type"]
+        assert item["created_at"]
+        assert "session_id" in item
+
+    def test_daemon_path_routes_profile_id(
+        self, mcp_server, monkeypatch,
+    ) -> None:
+        calls: list[tuple] = []
+
+        def _fake_daemon_request(method, path, body=None, **_kwargs):
+            calls.append((method, path, body))
+            return {
+                "success": True,
+                "results": [{
+                    "fact_id": "d-1",
+                    "content": LONG_CONTENT,
+                    "fact_type": "semantic",
+                    "created_at": "2026-09-01T00:00:00",
+                    "importance": 0.7,
+                }],
+                "count": 1,
+                "profile": "b",
+            }
+
+        monkeypatch.setattr(
+            "superlocalmemory.cli.daemon.is_daemon_running", lambda: True,
+        )
+        monkeypatch.setattr(
+            "superlocalmemory.cli.daemon.daemon_request",
+            _fake_daemon_request,
+        )
+
+        result = mcp_server.call_tool(
+            "list_recent", {"limit": 5, "profile_id": "b"},
+        )
+
+        assert result["success"] is True
+        assert result["results"][0]["fact_id"] == "d-1"
+        assert result["profile"] == "b"
+        assert calls, "daemon-running must route through the daemon /list"
+        method, path, _ = calls[0]
+        assert method == "GET"
+        assert path.startswith("/list?")
+        assert "limit=5" in path
+        assert "profile_id=b" in path
+
+    def test_daemon_path_omits_unset_profile_id(
+        self, mcp_server, monkeypatch,
+    ) -> None:
+        """An unset anchor keeps the legacy daemon request byte-identical:
+        no profile_id key is put on the wire at all."""
+        calls: list[tuple] = []
+
+        def _fake_daemon_request(method, path, body=None, **_kwargs):
+            calls.append((method, path, body))
+            return {
+                "success": True, "results": [], "count": 0,
+                "profile": "default",
+            }
+
+        monkeypatch.setattr(
+            "superlocalmemory.cli.daemon.is_daemon_running", lambda: True,
+        )
+        monkeypatch.setattr(
+            "superlocalmemory.cli.daemon.daemon_request",
+            _fake_daemon_request,
+        )
+
+        result = mcp_server.call_tool("list_recent", {"limit": 5})
+
+        assert result["success"] is True
+        list_calls = [c for c in calls if c[1].startswith("/list")]
+        assert len(list_calls) == 1, (
+            f"expected exactly one daemon /list request, got {calls!r}"
+        )
+        method, path, _ = list_calls[0]
+        assert method == "GET"
+        assert "profile_id" not in path
