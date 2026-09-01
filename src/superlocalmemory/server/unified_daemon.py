@@ -54,7 +54,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, field_validator
 
-from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
+from superlocalmemory.core.config import CANONICAL_LIST_LIMIT, CANONICAL_RECALL_LIMIT
 from superlocalmemory.infra.daemon_identity import (
     DaemonDescriptor,
     build_descriptor,
@@ -5452,21 +5452,50 @@ def _register_daemon_routes(application: FastAPI) -> None:
         return result
 
     @application.get("/list")
-    async def list_facts(limit: int = 50):
+    async def list_facts(
+        limit: int = CANONICAL_LIST_LIMIT, profile_id: str = "",
+    ):
         _update_activity()
         engine = _get_engine_or_503()
+        # Spec section 5: an empty profile_id is the legacy active-profile
+        # read; a non-empty one is pure routing — it never moves the active
+        # pointer or its generation, and an unknown id is a 404, never an
+        # implicit creation.
+        req_profile = (profile_id or "").strip()
+        if req_profile:
+            if not _daemon_profile_exists(engine, req_profile):
+                from starlette.responses import JSONResponse
+
+                return JSONResponse(
+                    _unknown_profile_body(req_profile), status_code=404,
+                )
+            # Same one-line-per-routed-request contract as /remember /recall.
+            logger.info(
+                "per-request profile routing: %s %s profile=%s",
+                "GET", "/list", req_profile,
+            )
         try:
-            facts = engine.list_facts(limit=limit)
+            facts = engine.list_facts(
+                limit=limit, profile_id=req_profile or None,
+            )
             items = [
                 {
-                    "content": f.content[:100],
-                    "fact_type": getattr(f.fact_type, 'value', str(f.fact_type)),
-                    "created_at": (f.created_at or "")[:19],
                     "fact_id": f.fact_id,
+                    "content": f.content,  # complete, never truncated
+                    "fact_type": getattr(f.fact_type, "value", str(f.fact_type)),
+                    "created_at": f.created_at,
+                    "importance": getattr(f, "importance", None),
                 }
                 for f in facts
             ]
-            return {"results": items, "count": len(items)}
+            return {
+                "success": True,
+                "results": items,
+                "count": len(items),
+                # Envelope honesty, same convention as /recall: echo the
+                # profile the read was actually served from.
+                "profile": req_profile or engine.profile_id,
+            }
         except Exception as exc:
             raise HTTPException(500, detail=str(exc))
 
