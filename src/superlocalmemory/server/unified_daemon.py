@@ -5485,6 +5485,8 @@ def _register_daemon_routes(application: FastAPI) -> None:
                     "fact_type": getattr(f.fact_type, "value", str(f.fact_type)),
                     "created_at": f.created_at,
                     "importance": getattr(f, "importance", None),
+                    # Spec section 3 parity with the offline engine path.
+                    "session_id": getattr(f, "session_id", ""),
                 }
                 for f in facts
             ]

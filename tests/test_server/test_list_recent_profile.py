@@ -93,12 +93,15 @@ def daemon(engine_with_mock_deps):
 
 def _remember(
     client, content: str, profile_id: str = "", key: str = "",
+    session_id: str = "",
 ) -> None:
     payload: dict = {"content": content}
     if profile_id:
         payload["profile_id"] = profile_id
     if key:
         payload["idempotency_key"] = key
+    if session_id:
+        payload["session_id"] = session_id
     response = client.post("/remember", json=payload)
     assert response.status_code == 200, response.text
 
@@ -186,6 +189,21 @@ class TestListRecentRouting:
         # Empty profile_id lands on the active profile, as before.
         assert body["profile"] == active
         assert any(item["content"] == LONG_CONTENT for item in body["results"])
+
+    def test_items_carry_session_id(self, daemon) -> None:
+        # Spec section 3: session_id is a pre-existing item field the daemon
+        # path must preserve, same as the offline engine path.
+        client, _ = daemon
+        _remember(
+            client, LONG_CONTENT, profile_id="b",
+            key="list-session-b-1", session_id="sess-list-1",
+        )
+
+        response = client.get("/list", params={"profile_id": "b", "limit": 1})
+
+        assert response.status_code == 200, response.text
+        item = response.json()["results"][0]
+        assert item["session_id"] == "sess-list-1"
 
     def test_empty_namespace_success(self, daemon) -> None:
         client, _ = daemon
