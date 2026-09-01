@@ -330,6 +330,34 @@ class TestMcpListRecent:
         ids = {item["fact_id"] for item in result["results"]}
         assert "mcp-leg-1" in ids
 
+    def test_offline_return_echoes_profile(
+        self, mcp_server, engine_with_mock_deps,
+    ) -> None:
+        """Envelope parity with the daemon path: the offline return echoes
+        the profile the read was actually served from — the explicit anchor
+        when set, the engine's active profile when unset (same resolution as
+        the daemon /list route's ``req_profile or engine.profile_id``)."""
+        _mcp_seed_profile(engine_with_mock_deps, "b")
+        _mcp_store(
+            engine_with_mock_deps, "mcp-echo-b", "routed echo probe",
+            profile_id="b",
+        )
+
+        routed = mcp_server.call_tool(
+            "list_recent", {"limit": 5, "profile_id": "b"},
+        )
+
+        assert routed["success"] is True
+        assert routed["profile"] == "b", routed
+
+        legacy = mcp_server.call_tool("list_recent", {"limit": 5})
+
+        assert legacy["success"] is True
+        assert legacy["profile"] == engine_with_mock_deps.profile_id, legacy
+        # The echo is real: it names the profile that actually served the
+        # read, and the routed call never moved the active pointer.
+        assert engine_with_mock_deps.profile_id != "b"
+
     def test_content_not_truncated_and_fields_complete(
         self, mcp_server, engine_with_mock_deps,
     ) -> None:

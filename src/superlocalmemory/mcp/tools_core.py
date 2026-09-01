@@ -601,7 +601,15 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     "session_id": f.session_id,
                     "importance": round(f.importance, 3),
                 })
-            return {"success": True, "results": items, "count": len(items)}
+            return {
+                "success": True,
+                "results": items,
+                "count": len(items),
+                # Envelope parity with the daemon path above and the
+                # daemon's /list route: echo the profile the read was
+                # actually served from.
+                "profile": profile_id or engine.profile_id,
+            }
         except Exception as exc:
             logger.exception("list_recent failed")
             return {"success": False, "error": str(exc)}
