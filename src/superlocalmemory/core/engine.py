@@ -25,7 +25,9 @@ from pathlib import Path
 from typing import Any
 
 from superlocalmemory.core.session_identity import synthetic_session_id
-from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT, SLMConfig
+from superlocalmemory.core.config import (
+    CANONICAL_LIST_LIMIT, CANONICAL_RECALL_LIMIT, SLMConfig,
+)
 from superlocalmemory.core.engine_capabilities import Capabilities, CapabilityError
 from superlocalmemory.core.modes import get_capabilities
 from superlocalmemory.storage.models import (
@@ -1229,6 +1231,25 @@ class MemoryEngine:
             logger.debug("recall outcome ticket skipped: %s", exc)
 
         return response
+
+    def list_facts(
+        self, limit: int = CANONICAL_LIST_LIMIT, *,
+        profile_id: str | None = None,
+    ) -> list[AtomicFact]:
+        """List facts newest-first, optionally routed to a specific profile.
+
+        ``profile_id`` follows the ``recall`` convention: ``None``/``""``
+        lists the active profile (byte-identical to the pre-feature
+        behaviour); an explicit value routes this one read without mutating
+        the engine's active profile.
+
+        ``limit`` is pushed down to the SQL layer — the database applies it
+        as a LIMIT over the newest-first ordering, so an ``n`` here never
+        materializes more than ``n`` rows.
+        """
+        self._ensure_init()
+        pid = profile_id or self._profile_id
+        return self._db.get_all_facts(pid, limit=limit)
 
     def _session_for_signals(self, session_id: str | None) -> str:
         """The name to file this call's outcome under.
