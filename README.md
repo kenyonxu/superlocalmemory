@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/branding/mslm-banner.png" alt="MSLM — Multi-Scope Local Memory：让 AI 不再遗忘的多层次本地记忆系统" width="100%"/>
+</p>
+
 <h1 align="center">MSLM</h1>
 
 <p align="center"><strong>Multi-Scope Local Memory</strong><br/>
