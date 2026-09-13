@@ -255,6 +255,13 @@ def serialize_recall_response(
                 else (lifecycle or ""),
             "access_count": getattr(fact, "access_count", 0),
             "created_at": _created,
+            # Spec provenance_kind section 5 (R4): governance echo on every
+            # recall surface — daemon HTTP, MCP, CLI, and the WorkerPool
+            # fallback all pass through this chokepoint, so the two keys
+            # arrive everywhere at once. Additive; None/"personal" for every
+            # pre-feature fact, and old consumers ignore unknown keys.
+            "scope": getattr(fact, "scope", "personal"),
+            "provenance_kind": getattr(fact, "provenance_kind", None),
             # T-inject: human-relative age so consumers (and the LLM) can
             # weigh recency without doing date math. "" when undated.
             "age_label": relative_age(_created, _now),

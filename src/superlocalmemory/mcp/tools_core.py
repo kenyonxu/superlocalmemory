@@ -564,6 +564,11 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     "fact_type": f.fact_type.value,
                     "confidence": round(f.confidence, 3),
                     "date": f.observation_date,
+                    # Spec provenance_kind section 5: governance echo on
+                    # every read surface — additive, same keys as recall,
+                    # fetch, and list_recent items.
+                    "scope": getattr(f, "scope", "personal"),
+                    "provenance_kind": getattr(f, "provenance_kind", None),
                 })
             return {"success": True, "results": items, "count": len(items)}
         except Exception as exc:
@@ -609,6 +614,11 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     "referenced_date": f.referenced_date,
                     "lifecycle": f.lifecycle.value,
                     "access_count": f.access_count,
+                    # Spec provenance_kind section 5: governance echo on
+                    # every read surface — additive, same keys as recall,
+                    # search, and list_recent items.
+                    "scope": getattr(f, "scope", "personal"),
+                    "provenance_kind": getattr(f, "provenance_kind", None),
                 })
             if not items:
                 return {
@@ -630,7 +640,10 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     @admits(OperationKind.RECALL)
-    async def list_recent(limit: int = CANONICAL_LIST_LIMIT, profile_id: str = "") -> dict:
+    async def list_recent(
+        limit: int = CANONICAL_LIST_LIMIT, profile_id: str = "",
+        scope: str = "", provenance_kind: str = "",
+    ) -> dict:
         """List most recently stored memories, newest first.
 
         ``profile_id`` is an explicit namespace anchor: a non-empty value
@@ -639,10 +652,31 @@ def register_core_tools(server, get_engine: Callable) -> None:
         call. The active-profile pointer is never read or moved by it.
         Result items carry the complete (untruncated) content plus
         ``importance`` — the same shape the daemon's ``GET /list`` returns.
+
+        Curation-scan filters (spec section 5): ``scope`` narrows to one
+        exact scope value (personal/shared/global) and ``provenance_kind``
+        to one tag (world/private/curated/legacy), with the literal
+        ``"null"`` explicitly selecting the not-yet-tagged rows. Both are
+        validated strictly here — an out-of-vocabulary value is a
+        structured failure, never a silently empty page — and travel on
+        the wire only when set, so an unset filter keeps the legacy
+        request byte-identical.
         """
         try:
             import asyncio
             import urllib.parse
+
+            from superlocalmemory.storage.models import parse_scan_filters
+
+            try:
+                scan_scope, scan_kind, scan_kind_null = parse_scan_filters(
+                    scope, provenance_kind,
+                )
+            except ValueError as exc:
+                # Deterministic client error: retrying the identical call
+                # can never succeed, and the offline path has no daemon 400
+                # to lean on — validate once at the tool boundary.
+                return {"success": False, "retryable": False, "error": str(exc)}
 
             from superlocalmemory.cli.daemon import (
                 daemon_request,
@@ -660,6 +694,15 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     # An unknown id is the daemon's 404, which daemon_request
                     # surfaces as None — a plain failure envelope here.
                     params["profile_id"] = profile_id
+                # Scan filters ride the same convention (validated above,
+                # threaded only when set): scope=<v> and the provenance_kind
+                # literal the daemon re-parses, including "null".
+                if scan_scope:
+                    params["scope"] = scan_scope
+                if scan_kind:
+                    params["provenance_kind"] = scan_kind
+                elif scan_kind_null:
+                    params["provenance_kind"] = "null"
                 result = await asyncio.to_thread(
                     daemon_request,
                     "GET",
@@ -685,8 +728,14 @@ def register_core_tools(server, get_engine: Callable) -> None:
             # Offline fallback (spec section 5): None/"" lists the engine's
             # active profile — byte-identical to the pre-feature behaviour;
             # an explicit id routes this one read without mutating engine
-            # state. engine.list_facts pushes the limit into SQL.
-            facts = engine.list_facts(limit=limit, profile_id=profile_id or None)
+            # state. engine.list_facts pushes the limit AND the scan filters
+            # into SQL, so limit still bounds the matched set.
+            facts = engine.list_facts(
+                limit=limit, profile_id=profile_id or None,
+                scope=scan_scope,
+                provenance_kind=scan_kind,
+                provenance_kind_null=scan_kind_null,
+            )
             items = []
             for f in facts:
                 items.append({
@@ -696,6 +745,10 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     "created_at": f.created_at,
                     "session_id": f.session_id,
                     "importance": round(f.importance, 3),
+                    # Spec section 5: governance echo, same shape the
+                    # daemon's /list items already carry.
+                    "scope": getattr(f, "scope", "personal"),
+                    "provenance_kind": getattr(f, "provenance_kind", None),
                 })
             return {
                 "success": True,

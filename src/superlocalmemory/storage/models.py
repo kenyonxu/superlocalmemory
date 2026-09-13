@@ -191,6 +191,54 @@ def validate_provenance_kind(value: str | None) -> str | None:
     return v if v in PROVENANCE_KINDS else None
 
 
+#: Closed vocabulary for ``scope`` on the curation-scan face. Mirrors the
+#: write-path values accepted around the codebase (personal / shared /
+#: global), kept here so the scan parser and its vocabulary travel together.
+VALID_SCOPES: Final[frozenset[str]] = frozenset({
+    "personal", "shared", "global",
+})
+
+
+def parse_scan_filters(
+    scope: str, provenance_kind: str,
+) -> tuple[str | None, str | None, bool]:
+    """Parse curation-scan filter literals into the DB-layer triple.
+
+    The scan API surface (``GET /list`` and the MCP ``list_recent`` tool,
+    spec section 5) speaks string literals: ``provenance_kind=null``
+    explicitly selects the not-yet-tagged rows — the operator's SQL
+    spelling, because "untagged" and "no filter" must never be the same
+    answer. Returns ``(scope, provenance_kind, provenance_kind_null)``
+    ready for ``get_all_facts`` / ``engine.list_facts``; unset filters come
+    back as ``None`` so the caller's request stays byte-identical.
+
+    Strict by contract: the scan is the controlled curation face, so an
+    out-of-vocabulary scope or tag raises ``ValueError`` instead of
+    filtering to zero rows — a misspelled filter returning an empty page
+    reads exactly like "nothing needs curation". The lenient write path is
+    deliberately the other way round (spec decision table).
+    """
+    normalized_scope = (scope or "").strip().lower()
+    if normalized_scope and normalized_scope not in VALID_SCOPES:
+        raise ValueError(
+            f"scope must be one of {sorted(VALID_SCOPES)}"
+        )
+    normalized_kind = (provenance_kind or "").strip().lower()
+    kind_null = normalized_kind == "null"
+    if not kind_null and normalized_kind and (
+        normalized_kind not in PROVENANCE_KINDS
+    ):
+        raise ValueError(
+            "provenance_kind must be one of "
+            f"{sorted(PROVENANCE_KINDS)} or 'null'"
+        )
+    return (
+        normalized_scope or None,
+        None if (kind_null or not normalized_kind) else normalized_kind,
+        kind_null,
+    )
+
+
 @dataclass
 class AtomicFact:
     """Structured fact extracted from memory — the PRIMARY retrieval unit.

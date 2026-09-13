@@ -1256,10 +1256,13 @@ class MemoryEngine:
     def list_facts(
         self, limit: int = CANONICAL_LIST_LIMIT, *,
         profile_id: str | None = None,
+        scope: str | None = None,
+        provenance_kind: str | None = None,
+        provenance_kind_null: bool = False,
     ) -> list[AtomicFact]:
         """List facts newest-first, optionally routed to a specific profile.
 
-        ``profile_id`` follows the ``recall`` convention: ``None``/``""``
+        ``profile_id`` follows the ``recall`` convention: ``None``/``"``
         lists the active profile (byte-identical to the pre-feature
         behaviour); an explicit value routes this one read without mutating
         the engine's active profile.
@@ -1267,10 +1270,23 @@ class MemoryEngine:
         ``limit`` is pushed down to the SQL layer — the database applies it
         as a LIMIT over the newest-first ordering, so an ``n`` here never
         materializes more than ``n`` rows.
+
+        Curation-scan filters (M052, spec section 5): ``scope`` narrows to
+        one exact scope value, ``provenance_kind`` to one tag, and
+        ``provenance_kind_null`` selects the not-yet-tagged rows. All are
+        optional, composable, and applied in SQL (never post-filtered, so
+        ``limit`` still bounds the matched set). The engine adds no
+        vocabulary knowledge of its own — callers validate at their boundary
+        (strictly, on the scan face) before threading values here.
         """
         self._ensure_init()
         pid = profile_id or self._profile_id
-        return self._db.get_all_facts(pid, limit=limit)
+        return self._db.get_all_facts(
+            pid, limit=limit,
+            scope=scope,
+            provenance_kind=provenance_kind,
+            provenance_kind_null=provenance_kind_null,
+        )
 
     def _session_for_signals(self, session_id: str | None) -> str:
         """The name to file this call's outcome under.

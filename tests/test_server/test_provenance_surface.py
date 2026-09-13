@@ -762,6 +762,353 @@ class TestMcpUpdateDeleteProfileRouting:
         delete = _core_tools()["delete_memory"]
         result = asyncio.run(delete("mcp-fact", "agent-a"))
 
-        assert result["success"] is True, result
+        assert result["success"] is True
         assert captured["method"] == "DELETE"
         assert captured["path"] == "/api/memories/mcp-fact"
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (spec section 5): read-surface echo + curation-scan filtering.
+#
+# Echo: every read tool's result items carry ``scope`` and
+# ``provenance_kind`` additively — an old consumer that ignores unknown
+# keys sees no difference. The four read surfaces: recall (one shared
+# serializer chokepoint serves the daemon route, MCP, CLI, and the
+# WorkerPool fallback), search, fetch, and list_recent (daemon
+# passthrough + the offline item builder).
+#
+# Scan filtering: /list and MCP list_recent accept ``scope`` /
+# ``provenance_kind`` filters; the literal ``provenance_kind=null``
+# explicitly selects the not-yet-tagged rows. Out-of-vocabulary values
+# are rejected strictly — the scan is the controlled curation face, the
+# write path is the forgiving one (spec decision table).
+# ---------------------------------------------------------------------------
+
+
+def _seed_sync(engine, content, *, scope="personal", provenance_kind=None):
+    """Seed one fully-enriched fact through the synchronous canonical path.
+
+    Recall and search read materialized artifacts (embeddings, BM25
+    tokens); the daemon write path defers those to the background
+    materializer, and an echo test that races it flakes. The synchronous
+    ``require_complete=True`` entry drives the same canonical_store with
+    enrichment finished before the read.
+    """
+    from superlocalmemory.core.engine_ingestion import (
+        canonical_store,
+        local_trusted_actor_id,
+    )
+
+    return canonical_store(
+        engine, content, source_type="python-api",
+        trusted_actor_id=local_trusted_actor_id("python-api"),
+        scope=scope, provenance_kind=provenance_kind,
+        require_complete=True,
+    )
+
+
+def _offline_daemon(monkeypatch):
+    """Pin the MCP daemon probes to OFFLINE.
+
+    ``is_daemon_running`` reaches for the resident daemon on its port; on a
+    dev box one is running, and an offline-path test must never ask it for
+    anything (or leak its answers into an assertion).
+    """
+    import superlocalmemory.cli.daemon as _d
+
+    monkeypatch.setattr(_d, "is_daemon_running", lambda *a, **k: False)
+
+
+def _core_tools_bound(engine):
+    """Core MCP tools bound to a real engine (the offline read tools)."""
+    from superlocalmemory.mcp.tools_core import register_core_tools
+
+    srv = _ToolCaptureServer()
+    register_core_tools(srv, lambda: engine)
+    return srv.tools
+
+
+class TestReadEcho:
+    def test_recall_results_carry_scope_and_provenance_kind(
+        self, daemon,
+    ) -> None:
+        client, app = daemon
+        _seed_sync(
+            app.state.engine,
+            "The harbor echo charter is tagged world evidence at "
+            "global scope.",
+            scope="global", provenance_kind="world",
+        )
+        listed = client.get("/list", params={"limit": 1}).json()["results"]
+        fid = listed[0]["fact_id"]
+
+        response = client.get(
+            "/recall", params={"q": "harbor echo charter"},
+        )
+
+        assert response.status_code == 200, response.text
+        match = next(
+            (
+                item for item in response.json()["results"]
+                if item["fact_id"] == fid
+            ),
+            None,
+        )
+        assert match is not None, response.json()["results"]
+        assert match["scope"] == "global"
+        assert match["provenance_kind"] == "world"
+
+    def test_search_carries_both(self, daemon, monkeypatch) -> None:
+        import asyncio
+
+        client, app = daemon
+        _seed_sync(
+            app.state.engine,
+            "The beacon calibration log is curated world evidence.",
+            scope="global", provenance_kind="curated",
+        )
+        _offline_daemon(monkeypatch)
+        search = _core_tools_bound(app.state.engine)["search"]
+
+        result = asyncio.run(search("beacon calibration"))
+
+        assert result["success"] is True, result
+        assert result["results"], "the seeded fact must be findable"
+        assert result["results"][0]["scope"] == "global"
+        assert result["results"][0]["provenance_kind"] == "curated"
+
+    def test_fetch_carries_both(self, daemon, monkeypatch) -> None:
+        import asyncio
+
+        client, app = daemon
+        client.post("/remember", json={
+            "content": (
+                "The quayside pump rota carries a world tag into the "
+                "fetch echo."
+            ),
+            "scope": "global",
+            "provenance_kind": "world",
+            "idempotency_key": "prov-echo-fetch-1",
+        })
+        fid = _newest(client)["fact_id"]
+        _offline_daemon(monkeypatch)
+        fetch = _core_tools_bound(app.state.engine)["fetch"]
+
+        result = asyncio.run(fetch(fid))
+
+        assert result["success"] is True, result
+        assert result["results"][0]["fact_id"] == fid
+        assert result["results"][0]["scope"] == "global"
+        assert result["results"][0]["provenance_kind"] == "world"
+
+    def test_list_recent_offline_carries_both(
+        self, daemon, monkeypatch,
+    ) -> None:
+        import asyncio
+
+        client, app = daemon
+        client.post("/remember", json={
+            "content": (
+                "The night-watch lantern ledger carries its governance "
+                "tag into the list echo."
+            ),
+            "scope": "global",
+            "provenance_kind": "world",
+            "idempotency_key": "prov-echo-list-1",
+        })
+        _offline_daemon(monkeypatch)
+        list_recent = _core_tools_bound(app.state.engine)["list_recent"]
+
+        result = asyncio.run(list_recent(limit=5))
+
+        assert result["success"] is True, result
+        newest = result["results"][0]
+        assert newest["scope"] == "global"
+        assert newest["provenance_kind"] == "world"
+
+
+def _seed_scan_set(client) -> None:
+    """The canonical curation-scan fixture: 4 global + 1 personal.
+
+    Global: one world-tagged, one curated-tagged, two untagged. Personal:
+    one world-tagged — a fact that must never leak into a scope=global
+    scan, but must match a tag-only scan.
+    """
+    seeds = (
+        ("prov-scan-world", "global", "world"),
+        ("prov-scan-curated", "global", "curated"),
+        ("prov-scan-untagged-a", "global", None),
+        ("prov-scan-untagged-b", "global", None),
+        ("prov-scan-personal-world", "personal", "world"),
+    )
+    for key, scope, kind in seeds:
+        body = {
+            "content": (
+                f"The {key} dredging record files under the curation "
+                "scan fixture."
+            ),
+            "scope": scope,
+            "idempotency_key": key,
+        }
+        if kind is not None:
+            body["provenance_kind"] = kind
+        response = client.post("/remember", json=body)
+        assert response.status_code == 200, response.text
+
+
+class TestCurationScan:
+    def test_no_filter_returns_everything(self, daemon) -> None:
+        client, _ = daemon
+        _seed_scan_set(client)
+
+        response = client.get("/list", params={"limit": 50})
+
+        assert response.status_code == 200, response.text
+        # Compatibility anchor: without filter params the scan is the
+        # legacy unfiltered list — every seeded row, in one page.
+        assert response.json()["count"] >= 5
+
+    def test_filter_scope_global(self, daemon) -> None:
+        client, _ = daemon
+        _seed_scan_set(client)
+
+        response = client.get("/list", params={"scope": "global"})
+
+        assert response.status_code == 200, response.text
+        results = response.json()["results"]
+        assert all(f["scope"] == "global" for f in results)
+        assert len(results) == 4
+
+    def test_filter_provenance_null(self, daemon) -> None:
+        client, _ = daemon
+        _seed_scan_set(client)
+
+        response = client.get(
+            "/list",
+            params={"scope": "global", "provenance_kind": "null"},
+        )
+
+        assert response.status_code == 200, response.text
+        results = response.json()["results"]
+        assert len(results) == 2
+        assert all(f["provenance_kind"] is None for f in results)
+
+    def test_filter_provenance_world(self, daemon) -> None:
+        client, _ = daemon
+        _seed_scan_set(client)
+
+        response = client.get(
+            "/list",
+            params={"scope": "global", "provenance_kind": "world"},
+        )
+
+        assert response.status_code == 200, response.text
+        results = response.json()["results"]
+        assert len(results) == 1
+        assert results[0]["provenance_kind"] == "world"
+
+        # A tag-only scan (no scope) crosses scopes: both world facts.
+        tag_only = client.get(
+            "/list", params={"provenance_kind": "world"},
+        )
+        assert tag_only.status_code == 200, tag_only.text
+        assert len(tag_only.json()["results"]) == 2
+
+    def test_out_of_vocabulary_scan_400(self, daemon) -> None:
+        client, _ = daemon
+
+        bad_kind = client.get(
+            "/list", params={"provenance_kind": "garbage"},
+        )
+        assert bad_kind.status_code == 400, bad_kind.text
+
+        bad_scope = client.get("/list", params={"scope": "bogus"})
+        assert bad_scope.status_code == 400, bad_scope.text
+
+
+class TestMcpListRecentScanFilters:
+    """list_recent threads the curation-scan filters, wire + offline.
+
+    Wire convention identical to profile_id: the filter params travel ONLY
+    when the caller set them, so the legacy request stays byte-identical.
+    Out-of-vocabulary is a structured non-retryable failure at the tool
+    boundary — the offline path has no daemon 400 to lean on, and a
+    misspelled filter must never read as an empty store.
+    """
+
+    @staticmethod
+    def _capture_daemon(monkeypatch):
+        import superlocalmemory.cli.daemon as _d
+
+        captured: dict = {}
+
+        def _request(method, path, body=None, **kwargs):
+            captured.update(method=method, path=path)
+            return {"success": True, "results": [], "count": 0,
+                    "profile": "a"}
+
+        monkeypatch.setattr(_d, "is_daemon_running", lambda *a, **k: True)
+        monkeypatch.setattr(_d, "daemon_request", _request)
+        return captured
+
+    def test_filters_thread_on_the_wire(self, monkeypatch) -> None:
+        import asyncio
+
+        captured = self._capture_daemon(monkeypatch)
+        list_recent = _core_tools()["list_recent"]
+
+        result = asyncio.run(
+            list_recent(scope="global", provenance_kind="null"),
+        )
+
+        assert result["success"] is True, result
+        assert captured["method"] == "GET"
+        assert "scope=global" in captured["path"]
+        assert "provenance_kind=null" in captured["path"]
+
+    def test_legacy_call_has_no_filter_params(self, monkeypatch) -> None:
+        import asyncio
+
+        captured = self._capture_daemon(monkeypatch)
+        list_recent = _core_tools()["list_recent"]
+
+        result = asyncio.run(list_recent())
+
+        assert result["success"] is True, result
+        from superlocalmemory.core.config import CANONICAL_LIST_LIMIT
+        assert captured["path"] == f"/list?limit={CANONICAL_LIST_LIMIT}"
+
+    def test_offline_filter_selects_rows(self, daemon, monkeypatch) -> None:
+        import asyncio
+
+        client, app = daemon
+        _seed_scan_set(client)
+        _offline_daemon(monkeypatch)
+        list_recent = _core_tools_bound(app.state.engine)["list_recent"]
+
+        result = asyncio.run(
+            list_recent(scope="global", provenance_kind="null", limit=50),
+        )
+
+        assert result["success"] is True, result
+        results = result["results"]
+        assert len(results) == 2
+        assert all(f["provenance_kind"] is None for f in results)
+        assert all(f["scope"] == "global" for f in results)
+
+    def test_out_of_vocabulary_is_structured_failure(
+        self, monkeypatch,
+    ) -> None:
+        import asyncio
+
+        list_recent = _core_tools()["list_recent"]
+
+        for kwargs in (
+            {"scope": "bogus"},
+            {"provenance_kind": "garbage"},
+        ):
+            result = asyncio.run(list_recent(**kwargs))
+            assert result["success"] is False, (kwargs, result)
+            # A deterministic client error: retrying the identical call
+            # can never succeed.
+            assert result.get("retryable") is False, (kwargs, result)

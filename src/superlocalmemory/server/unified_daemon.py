@@ -1055,7 +1055,8 @@ def _recall_keyword_fallback(
     results = []
     try:
         rows = engine._db.execute(
-            "SELECT fact_id, content, confidence FROM atomic_facts "
+            "SELECT fact_id, content, confidence, scope, provenance_kind "
+            "FROM atomic_facts "
             "WHERE profile_id = ? AND content LIKE ? "
             "ORDER BY confidence DESC LIMIT ?",
             (profile_id or engine.profile_id, f"%{query}%", limit),
@@ -1068,6 +1069,10 @@ def _recall_keyword_fallback(
                 "score": None, "relevance_score": None, "ranking_score": None,
                 "confidence": d.get("confidence"),
                 "rank_position": pos,
+                # Spec section 5: the governance echo rides the degraded
+                # path too — same additive keys as the full recall surface.
+                "scope": d.get("scope") or "personal",
+                "provenance_kind": d.get("provenance_kind"),
             })
     except Exception as exc:
         logger.warning("recall keyword fallback failed (non-fatal): %s", exc)
@@ -5551,9 +5556,24 @@ def _register_daemon_routes(application: FastAPI) -> None:
     @application.get("/list")
     async def list_facts(
         limit: int = CANONICAL_LIST_LIMIT, profile_id: str = "",
+        scope: str = "", provenance_kind: str = "",
     ):
         _update_activity()
         engine = _get_engine_or_503()
+        # Curation-scan filters (spec section 5): string literals on the
+        # query face — ``provenance_kind=null`` explicitly selects the
+        # not-yet-tagged rows. Strictly validated: the scan is the
+        # controlled curation face, so out-of-vocabulary values are a 400,
+        # never a silently empty page (the lenient write path is the
+        # forgiving one by design).
+        from superlocalmemory.storage.models import parse_scan_filters
+
+        try:
+            scan_scope, scan_kind, scan_kind_null = parse_scan_filters(
+                scope, provenance_kind,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         # Spec section 5: an empty profile_id is the legacy active-profile
         # read; a non-empty one is pure routing — it never moves the active
         # pointer or its generation, and an unknown id is a 404, never an
@@ -5574,6 +5594,9 @@ def _register_daemon_routes(application: FastAPI) -> None:
         try:
             facts = engine.list_facts(
                 limit=limit, profile_id=req_profile or None,
+                scope=scan_scope,
+                provenance_kind=scan_kind,
+                provenance_kind_null=scan_kind_null,
             )
             items = [
                 {
