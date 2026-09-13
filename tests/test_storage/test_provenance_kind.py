@@ -107,6 +107,102 @@ def _seed(db: DatabaseManager) -> None:
     ))
 
 
+class TestMaterializerSurvival:
+    """Task-2 handoff regression: the queryable→final promotion keeps the tag.
+
+    The daemon materializer promotes the already-queryable receipt in place
+    through ``store_pipeline``'s fixed-column UPDATE. That UPDATE deliberately
+    omits the governance columns (scope / shared_with / provenance_kind): an
+    ``UPDATE SET`` only touches listed columns, so the values written at
+    submit survive the promotion. These tests pin that property — a future
+    full-row rewrite of the promotion would silently null every tag on every
+    daemon-materialized fact, and must fail here instead.
+    """
+
+    def _row(self, engine, fact_id: str) -> dict:
+        rows = engine._db.execute(
+            "SELECT provenance_kind, scope, shared_with, "
+            "canonical_entities_json, embedding "
+            "FROM atomic_facts WHERE fact_id = ?",
+            (fact_id,),
+        )
+        assert rows, "promoted fact row must exist"
+        return dict(rows[0])
+
+    def test_daemon_materializer_promotion_keeps_tag_and_scope(
+        self, engine_with_mock_deps,
+    ):
+        """Queryable write → forced materializer pass → governance columns intact.
+
+        Mirrors the daemon's two-phase shape exactly: ``require_complete=False``
+        commits the queryable receipt (tag set), then the background
+        materializer's own entry point (``IngestionCommand.materialize``) runs
+        the promotion.
+        """
+        from superlocalmemory.core.engine_ingestion import (
+            build_engine_ingestion_command,
+            canonical_store,
+            local_trusted_actor_id,
+        )
+        from superlocalmemory.core.ingestion_command import IngestionState
+
+        engine = engine_with_mock_deps
+        receipt = canonical_store(
+            engine,
+            "Aurelia keeps the lighthouse ledger for the northern reef",
+            source_type="python-api",
+            trusted_actor_id=local_trusted_actor_id("python-api"),
+            scope="shared",
+            shared_with=("harbormaster",),
+            provenance_kind="world",
+            require_complete=False,
+            return_receipt=True,
+        )
+        fact_id = receipt.fact_ids[0]
+
+        # The queryable phase already carries the tag (submit wrote it).
+        before = self._row(engine, fact_id)
+        assert before["provenance_kind"] == "world"
+        assert before["scope"] == "shared"
+
+        # The exact promotion pass the daemon worker runs on a queryable
+        # receipt (the fixed-column UPDATE in store_pipeline).
+        command = build_engine_ingestion_command(engine)
+        result = command.materialize(receipt.operation_id)
+        assert result.state is IngestionState.COMPLETE
+
+        after = self._row(engine, fact_id)
+        # The promotion really ran: the enrichment columns materialized
+        # (the queryable stub is written without them).
+        assert after["embedding"] not in (None, b"", "")
+        assert after["canonical_entities_json"] not in (None, "", "[]")
+        # Governance columns survive the fixed-column promotion UPDATE.
+        assert after["provenance_kind"] == "world"
+        assert after["scope"] == "shared"
+        assert "harbormaster" in (after["shared_with"] or "")
+
+    def test_require_complete_promotion_keeps_tag(self, engine_with_mock_deps):
+        """``require_complete=True`` drives submit+materialize in one call —
+        the synchronous contract the Python API exposes. Same survival
+        property, asserted straight off the durable row."""
+        from superlocalmemory.core.engine_ingestion import (
+            canonical_store,
+            local_trusted_actor_id,
+        )
+        from tests.conftest import force_sync_enrichment
+
+        engine = force_sync_enrichment(engine_with_mock_deps)
+        fact_ids = engine.store(
+            "Bramwell charts the tide windows for the southern approach",
+            provenance_kind="curated",
+        )
+        assert fact_ids, "synchronous store must produce a fact"
+        row = self._row(engine, fact_ids[0])
+        assert row["embedding"] not in (None, b"", "")
+        assert row["provenance_kind"] == "curated"
+        assert row["scope"] == "personal"
+
+
 class TestDBFiltering:
     def test_get_all_facts_scope_filter(self, tmp_path):
         db = _db(tmp_path)

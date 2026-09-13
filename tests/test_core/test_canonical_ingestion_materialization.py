@@ -1364,6 +1364,9 @@ def test_public_python_store_routes_through_canonical_ingestion_and_preserves_co
         # Per-request profile routing (spec §4): the public entry forwards
         # its kwarg; None resolves to the engine's active profile.
         profile_id=None,
+        # Governance tag (provenance_kind spec, section 4): the public entry
+        # threads the tag the same way; None leaves the fact untagged.
+        provenance_kind=None,
     )
 
 

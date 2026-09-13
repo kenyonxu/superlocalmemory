@@ -154,7 +154,11 @@ import pytest
 #: This constant sat at 48 while M049 shipped, so the whole file was failing —
 #: nothing noticed because the full suite had not been run since. Keep it equal
 #: to the trailing serial of the last migration.
-_EXPECTED_SCHEMA_VERSION: int = 51
+#: 52 as of mslm 4.2.0+: +M052_provenance_kind_column (memory.db, the
+#: controlled governance tag). Additive only — one nullable TEXT column with
+#: no default and no data rewrite — but the ceiling still moves because the
+#: convention is "trailing serial, always" (see _schema_version.py).
+_EXPECTED_SCHEMA_VERSION: int = 52
 
 #: Total migrations in the MIGRATIONS + DEFERRED_MIGRATIONS catalogue.
 #: M001–M043 with M008 absent = 42 total.
@@ -171,7 +175,10 @@ _EXPECTED_SCHEMA_VERSION: int = 51
 # bandit_plays.shown_fact_ids) and +M045_fact_outcome_score (memory.db, the
 # per-fact outcome score). Both additive columns/tables; neither rewrites an
 # existing row, so 4.0.5 forward-compat is unaffected.
-_EXPECTED_MIGRATION_COUNT: int = 50
+# 51 as of mslm 4.2.0+: +M052_provenance_kind_column (memory.db). Additive
+# nullable column; backward-compat review done with the M015 pinned-column
+# precedent (fresh installs get it from the base schema, upgrades from here).
+_EXPECTED_MIGRATION_COUNT: int = 51
 
 #: Path to an installed reference package's migrations directory, if one exists.
 #:

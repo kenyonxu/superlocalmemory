@@ -545,8 +545,10 @@ class MemoryEngine:
         *,
         scope: str = "personal",
         shared_with: list[str] | None = None,
-        profile_id: str | None = None,
+        # profile_id stays the LAST keyword: the signature-contract tests pin
+        # it there so no later param can ever shift positional callers.
         provenance_kind: str | None = None,
+        profile_id: str | None = None,
     ) -> list[str]:
         """Store content and extract structured facts. Returns fact_ids.
 
@@ -979,8 +981,10 @@ class MemoryEngine:
         self, content: str, metadata: dict[str, Any] | None = None,
         *, scope: str = "personal", shared_with: list[str] | None = None,
         session_date: str | None = None, speaker: str = "", role: str = "user",
-        index_external: bool = True, profile_id: str | None = None,
+        index_external: bool = True,
         provenance_kind: str | None = None,
+        # profile_id stays LAST (signature contract, same as store/recall).
+        profile_id: str | None = None,
     ) -> list[str]:
         """v3.5.5 WRITE-THROUGH: synchronous verbatim insert for IMMEDIATE recall.
 
@@ -1255,10 +1259,12 @@ class MemoryEngine:
 
     def list_facts(
         self, limit: int = CANONICAL_LIST_LIMIT, *,
-        profile_id: str | None = None,
         scope: str | None = None,
         provenance_kind: str | None = None,
         provenance_kind_null: bool = False,
+        # profile_id stays the LAST keyword: the signature-contract tests pin
+        # it there so no later param can ever shift positional callers.
+        profile_id: str | None = None,
     ) -> list[AtomicFact]:
         """List facts newest-first, optionally routed to a specific profile.
 

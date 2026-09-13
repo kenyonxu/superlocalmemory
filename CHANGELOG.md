@@ -5,6 +5,13 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## mslm 4.2.0+ — provenance_kind controlled tagging (2026-09-13)
+- AtomicFact gains a controlled `provenance_kind` tag (world/private/curated/legacy,
+  default null): remember accepts it, update_memory migrates scope and annotates in
+  place with profile_id threading, all read surfaces echo scope+provenance_kind, and
+  daemon /list + MCP list_recent support curation-scan filtering (scope, provenance_kind,
+  provenance_kind=null). Vocabulary is generic; SLM carries no platform rules.
+
 ## mslm 4.2.0+upstream — merged upstream SuperLocalMemory 4.1.12–4.1.17 (2026-09-13)
 
 ## mslm 4.2.0+ — list_recent per-request profile + /list repair (2026-09-01)
