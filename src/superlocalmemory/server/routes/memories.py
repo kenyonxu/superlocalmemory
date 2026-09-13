@@ -1604,7 +1604,10 @@ async def edit_memory(request: Request, fact_id: str, profile_id: str = ""):
             raise HTTPException(status_code=400, detail="content is required")
 
         req_profile = (profile_id or "").strip()
-        engine, active_profile, hook_context = _authorize_memory_mutation(
+        # NOTE: the second return value is the EFFECTIVE profile (the routed
+        # one when set, else the engine's active profile) — the engine's own
+        # active pointer stays available as engine.profile_id.
+        engine, target_profile, hook_context = _authorize_memory_mutation(
             request,
             "update",
             fact_id,
@@ -1612,7 +1615,6 @@ async def edit_memory(request: Request, fact_id: str, profile_id: str = ""):
             run_pre_hook=False,
             profile_id=req_profile or None,
         )
-        target_profile = req_profile or active_profile
         if req_profile:
             rejection = _routed_profile_rejection(engine, req_profile)
             if rejection is not None:
@@ -1620,6 +1622,31 @@ async def edit_memory(request: Request, fact_id: str, profile_id: str = ""):
             logger.info(
                 "per-request profile routing: PATCH /api/memories/{fact_id} "
                 "profile=%s", req_profile,
+            )
+        if new_content and req_profile and req_profile != engine.profile_id:
+            # Pre-flight rejection BEFORE any durable mutation: the curation
+            # fields would commit against the routed profile, but the content
+            # correction that follows can only resolve against the ACTIVE
+            # profile (the canonical correction writer binds it) — a 404
+            # after the curation landed would be a status lying about a
+            # committed write. Curation-only bodies route fine; content
+            # corrections stay active-profile-bound.
+            from starlette.responses import JSONResponse
+
+            return JSONResponse(
+                {
+                    "success": False,
+                    "error": {
+                        "code": "routed_content_correction_unsupported",
+                        "profile_id": req_profile,
+                        "message": (
+                            "content corrections run on the daemon's active "
+                            "profile; route a curation-only body "
+                            "(scope/provenance_kind) or drop profile_id"
+                        ),
+                    },
+                },
+                status_code=409,
             )
         if curation and curation.get("scope") in {"shared", "global"}:
             from superlocalmemory.access.rbac import Permission

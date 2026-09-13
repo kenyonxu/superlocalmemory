@@ -1047,6 +1047,11 @@ def _propose_correction_successor(
         profile_id=profile_id,
         scope=str(source.get("scope") or "personal"),
         shared_with=json.loads(source["shared_with"]) if source.get("shared_with") else None,
+        # Governance tag (provenance_kind spec, fix round 1): the successor
+        # inherits the predecessor's tag the same way it inherits scope — a
+        # curator fixing content and tagging in one request must not end
+        # with an untagged live fact once the correction is applied.
+        provenance_kind=source.get("provenance_kind"),
         content=content,
         fact_type=FactType(str(source.get("fact_type") or "semantic")),
         entities=json.loads(source["entities_json"]) if source.get("entities_json") else [],

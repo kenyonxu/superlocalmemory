@@ -295,6 +295,206 @@ class TestUpdateMemoryProvenance:
         assert response.status_code == 404, response.text
         assert _newest(client, profile_id="b")["provenance_kind"] is None
 
+    def test_content_revision_successor_inherits_tag_and_scope(self, daemon) -> None:
+        """Fix round 1, finding 1: the successor carries the curation state.
+
+        A curator fixing content and tagging in one call must not end with
+        an untagged live fact: the successor copies scope/shared_with from
+        the predecessor row, and provenance_kind travels the same way.
+        """
+        import json as _json
+
+        client, app = daemon
+        client.post("/remember", json={
+            "content": (
+                "The untagged conveyor inspection rota waits for its "
+                "content revision and governance tag."
+            ),
+            "idempotency_key": "prov-upd-successor-1",
+        })
+        fid = _newest(client)["fact_id"]
+
+        response = client.patch(f"/api/memories/{fid}", json={
+            "content": (
+                "The revised conveyor inspection rota carries its "
+                "governance tag through the correction lineage."
+            ),
+            "provenance_kind": "curated",
+            "scope": "global",
+        })
+
+        assert response.status_code == 202, response.text
+        successor = response.json()["successor_fact_id"]
+        assert successor and successor != fid
+        rows = app.state.engine._db.execute(
+            "SELECT scope, shared_with, provenance_kind FROM atomic_facts "
+            "WHERE fact_id = ?",
+            (successor,),
+        )
+        assert rows, "the 202 must disclose a persisted successor row"
+        assert rows[0]["scope"] == "global"
+        assert rows[0]["provenance_kind"] == "curated"
+        assert _json.loads(rows[0]["shared_with"] or "[]") == []
+
+    def test_routed_content_correction_rejected_before_any_write(self, daemon) -> None:
+        """Fix round 1, finding 2: no partial write on a routed content edit.
+
+        The curation fields of a routed request must not commit when the
+        content correction that follows can only resolve against the ACTIVE
+        profile — the pre-flight rejects the whole request before any
+        durable mutation, so the status never lies about a committed write.
+        """
+        client, _ = daemon
+        client.post("/remember", json={
+            "content": (
+                "Doris keeps the northern depot roster and its review "
+                "schedule for profile b."
+            ),
+            "profile_id": "b",
+            "idempotency_key": "prov-upd-preflight-b-1",
+        })
+        fid = _newest(client, profile_id="b")["fact_id"]
+        before = client.get("/status").json()
+
+        response = client.patch(
+            f"/api/memories/{fid}?profile_id=b",
+            json={
+                "content": (
+                    "The revised northern depot roster carries a routed "
+                    "content correction attempt."
+                ),
+                "provenance_kind": "curated",
+                "scope": "global",
+            },
+        )
+
+        assert 400 <= response.status_code < 500, response.text
+        body = response.json()
+        assert body.get("error", {}).get("code") == (
+            "routed_content_correction_unsupported"
+        )
+        # Nothing landed: the addressed fact is byte-identical, and the
+        # active-profile pointer never moved.
+        fact = _newest(client, profile_id="b")
+        assert fact["fact_id"] == fid
+        assert fact["provenance_kind"] is None
+        assert fact["scope"] == "personal"
+        after = client.get("/status").json()
+        assert after["profile"] == before["profile"]
+        assert after["profile_generation"] == before["profile_generation"]
+
+    def test_clear_tag_with_json_null_literal(self, daemon) -> None:
+        """Fix round 1, finding 3b: JSON null clears the tag, like ""."""
+        client, _ = daemon
+        client.post("/remember", json={
+            "content": (
+                "The tagged harbor pilot rotation carries a world tag "
+                "until a curator clears it with a JSON null."
+            ),
+            "provenance_kind": "world",
+            "idempotency_key": "prov-upd-null-clear-1",
+        })
+        fid = _newest(client)["fact_id"]
+
+        cleared = client.patch(
+            f"/api/memories/{fid}", json={"provenance_kind": None},
+        )
+
+        assert cleared.status_code == 200, cleared.text
+        assert _newest(client)["provenance_kind"] is None
+
+    def test_migrate_to_shared_with_shared_with(self, daemon) -> None:
+        """Fix round 1, finding 3c: shared scope rides the unified PATCH.
+
+        Parity with PATCH /api/memories/{id}/scope: shared stores its
+        shared_with as a JSON array, and shared without the list is a 400.
+        """
+        import json as _json
+
+        client, app = daemon
+        client.post("/remember", json={
+            "content": (
+                "The quartermaster inventory ledger migrates to the "
+                "shared team scope through the unified revision route."
+            ),
+            "idempotency_key": "prov-upd-shared-1",
+        })
+        fid = _newest(client)["fact_id"]
+
+        migrated = client.patch(f"/api/memories/{fid}", json={
+            "scope": "shared", "shared_with": "team-alpha, team-beta",
+        })
+        assert migrated.status_code == 200, migrated.text
+
+        rows = app.state.engine._db.execute(
+            "SELECT scope, shared_with FROM atomic_facts WHERE fact_id = ?",
+            (fid,),
+        )
+        assert rows[0]["scope"] == "shared"
+        assert _json.loads(rows[0]["shared_with"]) == ["team-alpha", "team-beta"]
+
+        missing_list = client.patch(
+            f"/api/memories/{fid}", json={"scope": "shared"},
+        )
+        assert missing_list.status_code == 400, missing_list.text
+
+
+class TestDeleteMemoryProfileRouting:
+    """Fix round 1, finding 3a: the routed DELETE at route level.
+
+    Real TestClient daemon traffic (not an MCP wire mock): a routed delete
+    removes only the routed profile's fact, and an unknown routed profile
+    is the structured 404 envelope, never an implicit creation.
+    """
+
+    def test_routed_delete_removes_only_the_routed_profiles_fact(
+        self, daemon,
+    ) -> None:
+        client, app = daemon
+        client.post("/remember", json={
+            "content": (
+                "The routed ledger entry belongs to profile b and its "
+                "curators alone until it is deleted."
+            ),
+            "profile_id": "b",
+            "idempotency_key": "prov-del-route-b-1",
+        })
+        client.post("/remember", json={
+            "content": (
+                "The active-profile ledger entry outlives a delete that "
+                "was routed elsewhere."
+            ),
+            "idempotency_key": "prov-del-active-1",
+        })
+        doomed = _newest(client, profile_id="b")["fact_id"]
+        survivor = _newest(client)
+
+        response = client.delete(f"/api/memories/{doomed}?profile_id=b")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["erasure_verified"] is True
+        rows = app.state.engine._db.execute(
+            "SELECT 1 FROM atomic_facts WHERE fact_id = ?", (doomed,),
+        )
+        assert rows == []
+        # The active profile's newest fact is untouched by the routed delete.
+        after = _newest(client)
+        assert after["fact_id"] == survivor["fact_id"]
+        listed_b = client.get(
+            "/list", params={"profile_id": "b", "limit": 5},
+        ).json()["results"]
+        assert all(item["fact_id"] != doomed for item in listed_b)
+
+    def test_routed_delete_unknown_profile_is_structured_404(self, daemon) -> None:
+        client, _ = daemon
+
+        response = client.delete("/api/memories/whatever?profile_id=ghost")
+
+        assert response.status_code == 404, response.text
+        body = response.json()
+        assert body["success"] is False
+        assert body["error"]["code"] == "unknown_profile"
+
 
 # ---------------------------------------------------------------------------
 # The MCP tool surface (spec section 4)
