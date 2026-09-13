@@ -1208,6 +1208,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     result = await asyncio.to_thread(
                         daemon_request, "PATCH", path, body,
                         preserve_not_found=True,
+                        preserve_conflict=True,
                     )
                 except Exception as exc:
                     # An unknown routed profile is a terminal 404 — the same
@@ -1219,6 +1220,19 @@ def register_core_tools(server, get_engine: Callable) -> None:
                             "retryable": False,
                             "error": getattr(
                                 exc, "message", "daemon returned 404",
+                            ),
+                        }
+                    # A deterministic 409 (e.g. the routed-content pre-flight)
+                    # is terminal too: without preserve_conflict it collapsed
+                    # to None and this tool labelled a request that can never
+                    # succeed as retryable — the retry-forever lie.
+                    if type(exc).__name__ == "DaemonConflict":
+                        return {
+                            "success": False,
+                            "code": getattr(exc, "code", "conflict"),
+                            "retryable": False,
+                            "error": getattr(
+                                exc, "detail", str(exc),
                             ),
                         }
                     raise

@@ -697,6 +697,51 @@ class TestMcpUpdateDeleteProfileRouting:
         assert captured["path"] == "/api/memories/mcp-fact"
         assert captured["body"] == {"content": "new text"}
 
+    def test_update_tool_maps_daemon_409_conflict_non_retryable(
+        self, monkeypatch,
+    ) -> None:
+        """Fix round 2: a deterministic 409 is terminal, never retryable.
+
+        update_memory(content=..., profile_id="b") with b != active is
+        refused by the daemon's pre-flight with a structured 409. Without
+        ``preserve_conflict=True`` daemon_request collapses that answer to
+        None and the tool returns the retryable outage envelope — telling
+        the caller to retry forever a request that can never succeed.
+        """
+        import asyncio
+
+        import superlocalmemory.cli.daemon as _d
+        from superlocalmemory.cli.daemon import DaemonConflict
+
+        seen: dict = {}
+
+        def _request(method, path, body=None, **kwargs):
+            seen.update(kwargs=kwargs, path=path)
+            raise DaemonConflict(
+                "content corrections run on the daemon's active profile",
+                code="routed_content_correction_unsupported",
+            )
+
+        monkeypatch.setattr(_d, "is_daemon_running", lambda *a, **k: True)
+        monkeypatch.setattr(_d, "daemon_request", _request)
+
+        update = _core_tools()["update_memory"]
+        result = asyncio.run(update(
+            "mcp-fact",
+            "revised content the daemon refuses to route",
+            profile_id="b",
+        ))
+
+        assert result["success"] is False
+        # Deterministic conflict: retrying the identical request can never
+        # succeed, so the envelope must say so and name the reason.
+        assert result["retryable"] is False
+        assert result["code"] == "routed_content_correction_unsupported"
+        assert "active profile" in result["error"]
+        # The conflict must be preserved on the wire, not collapsed to None.
+        assert seen["kwargs"].get("preserve_conflict") is True
+        assert seen["kwargs"].get("preserve_not_found") is True
+
     def test_delete_tool_threads_profile(self, monkeypatch) -> None:
         """delete_memory(profile_id="b") routes the DELETE to profile b."""
         import asyncio

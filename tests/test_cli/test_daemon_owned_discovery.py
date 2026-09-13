@@ -294,6 +294,45 @@ def test_daemon_request_preserves_profile_conflict() -> None:
     assert "profile mismatch" in str(caught.value)
 
 
+def test_daemon_request_carries_structured_conflict_code() -> None:
+    """A structured 409 envelope keeps its machine code, like the 404 branch.
+
+    The routed-content pre-flight answers with
+    ``{"error": {"code": ..., "message": ...}}`` (no flat ``detail`` key);
+    collapsing that to the generic conflict string would hide WHY the
+    request is terminal from every MCP caller.
+    """
+    from superlocalmemory.cli import daemon
+
+    descriptor = _owned_descriptor(port=43135)
+    health = {"status": "ok", **descriptor.public_health_fields()}
+    conflict = urllib.error.HTTPError(
+        "http://127.0.0.1:43135/api/memories/fact-1",
+        409,
+        "Conflict",
+        {},
+        io.BytesIO(
+            b'{"success": false, "error": {'
+            b'"code": "routed_content_correction_unsupported", '
+            b'"profile_id": "b", '
+            b'"message": "content corrections run on the daemon\'s active '
+            b'profile"}}'
+        ),
+    )
+
+    with patch("urllib.request.urlopen", side_effect=[_HealthResponse(health), conflict]):
+        with pytest.raises(daemon.DaemonConflict) as caught:
+            daemon.daemon_request(
+                "PATCH",
+                "/api/memories/fact-1?profile_id=b",
+                {"content": "routed"},
+                preserve_conflict=True,
+            )
+
+    assert caught.value.code == "routed_content_correction_unsupported"
+    assert "active profile" in caught.value.detail
+
+
 def test_daemon_request_forwards_explicit_user_session_after_identity_match(
     monkeypatch,
 ) -> None:

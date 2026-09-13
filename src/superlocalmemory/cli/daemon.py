@@ -400,10 +400,19 @@ class DaemonRefused(RuntimeError):
 
 
 class DaemonConflict(RuntimeError):
-    """A deterministic daemon conflict that the caller must resolve."""
+    """A deterministic daemon conflict that the caller must resolve.
 
-    def __init__(self, detail: str) -> None:
+    ``code`` carries the structured machine code when the daemon answered
+    with the route-local error envelope (``{"error": {"code": ...}}``) —
+    the same convention ``DaemonNotFound`` established — so a caller can
+    tell WHY the request is terminal (e.g.
+    ``routed_content_correction_unsupported``) instead of only that it
+    conflicted.
+    """
+
+    def __init__(self, detail: str, code: str = "conflict") -> None:
         self.detail = detail or "daemon request conflicted with current state"
+        self.code = code or "conflict"
         super().__init__(self.detail)
 
 
@@ -526,13 +535,23 @@ def daemon_request(
             raise DaemonRefused(exc.code, path) from exc
         if exc.code == 409 and preserve_conflict:
             detail = "daemon request conflicted with current state"
+            code = "conflict"
             try:
                 payload = json.loads(exc.read().decode())
-                if isinstance(payload, dict) and payload.get("detail"):
-                    detail = str(payload["detail"])
+                if isinstance(payload, dict):
+                    if payload.get("detail"):
+                        detail = str(payload["detail"])
+                    # Structured envelope, same shape the 404 branch parses:
+                    # carry the machine code, and prefer its message when the
+                    # legacy flat "detail" key is absent.
+                    err = payload.get("error")
+                    if isinstance(err, dict):
+                        code = str(err.get("code") or code)
+                        if not payload.get("detail") and err.get("message"):
+                            detail = str(err["message"])
             except Exception:
                 pass
-            raise DaemonConflict(detail) from exc
+            raise DaemonConflict(detail, code=code) from exc
         if exc.code == 404 and preserve_not_found:
             code, message = "not_found", "daemon returned 404"
             try:
