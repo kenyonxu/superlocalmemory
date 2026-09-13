@@ -5,6 +5,8 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## mslm 4.2.0+upstream — merged upstream SuperLocalMemory 4.1.12–4.1.17 (2026-09-13)
+
 ## mslm 4.2.0+ — list_recent per-request profile + /list repair (2026-09-01)
 - list_recent and /list accept an optional profile_id (same semantics as remember/recall);
   content is no longer truncated upstream; importance is included; empty namespaces return

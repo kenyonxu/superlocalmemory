@@ -345,6 +345,41 @@ def _get_port() -> int:
     return _DEFAULT_PORT
 
 
+def _health_is_owned(health: dict, *, port: int | None = None) -> bool:
+    """Return whether an answering health payload belongs to this namespace.
+
+    Descriptor present: the payload must echo the descriptor's identity
+    (namespace, instance, capability, PID, port). No descriptor: only a
+    verified legacy same-root daemon counts — and when the probed ``port``
+    is given, the occupant must BE that legacy daemon (same PID answering
+    on the legacy port). Anything else answering is foreign by definition.
+
+    4.1.14 audit: the port check closes the spoof where a JSON /health on
+    the probed port plus a leftover daemon.pid skipped the loud fail-fast.
+    """
+    descriptor = read_descriptor()
+    if descriptor is not None:
+        try:
+            return bool(descriptor_matches_health(descriptor, health))
+        except Exception:
+            return False
+    try:
+        legacy = _verified_legacy_health()
+    except Exception:
+        return False
+    if legacy is None:
+        return False
+    if port is None:
+        return True
+    try:
+        return (
+            int(health.get("pid", -1)) == int(legacy.get("pid", -2))
+            and int(port) == int(legacy.get("_legacy_port", -3))
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 class DaemonRefused(RuntimeError):
     """The daemon answered, and the answer was no.
 
@@ -372,6 +407,22 @@ class DaemonConflict(RuntimeError):
         super().__init__(self.detail)
 
 
+class DaemonNotFound(RuntimeError):
+    """The daemon answered 404 with a structured error body.
+
+    Raised only when the caller passes ``preserve_not_found=True``: a live
+    daemon refusing an unknown id (e.g. per-request routing to a missing
+    profile) is an answer, not an outage, and collapsing it to None made
+    ``unknown_profile`` indistinguishable from a dead daemon (#audit).
+    """
+
+    def __init__(self, status: int, code: str, message: str, path: str = "") -> None:
+        self.status = int(status)
+        self.code = code or "not_found"
+        self.message = message or "daemon returned 404"
+        super().__init__(self.message + (f" for {path}" if path else ""))
+
+
 def daemon_request(
     method: str,
     path: str,
@@ -382,6 +433,7 @@ def daemon_request(
     expected_legacy: dict | None = None,
     verify_health: bool = True,
     preserve_conflict: bool = False,
+    preserve_not_found: bool = False,
 ) -> dict | None:
     """Send a request only after validating the owned daemon identity.
 
@@ -481,6 +533,18 @@ def daemon_request(
             except Exception:
                 pass
             raise DaemonConflict(detail) from exc
+        if exc.code == 404 and preserve_not_found:
+            code, message = "not_found", "daemon returned 404"
+            try:
+                payload = json.loads(exc.read().decode())
+                if isinstance(payload, dict):
+                    err = payload.get("error", {})
+                    if isinstance(err, dict):
+                        code = str(err.get("code", code))
+                        message = str(err.get("message", message))
+            except Exception:
+                pass
+            raise DaemonNotFound(exc.code, code, message, path) from exc
         return None
     except Exception:
         return None
@@ -501,7 +565,7 @@ def _lock_file_path():
     return _LOCK_FILE or state_path("daemon.lock")
 
 
-def _start_daemon_subprocess() -> bool:
+def _start_daemon_subprocess(*, port: int | None = None) -> bool:
     """Spawn the unified daemon subprocess and wait for readiness.
 
     v3.4.42: Extracted from ensure_daemon() so callers that already hold
@@ -525,8 +589,12 @@ def _start_daemon_subprocess() -> bool:
     # Never create a descriptor for a child that cannot own the listener.
     # A closed connection in TIME_WAIT is not a listener and is safe: the
     # server reserves its socket with SO_REUSEADDR during bootstrap.
-    if _has_tcp_listener(_DEFAULT_PORT):
-        logger.warning("daemon port %d is already owned; refusing a second start", _DEFAULT_PORT)
+    # 4.1.14 audit: bind the port ensure_daemon probed — probing a custom
+    # port and then spawning on the default opened the browser on a port
+    # with no daemon (or refused a start the probe had cleared).
+    _target_port = port if port is not None else _DEFAULT_PORT
+    if _has_tcp_listener(_target_port):
+        logger.warning("daemon port %d is already owned; refusing a second start", _target_port)
         return False
     assert_no_durable_root_conflict()
 
@@ -535,7 +603,6 @@ def _start_daemon_subprocess() -> bool:
     from superlocalmemory import __version__ as _slm_version
     # v3.6.9 (#33): pass SLM_DAEMON_PORT as explicit --port= so the daemon
     # binds the right port even when the env var reaches the subprocess.
-    _target_port = _DEFAULT_PORT
     cmd = [
         sys.executable, "-m", "superlocalmemory.server.unified_daemon",
         "--start", f"--port={_target_port}",
@@ -659,18 +726,54 @@ def ensure_daemon(*, port: int | None = None) -> bool:
         # has bound the port but hasn't written a PID file yet (e.g. different
         # HOME for the service user vs. the SSH user).  If the port is already
         # bound, don't start a second daemon — wait for HTTP readiness instead.
-        try:
-            import socket as _socket
-            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as _s:
-                _s.settimeout(1)
-                if _s.connect_ex(("127.0.0.1", _DEFAULT_PORT)) == 0:
-                    return _wait_for_daemon(timeout=30)
-        except Exception:
-            pass
+        #
+        # 4.1.14 (#132): probe the CONFIGURED port, not the default constant —
+        # a foreign squatter on 8765 must not divert startup when this
+        # namespace serves elsewhere. And when the occupant answers HTTP
+        # with non-SLM identity, fail fast and loud instead of burning a
+        # 30 s wait: an answering foreign service can never become our
+        # daemon. Silence (nothing answering) keeps the old wait — a slow
+        # starter is indistinguishable from a raw squat.
+        probe_port = port if port is not None else _get_port()
+        if _has_tcp_listener(probe_port):
+            occupant = _fetch_health(probe_port)
+            if occupant is not None and not _health_is_owned(
+                occupant, port=probe_port,
+            ):
+                # 4.1.14 audit: when the occupant PID matches this
+                # namespace's stale daemon.pid, say so — the owned daemon
+                # likely moved ports, and "foreign service" would send the
+                # operator hunting the wrong process.
+                _stale_hint = ""
+                try:
+                    _pid_text = (
+                        descriptor_path().with_name("daemon.pid").read_text().strip()
+                    )
+                    if _pid_text and str(occupant.get("pid")) == _pid_text:
+                        _stale_hint = (
+                            " The occupant PID matches this namespace's stale "
+                            "daemon.pid — the owned daemon likely moved ports; "
+                            "run `slm restart` instead of hunting a foreign process."
+                        )
+                except (OSError, ValueError):
+                    pass
+                logger.error(
+                    "SLM daemon will not start: port %d is occupied by a "
+                    "foreign service (answered HTTP without SLM identity).%s "
+                    "Free the port or point this namespace elsewhere, then "
+                    "run `slm restart`.",
+                    probe_port,
+                    _stale_hint,
+                )
+                return False
+            return _wait_for_daemon(timeout=30)
 
         # Start unified daemon in background — delegated to helper so the
         # same logic can be reused by callers that already hold the lock.
-        return _start_daemon_subprocess()
+        # 4.1.14 audit: the probed port travels with the spawn — probing a
+        # custom port and spawning the default would serve elsewhere than
+        # verified.
+        return _start_daemon_subprocess(port=probe_port)
 
     except Exception as exc:
         # Daemon auto-start is the entry point for dashboard / mesh /

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import glob
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -49,6 +50,23 @@ def _read_python_version(base: Path) -> Optional[str]:
     where multi-install divergence between pip and npm is most likely, and where
     the version-mismatch error would then name no installations at all.
     """
+    found = _find_package_init(base)
+    if found is None:
+        return None
+    try:
+        text = found.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # 4.1.14 audit: anchor on the full assignment — a bare startswith
+    # would let `__version_info__` win over the real version line.
+    match = re.search(r"(?m)^__version__\s*=\s*[\"']([^\"']+)[\"']", text)
+    if match:
+        return match.group(1).strip() or None
+    return None
+
+
+def _find_package_init(base: Path) -> Optional[Path]:
+    """Locate the installed ``superlocalmemory/__init__.py`` under ``base``."""
     patterns = [
         str(base / "lib" / "python*" / "site-packages" / "superlocalmemory" / "__init__.py"),
         str(base / "Lib" / "site-packages" / "superlocalmemory" / "__init__.py"),
@@ -58,18 +76,43 @@ def _read_python_version(base: Path) -> Optional[str]:
     for pattern in patterns:
         matches.extend(glob.glob(pattern))
     for init_path in sorted(set(matches)):
-        try:
-            text = Path(init_path).read_text(encoding="utf-8", errors="replace")
-            for line in text.splitlines():
-                line = line.strip()
-                if line.startswith("__version__"):
-                    # __version__ = "4.1.0"  or  __version__ = '4.1.0'
-                    parts = line.split("=", 1)
-                    if len(parts) == 2:
-                        return parts[1].strip().strip("\"'")
-        except OSError:
-            continue
+        return Path(init_path)
     return None
+
+
+def canonicalize_version(value: object) -> tuple:
+    """Normalize a version string for cross-scheme comparison (4.1.14 #134).
+
+    npm-semver (``4.1.14-rc.1``) and PEP 440 (``4.1.14rc1``) spell the same
+    release differently; a raw ``!=`` fails good wheels on pre-releases,
+    while stripping all separators collides distinct releases (``4.1.14``
+    vs ``4.11.4``). Split into a numeric core compared part-wise plus an
+    exact suffix: ``4.1.14-rc.1`` == ``4.1.14rc1`` != ``4.1.14``.
+    """
+    text = str(value or "").strip().lower()
+    if text.startswith("v"):
+        text = text[1:]
+    match = re.match(r"^(\d+(?:\.\d+)*)(.*)$", text)
+    if not match:
+        return ((), text)
+    core = tuple(int(part) for part in match.group(1).split("."))
+    suffix = re.sub(r"[-_.]+", "", match.group(2).strip())
+    return (core, suffix)
+
+
+def _resolve_package_dir(base: Path) -> Optional[str]:
+    """Return the directory holding the resolved package (4.1.14 #134).
+
+    This is the answer to "which copy actually loads": the venv
+    interpreter resolves exactly this ``superlocalmemory/`` directory.
+    A stale ``src/`` tree beside an npm install can never shadow it —
+    the launcher strips ``PYTHONPATH`` — but naming the authority in
+    doctor output ends the confusion class from #128 Bug 2.
+    """
+    found = _find_package_init(base)
+    if found is None:
+        return None
+    return str(found.parent)
 
 
 def _read_npm_version(npm_root: Path) -> Optional[str]:
@@ -89,6 +132,9 @@ def _detect_all_installs() -> list[dict]:
       - ``path``    (str) — directory of the install
       - ``version`` (str) — version string read from package metadata
       - ``type``    (str) — one of "pipx", "venv", "npm"
+      - ``resolved`` (str, optional) — the package directory the install's
+        interpreter actually loads (4.1.14 #134: names the single source
+        of truth so a stale tree can never silently shadow it).
 
     Detection is read-only and best-effort. A missing or unreadable install
     produces no entry rather than an error. Subprocess calls are bounded to
@@ -103,6 +149,7 @@ def _detect_all_installs() -> list[dict]:
             "path": str(_PIPX_ROOT) + "/",
             "version": pipx_version,
             "type": "pipx",
+            "resolved": _resolve_package_dir(_PIPX_ROOT),
         })
 
     # --- ~/.slm-venv ---
@@ -112,6 +159,7 @@ def _detect_all_installs() -> list[dict]:
             "path": str(_VENV_ROOT) + "/",
             "version": venv_version,
             "type": "venv",
+            "resolved": _resolve_package_dir(_VENV_ROOT),
         })
 
     # --- npm global ---
@@ -119,11 +167,19 @@ def _detect_all_installs() -> list[dict]:
     if npm_root is not None:
         npm_version = _read_npm_version(npm_root)
         if npm_version is not None:
-            results.append({
+            npm_venv = npm_root / "superlocalmemory" / ".slm-venv"
+            # 4.1.14 single-source (#134): the npm manifest version must
+            # agree with the wheel actually installed in the package-owned
+            # venv. A rebuilt-or-not npm wrapper over a stale venv is the
+            # Bug-2 hazard persisting — doctor warns on it below.
+            npm_entry: dict = {
                 "path": str(npm_root / "superlocalmemory") + "/",
                 "version": npm_version,
                 "type": "npm",
-            })
+                "resolved": _resolve_package_dir(npm_venv),
+                "wheel_version": _read_python_version(npm_venv),
+            }
+            results.append(npm_entry)
 
     return results
 

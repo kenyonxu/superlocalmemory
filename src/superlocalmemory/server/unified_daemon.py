@@ -1031,6 +1031,7 @@ def _recall_budget_s() -> float:
 
 def _recall_keyword_fallback(
     engine, query: str, limit: int, *, profile_id: str | None = None,
+    profile: str | None = None, profile_generation: int | None = None,
 ) -> dict:
     """Fast profile-scoped keyword (LIKE) fallback for /recall.
 
@@ -1038,6 +1039,10 @@ def _recall_keyword_fallback(
     a bounded response instead of hanging. Mirrors the dashboard /api/search
     fallback shape (retrieval_mode=degraded_lexical). ``profile_id`` follows
     the per-request routing convention: None/"" means the active profile.
+
+    4.1.14 audit: the envelope echoes the SERVED namespace (profile +
+    profile_generation), exactly like the success path — a degraded routed
+    recall must never be readable as an active-profile answer.
     """
     results = []
     try:
@@ -1064,6 +1069,8 @@ def _recall_keyword_fallback(
         "query_type": "text_search",
         "retrieval_mode": "degraded_lexical",
         "degraded_reason": "recall_budget_exceeded",
+        "profile": profile if profile else engine.profile_id,
+        "profile_generation": profile_generation,
         "result_count": len(results),
         "results": results,
         "count": len(results),
@@ -3218,6 +3225,22 @@ async def lifespan(application: FastAPI):
         _profile_runtime = profile_runtime
         _engine = engine
 
+        # Boot sweep for wedged enrichment leases (#131): a killed daemon
+        # leaves rows stuck in enriching; the materializer loop reclaims
+        # them only once it cycles, and its reap used to sit behind the
+        # embedder-warmth gate. Run the pure-SQL reap deterministically
+        # here so recovery never depends on worker warmth. Fail-soft by
+        # construction (the helper never raises).
+        try:
+            _swept = _reap_stuck_ingestion(getattr(engine, "_db", None))
+            if _swept:
+                logger.warning(
+                    "Boot sweep terminalized %d stuck ingestion operation(s)",
+                    len(_swept),
+                )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("ingestion boot sweep failed: %s", exc)
+
         # Uvicorn enters this lifespan only after it has bound the listener.
         # Publishing ``ready`` here prevents a failed competing process from
         # overwriting the live daemon descriptor before it owns the port.
@@ -4546,6 +4569,16 @@ def _register_daemon_routes(application: FastAPI) -> None:
         search_query = q or query  # Accept both ?q= and ?query= for compatibility
         engine = _get_engine_or_503()
         req_profile = (profile_id or "").strip()
+        # 4.1.14 audit: permission before existence on the read path, the
+        # same order the write path enforces. Existence-first lets a caller
+        # without READ probe which profile ids exist (404 vs data); READ on
+        # the served namespace comes first so present-but-forbidden reads
+        # 403 without confirming existence.
+        from superlocalmemory.access.rbac import Permission
+        from superlocalmemory.server.rbac_enforce import require_permission
+        require_permission(
+            request, Permission.READ, profile=req_profile or engine._profile_id,
+        )
         if req_profile and not _daemon_profile_exists(engine, req_profile):
             from starlette.responses import JSONResponse
 
@@ -4561,7 +4594,16 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 "GET", "/recall", req_profile,
             )
         if not search_query:
-            return {"results": [], "count": 0, "query_type": "none", "retrieval_time_ms": 0}
+            from superlocalmemory.server.profile_runtime import get_profile_runtime
+            _empty_snapshot = get_profile_runtime(application.state).snapshot
+            return {
+                "results": [], "count": 0, "query_type": "none",
+                "retrieval_time_ms": 0,
+                # 4.1.14 audit: even the empty-query shape echoes the served
+                # namespace — never let a routed call look active-profiled.
+                "profile": req_profile or _empty_snapshot.profile_id,
+                "profile_generation": _empty_snapshot.generation,
+            }
         # Phase 4b: normalize as_of at HTTP boundary. Invalid → return error.
         _as_of_raw = as_of.strip() if as_of else ""
         if _as_of_raw:
@@ -4675,8 +4717,12 @@ def _register_daemon_routes(application: FastAPI) -> None:
                     "recall: semantic recall exceeded %.0fs budget for %r — "
                     "serving keyword fallback", _budget, (search_query or "")[:80],
                 )
+                from superlocalmemory.server.profile_runtime import get_profile_runtime
+                fallback_snapshot = get_profile_runtime(application.state).snapshot
                 return _recall_keyword_fallback(
                     engine, search_query, limit, profile_id=req_profile or None,
+                    profile=req_profile or fallback_snapshot.profile_id,
+                    profile_generation=fallback_snapshot.generation,
                 )
             response = _rf.result()
             # v3.4.26: return the same field shape as recall_worker so
@@ -4773,7 +4819,10 @@ def _register_daemon_routes(application: FastAPI) -> None:
         # is trivially satisfied and unreachable for routed requests.
         req_profile = (req.profile_id or "").strip()
         if not req_profile:
-            _require_remember_profile(req.profile_id, engine._profile_id)
+            # Pass the STRIPPED value: whitespace-only input normalizes to
+            # the empty legacy shape, so the guard stays a no-op for it
+            # instead of 409ing on a truthy-but-blank string (#audit).
+            _require_remember_profile(req_profile, engine._profile_id)
         # Single write-target id for everything below: the routed profile,
         # or the engine's active profile on the legacy path. Never a 409.
         write_profile = req_profile or engine._profile_id
@@ -5088,6 +5137,30 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 IdempotencyConflict,
             )
 
+            # 4.1.14 audit: an unknown profile surfacing late (deleted
+            # between the existence gate and admission) must stay a 404,
+            # not a 503 retryable — a deleted profile never heals by
+            # retrying. The coordinator wraps failures, so walk the cause
+            # chain for the distinctive type instead of matching strings.
+            from superlocalmemory.core.ingestion_command import (
+                UnknownProfileError,
+            )
+            _cause: BaseException | None = exc
+            _unknown = False
+            _seen: set[int] = set()
+            while _cause is not None and id(_cause) not in _seen:
+                _seen.add(id(_cause))
+                if isinstance(_cause, UnknownProfileError):
+                    _unknown = True
+                    break
+                _cause = _cause.__cause__ or _cause.__context__
+            if _unknown:
+                from starlette.responses import JSONResponse
+
+                return JSONResponse(
+                    _unknown_profile_body(req_profile or write_profile),
+                    status_code=404,
+                )
             if isinstance(exc, CanonicalRememberUnavailable) or (
                 isinstance(exc, AdmissionRejected) and exc.retryable
             ):
@@ -5218,6 +5291,14 @@ def _register_daemon_routes(application: FastAPI) -> None:
             except Exception:
                 logger.exception("maintenance behavioral step failed")
                 results["behavioral"] = {"error": "internal error"}
+            try:
+                from superlocalmemory.core.maintenance_scheduler import (
+                    compact_vector_store,
+                )
+                results["vector"] = compact_vector_store()
+            except Exception:
+                logger.exception("maintenance vector compaction failed")
+                results["vector"] = {"ok": False, "error": "internal error"}
             authorization.complete()
             return {"ok": True, "profile": pid, **results}
         except HTTPException:
@@ -6009,6 +6090,39 @@ def _ops_failure_counts(engine, application) -> dict:
     return result
 
 
+def _materializer_should_idle(
+    pending: object, durable_complete: int, durable_failed: int,
+) -> bool:
+    """Whether the materializer pass earned a sleep before the next one.
+
+    ``durable_failed`` used to suppress the sleep. The pass runs one operation
+    at a time, so a single operation that cannot succeed kept this loop at full
+    speed indefinitely, re-reaping and re-listing on every iteration. A failure
+    is activity, not progress. GitHub #137.
+    """
+    return not pending and not durable_complete
+
+
+def _reap_stuck_ingestion(db) -> list[str]:
+    """Terminalize expired enrichment leases that exhausted retries.
+
+    Pure-SQL compare-and-swap transitions: needs no embedder, no LLM, and
+    no recall quiescence — so it runs unconditionally at daemon boot and
+    at the top of every materializer pass, ahead of the warmth/recall
+    gates that must never gate recovery (#131). Under-attempt rows need
+    no reset here; the pass reclaims them through list_materializable.
+    Never raises: recovery failing must not fail startup or the pass.
+    """
+    try:
+        from superlocalmemory.core.ingestion_command import (
+            IngestionOperationRepository,
+        )
+        return IngestionOperationRepository(db).reap_stuck_enriching()
+    except Exception as exc:
+        logger.warning("ingestion stuck-lease sweep failed (non-fatal): %s", exc)
+        return []
+
+
 def _materialize_ingestion_one_pass(
     engine,
     *,
@@ -6016,6 +6130,17 @@ def _materialize_ingestion_one_pass(
     min_queryable_age_seconds: float = 1.0,
 ) -> tuple[int, int]:
     """Materialize durable M018 work once; return ``(complete, failed)``."""
+    # Recovery first, unconditionally: terminalizing exhausted leases is
+    # pure SQL and must never wait on recall quiescence or embedder
+    # warmth — a cold embedder blocked the reap forever on one operator
+    # box, wedging the write pipeline until manual DB surgery (#131).
+    db = getattr(engine, "_db", None)
+    reaped = _reap_stuck_ingestion(db) if db is not None else []
+    if reaped:
+        logger.warning(
+            "Materializer terminalized %d exhausted ingestion operation(s)",
+            len(reaped),
+        )
     # The durable queue shares the embedder/LLM with foreground recall just
     # like the legacy pending queue.  Yield before even constructing/claiming
     # work so an active user recall cannot suffer priority inversion.
@@ -6039,17 +6164,6 @@ def _materialize_ingestion_one_pass(
     from superlocalmemory.core.ingestion_command import IngestionState
 
     command = build_engine_ingestion_command(engine)
-    reap = getattr(command.repository, "reap_stuck_enriching", None)
-    try:
-        reaped = reap() if callable(reap) else []
-    except Exception as exc:
-        logger.warning("ingestion reaper failed; materializer pass continues: %s", exc)
-        reaped = []
-    if reaped:
-        logger.warning(
-            "Materializer terminalized %d exhausted ingestion operation(s)",
-            len(reaped),
-        )
     completed = failed = 0
     for operation in command.repository.list_materializable(
         limit=limit,
@@ -6198,7 +6312,9 @@ def _start_pending_materializer() -> None:
                 # under whichever profile happens to be active now.
                 _active_profile = runtime.snapshot.profile_id
                 pending = get_pending(limit=50, profile_id=_active_profile)
-                if not pending and not durable_complete and not durable_failed:
+                if _materializer_should_idle(
+                    pending, durable_complete, durable_failed,
+                ):
                     time.sleep(1.0)
                     continue
                 if pending:
@@ -6278,9 +6394,62 @@ def _stop_pending_materializer(timeout: float = 5.0) -> bool:
     return True
 
 
+_thread_dump_file = None
+
+
+def install_thread_dump_signal() -> "os.PathLike | str | None":
+    """Make ``kill -USR1 <pid>`` dump every Python thread's stack to a file.
+
+    WHY THIS EXISTS. #137 was a 100%-CPU daemon, and on the two machines it was
+    investigated on, nobody could see inside the process. macOS needs root for
+    ``task_for_pid``, so py-spy is unavailable to any user not in sudoers --
+    which on a managed corporate Mac is the normal case, and was the case for
+    the author. The reporter on Ubuntu got py-spy attached and it was still
+    blind to the threads that mattered, so they fell back to ``gdb``. Between
+    them that is every standard tool defeated, for a defect whose entire
+    signature is "which thread is busy, doing what".
+
+    ``faulthandler`` needs no root, no attach, and no install: the process
+    dumps its own stacks on a signal it registered itself.
+
+    WHAT IT DOES NOT SHOW, said plainly: Python frames only. A native thread
+    with no Python frame -- a LanceDB tokio worker, for instance -- is
+    invisible here exactly as it was to py-spy. What it does show is which
+    Python thread is where, which is the question that went unanswered for
+    eleven days on the author's own machine.
+
+    Returns the dump path, or None where the platform has no SIGUSR1.
+    """
+    global _thread_dump_file
+    if not hasattr(signal, "SIGUSR1"):
+        return None
+    try:
+        import faulthandler
+
+        from superlocalmemory.infra.data_root import state_path
+
+        path = state_path("thread-dump.log")
+        # Held on a module global on purpose: faulthandler keeps the raw file
+        # descriptor, so a closed or garbage-collected handle turns the next
+        # signal into a crash instead of a diagnostic.
+        _thread_dump_file = open(path, "a", buffering=1)  # noqa: SIM115
+        faulthandler.register(
+            signal.SIGUSR1, file=_thread_dump_file,
+            all_threads=True, chain=False,
+        )
+        logger.info(
+            "thread dump armed: kill -USR1 %d  ->  %s", os.getpid(), path,
+        )
+        return path
+    except Exception:  # noqa: BLE001 -- a diagnostic must never block start
+        logger.debug("thread dump handler not installed", exc_info=True)
+        return None
+
+
 def start_server(port: int = _DEFAULT_PORT) -> None:
     """Start the unified daemon. Blocks until stopped."""
     global _start_time
+    install_thread_dump_signal()
     assert_no_durable_root_conflict()
     import socket
 

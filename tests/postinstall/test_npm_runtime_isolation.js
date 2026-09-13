@@ -129,6 +129,104 @@ test('postinstall creates only a package-owned venv and installs through its pip
   assert.equal(pipCalls[0].args.includes('--break-system-packages'), false);
 });
 
+test('postinstall installs the pinned PyPI wheel, never the bundled tree (#134)', () => {
+  const { calls } = capturePostinstall();
+  const pipCalls = calls.filter(({ args }) => args.includes('-m') && args.includes('pip'));
+  assert.equal(pipCalls.length, 1);
+  const installArg = pipCalls[0].args[pipCalls[0].args.length - 1];
+  assert.equal(
+    installArg,
+    `superlocalmemory==${PACKAGE_VERSION}`,
+    'the venv must be populated from the pinned PyPI wheel (single source of truth)',
+  );
+  assert.doesNotMatch(
+    pipCalls[0].args.join(' '),
+    /src\/superlocalmemory|\bsrc\b/,
+    'the bundled source tree must never be pip-installed',
+  );
+});
+
+test('SLM_LOCAL_WHEEL overrides the specifier for air-gapped installs (#134)', () => {
+  const originalSpawnSync = childProcess.spawnSync;
+  const originalEnv = process.env.SLM_LOCAL_WHEEL;
+  const calls = [];
+  childProcess.spawnSync = (command, args = []) => {
+    calls.push({ command, args: [...args] });
+    if (args.includes('--version')) {
+      return { status: 0, stdout: Buffer.from('Python 3.12.8\n'), stderr: Buffer.from('') };
+    }
+    if (args.includes('-c')) {
+      return { status: 0, stdout: Buffer.from(PACKAGE_VERSION + '\n'), stderr: Buffer.from('') };
+    }
+    return { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') };
+  };
+  const originalExistsSync = fs.existsSync;
+  const originalStatSync = fs.statSync;
+  const wheelPath = '/tmp/wheels/superlocalmemory-4.1.14-py3-none-any.whl';
+  fs.existsSync = () => false;
+  fs.statSync = (target) => {
+    if (String(target) === wheelPath) return { isFile: () => true };
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  };
+  process.env.SLM_LOCAL_WHEEL = wheelPath;
+  try {
+    clearModule(POSTINSTALL);
+    const { main } = require(POSTINSTALL);
+    assert.equal(main(), 0);
+  } finally {
+    childProcess.spawnSync = originalSpawnSync;
+    fs.existsSync = originalExistsSync;
+    fs.statSync = originalStatSync;
+    if (originalEnv === undefined) delete process.env.SLM_LOCAL_WHEEL;
+    else process.env.SLM_LOCAL_WHEEL = originalEnv;
+    clearModule(POSTINSTALL);
+  }
+  const pipCalls = calls.filter(({ args }) => args.includes('-m') && args.includes('pip'));
+  assert.equal(pipCalls.length, 1);
+  assert.equal(
+    pipCalls[0].args[pipCalls[0].args.length - 1],
+    '/tmp/wheels/superlocalmemory-4.1.14-py3-none-any.whl',
+  );
+});
+
+test('SLM_LOCAL_WHEEL refuses non-wheel and missing paths (#134)', () => {
+  const originalEnv = process.env.SLM_LOCAL_WHEEL;
+  const originalStatSync = fs.statSync;
+  fs.statSync = () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); };
+  try {
+    clearModule(POSTINSTALL);
+    const { main, pypiSpecifier } = require(POSTINSTALL);
+    for (const bad of ['/tmp/pkg/', 'https://example.com/x.whl', 'pkg.tar.gz', '/tmp/missing.whl']) {
+      process.env.SLM_LOCAL_WHEEL = bad;
+      assert.throws(() => pypiSpecifier(REPO_ROOT), /existing local .whl file/);
+    }
+    process.env.SLM_LOCAL_WHEEL = '/tmp/pkg/';
+    assert.equal(main(), 1);
+  } finally {
+    fs.statSync = originalStatSync;
+    if (originalEnv === undefined) delete process.env.SLM_LOCAL_WHEEL;
+    else process.env.SLM_LOCAL_WHEEL = originalEnv;
+    clearModule(POSTINSTALL);
+  }
+});
+
+test('SLM_LOCAL_WHEEL refuses a directory named like a wheel (#134)', () => {
+  const originalEnv = process.env.SLM_LOCAL_WHEEL;
+  const originalStatSync = fs.statSync;
+  fs.statSync = () => ({ isFile: () => false });
+  try {
+    clearModule(POSTINSTALL);
+    const { pypiSpecifier } = require(POSTINSTALL);
+    process.env.SLM_LOCAL_WHEEL = '/tmp/fake-4.1.14-py3-none-any.whl';
+    assert.throws(() => pypiSpecifier(REPO_ROOT), /existing local .whl file/);
+  } finally {
+    fs.statSync = originalStatSync;
+    if (originalEnv === undefined) delete process.env.SLM_LOCAL_WHEEL;
+    else process.env.SLM_LOCAL_WHEEL = originalEnv;
+    clearModule(POSTINSTALL);
+  }
+});
+
 test('postinstall never auto-runs setup, hooks, daemon, or model downloads', () => {
   const { calls } = capturePostinstall();
   const flattened = calls.flatMap(({ args }) => args).join(' ');

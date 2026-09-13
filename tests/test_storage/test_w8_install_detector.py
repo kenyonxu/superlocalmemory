@@ -325,3 +325,72 @@ class TestWindowsSitePackagesLayout:
         from superlocalmemory.core.install_detector import _read_python_version
 
         assert _read_python_version(tmp_path) is None
+
+    def test_version_info_does_not_shadow_version(self, tmp_path):
+        """4.1.14 audit: `__version_info__` must not win over `__version__`."""
+        from superlocalmemory.core.install_detector import _read_python_version
+
+        pkg = tmp_path / "lib" / "python3.13" / "site-packages" / "superlocalmemory"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text(
+            '__version_info__ = (4, 1, 99)\n__version__ = "4.1.14"\n'
+        )
+        assert _read_python_version(tmp_path) == "4.1.14"
+
+
+class TestCanonicalizeVersion:
+    """4.1.14 audit: npm-semver and PEP 440 spellings must agree."""
+
+    @staticmethod
+    def _canon(value):
+        from superlocalmemory.core.install_detector import canonicalize_version
+
+        return canonicalize_version(value)
+
+    def test_prerelease_spellings_agree(self):
+        assert self._canon("4.1.14-rc.1") == self._canon("4.1.14rc1")
+
+    def test_distinct_releases_differ(self):
+        assert self._canon("4.1.14") != self._canon("4.11.4")
+        assert self._canon("4.1.14-1") != self._canon("4.1.141")
+        assert self._canon("4.1.14") != self._canon("4.1.14-rc.1")
+
+    def test_identical_versions_agree(self):
+        assert self._canon("4.1.14") == self._canon("4.1.14")
+        assert self._canon("v4.1.14") == self._canon("4.1.14")
+
+
+class TestResolvedPackageAuthority:
+    """Entries name the package directory that actually loads (4.1.14 #134)."""
+
+    @staticmethod
+    def _make_venv(base: Path, version: str) -> Path:
+        pkg = base / "lib" / "python3.13" / "site-packages" / "superlocalmemory"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text(f'__version__ = "{version}"\n')
+        return pkg
+
+    def test_resolve_package_dir_points_at_package(self, tmp_path):
+        from superlocalmemory.core.install_detector import _resolve_package_dir
+
+        pkg = self._make_venv(tmp_path, "4.1.14")
+        assert _resolve_package_dir(tmp_path) == str(pkg)
+
+    def test_resolve_package_dir_none_when_absent(self, tmp_path):
+        from superlocalmemory.core.install_detector import _resolve_package_dir
+
+        assert _resolve_package_dir(tmp_path) is None
+
+    def test_venv_entry_carries_resolved(self, tmp_path, monkeypatch):
+        from superlocalmemory.core.install_detector import _detect_all_installs
+
+        pkg = self._make_venv(tmp_path / ".slm-venv", "4.1.14")
+        monkeypatch.setattr(
+            "superlocalmemory.core.install_detector._VENV_ROOT",
+            tmp_path / ".slm-venv",
+        )
+        entries = [
+            e for e in _detect_all_installs() if e["type"] == "venv"
+        ]
+        assert entries, "synthetic venv must be detected"
+        assert entries[0]["resolved"] == str(pkg)

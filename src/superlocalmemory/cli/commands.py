@@ -94,13 +94,58 @@ def _cmd_db_dispatch(args: Namespace) -> None:
     if sub == "regraph":
         _cmd_db_regraph(args)
         return
+    if sub == "compact":
+        rc = _cmd_db_compact(args)
+        if rc:
+            sys.exit(rc)
+        return
     print(
         "Usage: slm db migrate [--status] [--dry-run] "
         "| slm db scale <action> "
         "| slm db regraph [--check] [--profile NAME] "
-        "| slm db reembed [--missing-only] [--all-profiles] [--limit N]"
+        "| slm db reembed [--missing-only] [--all-profiles] [--limit N] "
+        "| slm db compact [--offline]"
     )
     sys.exit(2)
+
+
+def _cmd_db_compact(args: Namespace) -> int:
+    """Drop old LanceDB vector-store versions.
+
+    The live path goes through the daemon's orchestrator and never sets
+    delete_unverified — those files belong to in-flight writes. --offline
+    refuses to run while the daemon is alive and then may delete them.
+    """
+    from datetime import timedelta
+
+    from superlocalmemory.cli.daemon import owned_daemon_process_alive
+    from superlocalmemory.core.maintenance_scheduler import compact_vector_store
+    from superlocalmemory.infra.data_root import canonical_data_root
+
+    offline = bool(getattr(args, "offline", False))
+    if not offline:
+        out = compact_vector_store()
+        print(out)
+        return 0 if out.get("ok") else 1
+
+    if owned_daemon_process_alive():
+        print(
+            "slm db compact --offline: daemon is running. "
+            "Stop it first (`slm serve stop` / unload the LaunchAgent).",
+            file=sys.stderr,
+        )
+        return 1
+
+    lance = canonical_data_root() / "lance"
+    from superlocalmemory.vector.lancedb_backend import LanceDBVectorBackend
+
+    backend = LanceDBVectorBackend(str(lance))
+    try:
+        out = backend.compact(retention=timedelta(0), delete_unverified=True)
+    finally:
+        backend.close()
+    print(out)
+    return 0 if out.get("ok") else 1
 
 
 def _cmd_db_regraph(args: Namespace) -> None:
@@ -809,8 +854,11 @@ def cmd_restart(args: Namespace) -> None:
     # fall into its lock-fail branch and time out after 60s while the
     # actual daemon never gets started. Calling the helper directly
     # bypasses that self-deadlock and starts the daemon as intended.
-    from superlocalmemory.cli.daemon import _start_daemon_subprocess
-    started = _start_daemon_subprocess()
+    # 4.1.14 audit: restart on the OWNED port — spawning the default
+    # after stopping a custom-port daemon serves elsewhere than stopped.
+    from superlocalmemory.cli.daemon import _get_port, _start_daemon_subprocess
+    _restart_port = getattr(owned_descriptor, "port", None) or _get_port()
+    started = _start_daemon_subprocess(port=_restart_port)
 
     # Release restart lock — daemon is now running with its own lock
     if restart_lock_fd:
@@ -3126,17 +3174,23 @@ def cmd_doctor(args: Namespace) -> None:
                 "No additional SLM installs detected on this machine",
             )
         elif len(_versions) > 1:
-            _detail = "Version divergence: " + ", ".join(
-                f"{i['type']}={i['version']}" for i in _installs
-            )
+            _parts = []
+            for i in _installs:
+                _label = f"{i['type']}={i['version']}"
+                if i.get("resolved"):
+                    _label += f" [{i['resolved']}]"
+                _parts.append(_label)
+            _detail = "Version divergence: " + ", ".join(_parts)
             _check(
                 "install_versions",
                 "WARN",
                 _detail,
                 fix="Upgrade all installs: "
                     "pipx upgrade superlocalmemory  |  "
-                    "pip install -U superlocalmemory (in ~/.slm-venv)  |  "
-                    "npm install -g superlocalmemory@latest",
+                    "npm rebuild superlocalmemory (refreshes its pinned wheel; "
+                    "never pip-install inside an npm-owned .slm-venv by hand)  |  "
+                    "standalone ~/.slm-venv: activate it, then "
+                    "pip install -U superlocalmemory",
             )
         else:
             _unified = next(iter(_versions))
@@ -3146,6 +3200,31 @@ def cmd_doctor(args: Namespace) -> None:
                 "PASS",
                 f"All installs at {_unified} ({_types})",
             )
+        # 4.1.14 single-source (#134): the npm wrapper version must agree
+        # with the wheel actually installed in its package-owned venv. A
+        # stale venv under a fresh wrapper is the Bug-2 hazard persisting
+        # past an upgrade without rebuild. Compared canonically so
+        # npm-semver and PEP 440 spellings of one release agree.
+        from superlocalmemory.core.install_detector import (
+            canonicalize_version as _canon_ver,
+        )
+        for i in _installs:
+            if i.get("type") != "npm":
+                continue
+            _wheel_version = i.get("wheel_version")
+            if _wheel_version is None:
+                continue  # venv not yet installed; postinstall covers it
+            if _canon_ver(_wheel_version) != _canon_ver(i.get("version")):
+                _check(
+                    "install_versions",
+                    "WARN",
+                    f"npm wrapper is {i.get('version')} but its private venv "
+                    f"still holds wheel {_wheel_version} "
+                    f"({i.get('resolved') or 'unresolved path'})",
+                    fix="npm rebuild superlocalmemory "
+                        "(refreshes the pinned wheel; never pip-install "
+                        "inside an npm-owned .slm-venv by hand)",
+                )
     except Exception as _inst_exc:  # noqa: BLE001 — never break doctor
         _check("install_versions", "WARN", f"could not probe installs: {_inst_exc}")
 

@@ -168,6 +168,8 @@ from superlocalmemory.storage.migrations import (
     M047_fisher_vectors_are_stored_like_every_other_vector as _M047,
     M048_upcoming_holds_only_what_is_upcoming as _M048,
     M049_a_schema_version_marker_is_one_row as _M049,
+    M050_execution_learning_v2 as _M050,
+    M051_lifecycle_is_recomputed_not_resampled as _M051,
 )
 from superlocalmemory.storage.migrations import (
     M043_quarantine_display_summaries as _M043,
@@ -259,6 +261,8 @@ MIGRATIONS: list[Migration] = [
               dependencies=(_M003.NAME,)),
     Migration(name=_M041.NAME, db_target="learning", ddl=_M041.DDL,
               dependencies=(_M040.NAME,)),
+    Migration(name=_M050.NAME, db_target="learning", ddl=_M050.DDL,
+              dependencies=(_M041.NAME,)),
     # Review-gated correction metadata is self-contained in memory.db. It
     # contains identifiers only and does not alter temporal fact state.
     Migration(name=_M042.NAME, db_target="memory", ddl=_M042.DDL,
@@ -374,6 +378,10 @@ DEFERRED_MIGRATIONS: list[Migration] = [
     # versions held as 3,496 rows on one store and 234,348 on another. No
     # dependency -- it touches a bookkeeping table no other migration reads.
     Migration(name=_M049.NAME, db_target="memory", ddl=_M049.DDL),
+    # M051 clears lifecycle positions that were thermal noise, so the
+    # maintenance backfill recomputes them from the forgetting curve.
+    # No dependency: it clears one column no other migration reads.
+    Migration(name=_M051.NAME, db_target="memory", ddl=_M051.DDL),
 ]
 
 

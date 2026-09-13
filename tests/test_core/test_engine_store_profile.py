@@ -360,3 +360,64 @@ class TestEnrichNewFactsNowProfile:
         assert lookups
         assert set(lookups) == {eng._profile_id}
         assert enriched == len(ids)
+
+
+class TestAuditUnknownProfile:
+    """4.1.14 audit: the engine fails closed on unknown profiles itself."""
+
+    def test_store_fast_rejects_unknown_profile(self, engine_with_mock_deps):
+        eng = engine_with_mock_deps
+        with pytest.raises(ValueError, match="unknown profile"):
+            eng.store_fast(
+                "Ghost content must never land anywhere.", profile_id="ghost",
+            )
+
+    def test_store_rejects_unknown_profile(self, engine_with_mock_deps):
+        eng = engine_with_mock_deps
+        with pytest.raises(ValueError, match="unknown profile"):
+            eng.store(
+                "Ghost content must never land anywhere.", profile_id="ghost",
+            )
+
+    def test_junk_content_to_ghost_still_rejects(self, engine_with_mock_deps):
+        """4.1.14 audit: the profile guard precedes the content gate — junk
+        to a missing profile raises instead of returning [] silently."""
+        from superlocalmemory.core.ingestion_command import UnknownProfileError
+
+        eng = engine_with_mock_deps
+        with pytest.raises(UnknownProfileError, match="unknown profile"):
+            eng.store("x", profile_id="ghost")
+
+    def test_prebuilt_junk_content_still_rejects_unknown_profile(
+        self, engine_with_mock_deps,
+    ):
+        """4.1.14 audit: the guard precedes the low-quality early return —
+        junk content to a missing profile must raise, not report success."""
+        from superlocalmemory.core.ingestion_command import UnknownProfileError
+
+        eng = engine_with_mock_deps
+        fact = AtomicFact(
+            fact_id="ghost-junk-1", memory_id="", content="x",
+            fact_type=FactType.SEMANTIC, entities=[], confidence=0.1,
+        )
+        with pytest.raises(UnknownProfileError, match="unknown profile"):
+            eng.store_fact_direct(fact, profile_id="ghost")
+
+    def test_whitespace_profile_id_is_legacy(self, engine_with_mock_deps):
+        eng = engine_with_mock_deps
+        ids = eng.store_fast(
+            "Whitespace anchor resolves to the active profile.",
+            profile_id="   ",
+        )
+        assert ids
+        assert _fact_profile(eng, ids[0]) == eng._profile_id
+
+    def test_padded_profile_id_routes_stripped(self, engine_with_mock_deps):
+        eng = engine_with_mock_deps
+        _seed_profile(eng)
+        ids = eng.store_fast(
+            "Padded anchor routes to the stripped profile.",
+            profile_id=f"  {TARGET}  ",
+        )
+        assert ids
+        assert _fact_profile(eng, ids[0]) == TARGET

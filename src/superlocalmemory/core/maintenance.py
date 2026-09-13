@@ -18,6 +18,7 @@ License: AGPL-3.0-or-later
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import math as _math
 from datetime import UTC, datetime, timedelta
@@ -42,7 +43,8 @@ class _ConsolidationDisabled(Exception):
     """
 
 # Backfill constants
-_BACKFILL_BURN_IN_STEPS = 50
+_BACKFILL_BURN_IN_STEPS = 50  # retained for compatibility; no longer applied
+                              # at seed time -- see _seed_langevin_position
 _LANGEVIN_DIM = 8
 _MAX_NORM = 0.99
 
@@ -79,10 +81,17 @@ def _compute_equilibrium_radius(
     temperature: float = 0.3,
     dim: int = 8,
 ) -> float:
-    """Compute metadata-aware equilibrium radius (Strategy B).
+    """SUPERSEDED by ``_retention_radius``. No production caller remains.
 
-    Uses the Langevin potential coefficients to estimate where a fact
-    would settle if it had been in the dynamics from the start.
+    Kept because its behaviour is what several tests characterise, and because
+    deleting the thing a bug report names makes the report unreadable later.
+
+    Do not reach for this as the seed authority. ``r_eq = sqrt(T*dim / 2*a)``
+    scales as sqrt(dim) while the band boundaries in ``math/langevin.py`` are
+    dimension-independent constants, so at T=0.3, dim=8 its entire reachable
+    range over every possible input is [0.5210, 0.6330]: ACTIVE needs
+    alpha_eff > 13.33 against a maximum of ~4.05, and a memory accessed
+    100,000 times at maximum importance still lands in WARM. GitHub #136.
 
     r_eq ≈ sqrt(T * dim / (2 * effective_alpha))
     """
@@ -98,21 +107,128 @@ def _compute_equilibrium_radius(
     return min(r_eq, _MAX_NORM * 0.95)
 
 
+def _direction_seed(fact_id: str) -> int:
+    """A stable per-fact seed. ``hash()`` is salted per process and unusable."""
+    digest = hashlib.blake2b(fact_id.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big")
+
+
+def _retention_radius(
+    access_count: int, age_days: float, importance: float,
+) -> float:
+    """``1 - R(t)`` on the store's own timescale.
+
+    ``EbbinghausCurve`` is parameterised in HOURS -- ``max_strength`` is 100,
+    i.e. about four days -- because it models working-memory decay. Applied
+    verbatim it puts a one-day-old memory at r=0.94, archived. Measured, which
+    is the only reason this is not what shipped.
+
+    So the curve's SHAPE is used and its TIME CONSTANT is taken from the
+    ladder the product already documents in ``core/tier_manager.py``:
+    ``ARCHIVE_AFTER_DAYS`` days without access must reach
+    ``archive_threshold`` retention. That fixes S exactly, invents no new
+    constant, and leaves one authority for "how long is a long time here".
+
+    Strength then scales that constant, so being used extends the time
+    constant -- the same job ``ACCESS_BOOST_MULTIPLIER`` does in the tier
+    ladder, expressed continuously.
+    """
+    # Imported here, like LangevinDynamics below: this module is loaded on the
+    # daemon's start path and the config/ebbinghaus pair costs real time.
+    from superlocalmemory.core.config import ForgettingConfig
+    from superlocalmemory.math.ebbinghaus import EbbinghausCurve
+    from superlocalmemory.math.langevin import _MAX_NORM
+
+    curve = EbbinghausCurve(ForgettingConfig())
+    strength = curve.memory_strength(
+        access_count=access_count,
+        importance=importance,
+        confirmation_count=0,
+        emotional_salience=0.0,
+    )
+    # Same conversion the decay path uses — one derivation, not two copies.
+    # 4.1.15 scaled the seed here and left the decay path unscaled, so the
+    # decay cycle overwrote every corrected tier minutes later.
+    retention = curve.retention(
+        max(0.0, age_days) * 24.0, curve.store_scaled_strength(strength),
+    )
+    return min(max(1.0 - retention, 0.0), _MAX_NORM * 0.95)
+
+
+def _persist_lifecycle(
+    db: object,
+    profile_id: str,
+    updates: "list[tuple[str, str, object]]",
+) -> int:
+    """Write a computed tier to the authority AND the mirror, together.
+
+    WHY THIS EXISTS. Every lifecycle write in this module used to be
+    ``db.update_fact(fact_id, {"lifecycle": ...})`` -- the mirror only.
+    ``fact_retention.lifecycle_zone`` is the authority, and
+    ``reconcile_profile_lifecycle`` runs later in the SAME maintenance tick and
+    syncs authority -> mirror. So the pass computed a tier, wrote it to the
+    losing column, and reconcile faithfully threw it away. Observed on a real
+    store: the backfill moved ``active`` from 111 to 2,631, and one tick later
+    it was 111 again.
+
+    ``set_fact_lifecycle_zone`` writes both in one transaction and handles the
+    spelling difference -- ``atomic_facts`` says ``archived``,
+    ``fact_retention`` says ``archive``.
+
+    ``updates`` is ``(fact_id, lifecycle, position_or_None)``. The position has
+    no mirror, so it still goes through ``update_fact``; without it the backfill
+    would recompute the same facts on every pass and never converge.
+
+    Returns the number of facts whose tier was written.
+    """
+    if not updates:
+        return 0
+    from superlocalmemory.core.lifecycle_state import set_fact_lifecycle_zone
+
+    for fact_id, _lifecycle, position in updates:
+        if position is not None:
+            db.update_fact(fact_id, {"langevin_position": position})
+
+    by_zone: dict[str, list[str]] = {}
+    for fact_id, lifecycle, _position in updates:
+        by_zone.setdefault(str(lifecycle), []).append(fact_id)
+
+    written = 0
+    for zone, fact_ids in by_zone.items():
+        try:
+            written += set_fact_lifecycle_zone(
+                db, fact_ids, zone, profile_id=profile_id,
+            )
+        except Exception as exc:  # noqa: BLE001 -- maintenance is best-effort
+            logger.warning("lifecycle persist failed for %s: %s", zone, exc)
+    return written
+
+
 def _seed_langevin_position(
     access_count: int,
     age_days: float,
     importance: float,
     temperature: float = 0.3,
     dim: int = 8,
+    *,
+    fact_id: str = "",
 ) -> list[float]:
-    """Create a metadata-aware initial position (Strategy B).
+    """Place a fact at the radius its Ebbinghaus retention implies.
 
-    Places the fact at the equilibrium radius with a random direction.
+    Radius is ``1 - R(t)``. A memory written a moment ago has R = 1 and sits at
+    the centre; one left alone decays outward; using it raises S and pulls it
+    back in. That is the README's claim, and until 4.1.15 the code did not
+    implement it: the old equilibrium radius ``sqrt(T*dim / 2*alpha_eff)``
+    could only ever return a value in [0.5210, 0.6330] whatever the inputs, so
+    ACTIVE was unreachable and the whole metadata domain was worth 0.91
+    standard deviations of the diffusion noise applied on top of it.
+
+    The direction is seeded from ``fact_id`` so a tier is reproducible. A tier
+    nobody can reproduce is a support case nobody can answer. Direction still
+    varies per fact, so facts do not collapse onto one point.
     """
-    r_eq = _compute_equilibrium_radius(
-        access_count, age_days, importance, temperature, dim,
-    )
-    rng = np.random.default_rng()
+    r_eq = _retention_radius(access_count, age_days, importance)
+    rng = np.random.default_rng(_direction_seed(fact_id))
     direction = rng.standard_normal(dim)
     norm = float(np.linalg.norm(direction))
     if norm < 1e-8:
@@ -336,22 +452,24 @@ def run_maintenance(
                 if f.langevin_position is not None:
                     continue
                 age_days = _age_days(f.created_at)
-                # Strategy B: metadata-aware seed position
+                # The seed is now a measurement of this fact's retention, not
+                # a guess to be annealed. The 50-step burn-in that used to
+                # follow was there to anneal a seed that carried almost no
+                # information -- it added sd 0.1225 of thermal noise against
+                # 0.1120 of total signal, and moved the mean radius from
+                # 0.6076 to 0.7515, i.e. it aged every memory on creation.
+                # Fifty steps of simulated neglect applied to a fact four
+                # seconds old is not what the README describes. GitHub #136.
                 position = _seed_langevin_position(
                     f.access_count, age_days, f.importance,
                     config.math.langevin_temperature, _LANGEVIN_DIM,
+                    fact_id=f.fact_id,
                 )
-                # Strategy C: burn-in from the seeded position
-                for step_i in range(_BACKFILL_BURN_IN_STEPS):
-                    position, _ = ld.step(
-                        position, f.access_count, age_days, f.importance,
-                    )
                 weight = ld.compute_lifecycle_weight(position)
                 lifecycle = ld.get_lifecycle_state(weight).value
-                db.update_fact(f.fact_id, {
-                    "langevin_position": position,
-                    "lifecycle": lifecycle,
-                })
+                _persist_lifecycle(
+                    db, profile_id, [(f.fact_id, lifecycle, position)],
+                )
                 f.langevin_position = position  # update in-memory for step 1b
                 backfilled += 1
 
@@ -386,11 +504,10 @@ def run_maintenance(
 
             if fact_dicts:
                 results = ld.batch_step(fact_dicts)
-                for r in results:
-                    db.update_fact(r["fact_id"], {
-                        "langevin_position": r["position"],
-                        "lifecycle": r["lifecycle"],
-                    })
+                _persist_lifecycle(db, profile_id, [
+                    (r["fact_id"], r["lifecycle"], r["position"])
+                    for r in results
+                ])
                 counts["langevin_updated"] = len(results)
         except Exception as exc:
             logger.warning("Langevin maintenance failed: %s", exc)
@@ -433,10 +550,9 @@ def run_maintenance(
                         importance=f.importance,
                     )
                     lifecycle = coupled_ld.get_lifecycle_state(weight).value
-                    db.update_fact(f.fact_id, {
-                        "langevin_position": new_pos,
-                        "lifecycle": lifecycle,
-                    })
+                    _persist_lifecycle(
+                        db, profile_id, [(f.fact_id, lifecycle, new_pos)],
+                    )
                     coupled_count += 1
 
             counts["fisher_coupled"] = coupled_count
@@ -590,7 +706,7 @@ def run_maintenance(
                 )
                 if zone == current_zone:
                     continue
-                db.update_fact(f.fact_id, {"lifecycle": zone})
+                _persist_lifecycle(db, profile_id, [(f.fact_id, zone, None)])
             counts["ebbinghaus_coupled"] = elc_count
         except Exception as exc:
             logger.warning("Ebbinghaus-Langevin coupling failed: %s", exc)

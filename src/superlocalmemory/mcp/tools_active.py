@@ -28,6 +28,9 @@ from superlocalmemory.core.admission import admits
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.infra.data_root import state_path
 from superlocalmemory.mcp.shared import authorize_mcp_mutation
+from superlocalmemory.storage.database import (
+    current_fact_clause_for_connection,
+)
 from superlocalmemory.storage.read_connection import ReadConnectionFactory
 
 if TYPE_CHECKING:
@@ -82,6 +85,7 @@ def _sqlite_emergency_recall(
                     WHERE fts.atomic_facts_fts MATCH ?
                       AND f.profile_id = ?
                       {age_clause}
+                      {current_fact_clause_for_connection(conn, "f")}
                     ORDER BY fts.rank
                     LIMIT ?""",
                 (safe_query, profile_id, limit * 2),
@@ -283,6 +287,20 @@ def _upcoming_scheduled_facts(engine, now: datetime.datetime) -> list[dict]:
         # exclusive, so the horizon day itself is included.
         start = now.date().isoformat()
         end = (now + datetime.timedelta(days=_SCHEDULED_HORIZON_DAYS + 1)).date().isoformat()
+        # Resolved the way retrieval/scope_policy.py resolves it: `db` here is
+        # duck-typed on `.execute` alone, so a caller may hand us an object
+        # that is not a DatabaseManager. Reaching for the attribute directly
+        # raised inside this function's `except`, which swallowed the entire
+        # prospective surface rather than the filter -- silently, and only a
+        # test double noticed. Fall back to scope-only rather than to nothing.
+        current = ""
+        clause_fn = getattr(type(db), "current_fact_clause", None)
+        if callable(clause_fn):
+            try:
+                current = clause_fn(db)
+            except Exception:  # noqa: BLE001 -- fall back to scope-only
+                logger.warning("scheduled surface could not resolve its filter")
+                current = ""
         rows = db.execute(
             "SELECT fact_id, content, referenced_date"
             " FROM atomic_facts"
@@ -291,6 +309,7 @@ def _upcoming_scheduled_facts(engine, now: datetime.datetime) -> list[dict]:
             "   AND referenced_date IS NOT NULL"
             "   AND referenced_date >= ?"
             "   AND referenced_date < ?"
+            f"   {current}"
             " ORDER BY referenced_date ASC"
             f" LIMIT {_SCHEDULED_LIMIT}",
             (engine.profile_id, start, end),
@@ -318,6 +337,8 @@ def register_active_tools(server, get_engine: Callable) -> None:
         query: str = "",
         max_results: int = 10,
         max_age_days: int = 30,
+        session_id: str = "",
+        agent_id: str = "",
     ) -> dict:
         """Initialize session with relevant memory context.
 
@@ -563,18 +584,24 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 )
                 feedback_count = 0
 
-            # v3.6.9 (#35): generate a stable session_id so clients can pass it
-            # to remember() and close_session() for proper session aggregation.
-            session_id = (
+            # A gateway can serve concurrent host conversations.  An explicit
+            # host id therefore always wins; generating one is retained only
+            # for older clients that cannot supply lifecycle identity.
+            effective_session_id = session_id.strip() or (
                 f"slm-{datetime.datetime.now(datetime.timezone.utc):%Y%m%d}"
                 f"-{uuid.uuid4().hex[:8]}"
             )
+            effective_agent_id = agent_id.strip() or _get_agent_id()
+            # Backward-compatible default for legacy close_session() callers;
+            # native hosts must pass their explicit id when sessions overlap.
+            engine._last_session_id = effective_session_id
 
             _upcoming_events = _upcoming_scheduled_facts(engine, _now)
 
             return {
                 "success": True,
-                "session_id": session_id,
+                "session_id": effective_session_id,
+                "agent_id": effective_agent_id,
                 "context": context,
                 "memories": memories[:max_results],
                 "memory_count": len(memories),
@@ -623,6 +650,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
     async def observe(
         content: str,
         agent_id: str | None = None,
+        session_id: str = "",
     ) -> dict:
         """Observe conversation content for automatic memory capture.
 
@@ -673,11 +701,16 @@ def register_active_tools(server, get_engine: Callable) -> None:
             # Auto-store via engine.
             # pool_store uses blocking urllib (DaemonPoolProxy) — run in
             # thread so the MCP event loop stays unblocked (#34 class).
+            from superlocalmemory.mcp.session_binding import resolve_session_id
+            effective_session_id = resolve_session_id(
+                session_id, agent_id=agent_id, allow_agent_fallback=False,
+            )
             stored = await asyncio.to_thread(
                 auto.capture,
                 content,
                 category=decision.category,
-                metadata={"agent_id": agent_id, "source": "auto-observe"},
+                metadata={"agent_id": agent_id, "session_id": effective_session_id,
+                          "source": "auto-observe"},
             )
 
             if stored:
@@ -693,6 +726,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 "category": decision.category,
                 "confidence": round(decision.confidence, 3),
                 "reason": decision.reason,
+                "session_id": effective_session_id,
             }
         except Exception as exc:
             logger.exception("observe failed")

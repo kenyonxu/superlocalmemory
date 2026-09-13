@@ -24,7 +24,7 @@ from superlocalmemory.core.config import CANONICAL_LIST_LIMIT, CANONICAL_RECALL_
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.infra.data_root import state_path
 from superlocalmemory.mcp._daemon_proxy import daemon_unavailable_error
-from superlocalmemory.mcp.shared import authorize_mcp_mutation
+from superlocalmemory.mcp.shared import authorize_mcp_mutation, parse_id_list
 
 logger = logging.getLogger(__name__)
 
@@ -189,14 +189,33 @@ def register_core_tools(server, get_engine: Callable) -> None:
                         "session_date": session_date,
                         "idempotency_key": effective_idempotency_key or None,
                     }
-                    if profile_id:
+                    if (profile_id or "").strip():
                         # Per-request profile routing (spec section 3/5): the
                         # anchor is only put on the wire when the caller set
                         # it, so an unset profile_id keeps the legacy request
                         # byte-identical. The daemon routes THIS one write to
                         # that profile without moving the active pointer.
-                        body["profile_id"] = profile_id
-                    resp = await _asyncio.to_thread(daemon_request, "POST", "/remember", body)
+                        # 4.1.14 audit: stripped — whitespace-only is legacy,
+                        # padded ids travel canonical.
+                        body["profile_id"] = profile_id.strip()
+                    resp = None
+                    try:
+                        resp = await _asyncio.to_thread(
+                            daemon_request, "POST", "/remember", body,
+                            preserve_not_found=True,
+                        )
+                    except Exception as exc:
+                        # 4.1.14 audit: a live daemon's unknown-profile 404
+                        # surfaces immediately — neither the 3x retry below
+                        # nor the pool fallback can heal a 404.
+                        if type(exc).__name__ == "DaemonNotFound" and hasattr(exc, "code"):
+                            return {
+                                "success": False,
+                                "code": getattr(exc, "code"),
+                                "retryable": False,
+                                "error": getattr(exc, "message", "daemon returned 404"),
+                            }
+                        raise
                     if resp and (resp.get("fact_ids") is not None or resp.get("ok")):
                         fids = resp.get("fact_ids") or []
                         materialization_state = resp.get("materialization_state")
@@ -256,12 +275,12 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     or "mcp:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
                 ),
             }
-            if profile_id:
+            if (profile_id or "").strip():
                 # DaemonPoolProxy.store forwards metadata["profile_id"] as
                 # the per-request routing anchor on POST /remember. Kept out
                 # of the metadata entirely when unset so the legacy fallback
-                # call stays byte-identical.
-                worker_meta["profile_id"] = profile_id
+                # call stays byte-identical. 4.1.14 audit: stripped.
+                worker_meta["profile_id"] = profile_id.strip()
 
             def _store_via_daemon_pool():
                 pool = choose_pool()
@@ -278,6 +297,17 @@ def register_core_tools(server, get_engine: Callable) -> None:
                             "error",
                             daemon_unavailable_error(),
                         ),
+                    }
+                # 4.1.14 audit: structured non-retryable answers from the
+                # pool (unknown_profile, PROFILE_MISMATCH) pass through
+                # verbatim — mislabeling them DAEMON_UNAVAILABLE retryable
+                # would send clients into a hopeless retry loop.
+                if isinstance(stored, dict) and stored.get("code"):
+                    return {
+                        "success": False,
+                        "code": stored.get("code"),
+                        "retryable": bool(stored.get("retryable", False)),
+                        "error": stored.get("error", "daemon request failed"),
                     }
                 return {
                     "success": False,
@@ -450,8 +480,9 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     # Per-request profile routing (spec section 3/5): threaded
                     # only when set, so an unset anchor keeps the legacy call
                     # byte-identical and pool shapes that predate the
-                    # parameter are never asked for it.
-                    **({"profile_id": profile_id} if profile_id else {}),
+                    # parameter are never asked for it. 4.1.14 audit:
+                    # stripped (whitespace-only is legacy).
+                    **({"profile_id": profile_id.strip()} if (profile_id or "").strip() else {}),
                 )
 
             result = await asyncio.to_thread(
@@ -465,6 +496,12 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     "query_type": result.get("query_type", "unknown"),
                     "channel_weights": result.get("channel_weights", {}),
                     "retrieval_time_ms": result.get("retrieval_time_ms", 0),
+                    # 4.1.14 audit: the served namespace travels with the
+                    # answer — a routed recall must not look active-profiled
+                    # at the MCP boundary either.
+                    "profile": result.get("profile", ""),
+                    "profile_generation": result.get("profile_generation"),
+                    "retrieval_mode": result.get("retrieval_mode", ""),
                     # v3.6.6: surface evidence-floor signal to MCP clients.
                     "no_confident_match": result.get("no_confident_match", False),
                     "score_contract_version": result.get("score_contract_version", "2"),
@@ -476,6 +513,17 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     "answer_confidence": result.get("answer_confidence"),
                     "abstained": result.get("abstained", False),
                     "abstention_reason": result.get("abstention_reason"),
+                }
+            # 4.1.14 audit: structured daemon answers (unknown_profile)
+            # pass through with code and retryability intact — collapsing
+            # them to a bare error string repeats the DAEMON_UNAVAILABLE
+            # mislabel one layer down.
+            if isinstance(result, dict) and result.get("code"):
+                return {
+                    "success": False,
+                    "code": result.get("code"),
+                    "retryable": bool(result.get("retryable", False)),
+                    "error": result.get("error", "Recall failed"),
                 }
             return {"success": False, "error": result.get("error", "Recall failed")}
         except Exception as exc:
@@ -506,13 +554,30 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     @admits(OperationKind.RECALL)
-    async def fetch(fact_ids: str) -> dict:
-        """Fetch full details for specific fact IDs (comma-separated)."""
+    async def fetch(fact_ids: "str | list[str]") -> dict:
+        """Fetch full details for specific fact IDs (comma-separated or a list).
+
+        Reports every id it could not resolve. Before 4.1.15 an unmatched token
+        returned ``success: true, count: 0`` -- indistinguishable from a
+        correct answer for a fact that does not exist, on the one tool an agent
+        uses to verify that a write landed. GitHub #135.
+        """
         try:
             engine = get_engine()
-            ids = [fid.strip() for fid in fact_ids.split(",") if fid.strip()]
+            ids = parse_id_list(fact_ids)
+            if not ids:
+                return {
+                    "success": False,
+                    "error": (
+                        f"fetch could not read any fact id from {fact_ids!r}. "
+                        "Pass a comma-separated string or a list of ids."
+                    ),
+                    "results": [], "count": 0, "not_found": [],
+                }
             pid = await _runtime_profile(get_engine)
             facts = engine._db.get_facts_by_ids(ids, pid)
+            found = {f.fact_id for f in facts}
+            not_found = [fid for fid in ids if fid not in found]
             items = []
             for f in facts:
                 items.append({
@@ -527,7 +592,20 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     "lifecycle": f.lifecycle.value,
                     "access_count": f.access_count,
                 })
-            return {"success": True, "results": items, "count": len(items)}
+            if not items:
+                return {
+                    "success": False,
+                    "error": (
+                        "no fact matched "
+                        + ", ".join(repr(fid) for fid in not_found)
+                        + f" in profile {pid!r}"
+                    ),
+                    "results": [], "count": 0, "not_found": not_found,
+                }
+            return {
+                "success": True, "results": items, "count": len(items),
+                "not_found": not_found,
+            }
         except Exception as exc:
             logger.exception("fetch failed")
             return {"success": False, "error": str(exc)}

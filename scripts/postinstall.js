@@ -83,6 +83,47 @@ function runtimePythonPath(packageRoot, platform = os.platform()) {
     : path.join(packageRoot, '.slm-venv', 'bin', 'python');
 }
 
+/**
+ * Single source of truth for the Python payload (4.1.14 #134, Option A).
+ *
+ * The npm tarball carries NO Python sources. The package-owned venv is
+ * populated from the pinned PyPI wheel `superlocalmemory==<npm version>`,
+ * so there is exactly one copy of the package and patching any other
+ * tree cannot shadow it. `SLM_LOCAL_WHEEL=/path/to/file.whl` overrides
+ * the specifier for air-gapped installs: it must be an existing local
+ * `.whl` file (directories, sdists and URLs are refused) and it still
+ * passes the version identity check below. Note the boundary honestly:
+ * the wheel itself comes from the file, but pip still resolves its
+ * *dependencies* from the index unless PIP_FIND_LINKS/PIP_NO_INDEX say
+ * otherwise — never a source tree, but not fully offline either.
+ */
+function pypiSpecifier(packageRoot) {
+  const rawWheel = String(process.env.SLM_LOCAL_WHEEL || '').trim();
+  if (rawWheel) {
+    // 4.1.14 audit: resolve relative paths against the package root (not
+    // the caller's cwd), require an existing FILE (a directory named
+    // *.whl is refused), and require the .whl suffix (sdists, URLs and
+    // directories cannot pass).
+    const localWheel = path.isAbsolute(rawWheel)
+      ? rawWheel
+      : path.resolve(packageRoot, rawWheel);
+    let isFile = false;
+    try {
+      isFile = fs.statSync(localWheel).isFile();
+    } catch {
+      isFile = false;
+    }
+    if (!localWheel.toLowerCase().endsWith('.whl') || !isFile) {
+      throw new Error(
+        `SLM_LOCAL_WHEEL must be an existing local .whl file, got: ${rawWheel}`,
+      );
+    }
+    return localWheel;
+  }
+  const packageVersion = require(path.join(packageRoot, 'package.json')).version;
+  return `superlocalmemory==${packageVersion}`;
+}
+
 function validateRuntimeLocation(venvRoot) {
   if (!fs.existsSync(venvRoot)) return { ok: true };
   try {
@@ -145,6 +186,17 @@ function main(argv = process.argv.slice(2)) {
 
   console.log(`  Python ${python.version.join('.')} (${[python.command, ...python.prefixArgs].join(' ')})`);
 
+  // Fail fast on a bad package source BEFORE creating any venv, so a
+  // misconfigured SLM_LOCAL_WHEEL never leaves a half-built runtime behind.
+  let packageSource;
+  try {
+    packageSource = pypiSpecifier(packageRoot);
+  } catch (error) {
+    console.error(`SuperLocalMemory: ${error.message}`);
+    console.error('Unset SLM_LOCAL_WHEEL to install from PyPI, or point it at a real wheel file.');
+    return 1;
+  }
+
   const createVenv = spawnSync(
     python.command,
     [...python.prefixArgs, '-m', 'venv', venvRoot],
@@ -169,12 +221,15 @@ function main(argv = process.argv.slice(2)) {
       '--disable-pip-version-check',
       '--no-input',
       '--upgrade',
-      packageRoot,
+      packageSource,
     ],
     { stdio: 'inherit', timeout: INSTALL_TIMEOUT_MS, env: process.env },
   );
   if (installPackage.status !== 0) {
     console.error(`SuperLocalMemory: private-runtime installation failed (${failureDetail(installPackage)}).`);
+    console.error(`Tried Python source: ${packageSource}`);
+    console.error('This install needs network access to PyPI, or set SLM_LOCAL_WHEEL=/path/to/superlocalmemory-<version>-py3-none-any.whl for air-gapped installs, then run:');
+    console.error('  npm rebuild superlocalmemory');
     console.error('Check network access, available disk space, and Python build prerequisites, then run:');
     console.error('  npm rebuild superlocalmemory');
     console.error('No system Python packages or SLM durable data were modified.');
@@ -190,7 +245,16 @@ function main(argv = process.argv.slice(2)) {
     { stdio: 'pipe', timeout: 15000, env: process.env },
   );
   const installedVersion = (verify.stdout || '').toString().trim();
-  if (verify.status !== 0 || installedVersion !== packageVersion) {
+  // 4.1.14 audit: normalize across npm-semver and PEP 440 spellings
+  // ("4.1.14-rc.1" vs "4.1.14rc1") before comparing — a strict strcmp
+  // would fail a good wheel on pre-releases.
+  const normalizeVersion = (value) => String(value || '')
+    .trim().toLowerCase().replace(/^v/, '')
+    .replace(/[-_.]+/g, '');
+  if (
+    verify.status !== 0
+    || normalizeVersion(installedVersion) !== normalizeVersion(packageVersion)
+  ) {
     console.error(
       `SuperLocalMemory: runtime identity check failed (npm=${packageVersion}, python=${installedVersion || 'unavailable'}).`,
     );
@@ -199,6 +263,10 @@ function main(argv = process.argv.slice(2)) {
   }
 
   console.log(`SuperLocalMemory ${packageVersion}: isolated runtime verified.`);
+  console.log(`Single source of truth for this npm installation: the PyPI wheel superlocalmemory==${packageVersion} in .slm-venv;`);
+  console.log('the npm tarball carries no Python sources, so no second copy can shadow it.');
+  console.log('(The Claude Code plugin keeps its own separate pinned runtime for its host;');
+  console.log(' that scope is independent of this npm installation — see plugin/requirements.txt.)');
   console.log('No memory database, IDE hooks, daemon, configuration, or models were changed.');
   console.log('');
   console.log('  Your database will be automatically migrated on first run.');
@@ -228,6 +296,7 @@ module.exports = {
   isSupportedPython,
   main,
   parsePythonVersion,
+  pypiSpecifier,
   pythonCandidates,
   runtimePythonPath,
   validateRuntimeLocation,

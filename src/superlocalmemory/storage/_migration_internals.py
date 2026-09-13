@@ -165,6 +165,8 @@ from superlocalmemory.storage.migrations import (
     M047_fisher_vectors_are_stored_like_every_other_vector as _M047,
     M048_upcoming_holds_only_what_is_upcoming as _M048,
     M049_a_schema_version_marker_is_one_row as _M049,
+    M050_execution_learning_v2 as _M050,
+    M051_lifecycle_is_recomputed_not_resampled as _M051,
 )
 
 # Emit under the runner's logger name so operational log filters that key on
@@ -223,6 +225,8 @@ _MODULES = {
     _M047.NAME: _M047,
     _M048.NAME: _M048,
     _M049.NAME: _M049,
+    _M050.NAME: _M050,
+    _M051.NAME: _M051,
 }
 
 # Exact historical DDL fingerprints whose resulting schema is intentionally
@@ -348,6 +352,35 @@ def _why_unmet(mod, conn) -> str:
         return ""
 
 
+def _justified_skip(conn, mod, migration_name: str, justification: str) -> tuple[str, str]:
+    """Skip a justified module, or fail it when it blocks serving.
+
+    4.1.14 audit: REPAIR_NOT_APPLICABLE excuses the module from automatic
+    repair, NOT from the serving gate. A module whose own blocks_serving()
+    answers False (M048 data drift) skips quietly; anything else —
+    including M002 schema holes with no blocks_serving answer — keeps
+    failing with the justification attached, so nothing boots silently.
+    Unknown means blocking, mirroring _serving_blocked_by.
+    """
+    decide = getattr(mod, "blocks_serving", None)
+    if callable(decide):
+        try:
+            if not bool(decide(conn)):
+                logger.info(
+                    "schema incomplete for completed migration %s; "
+                    "no automatic repair by design: %s",
+                    migration_name, justification,
+                )
+                return ("skipped", f"no automatic repair by design: {justification}")
+        except Exception:  # noqa: BLE001 — unknown means blocking
+            pass
+    return (
+        "failed",
+        f"schema incomplete for completed migration {migration_name}; "
+        f"automatic replay is disabled; {justification}",
+    )
+
+
 def _apply_single(
     conn: sqlite3.Connection,
     migration: Migration,
@@ -447,6 +480,16 @@ def _apply_single(
                                 "failed",
                                 f"safe repair failed for {migration.name}: {exc}",
                             )
+                    # 4.1.14 audit: same by-design skip as the end-state
+                    # branch below — a justified module never fails here.
+                    justification = (
+                        getattr(mod, "REPAIR_NOT_APPLICABLE", "")
+                        if mod is not None else ""
+                    )
+                    if isinstance(justification, str) and justification.strip():
+                        return _justified_skip(
+                            conn, mod, migration.name, justification.strip(),
+                        )
                 detail = (
                     f"DDL drift detected for {migration.name}: "
                     f"logged={logged_hash[:8]}... current={ddl_hash[:8]}..."
@@ -486,6 +529,22 @@ def _apply_single(
                 getattr(mod, "repair", None) if mod is not None else None
             )
             if not callable(repair_fn):
+                # 4.1.14 audit: a module may deliberately decline automatic
+                # repair with REPAIR_NOT_APPLICABLE (destructive rebuilds,
+                # data-quality drift owned by maintenance). That is a SKIP
+                # with a reason, not a failure — failing here wrote
+                # migration-error logs and doctor FAILs for routine,
+                # by-design drift. The skip still honors blocks_serving:
+                # a justified module without an explicit non-blocking
+                # answer keeps failing, so M002-style schema holes never
+                # boot silently.
+                justification = (
+                    getattr(mod, "REPAIR_NOT_APPLICABLE", "") if mod is not None else ""
+                )
+                if isinstance(justification, str) and justification.strip():
+                    return _justified_skip(
+                        conn, mod, migration.name, justification.strip(),
+                    )
                 detail = (
                     f"schema incomplete for completed migration "
                     f"{migration.name}; automatic replay is disabled"

@@ -18,6 +18,8 @@ License: AGPL-3.0-or-later
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
+import os
 import threading
 from typing import TYPE_CHECKING
 
@@ -26,6 +28,44 @@ if TYPE_CHECKING:
     from superlocalmemory.storage.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
+
+
+
+# How much vector-store version history to keep. Every write to the vector
+# store creates a version and nothing used to remove them: a 5,561-memory
+# store reached 50,580 versions in 17 GB, and each vector operation then had
+# to walk that history -- the daemon in GitHub #137 held a core at 90%+ with
+# an empty queue. A week is enough to debug a bad projection and short enough
+# that the history cannot run away.
+_VECTOR_HISTORY_DAYS = float(os.environ.get("SLM_VECTOR_HISTORY_DAYS", "7"))
+
+
+def compact_vector_store() -> dict:
+    """Drop vector-store versions older than the retention window.
+
+    Best-effort and never raises: a maintenance pass that cannot compact must
+    not take the daemon down, and the next tick will try again.
+
+    ``delete_unverified`` stays OFF here. It removes files no manifest
+    references, which is exactly what an in-flight write is creating -- safe
+    only with no writer attached, i.e. the offline repair path.
+    """
+    try:
+        from superlocalmemory.core.backend_orchestrator import get_orchestrator
+
+        orchestrator = get_orchestrator()
+        if orchestrator is None:
+            logger.warning("vector store compaction skipped: no orchestrator")
+            return {"ok": False, "reason": "no orchestrator"}
+        backend = orchestrator.get_vector_backend()
+        compact = getattr(backend, "compact", None)
+        if not callable(compact):
+            logger.warning("vector store compaction skipped: backend cannot compact")
+            return {"ok": False, "reason": "backend cannot compact"}
+        return compact(retention=timedelta(days=_VECTOR_HISTORY_DAYS))
+    except Exception as exc:  # noqa: BLE001 -- maintenance is best-effort
+        logger.warning("vector store compaction skipped: %s", exc)
+        return {"ok": False, "reason": str(exc)}
 
 
 class MaintenanceScheduler:
@@ -91,6 +131,18 @@ class MaintenanceScheduler:
         )
         self._initial_reclassify_timer.daemon = True
         self._initial_reclassify_timer.start()
+        # Vector-store version history is bounded on the maintenance tick,
+        # but that tick is armed from boot and only re-armed at the end of
+        # _run. A LaunchAgent that restarts inside scheduler_interval_minutes
+        # (KeepAlive, MCP clients) never gets a first pass — measured: 3,517
+        # scheduler-start lines and zero compact lines on a 37k-version /
+        # 48 GB store. Same one-shot pattern as cache GC / graph metrics,
+        # staggered so it does not contend for the write lock.
+        self._initial_compact_timer = threading.Timer(
+            270.0, self._initial_vector_compaction,
+        )
+        self._initial_compact_timer.daemon = True
+        self._initial_compact_timer.start()
         logger.info(
             "Maintenance scheduler started (interval=%dm)",
             self._config.forgetting.scheduler_interval_minutes,
@@ -113,6 +165,17 @@ class MaintenanceScheduler:
             _reclassify.apply(open_connection=self._db.raw_connection)
         except Exception as exc:
             logger.debug("Startup plan re-read skipped: %s", exc)
+
+    def _initial_vector_compaction(self) -> None:
+        """Drop stale vector-store versions without waiting a full interval."""
+        if not self._running:
+            return
+        out = compact_vector_store()
+        self._record_step(
+            "vector compaction",
+            bool(out.get("ok")),
+            str(out.get("reason") or ""),
+        )
 
     def _initial_cache_gc(self) -> None:
         """Best-effort one-shot activation-cache GC shortly after boot."""
@@ -169,6 +232,10 @@ class MaintenanceScheduler:
         if _reclassify_timer is not None:
             _reclassify_timer.cancel()
             self._initial_reclassify_timer = None
+        _compact_timer = getattr(self, "_initial_compact_timer", None)
+        if _compact_timer is not None:
+            _compact_timer.cancel()
+            self._initial_compact_timer = None
         logger.info("Maintenance scheduler stopped")
 
     def _schedule_next(self) -> None:
@@ -245,6 +312,16 @@ class MaintenanceScheduler:
                     )
             except Exception as exc:
                 logger.debug("Self-heal backfill skipped: %s", exc)
+
+        # Once per cycle, not per profile: there is one embeddings table.
+        # Also before the per-profile Langevin/Ollama work — on a real store
+        # that work ran for 11+ minutes and compact never started.
+        out = compact_vector_store()
+        self._record_step(
+            "vector compaction",
+            bool(out.get("ok")),
+            str(out.get("reason") or ""),
+        )
 
         for profile_id in self._profile_ids():
             if self._config.forgetting.enabled:

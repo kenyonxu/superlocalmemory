@@ -115,17 +115,31 @@ class TestSeedLangevinPosition:
         assert isinstance(pos, list)
         assert len(pos) == 8
 
-    def test_radius_matches_equilibrium(self) -> None:
-        """Seeded position radius should equal the computed equilibrium radius."""
+    def test_radius_is_the_facts_retention(self) -> None:
+        """Seeded radius is 1 - R(t), not the old equilibrium formula.
+
+        This test used to assert the radius equalled
+        ``_compute_equilibrium_radius``. That contract was replaced in 4.1.15:
+        the formula scales as sqrt(dim) against dimension-independent band
+        boundaries, so its entire reachable range was [0.5210, 0.6330] and
+        ACTIVE was unreachable for every possible input. GitHub #136.
+
+        The assertion is kept in the same shape -- seeded radius equals the
+        authority -- with the authority corrected.
+        """
+        from superlocalmemory.core.maintenance import _retention_radius
+
         for _ in range(20):
             pos = _seed_langevin_position(
                 access_count=10, age_days=30.0, importance=0.7, dim=8,
+                fact_id="stable",
             )
-            expected_r = _compute_equilibrium_radius(
+            expected_r = _retention_radius(
                 access_count=10, age_days=30.0, importance=0.7,
             )
-            actual_r = float(np.linalg.norm(pos))
-            np.testing.assert_allclose(actual_r, expected_r, atol=1e-6)
+            np.testing.assert_allclose(
+                float(np.linalg.norm(pos)), expected_r, atol=1e-6,
+            )
 
     def test_inside_unit_ball(self) -> None:
         pos = _seed_langevin_position(
@@ -261,20 +275,42 @@ class TestMaintenanceBackfill:
 
         assert counts["langevin_backfilled"] == 1
 
-    def test_backfill_sets_lifecycle(self) -> None:
-        """Backfilled facts should have a valid lifecycle value."""
+    def test_backfill_sets_lifecycle(self, monkeypatch) -> None:
+        """Backfilled facts get a valid lifecycle, written where it survives.
+
+        The assertion moved in 4.1.16. It used to check that ``update_fact``
+        carried ``lifecycle`` — which is exactly the write that
+        ``reconcile_profile_lifecycle`` reverts later in the same maintenance
+        tick, because ``fact_retention.lifecycle_zone`` is the authority and
+        ``atomic_facts.lifecycle`` is only its mirror. On a real store that
+        silently undid the whole fix: active went 111 -> 2,631 -> 111 inside
+        one tick.
+
+        The tier now goes through ``_persist_lifecycle``, which writes both
+        columns in one transaction. Same guarantee, asserted at the place that
+        actually holds it.
+        """
+        from superlocalmemory.core import maintenance as _m
+
         config = self._make_config()
         db = MagicMock()
         f1 = self._make_fact("f1", langevin_position=None, age_days=5.0)
         db.get_all_facts.return_value = [f1]
 
+        seen: list[tuple] = []
+        real = _m._persist_lifecycle
+        monkeypatch.setattr(
+            _m, "_persist_lifecycle",
+            lambda d, p, updates: seen.extend(updates) or len(updates),
+        )
         run_maintenance(db, config, "default")
 
-        # First update call is from backfill
-        first_call = db.update_fact.call_args_list[0]
-        updates = first_call[0][1]
-        assert "lifecycle" in updates
-        assert updates["lifecycle"] in {"active", "warm", "cold", "archived"}
+        assert seen, "backfill persisted no lifecycle at all"
+        fact_id, lifecycle, position = seen[0]
+        assert fact_id == "f1"
+        assert lifecycle in {"active", "warm", "cold", "archived"}
+        assert position is not None, "the position must persist too, or it reruns"
+        assert real is not None
 
     def test_returns_backfill_count_key(self) -> None:
         """Return dict should include langevin_backfilled key."""
