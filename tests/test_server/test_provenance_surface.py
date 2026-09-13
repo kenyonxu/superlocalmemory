@@ -166,6 +166,137 @@ class TestRememberProvenance:
 
 
 # ---------------------------------------------------------------------------
+# The revision surface (spec section 6, Task 3): PATCH /api/memories/{id}
+#
+# Path split (controller ruling): a body WITH content keeps the existing
+# correction chain (predecessor/successor fact_id, review-gated). A body
+# with ONLY scope/provenance_kind updates the addressed row IN PLACE — the
+# fact_id never changes for a curation action, or deepmaid's historical
+# fact_id references break. The revision surface validates STRICTLY
+# (out-of-vocabulary → 400): curation is a governance operation, so it is
+# held to a tighter contract than the lenient write path above.
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateMemoryProvenance:
+    def test_migrate_scope_and_tag_in_place(self, daemon) -> None:
+        client, _ = daemon
+        client.post("/remember", json={
+            "content": (
+                "Rowan curates the turbine winter rota and keeps the "
+                "maintenance ledger current."
+            ),
+            "scope": "personal",
+            "idempotency_key": "prov-upd-inplace-1",
+        })
+        fid = _newest(client)["fact_id"]
+        response = client.patch(f"/api/memories/{fid}", json={
+            "scope": "global", "provenance_kind": "curated",
+        })
+
+        assert response.status_code == 200, response.text
+        fact = _newest(client)
+        # In-place: the addressed fact_id, content untouched.
+        assert fact["fact_id"] == fid
+        assert fact["scope"] == "global"
+        assert fact["provenance_kind"] == "curated"
+        assert fact["content"].startswith("Rowan curates")
+
+        # Strict curation vocabulary: out-of-vocabulary is a 400 here, not
+        # the silent null the lenient write path files (ruling: the
+        # revision face is the curation operation surface).
+        bad_tag = client.patch(
+            f"/api/memories/{fid}", json={"provenance_kind": "garbage"},
+        )
+        assert bad_tag.status_code == 400, bad_tag.text
+        bad_scope = client.patch(
+            f"/api/memories/{fid}", json={"scope": "bogus"},
+        )
+        assert bad_scope.status_code == 400, bad_scope.text
+
+    def test_content_optional(self, daemon) -> None:
+        client, _ = daemon
+        client.post("/remember", json={
+            "content": (
+                "The original release-window decision remains worded "
+                "exactly as filed."
+            ),
+            "idempotency_key": "prov-upd-keep-1",
+        })
+        fid = _newest(client)["fact_id"]
+        response = client.patch(
+            f"/api/memories/{fid}", json={"provenance_kind": "world"},
+        )
+
+        assert response.status_code == 200, response.text
+        assert _newest(client)["content"].startswith("The original release-window")
+
+    def test_clear_tag_with_null(self, daemon) -> None:
+        client, _ = daemon
+        client.post("/remember", json={
+            "content": (
+                "The tagged northern convoy schedule carries its governance "
+                "mark from the write path."
+            ),
+            "provenance_kind": "world",
+            "idempotency_key": "prov-upd-clear-1",
+        })
+        fid = _newest(client)["fact_id"]
+        cleared = client.patch(
+            f"/api/memories/{fid}", json={"provenance_kind": ""},
+        )
+
+        assert cleared.status_code == 200, cleared.text
+        assert _newest(client)["provenance_kind"] is None
+
+    def test_profile_routing(self, daemon) -> None:
+        client, _ = daemon
+        client.post("/remember", json={
+            "content": (
+                "Doris owns the platform release calendar and files every "
+                "freeze window."
+            ),
+            "profile_id": "b",
+            "idempotency_key": "prov-upd-route-b-1",
+        })
+        fid = _newest(client, profile_id="b")["fact_id"]
+        response = client.patch(
+            f"/api/memories/{fid}?profile_id=b",
+            json={"provenance_kind": "curated"},
+        )
+
+        assert response.status_code == 200, response.text
+        before = client.get("/status").json()
+        fact = _newest(client, profile_id="b")
+        assert fact["provenance_kind"] == "curated"
+        after = client.get("/status").json()
+        # Pure routing: the active-profile pointer never moves.
+        assert after["profile"] == before["profile"]
+        assert after["profile_generation"] == before["profile_generation"]
+
+    def test_legacy_active_profile_constraint_without_param(self, daemon) -> None:
+        client, _ = daemon
+        # No profile_id on a fact owned by another profile: the existing
+        # rejection semantics hold, and the other profile's row is untouched.
+        client.post("/remember", json={
+            "content": (
+                "The foreign profile ledger entry belongs to profile b "
+                "and its curators alone."
+            ),
+            "profile_id": "b",
+            "idempotency_key": "prov-upd-legacy-b-1",
+        })
+        fid = _newest(client, profile_id="b")["fact_id"]
+
+        response = client.patch(
+            f"/api/memories/{fid}", json={"provenance_kind": "curated"},
+        )
+
+        assert response.status_code == 404, response.text
+        assert _newest(client, profile_id="b")["provenance_kind"] is None
+
+
+# ---------------------------------------------------------------------------
 # The MCP tool surface (spec section 4)
 #
 # remember accepts an optional ``provenance_kind`` and threads it into the
@@ -307,3 +438,85 @@ class TestMcpProvenanceSurface:
         # Legacy shape: an unset tag never appears on the wire.
         assert proxy.store("proxy fact", {})["ok"] is True
         assert "provenance_kind" not in captured["body"]
+
+
+class TestMcpUpdateDeleteProfileRouting:
+    """update_memory/delete_memory thread profile_id + curation params.
+
+    Wire convention identical to remember (Task 1): the anchor and the
+    curation keys travel ONLY when the caller set them, so the legacy call
+    stays byte-identical — pinned separately by
+    test_mcp_mutations_use_profile_leased_daemon_routes.
+    """
+
+    @staticmethod
+    def _capture_daemon(monkeypatch):
+        import superlocalmemory.cli.daemon as _d
+
+        captured: dict = {}
+
+        def _request(method, path, body=None, **kwargs):
+            captured.update(method=method, path=path, body=body)
+            return {"success": True, "fact_id": "mcp-fact"}
+
+        monkeypatch.setattr(_d, "is_daemon_running", lambda *a, **k: True)
+        monkeypatch.setattr(_d, "daemon_request", _request)
+        return captured
+
+    def test_update_tool_threads_curation_and_profile(self, monkeypatch) -> None:
+        """A curation-only update reaches the PATCH body + profile query."""
+        import asyncio
+
+        captured = self._capture_daemon(monkeypatch)
+        update = _core_tools()["update_memory"]
+        result = asyncio.run(update(
+            "mcp-fact",
+            provenance_kind="curated",
+            scope="global",
+            profile_id="b",
+        ))
+
+        assert result["success"] is True, result
+        assert captured["method"] == "PATCH"
+        assert captured["path"] == "/api/memories/mcp-fact?profile_id=b"
+        assert captured["body"]["provenance_kind"] == "curated"
+        assert captured["body"]["scope"] == "global"
+        # content is optional now: absent, not empty-string, on the wire.
+        assert "content" not in captured["body"]
+
+    def test_update_tool_legacy_call_shape_unchanged(self, monkeypatch) -> None:
+        """content-only call: no query string, body is the legacy shape."""
+        import asyncio
+
+        captured = self._capture_daemon(monkeypatch)
+        update = _core_tools()["update_memory"]
+        result = asyncio.run(update("mcp-fact", "new text", "agent-a"))
+
+        assert result["success"] is True, result
+        assert captured["method"] == "PATCH"
+        assert captured["path"] == "/api/memories/mcp-fact"
+        assert captured["body"] == {"content": "new text"}
+
+    def test_delete_tool_threads_profile(self, monkeypatch) -> None:
+        """delete_memory(profile_id="b") routes the DELETE to profile b."""
+        import asyncio
+
+        captured = self._capture_daemon(monkeypatch)
+        delete = _core_tools()["delete_memory"]
+        result = asyncio.run(delete("mcp-fact", profile_id="b"))
+
+        assert result["success"] is True, result
+        assert captured["method"] == "DELETE"
+        assert captured["path"] == "/api/memories/mcp-fact?profile_id=b"
+
+    def test_delete_tool_legacy_call_shape_unchanged(self, monkeypatch) -> None:
+        """No profile_id: the DELETE URL is the legacy path, unmodified."""
+        import asyncio
+
+        captured = self._capture_daemon(monkeypatch)
+        delete = _core_tools()["delete_memory"]
+        result = asyncio.run(delete("mcp-fact", "agent-a"))
+
+        assert result["success"] is True, result
+        assert captured["method"] == "DELETE"
+        assert captured["path"] == "/api/memories/mcp-fact"

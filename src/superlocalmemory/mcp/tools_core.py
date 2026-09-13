@@ -1037,8 +1037,15 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
     @server.tool(annotations=ToolAnnotations(destructiveHint=True))
     @admits(OperationKind.FORGET)
-    async def delete_memory(fact_id: str, agent_id: str = "mcp_client") -> dict:
+    async def delete_memory(
+        fact_id: str, agent_id: str = "mcp_client", profile_id: str = "",
+    ) -> dict:
         """Delete a specific memory by exact fact ID.
+
+        ``profile_id`` (optional): a non-empty value routes this one delete
+        to that profile (which must already exist); empty = the active
+        profile, byte-identical to the legacy call. The active-profile
+        pointer is never moved.
 
         Security note: This is a destructive operation. All deletions are
         logged with the calling agent_id for audit trail. Use get_status or
@@ -1047,6 +1054,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
         Args:
             fact_id: Exact fact ID to delete (from recall or list_recent results).
             agent_id: Identifier of the calling agent (logged for audit).
+            profile_id: Explicit namespace anchor for this one delete.
         """
         # v3.6.10: resolve "mcp_client" sentinel → URL path (HTTP) or env var (stdio)
         if agent_id == "mcp_client":
@@ -1063,9 +1071,30 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
             if await asyncio.to_thread(is_daemon_running):
                 path = "/api/memories/" + urllib.parse.quote(fact_id, safe="")
-                result = await asyncio.to_thread(
-                    daemon_request, "DELETE", path,
-                )
+                if (profile_id or "").strip():
+                    # Same wire convention as update_memory/list_recent: the
+                    # anchor only goes on the URL when the caller set it.
+                    path += "?profile_id=" + urllib.parse.quote(
+                        profile_id.strip(), safe="",
+                    )
+                try:
+                    result = await asyncio.to_thread(
+                        daemon_request, "DELETE", path,
+                        preserve_not_found=True,
+                    )
+                except Exception as exc:
+                    # An unknown routed profile is a terminal 404, same
+                    # surfacing as remember/update_memory.
+                    if type(exc).__name__ == "DaemonNotFound" and hasattr(exc, "code"):
+                        return {
+                            "success": False,
+                            "code": getattr(exc, "code"),
+                            "retryable": False,
+                            "error": getattr(
+                                exc, "message", "daemon returned 404",
+                            ),
+                        }
+                    raise
                 if isinstance(result, dict) and result.get("success"):
                     _emit_event("memory.deleted", {
                         "fact_id": fact_id,
@@ -1083,13 +1112,17 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
             from superlocalmemory.core.worker_pool import WorkerPool
             pool = WorkerPool.shared()
-            result = pool._send({
+            offline_cmd: dict[str, object] = {
                 "cmd": "delete_memory",
                 "fact_id": fact_id,
                 # Informational IDE/client label only.  The worker derives its
                 # authorization actor from the private local capability.
                 "source_agent_id": agent_id,
-            })
+            }
+            if (profile_id or "").strip():
+                # Tenant-constrains the offline delete to that profile.
+                offline_cmd["profile_id"] = profile_id.strip()
+            result = pool._send(offline_cmd)
             if result.get("ok"):
                 logger.info("Memory deleted: %s by agent: %s", fact_id[:16], agent_id)
                 _emit_event("memory.deleted", {
@@ -1105,24 +1138,46 @@ def register_core_tools(server, get_engine: Callable) -> None:
     @server.tool(annotations=ToolAnnotations(idempotentHint=True))
     @admits(OperationKind.CORRECT)
     async def update_memory(
-        fact_id: str, content: str, agent_id: str = "mcp_client",
+        fact_id: str, content: str = "", agent_id: str = "mcp_client",
+        provenance_kind: str = "", scope: str = "", profile_id: str = "",
     ) -> dict:
-        """Update the content of a specific memory by exact fact ID.
+        """Update a memory by exact fact ID — two revision paths.
+
+        ``content`` (optional): a content revision proposes a review-gated
+        correction through the daemon (predecessor/successor lineage — the
+        existing semantics, unchanged).
+
+        ``provenance_kind`` / ``scope`` (optional): a curation revision
+        updates the addressed row IN PLACE — the fact_id never changes, so
+        historical references stay resolvable. ``provenance_kind`` is one of
+        world/private/curated/legacy; ``scope`` is personal or global
+        (shared needs the dashboard scope route, which also carries
+        shared_with). Empty means "leave unchanged" for both.
+
+        ``profile_id`` (optional): a non-empty value routes this one update
+        to that profile (which must already exist); empty = the active
+        profile. The active-profile pointer is never moved.
 
         Security note: All updates are logged with the calling agent_id.
-        The fact_id must belong to the active profile.
+        The fact_id must belong to the target profile.
 
         Args:
             fact_id: Exact fact ID to update.
-            content: New content for the memory (cannot be empty).
+            content: New content — omitted for a curation-only update.
             agent_id: Identifier of the calling agent (logged for audit).
+            provenance_kind: Governance tag to set (world/private/curated/legacy).
+            scope: Scope to migrate to (personal/global).
+            profile_id: Explicit namespace anchor for this one update.
         """
         # v3.6.10: resolve "mcp_client" sentinel → URL path (HTTP) or env var (stdio)
         if agent_id == "mcp_client":
             from superlocalmemory.mcp.agent_context import get_current_agent_id
             agent_id = get_current_agent_id()
         try:
-            if not content or not content.strip():
+            has_curation = bool(
+                (provenance_kind or "").strip() or (scope or "").strip(),
+            )
+            if not (content or "").strip() and not has_curation:
                 return {"success": False, "error": "content cannot be empty"}
             import asyncio
             import urllib.parse
@@ -1134,19 +1189,48 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
             if await asyncio.to_thread(is_daemon_running):
                 path = "/api/memories/" + urllib.parse.quote(fact_id, safe="")
-                result = await asyncio.to_thread(
-                    daemon_request,
-                    "PATCH",
-                    path,
-                    {"content": content.strip()},
-                )
+                if (profile_id or "").strip():
+                    # Per-request profile routing, list_recent wire
+                    # convention: the anchor only goes on the URL when the
+                    # caller set it, so the legacy request stays
+                    # byte-identical.
+                    path += "?profile_id=" + urllib.parse.quote(
+                        profile_id.strip(), safe="",
+                    )
+                body: dict[str, object] = {}
+                if (content or "").strip():
+                    body["content"] = content.strip()
+                if (provenance_kind or "").strip():
+                    body["provenance_kind"] = provenance_kind.strip()
+                if (scope or "").strip():
+                    body["scope"] = scope.strip()
+                try:
+                    result = await asyncio.to_thread(
+                        daemon_request, "PATCH", path, body,
+                        preserve_not_found=True,
+                    )
+                except Exception as exc:
+                    # An unknown routed profile is a terminal 404 — the same
+                    # surfacing remember uses, never a retryable failure.
+                    if type(exc).__name__ == "DaemonNotFound" and hasattr(exc, "code"):
+                        return {
+                            "success": False,
+                            "code": getattr(exc, "code"),
+                            "retryable": False,
+                            "error": getattr(
+                                exc, "message", "daemon returned 404",
+                            ),
+                        }
+                    raise
                 if isinstance(result, dict) and result.get("success"):
                     return {
                         "success": True,
+                        "fact_id": fact_id,
                         "predecessor_fact_id": result.get("predecessor_fact_id", fact_id),
                         "successor_fact_id": result.get("successor_fact_id"),
                         "correction_case": result.get("correction_case"),
                         "review_required": bool(result.get("review_required", False)),
+                        "in_place": bool(result.get("in_place", False)),
                     }
                 return {
                     "success": False,
@@ -1156,12 +1240,15 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
             from superlocalmemory.core.worker_pool import WorkerPool
             pool = WorkerPool.shared()
-            result = pool._send({
+            offline_cmd: dict[str, object] = {
                 "cmd": "update_memory",
                 "fact_id": fact_id,
-                "content": content.strip(),
+                "content": (content or "").strip(),
                 "source_agent_id": agent_id,
-            })
+            }
+            if (profile_id or "").strip():
+                offline_cmd["profile_id"] = profile_id.strip()
+            result = pool._send(offline_cmd)
             if result.get("ok"):
                 logger.info("Memory updated: %s by agent: %s", fact_id[:16], agent_id)
                 return {

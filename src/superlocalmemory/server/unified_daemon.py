@@ -5584,6 +5584,10 @@ def _register_daemon_routes(application: FastAPI) -> None:
                     "importance": getattr(f, "importance", None),
                     # Spec section 3 parity with the offline engine path.
                     "session_id": getattr(f, "session_id", ""),
+                    # Revision surface (provenance_kind Task 3): scope rides
+                    # the list echo so a curation pass can verify an in-place
+                    # scope migration without a second lookup.
+                    "scope": getattr(f, "scope", "personal"),
                     # Spec section 5 (R4): the governance tag echo — additive
                     # key, None for every pre-feature fact.
                     "provenance_kind": getattr(f, "provenance_kind", None),

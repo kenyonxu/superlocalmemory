@@ -226,8 +226,13 @@ def _handle_get_memory_facts(memory_id: str) -> dict:
 def _handle_delete_memory(
     fact_id: str,
     source_agent_id: str = "system",
+    profile_id: str = "",
 ) -> dict:
-    """Delete a fact after capability-derived authorization."""
+    """Delete a fact after capability-derived authorization.
+
+    ``profile_id`` (per-request routing): when set, the delete is tenant-
+    constrained to that profile instead of the engine's active one.
+    """
     engine = _get_engine()
     from superlocalmemory.core.engine_ingestion import local_trusted_actor_id
     from superlocalmemory.core.mutations import delete_fact_authorized
@@ -237,6 +242,7 @@ def _handle_delete_memory(
         fact_id,
         trusted_actor_id=local_trusted_actor_id("recall-worker"),
         source_agent_id=source_agent_id,
+        profile_id=(profile_id or "").strip() or None,
     )
 
 
@@ -371,6 +377,7 @@ def _worker_main() -> None:
                 result = _handle_delete_memory(
                     req.get("fact_id", ""),
                     req.get("source_agent_id", req.get("agent_id", "system")),
+                    req.get("profile_id", ""),
                 )
                 _respond(result)
             elif cmd == "update_memory":

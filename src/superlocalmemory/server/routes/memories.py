@@ -178,8 +178,15 @@ def _authorize_memory_mutation(
     *,
     content_preview: str = "",
     run_pre_hook: bool = True,
+    profile_id: str | None = None,
 ):
-    """Authenticate a mutation, optionally gating route-owned direct SQL."""
+    """Authenticate a mutation, optionally gating route-owned direct SQL.
+
+    ``profile_id`` (spec section 3/5, per-request routing): a non-empty value
+    authorizes the mutation against THAT profile instead of the active one —
+    pure routing, the active-profile pointer is never read or moved. None/empty
+    keeps the legacy active-profile path byte-identical.
+    """
     from superlocalmemory.server.write_identity import require_write_actor
 
     actor_id = require_write_actor(
@@ -187,25 +194,28 @@ def _authorize_memory_mutation(
         getattr(request.app.state, "daemon_descriptor", None),
         actor_kind="dashboard",
     )
-    # RBAC (C3): on top of machine auth, enforce the caller's role on the active
-    # profile. delete → DELETE; every other mutation → WRITE.
+    routed_profile = (profile_id or "").strip() or None
+    # RBAC (C3): on top of machine auth, enforce the caller's role on the
+    # target profile (routed) or the active profile (legacy). delete →
+    # DELETE; every other mutation → WRITE.
     from superlocalmemory.access.rbac import Permission as _Perm
     from superlocalmemory.server.rbac_enforce import require_permission as _rbac_require
     _rbac_require(
         request,
         _Perm.DELETE if operation == "delete" else _Perm.WRITE,
+        profile=routed_profile,
     )
     # Phase 1: admission gateway — policy registry decision for this route.
     _admit_http_mutation(request, operation)
     engine = _get_engine(request)
     if engine is None:
         raise HTTPException(503, detail="Engine not initialized")
-    profile_id = engine.profile_id
+    effective_profile = routed_profile or engine.profile_id
     context = {
         "operation": operation,
         "agent_id": actor_id,
         "source_agent_id": "dashboard",
-        "profile_id": profile_id,
+        "profile_id": effective_profile,
         "fact_id": fact_id,
     }
     if content_preview:
@@ -216,7 +226,26 @@ def _authorize_memory_mutation(
         except Exception as exc:
             logger.warning("Dashboard %s authorization rejected: %s", operation, exc)
             raise HTTPException(403, detail="Write authorization rejected") from exc
-    return engine, profile_id, context
+    return engine, effective_profile, context
+
+
+def _routed_profile_rejection(engine, req_profile: str):
+    """404 envelope for a routed mutation to a profile that does not exist.
+
+    Same shape and rule as POST /remember (spec section 3/5): permission was
+    already enforced by the caller; unknown means 404, never an implicit
+    creation. Returns None when the profile exists.
+    """
+    rows = engine._db.execute(
+        "SELECT 1 AS one FROM profiles WHERE profile_id = ?", (req_profile,),
+    )
+    if rows:
+        return None
+    from starlette.responses import JSONResponse
+
+    from superlocalmemory.server.unified_daemon import _unknown_profile_body
+
+    return JSONResponse(_unknown_profile_body(req_profile), status_code=404)
 
 
 def _preview(content: str | None) -> str:
@@ -1325,23 +1354,49 @@ def _code_links_for_fact(fact_id: str) -> list[dict]:
 
 
 @router.delete("/api/memories/{fact_id}")
-async def delete_memory(request: Request, fact_id: str):
-    """Delete a specific memory (atomic fact) by ID."""
-    engine, _active_profile, hook_context = _authorize_memory_mutation(
+async def delete_memory(request: Request, fact_id: str, profile_id: str = ""):
+    """Delete a specific memory (atomic fact) by ID.
+
+    ``?profile_id=`` routes this one delete to that profile (recall
+    convention): pure routing, unknown id is a structured 404, and the
+    active-profile pointer is never read or moved. Empty keeps the legacy
+    active-profile path.
+    """
+    req_profile = (profile_id or "").strip()
+    engine, active_profile, hook_context = _authorize_memory_mutation(
         request, "delete", fact_id, run_pre_hook=False,
+        profile_id=req_profile or None,
     )
     try:
+        if req_profile:
+            rejection = _routed_profile_rejection(engine, req_profile)
+            if rejection is not None:
+                return rejection
+            logger.info(
+                "per-request profile routing: DELETE /api/memories/{fact_id} "
+                "profile=%s", req_profile,
+            )
         from superlocalmemory.core.mutations import delete_fact_authorized
 
+        # The canonical mutation writer is bound to the ACTIVE profile (its
+        # handler rejects any other), so a routed delete uses the same
+        # db-direct branch inside the authorized erasure flow that offline
+        # callers use; delete_fact_authorized's own tenant lookup provides
+        # the 404 for a fact outside the routed profile.
+        if req_profile:
+            canonical_runtime = None
+        else:
+            canonical_runtime = _mutation_runtime_or_missing_fact(
+                request, engine, active_profile, fact_id,
+            )
         result = delete_fact_authorized(
             engine,
             fact_id,
             trusted_actor_id=hook_context["agent_id"],
             source_agent_id="dashboard",
-            canonical_runtime=_mutation_runtime_or_missing_fact(
-                request, engine, _active_profile, fact_id,
-            ),
+            canonical_runtime=canonical_runtime,
             idempotency_key=_mutation_idempotency_key(request),
+            profile_id=req_profile or None,
         )
         if not result.get("ok"):
             if result.get("retryable"):
@@ -1438,21 +1493,180 @@ async def merge_memory(request: Request, fact_id: str):
         raise _canonical_mutation_error(exc, "Merge error")
 
 
+_VALID_SCOPES = ("personal", "shared", "global")
+
+
+def _parse_curation_updates(body: dict) -> dict:
+    """Parse the in-place curation fields of a PATCH body, strictly.
+
+    Revision-surface contract (spec provenance_kind, ruling): unlike the
+    lenient write path, validation here REJECTS — an out-of-vocabulary
+    provenance_kind or scope is a 400, because curation is a governance
+    operation and a silently-dropped migration would leave the operator
+    believing a fact was re-filed when it was not.
+
+    Selective update semantics: only provided keys are changed. A present
+    but empty/whitespace/null ``provenance_kind`` explicitly CLEARS the tag;
+    ``scope`` accepts optional ``shared_with`` (comma string or list) exactly
+    like the /scope route, and shared scope requires it.
+    """
+    from superlocalmemory.storage.models import PROVENANCE_KINDS
+
+    updates: dict[str, object] = {}
+
+    if "provenance_kind" in body:
+        raw_kind = body["provenance_kind"]
+        if raw_kind is None:
+            updates["provenance_kind"] = None
+        elif isinstance(raw_kind, str):
+            normalized = raw_kind.strip().lower()
+            if not normalized:
+                updates["provenance_kind"] = None
+            elif normalized in PROVENANCE_KINDS:
+                updates["provenance_kind"] = normalized
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "provenance_kind must be one of "
+                        f"{sorted(PROVENANCE_KINDS)} or empty to clear"
+                    ),
+                )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="provenance_kind must be a string or null",
+            )
+
+    if "scope" in body:
+        raw_scope = body["scope"]
+        if not isinstance(raw_scope, str):
+            raise HTTPException(status_code=400, detail="scope must be a string")
+        scope = raw_scope.strip().lower()
+        if scope not in _VALID_SCOPES:
+            raise HTTPException(
+                status_code=400, detail=f"scope must be one of {_VALID_SCOPES}",
+            )
+        raw_shared = body.get("shared_with", [])
+        if isinstance(raw_shared, str):
+            shared_list = [s.strip() for s in raw_shared.split(",") if s.strip()]
+        elif isinstance(raw_shared, list):
+            shared_list = [str(s).strip() for s in raw_shared if str(s).strip()]
+        else:
+            shared_list = []
+        if scope == "shared" and not shared_list:
+            raise HTTPException(
+                status_code=400,
+                detail="shared scope requires at least one profile in shared_with",
+            )
+        # global/personal never carry a shared_with list.
+        if scope != "shared":
+            shared_list = []
+        updates["scope"] = scope
+        updates["shared_with"] = shared_list
+
+    return updates
+
+
 @router.patch("/api/memories/{fact_id}", status_code=202)
-async def edit_memory(request: Request, fact_id: str):
-    """Propose an immutable, review-required correction for one memory."""
+async def edit_memory(request: Request, fact_id: str, profile_id: str = ""):
+    """Edit one memory — two revision paths, split on ``content``.
+
+    Content revision (body carries ``content``): the EXISTING correction
+    chain, unchanged — a review-gated immutable successor is proposed and
+    the fact_id lineage moves (202 proposed). ``scope``/``provenance_kind``
+    may ride the same request; they are applied in place to the addressed
+    fact first, so the successor inherits the migrated scope.
+
+    Curation revision (content absent, only ``scope``/``provenance_kind``):
+    an IN-PLACE column update through the tenant-constrained
+    ``db.update_fact`` — the fact_id NEVER changes (deepmaid's historical
+    references must stay resolvable), and the response is a plain 200.
+
+    ``?profile_id=`` routes this one mutation to that profile (recall
+    convention): pure routing, unknown id is a structured 404, and the
+    active-profile pointer is never read or moved.
+    """
     try:
         body = await request.json()
-        new_content = (body.get("content") or "").strip()
-        if not new_content:
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="body must be a JSON object")
+        raw_content = body.get("content")
+        if raw_content is not None and not isinstance(raw_content, str):
+            raise HTTPException(status_code=400, detail="content must be a string")
+        new_content = (raw_content or "").strip()
+        curation = _parse_curation_updates(body)
+        if raw_content is not None and not new_content:
+            # Legacy contract: an explicitly empty/whitespace content is a
+            # client error, never a "clear the text" instruction.
             raise HTTPException(status_code=400, detail="content is required")
-        engine, _active_profile, hook_context = _authorize_memory_mutation(
+        if not new_content and not curation:
+            raise HTTPException(status_code=400, detail="content is required")
+
+        req_profile = (profile_id or "").strip()
+        engine, active_profile, hook_context = _authorize_memory_mutation(
             request,
             "update",
             fact_id,
             content_preview=new_content,
             run_pre_hook=False,
+            profile_id=req_profile or None,
         )
+        target_profile = req_profile or active_profile
+        if req_profile:
+            rejection = _routed_profile_rejection(engine, req_profile)
+            if rejection is not None:
+                return rejection
+            logger.info(
+                "per-request profile routing: PATCH /api/memories/{fact_id} "
+                "profile=%s", req_profile,
+            )
+        if curation and curation.get("scope") in {"shared", "global"}:
+            from superlocalmemory.access.rbac import Permission
+            from superlocalmemory.server.rbac_enforce import require_permission
+
+            require_permission(
+                request, Permission.SHARE, profile=target_profile,
+            )
+
+        if curation:
+            # In-place branch: strict validation happened above; the write
+            # delegates to the authorized mutation service, which owns the
+            # hooks and the tenant-constrained column update (fact_id never
+            # changes — no correction successor on the curation path).
+            from superlocalmemory.core.mutations import curate_fact_authorized
+
+            curated = curate_fact_authorized(
+                engine,
+                fact_id,
+                curation,
+                trusted_actor_id=hook_context["agent_id"],
+                source_agent_id="dashboard",
+                profile_id=req_profile or None,
+            )
+            if not curated.get("ok"):
+                raise HTTPException(
+                    status_code=404, detail="Memory not found in this profile",
+                )
+
+        if not new_content:
+            # Curation-only: in-place succeeded, no correction to propose.
+            # Echo only the requested fields — an absent key means "not
+            # touched", a present None means "cleared".
+            from starlette.responses import JSONResponse
+
+            payload: dict[str, object] = {
+                "success": True,
+                "fact_id": fact_id,
+                "active_profile": target_profile,
+                "in_place": True,
+            }
+            if "scope" in curation:
+                payload["scope"] = curation["scope"]
+            if "provenance_kind" in curation:
+                payload["provenance_kind"] = curation["provenance_kind"]
+            return JSONResponse(payload, status_code=200)
+
         from superlocalmemory.core.mutations import update_fact_authorized
 
         result = update_fact_authorized(
@@ -1598,8 +1812,6 @@ async def get_correction(request: Request, case_id: str):
             raise HTTPException(404, detail="Correction case not found") from exc
         raise _canonical_mutation_error(exc, "Correction lookup error")
 
-
-_VALID_SCOPES = ("personal", "shared", "global")
 
 
 @router.patch("/api/memories/{fact_id}/scope")

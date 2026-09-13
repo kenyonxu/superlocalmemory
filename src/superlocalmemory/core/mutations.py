@@ -9,7 +9,7 @@ import logging
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 logger = logging.getLogger("superlocalmemory.audit")
 
@@ -22,21 +22,24 @@ def _context(
     trusted_actor_id: str,
     source_agent_id: str,
     content_preview: str = "",
+    profile_id: str | None = None,
 ) -> tuple[str, dict[str, str]]:
     if not trusted_actor_id:
         raise ValueError("trusted actor identity is required")
-    profile_id = engine.profile_id
+    # Per-request profile routing: an explicit profile overrides the engine's
+    # active pointer for THIS mutation only; the pointer itself never moves.
+    resolved_profile = (profile_id or "").strip() or engine.profile_id
     context = {
         "operation": operation,
         "agent_id": trusted_actor_id,
         "source_agent_id": source_agent_id,
-        "profile_id": profile_id,
+        "profile_id": resolved_profile,
         "fact_id": fact_id,
     }
     if content_preview:
         context["content_preview"] = content_preview[:100]
     engine._hooks.run_pre(operation, context)
-    return profile_id, context
+    return resolved_profile, context
 
 
 def _invalidate_context_cache_for_fact(
@@ -450,8 +453,15 @@ def delete_fact_authorized(
     source_agent_id: str,
     canonical_runtime: Any | None = None,
     idempotency_key: str | None = None,
+    profile_id: str | None = None,
 ) -> dict[str, Any]:
-    """Authorize, delete one profile-owned fact, then emit post hooks."""
+    """Authorize, delete one profile-owned fact, then emit post hooks.
+
+    ``profile_id`` (per-request routing): when set, the fact is looked up
+    and erased in THAT profile instead of the engine's active one. Callers
+    that pass it must also pass ``canonical_runtime=None`` — the canonical
+    mutation writer binds the active profile only.
+    """
     import time as _time
     import uuid
 
@@ -471,6 +481,7 @@ def delete_fact_authorized(
         fact_id,
         trusted_actor_id=trusted_actor_id,
         source_agent_id=source_agent_id,
+        profile_id=profile_id,
     )
 
     rows = engine._db.execute(
@@ -588,6 +599,59 @@ def delete_fact_authorized(
         }
     finally:
         clear_erasing(profile_id, fact_id)
+
+
+def curate_fact_authorized(
+    engine: Any,
+    fact_id: str,
+    updates: Mapping[str, Any],
+    *,
+    trusted_actor_id: str,
+    source_agent_id: str,
+    profile_id: str | None = None,
+) -> dict[str, Any]:
+    """Apply an in-place curation update (scope / provenance_kind) to a fact.
+
+    The revision surface for governance annotations (provenance_kind spec,
+    Task 3): unlike ``update_fact_authorized`` this NEVER creates a
+    correction successor — the addressed row is updated in place, so the
+    fact_id stays stable for historical references (deepmaid fact-id
+    citations must keep resolving across a curation pass).
+
+    The write is tenant-constrained: with ``profile_id`` set (per-request
+    routing) the fact must belong to that profile, and a foreign fact_id is
+    a clean not-found rather than a cross-profile write. Callers own the
+    strict controlled-vocabulary validation; this helper owns authorization,
+    the pre/post hooks, and the atomic column update.
+    """
+    if not updates:
+        return {"ok": False, "error": "curation updates must not be empty"}
+    resolved_profile, context = _context(
+        engine,
+        "update",
+        fact_id,
+        trusted_actor_id=trusted_actor_id,
+        source_agent_id=source_agent_id,
+        profile_id=profile_id,
+    )
+    rows = engine._db.execute(
+        "SELECT 1 FROM atomic_facts WHERE fact_id = ? AND profile_id = ? LIMIT 1",
+        (fact_id, resolved_profile),
+    )
+    if not rows:
+        return {"ok": False, "error": f"Memory {fact_id} not found in this profile"}
+    engine._db.update_fact(fact_id, dict(updates), profile_id=resolved_profile)
+    engine._hooks.run_post("update", context)
+    logger.info(
+        "CURATE fact_id=%s actor=%s fields=%s",
+        fact_id[:16], trusted_actor_id, sorted(updates),
+    )
+    return {
+        "ok": True,
+        "fact_id": fact_id,
+        "profile_id": resolved_profile,
+        "fields": sorted(updates),
+    }
 
 
 def update_fact_authorized(
