@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Final
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +164,33 @@ class MemoryRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+# ---------------------------------------------------------------------------
+# Governance gating vocabulary (deepmaid M3b shared-layer governance)
+# ---------------------------------------------------------------------------
+
+#: Closed vocabulary for ``AtomicFact.provenance_kind``. The tag gates which
+#: shared-layer governance rules apply to a fact; ``None`` means "not yet
+#: tagged" and is NOT an implicit member of any kind.
+PROVENANCE_KINDS: Final[frozenset[str]] = frozenset({
+    "world", "private", "curated", "legacy",
+})
+
+
+def validate_provenance_kind(value: str | None) -> str | None:
+    """Normalize a provenance_kind tag against the controlled vocabulary.
+
+    Exact contract: ``value.strip().lower()``; in-vocabulary returns the
+    normalized form, out-of-vocabulary returns ``None``, and ``None`` /
+    empty / whitespace-only return ``None``. Callers never get to persist a
+    tag outside the vocabulary — normalizing at the boundary is cheaper than
+    policing every reader.
+    """
+    if value is None:
+        return None
+    v = value.strip().lower()
+    return v if v in PROVENANCE_KINDS else None
+
+
 @dataclass
 class AtomicFact:
     """Structured fact extracted from memory — the PRIMARY retrieval unit.
@@ -218,6 +245,10 @@ class AtomicFact:
 
     # v3.4.65: Core Memory Block explicit pin (M015)
     pinned: bool = False
+
+    # Governance gating tag (M052), controlled vocabulary — see
+    # PROVENANCE_KINDS above. None = not yet tagged.
+    provenance_kind: str | None = None
 
     created_at: str = field(default_factory=_now)
 

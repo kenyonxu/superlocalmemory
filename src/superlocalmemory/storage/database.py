@@ -845,9 +845,9 @@ class DatabaseManager:
                 source_turn_ids_json, session_id,
                 embedding, fisher_mean, fisher_variance,
                 lifecycle, langevin_position,
-                emotional_valence, emotional_arousal, signal_type, created_at,
-                scope, shared_with)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               emotional_valence, emotional_arousal, signal_type, created_at,
+               scope, shared_with, provenance_kind)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(fact_id) DO UPDATE SET
                    memory_id               = excluded.memory_id,
                    content                 = excluded.content,
@@ -888,7 +888,11 @@ class DatabaseManager:
                  encode_float_vector(fact.fisher_variance),
                  fact.lifecycle.value, _jd(fact.langevin_position),
                  fact.emotional_valence, fact.emotional_arousal,
-                 fact.signal_type.value, fact.created_at, _scope, _shared),
+                 fact.signal_type.value, fact.created_at, _scope, _shared,
+                 # Governance tag: written on first insert, but NOT in the
+                 # DO UPDATE list — a re-store is not governance, and must no
+                 # more revoke a provenance_kind than it revokes a pin.
+                 getattr(fact, "provenance_kind", None)),
             )
             if not written:
                 self._refuse_cross_profile_reown(
@@ -948,6 +952,7 @@ class DatabaseManager:
             pinned=bool(d.get("pinned", 0)),
             scope=d.get("scope", "personal"),
             shared_with=_jl(d.get("shared_with"), None),
+            provenance_kind=d.get("provenance_kind"),
             created_at=d["created_at"],
         )
 
@@ -971,8 +976,8 @@ class DatabaseManager:
             embedding, fisher_mean, fisher_variance,
             lifecycle, langevin_position,
             emotional_valence, emotional_arousal, signal_type, created_at,
-            scope, shared_with)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            scope, shared_with, provenance_kind)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 fact.fact_id,
                 fact.memory_id,
@@ -1002,6 +1007,7 @@ class DatabaseManager:
                 fact.created_at,
                 scope,
                 shared,
+                getattr(fact, "provenance_kind", None),
             ),
         )
         self.store_temporal_validity(fact.fact_id, fact.profile_id)
@@ -1181,18 +1187,39 @@ class DatabaseManager:
         *,
         include_global: bool = False,
         include_shared: bool = False,
+        scope: str | None = None,
+        provenance_kind: str | None = None,
+        provenance_kind_null: bool = False,
     ) -> list[AtomicFact]:
         """All facts for a profile, newest first.
 
         memory-bounding-02: optional SQL LIMIT so callers needing only the
         most-recent N (e.g. the Hopfield channel's 5000 cap) don't deserialize
         the entire table into AtomicFact objects. Default (None) = all facts.
+
+        Governance filters (M052), all optional and composable with the
+        scope-visibility clause: ``scope`` narrows to one exact scope value;
+        ``provenance_kind`` narrows to one tag; ``provenance_kind_null``
+        selects the not-yet-tagged rows. ``provenance_kind`` and
+        ``provenance_kind_null`` are mutually exclusive in practice — when
+        both are given the equality wins and the NULL test never runs — but
+        no caller has a reason to combine them.
         """
         where, params = _scope_where(
             profile_id,
             include_global=include_global,
             include_shared=include_shared,
         )
+        extra: list[str] = []
+        if scope is not None:
+            extra.append("scope = ?")
+            params.append(scope)
+        if provenance_kind is not None:
+            extra.append("provenance_kind = ?")
+            params.append(provenance_kind)
+        elif provenance_kind_null:
+            extra.append("provenance_kind IS NULL")
+        extra_sql = f" AND {' AND '.join(extra)}" if extra else ""
         # memory-bounding-02 + perf M-04: an unbounded fetch materializes the
         # whole table (hundreds of MB with embeddings at 50k+ facts). Apply a
         # hard, env-tunable ceiling even when the caller passes limit=None.
@@ -1201,6 +1228,7 @@ class DatabaseManager:
         # Soft-deleted and withheld rows are not memories a caller may see.
         rows = self.execute(
             f"SELECT * FROM atomic_facts WHERE {where}"
+            f"{extra_sql}"
             f"{self.visible_fact_clause()} "
             "ORDER BY created_at DESC LIMIT ?",
             (*params, int(limit)),
@@ -1294,6 +1322,9 @@ class DatabaseManager:
         # Multi-scope (M016): allow re-scoping a fact after creation so a memory
         # can be shared with a team or made global from the dashboard.
         "scope", "shared_with",
+        # Governance gating tag (M052): a controlled-vocabulary annotation,
+        # updated by governance tooling rather than ingestion.
+        "provenance_kind",
     })
 
     def update_fact(self, fact_id: str, updates: dict[str, Any],

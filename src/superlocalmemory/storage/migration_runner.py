@@ -170,6 +170,7 @@ from superlocalmemory.storage.migrations import (
     M049_a_schema_version_marker_is_one_row as _M049,
     M050_execution_learning_v2 as _M050,
     M051_lifecycle_is_recomputed_not_resampled as _M051,
+    M052_provenance_kind_column as _M052,
 )
 from superlocalmemory.storage.migrations import (
     M043_quarantine_display_summaries as _M043,
@@ -382,6 +383,13 @@ DEFERRED_MIGRATIONS: list[Migration] = [
     # maintenance backfill recomputes them from the forgetting curve.
     # No dependency: it clears one column no other migration reads.
     Migration(name=_M051.NAME, db_target="memory", ddl=_M051.DDL),
+    # M052 adds the governance gating tag provenance_kind (controlled
+    # vocabulary, NULL = not yet tagged). Deferred for the same reason as
+    # M015/M016: atomic_facts is bootstrapped at engine init. Depends on M046
+    # because that migration rebuilds atomic_facts with an explicit column
+    # list — a column added before the rebuild would be dropped by it.
+    Migration(name=_M052.NAME, db_target="memory", ddl=_M052.DDL,
+              dependencies=(_M046.NAME,)),
 ]
 
 

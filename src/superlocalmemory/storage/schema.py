@@ -210,6 +210,11 @@ CREATE TABLE IF NOT EXISTS atomic_facts (
     -- Signal type (V2 compatible)
     signal_type        TEXT NOT NULL DEFAULT 'factual',
 
+    -- Governance gating tag (M052 on upgraded databases). Controlled
+    -- vocabulary: world/private/curated/legacy (storage.models.
+    -- PROVENANCE_KINDS); NULL = not yet tagged.
+    provenance_kind    TEXT,
+
     created_at         TEXT NOT NULL DEFAULT (datetime('now')),
 
     FOREIGN KEY (memory_id) REFERENCES memories (memory_id)
