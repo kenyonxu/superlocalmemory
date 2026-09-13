@@ -78,3 +78,33 @@ deepmaid M3b 要落地女仆团共享知识层(global scope)的三闸门治理:*
 - 需求依据:deepmaid 仓《女仆的一天·九幕体验定稿》收官「共享知识层治理方案」节;总规格修订 5;roadmap M3b 节
 - 前置需求:[mslm-per-request-profile-需求书-2026-08-30.md](mslm-per-request-profile-需求书-2026-08-30.md)(R3 的 profile_id 语义承它)、[mslm-recent-需求书-2026-09-01.md](mslm-recent-需求书-2026-09-01.md)(list_recent 管理面先例)
 - 副本:superlocalmemory 仓 `docs/deepmaid-provenance-需求书-2026-09-08.md`
+
+## 7. 实施记录(2026-09-13 落地)
+
+**实现**:`main @ 93ff8deb`(fork superlocalmemory),2026-09-13 合入并完成生产升级(daemon M052 迁移自动执行,存量 12,481 条全部 NULL,无 backfill)。
+
+**规格与计划**:spec `docs/superpowers/specs/2026-09-13-provenance-kind-design.md`;实施计划 `docs/superpowers/plans/2026-09-13-provenance-kind.md`(5 任务全部评审通过,全量门 11395 passed 零新增失败)。
+
+**关键落地决策**(与需求书的差异点):
+
+| 需求书原文 | 实际落地 | 理由 |
+|---|---|---|
+| 字段名 `provenance` | **`provenance_kind`** | DB 已有 `provenance` 血缘表(来源追踪),同名混淆;治理标注与来源追踪分层 |
+| 词表 `world-fact` / `maid-private` / `curated` / `legacy` | **`world` / `private` / `curated` / `legacy`** | 通用化对外发布(上游 PR 不带平台词汇);deepmaid 侧映射 `world-fact→world`、`maid-private→private` |
+| R3 "新增 annotate_memory 或扩展 update_memory 二选一" | **扩展 `update_memory`** | 一个工具面收敛;content 修订沿用既有 correction 链(fact_id 变迁),仅 scope/标注的修订走 in-place(**fact_id 不变迁**——策展不破坏历史引用) |
+| R1 "词表外拒绝或归 null 二选一" | **写入归 null / 扫描与修订 400** | 策展场景"未知=未分拣"最安全;扫描是受控操作面不容模糊 |
+
+**deepmaid 消费注意事项**(§5 适配前必读):
+
+1. **MCP 面不能清标注、不能迁 `scope=shared`**——`""` 参数语义是"不变";清标注(`provenance_kind: null`)与 shared 迁移(带 `shared_with`)走 daemon HTTP 面(`PATCH /api/memories/{id}`)。§5-3 策展流(升 curated/降 personal/删除)不受影响。
+2. **一次 `remember` 的派生 fact 不继承标注**——标注只落在 queryable fact(`fact_ids` 回执那条);注入层不得假设一次写入的 fact 集均匀标注。
+3. 扫描是 ownership 域(`get_all_facts` 默认不含他 profile 的 global)——恰好匹配"盘点自己 profile 里的 global 遗产"。
+4. `provenance_kind=null` 字面量筛选未标注(大小写不敏感);`scope`+`provenance_kind` 可组合。
+
+**验收场景对账**(§4 → 实测):
+
+1. 写入回环 ✅(三读工具回显,spec 验收 1);2. 原位修订 ✅(fact_id 稳定+successor 继承标注,验收 2);3. 穿透与隔离 ✅(指针/generation 冻结,e2e);4. 策展扫描 ✅(null 显式筛选恰返未标注,验收 4);5. 词表约束 ✅(写入归 null/扫描 400 双语义);6. 兼容 ✅(journal 字节 sha256 恒等,wire 五组钉死)。
+
+**已知边界**(fork ledger 存档):MCP `delete_memory` 对 correction-history 保护事实的 409 会塌缩成 retryable 信封(既有缺陷,非本特性引入);`recall_trace` 调试工具不回显两新键(§5 四读面之外)。
+
+**上游 PR**:材料就绪(squash 方案与 PR 描述要点在实施 ledger),建议随下一个上游窗口提交——词表通用化叙事("SLM 只提供受控词表与读写面,不背平台规则")。
