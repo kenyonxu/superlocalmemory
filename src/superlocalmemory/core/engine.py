@@ -546,6 +546,7 @@ class MemoryEngine:
         scope: str = "personal",
         shared_with: list[str] | None = None,
         profile_id: str | None = None,
+        provenance_kind: str | None = None,
     ) -> list[str]:
         """Store content and extract structured facts. Returns fact_ids.
 
@@ -556,6 +557,12 @@ class MemoryEngine:
         switching the engine's active profile (same convention as
         ``recall``): ``None``/``""`` means the active profile, and the
         active pointer is never mutated by the call.
+
+        ``provenance_kind`` is the optional governance tag (spec section 4):
+        ``None``/``""`` leaves the fact untagged; a value from the
+        ``PROVENANCE_KINDS`` vocabulary is filed on the fact, and an
+        out-of-vocabulary value files as untagged rather than failing the
+        write.
         """
         self._require_full("store")
         self._ensure_init()
@@ -578,6 +585,7 @@ class MemoryEngine:
             role=role,
             require_complete=False,
             profile_id=profile_id,
+            provenance_kind=provenance_kind,
         )
 
     def store_fact_direct(
@@ -972,6 +980,7 @@ class MemoryEngine:
         *, scope: str = "personal", shared_with: list[str] | None = None,
         session_date: str | None = None, speaker: str = "", role: str = "user",
         index_external: bool = True, profile_id: str | None = None,
+        provenance_kind: str | None = None,
     ) -> list[str]:
         """v3.5.5 WRITE-THROUGH: synchronous verbatim insert for IMMEDIATE recall.
 
@@ -996,9 +1005,13 @@ class MemoryEngine:
 
         Returns real fact_ids immediately. Quality gate rejects template junk.
 
-        ``profile_id`` follows the ``recall`` convention: ``None``/``""``
+        ``profile_id`` follows the ``recall`` convention: ``None``/``"``
         targets the active profile; an explicit value routes this one
         write without mutating the engine's active profile.
+
+        ``provenance_kind`` is the optional governance tag (spec section 4):
+        ``None``/``""`` leaves the fact untagged; out-of-vocabulary values
+        file as untagged rather than failing the write.
         """
         self._require_full("store_fast")
         self._ensure_init()
@@ -1064,6 +1077,7 @@ class MemoryEngine:
         # This preserves the 3.8.2 invariant for cold start while eliminating the
         # semantic-channel blind spot on warm daemons (the top UX complaint).
         emb, fmean, fvar = self._warm_guard_embed(fact_text)
+        from superlocalmemory.storage.models import validate_provenance_kind
         fact = AtomicFact(
             fact_id=_uuid.uuid4().hex[:16], memory_id=record.memory_id,
             profile_id=pid, content=fact_text,
@@ -1078,6 +1092,9 @@ class MemoryEngine:
             embedding=None, fisher_mean=None, fisher_variance=None,
             created_at=now,
             scope=scope, shared_with=shared_with,
+            # Governance tag: same leniency as canonical_store — an
+            # out-of-vocabulary value files as untagged, never fails the write.
+            provenance_kind=validate_provenance_kind(provenance_kind),
         )
         self._db.store_fact(fact)  # FTS5 trigger → immediately BM25-recallable
         # Attach the vector so the meaning-based channel finds it now, through

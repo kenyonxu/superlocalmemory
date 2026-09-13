@@ -172,6 +172,14 @@ class DaemonPoolProxy:
             "idempotency_key": (metadata or {}).get("idempotency_key") or None,
             "profile_id": (metadata or {}).get("profile_id", ""),
         }
+        # Governance tag (spec section 4): forwarded as the TOP-LEVEL body
+        # key the daemon validates — a value left inside ``metadata`` would
+        # ride the memory record's metadata dict and never reach the fact
+        # row. Only on the wire when set, so an unset tag keeps the legacy
+        # fallback request byte-identical (same convention as profile_id).
+        _tag = (metadata or {}).get("provenance_kind")
+        if isinstance(_tag, str) and _tag.strip():
+            body["provenance_kind"] = _tag.strip()
         # One identity-aware daemon client owns descriptor validation,
         # capability delivery, and exact-instance targeting. A raw urllib POST
         # here previously became unauthenticated when /remember was hardened

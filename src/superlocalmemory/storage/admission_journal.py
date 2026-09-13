@@ -134,6 +134,11 @@ class RememberRequest:
     session_date: str = ""
     speaker: str = ""
     role: str = "user"
+    # Governance tag (spec provenance_kind): ``None`` = untagged, the
+    # pre-feature shape. Validated (vocabulary, strip/lower) at the daemon
+    # boundary BEFORE the journal — the immutable payload only ever carries
+    # a canonical tag or omits the key entirely.
+    provenance_kind: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.content, str) or not self.content.strip():
@@ -155,7 +160,7 @@ class RememberRequest:
         object.__setattr__(self, "shared_with", tuple(self.shared_with))
 
     def canonical_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "content": self.content,
             "idempotency_key": self.idempotency_key,
             "metadata": dict(self.metadata),
@@ -169,6 +174,13 @@ class RememberRequest:
             "speaker": self.speaker,
             "trusted_actor_id": self.trusted_actor_id,
         }
+        if self.provenance_kind is not None:
+            # Key present only when tagged: the journal bytes (and the
+            # request_hash over them) stay identical to the pre-feature
+            # shape for every untagged write, and a prepared-but-undispatched
+            # entry replays with its tag intact after any restart.
+            payload["provenance_kind"] = self.provenance_kind
+        return payload
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> RememberRequest:
@@ -185,6 +197,10 @@ class RememberRequest:
             session_date=str(payload.get("session_date") or ""),
             speaker=str(payload.get("speaker") or ""),
             role=str(payload.get("role") or "user"),
+            provenance_kind=(
+                str(payload["provenance_kind"])
+                if payload.get("provenance_kind") is not None else None
+            ),
         )
 
 

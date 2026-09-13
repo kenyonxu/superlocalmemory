@@ -117,7 +117,7 @@ def _prebuilt_fact_payload(fact: AtomicFact) -> dict:
         "source_turn_ids", "session_id", "embedding", "fisher_mean",
         "fisher_variance", "lifecycle", "langevin_position",
         "emotional_valence", "emotional_arousal", "signal_type", "pinned",
-        "created_at",
+        "created_at", "provenance_kind",
     )
     payload = {}
     for name in fields:
@@ -212,6 +212,11 @@ def build_immediate_admission_handler(
             fact.session_id = request.session_id or fact.session_id
             if request.session_date:
                 fact.observation_date = request.session_date
+            if request.provenance_kind is not None:
+                # The request-level tag is authoritative when the caller set
+                # one; otherwise the prebuilt fact keeps its own (payload
+                # round-trips it since the field joined _prebuilt_fact_payload).
+                fact.provenance_kind = request.provenance_kind
         else:
             entities = sorted(
                 {match.group(1) for match in re.finditer(
@@ -234,6 +239,7 @@ def build_immediate_admission_handler(
                 confidence=0.7,
                 importance=0.5,
                 created_at=now,
+                provenance_kind=request.provenance_kind,
             )
 
         # A receipt is queryable through FTS immediately, but model-derived
@@ -312,6 +318,7 @@ def canonical_store(
     require_complete: bool = True,
     return_receipt: bool = False,
     profile_id: str | None = None,
+    provenance_kind: str | None = None,
 ) -> list[str] | IngestionOperation:
     """Submit canonical evidence, optionally waiting for enrichment completion.
 
@@ -373,6 +380,11 @@ def canonical_store(
     try:
         # Anchor already normalized and validated at function top.
         command = build_engine_ingestion_command(engine, profile_id=profile_id)
+        # Write-path leniency (spec decision table): out-of-vocabulary tags
+        # file themselves as None here, at the engine boundary, so every
+        # ingress surface (daemon body, Python API, MCP) shares one rule.
+        from superlocalmemory.storage.models import validate_provenance_kind
+
         receipt = command.submit(IngestionRequest(
             content=content,
             profile_id=profile_id or engine._profile_id,
@@ -386,6 +398,7 @@ def canonical_store(
             session_date=session_date or "",
             speaker=speaker,
             role=role,
+            provenance_kind=validate_provenance_kind(provenance_kind),
         ))
         if not require_complete:
             record_operation(

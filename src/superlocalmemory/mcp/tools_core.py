@@ -88,6 +88,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
         idempotency_key: str = "",
         session_date: str = "",
         profile_id: str = "",
+        provenance_kind: str = "",
     ) -> dict:
         """Store content to memory with intelligent indexing.
 
@@ -108,6 +109,11 @@ def register_core_tools(server, get_engine: Callable) -> None:
         an unknown id is rejected, never created); empty = the active
         profile, byte-identical to the legacy call. Routing never moves
         the active-profile pointer.
+
+        ``provenance_kind`` is the optional governance tag: one of
+        world/private/curated/legacy. Empty = untagged, byte-identical to
+        the legacy call. The daemon validates the value — out-of-vocabulary
+        input is filed as untagged, never rejected.
         """
         # v3.6.10: resolve "mcp_client" sentinel → URL path (HTTP) or env var (stdio)
         if agent_id == "mcp_client":
@@ -198,6 +204,13 @@ def register_core_tools(server, get_engine: Callable) -> None:
                         # 4.1.14 audit: stripped — whitespace-only is legacy,
                         # padded ids travel canonical.
                         body["profile_id"] = profile_id.strip()
+                    if (provenance_kind or "").strip():
+                        # Governance tag (spec section 4): same wire
+                        # convention as profile_id — only on the body when
+                        # the caller set it, so an unset tag keeps the
+                        # legacy request byte-identical. The daemon owns
+                        # vocabulary validation (out-of-vocab → untagged).
+                        body["provenance_kind"] = provenance_kind.strip()
                     resp = None
                     try:
                         resp = await _asyncio.to_thread(
@@ -281,6 +294,11 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 # of the metadata entirely when unset so the legacy fallback
                 # call stays byte-identical. 4.1.14 audit: stripped.
                 worker_meta["profile_id"] = profile_id.strip()
+            if (provenance_kind or "").strip():
+                # DaemonPoolProxy.store forwards metadata["provenance_kind"]
+                # as the governance tag on POST /remember. Same unset-is-
+                # byte-identical convention as the routing anchor above.
+                worker_meta["provenance_kind"] = provenance_kind.strip()
 
             def _store_via_daemon_pool():
                 pool = choose_pool()

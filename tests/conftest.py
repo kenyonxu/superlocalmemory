@@ -359,13 +359,14 @@ def force_sync_enrichment(engine):
 
     def _sync_store(content, session_id="", session_date=None, speaker="",
                     role="user", metadata=None, *, scope="personal",
-                    shared_with=None):
+                    shared_with=None, provenance_kind=None):
         return canonical_store(
             engine, content, source_type="python-api",
             trusted_actor_id=local_trusted_actor_id("python-api"),
             metadata=metadata, scope=scope, shared_with=shared_with,
             session_id=session_id, session_date=session_date,
             speaker=speaker, role=role, require_complete=True,
+            provenance_kind=provenance_kind,
         )
 
     engine.store = _sync_store

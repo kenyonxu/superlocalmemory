@@ -93,6 +93,11 @@ class IngestionRequest:
     session_date: str = ""
     speaker: str = ""
     role: str = "user"
+    # Governance tag (spec provenance_kind): carried as request data so it
+    # survives the journal → coordinator → materializer chain and lands on
+    # the queryable fact at the single request→AtomicFact construction site.
+    # ``None`` = untagged, the pre-feature shape.
+    provenance_kind: str | None = None
 
     def __post_init__(self) -> None:
         if not self.content or not self.content.strip():

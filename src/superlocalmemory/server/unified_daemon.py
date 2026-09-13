@@ -649,6 +649,14 @@ class RememberRequest(BaseModel):
     # empty legacy shape and is unreachable for routed requests (routing
     # replaced the guard for them).
     profile_id: str = ""
+    # Governance tag (spec provenance_kind, section 4): optional, write-path
+    # lenient. Empty/absent = untagged (None) and keeps the legacy request
+    # byte-identical; the value is normalized (strip+lower) against the
+    # PROVENANCE_KINDS vocabulary below and an out-of-vocabulary value is
+    # filed as untagged rather than rejected — "unknown" and "not yet
+    # curated" share the safest default. Purely per-write data: it never
+    # interacts with the profile routing anchor above.
+    provenance_kind: str = ""
     #: WHEN this memory is about, as distinct from when it was written.
     #:
     #: The internal admission record has carried this field all along and this
@@ -4881,6 +4889,7 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 validate_deterministic_admission,
             )
             from superlocalmemory.storage.admission_journal import Actor, RememberRequest
+            from superlocalmemory.storage.models import validate_provenance_kind
 
             meta = {}
             if req.tags:
@@ -4986,6 +4995,13 @@ def _register_daemon_routes(application: FastAPI) -> None:
                 trusted_actor_id=trusted_actor_id,
                 session_id=req.session_id,
                 session_date=req.session_date,
+                # Governance tag validated at this boundary (spec section 4):
+                # strip+lower against PROVENANCE_KINDS, out-of-vocabulary
+                # files as untagged. The journal payload and the durable row
+                # only ever see a canonical tag or None.
+                provenance_kind=validate_provenance_kind(
+                    req.provenance_kind or ""
+                ),
             )
             actor = Actor(
                 principal_id=trusted_actor_id,
@@ -5568,6 +5584,9 @@ def _register_daemon_routes(application: FastAPI) -> None:
                     "importance": getattr(f, "importance", None),
                     # Spec section 3 parity with the offline engine path.
                     "session_id": getattr(f, "session_id", ""),
+                    # Spec section 5 (R4): the governance tag echo — additive
+                    # key, None for every pre-feature fact.
+                    "provenance_kind": getattr(f, "provenance_kind", None),
                 }
                 for f in facts
             ]

@@ -796,6 +796,10 @@ class CanonicalRememberRuntime:
                 session_date=request.session_date,
                 speaker=request.speaker,
                 role=request.role,
+                # Governance tag rides the request data (spec section 4):
+                # already validated at the daemon boundary, replayed intact
+                # from the journal payload.
+                provenance_kind=request.provenance_kind,
             )
             # There is deliberately no validate_admission argument here. The
             # HTTP trust hook ran before journal.prepare, and no hook/model or
