@@ -78,6 +78,7 @@ def _record_correction_candidate(
     from superlocalmemory.storage.correction_cases import (
         CorrectionActor,
         CorrectionCaseError,
+        CorrectionPredecessorBusyError,
         propose_on_connection,
     )
 
@@ -111,6 +112,14 @@ def _record_correction_candidate(
                 is_profile_active=lambda candidate_profile: candidate_profile == profile_id,
                 is_actor_trusted=lambda candidate_actor: candidate_actor == actor,
             )
+    except CorrectionPredecessorBusyError:
+        # An expected occurrence under repeated ingestion (another correction
+        # is already open for this predecessor) — debug, not an operational
+        # signal. Warned per attempt it once reached 226/hour in production.
+        logger.debug(
+            "Correction candidate skipped (predecessor already has an active "
+            "case): %s", successor_fact_id,
+        )
     except (CorrectionCaseError, sqlite3.Error, ValueError) as exc:
         # A missing/hot-upgrading M042 ledger must not make memory ingestion
         # unavailable. The candidate is advisory and has no retrieval effect;

@@ -39,6 +39,16 @@ class CorrectionIdempotencyError(CorrectionCaseError):
     """A replay key names a different correction proposal."""
 
 
+class CorrectionPredecessorBusyError(CorrectionCaseError):
+    """Another correction is already active for this predecessor fact.
+
+    The active-predecessor uniqueness constraint (one open case per
+    (profile, predecessor) while status is proposed/applied) is a design
+    invariant; a competing proposal is an expected occurrence under
+    repeated ingestion, not an operational fault to warn about.
+    """
+
+
 class CorrectionNotFoundError(CorrectionCaseError):
     """No correction case exists for the requested identifier."""
 
@@ -285,6 +295,28 @@ def propose_on_connection(
         ):
             raise CorrectionIdempotencyError("proposal replay key names different data")
         return case
+
+    # Active-predecessor check BEFORE the INSERT. The idempotency-key lookup
+    # above only catches replays of the SAME operation; a different operation
+    # proposing the same predecessor re-ran straight into the partial UNIQUE
+    # index and surfaced as an IntegrityError warning per attempt (226/hour
+    # observed in production, 2026-09-22).
+    active = conn.execute(
+        "SELECT * FROM correction_cases "
+        "WHERE profile_id = ? AND predecessor_fact_id = ? "
+        "AND status IN ('proposed', 'applied')",
+        (profile_id, predecessor_fact_id),
+    ).fetchone()
+    if active is not None:
+        case = _case_from_row(active)
+        if case.successor_fact_id == successor_fact_id:
+            # Same correction observed by a different operation: idempotent
+            # success — the open case already records exactly this proposal.
+            return case
+        raise CorrectionPredecessorBusyError(
+            "another correction is already active for predecessor "
+            f"{predecessor_fact_id} in profile {profile_id}"
+        )
 
     now = _now()
     conn.execute(

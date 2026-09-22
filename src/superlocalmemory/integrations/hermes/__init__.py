@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import threading
+import time
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
@@ -62,7 +63,13 @@ _SEMANTIC_NOISE = frozenset({"", "ok", "yes", "thanks", "thx"})
 # falls back to the in-process engine (previous behaviour).
 # ---------------------------------------------------------------------------
 
-_DAEMON_RECALL_TIMEOUT = 8.0
+# Client budget must not be tighter than the daemon's own semantic-channel
+# budget (25s): under load the client would give up first and surface a
+# false "daemon and engine both unavailable" (2026-09-22 cron lane).
+_DAEMON_RECALL_TIMEOUT = 30.0
+# A recall query is embedded verbatim; a whole prompt pasted as a query
+# blows the semantic budget for every channel. Bound it at the wire.
+_MAX_RECALL_QUERY_CHARS = 2000
 _DAEMON_STORE_TIMEOUT = 20.0
 
 # ---------------------------------------------------------------------------
@@ -108,14 +115,26 @@ def _resolve_pin_profile() -> bool:
         return True
 
 
-def _daemon_available() -> bool:
-    """True when the unified daemon is alive (cheap PID-file check)."""
-    try:
-        from superlocalmemory.cli.daemon import is_daemon_running
+def _daemon_available(retries: int = 1, retry_delay: float = 0.5) -> bool:
+    """True when the unified daemon is alive.
 
-        return bool(is_daemon_running())
-    except Exception:
-        return False
+    The probe carries a short HTTP budget and historically had no retry, so a
+    gateway process momentarily choked (GIL starvation during a restart
+    window) read as daemon-down and every cron lane reported not-ready. One
+    retry half a second later rides out the transient without weakening the
+    identity check itself.
+    """
+    for attempt in range(retries + 1):
+        try:
+            from superlocalmemory.cli.daemon import is_daemon_running
+
+            if bool(is_daemon_running()):
+                return True
+        except Exception:
+            pass
+        if attempt < retries:
+            time.sleep(retry_delay)
+    return False
 
 
 def _daemon_api(
@@ -497,7 +516,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
         if not _daemon_available():
             return None
         params = {
-            "q": query,
+            "q": query[:_MAX_RECALL_QUERY_CHARS],
             "limit": limit,
             "include_global": "true" if self._include_global else "false",
             "include_shared": "true" if self._include_shared else "false",

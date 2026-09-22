@@ -305,3 +305,44 @@ def test_rollback_refuses_when_a_live_child_correction_depends_on_the_successor(
 
     with pytest.raises(CorrectionCompareAndSetError, match="dependent"):
         store.rollback("case-1", expected_version=1, actor=_actor(), operation_id="rollback-1")
+
+
+class TestActivePredecessorIdempotency:
+    """同一 (profile, predecessor) 的活跃 case 唯一(uq_correction_cases_active_predecessor)。
+    生产实况(2026-09-22):不同 operation 对同一 predecessor 反复提议,
+    幂等键查不到 → INSERT 撞 UNIQUE → 每小时 226 条 warning 空转。"""
+
+    def test_reproposal_same_successor_returns_existing(self, store):
+        first = store.propose(
+            case_id="case-a", profile_id="alpha", scope="project",
+            predecessor_fact_id="old-release", successor_fact_id="new-release",
+            reason_code="release_state_replaced", actor=_actor(),
+            idempotency_key="op-1",
+        )
+        # 不同 operation、同 predecessor+successor → 幂等返回既有 case,不再 INSERT
+        again = store.propose(
+            case_id="case-b", profile_id="alpha", scope="project",
+            predecessor_fact_id="old-release", successor_fact_id="new-release",
+            reason_code="release_state_replaced", actor=_actor(),
+            idempotency_key="op-2",
+        )
+        assert again.case_id == first.case_id
+        assert len(store.list_cases("alpha")) == 1
+
+    def test_reproposal_different_successor_raises_typed(self, store):
+        store.propose(
+            case_id="case-a", profile_id="alpha", scope="project",
+            predecessor_fact_id="old-release", successor_fact_id="new-release",
+            reason_code="release_state_replaced", actor=_actor(),
+            idempotency_key="op-1",
+        )
+        from superlocalmemory.storage.correction_cases import (
+            CorrectionPredecessorBusyError,
+        )
+        with pytest.raises(CorrectionPredecessorBusyError):
+            store.propose(
+                case_id="case-c", profile_id="alpha", scope="project",
+                predecessor_fact_id="old-release", successor_fact_id="final-release",
+                reason_code="release_state_replaced", actor=_actor(),
+                idempotency_key="op-3",
+            )

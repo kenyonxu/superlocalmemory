@@ -1308,3 +1308,45 @@ class TestCronDaemonService:
              patch("superlocalmemory.integrations.hermes._daemon_api", return_value=None):
             out = p._tool_recall({"query": "q"})
         assert "engine not ready" in out or "failed" in out.lower() or "unavailable" in out.lower()
+
+
+class TestRecallHardening:
+    """知惠 §10.1 处置:超时对齐/巨型 query 截断/daemon 探测重试。"""
+
+    # 类体导入在收集期执行,早于 conftest 的 autouse daemon-down fixture,
+    # 捕获的是真函数而非被 patch 的模块属性
+    from superlocalmemory.integrations.hermes import _daemon_available as _real_available
+
+    def test_recall_timeout_at_least_daemon_semantic_budget(self):
+        # 客户端预算不得紧过服务端(语义通道 25s 预算)——8s 客户端在负载高时
+        # 先放弃,制造假性 both-unavailable
+        from superlocalmemory.integrations.hermes import _DAEMON_RECALL_TIMEOUT
+        assert _DAEMON_RECALL_TIMEOUT >= 30.0
+
+    def test_giant_query_truncated_on_daemon_wire(self, provider):
+        giant = "A" * 20000
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api",
+                   return_value=TestDaemonRouting()._daemon_recall_json()) as api:
+            provider._engine_recall(giant, 3)
+        from urllib.parse import urlparse, parse_qs
+        url = api.call_args.args[1]
+        q = parse_qs(urlparse("http://x" + url).query)["q"][0]
+        assert len(q) <= 2000
+
+    def test_daemon_probe_retries_once(self):
+        import superlocalmemory.integrations.hermes as hermes_mod
+        with patch("superlocalmemory.cli.daemon.is_daemon_running",
+                   side_effect=[False, True]) as probe, \
+             patch("superlocalmemory.integrations.hermes.time") as tmock:
+            tmock.sleep = __import__("time").sleep
+            assert TestRecallHardening._real_available() is True
+        assert probe.call_count == 2
+
+    def test_daemon_probe_both_fail_returns_false(self):
+        import superlocalmemory.integrations.hermes as hermes_mod
+        with patch("superlocalmemory.cli.daemon.is_daemon_running",
+                   side_effect=[False, False]), \
+             patch("superlocalmemory.integrations.hermes.time") as tmock:
+            tmock.sleep = __import__("time").sleep
+            assert TestRecallHardening._real_available() is False
