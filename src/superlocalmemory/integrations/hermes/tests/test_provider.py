@@ -510,11 +510,20 @@ class TestSyncTurn:
             mock_engine.store.assert_called_once()
 
     def test_sync_turn_cron_skipped(self, provider):
-        """_cron_skipped=True 时直接返回."""
+        """_cron_skipped=True 且引擎在场时仍服务(挂账 A 修复后的契约).
+
+        cron skip 的语义是"不加载引擎",不是"拒绝服务":引擎在场(daemon
+        离线回退可用)时 cron 上下文的写入照常落库。无引擎+无 daemon 的
+        not-ready 分支由 test_sync_turn_engine_none 与
+        TestCronDaemonService 覆盖。
+        """
         provider._cron_skipped = True
         provider._engine = MagicMock()
-        provider.sync_turn("hello", "world")
-        provider._engine.store.assert_not_called()
+        mock_engine = provider._engine
+        mock_engine.store.return_value = ["f1"]
+        provider.sync_turn("hello world", "hi there")
+        provider._sync_thread.join(timeout=5.0)
+        mock_engine.store.assert_called()
 
     def test_sync_turn_engine_none(self, provider):
         """_engine=None 时直接返回."""
@@ -1246,3 +1255,56 @@ class TestProfilePin:
         """get_config_schema 暴露 pin_profile 开关."""
         keys = {item["key"] for item in provider.get_config_schema()}
         assert "pin_profile" in keys
+
+
+class TestCronDaemonService:
+    """挂账 A 修复: cron/flush 上下文跳过引擎加载(设计),但 daemon 在线时
+    daemon-first 路由仍应服务——工具守卫不得把 daemon 路径一并拦下。"""
+
+    def _cron_provider(self, provider):
+        provider.initialize("cron_session", agent_context="cron", agent_identity="coder")
+        assert provider._cron_skipped is True
+        assert provider._engine is None
+        return provider
+
+    def test_cron_tool_recall_served_via_daemon(self, provider):
+        p = self._cron_provider(provider)
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api",
+                   return_value=TestDaemonRouting()._daemon_recall_json()):
+            out = p._tool_recall({"query": "q"})
+        assert "engine not ready" not in out
+        assert "daemon fact" in out
+
+    def test_cron_tool_remember_served_via_daemon(self, provider):
+        p = self._cron_provider(provider)
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api",
+                   return_value={"ok": True, "fact_ids": ["f1"]}) as api:
+            out = p._tool_remember({"content": "cron writes too"})
+        assert "engine not ready" not in out
+        assert api.call_count == 1
+        assert api.call_args.args[0] == "POST" and api.call_args.args[1] == "/remember"
+
+    def test_cron_sync_turn_via_daemon(self, provider):
+        p = self._cron_provider(provider)
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api",
+                   return_value={"ok": True, "fact_ids": ["f1"]}) as api:
+            p.sync_turn("cron turn user", "cron turn assistant")
+            p._sync_thread.join(timeout=5.0)
+        assert api.call_count == 1
+
+    def test_cron_daemon_down_still_not_ready(self, provider):
+        # autouse fixture: daemon down; engine None too → 守卫保持 not ready
+        p = self._cron_provider(provider)
+        out = p._tool_recall({"query": "q"})
+        assert "engine not ready" in out
+
+    def test_cron_recall_daemon_error_no_crash(self, provider):
+        # daemon 在线但请求失败(None)且引擎为 None → 优雅错误,不 AttributeError
+        p = self._cron_provider(provider)
+        with patch("superlocalmemory.integrations.hermes._daemon_available", return_value=True), \
+             patch("superlocalmemory.integrations.hermes._daemon_api", return_value=None):
+            out = p._tool_recall({"query": "q"})
+        assert "engine not ready" in out or "failed" in out.lower() or "unavailable" in out.lower()

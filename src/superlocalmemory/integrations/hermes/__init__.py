@@ -311,6 +311,17 @@ class SuperLocalMemoryProvider(MemoryProvider):
         """Return ``True`` if the engine is available and initialised."""
         return self._engine is not None
 
+    def _can_serve(self) -> bool:
+        """Return ``True`` when memory service is possible in this context.
+
+        Cron/flush contexts intentionally skip engine initialisation (no
+        model loading); the daemon-first route serves them instead — the
+        daemon holds the machine-wide embedding worker either way. Service
+        is only unavailable when there is neither a local engine nor a
+        reachable daemon.
+        """
+        return self._engine is not None or _daemon_available()
+
     # -- Lifecycle: initialize -----------------------------------------------
 
     def initialize(self, session_id: str, **kwargs) -> None:
@@ -576,7 +587,11 @@ class SuperLocalMemoryProvider(MemoryProvider):
         try:
             limit = kwargs.get("limit", _PREFETCH_RECALL_LIMIT)
             fast = kwargs.get("fast", True)
-            response = self._engine_recall(query, limit) or self._engine.recall(
+            response = self._engine_recall(query, limit)
+            if response is None:
+                if self._engine is None:
+                    return ""
+                response = self._engine.recall(
                 query, limit=limit, fast=fast,
                 include_global=self._include_global,
                 include_shared=self._include_shared,
@@ -594,7 +609,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
         - Subsequent turns: consume ``_prefetch_cache`` written by the prior
           turn's ``queue_prefetch()``.
         """
-        if self._cron_skipped or not self._engine:
+        if not self._can_serve():
             return ""
         if not query.strip():
             return ""
@@ -614,7 +629,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
 
         Results are written to ``_prefetch_cache`` under ``_prefetch_lock``.
         """
-        if self._cron_skipped or not self._engine or not query.strip():
+        if not self._can_serve() or not query.strip():
             return
 
         # One prefetch at a time — daemon-routed recalls vary in latency
@@ -625,7 +640,10 @@ class SuperLocalMemoryProvider(MemoryProvider):
 
         def _do_prefetch() -> None:
             try:
-                response = self._engine_recall(query, _PREFETCH_RECALL_LIMIT) or self._engine.recall(
+                response = self._engine_recall(query, _PREFETCH_RECALL_LIMIT)
+                if response is None and self._engine is None:
+                    return
+                response = response or self._engine.recall(
                     query, limit=_PREFETCH_RECALL_LIMIT,
                     include_global=self._include_global,
                     include_shared=self._include_shared,
@@ -664,7 +682,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
         (no queue build-up).  The ``_sync_turn_lock`` prevents a race between
         ``is_alive()`` and ``thread.start()``.
         """
-        if self._cron_skipped or not self._engine:
+        if not self._can_serve():
             return
 
         clean_user = (sanitize_context(user_content) or "").strip()
@@ -717,7 +735,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
         metadata: Any = None,
     ) -> None:
         """Mirror built-in memory writes to MSLM (personal scope)."""
-        if not self._ensure_engine() or self._cron_skipped or not content:
+        if not self._can_serve() or not content:
             return
 
         def _write() -> None:
@@ -746,7 +764,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
         Returns an empty string (does not interfere with the compression
         summary prompt).
         """
-        if self._cron_skipped or not self._engine:
+        if not self._can_serve():
             return ""
 
         parts: List[str] = []
@@ -933,7 +951,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
 
     def _tool_recall(self, params: Dict[str, Any]) -> str:
         """Handle ``slm_recall`` tool call."""
-        if not self._ensure_engine():
+        if not self._can_serve():
             return tool_error("SuperLocalMemory engine not ready")
 
         query = params.get("query", "").strip()
@@ -944,7 +962,11 @@ class SuperLocalMemoryProvider(MemoryProvider):
         fast = bool(params.get("fast", False))
 
         try:
-            response = self._engine_recall(query, limit) or self._engine.recall(
+            response = self._engine_recall(query, limit)
+            if response is None:
+                if self._engine is None:
+                    return tool_error("SuperLocalMemory daemon and engine both unavailable")
+                response = self._engine.recall(
                 query, limit=limit, fast=fast,
                 include_global=self._include_global,
                 include_shared=self._include_shared,
@@ -974,7 +996,7 @@ class SuperLocalMemoryProvider(MemoryProvider):
 
     def _tool_remember(self, params: Dict[str, Any]) -> str:
         """Handle ``slm_remember`` tool call."""
-        if not self._ensure_engine():
+        if not self._can_serve():
             return tool_error("SuperLocalMemory engine not ready")
 
         content = (params.get("content") or "").strip()
@@ -998,6 +1020,8 @@ class SuperLocalMemoryProvider(MemoryProvider):
                 content, session_id=self._session_id, scope=scope, shared_with=shared_with,
             )
             if fact_ids is None:  # daemon unreachable — in-process fallback
+                if self._engine is None:
+                    return tool_error("SuperLocalMemory daemon and engine both unavailable")
                 with self._write_lock:
                     fact_ids = self._engine.store(
                         content, session_id=self._session_id, scope=scope,
