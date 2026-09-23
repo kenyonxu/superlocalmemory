@@ -318,3 +318,55 @@ def test_register_temporal_validity_filter_disabled(
     db = MagicMock()
     register_temporal_validity_filter(registry, db, disabled_config)
     registry.register_filter.assert_not_called()
+
+
+class TestLockTransientTolerance:
+    """知惠 §16:DB 锁瞬断不应整卷弃权——锁类错误一次重试,仍锁则
+    fail-open 跳过该过滤(漏检一次修正 ≪ 整次空结果)。非锁类错误
+    保持 fail-closed(设计意图:真不可证明仍弃权)。"""
+
+    def _locked_then_ok(self, db, good=None):
+        import sqlite3 as _sq
+        db.get_nonapplied_correction_successor_ids.return_value = set()
+        calls = {"n": 0}
+        def side_effect(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _sq.OperationalError("database is locked")
+            return good if good is not None else set()
+        db.get_invalidated_fact_ids.side_effect = side_effect
+        return calls
+
+    def test_lock_retries_then_succeeds(self) -> None:
+        db = MagicMock()
+        self._locked_then_ok(db, good=set())
+        original = {"semantic": [("fact_ok", 0.9)]}
+        admitted = admit_correction_candidates(original, "default", db)
+        assert admitted == original
+        assert db.get_invalidated_fact_ids.call_count == 2
+
+    def test_lock_persists_fails_open_not_abstain(self) -> None:
+        import sqlite3 as _sq
+        db = MagicMock()
+        db.get_nonapplied_correction_successor_ids.return_value = set()
+        db.get_invalidated_fact_ids.side_effect = _sq.OperationalError("database is locked")
+        original = {"semantic": [("fact_x", 0.9)], "bm25": [("fact_x", 0.8)]}
+        admitted = admit_correction_candidates(original, "default", db)
+        # fail-open:结果原样放行(过滤跳过),不是全空弃权
+        assert admitted == original
+
+    def test_non_lock_error_still_abstains(self) -> None:
+        db = MagicMock()
+        db.get_nonapplied_correction_successor_ids.return_value = set()
+        db.get_invalidated_fact_ids.side_effect = RuntimeError("disk corrupted")
+        original = {"semantic": [("fact_y", 0.9)]}
+        assert admit_correction_candidates(original, "default", db) == {"semantic": []}
+
+    def test_post_fusion_lock_also_fails_open(self) -> None:
+        import sqlite3 as _sq
+        db = MagicMock()
+        db.get_nonapplied_correction_successor_ids.return_value = set()
+        db.get_invalidated_fact_ids.side_effect = _sq.OperationalError("database is locked")
+        expanded = [MagicMock(fact_id="cand_z")]
+        out = admit_correction_fusion_results(expanded, "default", db)
+        assert out == expanded

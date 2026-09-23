@@ -99,7 +99,13 @@ def test_high_strength_stabilizes(coupling: EbbinghausLangevinCoupling) -> None:
 # ---- Test 11: Low strength fades ----
 
 def test_low_strength_fades(coupling: EbbinghausLangevinCoupling) -> None:
-    """access_count=0, importance=0, 720h since access -> zone in archive/forgotten."""
+    """access_count=0, importance=0, 720h since access -> demoted below warm.
+
+    Store-scaled clock (GitHub #136, aligned here 2026-09-23): 30 days
+    unaccessed at zero importance computes R ~= 0.37 -> 'cold'. The old
+    assertion ('archive'/'forgotten') pinned the hours-tuned curve fed
+    store-time — the exact bug #136 fixed in the batch path.
+    """
     fisher_var = np.array([5.0] * 8)
 
     state = coupling.compute_coupled_state(
@@ -113,8 +119,12 @@ def test_low_strength_fades(coupling: EbbinghausLangevinCoupling) -> None:
         hours_since_last_access=720.0,
     )
 
-    assert state.lifecycle_zone in ("archive", "forgotten"), (
-        f"Expected 'archive' or 'forgotten', got '{state.lifecycle_zone}'"
+    assert state.lifecycle_zone in ("cold", "archive", "forgotten"), (
+        f"Expected at most 'cold', got '{state.lifecycle_zone}'"
+    )
+    assert state.lifecycle_zone == "cold", (
+        f"30d unaccessed zero-importance on the store clock is 'cold', "
+        f"got '{state.lifecycle_zone}'"
     )
 
 
@@ -188,3 +198,88 @@ def test_forgetting_drift_in_langevin(coupling: EbbinghausLangevinCoupling) -> N
     assert state_low.forgetting_drift == pytest.approx(expected_drift, abs=1e-9), (
         f"Expected drift {expected_drift}, got {state_low.forgetting_drift}"
     )
+
+
+class TestStoreScaledClock:
+    """知惠 §16 / 2026-09-23:ELC 的 Ebbinghaus 步骤必须走 store_scaled_strength
+    (#136 的时钟修复只落在 batch 路径;维护层 ELC 仍用原始 retention →
+    凌晨维护窗把 3 个月未访问的记忆(曲线真值 = warm)成批判成 forgotten→archive)。"""
+
+    def test_three_months_unaccessed_is_warm_not_forgotten(self):
+        import numpy as np
+        from superlocalmemory.core.config import ForgettingConfig
+        from superlocalmemory.dynamics.ebbinghaus_langevin_coupling import (
+            EbbinghausLangevinCoupling,
+        )
+
+        cfg = ForgettingConfig()
+        coupling = _make_elc(cfg)
+        state = coupling.compute_coupled_state(
+            fact_id="f",
+            fisher_variance=np.ones(8) * 0.1,
+            langevin_radius=0.5,
+            access_count=0,
+            importance=0.5,
+            confirmation_count=0,
+            emotional_salience=0.0,
+            hours_since_last_access=3 * 30 * 24.0,  # 3 个月
+        )
+        assert state.lifecycle_zone == "warm"
+
+    def test_matches_batch_path_zone(self):
+        """ELC 与 batch_compute_retention(修复后的正确时钟)对同一输入给同 zone。"""
+        import numpy as np
+        from superlocalmemory.core.config import ForgettingConfig
+        from superlocalmemory.dynamics.ebbinghaus_langevin_coupling import (
+            EbbinghausLangevinCoupling,
+        )
+        from superlocalmemory.math.ebbinghaus import EbbinghausCurve
+
+        cfg = ForgettingConfig()
+        curve = EbbinghausCurve(cfg)
+        coupling = _make_elc(cfg)
+        for hours in [24.0, 24 * 30, 24 * 90, 24 * 365]:
+            state = coupling.compute_coupled_state(
+                fact_id="f",
+                fisher_variance=np.ones(8) * 0.1, langevin_radius=0.5,
+                access_count=0, importance=0.5, confirmation_count=0,
+                emotional_salience=0.0, hours_since_last_access=hours,
+            )
+            batch = curve.batch_compute_retention([{
+                "fact_id": "f", "access_count": 0, "importance": 0.5,
+                "confirmation_count": 0, "emotional_salience": 0.0,
+                "last_accessed_at": _iso_hours_ago(hours),
+            }])[0]
+            assert state.lifecycle_zone == batch["zone"], (
+                f"hours={hours}: ELC={state.lifecycle_zone} batch={batch['zone']}"
+            )
+
+
+def _make_curve(cfg):
+    from superlocalmemory.math.ebbinghaus import EbbinghausCurve
+    return EbbinghausCurve(cfg)
+
+
+def _make_elc(cfg):
+    from superlocalmemory.dynamics.ebbinghaus_langevin_coupling import (
+        EbbinghausLangevinCoupling,
+    )
+    from superlocalmemory.math.langevin import LangevinDynamics
+    from superlocalmemory.dynamics.fisher_langevin_coupling import (
+        FisherLangevinCoupling,
+    )
+    return EbbinghausLangevinCoupling(
+        _make_curve(cfg), LangevinDynamics(), FisherLangevinCoupling(), cfg,
+    )
+
+
+def _make_fl(cfg):
+    from superlocalmemory.dynamics.fisher_langevin_coupling import (
+        FisherLangevinCoupling,
+    )
+    return FisherLangevinCoupling()
+
+
+def _iso_hours_ago(hours: float) -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()

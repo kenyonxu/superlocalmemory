@@ -144,7 +144,7 @@ def _invalidated_candidate_ids(
             if lifecycle_cache is not None
             else set()
         )
-    try:
+    def _query():
         kwargs: dict[str, Any] = {"as_of": _normalized_as_of(as_of)}
         if include_global:
             kwargs["include_global"] = True
@@ -155,22 +155,37 @@ def _invalidated_candidate_ids(
         # adapters continue through the two focused public queries below.
         combined = getattr(type(db), "get_correction_inadmissible_fact_ids", None)
         if callable(combined):
-            invalid = db.get_correction_inadmissible_fact_ids(
+            return db.get_correction_inadmissible_fact_ids(
                 list(unchecked), profile_id, **kwargs,
             )
-        else:
-            invalid = db.get_invalidated_fact_ids(list(unchecked), profile_id, **kwargs)
-            pending_successors = db.get_nonapplied_correction_successor_ids(
-                list(unchecked),
-                profile_id,
-                include_global=include_global,
-                include_shared=include_shared,
-            )
-            if not isinstance(pending_successors, set):
-                return None
-            invalid |= pending_successors
+        invalid = db.get_invalidated_fact_ids(list(unchecked), profile_id, **kwargs)
+        pending_successors = db.get_nonapplied_correction_successor_ids(
+            list(unchecked),
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+        )
+        if not isinstance(pending_successors, set):
+            return None
+        invalid |= pending_successors
+        return invalid
+
+    try:
+        outcome = _run_admission_query(_query, lifecycle_cache=lifecycle_cache)
     except Exception as exc:
+        # Non-lock failure: unprovable stays abstaining (module contract).
         logger.warning("Correction admission lookup failed: %s", exc)
+        if lifecycle_cache is not None:
+            lifecycle_cache.unavailable = True
+        return None
+    if outcome == "fail_open":
+        # Lock-class transient: unprovable is not an integrity answer here.
+        # Signal the caller to skip this admission pass (results unchanged)
+        # rather than abstaining every channel. A distinct sentinel keeps
+        # the fail-closed contract intact for every other error class.
+        return _LOCK_FAIL_OPEN
+    invalid = outcome
+    if invalid is None:
         if lifecycle_cache is not None:
             lifecycle_cache.unavailable = True
         return None
@@ -212,6 +227,58 @@ def _strict_temporal_candidate_ids(
         logger.warning("Strict temporal admission lookup failed: %s", exc)
         return None
     return invalid if isinstance(invalid, set) else None
+
+
+#: Lock-tolerance sentinel: "skip this admission pass, keep candidates".
+#: Distinct from ``None`` ("unprovable — abstain") so the fail-closed
+#: contract survives for every non-lock error class.
+_LOCK_FAIL_OPEN = "__lock_fail_open__"
+
+_LOCK_RETRY_DELAY_S = 0.05
+_LOCK_RETRIES = 1
+
+
+def _is_lock_transient(exc: BaseException) -> bool:
+    """A lock-class infrastructure blip, not an integrity answer.
+
+    ``database is locked`` during a maintenance window is a scheduling
+    collision, not evidence about correction state. Treating it as
+    "unprovable" made every recall in that window return all-empty
+    (2026-09-23 cron lane: one 5-minute maintenance tick zeroed 100% of
+    recalls that landed inside it).
+    """
+    msg = str(exc).lower()
+    return "database is locked" in msg or "database table is locked" in msg
+
+
+def _run_admission_query(query, *, lifecycle_cache):
+    """Run one admission lookup with lock-class retry.
+
+    Returns the query result, or ``None`` signalling how to degrade:
+    - ``"fail_open"`` for a lock that persists past the retry — the caller
+      skips this filter for this recall rather than abstaining everything.
+    - ``"fail_closed"`` for non-lock errors — unprovable stays abstaining
+      (the module's documented contract for genuine integrity failures).
+    """
+    import sqlite3 as _sq
+    for attempt in range(_LOCK_RETRIES + 1):
+        try:
+            return query()
+        except _sq.OperationalError as exc:
+            if _is_lock_transient(exc) and attempt < _LOCK_RETRIES:
+                import time as _time
+                _time.sleep(_LOCK_RETRY_DELAY_S)
+                continue
+            if _is_lock_transient(exc):
+                logger.warning(
+                    "Correction admission lookup locked twice; failing open "
+                    "(skipping temporal admission for this recall): %s", exc,
+                )
+                return "fail_open"
+            raise
+        except Exception:
+            raise
+    return "fail_open"
 
 
 def _abstain_candidates(
@@ -264,6 +331,8 @@ def admit_correction_candidates(
         include_global=include_global, include_shared=include_shared,
         lifecycle_cache=lifecycle_cache,
     )
+    if invalid is _LOCK_FAIL_OPEN:
+        return all_results
     if invalid is None:
         return _abstain_candidates(all_results, stage="pre_fusion.lifecycle")
     strict = _strict_temporal_candidate_ids(
@@ -308,6 +377,8 @@ def admit_correction_fusion_results(
         include_global=include_global, include_shared=include_shared,
         lifecycle_cache=lifecycle_cache,
     )
+    if invalid is _LOCK_FAIL_OPEN:
+        return fused_results
     if invalid is None:
         logger.error(
             "Temporal correction admission unavailable at post_fusion.lifecycle; "
