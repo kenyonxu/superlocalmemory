@@ -158,7 +158,7 @@ def _retention_radius(
 def _persist_lifecycle(
     db: object,
     profile_id: str,
-    updates: "list[tuple[str, str, object]]",
+    updates: "list[tuple[str, str | None, object]]",
 ) -> int:
     """Write a computed tier to the authority AND the mirror, together.
 
@@ -179,6 +179,10 @@ def _persist_lifecycle(
     no mirror, so it still goes through ``update_fact``; without it the backfill
     would recompute the same facts on every pass and never converge.
 
+    ``lifecycle`` may be None, which the lifecycle guard uses to say "persist
+    the position, leave the zone alone": the radius proposed a cooling the
+    score authority has not signed, or one it already holds.
+
     Returns the number of facts whose tier was written.
     """
     if not updates:
@@ -191,6 +195,8 @@ def _persist_lifecycle(
 
     by_zone: dict[str, list[str]] = {}
     for fact_id, lifecycle, _position in updates:
+        if lifecycle is None:
+            continue  # position-only: refused cooling or a no-op re-affirm
         by_zone.setdefault(str(lifecycle), []).append(fact_id)
 
     written = 0
@@ -235,6 +241,104 @@ def _seed_langevin_position(
         direction = np.ones(dim)
         norm = float(np.linalg.norm(direction))
     return (direction / norm * r_eq).tolist()
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle guard (GitHub #136 follow-up, 运维笔记 §19)
+# ---------------------------------------------------------------------------
+#
+# Two writers touch the zone. The score authority (the decay cycle's
+# batch_upsert_retention) derives it from retention_score. The radius domain
+# (the three Langevin write sites below) derives it from position. Positions
+# saturate at the boundary and then the radius convicts every fact to
+# archived, whatever the score says -- production measured 3,306 such rows
+# whose score still read 1.0. The rule from here on: the radius may warm
+# freely, it may never cool past the score authority's zone. Cooling still
+# happens, through the decay cycle, at most one tick later.
+
+# Both spellings, one rank: atomic_facts says 'archived', fact_retention says
+# 'archive'.
+_ZONE_COLDNESS: dict[str, int] = {
+    "active": 0, "warm": 1, "cold": 2,
+    "archive": 3, "archived": 3, "forgotten": 4,
+}
+
+
+def _is_colder(proposed: str | None, current: str | None) -> bool:
+    """True when ``proposed`` is a strictly colder zone than ``current``.
+
+    Total function: an unrecognized zone on either side answers False. The
+    guard exists to stop a KNOWN-worse overwrite, not to freeze the writer on
+    input it cannot read (a legacy spelling, a test double).
+    """
+    p = _ZONE_COLDNESS.get(str(proposed or "").strip().lower())
+    c = _ZONE_COLDNESS.get(str(current or "").strip().lower())
+    return p is not None and c is not None and p > c
+
+
+def _current_zone_map(
+    db: "DatabaseManager", profile_id: str, facts: list,
+) -> dict[str, str]:
+    """fact_id -> current zone: the authority overlaid on the mirror.
+
+    The mirror copy comes from the facts this pass already loaded; the
+    authority overlay (``fact_retention.lifecycle_zone``) is one indexed read.
+    Unrecognized values are dropped -- an unreadable zone must behave like no
+    zone, not like a freeze. Best-effort: if the authority read itself fails,
+    the mirror map still stands, and if both fail the radius path behaves
+    exactly as it did before the guard existed.
+    """
+    zones: dict[str, str] = {}
+    for f in facts:
+        lifecycle = getattr(f, "lifecycle", None)
+        value = getattr(lifecycle, "value", lifecycle)
+        key = str(value or "").strip().lower()
+        fact_id = str(getattr(f, "fact_id", "") or "")
+        if fact_id and key in _ZONE_COLDNESS:
+            zones[fact_id] = key
+    try:
+        rows = db.execute(
+            "SELECT fact_id, lifecycle_zone FROM fact_retention "
+            "WHERE profile_id = ?",
+            (profile_id,),
+        )
+        for row in rows:
+            d = dict(row)
+            key = str(d.get("lifecycle_zone") or "").strip().lower()
+            fact_id = str(d.get("fact_id") or "")
+            if fact_id and key in _ZONE_COLDNESS:
+                zones[fact_id] = key
+    except Exception:  # noqa: BLE001 -- the guard must never break maintenance
+        logger.debug(
+            "lifecycle guard: authority zone read failed", exc_info=True,
+        )
+    return zones
+
+
+def _guard_zone_updates(
+    updates: "list[tuple[str, str, object]]",
+    current_zones: dict[str, str],
+) -> "tuple[list[tuple[str, str | None, object]], int]":
+    """Clamp radius-proposed zones against the score authority's zone.
+
+    Returns ``(guarded, refused)``. The position always survives. A proposal
+    strictly warmer than the authority is written; equal ranks and refused
+    coolings come back with the zone set to None, which ``_persist_lifecycle``
+    reads as "persist the position, leave the zone alone" -- skipping the
+    no-op write keeps ``fact_retention.last_computed_at`` meaning "the score
+    authority computed", not "the radius path re-affirmed".
+    """
+    guarded: list[tuple[str, str | None, object]] = []
+    refused = 0
+    for fact_id, proposed, position in updates:
+        current = current_zones.get(fact_id)
+        if current is None or _is_colder(current, proposed):
+            guarded.append((fact_id, proposed, position))
+            continue
+        if _is_colder(proposed, current):
+            refused += 1
+        guarded.append((fact_id, None, position))
+    return guarded, refused
 
 
 def close_stale_sessions(
@@ -341,6 +445,7 @@ def run_maintenance(
     counts: dict[str, int] = {
         "langevin_backfilled": 0,
         "langevin_updated": 0,
+        "langevin_guard_refused": 0,         # radius cooling the score did not sign
         "fisher_coupled": 0,
         "fisher_posterior_updated": 0,       # P1-9: Fisher bayesian_update on access
         "ebbinghaus_coupled": 0,             # Phase 5: Ebbinghaus-Langevin coupling
@@ -414,6 +519,12 @@ def run_maintenance(
     if not facts:
         return counts
 
+    # The guard's authority snapshot: built once per pass, before any radius
+    # write site runs. Gated the same way as the writers themselves.
+    current_zones: dict[str, str] = {}
+    if config.math.langevin_persist_positions:
+        current_zones = _current_zone_map(db, profile_id, facts)
+
     # T3b: backfill fact-expansion alt-keys (Mode A, entity-alias based) for
     # facts stored before expansion existed. Bounded per run + skips already-
     # populated and entity-less facts, so it converges without re-work churn.
@@ -449,6 +560,11 @@ def run_maintenance(
 
             backfilled = 0
             for f in facts:
+                # NO-OVERWRITE, and it is load-bearing: the seed is a
+                # measurement taken once. M051 clears positions so this
+                # backfill re-measures; if this guard came off, every pass
+                # would reseed every fact and the clear/reseed ordering the
+                # repair depends on would mean nothing.
                 if f.langevin_position is not None:
                     continue
                 age_days = _age_days(f.created_at)
@@ -467,9 +583,11 @@ def run_maintenance(
                 )
                 weight = ld.compute_lifecycle_weight(position)
                 lifecycle = ld.get_lifecycle_state(weight).value
-                _persist_lifecycle(
-                    db, profile_id, [(f.fact_id, lifecycle, position)],
+                guarded, refused = _guard_zone_updates(
+                    [(f.fact_id, lifecycle, position)], current_zones,
                 )
+                counts["langevin_guard_refused"] += refused
+                _persist_lifecycle(db, profile_id, guarded)
                 f.langevin_position = position  # update in-memory for step 1b
                 backfilled += 1
 
@@ -504,10 +622,13 @@ def run_maintenance(
 
             if fact_dicts:
                 results = ld.batch_step(fact_dicts)
-                _persist_lifecycle(db, profile_id, [
-                    (r["fact_id"], r["lifecycle"], r["position"])
-                    for r in results
-                ])
+                guarded, refused = _guard_zone_updates(
+                    [(r["fact_id"], r["lifecycle"], r["position"])
+                     for r in results],
+                    current_zones,
+                )
+                counts["langevin_guard_refused"] += refused
+                _persist_lifecycle(db, profile_id, guarded)
                 counts["langevin_updated"] = len(results)
         except Exception as exc:
             logger.warning("Langevin maintenance failed: %s", exc)
@@ -550,9 +671,11 @@ def run_maintenance(
                         importance=f.importance,
                     )
                     lifecycle = coupled_ld.get_lifecycle_state(weight).value
-                    _persist_lifecycle(
-                        db, profile_id, [(f.fact_id, lifecycle, new_pos)],
+                    guarded, refused = _guard_zone_updates(
+                        [(f.fact_id, lifecycle, new_pos)], current_zones,
                     )
+                    counts["langevin_guard_refused"] += refused
+                    _persist_lifecycle(db, profile_id, guarded)
                     coupled_count += 1
 
             counts["fisher_coupled"] = coupled_count
@@ -877,9 +1000,11 @@ def run_maintenance(
 
     logger.info(
         "Maintenance complete: %d backfilled, %d Langevin, %d Fisher-coupled, "
-        "%d Sheaf, %d entity-summaries, %d facts-consolidated, %d code-links",
+        "%d guard-refused, %d Sheaf, %d entity-summaries, "
+        "%d facts-consolidated, %d code-links",
         counts["langevin_backfilled"], counts["langevin_updated"],
-        counts["fisher_coupled"], counts["sheaf_checked"],
+        counts["fisher_coupled"], counts["langevin_guard_refused"],
+        counts["sheaf_checked"],
         counts["entity_summaries_consolidated"],
         counts["facts_consolidated"],
         counts["bridge_links"],
