@@ -23,7 +23,6 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +30,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class VerificationResult:
     """Result of blind verification."""
+
     passed: bool
     confidence: float  # 0.0-1.0
     issues: tuple[str, ...] = ()
@@ -82,41 +82,41 @@ A mediocre skill that might work sometimes should FAIL — evolution should prod
 clear improvements, not marginal changes."""
 
 
+def _unique_fields(pairs):
+    data = {}
+    for key, value in pairs:
+        if key in data:
+            raise ValueError("Duplicate verification field")
+        data[key] = value
+    return data
+
+
 def parse_verification_response(response: str) -> VerificationResult:
     """Parse the verifier's JSON response."""
-    # Try parsing JSON from response
-    json_match = re.search(r"\{[^{}]*\"passed\"[^{}]*\}", response, re.DOTALL)
-    if json_match:
-        try:
-            data = json.loads(json_match.group(0))
-            return VerificationResult(
-                passed=bool(data.get("passed", False)),
-                confidence=float(data.get("confidence", 0.5)),
-                issues=tuple(data.get("issues", [])),
-                reasoning=str(data.get("reasoning", "")),
-            )
-        except (json.JSONDecodeError, TypeError, ValueError):
-            pass
-
-    # Fallback: keyword detection.
-    # Negative keywords are checked first so that negating phrases such as
-    # "cannot approve" or "not approved" are never mistakenly matched by the
-    # positive keyword "approve".
-    lower = response.lower()
-    if any(kw in lower for kw in (
-        "\"passed\": false", "passed: false",
-        "reject", "fail",
-        "cannot approve", "not approve",
-    )):
-        return VerificationResult(passed=False, confidence=0.6, reasoning="keyword match")
-
-    if any(kw in lower for kw in ("\"passed\": true", "passed: true", "approve", "looks good")):
-        return VerificationResult(passed=True, confidence=0.6, reasoning="keyword match")
-
-    # Default: reject if can't parse (conservative)
-    return VerificationResult(
-        passed=False,
-        confidence=0.3,
-        reasoning="Could not parse verification response",
-        issues=("Unparseable response",),
-    )
+    try:
+        # Decode the outer object, never an approving object nested inside it.
+        start = re.search(r"[\[{]", response).start()
+        end = max(response.rfind("}"), response.rfind("]")) + 1
+        data = json.loads(response[start:end], object_pairs_hook=_unique_fields)
+        if not isinstance(data, dict):
+            raise ValueError("Expected a JSON object")
+        confidence = data.get("confidence", 0.5)
+        issues, reasoning = data.get("issues", []), data.get("reasoning", "")
+        if type(confidence) not in (int, float):
+            raise ValueError("Invalid confidence")
+        if not 0 <= confidence <= 1:
+            raise ValueError("Confidence outside [0, 1]")
+        if not isinstance(issues, list) or any(not isinstance(i, str) for i in issues):
+            raise ValueError("Invalid issues")
+        if not isinstance(reasoning, str):
+            raise ValueError("Invalid reasoning")
+        return VerificationResult(
+            passed=data.get("passed") is True,
+            confidence=float(confidence), issues=tuple(issues), reasoning=reasoning,
+        )
+    except (ValueError, TypeError, AttributeError):
+        return VerificationResult(
+            passed=False, confidence=0.3,
+            reasoning="Could not parse verification response",
+            issues=("Unparseable response",),
+        )

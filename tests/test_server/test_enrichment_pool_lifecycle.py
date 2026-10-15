@@ -20,8 +20,6 @@ from __future__ import annotations
 
 import threading
 import time
-from concurrent.futures import Future
-from unittest.mock import patch
 
 import pytest
 

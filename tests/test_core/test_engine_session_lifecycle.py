@@ -21,7 +21,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from superlocalmemory.core.config import SLMConfig
 from superlocalmemory.core.engine import MemoryEngine

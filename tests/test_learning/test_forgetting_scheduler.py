@@ -10,11 +10,8 @@ soft-delete audit trail, and scheduler interval check.
 
 from __future__ import annotations
 
-import json
 import sqlite3
-import time
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -73,8 +70,7 @@ def db_with_facts(tmp_path):
             "(memory_id, profile_id, content, session_id, speaker, role, "
             " created_at, metadata_json) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (f"mem_{i}", "test_profile", f"Memory {i}", "sess1", "user",
-             "user", created, "{}"),
+            (f"mem_{i}", "test_profile", f"Memory {i}", "sess1", "user", "user", created, "{}"),
         )
 
         conn.execute(
@@ -84,10 +80,25 @@ def db_with_facts(tmp_path):
             " evidence_count, access_count, source_turn_ids_json, "
             " lifecycle, emotional_valence, emotional_arousal, signal_type, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (fact_id, f"mem_{i}", "test_profile", f"Test fact {i}",
-             "semantic", "[]", "[]", 1.0, 0.5 - (i * 0.05),
-             max(1, 5 - i), 0, "[]",
-             "active", 0.0, 0.0, "factual", created),
+            (
+                fact_id,
+                f"mem_{i}",
+                "test_profile",
+                f"Test fact {i}",
+                "semantic",
+                "[]",
+                "[]",
+                1.0,
+                0.5 - (i * 0.05),
+                max(1, 5 - i),
+                0,
+                "[]",
+                "active",
+                0.0,
+                0.0,
+                "factual",
+                created,
+            ),
         )
 
         # Add access log entries (more for recent facts)
@@ -116,7 +127,10 @@ def db_with_facts(tmp_path):
 
 # ---- Test 16: Batch retention update (100 facts in <200ms) ----
 
-def test_batch_retention_update(db_with_facts, ebbinghaus: EbbinghausCurve, config: ForgettingConfig) -> None:
+
+def test_batch_retention_update(
+    db_with_facts, ebbinghaus: EbbinghausCurve, config: ForgettingConfig
+) -> None:
     """10 facts get retention scores computed correctly."""
     scheduler = ForgettingScheduler(db_with_facts, ebbinghaus, config)
 
@@ -124,13 +138,14 @@ def test_batch_retention_update(db_with_facts, ebbinghaus: EbbinghausCurve, conf
 
     assert stats["total"] == 10, f"Expected 10 facts, got {stats['total']}"
     assert stats["total"] == (
-        stats["active"] + stats["warm"] + stats["cold"]
-        + stats["archive"] + stats["forgotten"]
+        stats["active"] + stats["warm"] + stats["cold"] + stats["archive"] + stats["forgotten"]
     ), "Zone counts must sum to total"
 
 
 def test_decay_dry_run_computes_without_durable_changes(
-    db_with_facts, ebbinghaus: EbbinghausCurve, config: ForgettingConfig,
+    db_with_facts,
+    ebbinghaus: EbbinghausCurve,
+    config: ForgettingConfig,
 ) -> None:
     scheduler = ForgettingScheduler(db_with_facts, ebbinghaus, config)
     before = db_with_facts.execute(
@@ -154,7 +169,10 @@ def test_decay_dry_run_computes_without_durable_changes(
 
 # ---- Test 17: On-access strengthens ----
 
-def test_on_access_strengthens(db_with_facts, ebbinghaus: EbbinghausCurve, config: ForgettingConfig) -> None:
+
+def test_on_access_strengthens(
+    db_with_facts, ebbinghaus: EbbinghausCurve, config: ForgettingConfig
+) -> None:
     """After on_access_event, retention increases or stays same."""
     scheduler = ForgettingScheduler(db_with_facts, ebbinghaus, config)
 
@@ -186,7 +204,9 @@ def test_on_access_strengthens(db_with_facts, ebbinghaus: EbbinghausCurve, confi
 
 
 def test_on_access_keeps_atomic_and_retention_lifecycle_in_sync(
-    db_with_facts, ebbinghaus: EbbinghausCurve, config: ForgettingConfig,
+    db_with_facts,
+    ebbinghaus: EbbinghausCurve,
+    config: ForgettingConfig,
 ) -> None:
     scheduler = ForgettingScheduler(db_with_facts, ebbinghaus, config)
     scheduler.run_decay_cycle("test_profile")
@@ -212,6 +232,7 @@ def test_on_access_keeps_atomic_and_retention_lifecycle_in_sync(
 
 
 # ---- Test 20 (A-HIGH-01): Soft-delete audit trail ----
+
 
 def test_forgotten_soft_delete(tmp_path, ebbinghaus: EbbinghausCurve) -> None:
     """Facts with retention < forget_threshold get lifecycle_zone='forgotten'
@@ -249,8 +270,7 @@ def test_forgotten_soft_delete(tmp_path, ebbinghaus: EbbinghausCurve) -> None:
         "(memory_id, profile_id, content, session_id, speaker, role, "
         " created_at, metadata_json) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ("mem_old", "test_profile", "Old memory", "sess1", "user",
-         "user", old_time, "{}"),
+        ("mem_old", "test_profile", "Old memory", "sess1", "user", "user", old_time, "{}"),
     )
     conn.execute(
         "INSERT INTO atomic_facts "
@@ -259,10 +279,25 @@ def test_forgotten_soft_delete(tmp_path, ebbinghaus: EbbinghausCurve) -> None:
         " evidence_count, access_count, source_turn_ids_json, "
         " lifecycle, emotional_valence, emotional_arousal, signal_type, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("fact_old", "mem_old", "test_profile", "Old fact",
-         "semantic", "[]", "[]", 1.0, 0.0,
-         0, 0, "[]",
-         "active", 0.0, 0.0, "factual", old_time),
+        (
+            "fact_old",
+            "mem_old",
+            "test_profile",
+            "Old fact",
+            "semantic",
+            "[]",
+            "[]",
+            1.0,
+            0.0,
+            0,
+            0,
+            "[]",
+            "active",
+            0.0,
+            0.0,
+            "factual",
+            old_time,
+        ),
     )
     conn.execute(
         "INSERT INTO fact_importance "
@@ -299,8 +334,11 @@ def test_forgotten_soft_delete(tmp_path, ebbinghaus: EbbinghausCurve) -> None:
 
 # ---- Test 21 (A-HIGH-01): Scheduler interval check ----
 
+
 def test_scheduler_triggers_on_interval(
-    db_with_facts, ebbinghaus: EbbinghausCurve, config: ForgettingConfig,
+    db_with_facts,
+    ebbinghaus: EbbinghausCurve,
+    config: ForgettingConfig,
 ) -> None:
     """Scheduler only runs when time_since_last_run >= interval.
     Calling before interval returns early with no-op stats."""
@@ -323,8 +361,11 @@ def test_scheduler_triggers_on_interval(
 
 # ---- Coverage: on_access_event with no retention data ----
 
+
 def test_on_access_no_retention_data(
-    db_with_facts, ebbinghaus: EbbinghausCurve, config: ForgettingConfig,
+    db_with_facts,
+    ebbinghaus: EbbinghausCurve,
+    config: ForgettingConfig,
 ) -> None:
     """on_access_event for a fact with no retention data should be a no-op."""
     scheduler = ForgettingScheduler(db_with_facts, ebbinghaus, config)
@@ -335,8 +376,11 @@ def test_on_access_no_retention_data(
 
 # ---- Coverage: run_decay_cycle with empty profile ----
 
+
 def test_decay_cycle_empty_profile(
-    db_with_facts, ebbinghaus: EbbinghausCurve, config: ForgettingConfig,
+    db_with_facts,
+    ebbinghaus: EbbinghausCurve,
+    config: ForgettingConfig,
 ) -> None:
     """run_decay_cycle for a profile with no facts should return zero counts."""
     scheduler = ForgettingScheduler(db_with_facts, ebbinghaus, config)
@@ -346,8 +390,11 @@ def test_decay_cycle_empty_profile(
 
 # ---- Coverage: zone transition tracking (line 117) ----
 
+
 def test_decay_cycle_tracks_transitions(
-    db_with_facts, ebbinghaus: EbbinghausCurve, config: ForgettingConfig,
+    db_with_facts,
+    ebbinghaus: EbbinghausCurve,
+    config: ForgettingConfig,
 ) -> None:
     """run_decay_cycle should count zone transitions between runs."""
     scheduler = ForgettingScheduler(db_with_facts, ebbinghaus, config)
@@ -374,6 +421,11 @@ def test_decay_cycle_tracks_transitions(
         (stale,),
     )
 
+    db_with_facts.execute(
+        "UPDATE fact_access_log SET accessed_at=? WHERE fact_id='fact_009'",
+        (stale,),
+    )
+
     # Second run should detect fact_009 transitioning from 'active' to its
     # real computed zone.
     stats = scheduler.run_decay_cycle("test_profile")
@@ -382,8 +434,11 @@ def test_decay_cycle_tracks_transitions(
 
 # ---- Coverage: on_access_event with timezone-naive date (lines 165-166) ----
 
+
 def test_on_access_event_timezone_naive_date(
-    db_with_facts, ebbinghaus: EbbinghausCurve, config: ForgettingConfig,
+    db_with_facts,
+    ebbinghaus: EbbinghausCurve,
+    config: ForgettingConfig,
 ) -> None:
     """on_access_event handles timezone-naive last_accessed_at strings."""
     scheduler = ForgettingScheduler(db_with_facts, ebbinghaus, config)
@@ -410,8 +465,11 @@ def test_on_access_event_timezone_naive_date(
 
 # ---- Coverage: on_access_event with invalid date (lines 169-170) ----
 
+
 def test_on_access_event_invalid_date(
-    db_with_facts, ebbinghaus: EbbinghausCurve, config: ForgettingConfig,
+    db_with_facts,
+    ebbinghaus: EbbinghausCurve,
+    config: ForgettingConfig,
 ) -> None:
     """on_access_event handles invalid last_accessed_at gracefully."""
     scheduler = ForgettingScheduler(db_with_facts, ebbinghaus, config)
@@ -430,8 +488,11 @@ def test_on_access_event_invalid_date(
 
 # ---- Coverage: _get_existing_zones with empty facts (line 250) ----
 
+
 def test_get_existing_zones_empty(
-    db_with_facts, ebbinghaus: EbbinghausCurve, config: ForgettingConfig,
+    db_with_facts,
+    ebbinghaus: EbbinghausCurve,
+    config: ForgettingConfig,
 ) -> None:
     """_get_existing_zones returns empty dict for empty input."""
     scheduler = ForgettingScheduler(db_with_facts, ebbinghaus, config)

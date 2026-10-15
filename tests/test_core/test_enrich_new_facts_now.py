@@ -23,6 +23,7 @@ background queue.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -38,7 +39,7 @@ from tests.helpers.env_capabilities import (
 
 
 @pytest.fixture
-def engine(tmp_path: Path) -> MemoryEngine:
+def engine(tmp_path: Path) -> Iterator[MemoryEngine]:
     eng = MemoryEngine(
         SLMConfig(
             mode=Mode.A,
@@ -48,8 +49,16 @@ def engine(tmp_path: Path) -> MemoryEngine:
             embedding=EmbeddingConfig(model_name="nomic-embed-text", dimension=768),
         )
     )
-    eng._ensure_init()
-    return eng
+    # These are deadline/adapter unit tests, not requests to shared Ollama.
+    # Seed with a cold local double, then each test supplies its own behaviour.
+    from unittest.mock import patch
+    cold = _local_embedder_mock()
+    cold._available = False
+    cold.embed.return_value = None
+    with patch('superlocalmemory.core.engine_wiring.init_embedder', return_value=cold):
+        eng._ensure_init()
+    yield eng
+    eng.close()
 
 
 def _local_embedder_mock() -> MagicMock:
@@ -116,7 +125,21 @@ class TestTheVectorIsAttached:
         Searching by meaning reads the vector projection, not the canonical
         column. Writing only the column looks like success at the database level
         and leaves the memory exactly as unfindable as before.
+
+        A deterministic local embedder is injected through the engine's own
+        seam (``engine._embedder`` — see ``_local_embedder_mock`` above and
+        ``tests/core/test_warm_guard_embed.py``) rather than relying on
+        whatever real embedder the engine fixture would otherwise build: CI has
+        no local model and no Ollama, so the real embedder is never warm and
+        this test would otherwise fail on "is it embedded" instead of on the
+        thing it is actually pinning (the column/projection pair).
         """
+        fake = _local_embedder_mock()
+        fake._available = True
+        fake.embed.return_value = [0.01] * 768
+        fake.compute_fisher_params.return_value = ([0.0] * 768, [1.0] * 768)
+        engine._embedder = fake
+
         fact_id = _fact_without_a_vector(engine, "The Helsinki ledger reconciliation is deferred.")
         assert _state(engine, fact_id) == ("null", 0), "test setup did not strip the vector"
 
@@ -150,6 +173,12 @@ class TestTheVectorIsAttached:
         meaning, and is exactly the state this number must not claim success for.
         So the end state is checked too.
         """
+        fake = _local_embedder_mock()
+        fake._available = True
+        fake.embed.return_value = [0.02] * 768
+        fake.compute_fisher_params.return_value = ([0.0] * 768, [1.0] * 768)
+        engine._embedder = fake
+
         fact_id = engine.store_fast("Procurement confirmed the tariff schedule.")[0]
         spy = MagicMock(wraps=engine._embedder)
         spy._config = None
@@ -197,13 +226,24 @@ class TestItCannotHarmTheWrite:
         This daemon serves many sessions, so a slow embedder must cost the caller
         a bounded wait and nothing more.
         """
+        import threading
         import time as _time
 
+        # Real-time bound on the caller's wait. The embed holds out for 30 s
+        # unless released, so a caller that ignored its 0.2 s deadline would wait
+        # ~30 s; a third of that is slack no loaded host can use up honestly.
+        slow_embed_s, deadline_s = 30.0, 0.2
+        caller_bound_s = slow_embed_s / 3
         fact_id = _fact_without_a_vector(engine, "A note recorded while the embedder is slow.")
+        release = threading.Event()
         slow = _local_embedder_mock()
         slow._available = True
-        slow.embed.side_effect = lambda _t: (_time.sleep(1.5), [0.1] * 768)[1]
+        slow.embed.side_effect = lambda _t: (release.wait(slow_embed_s), [0.1] * 768)[1]
         engine._embedder = slow
         started = _time.monotonic()
-        assert engine.enrich_new_facts_now([fact_id], timeout_s=0.2) == 0
-        assert _time.monotonic() - started < 1.2, "the deadline was not enforced"
+        try:
+            assert engine.enrich_new_facts_now([fact_id], timeout_s=deadline_s) == 0
+            assert _time.monotonic() - started < caller_bound_s, (
+                "the deadline was not enforced")
+        finally:
+            release.set()  # let the abandoned embed finish so close() is prompt

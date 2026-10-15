@@ -55,25 +55,19 @@ def _session_id(session: Any) -> Optional[str]:
     return None
 
 
-def _message_to_dict(message: Any) -> dict:
-    """Best-effort conversion of an Agent Framework Message to a plain dict."""
-    role = getattr(message, "role", None)
-    role = getattr(role, "value", role)  # unwrap an enum if present
-    text = getattr(message, "text", None)
-    if text is None:
-        text = getattr(message, "content", None)
-    return {
-        "role": str(role) if role is not None else "user",
-        "text": "" if text is None else str(text),
-    }
+# Native serialization contract opened 2026-10-11:
+# https://raw.githubusercontent.com/microsoft/agent-framework/main/python/packages/core/agent_framework/_types.py
+
+def _message_to_dict(message: Message) -> dict:
+    """Preserve the SDK's full structured message, excluding raw provider objects."""
+    return message.to_dict()
 
 
 def _dict_to_message(data: dict) -> Message:
-    """Best-effort reconstruction of a Message from a stored dict."""
-    try:
-        return Message(role=data.get("role", "user"), text=data.get("text", ""))
-    except TypeError:  # pragma: no cover - constructor variance across versions
-        return Message(data.get("text", ""))
+    """Restore native messages and the adapter's older role/text envelopes."""
+    if "contents" in data:
+        return Message.from_dict(data)
+    return Message(role=data.get("role", "user"), contents=[data.get("text", "")])
 
 
 def _open_store(db_path: Optional[str]):
@@ -152,7 +146,8 @@ class SuperLocalMemoryContextProvider(ContextProvider):
         prior = self._store.messages(_session_id(session), limit=self._max_recall)
         if not prior:
             return
-        lines = [f"{m.get('role', '')}: {m.get('text', '')}" for m in prior]
+        messages = [_dict_to_message(m) for m in prior]
+        lines = [f"{m.role}: {m.text}" for m in messages]
         context.extend_instructions(
             self.source_id,
             "Relevant prior memory from SuperLocalMemory:\n" + "\n".join(lines),

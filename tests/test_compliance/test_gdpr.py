@@ -209,7 +209,11 @@ class TestForgetEntity:
         delete_entries = [e for e in trail if e["action"] == "delete"]
         assert len(delete_entries) >= 1
         assert delete_entries[0]["target_type"] == "entity"
-        assert delete_entries[0]["target_id"] == "UserX"
+        # The audit row names the erasure, never the erased name.
+        from superlocalmemory.compliance.erasure_outcome import subject_ref
+
+        assert delete_entries[0]["target_id"] == subject_ref("entity", "UserX")
+        assert "UserX" not in str(delete_entries[0])
 
 
 # ---------------------------------------------------------------------------

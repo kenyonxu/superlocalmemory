@@ -3,7 +3,6 @@
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 """Tests for V3 Event Bus -- Task 2 of V3 build."""
 import pytest
-from pathlib import Path
 from superlocalmemory.infra.event_bus import EventBus, VALID_EVENT_TYPES
 
 

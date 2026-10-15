@@ -11,8 +11,6 @@ Spec from LLD: test_registry_coverage
 
 from __future__ import annotations
 
-import pytest
-
 from superlocalmemory.core.operation_policy_registry import _DEFAULT_REGISTRY
 from superlocalmemory.core.operation_request import OperationKind
 

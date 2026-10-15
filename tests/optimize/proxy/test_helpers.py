@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi.requests import Request
-
 from superlocalmemory.optimize.proxy._helpers import (
     _HOP_BY_HOP,
     _SENSITIVE_HEADER_KEYS,
     _body_has_tools,
-    _build_forward_headers,
     _filter_response_headers,
     _redact_headers,
 )

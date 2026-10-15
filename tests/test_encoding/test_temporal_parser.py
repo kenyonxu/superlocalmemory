@@ -13,10 +13,9 @@ Covers:
 
 from __future__ import annotations
 
-import pytest
 
 from superlocalmemory.encoding.temporal_parser import TemporalParser
-from superlocalmemory.storage.models import AtomicFact, FactType, TemporalEvent
+from superlocalmemory.storage.models import AtomicFact
 
 
 # ---------------------------------------------------------------------------

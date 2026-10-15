@@ -1,41 +1,55 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
-# Part of SuperLocalMemory v3.4.22 — Stage 8 SB-1 / Track A.3 (LLD-10)
+# Part of SuperLocalMemory — Stage 8 SB-1 / LLD-10, rebuilt in 4.1.25
 
-"""Daemon-resident recall-time A/B router for LLD-10 shadow + rollback.
+"""Recall-time A/B router: serve, record, decide, promote, watch.
 
-This module is the single seam that wires ``ShadowTest`` (pre-promotion)
-and ``ModelRollback`` (post-promotion) into the live recall path. Before
-this module existed (pre-v3.4.22 Stage 8 SB-1) both classes were
-defined + unit-tested but had zero production callers in ``src/``.
+The single seam between the live recall path and the two model-lifecycle
+state machines: :class:`~superlocalmemory.learning.shadow_test.ShadowTest`
+(before promotion) and :class:`~superlocalmemory.learning.model_rollback.ModelRollback`
+(after it).
 
-Design constraints:
+WHAT CHANGED IN 4.1.25
+-------------------------------------
+* **The candidate is actually served.** ``assign()`` runs at recall time,
+  routes the query, and records ``(candidate_id, query_id, arm,
+  served_model_id)`` in ``shadow_assignments`` (M055). Before, nothing served
+  the candidate at all: both "arms" were ranked by the active model, and the
+  arm was recomputed from the query id only when the reward settled.
+* **The settled reward goes to the arm that served it,** read back from that
+  persisted row, so a restart or a token rotation cannot move it. A reward for
+  a query that was not served under the current test is ignored.
+* **The decision can be reached.** ShadowTest is an independent-groups
+  always-valid test now (see its module docstring), so both ``promote`` and
+  ``reject`` happen.
+* **Reject is durable.** A rejected candidate is retired in
+  ``learning_model_state`` (``is_candidate = 0``) with its statistics, instead
+  of being re-attached from the database on the next restart.
+* **Promotion arms the rollback watch.** ``arm_post_promotion_watch`` had no
+  caller, so the advertised auto-rollback could never fire. The watch baseline
+  is the active arm's mean reward from the same experiment — the same metric
+  the watch then measures.
+* **One router per learning store.** The cache used to key on the memory.db
+  path too; the trainer attached candidates with ``memory_db=""`` while the
+  settlement path asked with the real path, so they talked to two different
+  routers. The router never reads memory.db, so it is no longer part of the key.
+* **Candidates trained in another process are seen.** The candidate id is
+  refreshed from ``learning_model_state`` at most every ``_REFRESH_SEC``.
 
-  * Process-local state only — one ``ShadowRouter`` instance per
-    ``(memory_db, learning_db, profile_id)`` tuple, held by the
-    daemon's in-process singleton cache.
-  * Deterministic A/B routing — ``route_query(qid)`` uses
-    ``sha256(install_token + qid)`` so an attacker who controls
-    ``qid`` still cannot bias the split without reading the install
-    token on disk (closes skeptic H-02 + H-03).
-  * Promotion and rollback are DELEGATED to the canonical helpers in
-    ``learning/consolidation_worker`` and ``learning/model_rollback``.
-    The router never writes to ``learning_model_state`` directly.
-  * Fail-soft: any exception during recall-time ingestion is logged
-    and swallowed — we must not break the user's recall path.
-
-References:
-  - LLD-00 §8    — two-phase shadow + auto-rollback.
-  - LLD-10 §4.1  — deterministic A/B routing.
-  - LLD-10 §5    — atomic BEGIN IMMEDIATE promotion + rollback.
-  - Stage 8 SB-1 — architect S8-ARC-C1, skeptic C-01/C-02/H-07.
+Fail-soft: every exception on the recall or settlement path is logged and
+swallowed — recall integrity comes first.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import sqlite3
 import threading
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Final
 
 from superlocalmemory.core.security_primitives import ensure_install_token
@@ -44,228 +58,289 @@ from superlocalmemory.learning.shadow_test import ShadowTest
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Arm vocabulary — externalised so hooks can grep-check.
-# ---------------------------------------------------------------------------
-
 ARM_BASELINE: Final[str] = "baseline"
 ARM_CANDIDATE: Final[str] = "candidate"
 
+#: Seconds between candidate-id refreshes from the learning store.
+_REFRESH_SEC: Final[float] = 30.0
+
+
+@dataclass(frozen=True)
+class Assignment:
+    """Which arm served a recall under a shadow test, and with what model."""
+
+    candidate_id: int
+    arm: str
+    served_model_id: int | None
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
 
 class ShadowRouter:
-    """Per-profile A/B router + post-promotion watcher.
+    """Per-(learning store, profile) A/B router and post-promotion watcher."""
 
-    Not thread-safe for write state (`_shadow`, `_rollback`) — the daemon
-    calls ``on_recall_settled`` from a single recall-settled worker queue.
-    Reads (``route_query``) are safe under concurrency.
-    """
-
-    def __init__(
-        self,
-        *,
-        memory_db: str,
-        learning_db: str,
-        profile_id: str,
-    ) -> None:
-        self._memory_db = str(memory_db)
+    def __init__(self, *, learning_db: str, profile_id: str,
+                 memory_db: str = "") -> None:
         self._learning_db = str(learning_db)
         self._profile_id = str(profile_id)
-        # Shadow pre-promotion accumulator (created lazily when a
-        # candidate is persisted).
+        self._memory_db = str(memory_db)  # unused; kept for callers
         self._shadow: ShadowTest | None = None
         self._candidate_id: int | None = None
-        # S9-SKEP-11: pin the routing token at router creation.
-        # ``install_token`` rotation is a documented user action (SEC-M07
-        # ``slm escape-hatch rotate-token``) but must not flip the arm
-        # assignment of every in-flight query_id — that would silently
-        # mix baseline and candidate observations for the same qid and
-        # break the paired-t assumption. We snapshot the token once at
-        # init; subsequent rotations are picked up only when a new
-        # router is created (i.e. at daemon restart / candidate rotate).
+        self._rollback: ModelRollback | None = None
+        self._checked_at = 0.0
+        self._lock = threading.RLock()
+        # Pinned so a token rotation mid-test cannot flip arms (S9-SKEP-11).
         try:
             self._routing_token = ensure_install_token()
         except Exception:  # pragma: no cover — defensive
             self._routing_token = ""
-        # Rollback post-promotion watcher (created when arm_post_promotion
-        # is called after a promote).
-        self._rollback: ModelRollback | None = None
-        # S9-W4 H-ARC-01: re-attach an existing candidate across daemon
-        # restart. The prior implementation lost the candidate_id on
-        # process exit — a 6-hour shadow test that had persisted a
-        # candidate an hour in would restart the observation window
-        # from zero on the next boot, extending the test indefinitely.
-        # Observations themselves do NOT survive restart (they live
-        # only in ``ShadowTest._active/_candidate`` lists and would
-        # require a new schema to persist durably); re-attaching the
-        # candidate_id is the minimum that keeps the A/B loop from
-        # silently stalling.
-        self._reattach_existing_candidate()
+        self.refresh_candidate(force=True)
 
-    def _reattach_existing_candidate(self) -> None:
-        """H-ARC-01: look up any ``is_candidate=1`` row for this profile
-        and restore ``self._candidate_id`` + a fresh ``ShadowTest``.
+    # ------------------------------------------------------------------
+    # Candidate discovery
+    # ------------------------------------------------------------------
 
-        Fail-soft — on any DB error we leave the router empty and the
-        normal lazy-init path takes over as candidates land.
-        """
+    def _read_candidate_id(self) -> int | None:
         try:
-            import sqlite3 as _sq
-            conn = _sq.connect(self._learning_db, timeout=2.0)
+            conn = sqlite3.connect(self._learning_db, timeout=2.0)
             try:
                 row = conn.execute(
                     "SELECT id FROM learning_model_state "
-                    "WHERE profile_id = ? AND is_candidate = 1 "
-                    "LIMIT 1",
+                    "WHERE profile_id = ? AND is_candidate = 1 LIMIT 1",
                     (self._profile_id,),
                 ).fetchone()
             finally:
                 conn.close()
-        except Exception:
-            return  # learning.db or table missing — normal cold start.
-        if row and row[0] is not None:
-            cid = int(row[0])
-            self._candidate_id = cid
-            # Pass learning_db so ShadowTest reloads persisted paired
-            # observations from ``shadow_observations`` (M012).
+        except sqlite3.Error:
+            return None
+        return int(row[0]) if row and row[0] is not None else None
+
+    def refresh_candidate(self, *, force: bool = False) -> int | None:
+        """Re-read the candidate id (TTL-limited). Returns the current id."""
+        now = time.monotonic()
+        with self._lock:
+            if not force and now - self._checked_at < _REFRESH_SEC:
+                return self._candidate_id
+            self._checked_at = now
+            cid = self._read_candidate_id()
+            if cid != self._candidate_id:
+                self._candidate_id = cid
+                self._shadow = (None if cid is None else ShadowTest(
+                    profile_id=self._profile_id, candidate_model_id=str(cid),
+                    learning_db=self._learning_db,
+                ))
+            return self._candidate_id
+
+    def attach_candidate(self, candidate_id: int) -> None:
+        """Start a fresh test for a just-persisted candidate."""
+        with self._lock:
+            self._candidate_id = int(candidate_id)
+            self._checked_at = time.monotonic()
             self._shadow = ShadowTest(
                 profile_id=self._profile_id,
-                candidate_model_id=str(cid),
+                candidate_model_id=str(candidate_id),
                 learning_db=self._learning_db,
             )
 
     # ------------------------------------------------------------------
-    # Routing
+    # Routing + serve-time assignment
     # ------------------------------------------------------------------
 
     def route_query(self, query_id: str) -> str:
-        """Return the arm for ``query_id``: ``'baseline'`` or ``'candidate'``.
-
-        Deterministic per ``(install_token, query_id)`` — survives
-        daemon restart. Install-token dependence closes the
-        attacker-picks-query-id bias vector (skeptic H-02).
-
-        S9-SKEP-11: uses ``self._routing_token`` (pinned at router
-        init) instead of a fresh ``ensure_install_token()`` per call,
-        so mid-test token rotation does not silently flip the arm of
-        every subsequent qid and mix the paired-t arms.
-        """
+        """``'baseline'`` or ``'candidate'``, keyed by install token + query id."""
         digest = hashlib.sha256(
             (self._routing_token + str(query_id)).encode("utf-8"),
         ).hexdigest()[:8]
         return ARM_CANDIDATE if int(digest, 16) % 2 == 1 else ARM_BASELINE
 
-    # ------------------------------------------------------------------
-    # Pre-promotion accumulator
-    # ------------------------------------------------------------------
+    def assign(self, query_id: str, *,
+               active_model_id: int | None) -> Assignment | None:
+        """Route and persist one recall while a candidate is under test.
 
-    def attach_candidate(self, candidate_id: int) -> None:
-        """Called after ``_persist_candidate`` writes a fresh candidate row.
-        Creates a new ``ShadowTest`` to collect paired recall results.
+        Returns ``None`` when there is no candidate. A replayed query id gets
+        its ORIGINAL assignment back (``INSERT OR IGNORE`` then read).
         """
-        self._candidate_id = int(candidate_id)
-        # Pass learning_db so new paired observations persist to
-        # ``shadow_observations`` (M012) for restart durability.
-        self._shadow = ShadowTest(
-            profile_id=self._profile_id,
-            candidate_model_id=str(candidate_id),
-            learning_db=self._learning_db,
-        )
+        cid = self.refresh_candidate()
+        if cid is None:
+            return None
+        arm = self.route_query(query_id)
+        served = cid if arm == ARM_CANDIDATE else active_model_id
+        try:
+            conn = sqlite3.connect(self._learning_db, timeout=2.0)
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO shadow_assignments "
+                    "(candidate_id, query_id, profile_id, arm, "
+                    " served_model_id, assigned_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (cid, str(query_id), self._profile_id, arm, served,
+                     _now_iso()),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT arm, served_model_id FROM shadow_assignments "
+                    "WHERE candidate_id = ? AND query_id = ?",
+                    (cid, str(query_id)),
+                ).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            logger.debug("shadow assignment not recorded: %s", exc)
+            return None
+        if row is None:  # pragma: no cover — defensive
+            return None
+        return Assignment(cid, str(row[0]),
+                          None if row[1] is None else int(row[1]))
+
+    def lookup(self, query_id: str) -> Assignment | None:
+        """The persisted assignment of ``query_id`` under the current test."""
+        cid = self.refresh_candidate()
+        if cid is None:
+            return None
+        try:
+            conn = sqlite3.connect(self._learning_db, timeout=2.0)
+            try:
+                row = conn.execute(
+                    "SELECT arm, served_model_id FROM shadow_assignments "
+                    "WHERE candidate_id = ? AND query_id = ?",
+                    (cid, str(query_id)),
+                ).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        return Assignment(cid, str(row[0]),
+                          None if row[1] is None else int(row[1]))
 
     # ------------------------------------------------------------------
-    # Post-promotion watcher
+    # Settlement ingestion
     # ------------------------------------------------------------------
 
-    def arm_post_promotion_watch(self, *, baseline_ndcg: float) -> None:
-        """Install a fresh ``ModelRollback`` observer for the 200-recall
-        post-promotion watch window."""
+    def arm_post_promotion_watch(self, *, baseline_reward: float | None = None,
+                                 baseline_ndcg: float | None = None) -> None:
+        """Start the 200-recall post-promotion watch.
+
+        ``baseline_ndcg`` is the pre-4.1.25 name of the same number; it was
+        never an NDCG and is accepted only for old callers.
+        """
+        base = baseline_reward if baseline_reward is not None else baseline_ndcg
         self._rollback = ModelRollback(
-            learning_db_path=self._learning_db,
-            profile_id=self._profile_id,
-            baseline_ndcg=float(baseline_ndcg),
+            learning_db_path=self._learning_db, profile_id=self._profile_id,
+            baseline_reward=float(base or 0.0),
         )
-
-    # ------------------------------------------------------------------
-    # Recall-settled ingestion
-    # ------------------------------------------------------------------
 
     def on_recall_settled(
-        self,
-        *,
-        query_id: str,
-        arm: str,
-        ndcg_at_10: float,
-    ) -> None:
-        """Feed one settled recall into whichever phase is active.
+        self, *, query_id: str, reward: float | None = None,
+        ndcg_at_10: float | None = None, arm: str | None = None,
+    ) -> str | None:
+        """Feed one settled reward. Returns the shadow decision, if any.
 
-        Precedence:
-          1. If a ShadowTest is active → record paired observation; on
-             ``decide() == 'promote'`` fire the atomic promotion.
-          2. If a ModelRollback watch is active → record observation;
-             on ``should_rollback() is True`` fire execute_rollback.
-
-        Both phases may run for the same profile briefly if a promote
-        fires mid-batch; that is intentional — the first watch window
-        starts immediately on promotion.
+        ``arm`` is ignored: the persisted assignment is authoritative.
+        ``ndcg_at_10`` is the legacy name of ``reward``.
         """
+        del arm
+        value = reward if reward is not None else ndcg_at_10
+        if value is None:
+            return None
         try:
-            if self._shadow is not None and self._candidate_id is not None:
-                # ShadowTest expects arm='active'|'candidate'. Our router
-                # uses 'baseline' as the externally-visible arm name.
-                st_arm = "active" if arm == ARM_BASELINE else "candidate"
-                self._shadow.record_recall_pair(
-                    query_id=str(query_id), arm=st_arm,
-                    ndcg_at_10=float(ndcg_at_10),
-                )
-                decision, _stats = self._shadow.decide()
-                if decision == "promote":
-                    self._fire_promotion()
-                elif decision == "reject":
-                    # Release the candidate reservation — a future
-                    # _run_shadow_cycle may insert a new candidate.
-                    self._shadow = None
-                    self._candidate_id = None
-
-            if self._rollback is not None:
-                self._rollback.record_post_promotion(
-                    query_id=str(query_id), ndcg_at_10=float(ndcg_at_10),
-                )
-                if self._rollback.should_rollback():
-                    self._fire_rollback()
+            with self._lock:
+                decision = self._feed_shadow(str(query_id), float(value))
+                self._feed_rollback(str(query_id), float(value))
+            return decision
         except Exception as exc:  # pragma: no cover — defensive
             logger.debug("shadow_router on_recall_settled error: %s", exc)
+            return None
+
+    def _feed_shadow(self, query_id: str, reward: float) -> str | None:
+        if self._shadow is None or self._candidate_id is None:
+            return None
+        assignment = self.lookup(query_id)
+        if assignment is None or assignment.candidate_id != self._candidate_id:
+            return None  # not served under this test
+        st_arm = "candidate" if assignment.arm == ARM_CANDIDATE else "active"
+        self._shadow.record_observation(query_id=query_id, arm=st_arm,
+                                        reward=reward)
+        decision, stats = self._shadow.decide()
+        if decision == "promote":
+            self._fire_promotion(stats)
+        elif decision == "reject":
+            self._fire_rejection(stats)
+        return decision
+
+    def _feed_rollback(self, query_id: str, reward: float) -> None:
+        if self._rollback is None:
+            return
+        self._rollback.record_post_promotion(query_id=query_id, reward=reward)
+        if self._rollback.should_rollback():
+            self._fire_rollback()
 
     # ------------------------------------------------------------------
-    # Internal: promotion + rollback triggers
+    # Lineage transitions
     # ------------------------------------------------------------------
 
-    def _fire_promotion(self) -> None:
-        """Call the canonical ``_promote_candidate`` helper and reset
-        the shadow state so a new A/B cycle can start next retrain."""
-        if self._candidate_id is None:
+    def _fire_promotion(self, stats: dict) -> None:
+        cid = self._candidate_id
+        if cid is None:
             return
         try:
             from superlocalmemory.learning.consolidation_worker import (
                 _promote_candidate,
             )
-            _promote_candidate(
-                self._learning_db,
-                profile_id=self._profile_id,
-                candidate_id=int(self._candidate_id),
-            )
+            if _promote_candidate(self._learning_db, profile_id=self._profile_id,
+                                  candidate_id=int(cid)):
+                self._record_results(cid, "promoted", stats)
+                self.arm_post_promotion_watch(
+                    baseline_reward=float(stats.get("mean_active", 0.0)))
         except Exception as exc:  # pragma: no cover — defensive
             logger.warning("shadow_router promotion failed: %s", exc)
         finally:
             self._shadow = None
             self._candidate_id = None
 
+    def _fire_rejection(self, stats: dict) -> None:
+        cid = self._candidate_id
+        try:
+            if cid is not None:
+                conn = sqlite3.connect(self._learning_db, timeout=5.0)
+                try:
+                    conn.execute(
+                        "UPDATE learning_model_state SET is_candidate = 0 "
+                        "WHERE id = ? AND is_candidate = 1", (int(cid),))
+                    conn.commit()
+                finally:
+                    conn.close()
+                self._record_results(cid, "rejected", stats)
+        except sqlite3.Error as exc:  # pragma: no cover — defensive
+            logger.warning("shadow_router rejection not persisted: %s", exc)
+        finally:
+            self._shadow = None
+            self._candidate_id = None
+
+    def _record_results(self, cid: int, verdict: str, stats: dict) -> None:
+        payload = {k: v for k, v in stats.items()
+                   if isinstance(v, (int, float, str, type(None)))}
+        payload["verdict"] = verdict
+        payload["decided_at"] = _now_iso()
+        try:
+            conn = sqlite3.connect(self._learning_db, timeout=5.0)
+            try:
+                conn.execute(
+                    "UPDATE learning_model_state SET shadow_results_json = ? "
+                    "WHERE id = ?",
+                    (json.dumps(payload, default=str), int(cid)))
+                conn.commit()
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:  # pragma: no cover — defensive
+            logger.debug("shadow results not recorded: %s", exc)
+
     def _fire_rollback(self) -> None:
-        """Call ``ModelRollback.execute_rollback`` and clear the watcher."""
         try:
             if self._rollback is not None:
-                self._rollback.execute_rollback(
-                    reason="watch_window_regression",
-                )
+                self._rollback.execute_rollback(reason="watch_window_regression")
         except Exception as exc:  # pragma: no cover — defensive
             logger.warning("shadow_router rollback failed: %s", exc)
         finally:
@@ -273,33 +348,26 @@ class ShadowRouter:
 
 
 # ---------------------------------------------------------------------------
-# Process-local singleton cache — one ShadowRouter per (learning_db, profile).
-# Thread-safe; keyed by a stable tuple so repeated factory calls reuse state.
+# Process-local cache: one router per (learning store, profile).
 # ---------------------------------------------------------------------------
 
-
-_CACHE: dict[tuple[str, str, str], ShadowRouter] = {}
+_CACHE: dict[tuple[str, str], ShadowRouter] = {}
 _CACHE_LOCK = threading.Lock()
 
 
-def get_shadow_router(
-    *,
-    memory_db: str,
-    learning_db: str,
-    profile_id: str,
-) -> ShadowRouter:
-    """Factory — returns the process-local ``ShadowRouter`` for
-    ``(memory_db, learning_db, profile_id)``, creating one on first call.
+def get_shadow_router(*, learning_db: str, profile_id: str,
+                      memory_db: str = "") -> ShadowRouter:
+    """Return the process-local router for ``(learning_db, profile_id)``.
+
+    ``memory_db`` is accepted for old callers and ignored: keying on it split
+    one experiment across two routers (see the module docstring).
     """
-    key = (str(memory_db), str(learning_db), str(profile_id))
+    key = (str(learning_db), str(profile_id))
     with _CACHE_LOCK:
         router = _CACHE.get(key)
         if router is None:
-            router = ShadowRouter(
-                memory_db=memory_db,
-                learning_db=learning_db,
-                profile_id=profile_id,
-            )
+            router = ShadowRouter(learning_db=learning_db,
+                                  profile_id=profile_id, memory_db=memory_db)
             _CACHE[key] = router
         return router
 
@@ -313,6 +381,7 @@ def reset_for_testing() -> None:
 __all__ = (
     "ARM_BASELINE",
     "ARM_CANDIDATE",
+    "Assignment",
     "ShadowRouter",
     "get_shadow_router",
     "reset_for_testing",

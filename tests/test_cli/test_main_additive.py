@@ -7,8 +7,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 # Subprocesses spawned with sys.executable do NOT inherit pytest's
 # `pythonpath = ["src"]` (pyproject.toml). Put src/ on the child's path so
 # `from superlocalmemory...` imports work from a source checkout (no install).
@@ -23,8 +21,9 @@ def _env():
 
 def _slm_help(cmd):
     """Run ``slm <cmd>`` and return exit code + stdout."""
-    from superlocalmemory.cli.main import main
     import io
+
+    from superlocalmemory.cli.main import main
 
     old_argv = sys.argv[:]
     old_stdout = sys.stdout

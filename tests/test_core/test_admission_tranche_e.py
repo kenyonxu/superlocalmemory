@@ -114,7 +114,7 @@ class TestE1EnterpriseAnonymousDenied:
 
     def test_slm_loop_run_enterprise_anonymous_denied(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SLM_DATA_DIR", str(tmp_path))
-        (tmp_path / "config.toml").write_text('[deployment]\nmode = "enterprise"\n')
+        (tmp_path / "config.toml").write_text('[deployment]\nmode = "enterprise"\n', encoding="utf-8")
 
         from superlocalmemory.mcp.tools_loops import register_loop_tools
 
@@ -181,7 +181,7 @@ class TestE2AuthorizeRouteMutationCallsAdmit:
         src = (
             pathlib.Path(superlocalmemory.__file__).parent
             / "server" / "route_mutations.py"
-        ).read_text()
+        ).read_text(encoding="utf-8")
         assert "admit(" in src or "admit\n" in src or "from superlocalmemory.core.admission import" in src, (
             "admit() not referenced in route_mutations.py — HTTP routes bypass registry"
         )
@@ -190,13 +190,19 @@ class TestE2AuthorizeRouteMutationCallsAdmit:
         """Enterprise anonymous caller → HTTPException(403) from authorize_route_mutation."""
         from fastapi import HTTPException
         monkeypatch.setenv("SLM_DATA_DIR", str(tmp_path))
-        (tmp_path / "config.toml").write_text('[deployment]\nmode = "enterprise"\n')
+        (tmp_path / "config.toml").write_text('[deployment]\nmode = "enterprise"\n', encoding="utf-8")
 
         from superlocalmemory.server.route_mutations import authorize_route_mutation
 
         mock_request = MagicMock()
         mock_request.app.state = MagicMock()
         mock_request.app.state.daemon_descriptor = None
+        # No role store and no session: the caller is the machine itself. The
+        # route now resolves the real principal (OPS-26), so a MagicMock role
+        # store would invent a user.
+        mock_request.app.state.rbac = None
+        mock_request.headers = {}
+        mock_request.cookies = {}
 
         mock_engine = MagicMock()
         mock_engine.profile_id = "default"
@@ -231,6 +237,12 @@ class TestE2AuthorizeRouteMutationCallsAdmit:
         mock_request = MagicMock()
         mock_request.app.state = MagicMock()
         mock_request.app.state.daemon_descriptor = None
+        # No role store and no session: the caller is the machine itself. The
+        # route now resolves the real principal (OPS-26), so a MagicMock role
+        # store would invent a user.
+        mock_request.app.state.rbac = None
+        mock_request.headers = {}
+        mock_request.cookies = {}
 
         mock_engine = MagicMock()
         mock_engine.profile_id = "default"

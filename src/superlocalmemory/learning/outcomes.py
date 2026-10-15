@@ -66,8 +66,17 @@ class OutcomeTracker:
         profile_id: str,
         context: dict[str, Any] | None = None,
         recall_query_id: str = "",
+        *,
+        surface: str = "python",
+        agent_id: str = "",
+        idempotency_key: str = "",
     ) -> ActionOutcome:
         """Record an outcome against one or more facts.
+
+        Delegates to :mod:`superlocalmemory.learning.outcome_events`, the one
+        writer every surface shares. This method used to build its own INSERT
+        without ``reward``/``settled``/``settled_at``, so the settler skipped
+        every row it wrote and an MCP report trained nothing.
 
         Args:
             query: The recall query that produced these facts.
@@ -75,70 +84,55 @@ class OutcomeTracker:
             outcome: One of "success", "failure", "partial".
             profile_id: Profile scope.
             context: Arbitrary metadata dict.
-            recall_query_id: The name of the answer being reported on, as it
-                came back from recall. Supplying it ties this report to that
-                exact answer; leaving it empty falls back to matching on which
-                memories overlap, inside a time window.
+            recall_query_id: The ``query_id`` recall returned. Supplying it
+                ties this report to that exact answer; leaving it empty falls
+                back to matching on which memories overlap, inside a window.
+            surface / agent_id: provenance, stored with the event.
+            idempotency_key: optional caller key; a retry with it is ignored.
 
         Returns:
-            The persisted ActionOutcome.
+            The ActionOutcome as stored (the existing one for a duplicate).
         """
         if outcome not in VALID_OUTCOMES:
-            # Refused, not reinterpreted. This used to become "partial", which
-            # carries a reward of 0.5 -- so a typo, a wrong enum, or a client
-            # sending "ok" was recorded as a mildly positive judgement of those
-            # memories and fed to the ranking as if somebody had meant it.
-            # Silently inventing a signal is worse than having none.
+            # Refused, not reinterpreted: a typo must not become a judgement.
             raise ValueError(
                 f"outcome must be one of {sorted(VALID_OUTCOMES)}, not "
                 f"{outcome!r}"
             )
+        from superlocalmemory.learning.outcome_events import (
+            OutcomeReport,
+            record_outcome_event,
+        )
 
-        ao = ActionOutcome(
-            profile_id=profile_id,
-            query=query,
-            fact_ids=list(fact_ids),
-            outcome=outcome,
+        report = OutcomeReport(
+            profile_id=profile_id, fact_ids=tuple(fact_ids or ()),
+            outcome=outcome, surface=surface,
+            recall_query_id=str(recall_query_id or ""), agent_id=agent_id,
+            idempotency_key=idempotency_key, query=query or "",
+            extra=dict(context) if context else {},
+        )
+        written = self._write(report, record_outcome_event)
+        return ActionOutcome(
+            outcome_id=written.outcome_id, profile_id=profile_id,
+            query=query, fact_ids=list(fact_ids or []), outcome=outcome,
             context=dict(context) if context else {},
         )
 
-        columns = [
-            "outcome_id", "profile_id", "query", "fact_ids_json", "outcome",
-            "context_json", "timestamp",
-        ]
-        values: list[Any] = [
-            ao.outcome_id, ao.profile_id, ao.query, json.dumps(ao.fact_ids),
-            ao.outcome, json.dumps(ao.context), ao.timestamp,
-        ]
-        # Only when there is one to write, and only on a store that has the
-        # column: it arrives with a migration, and an older store must keep
-        # recording outcomes rather than start failing on them.
-        if recall_query_id and self._has_recall_query_id():
-            columns.append("recall_query_id")
-            values.append(str(recall_query_id))
-        placeholders = ", ".join("?" * len(values))
-        self._db.execute(
-            f"INSERT OR REPLACE INTO action_outcomes ({', '.join(columns)}) "
-            f"VALUES ({placeholders})",
-            tuple(values),
-        )
-        return ao
+    def _write(self, report, record_outcome_event):
+        """Write through the manager's own connection, under its lock.
 
-    def _has_recall_query_id(self) -> bool:
-        """Whether this store records which answer an outcome is about."""
-        cached = getattr(self, "_recall_query_id_column", None)
-        if cached is not None:
-            return bool(cached)
+        The tracker is a library API over an existing ``DatabaseManager``; it
+        does not validate fact ownership (surfaces do that at their boundary).
+        """
+        conn = self._db._connect()  # noqa: SLF001 — same-package storage
         try:
-            rows = self._db.execute("PRAGMA table_info(action_outcomes)")
-            present = any(
-                str(dict(row).get("name") or row[1]) == "recall_query_id"
-                for row in rows
-            )
-        except Exception:  # noqa: BLE001
-            present = False
-        self._recall_query_id_column = present
-        return present
+            with self._db._lock:  # noqa: SLF001
+                written = record_outcome_event(conn, report,
+                                               check_memories=False)
+                conn.commit()
+        finally:
+            conn.close()
+        return written
 
     # ------------------------------------------------------------------
     # Public API — Querying
@@ -281,6 +275,9 @@ class OutcomeTracker:
             query=d.get("query", ""),
             fact_ids=json.loads(d.get("fact_ids_json", "[]")),
             outcome=d.get("outcome", ""),
-            context=json.loads(d.get("context_json", "{}")),
+            context={
+                k: v for k, v in json.loads(d.get("context_json") or "{}").items()
+                if k != "_provenance"
+            },
             timestamp=d.get("timestamp", ""),
         )

@@ -1,7 +1,6 @@
 """Tests for router.py — CompressRouter (CompressHook impl)."""
 from __future__ import annotations
 
-import asyncio
 import json
 from unittest.mock import patch
 
@@ -784,7 +783,6 @@ def test_compress_text_exception_returns_fallback() -> None:
 def test_compress_prose_aggressive_with_mocked_llmlingua() -> None:
     """Prose in aggressive mode with compress_prose=True uses LLMLingua."""
     from unittest.mock import MagicMock, patch
-    import sys
 
     router = CompressRouter()
     # Set config to aggressive + prose enabled
@@ -1508,7 +1506,7 @@ def test_compress_request_system_prompt_with_enabled() -> None:
 
 def test_compress_messages_primary_strategy_update() -> None:
     """Cover _compress_messages line 190: primary_strategy updated when strat != 'none'."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
     router = CompressRouter()
     cfg = router._get_config()
     cfg_enabled = type(cfg).from_dict({

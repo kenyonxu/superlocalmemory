@@ -227,15 +227,20 @@ class TestItRecordsWithoutActing:
         assert _resolve_ranking_mode({"SLM_RANKING": "v1"}) == "v1"
         assert _resolve_ranking_mode({"SLM_RANKING": "v2-ensemble"}) == "v2-ensemble"
 
-    def test_exposure_rows_are_still_not_written(self) -> None:
-        """The per-displayed-memory exposure enqueue badly inflated the
-        ranking phase counter. It stays off; the ticket above is one row."""
+    def test_exposure_rows_are_written_only_when_ranking_is_on(self) -> None:
+        """Exposures are the ranker's only feature source (audit BRN-12), so
+        they are recorded when the operator enables v2-ensemble ranking — and
+        never otherwise. The 2,675x phase inflation they once caused is closed
+        where it belonged: the phase counter excludes exposure kinds."""
         import inspect
 
         from superlocalmemory.core import recall_pipeline
+        from superlocalmemory.learning.signal_kinds import (
+            EXPOSURE_SIGNAL_TYPES,
+            is_feedback,
+        )
 
         source = inspect.getsource(recall_pipeline.run_recall)
-        assert "record_signals=False" in source, (
-            "the per-fact exposure enqueue has been re-enabled; that is the "
-            "2,675x counter inflation, not the learning fix"
-        )
+        assert 'record_signals=(mode == "v2-ensemble")' in source
+        assert "candidate" in EXPOSURE_SIGNAL_TYPES
+        assert not is_feedback("candidate")

@@ -241,8 +241,8 @@ function _renderMessages() {
             var citation = msg.citations[idx];
             if (citation) {
                 return '<a href="#" class="badge bg-primary text-decoration-none" '
-                    + 'data-act-click="citation-click" data-fact-id="' + citation.fact_id + '" '
-                    + 'title="' + (citation.content_preview || '').replace(/"/g, '&quot;') + '">'
+                    + 'data-act-click="citation-click" data-fact-id="' + escapeHtml(String(citation.fact_id)) + '" '
+                    + 'title="' + escapeHtml(citation.content_preview || '') + '">'
                     + match + '</a>';
             }
             return '<span class="badge bg-secondary">' + match + '</span>';

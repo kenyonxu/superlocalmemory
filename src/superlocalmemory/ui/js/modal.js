@@ -78,6 +78,8 @@ function openMemoryDetail(mem, source) {
             .then(function(r) { return r.ok ? r.json() : null; })
             .then(function(data) {
                 if (!data || !data.memory) return;
+                // Recall shows a shortened memory; the modal shows all of it.
+                if (data.memory.content) contentDiv.textContent = data.memory.content;
                 var hydration = document.getElementById('memory-detail-hydration');
                 if (hydration) hydration.remove();
                 var block = document.createElement('div');

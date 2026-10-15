@@ -83,8 +83,14 @@ class GraphBuilder:
         edges.extend(self._build_semantic_edges(new_fact, profile_id))
         edges.extend(self._build_causal_edges(new_fact, profile_id, hub_cache))
 
-        for edge in edges:
-            self._db.store_edge(edge)
+        # One transaction for the fact's edges: the same statements in the
+        # same order, on one connection. Per-edge commits opened, configured
+        # and closed a connection for every edge (tens per saved fact) while
+        # holding the store's write lock.
+        if edges:
+            with self._db.transaction():
+                for edge in edges:
+                    self._db.store_edge(edge)
 
         if edges:
             logger.debug(
@@ -153,10 +159,18 @@ class GraphBuilder:
     def _node_degree(self, fact_id: str, profile_id: str, cache: dict[str, int]) -> int:
         """Cached total degree (in + out) for a node."""
         if fact_id not in cache:
+            # The same count as "source = id OR target = id", in three index
+            # lookups: out-edges + in-edges - self-loops (counted in both).
+            # The OR form made SQLite walk every edge of the profile per call
+            # (33 ms warm, 0.8 s cold on a 486k-edge store, many calls per save).
             rows = self._db.execute(
-                "SELECT COUNT(*) as cnt FROM graph_edges "
-                "WHERE profile_id = ? AND (source_id = ? OR target_id = ?)",
-                (profile_id, fact_id, fact_id),
+                "SELECT (SELECT COUNT(*) FROM graph_edges "
+                "WHERE profile_id = ? AND source_id = ?) "
+                "+ (SELECT COUNT(*) FROM graph_edges "
+                "WHERE profile_id = ? AND target_id = ?) "
+                "- (SELECT COUNT(*) FROM graph_edges "
+                "WHERE profile_id = ? AND source_id = ? AND target_id = ?) AS cnt",
+                (profile_id, fact_id, profile_id, fact_id, profile_id, fact_id, fact_id),
             )
             cache[fact_id] = int(dict(rows[0])["cnt"]) if rows else 0
         return cache[fact_id]
@@ -287,8 +301,11 @@ class GraphBuilder:
         self, new_fact: AtomicFact, profile_id: str,
         hub_cache: dict[str, int] | None = None,
     ) -> list[GraphEdge]:
-        """CAUSAL edges: causal markers + shared entity. Direction: cause -> effect."""
-        if not any(p.search(new_fact.content) for p in _CAUSAL_CUES):
+        """CAUSAL edges require an asserted, temporally prior cause endpoint."""
+        from superlocalmemory.encoding.causal_evidence import cause_clause, supports_cause
+
+        clause = cause_clause(new_fact.content)
+        if clause is None:
             return []
         if not new_fact.canonical_entities:
             return []
@@ -303,6 +320,8 @@ class GraphBuilder:
                 if causal_edge_count >= self._MAX_CAUSAL_EDGES_PER_ENTITY:
                     break
                 if other.fact_id == new_fact.fact_id or other.fact_id in seen:
+                    continue
+                if not supports_cause(other, new_fact, clause):
                     continue
                 if self._node_degree(other.fact_id, profile_id, hub_cache) >= self._MAX_HUB_DEGREE:
                     continue

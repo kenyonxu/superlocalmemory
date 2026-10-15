@@ -75,6 +75,10 @@ class WorkerPool:
         known_as_of: str | None = None,
         valid_at: str | None = None,
         include_unknown: bool = False,
+        show_weak: bool = False,
+        include_related: bool = False,
+        depth: int = 1,
+        max_tokens: int | None = None,
     ) -> dict:
         """Run recall in worker subprocess. Returns result dict.
 
@@ -108,6 +112,14 @@ class WorkerPool:
             msg["valid_at"] = valid_at
         if include_unknown:
             msg["include_unknown"] = True
+        if show_weak:
+            msg["show_weak"] = True
+        if include_related:
+            msg["include_related"] = True
+        if depth != 1:
+            msg["depth"] = int(depth)
+        if max_tokens:
+            msg["max_tokens"] = int(max_tokens)
         return self._send(msg)
 
     def store(self, content: str, metadata: dict | None = None) -> dict:

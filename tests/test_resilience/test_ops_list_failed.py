@@ -15,8 +15,6 @@ import sqlite3
 import time
 from types import SimpleNamespace
 
-import pytest
-
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
     from superlocalmemory.storage.migrations import (

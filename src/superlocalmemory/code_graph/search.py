@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from superlocalmemory.code_graph.database import CodeGraphDatabase

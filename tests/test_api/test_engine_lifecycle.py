@@ -17,8 +17,6 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -253,7 +251,7 @@ class TestRequireEngineHelper:
 
     def test_require_engine_returns_engine_when_available(self, engine_db):
         """When engine is available, require_engine returns it (no exception)."""
-        from superlocalmemory.server.routes.helpers import require_engine, get_engine_lazy
+        from superlocalmemory.server.routes.helpers import require_engine
 
         class FakeState:
             engine = None
@@ -284,7 +282,7 @@ class TestModeChangeAudit:
 
         audit = tmp_path / "logs" / "mode-audit.log"
         assert audit.exists(), "mode-audit.log was not created"
-        content = audit.read_text()
+        content = audit.read_text(encoding="utf-8")
         assert "old=a" in content
         assert "new=c" in content
         assert "anthropic/claude-sonnet-4" in content

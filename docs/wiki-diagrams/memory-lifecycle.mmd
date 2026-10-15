@@ -1,0 +1,15 @@
+flowchart LR
+    N["New memory<br/>retention starts at 1.0"] --> A["Active<br/>retention above 0.8"]
+    A -->|"time passes, no access"| W["Warm<br/>above 0.5"]
+    W -->|"time passes"| C["Cold<br/>above 0.2"]
+    C -->|"time passes"| AR["Archive<br/>above 0.05"]
+    AR -->|"retention at or below 0.05"| F["Forgotten"]
+    W -->|"recalled or confirmed"| A
+    C -->|"recalled or confirmed"| A
+    W --> CC["Consolidation (CCQ)<br/>cluster of 3 or more facts<br/>below retention 0.5"]
+    C --> CC
+    CC --> G["Gist block<br/>float32 summary"]
+    CC --> Q["Source embeddings<br/>compressed to 2 bits"]
+    CC --> S["Source facts<br/>soft-archived, never deleted"]
+    classDef end1 fill:#FFF4E0,stroke:#C27A00,color:#1F2340
+    class G,F end1

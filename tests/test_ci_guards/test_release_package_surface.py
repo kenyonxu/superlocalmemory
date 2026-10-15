@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -16,8 +17,11 @@ LEGACY_WORKFLOWS = (ROOT / ".github" / "workflows" / "npm-publish.yml",)
 
 
 def _npm_dry_run() -> dict:
+    # On Windows npm is npm.cmd, which CreateProcess does not find by the bare
+    # name "npm"; the resolved path runs everywhere.
+    npm = shutil.which("npm") or "npm"
     completed = subprocess.run(
-        ["npm", "pack", "--ignore-scripts", "--dry-run", "--json"],
+        [npm, "pack", "--ignore-scripts", "--dry-run", "--json"],
         cwd=ROOT,
         check=True,
         capture_output=True,
@@ -36,6 +40,9 @@ def test_npm_manifest_allowlists_only_runtime_install_scripts() -> None:
         "scripts/postinstall.js",
         "scripts/postinstall-interactive.js",
         "scripts/postinstall/validation.js",
+        "scripts/postinstall/media-request.js",
+        "scripts/postinstall/node-arch.js",
+        "scripts/postinstall/engine-upgrade.js",
         "scripts/preuninstall.js",
     } <= files
     assert "scripts/postinstall_binary.js" not in files
@@ -59,6 +66,9 @@ def test_npm_dry_run_contains_no_build_tools_tests_or_compiled_caches() -> None:
         "scripts/postinstall-interactive.js",
         "scripts/postinstall.js",
         "scripts/postinstall/validation.js",
+        "scripts/postinstall/media-request.js",
+        "scripts/postinstall/node-arch.js",
+        "scripts/postinstall/engine-upgrade.js",
         "scripts/preuninstall.js",
     }
     # 4.1.14 single-source (#134): the tarball carries NO Python sources —

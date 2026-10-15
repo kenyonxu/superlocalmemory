@@ -20,13 +20,17 @@ def withSLM(client: Any, *, tenant_id: str = "default") -> Any:
       - If client type unrecognized → return client unchanged, log WARNING.
     """
     try:
-        from superlocalmemory.optimize.config import get_optimize_config
         from superlocalmemory.optimize.cache.manager import CacheManager
+        from superlocalmemory.optimize.config import get_shared_store
     except ImportError as exc:
         logger.warning("SLM Optimize not available (%s) — pass-through active", exc)
         return client
 
-    config = get_optimize_config()
+    try:
+        config = get_shared_store().get()
+    except Exception as exc:
+        logger.warning("SLM config unavailable (%s) — pass-through active", exc)
+        return client
     if not config.enabled:
         return client  # DEFAULT STATE — zero behavioral change
 
@@ -36,6 +40,11 @@ def withSLM(client: Any, *, tenant_id: str = "default") -> Any:
         logger.warning("SLM cache unavailable (%s) — pass-through active", exc)
         return client
 
+    return _wrap_sdk(client, cache_manager, config, tenant_id)
+
+
+def _wrap_sdk(client, cache_manager, config, tenant_id):
+    """Choose the supported SDK wrapper, preserving factory fail-open behavior."""
     # Anthropic (.messages.create)
     if hasattr(client, "messages") and hasattr(client.messages, "create"):
         try:

@@ -171,7 +171,6 @@ def test_tc3_no_credential_derive_returns_none() -> None:
 def test_tc3_check_skips_when_no_tenant(tmp_cache_db) -> None:
     """CacheManager.check() must return None (skip) when tenant_id is None."""
     from superlocalmemory.optimize.cache.manager import CacheManager
-    from superlocalmemory.optimize.proxy.lifecycle import ProxyRequest
 
     cm = CacheManager(tmp_cache_db)
     req = _make_proxy_request()
@@ -265,7 +264,7 @@ def test_tc4_different_providers_same_key_differ() -> None:
 
 def test_tc5_check_signature_accepts_optional_tenant_id(tmp_cache_db) -> None:
     """check() and store() must accept an optional tenant_id kwarg."""
-    from superlocalmemory.optimize.cache.manager import CacheManager, _DEFAULT_TENANT_HASH
+    from superlocalmemory.optimize.cache.manager import CacheManager
 
     cm = CacheManager(tmp_cache_db)
     req = _make_proxy_request()
@@ -306,7 +305,7 @@ async def test_tc6_anthropic_surface_extracts_raw_key(tmp_cache_db, monkeypatch)
     from fastapi import FastAPI
 
     from superlocalmemory.optimize.config.schema import OptimizeConfig
-    from superlocalmemory.optimize.proxy.lifecycle import HookChain, CachedResponse, ProviderResponse
+    from superlocalmemory.optimize.proxy.lifecycle import HookChain, CachedResponse
     from superlocalmemory.optimize.proxy.server import ProxyApp, build_proxy_router
 
     check_tenant_ids: list[str | None] = []

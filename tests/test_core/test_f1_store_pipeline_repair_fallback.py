@@ -16,8 +16,6 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-import pytest
-
 from superlocalmemory.core.store_pipeline import _record_fact_entity_association
 from superlocalmemory.storage import schema
 from superlocalmemory.storage.database import DatabaseManager

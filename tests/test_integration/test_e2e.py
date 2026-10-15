@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -39,7 +39,6 @@ from superlocalmemory.core.config import SLMConfig, RetrievalConfig
 from superlocalmemory.core.engine import MemoryEngine
 from superlocalmemory.storage.models import (
     AtomicFact,
-    FactType,
     Mode,
     RecallResponse,
     RetrievalResult,

@@ -15,7 +15,9 @@ death must be distinguishable from "no memories" on the user side.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,8 @@ class PoolRecallItem:
     relevance_score: float = 0.0
     ranking_score: float | None = None
     memory_confidence: float = 0.0
+    match_confidence: float | None = None
+    confidence_basis: str = "unmeasured"
     rank_position: int = 0
     trust_score: float = 0.0
     channel_scores: dict[str, float] = field(default_factory=dict)
@@ -56,6 +60,10 @@ class PoolRecallResponse:
     answer_confidence: float | None = None
     abstained: bool = False
     abstention_reason: str | None = None
+    #: Every field of ``recall_response_metadata`` the daemon returned (and
+    #: the empty-recall default for any it did not), read-only. The typed
+    #: fields above are kept for existing callers; this one is complete.
+    metadata: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
 
 class PoolError(RuntimeError):
@@ -109,6 +117,34 @@ def pool_recall(query: str, limit: int = 10, **kwargs: Any) -> PoolRecallRespons
         _recall_kwargs["include_shared"] = kwargs["include_shared"]
     if kwargs.get("window"):
         _recall_kwargs["window"] = kwargs["window"]
+    # #150: a project filter / preference, forwarded only when set. A named
+    # profile is per-request routing (the active profile is not moved).
+    for _name in ("project", "prefer_project", "profile_id"):
+        if (kwargs.get(_name) or "").strip():
+            _recall_kwargs[_name] = kwargs[_name].strip()
+    # 4.1.22: forwarded only when set, same as the other facets. A
+    # string or a list are both accepted here and downstream (the daemon
+    # proxy / HTTP route parse either the same way).
+    _tags = kwargs.get("tags")
+    if isinstance(_tags, str) and _tags.strip():
+        _recall_kwargs["tags"] = _tags.strip()
+    elif isinstance(_tags, (list, tuple)) and _tags:
+        _recall_kwargs["tags"] = list(_tags)
+    if "tags" in _recall_kwargs and (kwargs.get("tags_match") or "").strip():
+        _recall_kwargs["tags_match"] = kwargs["tags_match"].strip()
+    if kwargs.get("project_strict") and "project" in _recall_kwargs:
+        _recall_kwargs["project_strict"] = True
+    # S-M2: a context load (session start, auto-injection) is not a question.
+    # Only an explicit False is forwarded, so every other call is unchanged;
+    # a caller inside ``skip_answer_check()`` is covered by the proxy itself.
+    if kwargs.get("answer_check") is False:
+        _recall_kwargs["answer_check"] = False
+    if not _recall_kwargs.get("profile_id"):
+        from superlocalmemory.server.profile_runtime import current_request_profile
+
+        pinned = current_request_profile()
+        if pinned:
+            _recall_kwargs["profile_id"] = pinned
     raw = _pool().recall(**_recall_kwargs)
     _unwrap_error(raw, "recall")
     items = raw.get("results", []) if isinstance(raw, dict) else []
@@ -120,9 +156,9 @@ def pool_recall(query: str, limit: int = 10, **kwargs: Any) -> PoolRecallRespons
                 memory_id=item.get("memory_id", ""),
                 created_at=item.get("created_at", "") or "",
             ),
-            score=float(item.get("score", 0.0)),
+            score=float(item.get("score") or 0.0),
             confidence=float(item.get("confidence", 0.0)),
-            relevance_score=float(item.get("relevance_score", item.get("score", 0.0))),
+            relevance_score=float(item.get("relevance_score", item.get("score")) or 0.0),
             ranking_score=(
                 float(item["ranking_score"])
                 if item.get("ranking_score") is not None else None
@@ -130,6 +166,8 @@ def pool_recall(query: str, limit: int = 10, **kwargs: Any) -> PoolRecallRespons
             memory_confidence=float(
                 item.get("memory_confidence", item.get("confidence", 0.0))
             ),
+            match_confidence=item.get("match_confidence"),
+            confidence_basis=item.get("confidence_basis", "unmeasured"),
             rank_position=int(item.get("rank_position", 0)),
             trust_score=float(item.get("trust_score", 0.0)),
             channel_scores=item.get("channel_scores", {}) or {},
@@ -154,7 +192,14 @@ def pool_recall(query: str, limit: int = 10, **kwargs: Any) -> PoolRecallRespons
         answer_confidence=raw.get("answer_confidence") if isinstance(raw, dict) else None,
         abstained=bool(raw.get("abstained", False)) if isinstance(raw, dict) else False,
         abstention_reason=raw.get("abstention_reason") if isinstance(raw, dict) else None,
+        metadata=MappingProxyType(_forward_metadata(raw)),
     )
+
+
+def _forward_metadata(raw: Any) -> dict[str, Any]:
+    from superlocalmemory.mcp._recall_metadata import forward_recall_metadata
+
+    return forward_recall_metadata(raw if isinstance(raw, dict) else {})
 
 
 def pool_store(content: str, metadata: dict | None = None) -> list[str]:

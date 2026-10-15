@@ -16,7 +16,6 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -29,8 +28,7 @@ def _make_args(**kwargs) -> Namespace:
 
 def _run_doctor_json(monkeypatch_fixture=None, patch_gather=None) -> list[dict]:
     """Run cmd_doctor with --json and return the checks list."""
-    import io
-    from superlocalmemory.cli.commands import cmd_doctor
+    from tests.helpers.doctor import run_doctor_report
 
     captured: list[str] = []
 
@@ -45,9 +43,9 @@ def _run_doctor_json(monkeypatch_fixture=None, patch_gather=None) -> list[dict]:
                 "superlocalmemory.cli.commands._gather_optimize_surface_b",
                 return_value=patch_gather,
             ):
-                cmd_doctor(_make_args(json=True, quick=True))
+                run_doctor_report(_make_args(json=True, quick=True))
         else:
-            cmd_doctor(_make_args(json=True, quick=True))
+            run_doctor_report(_make_args(json=True, quick=True))
 
     assert captured, "json_print was never called — doctor did not run"
     data = json.loads(captured[-1])
@@ -137,7 +135,7 @@ def test_doctor_no_crash_when_metrics_empty_and_db_absent(tmp_path: Path):
     slm_dir = tmp_path / ".superlocalmemory"
     slm_dir.mkdir(parents=True, exist_ok=True)
     optimize_json = slm_dir / "optimize.json"
-    optimize_json.write_text(json.dumps({"enabled": True}))
+    optimize_json.write_text(json.dumps({"enabled": True}), encoding="utf-8")
 
     # ConfigStore resolves its path from the MODULE-LEVEL _DEFAULT_CONFIG_PATH
     # (bound at import via Path.home()). Patching Path.home alone does NOT
@@ -153,14 +151,14 @@ def test_doctor_no_crash_when_metrics_empty_and_db_absent(tmp_path: Path):
     assert result["db_present"] is False, f"expected db_present=False, got {result['db_present']}"
     assert result["compress_runs"] == 0, f"expected compress_runs=0, got {result['compress_runs']}"
 
-    # Also verify cmd_doctor itself doesn't raise
-    from superlocalmemory.cli.commands import cmd_doctor
+    # Inspect this row even if an unrelated doctor check reports FAIL
+    from tests.helpers.doctor import run_doctor_report
     with patch("pathlib.Path.home", return_value=tmp_path), patch(
         "superlocalmemory.optimize.config.store._DEFAULT_CONFIG_PATH",
         optimize_json,
     ):
-        result_cmd = cmd_doctor(_make_args(json=False, quick=True))
-    assert result_cmd is None  # cmd_doctor returns None on success
+        result_cmd = run_doctor_report(_make_args(json=False, quick=True))
+    assert result_cmd is None  # report-only wrapper explicitly tolerates exit 1
 
 
 # ---------------------------------------------------------------------------
@@ -227,10 +225,11 @@ def test_embedding_probe_does_not_use_posix_select():
     pipe reader helper instead of select.select(proc.stdout, ...).
     """
     import io
+
     from superlocalmemory.cli import commands
     from superlocalmemory.cli.commands import _readline_with_timeout
 
-    source = inspect.getsource(commands.cmd_doctor)
+    source = inspect.getsource(commands._cmd_doctor_checks)
     assert "select.select" not in source
     assert "_readline_with_timeout" in source
 
@@ -240,7 +239,7 @@ def test_embedding_probe_does_not_use_posix_select():
 
 
 # ---------------------------------------------------------------------------
-# Test 6 — existing checks unchanged; Optimize (Surface B) is last
+# Test 6 — existing checks unchanged; initialized MCP presence is last
 # ---------------------------------------------------------------------------
 
 def test_existing_doctor_checks_unchanged():
@@ -255,10 +254,12 @@ def test_existing_doctor_checks_unchanged():
     tail instead of blocking it, and 'Optimize (Surface B)' keeps a
     presence-only assertion.
 
-    Moved for 4.0.10's 'Memory answer-ability' check, which asks the only
-    question none of the others did: can the owner's memories be found?
+    WP-8 adds initialized MCP presence after the memory answer-ability check.
+    Keep both checks present and acknowledge the new tail explicitly.
     """
-    required_existing = {"Python", "Core deps", "Database", "Optimize (Surface B)"}
+    required_existing = {
+        "Python", "Core deps", "Database", "Optimize (Surface B)", "Memory answer-ability",
+    }
 
     checks = _run_doctor_json()
 
@@ -268,7 +269,7 @@ def test_existing_doctor_checks_unchanged():
     missing = required_existing - names_set
     assert not missing, f"Pre-existing checks missing from doctor output: {missing}"
 
-    assert names[-1] == "Memory answer-ability", (
-        f"'Memory answer-ability' must be last check, but last is {names[-1]!r}. "
+    assert names[-1] == "Connected MCP apps", (
+        f"'Connected MCP apps' must be last check, but last is {names[-1]!r}. "
         f"All checks: {names}"
     )

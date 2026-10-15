@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from superlocalmemory.core.config import QuantizationConfig
 
 # ---------------------------------------------------------------------------
 # Helper: mock objects
@@ -45,7 +46,7 @@ def _mock_config(profile_id: str = "test-profile"):
     config = MagicMock()
     config.active_profile = profile_id
     config.forgetting = MagicMock()
-    config.quantization = MagicMock()
+    config.quantization = QuantizationConfig()
     return config
 
 

@@ -15,7 +15,6 @@ import math
 import numpy as np
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -45,14 +44,14 @@ def _orthogonal_patterns(n: int, d: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 class TestHopfieldBetaScaling:
-    """LLD Test 6: Verify beta = 1/sqrt(d) for different dimensions."""
+    """LLD Test 6: Verify unit-norm beta = sqrt(d) for different dimensions."""
 
     def test_hopfield_beta_scaling_768(self) -> None:
         from superlocalmemory.math.hopfield import HopfieldConfig, ModernHopfieldNetwork
 
         config = HopfieldConfig(dimension=768)
         net = ModernHopfieldNetwork(config)
-        expected = 1.0 / math.sqrt(768)
+        expected = math.sqrt(768)
         assert net._beta == pytest.approx(expected, rel=1e-6)
 
     def test_hopfield_beta_scaling_384(self) -> None:
@@ -60,7 +59,7 @@ class TestHopfieldBetaScaling:
 
         config = HopfieldConfig(dimension=384)
         net = ModernHopfieldNetwork(config)
-        expected = 1.0 / math.sqrt(384)
+        expected = math.sqrt(384)
         assert net._beta == pytest.approx(expected, rel=1e-6)
 
 

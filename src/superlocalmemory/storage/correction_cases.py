@@ -21,6 +21,29 @@ _SCOPES = frozenset({"personal", "project", "shared", "global"})
 _STATUSES = frozenset({"proposed", "applied", "rejected", "rolled_back"})
 _EVENTS = frozenset({"proposed", "applied", "rejected", "rolled_back"})
 _MAX_FIELD_LENGTH = 128
+#: Reason code of a case the caller recorded by saving a memory with
+#: ``replaces`` (core/remember_replaces.py). Proposed and applied in one
+#: transaction, so it is never pending review; and the caller's new memory
+#: stands on its own, so undoing the case restores the old fact without
+#: withdrawing the new one (see the successor checks in storage/database.py).
+CALLER_REPLACEMENT_REASON = "replaced_by_caller"
+#: Reason codes of the cases the SAVE PATH files when it only guesses that a new
+#: memory updates an older one (core/store_pipeline._record_correction_candidate):
+#: the temporal check, and every consolidation action ("consolidation_<action>").
+#: Their successor is the memory the caller saved, so an unreviewed, rejected or
+#: rolled-back guess never withholds it (Varun, 2026-10-08: both stay findable
+#: until a person reviews; approving retires the older one).
+TEMPORAL_CANDIDATE_REASON = "temporal_contradiction"
+CONSOLIDATION_CANDIDATE_PREFIX = "consolidation_"
+#: SQL over ``alias``: true when the case's successor is NOT a saved memory, i.e.
+#: its pending review may withhold it. Takes ``SAVED_SUCCESSOR_PARAMS``.
+SAVED_SUCCESSOR_SQL = (
+    "{alias}.reason_code NOT IN (?, ?) "
+    "AND substr({alias}.reason_code, 1, ?) != ?"
+)
+SAVED_SUCCESSOR_PARAMS = (CALLER_REPLACEMENT_REASON, TEMPORAL_CANDIDATE_REASON,
+                          len(CONSOLIDATION_CANDIDATE_PREFIX),
+                          CONSOLIDATION_CANDIDATE_PREFIX)
 
 
 class CorrectionCaseError(RuntimeError):
@@ -33,6 +56,10 @@ class CorrectionAuthorizationError(CorrectionCaseError):
 
 class CorrectionCompareAndSetError(CorrectionCaseError):
     """The caller attempted a state transition against a stale case version."""
+
+
+class CorrectionFactErasingError(CorrectionCompareAndSetError):
+    """A fact the case names is being deleted (its erasure tombstone exists)."""
 
 
 class CorrectionIdempotencyError(CorrectionCaseError):
@@ -296,11 +323,11 @@ def propose_on_connection(
             raise CorrectionIdempotencyError("proposal replay key names different data")
         return case
 
-    # Active-predecessor check BEFORE the INSERT. The idempotency-key lookup
-    # above only catches replays of the SAME operation; a different operation
-    # proposing the same predecessor re-ran straight into the partial UNIQUE
-    # index and surfaced as an IntegrityError warning per attempt (226/hour
-    # observed in production, 2026-09-22).
+    # Active-predecessor check BEFORE the INSERT (fork, 2026-09-22). The
+    # idempotency-key lookup above only catches replays of the SAME
+    # operation; a different operation proposing the same predecessor re-ran
+    # straight into the partial UNIQUE index and surfaced as an
+    # IntegrityError warning per attempt (226/hour observed in production).
     active = conn.execute(
         "SELECT * FROM correction_cases "
         "WHERE profile_id = ? AND predecessor_fact_id = ? "
@@ -318,6 +345,7 @@ def propose_on_connection(
             f"{predecessor_fact_id} in profile {profile_id}"
         )
 
+    refuse_if_being_deleted(conn, (predecessor_fact_id, successor_fact_id), "proposed")
     now = _now()
     conn.execute(
         "INSERT INTO correction_cases (case_id, profile_id, scope, predecessor_fact_id, "
@@ -338,6 +366,23 @@ def propose_on_connection(
         event_valid_from=event_valid_from, event_valid_until=event_valid_until,
     )
     return _get_case(conn, case_id)
+
+
+def open_case_id(
+    conn: sqlite3.Connection, profile_id: str, predecessor_fact_id: str,
+) -> str | None:
+    """Return the id of the proposed or applied case for a memory, if any.
+
+    The ledger keeps at most one such case per memory and profile (the partial
+    unique index ``uq_correction_cases_active_predecessor``), so this is the
+    question a writer asks before proposing another.
+    """
+    row = conn.execute(
+        "SELECT case_id FROM correction_cases WHERE profile_id=? "
+        "AND predecessor_fact_id=? AND status IN ('proposed', 'applied') LIMIT 1",
+        (profile_id, predecessor_fact_id),
+    ).fetchone()
+    return None if row is None else str(row[0])
 
 
 def transition_on_connection(
@@ -375,6 +420,8 @@ def transition_on_connection(
         raise CorrectionAuthorizationError("profile is inactive or closing")
     if case.status != from_status or case.version != expected_version:
         raise CorrectionCompareAndSetError("case state changed; reload before review action")
+    refuse_if_being_deleted(conn, (case.predecessor_fact_id, case.successor_fact_id),
+                            to_status.replace("_", " "))
     if to_status == "rolled_back":
         dependent = conn.execute(
             "SELECT 1 FROM correction_cases WHERE profile_id=? "
@@ -431,7 +478,39 @@ def transition_on_connection(
         event_valid_from=case.event_valid_from,
         event_valid_until=case.event_valid_until,
     )
+    if to_status == "rolled_back" and case.reason_code == CALLER_REPLACEMENT_REASON:
+        # Undoing a caller's whole-memory replacement also restores the facts
+        # its enrichment derived after it (storage/replaced_memory.py).
+        from superlocalmemory.storage.replaced_memory import restore_late_facts
+
+        restore_late_facts(
+            conn, case, actor=actor, operation_id=operation_id,
+            is_profile_active=is_profile_active, is_actor_trusted=is_actor_trusted,
+        )
     return _get_case(conn, case_id)
+
+
+def refuse_if_being_deleted(conn: sqlite3.Connection, fact_ids: tuple[str, ...],
+                            action: str) -> None:
+    """Refuse while a delete of either fact is in progress (4.1.22).
+
+    A delete writes the fact's erasure tombstone and removes its search entries
+    before its last protection check; a case proposed or reviewed in that window
+    would turn the delete into a late refusal. Asked inside the case's own write
+    transaction, so it cannot interleave with the tombstone write.
+    """
+    ph = ",".join("?" * len(fact_ids))
+    try:
+        row = conn.execute(f"SELECT fact_id FROM projection_tombstones "  # noqa: S608
+                           f"WHERE fact_id IN ({ph}) LIMIT 1", fact_ids).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return  # an older store without erasure tombstones
+        raise
+    if row is not None:
+        raise CorrectionFactErasingError(
+            f"memory {row[0]} is being deleted, so this correction cannot be {action}; "
+            "nothing was changed")
 
 
 def _append_event(
@@ -584,10 +663,18 @@ class _CorrectionTransaction:
         try:
             conn = sqlite3.connect(str(self._path), timeout=5, isolation_level=None)
             conn.row_factory = sqlite3.Row
-            apply_journal_mode(conn)
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("BEGIN IMMEDIATE")
-            self._conn = conn
+            try:
+                # Fork (f4dd873c): the journal mode comes from the central
+                # policy, not a hardcoded WAL here.
+                apply_journal_mode(conn)
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("BEGIN IMMEDIATE")
+                self._conn = conn
+            except BaseException:
+                # Setup failed: close it now, or the file stays open (Windows
+                # then cannot delete or replace it) for as long as the error lives.
+                conn.close()
+                raise
             return conn
         except Exception:
             self._lock.release()
@@ -614,8 +701,14 @@ class _CorrectionReadConnection:
     def __enter__(self) -> sqlite3.Connection:
         conn = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True, timeout=0.25)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only=ON")
-        self._conn = conn
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            self._conn = conn
+        except BaseException:
+            # Setup failed: close it now, or the file stays open (Windows
+            # then cannot delete or replace it) for as long as the error lives.
+            conn.close()
+            raise
         return conn
 
     def __exit__(self, _exc_type, _exc, _traceback) -> None:

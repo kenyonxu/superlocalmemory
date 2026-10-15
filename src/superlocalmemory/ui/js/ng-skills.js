@@ -25,7 +25,7 @@
         var backend = data.backend || 'none';
         var stats = data.stats || {};
 
-        var statusColor = enabled ? '#10b981' : '#888';
+        var statusColor = enabled ? '#8F76FF' : '#888';
         var statusText = enabled ? 'Enabled (' + backend + ')' : 'Disabled';
         var statusIcon = enabled ? 'bi-lightning-charge-fill' : 'bi-lightning-charge';
 
@@ -84,7 +84,7 @@
           html += '<div style="margin-top:12px;border-top:1px solid var(--bs-border-color);padding-top:12px">' +
             '<div style="font-size:0.8125rem;font-weight:600;margin-bottom:8px">Recent Evolution</div>';
           data.recent.forEach(function(r) {
-            var sColor = r.status === 'promoted' ? '#10b981' : r.status === 'rejected' ? '#ef4444' : '#f59e0b';
+            var sColor = r.status === 'promoted' ? '#8F76FF' : r.status === 'rejected' ? '#ef4444' : '#f59e0b';
             html += '<div style="display:flex;justify-content:space-between;font-size:0.75rem;padding:4px 0;border-bottom:1px solid var(--bs-border-color)">' +
               '<span><i class="bi bi-lightning-charge" style="color:#8b5cf6"></i> ' + escapeHtml(r.skill_name) + '</span>' +
               '<span style="color:' + sColor + '">' + escapeHtml(r.status) + ' (' + escapeHtml(r.evolution_type) + ')</span>' +
@@ -200,7 +200,7 @@
       var html = '<div class="row g-3 mb-4">' +
         overviewCard('Total Skill Events', events.length, 'bi-lightning-charge', 'var(--ng-accent)') +
         overviewCard('Unique Skills', Object.keys(skillNames).length, 'bi-grid-3x3', '#8b5cf6') +
-        overviewCard('Performance Assertions', perfAssertions.length, 'bi-graph-up', '#10b981') +
+        overviewCard('Performance Assertions', perfAssertions.length, 'bi-graph-up', '#8F76FF') +
         overviewCard('Skill Correlations', corrAssertions.length, 'bi-link-45deg', '#f59e0b') +
       '</div>';
 
@@ -306,7 +306,7 @@
   function renderSkillCard(assertion) {
     var conf = assertion.confidence || 0;
     var confPct = (conf * 100).toFixed(0);
-    var confColor = conf >= 0.7 ? '#10b981' : conf >= 0.5 ? '#f59e0b' : '#ef4444';
+    var confColor = conf >= 0.7 ? '#8F76FF' : conf >= 0.5 ? '#f59e0b' : '#ef4444';
 
     // Extract skill name from trigger_condition
     var skillName = (assertion.trigger_condition || '').replace('when considering skill ', '');
@@ -365,15 +365,13 @@
   }
 
   function escapeHtml(s) {
-    var d = document.createElement('div');
-    d.textContent = s || '';
-    return d.innerHTML;
+    return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   // ── Skill Lineage (Version DAG) ────────────────────────────
 
   var LINEAGE_COLORS = {
-    promoted: '#22c55e',
+    promoted: '#8F76FF',
     rejected: '#ef4444',
     pending:  '#eab308',
     original: '#6b7280'
@@ -555,7 +553,7 @@
       var label = (item.skill_name || 'unknown');
       if (label.length > 16) label = label.substring(0, 14) + '..';
 
-      svg += '<g class="lineage-node" data-id="' + item.id + '" style="cursor:pointer">';
+      svg += '<g class="lineage-node" data-id="' + escapeHtml(String(item.id)) + '" style="cursor:pointer">';
       svg += '<rect x="' + pos.x + '" y="' + pos.y + '" width="' + nodeW + '" height="' + nodeH + '" ' +
         'rx="8" ry="8" fill="' + fillColor + '" fill-opacity="0.15" stroke="' + fillColor + '" stroke-width="2"/>';
       // Node label (skill name)
@@ -607,10 +605,10 @@
       var status = (item.status || 'original').toLowerCase();
       var color = LINEAGE_COLORS[status] || LINEAGE_COLORS.original;
       var parentName = item.parent_skill_id ? (nameMap[item.parent_skill_id] || item.parent_skill_id) : '-';
-      var verified = item.blind_verified ? '<i class="bi bi-check-circle-fill" style="color:#22c55e"></i>' : '<i class="bi bi-dash-circle" style="color:var(--bs-secondary-color)"></i>';
+      var verified = item.blind_verified ? '<i class="bi bi-check-circle-fill" style="color:#8F76FF"></i>' : '<i class="bi bi-dash-circle" style="color:var(--bs-secondary-color)"></i>';
       var created = item.created_at ? new Date(item.created_at).toLocaleDateString() : '-';
 
-      html += '<tr class="lineage-table-row" data-id="' + item.id + '" style="cursor:pointer">' +
+      html += '<tr class="lineage-table-row" data-id="' + escapeHtml(String(item.id)) + '" style="cursor:pointer">' +
         '<td style="font-weight:500">' + escapeHtml(item.skill_name || '') + '</td>' +
         '<td><span class="badge" style="background:' + color + '20;color:' + color + ';font-size:0.6875rem">' +
           escapeHtml(item.evolution_type || 'ORIGINAL') + '</span></td>' +

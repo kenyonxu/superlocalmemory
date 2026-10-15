@@ -1,0 +1,16 @@
+flowchart TD
+    ST["Scan starts<br/>every 15 min, or when files change"] --> RM{"Web access set up?"}
+    RM -->|"yes"| PA["Source paused<br/>nothing is read"]
+    RM -->|"no"| WK["Walk the folder<br/>ignore rules, up to 50,000 files"]
+    WK --> GD{"Folder reachable and<br/>same disk?"}
+    GD -->|"no"| OF["Source offline<br/>nothing is hidden or erased"]
+    GD -->|"yes"| HS["Wait 2 s for files to settle<br/>then hash each file"]
+    HS --> CL{"Compare with last scan"}
+    CL -->|"same hash"| UN["Unchanged"]
+    CL -->|"same hash, new path"| MV["Moved: repoint the record"]
+    CL -->|"credential-like text"| QU["Quarantined, not saved"]
+    CL -->|"new or edited"| SV["Save as memory, picture or PDF<br/>hide the old version"]
+    CL -->|"missing from disk"| TB["Tombstone: memories hidden"]
+    TB -->|"after 7 days"| ER["Erased for good"]
+    classDef out fill:#FFF4E0,stroke:#C27A00,color:#1F2340
+    class PA,OF,QU,ER out

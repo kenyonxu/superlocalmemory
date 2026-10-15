@@ -8,12 +8,14 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from superlocalmemory.storage.erasure_visibility import aggregate_erasure_clause
+
 from .helpers import get_active_profile, get_read_connection, require_engine
 
 router = APIRouter(prefix="/api/entity", tags=["entity"])
 
 
-def _list_entities_sql(where_sql: str) -> str:
+def _list_entities_sql(where_sql: str, erasure: str = "") -> str:
     """Build the page-first entity query after ``where_sql`` is parameterized."""
     return f"""
         WITH page_entities AS MATERIALIZED (
@@ -36,7 +38,7 @@ def _list_entities_sql(where_sql: str) -> str:
             JOIN page_entities page
               ON page.entity_id = ep.entity_id
              AND page.profile_id = ep.profile_id
-            WHERE ep.profile_id = ?
+            WHERE ep.profile_id = ?{erasure}
         )
         SELECT ce.entity_id, ce.canonical_name, ce.entity_type,
                ce.fact_count, ce.first_seen, ce.last_seen,
@@ -112,7 +114,7 @@ def list_entities(
                 "WHERE eps.entity_id = ce.entity_id "
                 "AND eps.profile_id = ce.profile_id "
                 "AND LOWER(COALESCE(eps.knowledge_summary, '')) "
-                "LIKE ? ESCAPE '\\'))"
+                "LIKE ? ESCAPE '\\'" + aggregate_erasure_clause(conn, "eps") + "))"
             )
             params.extend([f"%{escaped}%"] * 3)
         where_sql = " AND ".join(where)
@@ -124,7 +126,7 @@ def list_entities(
         ).fetchone()[0]
 
         rows = conn.execute(
-            _list_entities_sql(where_sql),
+            _list_entities_sql(where_sql, aggregate_erasure_clause(conn, "ep")),
             [*params, limit, offset, profile],
         ).fetchall()
 
@@ -180,7 +182,7 @@ def get_entity(
             WHERE LOWER(ce.canonical_name) = LOWER(?)
               AND ep.profile_id = ?
               AND ep.project_name = ?
-        """, (entity_name, profile, project)).fetchone()
+        """ + aggregate_erasure_clause(conn, "ep"), (entity_name, profile, project)).fetchone()
 
         if not row:
             raise HTTPException(404, detail=f"Entity '{entity_name}' not found")

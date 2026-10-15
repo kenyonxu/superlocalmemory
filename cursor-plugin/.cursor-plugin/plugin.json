@@ -1,0 +1,24 @@
+{
+  "author": {
+    "name": "Qualixar"
+  },
+  "description": "Local-first long-term memory for your agents and bots: remember, recall and session context stored on your own computer, with reversible compression and a cache for large tool outputs.",
+  "homepage": "https://superlocalmemory.com",
+  "hooks": {
+    "hooks": {}
+  },
+  "keywords": [
+    "memory",
+    "long-term-memory",
+    "local-first",
+    "mcp",
+    "agents"
+  ],
+  "license": "MIT",
+  "logo": "assets/logo.svg",
+  "mcpServers": "./mcp.cursor.json",
+  "name": "superlocalmemory",
+  "repository": "https://github.com/qualixar/superlocalmemory",
+  "skills": "./cursor-skills/",
+  "version": "4.2.6"
+}

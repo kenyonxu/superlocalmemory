@@ -5,7 +5,7 @@
 """TurboQuant embedding quantization (ICLR 2026).
 
 Per-coordinate Lloyd-Max scalar quantization after random orthogonal rotation.
-D_mse <= sqrt(3*pi/2) / 4^b. No scipy (HR-SCIPY-01). 2-byte "TQ" prefix on
+Gaussian approximation to post-rotation sphere coordinates. No scipy. Versioned "TQ" prefix on
 all BLOBs (HR-MIG-02). Bit-widths: 2, 4, 8 only (HR-3BIT-01).
 
 References: TurboQuant (arXiv 2504.19874), PolarQuant (arXiv 2502.02617).
@@ -19,15 +19,18 @@ import math
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import NormalDist
 
 import numpy as np
 from numpy.typing import NDArray
 
 from superlocalmemory.core.config import PolarQuantConfig
 from superlocalmemory.infra.data_root import canonical_data_root
+from superlocalmemory.math.orthogonal import haar_orthogonal
 
 logger = logging.getLogger(__name__)
 
+TQ_V2_HEADER = b"TQ\x02"  # Versioned normalized-Gaussian codebook
 TQ_MAGIC = b"\x54\x51"  # 2-byte prefix for TurboQuant BLOBs (HR-MIG-02)
 SUPPORTED_BIT_WIDTHS: frozenset[int] = frozenset({2, 4, 8})
 
@@ -61,15 +64,59 @@ def _std_normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / _SQRT_2))
 
 
+def _normal_interval_mass(a: float, b: float) -> float:
+    """Stable Gaussian interval probability, including positive tails."""
+    if a >= 0:
+        return 0.5 * (math.erfc(a / _SQRT_2) - math.erfc(b / _SQRT_2))
+    if b <= 0:
+        return _normal_interval_mass(-b, -a)
+    return _std_normal_cdf(b) - _std_normal_cdf(a)
+
+
 def _compute_lloyd_max_gaussian(
+    sigma: float, n_levels: int, max_iter: int = 1000, tol: float = 1e-10,
+) -> NDArray:
+    """Solve Lloyd-Max in standardized coordinates, then scale to sigma.
+
+    TurboQuant arXiv:2504.19874 uses rotation plus optimal scalar quantization.
+    Normal approximation to sphere coordinates is appropriate at large d;
+    this is not a proof of its exact Beta-distribution distortion bound.
+    Lloyd conditional means and midpoint partitions, with quantile seeds,
+    avoid the empty tail cells of uniform initialization in [-1,1].
+    Reference checked 2026-10-11: https://arxiv.org/abs/2504.19874
+    2026 community reference (not author code), Gaussian at d>=64:
+    https://github.com/OnlyTerp/turboquant/blob/1891cdd2ee60514dbd6dd0172ea3dcf00a3b0306/src/cache.py
+    compute_lloyd_max_codebook uses conditional means and midpoint partitions.
+    """
+    if not math.isfinite(sigma) or sigma <= 0 or n_levels < 2:
+        raise ValueError("sigma must be positive and n_levels >= 2")
+    normal = NormalDist()
+    limit = 1.0 / sigma
+    mass = _normal_interval_mass(-limit, limit)
+    start = _std_normal_cdf(-limit)
+    centroids = np.array([
+        normal.inv_cdf(start + mass * (k + 0.5) / n_levels)
+        for k in range(n_levels)
+    ])
+    for _ in range(max_iter):
+        old = centroids.copy()
+        boundaries = np.concatenate(([-limit], (old[:-1] + old[1:]) / 2, [limit]))
+        for k, (a, b) in enumerate(zip(boundaries[:-1], boundaries[1:], strict=True)):
+            probability = _normal_interval_mass(float(a), float(b))
+            if probability > 0:
+                centroids[k] = (_std_normal_pdf(a) - _std_normal_pdf(b)) / probability
+        if float(np.max(np.abs(centroids - old))) < tol:
+            break
+    return np.sort(centroids * sigma)
+
+
+def _legacy_lloyd_max_gaussian(
     sigma: float, n_levels: int, max_iter: int = 100, tol: float = 1e-10,
 ) -> NDArray:
-    """Lloyd-Max optimal codebook for N(0, sigma^2) on [-1, 1]. Deterministic (HR-CB-01).
+    """Frozen original TQ codebook for decoding already persisted payloads.
 
-    The codebook boundaries extend to [-1, 1] (full unit-sphere coordinate range)
-    rather than [-5*sigma, 5*sigma], because after rotation, unit vector coordinates
-    CAN have extreme values (up to ±1). The Gaussian distribution determines
-    centroid placement, but the boundary range must cover all possible values.
+    Uniform sphere-support initialization leaves empty tail cells at large d.
+    Preserve that behavior byte-for-byte here; new payloads use the v2 solver.
     """
     lo, hi = -1.0, 1.0  # Full unit-sphere coordinate range
     boundaries = np.linspace(lo, hi, n_levels + 1)
@@ -163,13 +210,14 @@ class TurboQuantEncoder:
     HR-SCIPY-01: No scipy dependency.
     """
 
-    __slots__ = ("_config", "_d", "_S", "_codebooks")
+    __slots__ = ("_config", "_d", "_S", "_codebooks", "_legacy_codebooks")
 
     def __init__(self, config: PolarQuantConfig) -> None:
         self._config = config
         self._d = config.dimension
         self._S = self._load_or_create_rotation_matrix()
         self._codebooks = self._compute_codebooks()
+        self._legacy_codebooks: dict[int, NDArray] = {}
 
     def _load_or_create_rotation_matrix(self) -> NDArray:
         """Load/create rotation matrix with copy-on-detect (AUDIT C4-MED-01)."""
@@ -203,11 +251,8 @@ class TurboQuantEncoder:
             except Exception as exc:
                 logger.warning("Could not copy polar rotation: %s", exc)
 
-        # Generate new via Mezzadri-corrected QR
-        rng = np.random.default_rng(self._config.seed)
-        H = rng.standard_normal((d, d))
-        Q, R = np.linalg.qr(H)
-        S = Q @ np.diag(np.sign(np.diag(R)))
+        # Generate new via Mezzadri-corrected QR (no LAPACK; see math.orthogonal)
+        S = haar_orthogonal(d, self._config.seed)
 
         turbo_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(str(turbo_path), S)
@@ -237,7 +282,7 @@ class TurboQuantEncoder:
 
         if r < 1e-12:
             pack_fn, _ = _PACKERS[bit_width]
-            packed = TQ_MAGIC + pack_fn(np.zeros(self._d, dtype=np.uint8))
+            packed = TQ_V2_HEADER + pack_fn(np.zeros(self._d, dtype=np.uint8))
             return TurboQuantResult(radius=0.0, indices=packed, bit_width=bit_width)
 
         y_unit = y / r
@@ -249,24 +294,37 @@ class TurboQuantEncoder:
         idx = np.where(use_left, left, idx).astype(np.uint8)
 
         pack_fn, _ = _PACKERS[bit_width]
-        packed = TQ_MAGIC + pack_fn(idx)
+        packed = TQ_V2_HEADER + pack_fn(idx)
 
         return TurboQuantResult(
             radius=float(np.float16(r)), indices=packed, bit_width=bit_width,
         )
 
     def decode(self, result: TurboQuantResult) -> NDArray:
-        """Decode with format detection: TQ prefix -> turbo, else -> legacy polar."""
+        """Decode versioned TQ, original TQ, or legacy polar payloads."""
         blob = result.indices
 
-        if blob[:2] == TQ_MAGIC:
-            data = blob[2:]
-        else:
+        if blob[:2] != TQ_MAGIC:
             return self._decode_legacy_polar(result)
-
+        if result.bit_width not in SUPPORTED_BIT_WIDTHS:
+            raise ValueError("unsupported TurboQuant bit width")
+        payload_length = (self._d * result.bit_width + 7) // 8
+        if len(blob) == payload_length + 2:
+            # Old TQ payloads may themselves start with byte 2: discriminate
+            # by exact length before checking the version marker.
+            data = blob[2:]
+            if result.bit_width not in self._legacy_codebooks:
+                self._legacy_codebooks[result.bit_width] = _legacy_lloyd_max_gaussian(
+                    1.0 / math.sqrt(self._d), 2 ** result.bit_width,
+                )
+            centroids = self._legacy_codebooks[result.bit_width]
+        elif len(blob) == payload_length + 3 and blob[:3] == TQ_V2_HEADER:
+            data = blob[3:]
+            centroids = self._codebooks[result.bit_width]
+        else:
+            raise ValueError("invalid or unsupported TurboQuant payload version/length")
         _, unpack_fn = _PACKERS[result.bit_width]
         indices = unpack_fn(data, self._d)
-        centroids = self._codebooks[result.bit_width]
         y_unit_approx = centroids[np.clip(indices, 0, len(centroids) - 1)]
         return self._S.T @ (y_unit_approx * result.radius)
 

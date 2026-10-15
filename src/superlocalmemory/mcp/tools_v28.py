@@ -19,6 +19,7 @@ from mcp.types import ToolAnnotations
 
 from superlocalmemory.core.admission import admits
 from superlocalmemory.core.operation_request import OperationKind
+from superlocalmemory.mcp.request_profile import tool_profile
 from superlocalmemory.mcp.shared import authorize_mcp_mutation
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,9 @@ def register_v28_tools(server, get_engine: Callable) -> None:
         outcome: str,
         context: str = "",
         recall_query_id: str = "",
+        profile_id: str = "",
+        agent_id: str = "",
+        report_id: str = "",
     ) -> dict:
         """Report outcome of using recalled memories.
 
@@ -51,63 +55,83 @@ def register_v28_tools(server, get_engine: Callable) -> None:
                 this report is about. Passing it ties the report to that exact
                 answer; leaving it out falls back to matching on which memories
                 overlap, within a time window.
+            profile_id: The profile the recall was made in (empty = the active
+                one).
+            agent_id: Optional name of the reporting agent (provenance).
+            report_id: Optional idempotency key; re-sending a report with the
+                same key records nothing new.
+
+        Returns ``reward`` (success 1.0 / partial 0.5 / failure 0.0),
+        ``duplicate`` when the same report was already recorded, and
+        ``attributed`` when it is tied to one recall by ``recall_query_id``.
         """
         try:
             engine = get_engine()
+            pid, refused = tool_profile(engine, profile_id)
+            if refused:
+                return refused
             authorization = authorize_mcp_mutation(
                 engine,
                 "update",
                 mutation_source="mcp-report-outcome",
+                profile_id=pid,
             )
-            from superlocalmemory.learning.outcomes import (
-                VALID_OUTCOMES,
-                OutcomeTracker,
-            )
+            from superlocalmemory.learning.outcomes import VALID_OUTCOMES
+
             if outcome not in VALID_OUTCOMES:
                 # Answered here rather than as a stack trace: the caller is an
                 # assistant that can correct itself if told what is allowed.
                 return {
                     "success": False,
-                    "error": (
-                        f"outcome must be one of {sorted(VALID_OUTCOMES)}, "
-                        f"not {outcome!r}"
-                    ),
+                    "error": (f"outcome must be one of {sorted(VALID_OUTCOMES)}, not {outcome!r}"),
                 }
-            tracker = OutcomeTracker(engine._db)
             ids = [mid.strip() for mid in memory_ids.split(",") if mid.strip()]
-            ctx = {"note": context} if context else None
-            ao = tracker.record_outcome(
-                query="[mcp_feedback]",
-                fact_ids=ids,
-                outcome=outcome,
-                profile_id=engine.profile_id,
-                context=ctx,
-                recall_query_id=str(recall_query_id or "").strip(),
+            # A remote app reports on memories it can see; the rest are left out, and if
+            # none are left the answer is the one for an id that is not there.
+            from superlocalmemory.mcp.remote_visibility import unseen_ids
+
+            unseen = unseen_ids(engine._db, pid, ids)
+            if unseen:
+                ids = [mid for mid in ids if mid not in unseen]
+            if not ids:
+                return {"success": False, "error": "Memory not found."}
+            from pathlib import Path as _Path
+
+            from superlocalmemory.learning.outcome_events import (
+                OutcomeReport,
+                UnknownMemories,
+                write_outcome,
             )
 
-            # v3.4.7: Bridge outcomes → learning signals for two-way learning.
-            # Previously, outcomes were stored but never created learning signals.
+            # The one writer every surface shares (audit BRN-05): reward,
+            # settlement fields, attribution, provenance and idempotence.
             try:
-                from superlocalmemory.learning.feedback import FeedbackCollector
-                from superlocalmemory.infra.data_root import state_path
-                learning_db = state_path("learning.db")
-                collector = FeedbackCollector(learning_db)
-                signal_map = {"success": ("user_positive", 1.0),
-                              "failure": ("user_negative", 0.0),
-                              "partial": ("user_correction", 0.5)}
-                sig_type, sig_val = signal_map.get(outcome, ("user_correction", 0.5))
-                for fid in ids:
-                    collector.record_explicit(
-                        profile_id=engine.profile_id,
-                        fact_id=fid,
-                        signal_type=sig_type,
-                        value=sig_val,
-                    )
-            except Exception as exc2:
-                logger.debug("Outcome→signal bridge: %s", exc2)
-
+                written = write_outcome(
+                    OutcomeReport(
+                        profile_id=pid,
+                        fact_ids=tuple(ids),
+                        outcome=outcome,
+                        surface="mcp",
+                        recall_query_id=recall_query_id or "",
+                        agent_id=agent_id or "",
+                        note=context or "",
+                        idempotency_key=report_id or "",
+                        query="[mcp_feedback]",
+                    ),
+                    memory_db_path=_Path(engine._db.db_path),
+                    learning_db_path=_Path(engine._config.base_dir) / "learning.db",
+                )
+            except UnknownMemories:
+                return {"success": False, "error": "Memory not found."}
             authorization.complete()
-            return {"success": True, "outcome_id": ao.outcome_id, "outcome": outcome}
+            return {
+                "success": True,
+                "outcome_id": written.outcome_id,
+                "outcome": outcome,
+                "reward": written.reward,
+                "duplicate": not written.created,
+                "attributed": written.attributed,
+            }
         except Exception as exc:
             logger.exception("report_outcome failed")
             return {"success": False, "error": str(exc)}
@@ -116,7 +140,7 @@ def register_v28_tools(server, get_engine: Callable) -> None:
     # 2. get_lifecycle_status
     # ------------------------------------------------------------------
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def get_lifecycle_status(limit: int = 50) -> dict:
+    async def get_lifecycle_status(limit: int = 50, profile_id: str = "") -> dict:
         """Get lifecycle state distribution for stored memories.
 
         Shows counts per lifecycle state (active, warm, cold, archived)
@@ -124,23 +148,41 @@ def register_v28_tools(server, get_engine: Callable) -> None:
 
         Args:
             limit: Maximum facts to inspect (default 50).
+            profile_id: The profile to inspect (empty = the active one).
         """
         try:
             engine = get_engine()
-            pid = engine.profile_id
-            facts = engine._db.get_all_facts(pid)[:limit]
+            pid, refused = tool_profile(engine, profile_id)
+            if refused:
+                return refused
+            from superlocalmemory.mcp.remote_visibility import visible_facts
+
+            everything = engine._db.get_all_facts(pid)
+            facts: list = []
+            step = max(int(limit), 1)
+            # The view check runs on a page at a time, not on every fact of the profile.
+            for start in range(0, len(everything), step):
+                facts += visible_facts(engine._db, pid, everything[start : start + step])
+                if len(facts) >= limit:
+                    break
+            facts = facts[:limit]
             states: dict[str, list[dict]] = {
-                "active": [], "warm": [], "cold": [], "archived": [],
+                "active": [],
+                "warm": [],
+                "cold": [],
+                "archived": [],
             }
             for f in facts:
                 state = f.lifecycle.value
                 if state in states and len(states[state]) < 10:
-                    states[state].append({
-                        "fact_id": f.fact_id,
-                        "content": f.content[:80],
-                        "access_count": f.access_count,
-                        "created_at": f.created_at,
-                    })
+                    states[state].append(
+                        {
+                            "fact_id": f.fact_id,
+                            "content": f.content[:80],
+                            "access_count": f.access_count,
+                            "created_at": f.created_at,
+                        }
+                    )
             counts = {k: len(v) for k, v in states.items()}
             return {"success": True, "counts": counts, "samples": states}
         except Exception as exc:
@@ -167,16 +209,22 @@ def register_v28_tools(server, get_engine: Callable) -> None:
         """
         try:
             engine = get_engine()
+            pid, refused = tool_profile(engine, "")
+            if refused:
+                return refused
             authorization = authorize_mcp_mutation(
                 engine,
                 "update",
                 mutation_source="mcp-retention-policy",
+                profile_id=pid,
             )
-            engine._db.set_config("retention_cold_days", str(cold_after_days))
-            engine._db.set_config("retention_archive_days", str(archive_after_days))
+            from superlocalmemory.learning.lifecycle_policy import set_configured_policy
+
+            set_configured_policy(engine._db, pid, cold_after_days, archive_after_days)
             authorization.complete()
             return {
                 "success": True,
+                "profile_id": pid,
                 "cold_after_days": cold_after_days,
                 "archive_after_days": archive_after_days,
             }
@@ -201,18 +249,21 @@ def register_v28_tools(server, get_engine: Callable) -> None:
         try:
             engine = get_engine()
             pid = engine.profile_id
-            from superlocalmemory.compliance.lifecycle import LifecycleManager
+            from superlocalmemory.learning.lifecycle_policy import LifecycleManager
+
             mgr = LifecycleManager(engine._db)
             facts = engine._db.get_all_facts(pid)
             candidates = []
             for f in facts:
                 new_state = mgr.get_lifecycle_state(f)
                 if new_state != f.lifecycle:
-                    candidates.append({
-                        "fact_id": f.fact_id,
-                        "current": f.lifecycle.value,
-                        "proposed": new_state.value,
-                    })
+                    candidates.append(
+                        {
+                            "fact_id": f.fact_id,
+                            "current": f.lifecycle.value,
+                            "proposed": new_state.value,
+                        }
+                    )
             if not dry_run:
                 authorization = authorize_mcp_mutation(
                     engine,
@@ -220,10 +271,9 @@ def register_v28_tools(server, get_engine: Callable) -> None:
                     mutation_source="mcp-compact-memories",
                     profile_id=pid,
                 )
-                for c in candidates:
-                    engine._db.update_fact(
-                        c["fact_id"], {"lifecycle": c["proposed"]},
-                    )
+                from superlocalmemory.storage.retention_lifecycle import compact_facts
+
+                candidates = compact_facts(engine._db, candidates, pid)
                 authorization.complete()
             return {
                 "success": True,
@@ -239,8 +289,8 @@ def register_v28_tools(server, get_engine: Callable) -> None:
     # 5. get_behavioral_patterns
     # ------------------------------------------------------------------
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def get_behavioral_patterns(limit: int = 20) -> dict:
-        """Get detected behavioral patterns for the active profile.
+    async def get_behavioral_patterns(limit: int = 20, profile_id: str = "") -> dict:
+        """Get detected behavioral patterns for the active profile (or ``profile_id``).
 
         Returns patterns such as topic interests, refinement habits,
         and time-of-day usage with confidence scores.
@@ -250,10 +300,14 @@ def register_v28_tools(server, get_engine: Callable) -> None:
         """
         try:
             engine = get_engine()
+            pid, refused = tool_profile(engine, profile_id)
+            if refused:
+                return refused
             from superlocalmemory.learning.behavioral import BehavioralPatternStore
+
             store = BehavioralPatternStore(engine._db.db_path)
-            patterns = store.get_patterns(engine.profile_id, limit=limit)
-            summary = store.get_summary(engine.profile_id)
+            patterns = store.get_patterns(pid, limit=limit)
+            summary = store.get_summary(pid)
             return {
                 "success": True,
                 "patterns": patterns,
@@ -280,6 +334,7 @@ def register_v28_tools(server, get_engine: Callable) -> None:
         try:
             engine = get_engine()
             from superlocalmemory.compliance.gdpr import GDPRCompliance
+
             gdpr = GDPRCompliance(engine._db)
             entries = gdpr.get_audit_trail(engine.profile_id, limit=limit)
             return {

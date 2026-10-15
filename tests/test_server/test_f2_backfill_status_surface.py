@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import inspect
 
-import pytest
-
 
 def test_f2_status_endpoint_contains_m028_backfill_key() -> None:
     """The /status handler source must assemble the 'm028_backfill' response field.

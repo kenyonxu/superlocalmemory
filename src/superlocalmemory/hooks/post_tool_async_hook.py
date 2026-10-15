@@ -21,7 +21,6 @@ import os
 import sys
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 from superlocalmemory.infra.data_root import state_path
 
@@ -43,7 +42,7 @@ def _port_file_url() -> str:
     """
     port = _DEFAULT_DAEMON_PORT
     try:
-        port = int(state_path("daemon.port").read_text().strip())
+        port = int(state_path("daemon.port").read_text(encoding="utf-8").strip())
     except Exception:
         pass
     return f"http://127.0.0.1:{port}"
@@ -110,8 +109,28 @@ def _summarize(obj, cap: int) -> str:
             return ""
 
 
+def _daemon_is_mine(url: str) -> bool:
+    """The daemon at ``url`` is this account's own, proven by its identity.
+
+    The install token and the tool summary go nowhere else: on a computer
+    shared by several accounts, the port may be another account's
+    SuperLocalMemory (or anything) when this account's daemon is not running.
+    """
+    try:
+        from urllib.parse import urlparse
+
+        from superlocalmemory.cli.daemon import owned_daemon_answers
+
+        port = urlparse(url).port or _DEFAULT_DAEMON_PORT
+        return owned_daemon_answers(port)
+    except Exception:
+        return False
+
+
 def _post(body: dict, token: str) -> None:
     """Fire the prewarm POST. Silently swallows all failures."""
+    if not _daemon_is_mine(DAEMON_URL):
+        return
     try:
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
@@ -123,7 +142,9 @@ def _post(body: dict, token: str) -> None:
             },
             method="POST",
         )
-        resp = urllib.request.urlopen(req, timeout=DAEMON_TIMEOUT)
+        # Stdlib urllib through the outbound gate: never via a proxy.
+        from superlocalmemory.core import outbound_http
+        resp = outbound_http.urlopen(req, timeout=DAEMON_TIMEOUT)
         try:
             resp.read()
         except Exception:  # pragma: no cover — partial response flush

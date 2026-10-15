@@ -38,7 +38,8 @@ def test_sync_remember_routes_to_daemon_wait_endpoint(capsys) -> None:
 
     request.assert_called_once()
     assert request.call_args.args[1] == "/remember?wait=true"
-    assert request.call_args.kwargs["timeout_seconds"] == 30
+    # Synchronous saves wait for materialization; the async path remains 30s.
+    assert request.call_args.kwargs["timeout_seconds"] == 300
     assert json.loads(capsys.readouterr().out)["data"]["operation_id"] == "op-1"
 
 

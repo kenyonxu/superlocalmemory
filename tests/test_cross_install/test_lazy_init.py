@@ -18,13 +18,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import stat
-import sys
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +45,7 @@ def test_ensure_initialized_creates_dirs_on_fresh_home(tmp_path, monkeypatch):
     monkeypatch.delenv("SLM_HOME", raising=False)
 
     # Module must be imported AFTER env is set so slm_home() picks it up
-    from superlocalmemory.cli._lazy_init import _ensure_initialized, slm_home
+    from superlocalmemory.cli._lazy_init import _ensure_initialized
 
     assert not new_home.exists(), "precondition: home must not exist yet"
 
@@ -60,7 +56,7 @@ def test_ensure_initialized_creates_dirs_on_fresh_home(tmp_path, monkeypatch):
     assert config.exists(), "config.json should have been created"
 
     # Validate it is parseable JSON and has a mode key
-    data = json.loads(config.read_text())
+    data = json.loads(config.read_text(encoding="utf-8"))
     assert "mode" in data, "config.json must contain a 'mode' key"
     from superlocalmemory import __version__
 
@@ -114,7 +110,7 @@ def test_ensure_initialized_never_overwrites_user_config(tmp_path, monkeypatch):
 
     custom_data = {"mode": "c", "custom_key": "do_not_touch", "llm": {"provider": "openai"}}
     config = home / "config.json"
-    config.write_text(json.dumps(custom_data))
+    config.write_text(json.dumps(custom_data), encoding="utf-8")
 
     sha_before = _sha256(config)
 

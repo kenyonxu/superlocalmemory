@@ -27,7 +27,7 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -300,7 +300,7 @@ TOOL_CLI_MAP: dict[str, CliVerb] = {
 #   - observe: lacks --json output (argparse exit or no structured output)
 #   - evolve_skill/skill_health/skill_lineage: learning tools, no CLI equivalent
 #   - get_version: --version is plain text, not --json envelope
-#   - all 8 mesh: P2P daemon-backed, no CLI equivalent
+#   - all 9 mesh: P2P daemon-backed, no CLI equivalent
 #   - learning/assertion: no CLI equivalent
 #   - session_init/close_session/run_maintenance: daemon-implicit lifecycle
 #   - report_feedback/report_outcome: no CLI equivalent
@@ -315,6 +315,8 @@ TOOL_CLI_MAP: dict[str, CliVerb] = {
 NON_BACKED_TOOLS: frozenset[str] = frozenset({
     # Fetch — no single-fact CLI verb
     "fetch",
+    # Expand — drill into one recall result (no CLI verb; `slm recall --depth 2`)
+    "expand",
     # Code-graph tools (20)
     "build_code_graph",
     "update_code_graph",
@@ -345,11 +347,12 @@ NON_BACKED_TOOLS: frozenset[str] = frozenset({
     "evolve_skill",
     # Version is plain text
     "get_version",
-    # Mesh P2P tools (8)
+    # Mesh P2P tools (9)
     "mesh_summary",
     "mesh_peers",
     "mesh_send",
     "mesh_inbox",
+    "mesh_wait",
     "mesh_state",
     "mesh_lock",
     "mesh_events",

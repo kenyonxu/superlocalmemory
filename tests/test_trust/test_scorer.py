@@ -25,7 +25,6 @@ import pytest
 
 from superlocalmemory.storage import schema as real_schema
 from superlocalmemory.storage.database import DatabaseManager
-from superlocalmemory.storage.models import TrustScore
 from superlocalmemory.trust.scorer import TrustScorer
 
 

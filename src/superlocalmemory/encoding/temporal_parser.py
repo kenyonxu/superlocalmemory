@@ -20,11 +20,12 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
-from dateutil.parser import parse as dateutil_parse, ParserError
+from dateutil.parser import ParserError
+from dateutil.parser import parse as dateutil_parse
 from dateutil.relativedelta import relativedelta
 
+from superlocalmemory.encoding.typed_values import looks_like_calendar_date
 from superlocalmemory.storage.models import AtomicFact, TemporalEvent
 
 logger = logging.getLogger(__name__)
@@ -107,8 +108,13 @@ _SEASON_MONTHS: dict[str, tuple[int, int]] = {
 }
 
 _WEEKDAY_MAP: dict[str, int] = {
-    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-    "friday": 4, "saturday": 5, "sunday": 6,
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
 }
 
 
@@ -222,11 +228,15 @@ class TemporalParser:
                 interval_end = self._ref + delta
 
         # --- Pass 3: Absolute date patterns ---
-        for pattern in (_ISO_DATE, _WRITTEN_DATE, _WRITTEN_DATE_DMY, _MONTH_YEAR, _US_DATE):
-            for match in pattern.finditer(text):
-                dt = self._try_parse(match.group(0))
-                if dt is not None:
-                    dates_found.append(dt)
+        from superlocalmemory.encoding.date_scan import absolute_dates
+
+        dates_found.extend(
+            absolute_dates(
+                text,
+                (_ISO_DATE, _WRITTEN_DATE, _WRITTEN_DATE_DMY, _MONTH_YEAR, _US_DATE),
+                self._try_parse,
+            )
+        )
 
         # --- Pass 4: Relative expressions ---
         for match in _RELATIVE.finditer(text):
@@ -262,7 +272,9 @@ class TemporalParser:
             # Two distinct dates without explicit "from...to" -> interval
             if len(dates_found) >= 2 and interval_start is None:
                 # Normalize tz-awareness before comparing
-                _normed = [d.replace(tzinfo=UTC) if d.tzinfo is None else d for d in dates_found[:2]]
+                _normed = [
+                    d.replace(tzinfo=UTC) if d.tzinfo is None else d for d in dates_found[:2]
+                ]
                 sorted_dates = sorted(_normed)
                 interval_start = sorted_dates[0]
                 interval_end = sorted_dates[1]
@@ -353,11 +365,15 @@ class TemporalParser:
     # ------------------------------------------------------------------
 
     def _try_parse(self, text: str) -> datetime | None:
-        """Attempt to parse a text fragment as a date."""
-        if not text or len(text.strip()) < 3:
+        """Attempt to parse a text fragment as a date.
+
+        Only date-shaped fragments reach the fuzzy parser: "from 1,234 to
+        2,000 ms" is a range of measurements, not the years 234 to 2000.
+        """
+        if not text or len(text.strip()) < 3 or not looks_like_calendar_date(text):
             return None
         try:
-            return dateutil_parse(text, fuzzy=True)
+            return dateutil_parse(text, fuzzy=True, default=self._ref)
         except (ParserError, ValueError, OverflowError):
             return None
 

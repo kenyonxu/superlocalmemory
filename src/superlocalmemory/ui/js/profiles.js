@@ -98,10 +98,7 @@ async function createProfile(nameOverride) {
 
 // OD-styled create-profile dialog. Lazily built, reused across opens. Inline
 // validation + 409 handling; ESC / backdrop / Cancel dismiss; Enter submits.
-function openCreateProfileModal() {
-    var existing = document.getElementById('od-create-profile-overlay');
-    if (existing) { existing.remove(); }
-
+function _profileDialogFrame() {
     var overlay = document.createElement('div');
     overlay.id = 'od-create-profile-overlay';
     overlay.setAttribute('role', 'dialog');
@@ -124,6 +121,10 @@ function openCreateProfileModal() {
     sub.textContent = 'Each profile is a fully isolated memory space.';
     sub.style.cssText = 'margin:0 0 16px;font-size:0.8125rem;color:var(--fg-3,#8b93a7);';
 
+    return {overlay:overlay, card:card, h:h, sub:sub};
+}
+
+function _profileDialogFields() {
     var input = document.createElement('input');
     input.type = 'text';
     input.maxLength = 32;
@@ -135,8 +136,15 @@ function openCreateProfileModal() {
         'border:1px solid var(--border,rgba(255,255,255,0.14));border-radius:8px;outline:none;';
 
     var err = document.createElement('div');
+    err.id = 'od-profile-error';
+    err.setAttribute('role', 'status');
+    input.setAttribute('aria-describedby', err.id);
     err.style.cssText = 'min-height:18px;margin:6px 2px 0;font-size:0.75rem;color:#ff6b6b;';
 
+    return {input:input, err:err};
+}
+
+function _profileDialogActions() {
     var actions = document.createElement('div');
     actions.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:16px;';
 
@@ -155,26 +163,31 @@ function openCreateProfileModal() {
         'padding:8px 16px;font-size:0.85rem;border-radius:8px;cursor:pointer;' +
         'background:var(--violet,#7c5cff);color:#fff;border:1px solid transparent;font-weight:600;';
 
-    actions.appendChild(cancel);
-    actions.appendChild(create);
-    card.appendChild(h);
-    card.appendChild(sub);
-    card.appendChild(input);
-    card.appendChild(err);
-    card.appendChild(actions);
-    overlay.appendChild(card);
-    document.body.appendChild(overlay);
-    setTimeout(function () { input.focus(); }, 30);
+    return {actions:actions, cancel:cancel, create:create};
+}
 
-    function close() {
-        document.removeEventListener('keydown', onKey);
+function _closeProfileDialog(view) {
+    var overlay=view.overlay, opener=view.opener;
+        document.removeEventListener('keydown', view.onKey);
         overlay.remove();
+        if (opener && opener.isConnected) opener.focus();
     }
-    function onKey(e) {
-        if (e.key === 'Escape') { close(); }
-        else if (e.key === 'Enter') { submit(); }
+
+function _profileDialogKey(view, e) {
+    var input=view.input, cancel=view.cancel, create=view.create;
+        if (e.key === 'Escape') { e.preventDefault(); _closeProfileDialog(view); }
+        else if (e.key === 'Tab') {
+            var fields = [input, cancel, create].filter(function (field) { return !field.disabled; });
+            var first = fields[0], last = fields[fields.length - 1];
+            if (fields.indexOf(document.activeElement) < 0) { e.preventDefault(); (e.shiftKey ? last : first).focus(); return; }
+            if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        } else if (e.key === 'Enter' && e.target === input) { e.preventDefault(); _submitProfileDialog(view); }
     }
-    async function submit() {
+
+async function _submitProfileDialog(view) {
+    var input=view.input, err=view.err, create=view.create;
+        if (create.disabled) return;
         var name = input.value.trim();
         if (!name) { err.textContent = 'Please enter a profile name.'; return; }
         if (!PROFILE_NAME_RE.test(name)) {
@@ -195,15 +208,34 @@ function openCreateProfileModal() {
             create.disabled = false; create.textContent = 'Create profile';
             return;
         }
-        close();
+        _closeProfileDialog(view);
         showToast('Profile "' + name + '" created');
         _afterProfileMutation();
     }
 
-    cancel.addEventListener('click', close);
-    create.addEventListener('click', submit);
-    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
-    document.addEventListener('keydown', onKey);
+
+function openCreateProfileModal() {
+    var existing = document.getElementById('od-create-profile-overlay');
+    if (existing) return;
+    var view = Object.assign({opener:document.activeElement}, _profileDialogFrame(),
+        _profileDialogFields(), _profileDialogActions());
+    var {overlay,card,h,sub,input,err,actions,cancel,create} = view;
+    actions.appendChild(cancel);
+    actions.appendChild(create);
+    card.appendChild(h);
+    card.appendChild(sub);
+    card.appendChild(input);
+    card.appendChild(err);
+    card.appendChild(actions);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    setTimeout(function () { input.focus(); }, 30);
+
+    view.onKey = function(e) {_profileDialogKey(view,e);};
+    cancel.addEventListener('click', function(){_closeProfileDialog(view);});
+    create.addEventListener('click', function(){_submitProfileDialog(view);});
+    overlay.addEventListener('click', function(e){if(e.target===overlay)_closeProfileDialog(view);});
+    document.addEventListener('keydown', view.onKey);
 }
 
 async function deleteProfile(name) {

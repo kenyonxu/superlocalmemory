@@ -21,11 +21,13 @@ Usage::
     # CrewAI sets this on agent/task/crew memory configuration.
 """
 
+# Current native API (opened 2026-10-11):
+# https://raw.githubusercontent.com/crewAIInc/crewAI/main/lib/crewai/src/crewai/memory/storage/backend.py
 from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -59,7 +61,7 @@ def _parse_dt(value: Any) -> Optional[datetime]:
 def _record_to_dict(record: MemoryRecord) -> dict[str, Any]:
     """Convert a CrewAI MemoryRecord to the plain dict the core uses.
 
-    # Field set verified against CrewAI v1.x MemoryRecord (p4b2 research); confirm against installed crewai in CI.
+    Fields follow the installed CrewAI MemoryRecord contract.
     """
     emb = getattr(record, "embedding", None)
     cats = getattr(record, "categories", None)

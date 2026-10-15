@@ -26,12 +26,10 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import socket
 import sqlite3
 import time
 from pathlib import Path
-from threading import Thread
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -59,15 +57,13 @@ def _write_plain_pid(path: Path, pid: int) -> None:
 
 def _dead_pid() -> int:
     """Return a PID that is provably NOT alive on this machine."""
+    from superlocalmemory.core.platform_utils import is_pid_alive
+
     pid = 2_000_000
     while pid > 1:
-        try:
-            os.kill(pid, 0)
-            pid -= 1
-        except ProcessLookupError:
+        if not is_pid_alive(pid):  # not os.kill(pid, 0): Ctrl+C on Windows
             return pid
-        except PermissionError:
-            pid -= 1
+        pid -= 1
     raise RuntimeError("Could not find a dead PID — something is wrong with the OS")
 
 
@@ -171,8 +167,6 @@ class TestDoubleSpawnRace:
         """
         from superlocalmemory.core.remember_runtime import (
             DaemonAlreadyServing,
-            _get_daemon_port,
-            _slm_health_check,
         )
 
         # The claim returns False (another daemon holds the lock)
@@ -189,11 +183,9 @@ class TestDoubleSpawnRace:
                 "superlocalmemory.core.remember_runtime._get_daemon_port",
                 return_value=8781,
             ):
-                from superlocalmemory.core.remember_runtime import CanonicalRememberRuntime
+                from tests.test_resilience.runtime_factory import runtime_with_coordinator
 
-                runtime = CanonicalRememberRuntime.__new__(CanonicalRememberRuntime)
-                runtime._started = False
-                runtime.coordinator = mock_coordinator
+                runtime = runtime_with_coordinator(tmp_path, mock_coordinator)
 
                 with pytest.raises(DaemonAlreadyServing) as exc_info:
                     runtime.start()
@@ -221,8 +213,6 @@ class TestDoubleSpawnRace:
           call 2 (loop iter 0): False → health=False → self-heal (first iter)
           call 3 (loop iter 1): True → break, proceed
         """
-        from superlocalmemory.core.remember_runtime import CanonicalRememberRuntime
-
         mock_coordinator = MagicMock()
         # Three calls: outer=False, loop-iter0=False, loop-iter1=True
         mock_coordinator.claim_ownership.side_effect = [False, False, True]
@@ -243,9 +233,9 @@ class TestDoubleSpawnRace:
             "superlocalmemory.core.remember_runtime._boot_self_heal",
             side_effect=_record_self_heal,
         ), patch("time.sleep"):  # don't actually sleep 1s between retries
-            runtime = CanonicalRememberRuntime.__new__(CanonicalRememberRuntime)
-            runtime._started = False
-            runtime.coordinator = mock_coordinator
+            from tests.test_resilience.runtime_factory import runtime_with_coordinator
+
+            runtime = runtime_with_coordinator(tmp_path, mock_coordinator)
 
             mock_coordinator.register_handler = MagicMock()
             mock_coordinator.start = MagicMock()
@@ -321,6 +311,10 @@ class TestStalePlainPidFiles:
             "Fresh worker can write its PID after stale file is cleared"
         )
 
+    @pytest.mark.skipif(
+        getattr(socket, "AF_UNIX", None) is None,
+        reason="no Unix socket files on this platform (Windows Python has no AF_UNIX)",
+    )
     def test_stale_socket_with_no_listener_removed(self):
         """A socket file with no active listener is removed by self-heal.
 
@@ -632,9 +626,9 @@ class TestPidReuseSafety:
         )
 
         # Critical: the live unrelated process must NOT have been killed.
-        try:
-            os.kill(live_unrelated_pid, 0)
-        except ProcessLookupError:
+        from superlocalmemory.core.platform_utils import is_pid_alive
+
+        if not is_pid_alive(live_unrelated_pid):
             pytest.fail(
                 f"PID {live_unrelated_pid} was killed — self_heal MUST NOT kill "
                 "unrelated live processes"

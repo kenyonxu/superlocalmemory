@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 
 from superlocalmemory.parameterization.pattern_extractor import (
     PatternAssertion,
-    PatternCategory,
 )
 from superlocalmemory.parameterization.pii_filter import PIIFilter
 

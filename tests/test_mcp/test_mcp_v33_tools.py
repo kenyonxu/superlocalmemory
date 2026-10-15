@@ -24,7 +24,6 @@ import asyncio
 from dataclasses import dataclass, field
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +285,11 @@ class TestQuantizeTool:
 
     def test_quantize_returns_success_with_stats(self):
         """quantize tool (dry_run=False) returns EAP cycle stats."""
+        from superlocalmemory.core.config import QuantizationConfig
+
         tool, engine = self._get_tool()
+        engine._config.quantization = QuantizationConfig()
+        engine._config.embedding.dimension = 16
 
         mock_result = {
             "total": 50,
@@ -301,7 +304,7 @@ class TestQuantizeTool:
             patch("superlocalmemory.dynamics.eap_scheduler.EAPScheduler") as MockEAP,
             patch("superlocalmemory.math.ebbinghaus.EbbinghausCurve"),
             patch("superlocalmemory.storage.quantized_store.QuantizedEmbeddingStore"),
-            patch("superlocalmemory.math.polar_quant.PolarQuantEncoder"),
+            patch("superlocalmemory.math.polar_quant.PolarQuantEncoder") as encoder,
             patch("superlocalmemory.math.qjl.QJLEncoder"),
         ):
             MockEAP.return_value.run_eap_cycle.return_value = mock_result
@@ -311,6 +314,7 @@ class TestQuantizeTool:
         assert result["downgrades"] == 10
         assert result["upgrades"] == 3
         assert result["dry_run"] is False
+        assert encoder.call_args.args[0].dimension == 16
 
     def test_quantize_handles_error(self):
         """quantize tool returns success=False on exception."""

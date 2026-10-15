@@ -21,9 +21,6 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
-
-import pytest
 
 # Add scripts/ to path so we can import the modules directly
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / "scripts"
@@ -134,6 +131,7 @@ class TestMetricsDeltaFunction:
 
     def test_positive_delta(self):
         from _savings_math import MetricsDelta, metrics_delta
+
         from superlocalmemory.optimize.storage.db import MetricsSnapshot
         before = MetricsSnapshot(hits=5, misses=2, tokens_saved_input=1000,
                                  tokens_saved_output=200, tokens_saved_compress=50)
@@ -150,6 +148,7 @@ class TestMetricsDeltaFunction:
     def test_negative_clamped_to_zero(self):
         """If counters go backwards (e.g. DB reset), clamp to 0."""
         from _savings_math import metrics_delta
+
         from superlocalmemory.optimize.storage.db import MetricsSnapshot
         before = MetricsSnapshot(hits=100, tokens_saved_input=5000)
         after = MetricsSnapshot(hits=10, tokens_saved_input=500)
@@ -232,7 +231,6 @@ class TestSimRunOfflineWritesArtifacts:
 
     def test_sim_exits_zero_and_writes_artifacts(self, tmp_path):
         """sim mode: exit 0, both JSON + MD artifacts written."""
-        import importlib.util
         import subprocess
 
         script = _SCRIPTS_DIR / "dogfood_savings.py"
@@ -273,7 +271,7 @@ class TestSimRunOfflineWritesArtifacts:
             capture_output=True, text=True, timeout=30,
             env={**os.environ, "SLM_DATA_DIR": str(tmp_path)},
         )
-        data = json.loads(json_path.read_text())
+        data = json.loads(json_path.read_text(encoding="utf-8"))
         delta = data["delta"]
         pricing = data["pricing"]
         computed = data["computed"]
@@ -310,7 +308,7 @@ class TestSimRunOfflineWritesArtifacts:
             capture_output=True, text=True, timeout=30,
             env={**os.environ, "SLM_DATA_DIR": str(tmp_path)},
         )
-        data = json.loads(json_path.read_text())
+        data = json.loads(json_path.read_text(encoding="utf-8"))
         assert data["delta"]["hits"] == n_prompts * r_repeat
 
     def test_sim_uses_real_cache_manager_not_hardcoded(self, tmp_path):
@@ -331,7 +329,7 @@ class TestSimRunOfflineWritesArtifacts:
             capture_output=True, text=True, timeout=30,
             env={**os.environ, "SLM_DATA_DIR": str(tmp_path)},
         )
-        data = json.loads(json_path.read_text())
+        data = json.loads(json_path.read_text(encoding="utf-8"))
         # The formula field must cite tokens from delta, not a literal percentage
         formula = data["computed"]["formula"]
         assert "tokens_saved" in formula.lower() or "/" in formula

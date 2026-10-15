@@ -9,15 +9,16 @@ TDD RED suite: all tests MUST fail before the feature is implemented.
 
 from __future__ import annotations
 
-import os
 from unittest.mock import MagicMock
 
 import pytest
 
-from superlocalmemory.core.config import ChannelWeights, RetrievalConfig
+from superlocalmemory.core.config import RetrievalConfig
 from superlocalmemory.retrieval.engine import RetrievalEngine
-from superlocalmemory.retrieval.fusion import FusionResult
 from superlocalmemory.storage.models import AtomicFact, Mode
+
+# Every RetrievalEngine a test builds is closed when the test ends.
+pytestmark = pytest.mark.usefixtures("closes_retrieval_engines")
 
 
 # ---------------------------------------------------------------------------
@@ -132,17 +133,17 @@ class TestEvidenceFloor:
         assert getattr(response, "no_confident_match", False) is True
 
     def test_semantic_above_floor_passes(self) -> None:
-        """A fact with semantic >= 0.60 is retained."""
+        """A fact at raw cosine 0.75 (stored 0.875) is retained."""
         f1 = _make_fact("f1")
         engine = _build_engine(
             facts=[f1],
-            semantic_results=[("f1", 0.75)],
+            semantic_results=[("f1", 0.875)],
             bm25_results=[],
             temporal_results=[],
         )
         response = engine.recall("SLM recall quality", "default", Mode.A, limit=10)
         fact_ids = [r.fact.fact_id for r in response.results]
-        assert "f1" in fact_ids, "Fact with semantic=0.75 must pass floor"
+        assert "f1" in fact_ids, "Fact with raw cosine 0.75 must pass floor"
 
     def test_bm25_above_zero_passes(self) -> None:
         """A fact with bm25 > 0 is retained regardless of semantic."""
@@ -251,32 +252,32 @@ class TestEvidenceFloor:
         )
 
     def test_semantic_just_below_floor_filtered(self) -> None:
-        """Semantic score of 0.59 (just below 0.60 default) is filtered."""
+        """Raw cosine 0.58 (stored 0.79, just below the 0.60 default) is filtered."""
         f1 = _make_fact("f1")
         engine = _build_engine(
             facts=[f1],
-            semantic_results=[("f1", 0.59)],
+            semantic_results=[("f1", 0.79)],
             bm25_results=[],
             temporal_results=[],
         )
         response = engine.recall("marginal query", "default", Mode.A, limit=10)
         fact_ids = [r.fact.fact_id for r in response.results]
         assert "f1" not in fact_ids, (
-            "Semantic 0.59 is below floor 0.60, must be filtered"
+            "Raw cosine 0.58 is below floor 0.60, must be filtered"
         )
 
     def test_semantic_exactly_at_floor_passes(self) -> None:
-        """Semantic score of exactly 0.60 passes."""
+        """Raw cosine exactly 0.60 (stored 0.80) passes."""
         f1 = _make_fact("f1")
         engine = _build_engine(
             facts=[f1],
-            semantic_results=[("f1", 0.60)],
+            semantic_results=[("f1", 0.80)],
             bm25_results=[],
             temporal_results=[],
         )
         response = engine.recall("at-floor query", "default", Mode.A, limit=10)
         fact_ids = [r.fact.fact_id for r in response.results]
-        assert "f1" in fact_ids, "Semantic >= 0.60 must pass floor"
+        assert "f1" in fact_ids, "Raw cosine >= 0.60 must pass floor"
 
     def test_qualified_bm25_hit_backfills_after_associative_noise(self) -> None:
         """Apply the evidence floor before the result limit.

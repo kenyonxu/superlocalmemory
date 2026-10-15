@@ -47,7 +47,6 @@ from superlocalmemory.optimize.proxy._helpers import (
     _safe_cache_store,
     _safe_compress,
     _stream_and_cache_forward,
-    _stream_forward,
     capture_passthrough_forward,
 )
 from superlocalmemory.optimize.proxy.capture import capture_enabled

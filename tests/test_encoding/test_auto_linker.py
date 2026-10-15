@@ -6,10 +6,8 @@
 
 from __future__ import annotations
 
-import sqlite3
 from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
 
 from superlocalmemory.encoding.auto_linker import AutoLinker

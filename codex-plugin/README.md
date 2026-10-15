@@ -2,7 +2,7 @@
 
 Local-first agent memory + reversible context compression for OpenAI Codex CLI.
 
-SuperLocalMemory v4.2.0 · Qualixar · AGPL-3.0-or-later
+SuperLocalMemory v4.2.6 · Qualixar · AGPL-3.0-or-later
 
 ---
 
@@ -11,16 +11,16 @@ SuperLocalMemory v4.2.0 · Qualixar · AGPL-3.0-or-later
 | Capability         | How                                            |
 |--------------------|------------------------------------------------|
 | Agent rules        | `AGENTS.md` — loaded automatically per project |
-| MCP memory tools   | `.codex/config.toml` — 29-tool code profile with portable Brain evidence |
+| MCP memory tools   | `.codex/config.toml` — the default 58-tool profile (no profile forced) |
 | Lifecycle hooks    | `hooks/hooks.json` — session start/stop/prompt |
-| Slash skills       | `skills/*/SKILL.md` — 11 skills via `/skills`  |
+| Slash skills       | `skills/*/SKILL.md` — the SLM skills via `/skills` |
 | Venv launcher      | `scripts/slm-launch` — optional isolated mode  |
 
 ---
 
 ## Prerequisites
 
-- **Python 3.11+** on PATH
+- **Python 3.12+** on PATH
 - **SuperLocalMemory installed:**
 
   ```bash
@@ -30,21 +30,28 @@ SuperLocalMemory v4.2.0 · Qualixar · AGPL-3.0-or-later
   ```
 
 - Verify: `slm --version`
+- **Windows:** install with pipx or pip (they put `slm.exe` on PATH). On
+  native Windows the MCP server always runs that installed `slm`; with no
+  `slm` on PATH it does not start, and its log says `slm is not on PATH` with
+  the install command.
 
 ---
 
-## Install — recommended: the SLM installer (non-destructive)
+## Install — recommended: the SLM commands
 
 ```bash
-slm install codex        # or run the interactive installer and multi-select Codex
+slm connect codex --dry-run   # show what would be written, change nothing
+slm connect codex             # wire the superlocalmemory MCP server into your Codex config
+slm codex install             # SLM-owned skills, subagents and lifecycle hooks (preview with --dry-run)
+slm codex status              # what is installed
+slm codex remove              # remove only the SLM-owned add-ons
 ```
 
-The installer **merges** SLM into your existing Codex setup — it never overwrites your
-files. It appends the SLM rules block to your `AGENTS.md` (between
-`<!-- BEGIN/END SuperLocalMemory -->` markers), adds the `[mcp_servers.superlocalmemory]`
-section to your `~/.codex/config.toml` while preserving your other MCP servers, and
-appends the SLM hook entries to your existing `hooks.json`. Re-running updates only the
-SLM block; your own config is untouched.
+`slm codex install` leaves MCP wiring to `slm connect codex` and leaves your own
+settings alone; `slm codex remove` removes only what SLM installed. Review and
+trust newly installed hooks in Codex with `/hooks`. The agent rules in
+`codex-plugin/AGENTS.md` are not written for you: append them to your `AGENTS.md`
+as described below.
 
 ---
 
@@ -56,9 +63,9 @@ SLM block; your own config is untouched.
 ### 1 — Append the SLM rules to your `AGENTS.md`
 
 Codex reads `AGENTS.md` from the repo root. Append the contents of `codex-plugin/AGENTS.md`
-to your existing `AGENTS.md` (or create one if you have none). The SLM block is wrapped in
-`<!-- BEGIN SuperLocalMemory -->` … `<!-- END SuperLocalMemory -->` markers so you can find
-and update it later without touching your own rules.
+to your existing `AGENTS.md` (or create one if you have none). Wrap what you add in
+`<!-- BEGIN SuperLocalMemory -->` … `<!-- END SuperLocalMemory -->` comments of your own so
+you can find and update it later without touching your other rules.
 
 ### 2 — Add the MCP server to your Codex config
 
@@ -69,11 +76,13 @@ Add ONLY this section to your existing `.codex/config.toml` (project) or
 [mcp_servers.superlocalmemory]
 command = "slm"
 args = ["mcp"]
-env = { SLM_MCP_PROFILE = "code", SLM_AGENT_ID = "codex", SLM_DATA_DIR = "~/.superlocalmemory" }
+env = { SLM_AGENT_ID = "codex" }
 ```
 
-This registers the `superlocalmemory` MCP server with `SLM_MCP_PROFILE=code` (the 28-tool
-code profile: memory, portable Brain evidence, code graph, profile switching, and bounded loops).
+This registers the `superlocalmemory` MCP server with only the agent id. No profile is
+forced, so it serves the default 58-tool profile; add `SLM_MCP_PROFILE = "code"` yourself
+for the 39-tool code profile (memory, portable Brain evidence, code graph, profile
+switching, memory-kind management, and bounded loops).
 
 ### 3 — Append lifecycle hooks (optional)
 
@@ -98,9 +107,14 @@ To use SLM skills in Codex, type `/skills` in the Codex chat and select the skil
 | slm-compress   | Reversible context compression                   |
 | slm-graph      | Code graph: blast radius, callers, search        |
 | slm-scope      | Personal / shared / global memory scoping        |
-| slm-profile    | Workspace isolation and profile switching        |
+| slm-profile    | Memory profiles versus MCP tool sets             |
 | slm-governance | Enterprise roles, retention, audit, GDPR         |
-| slm-mesh       | Cross-session peer coordination                  |
+| slm-mesh       | Cross-session peer coordination, `mesh_wait`, web-app peers |
+| slm-media      | Pictures, PDFs and folders: save, find, limits   |
+| slm-web-access | Connecting web apps: switches, upload links      |
+| slm-loop       | Bounded, gate-verified agent loops               |
+| slm-bot-memory | Sharing one computer with other bots             |
+| slm-getting-started-bot | First session on a headless bot host    |
 
 To make these available as project skills, copy `codex-plugin/skills/` to your project:
 
@@ -173,7 +187,7 @@ Add them manually once you know your Codex version's tool names.
 | Runtime vars       | `${CLAUDE_PLUGIN_ROOT}` | Script-relative path resolution  |
 | Hook tool matchers | `Write\|Edit\|Bash`     | Omitted (Codex names unconfirmed)|
 | Plugin manifest    | `.claude-plugin/plugin.json` | Not applicable             |
-| Skills             | 11 skills (identical)   | 11 skills (identical)            |
+| Skills             | The same skills (identical) | The same skills (identical)  |
 
 ---
 
@@ -190,4 +204,4 @@ root (not inside a subdirectory), then restart Codex.
 
 ---
 
-SuperLocalMemory v4.2.0 · Qualixar · https://github.com/qualixar/superlocalmemory
+SuperLocalMemory v4.2.6 · Qualixar · https://github.com/qualixar/superlocalmemory

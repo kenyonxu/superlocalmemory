@@ -19,12 +19,24 @@ import logging
 from typing import Callable
 
 from mcp.types import ToolAnnotations
+
 from superlocalmemory.core.admission import admits
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.infra.data_root import state_path
 from superlocalmemory.storage.read_connection import ReadConnectionFactory
 
 logger = logging.getLogger(__name__)
+
+
+def _skill_profile(engine, profile_id: str) -> tuple[str, dict | None]:
+    """The named profile (it must exist), else the active one ("default"
+    when there is no engine, as before)."""
+    from superlocalmemory.mcp.request_profile import requested_profile, tool_profile
+
+    if engine is None or not requested_profile(profile_id):
+        return (engine.profile_id if engine else "default"), None
+    return tool_profile(engine, profile_id)
+
 
 def register_evolution_tools(server, get_engine: Callable) -> None:
     """Register evolution MCP tools for skill evolution intelligence."""
@@ -51,14 +63,16 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
             config_path = state_path("config.json")
             evo_cfg = {}
             if config_path.exists():
-                with open(config_path) as f:
+                with open(config_path, encoding="utf-8") as f:
                     cfg = json.load(f)
                 evo_cfg = cfg.get("evolution", {})
 
             if not evo_cfg.get("enabled", False):
                 return {
                     "success": False,
-                    "error": "Evolution is disabled. Enable via: slm config set evolution.enabled true",
+                    "error": (
+                        "Evolution is disabled. Enable via: slm config set evolution.enabled true"
+                    ),
                 }
 
             from superlocalmemory.evolution.skill_evolver import SkillEvolver
@@ -69,7 +83,11 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
             )
 
             # Map string to enum
-            type_map = {"fix": EvolutionType.FIX, "derived": EvolutionType.DERIVED, "captured": EvolutionType.CAPTURED}
+            type_map = {
+                "fix": EvolutionType.FIX,
+                "derived": EvolutionType.DERIVED,
+                "captured": EvolutionType.CAPTURED,
+            }
             evo_type = type_map.get(evolution_type, EvolutionType.FIX)
 
             # Build a minimal config for the evolver
@@ -82,7 +100,12 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
                 evolution = _EvoCfg()
 
             db_path = str(state_path("memory.db"))
-            evolver = SkillEvolver(db_path, _Cfg())
+            from superlocalmemory.evolution.workspace_artifacts import workspace_activator
+
+            engine = get_engine()
+            profile_id = engine.profile_id if engine else "default"
+            activator = workspace_activator(state_path("memory.db").parent, profile_id)
+            evolver = SkillEvolver(db_path, _Cfg(), profile_id=profile_id, activator=activator)
 
             # Build candidate from manual trigger
             evidence = (reason,) if reason else ("Manual evolution trigger via MCP",)
@@ -95,9 +118,7 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
                 invocation_count=0,
             )
 
-            # Process through the pipeline
-            engine = get_engine()
-            profile_id = engine.profile_id if engine else "default"
+            # Process through the pipeline using the same workspace as its artifacts.
 
             evolver._store.reset_cycle(profile_id)
             # audit-10 fix: go through evolve_candidate so the manual/MCP path
@@ -133,6 +154,7 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
     async def skill_health(
         skill_name: str = "",
         include_history: bool = False,
+        profile_id: str = "",
     ) -> dict:
         """Get health metrics for a skill or all skills.
 
@@ -143,119 +165,17 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
         Args:
             skill_name: Specific skill name (empty = all skills)
             include_history: Include recent tool event history per skill
+            profile_id: The profile to read (empty = the active one)
         """
         try:
             engine = get_engine()
-            profile_id = engine.profile_id if engine else "default"
+            profile_id, refused = _skill_profile(engine, profile_id)
+            if refused:
+                return {"skills": [], "skill_count": 0, **refused}
             db_path = state_path("memory.db")
-            conn = ReadConnectionFactory(db_path).open()
+            from superlocalmemory.learning.skill_health import skill_health as read_health
 
-            # Gather per-skill invocation stats from tool_events
-            # Skills are logged as tool_name='Skill' with actual skill name in input_summary
-            if skill_name:
-                # M-LIKE: Escape LIKE wildcards in user-provided skill_name
-                safe_name = skill_name.replace('\\', '\\\\').replace('%', r'\%').replace('_', r'\_')
-                event_query = (
-                    "SELECT input_summary, event_type, created_at, duration_ms "
-                    "FROM tool_events "
-                    "WHERE profile_id = ? AND tool_name = 'Skill' "
-                    "AND input_summary LIKE ? ESCAPE '\\' "
-                    "ORDER BY created_at DESC"
-                )
-                event_rows = conn.execute(event_query, (profile_id, f"%{safe_name}%")).fetchall()
-                # Aggregate
-                invocations = len(event_rows)
-                errors = sum(1 for r in event_rows if dict(r).get("event_type") == "error")
-                last_invoked = dict(event_rows[0]).get("created_at", "") if event_rows else ""
-                effective_rate = ((invocations - errors) / invocations) if invocations > 0 else 0.0
-                skill_entries = [{
-                    "name": skill_name,
-                    "invocations": invocations,
-                    "errors": errors,
-                    "effective_rate": round(effective_rate, 4),
-                    "last_invoked": last_invoked,
-                    "status": "healthy" if effective_rate >= 0.7 else ("degraded" if effective_rate >= 0.4 else "critical"),
-                }]
-                if include_history:
-                    skill_entries[0]["recent_events"] = [
-                        dict(r) for r in event_rows[:10]
-                    ]
-            else:
-                # Get all Skill tool events and extract skill names from input_summary
-                event_query = (
-                    "SELECT input_summary, event_type, created_at "
-                    "FROM tool_events "
-                    "WHERE profile_id = ? AND tool_name = 'Skill' "
-                    "ORDER BY created_at DESC LIMIT 500"
-                )
-                event_rows = conn.execute(event_query, (profile_id,)).fetchall()
-
-                # Parse skill names from input_summary and aggregate
-                from collections import defaultdict
-                skill_stats: dict = defaultdict(lambda: {"invocations": 0, "errors": 0, "last_invoked": ""})
-                for row in event_rows:
-                    r = dict(row)
-                    summary = r.get("input_summary", "")
-                    # Extract skill name from JSON or plain text
-                    sname = ""
-                    try:
-                        parsed = json.loads(summary)
-                        sname = parsed.get("skill", "") or parsed.get("name", "")
-                    except (json.JSONDecodeError, TypeError):
-                        if ":" in summary:
-                            sname = summary.split('"')[1] if '"' in summary else summary.strip()
-                    if not sname:
-                        continue
-                    stats = skill_stats[sname]
-                    stats["invocations"] += 1
-                    if r.get("event_type") == "error":
-                        stats["errors"] += 1
-                    if not stats["last_invoked"]:
-                        stats["last_invoked"] = r.get("created_at", "")
-
-                skill_entries = []
-                for sname, stats in sorted(skill_stats.items(), key=lambda x: x[1]["invocations"], reverse=True)[:50]:
-                    inv = stats["invocations"]
-                    errs = stats["errors"]
-                    eff = ((inv - errs) / inv) if inv > 0 else 0.0
-                    skill_entries.append({
-                        "name": sname,
-                        "invocations": inv,
-                        "errors": errs,
-                        "effective_rate": round(eff, 4),
-                        "last_invoked": stats["last_invoked"],
-                        "status": "healthy" if eff >= 0.7 else ("degraded" if eff >= 0.4 else "critical"),
-                    })
-
-            # Gather skill_performance assertions
-            assertion_query = (
-                "SELECT trigger_condition, action, confidence "
-                "FROM behavioral_assertions "
-                "WHERE profile_id = ? AND category = 'skill_performance'"
-            )
-            assertion_params = [profile_id]
-            if skill_name:
-                safe_assert_name = skill_name.replace('\\', '\\\\').replace('%', r'\%').replace('_', r'\_')
-                assertion_query += " AND trigger_condition LIKE ? ESCAPE '\\'"
-                assertion_params.append(f"%{safe_assert_name}%")
-            assertion_rows = conn.execute(assertion_query, tuple(assertion_params)).fetchall()
-
-            skills = skill_entries
-
-            # Add assertion insights
-            assertion_insights = [
-                {"trigger": dict(a)["trigger_condition"], "action": dict(a)["action"], "confidence": dict(a)["confidence"]}
-                for a in assertion_rows
-            ]
-
-            conn.close()
-
-            return {
-                "skills": skills,
-                "skill_count": len(skills),
-                "assertion_insights": assertion_insights,
-                "profile_id": profile_id,
-            }
+            return read_health(db_path, profile_id, skill_name, include_history)
         except Exception as exc:
             logger.debug("skill_health failed: %s", exc)
             return {"skills": [], "skill_count": 0, "error": str(exc)}
@@ -263,6 +183,7 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def skill_lineage(
         skill_name: str = "",
+        profile_id: str = "",
     ) -> dict:
         """Get evolution lineage for a skill.
 
@@ -271,10 +192,13 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
 
         Args:
             skill_name: Specific skill name (empty = all skills)
+            profile_id: The profile to read (empty = the active one)
         """
         try:
             engine = get_engine()
-            profile_id = engine.profile_id if engine else "default"
+            profile_id, refused = _skill_profile(engine, profile_id)
+            if refused:
+                return {"lineage": [], "lineage_count": 0, "tree": {}, **refused}
             db_path = state_path("memory.db")
             conn = ReadConnectionFactory(db_path).open()
 
@@ -324,14 +248,16 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
                 root = entry.get("parent_skill_id") or entry["skill_name"]
                 if root not in tree:
                     tree[root] = {"root": root, "evolutions": []}
-                tree[root]["evolutions"].append({
-                    "id": entry["id"],
-                    "skill_name": entry["skill_name"],
-                    "evolution_type": entry["evolution_type"],
-                    "status": entry["status"],
-                    "generation": entry["generation"],
-                    "created_at": entry["created_at"],
-                })
+                tree[root]["evolutions"].append(
+                    {
+                        "id": entry["id"],
+                        "skill_name": entry["skill_name"],
+                        "evolution_type": entry["evolution_type"],
+                        "status": entry["status"],
+                        "generation": entry["generation"],
+                        "created_at": entry["created_at"],
+                    }
+                )
 
             return {
                 "lineage": lineage,
@@ -339,5 +265,11 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
                 "tree": tree,
             }
         except Exception as exc:
+            # 4.2.3: a store where evolution never ran has no log table yet;
+            # that is an empty lineage, not a failure.
+            if "no such table" in str(exc):
+                return {"success": True, "lineage": [], "lineage_count": 0, "tree": {},
+                        "note": "No skill has evolved in this profile yet."}
             logger.debug("skill_lineage failed: %s", exc)
-            return {"lineage": [], "lineage_count": 0, "tree": {}, "error": str(exc)}
+            return {"success": False, "lineage": [], "lineage_count": 0, "tree": {},
+                    "error": str(exc)}

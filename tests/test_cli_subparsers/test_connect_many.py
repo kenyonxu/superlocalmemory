@@ -15,7 +15,6 @@ Coverage:
 
 from __future__ import annotations
 
-import copy
 import json
 import sys
 from pathlib import Path
@@ -29,7 +28,6 @@ sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 from superlocalmemory.hooks.portable_kit import (  # noqa: E402
     IDE_MATRIX,
     connect_many,
-    connect_ide,
 )
 
 # ---------------------------------------------------------------------------
@@ -64,18 +62,7 @@ def _pre_populate_with_other_server(config_path: Path, fmt: str, server_key: str
 
     elif fmt == "yaml":
         import yaml
-        data = {
-            server_key: [
-                {
-                    "name": "mcp",
-                    "params": {
-                        "serverName": "othersrv",
-                        "command": "other-cmd",
-                        "args": ["--flag"],
-                    },
-                }
-            ]
-        }
+        data = {server_key: [{"name": "othersrv", "command": "other-cmd", "args": ["--flag"]}]}
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
 
@@ -175,7 +162,7 @@ class TestConnectMany:
         data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         providers = data.get(desc.server_key, [])
         server_names = [
-            p.get("params", {}).get("serverName") for p in providers
+            p.get("name") for p in providers
         ]
         assert "othersrv" in server_names
         assert "superlocalmemory" in server_names
@@ -231,14 +218,14 @@ class TestConnectMany:
     def test_profile_propagated_to_all(self, fake_home: Path) -> None:
         """Profile kwarg is passed through to every IDE."""
         ids = ["cursor", "windsurf"]
-        connect_many(ids, home=fake_home, profile="myprofile")
+        connect_many(ids, home=fake_home, profile="full")
 
         for ide_id in ids:
             desc = IDE_MATRIX[ide_id]
             config_path = fake_home / desc.mcp_path_global
             data = json.loads(config_path.read_text(encoding="utf-8"))
             block = data[desc.server_key]["superlocalmemory"]
-            assert block.get("env", {}).get("SLM_MCP_PROFILE") == "myprofile"
+            assert block.get("env", {}).get("SLM_MCP_PROFILE") == "full"
 
     def test_many_with_pre_existing_multi_server_preserves_all(
         self, fake_home: Path

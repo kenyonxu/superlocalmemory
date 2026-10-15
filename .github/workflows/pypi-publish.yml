@@ -21,7 +21,11 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The gates run ~22,500 tests. Serial, that measured 70-95 minutes on the
+    # runner (v4.2.3 reached 34% in 23 min; v4.2.4 reached 48% at the old 45 min
+    # limit and was cancelled), so the gate is parallel (-n 4) and the budget
+    # leaves room for slower runners plus the build, artifact and publish steps.
+    timeout-minutes: 90
     environment:
       name: pypi
       url: https://pypi.org/project/superlocalmemory/
@@ -96,7 +100,7 @@ jobs:
       - name: Run release gates
         run: |
           RELEASE_TEST_ARGS=(
-            tests/ -q --tb=short -x
+            tests/ -q --tb=short -x -n 4 --durations=15
             --ignore=tests/test_integration/test_mode_b_ollama.py
             --ignore=tests/test_integration/test_e2e.py
             --ignore=tests/test_integration/test_e2e_v32.py
@@ -219,6 +223,13 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           packages-dir: dist/python/
+          # Belt-and-suspenders: the registry-guard step above already skips
+          # this step when PyPI reports the version exists, but we publish
+          # from the laptop first and that check can race a newly-uploaded
+          # file PyPI has not finished indexing yet. skip-existing makes the
+          # upload itself idempotent so that race can never turn into a hard
+          # failure ("File already exists") on an otherwise-successful release.
+          skip-existing: true
 
       - name: Publish to npm
         if: steps.registry.outputs.npm_exists != 'true'

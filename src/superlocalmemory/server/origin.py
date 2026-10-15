@@ -7,6 +7,78 @@ from urllib.parse import urlsplit
 from superlocalmemory.server.loopback import is_loopback as _is_loopback_host
 
 
+def daemon_browser_origins(port: int) -> tuple[str, ...]:
+    """The HTTP browser origins owned by this listener (never the redirect)."""
+    if not 1 <= port <= 65535 or port == 8767:
+        return ()
+    return (f"http://localhost:{port}", f"http://127.0.0.1:{port}",
+            f"http://[::1]:{port}")
+
+
+def _origin_matches_request_host(host: str, host_header: str, port: int) -> bool:
+    """A Host authority naming the same browser host and owned port."""
+    if not host_header or any(char in host_header for char in "/?#"):
+        return False
+    try:
+        requested = urlsplit(f"http://{host_header}")
+        return (
+            requested.hostname == host and requested.port == port
+            and requested.username is None and requested.password is None
+            and not requested.path and not requested.query and not requested.fragment
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def remote_browser_origin_allowed(origin: str, *, port: int, host_header: str = "") -> bool:
+    """A configured LAN dashboard at this listener's owned port.
+
+    Honor HTTP's exact names and bounded IP networks/prefixes. The documented
+    global wildcard permits only a same-Host browser, not a foreign Origin.
+    Origin admission grants neither caller authentication nor HTTP CORS.
+    """
+    from ipaddress import ip_address
+
+    from superlocalmemory.core.remote_mode import (
+        _allowlist_entries,
+        _host_matches,
+        _strip_port,
+        is_remote_origin_allowed,
+    )
+
+    if not 1 <= port <= 65535 or port == 8767:
+        return False
+    try:
+        parsed = urlsplit(origin)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.port != port
+            or not parsed.hostname
+            or "*" in parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path or parsed.query or parsed.fragment
+        ):
+            return False
+        if not is_remote_origin_allowed(origin):
+            return False
+        host = parsed.hostname.lower()
+        entries = {_strip_port(entry).lower() for entry in _allowlist_entries()}
+        if host in {entry for entry in entries if "*" not in entry and "/" not in entry}:
+            return True
+        if "*" in entries and _origin_matches_request_host(host, host_header, port):
+            return True
+        # Prefixes describe IP addresses, never domains that resemble an IP.
+        client_ip = ip_address(host)
+        return any(
+            _host_matches(entry, host, client_ip)
+            for entry in entries
+            if entry != "*" and ("/" in entry or entry.endswith("*"))
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def origin_is_loopback(origin: str) -> bool:
     """Return whether an Origin is absent or an exact HTTP(S) loopback URL.
 

@@ -26,8 +26,6 @@ import concurrent.futures
 import threading
 import time
 
-import pytest
-
 from superlocalmemory.retrieval import engine as engine_mod
 from superlocalmemory.retrieval.engine import CHANNEL_HANG_GUARD_SECONDS
 
@@ -56,7 +54,7 @@ class TestTheGuardIsSizedAboveMeasuredChannelCost:
             "machine will cross it and silently drop answers"
         )
 
-    def test_it_stays_inside_the_daemons_last_resort_budget(self) -> None:
+    def test_public_deadline_can_finish_before_the_sdk_hang_guard(self) -> None:
         """The outer budget is what catches a true hang -- and it says so.
 
         `_recall_budget_s` is documented as a last-resort net for a genuine
@@ -67,10 +65,11 @@ class TestTheGuardIsSizedAboveMeasuredChannelCost:
         from superlocalmemory.server.unified_daemon import _recall_budget_s
 
         outer = _recall_budget_s()
-        assert CHANNEL_HANG_GUARD_SECONDS < outer, (
-            f"the channel guard ({CHANNEL_HANG_GUARD_SECONDS}s) is not below "
-            f"the recall budget ({outer}s), so the outer net can never fire"
-        )
+        # WP-6: the HTTP caller gets an explicit unjudged timeout at 3 s;
+        # SDK/background work retains the measured channel correctness guard.
+        assert outer <= 3.0
+        assert CHANNEL_HANG_GUARD_SECONDS > outer
+
 
     def test_it_is_not_quietly_retightened_to_a_latency_figure(self) -> None:
         """Guards against the change this replaced.

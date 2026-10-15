@@ -10,7 +10,6 @@ import pytest
 from superlocalmemory.code_graph.bridge.entity_resolver import MatchedNode
 from superlocalmemory.code_graph.bridge.fact_enricher import (
     MAX_ENRICHMENT_LEN,
-    MAX_NODES_PER_ENRICHMENT,
     FactEnricher,
 )
 from superlocalmemory.code_graph.database import CodeGraphDatabase

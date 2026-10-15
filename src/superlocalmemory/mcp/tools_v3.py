@@ -12,7 +12,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from typing import Any, Callable
 
 from mcp.types import ToolAnnotations
 
@@ -55,12 +55,20 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     async def set_mode(mode: str) -> dict:
         """Switch operating mode (a, b, or c).
 
+        Modes are named by what you get, not by a vendor:
         Mode A (Local Guardian): Nothing leaves this device. No AI language
                 model runs. Fastest and most private.
-        Mode B: All data stays on this device. Uses a local Ollama AI model
-                to improve recall quality. Requires Ollama installed.
-        Mode C: Uses a cloud AI provider (OpenAI, Anthropic, …) for best
-                recall quality. Queries leave this device; API key required.
+        Mode B (Smart Local): All data stays on this device. Uses a model
+                running on this machine to improve recall quality — Ollama
+                by default, but any local OpenAI-compatible server works.
+        Mode C (Full Power): Uses your own endpoint, or a cloud AI provider
+                (OpenAI, Anthropic, …), for best recall quality. Queries
+                leave this device; a key is required for a cloud provider,
+                but not for a keyless custom endpoint.
+        In any mode, the optional online answer check (off unless the user
+        turns it on and agrees) sends each recall's question and top
+        memories to the chosen provider; the returned description says so
+        while it is on.
 
         Resets the engine to apply the new mode configuration.
 
@@ -83,6 +91,7 @@ def register_v3_tools(server, get_engine: Callable) -> None:
                 content_preview=mode_lower,
             )
             from superlocalmemory.core.config import SLMConfig
+            from superlocalmemory.core.egress_notice import online_check_on
             from superlocalmemory.mcp.server import reset_engine
 
             # Use switch_mode() — the correct load-then-patch path that preserves
@@ -91,11 +100,13 @@ def register_v3_tools(server, get_engine: Callable) -> None:
             old_config = SLMConfig.load()
             config = SLMConfig.switch_mode(mode_lower)
 
-            # V3.3: Check if embedding model changed — flag for re-indexing
-            needs_reindex = (
-                old_config.embedding.provider != config.embedding.provider
-                or old_config.embedding.model_name != config.embedding.model_name
+            # A mode file naming another model: every engine stays on the live one
+            # and the daemon re-indexes in the background (core/embedding_live.py).
+            from superlocalmemory.core.embedding_reindex import (
+                pending_switch_message,
+                space_changed,
             )
+            needs_reindex = space_changed(old_config.embedding, config.embedding)
 
             reset_engine()
             authorization.complete()
@@ -103,9 +114,11 @@ def register_v3_tools(server, get_engine: Callable) -> None:
             return {
                 "success": True,
                 "mode": mode_lower,
-                "description": _mode_description(mode_lower),
+                "description": _mode_description(mode_lower, config.retrieval),
+                "online_answer_check": online_check_on(config.retrieval),
                 "needs_reindex": needs_reindex,
-                "message": "Embedding re-indexing will run on next recall." if needs_reindex else "",
+                "message": (pending_switch_message(old_config.embedding, config.embedding)
+                            if needs_reindex else ""),
             }
         except Exception as exc:
             logger.exception("set_mode failed")
@@ -122,18 +135,22 @@ def register_v3_tools(server, get_engine: Callable) -> None:
         (LLM availability, cross-encoder, agentic retrieval).
         """
         try:
+            from superlocalmemory.core.egress_notice import online_check_on
+
             engine = get_engine()
             m = engine._config.mode.value
+            retrieval = _current_retrieval(engine)
             caps = {
                 "llm_available": engine._llm is not None,
-                "cross_encoder": engine._config.retrieval.use_cross_encoder,
+                "cross_encoder": engine._config.retrieval.reranker_enabled(),
                 "agentic_rounds": engine._config.retrieval.agentic_max_rounds,
                 "sheaf_at_encoding": engine._config.math.sheaf_at_encoding,
             }
             return {
                 "success": True,
                 "mode": m,
-                "description": _mode_description(m),
+                "description": _mode_description(m, retrieval),
+                "online_answer_check": online_check_on(retrieval),
                 "capabilities": caps,
             }
         except Exception as exc:
@@ -144,15 +161,21 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     # 3. health
     # ------------------------------------------------------------------
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def health() -> dict:
+    async def health(profile_id: str = "") -> dict:
         """Get system health including math layer status.
 
         Reports on Fisher-Rao, Sheaf consistency, and Langevin dynamics
         health. Also includes database integrity and component status.
+        ``profile_id`` counts another profile's memories (empty = the active
+        one).
         """
         try:
+            from superlocalmemory.mcp.request_profile import tool_profile
+
             engine = get_engine()
-            pid = engine.profile_id
+            pid, refused = tool_profile(engine, profile_id)
+            if refused:
+                return refused
 
             status: dict = {
                 "success": True,
@@ -177,6 +200,11 @@ def register_v3_tools(server, get_engine: Callable) -> None:
                 "source": "daemon_proxy" if _is_proxy else "local",
                 "model": engine._config.embedding.model_name,
             }
+
+            # Recall's answer check for this text model: the same fact and advice
+            # the dashboard card and slm doctor show (core/support_fit_guard).
+            from superlocalmemory.core.support_fit_guard import answer_check_status
+            status["components"]["answer_check"] = answer_check_status(engine._config.embedding)
 
             # LLM
             status["components"]["llm"] = {
@@ -292,6 +320,12 @@ def register_v3_tools(server, get_engine: Callable) -> None:
         known_as_of: str | None = None,
         valid_at: str | None = None,
         include_unknown: bool = False,
+        project: str = "",
+        prefer_project: str = "",
+        profile_id: str = "",
+        tags: "str | list[str]" = "",
+        tags_match: str = "all",
+        project_strict: bool = False,
     ) -> dict:
         """Recall with per-channel score breakdown.
 
@@ -303,12 +337,23 @@ def register_v3_tools(server, get_engine: Callable) -> None:
             limit: Maximum results (default 10).
             as_of: Optional ISO 8601 UTC datetime for point-in-time recall
                 (e.g. "2024-01-01T00:00:00Z"). Omit for current-state recall.
+            project / prefer_project: exactly as ``recall`` takes them, so the
+                order explained here is the order recall returns for the same
+                arguments. A preferred memory's evidence names
+                ``same_project``; ``project_scope`` says what was applied.
+            profile_id: recall another profile (empty = the active one), as
+                ``recall`` takes it; the active profile is not moved.
+            tags / tags_match: exactly as ``recall`` takes them (4.1.22);
+                ``tag_scope`` says what the filter did.
         """
         try:
             import asyncio
+
             from superlocalmemory.mcp._daemon_proxy import choose_pool
+            from superlocalmemory.mcp._recall_metadata import forward_recall_metadata
             from superlocalmemory.retrieval.temporal_utils import (
-                normalize_as_of, normalize_strict_boundary,
+                normalize_as_of,
+                normalize_strict_boundary,
             )
 
             # Normalize at MCP boundary before forwarding.
@@ -330,18 +375,42 @@ def register_v3_tools(server, get_engine: Callable) -> None:
                     query=query, limit=limit, as_of=_as_of,
                     known_as_of=_known_as_of, valid_at=_valid_at,
                     include_unknown=include_unknown,
+                    # #150: sent only when set, as recall does, so a trace of a
+                    # project recall explains that recall and not another one.
+                    **{k: v.strip() for k, v in (("project", project),
+                                                 ("prefer_project", prefer_project),
+                                                 ("profile_id", profile_id))
+                       if (v or "").strip()},
+                    # 4.1.22: sent only when set, same as the facets above.
+                    **({"tags": tags if isinstance(tags, list) else tags.strip()}
+                       if (tags if isinstance(tags, list) else (tags or "").strip())
+                       else {}),
+                    **({"tags_match": tags_match.strip()}
+                       if (tags_match or "").strip().lower() == "any" else {}),
+                    **({"project_strict": True}
+                       if project_strict and (project or "").strip() else {}),
+                    evidence=True,
                 )
             )
+            if ((profile_id or "").strip() and isinstance(raw, dict)
+                    and raw.get("ok") is False and raw.get("code")):
+                # For a named profile a refusal (no such profile) is an
+                # answer, never an empty recall.
+                return {"success": False, "code": raw["code"],
+                        "retryable": bool(raw.get("retryable", False)),
+                        "error": raw.get("error", "")}
             items = raw.get("results", []) if isinstance(raw, dict) else []
             results = []
             for item in items[:limit]:
                 results.append({
                     "fact_id": item.get("fact_id", ""),
                     "content": item.get("content", ""),
-                    "score": round(float(item.get("score", 0.0)), 4),
+                    "score": round(float(item.get("score") or 0.0), 4),
                     "relevance_score": round(
-                        float(item.get("relevance_score", item.get("score", 0.0))), 4
+                        float(item.get("relevance_score", item.get("score")) or 0.0), 4
                     ),
+                    "match_confidence": item.get("match_confidence"),
+                    "confidence_basis": item.get("confidence_basis", "unmeasured"),
                     "ranking_score": item.get("ranking_score"),
                     "confidence": round(float(item.get("confidence", 0.0)), 3),
                     "memory_confidence": round(
@@ -354,6 +423,9 @@ def register_v3_tools(server, get_engine: Callable) -> None:
                     "fact_type": item.get("fact_type", ""),
                     "lifecycle": item.get("lifecycle", ""),
                     "access_count": int(item.get("access_count", 0)),
+                    # 4.1.25: what each signal says about this result
+                    # (retrieval/evidence_features.py); {} from an older daemon.
+                    "evidence": item.get("evidence", {}) or {},
                 })
             return {
                 "success": True,
@@ -362,13 +434,13 @@ def register_v3_tools(server, get_engine: Callable) -> None:
                 "query_type": raw.get("query_type", "") if isinstance(raw, dict) else "",
                 "channel_weights": raw.get("channel_weights", {}) if isinstance(raw, dict) else {},
                 "total_candidates": raw.get("total_candidates", 0) if isinstance(raw, dict) else 0,
-                "retrieval_time_ms": round(float(raw.get("retrieval_time_ms", 0.0)) if isinstance(raw, dict) else 0.0, 1),
-                "score_contract_version": raw.get("score_contract_version", "2") if isinstance(raw, dict) else "2",
-                "calibration_status": raw.get("calibration_status", "uncalibrated") if isinstance(raw, dict) else "uncalibrated",
-                "calibration_id": raw.get("calibration_id") if isinstance(raw, dict) else None,
-                "answer_confidence": raw.get("answer_confidence") if isinstance(raw, dict) else None,
-                "abstained": bool(raw.get("abstained", False)) if isinstance(raw, dict) else False,
-                "abstention_reason": raw.get("abstention_reason") if isinstance(raw, dict) else None,
+                "retrieval_time_ms": round(
+                    float(raw.get("retrieval_time_ms", 0.0)) if isinstance(raw, dict) else 0.0, 1),
+                # M-10: the HTTP envelope's metadata in full (and any field
+                # added to it later), not a hand-picked subset.
+                **forward_recall_metadata(raw if isinstance(raw, dict) else {}),
+                "query_evidence": (raw.get("query_evidence", {}) or {})
+                if isinstance(raw, dict) else {},
             }
         except Exception as exc:
             logger.exception("recall_trace failed")
@@ -377,22 +449,43 @@ def register_v3_tools(server, get_engine: Callable) -> None:
 
 # -- Helpers ------------------------------------------------------------------
 
-def _mode_description(mode: str) -> str:
-    """Human-readable capability description for a mode (never a legal claim)."""
-    descriptions = {
-        "a": (
-            "Local Guardian — on-device only: no AI language model runs and "
-            "nothing leaves this device. Fastest and most private."
-        ),
-        "b": (
-            "Smart Local — on-device plus a local Ollama model: better recall "
-            "quality, and nothing leaves this device. Requires Ollama to be "
-            "installed and running."
-        ),
-        "c": (
-            "Full Power — uses a cloud AI provider (OpenAI, Anthropic, …) for "
-            "the best recall quality. Your queries leave this device and an "
-            "API key is required."
-        ),
-    }
-    return descriptions.get(mode, "Unknown mode")
+def _current_retrieval(engine: Any) -> Any:
+    """The saved answer-check settings (what the dashboard last wrote), else
+    the engine's own copy."""
+    try:
+        from superlocalmemory.core.config import SLMConfig
+
+        return SLMConfig.load().retrieval
+    except Exception:  # noqa: BLE001 — a status call never fails on this
+        return getattr(getattr(engine, "_config", None), "retrieval", None)
+
+
+def _mode_description(mode: str, retrieval: Any = None) -> str:
+    """Human-readable capability description for a mode (never a legal claim).
+
+    While the online answer check is on, "nothing leaves this device" is not
+    true in any mode, so the description says what does leave instead.
+    """
+    from superlocalmemory.core.egress_notice import online_check_notice
+
+    notice = online_check_notice(retrieval) if retrieval is not None else ""
+    text = _base_mode_description(mode)
+    if notice and mode in ("a", "b"):
+        text = text.replace("nothing leaves this device", "nothing else leaves this device")
+        return f"{text} {notice}"
+    return f"{text} {notice}" if notice else text
+
+
+def _base_mode_description(mode: str) -> str:
+    """Capability blurb for a mode, read from the one place every surface
+    shares (#112) — CLI help, the setup wizard, and this MCP tool must never
+    describe a mode differently from one another.
+    """
+    from superlocalmemory.core.modes import mode_short_name, mode_tagline
+    from superlocalmemory.storage.models import Mode as _Mode
+
+    try:
+        m = _Mode(mode)
+    except ValueError:
+        return "Unknown mode"
+    return f"{mode_short_name(m)} — {mode_tagline(m)}"

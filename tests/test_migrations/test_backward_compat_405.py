@@ -123,10 +123,10 @@ from __future__ import annotations
 import ast
 import hashlib
 import inspect
+import os
 import re
 import sqlite3
 import time
-import os
 from pathlib import Path
 
 import pytest
@@ -154,11 +154,28 @@ import pytest
 #: This constant sat at 48 while M049 shipped, so the whole file was failing —
 #: nothing noticed because the full suite had not been run since. Keep it equal
 #: to the trailing serial of the last migration.
-#: 52 as of mslm 4.2.0+: +M052_provenance_kind_column (memory.db, the
-#: controlled governance tag). Additive only — one nullable TEXT column with
+#:
+#: 52 as of 4.1.19: +M052_memory_kinds. Additive (five nullable columns, two new
+#: tables); the ceiling still follows the trailing serial by convention.
+#: 53 as of 4.1.20: +M053_answer_check_history (learning.db, two new tables).
+#: 54 as of 4.1.21: +M054_saved_views (learning.db, one new table).
+#: 55 as of 4.1.25: +M055_learning_attribution (learning.db; additive columns,
+#: one partial unique index, one new table).
+#: 58 as of WP-4b: +M056 recall indexes, M057 temporal version triggers,
+#: M058 covering fact index. All additive, with downgrade floor 51.
+#: 61 as of 4.1.25: +M060 memory description (two columns, ledger tables) and
+#: +M061_fact_hub_baseline (deferred, memory.db, one new table and its
+#: triggers); both additive, downgrade floor 51.
+#: 62 as of 4.2.2: +M062_hook_bookkeeping_is_flagged (deferred, memory.db; no
+#: schema change, sets an existing flag column), downgrade floor 51.
+#: 63 as of 4.2.4: +M063_blank_temporal_dates_are_null (deferred, memory.db;
+#: data only), downgrade floor 51.
+#: 64 as of mslm 4.2.6 merge: +M064_provenance_kind_column (memory.db, the
+#: controlled governance tag; the fork's historical M052 renumbered after
+#: upstream took M052-M063). Additive only — one nullable TEXT column with
 #: no default and no data rewrite — but the ceiling still moves because the
 #: convention is "trailing serial, always" (see _schema_version.py).
-_EXPECTED_SCHEMA_VERSION: int = 52
+_EXPECTED_SCHEMA_VERSION: int = 64
 
 #: Total migrations in the MIGRATIONS + DEFERRED_MIGRATIONS catalogue.
 #: M001–M043 with M008 absent = 42 total.
@@ -175,10 +192,21 @@ _EXPECTED_SCHEMA_VERSION: int = 52
 # bandit_plays.shown_fact_ids) and +M045_fact_outcome_score (memory.db, the
 # per-fact outcome score). Both additive columns/tables; neither rewrites an
 # existing row, so 4.0.5 forward-compat is unaffected.
-# 51 as of mslm 4.2.0+: +M052_provenance_kind_column (memory.db). Additive
-# nullable column; backward-compat review done with the M015 pinned-column
-# precedent (fresh installs get it from the base schema, upgrades from here).
-_EXPECTED_MIGRATION_COUNT: int = 51
+# 51 as of 4.1.19: +M052_memory_kinds (eager, memory.db, additive).
+# 52 as of 4.1.20: +M053_answer_check_history (eager, learning.db, additive).
+# 53 as of 4.1.21: +M054_saved_views (eager, learning.db, additive).
+# 54 as of 4.1.25: +M055_learning_attribution (eager, learning.db, additive).
+# 57 as of WP-4b: +M056, M057, M058 (deferred, memory.db, additive).
+# 60 as of 4.1.25: +M060_memory_description and +M061_fact_hub_baseline
+# (both deferred, memory.db, additive).
+# 61 as of 4.2.2: +M062_hook_bookkeeping_is_flagged (deferred, memory.db).
+# 62 as of 4.2.4: +M063_blank_temporal_dates_are_null (deferred, memory.db).
+# 63 as of mslm 4.2.6 merge: +M064_provenance_kind_column (deferred,
+# memory.db, the fork's governance tag renumbered from its historical M052).
+# Additive nullable column; backward-compat review done with the M015
+# pinned-column precedent (fresh installs get it from the base schema,
+# upgrades from here).
+_EXPECTED_MIGRATION_COUNT: int = 63
 
 #: Path to an installed reference package's migrations directory, if one exists.
 #:
@@ -757,7 +785,7 @@ class TestFixtureShape:
         if not _INSTALLED_405_SCHEMA_VERSION_PATH.exists():
             return  # skip the cross-version part silently
 
-        src = _INSTALLED_405_SCHEMA_VERSION_PATH.read_text()
+        src = _INSTALLED_405_SCHEMA_VERSION_PATH.read_text(encoding="utf-8")
         m = re.search(r"SUPPORTED_SCHEMA_VERSION\s*:\s*int\s*=\s*(\d+)", src)
         assert m is not None, (
             f"Cannot parse SUPPORTED_SCHEMA_VERSION from installed 4.0.5 "

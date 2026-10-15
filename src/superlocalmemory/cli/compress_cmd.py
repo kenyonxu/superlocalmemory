@@ -59,7 +59,7 @@ def _cmd_compress_removed(name: str):
         print(
             f"slm compress {name}: removed in SLM v3.6.10. "
             f"Extractive {name} compression has been replaced by "
-            f"Layer 1 (lossless whitespace) + Layer 2 (LLMLingua-2 prose). "
+            f"Layer 1 (prose blank-line normalize; code untouched) + Layer 2 (LLMLingua-2 prose). "
             f"Use 'slm compress prose on' to enable prose compression."
         )
         sys.exit(0)
@@ -88,7 +88,8 @@ def cmd_compress_status(args: Namespace) -> None:
     print(f"  Prose (Layer 2): {'ON' if cfg.compress_prose else 'OFF'}"
           "  (LLMLingua-2, aggressive mode only)")
     print(f"  Protect recent:  {cfg.compress_protect_recent} user turns")
-    print("  Layer 1 (lossless whitespace normalization) is always ON when enabled.")
+    print("  Layer 1 (prose blank-line normalization; code passes through) "
+          "is always ON when enabled.")
 
 
 def cmd_compress_mode(args: Namespace) -> None:

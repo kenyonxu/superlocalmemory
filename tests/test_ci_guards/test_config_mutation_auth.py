@@ -29,6 +29,9 @@ def test_dashboard_config_mutations_require_manage() -> None:
 
 
 def test_evolution_config_mutations_require_manage() -> None:
+    from superlocalmemory.access.rbac import Permission
+    from superlocalmemory.server.mutation_gate import rule_for
+
     source = Path("src/superlocalmemory/server/routes/evolution.py").read_text(
         encoding="utf-8"
     )
@@ -36,7 +39,17 @@ def test_evolution_config_mutations_require_manage() -> None:
     for handler in (
         "evolution_enable",
         "evolution_disable",
-        "evolution_run",
         "evolution_config",
     ):
         assert "_require_manage(request)" in _handler_block(source, handler)
+
+    for action in ("enable", "disable", "config"):
+        rule = rule_for("POST", f"/api/evolution/{action}")
+        assert rule.scope == "global" and rule.permission == Permission.MANAGE
+
+    assert "require_global_manage(request)" in _handler_block(source, "_require_manage")
+    assert "_require_manage(request, installation_wide=False)" in _handler_block(
+        source, "evolution_run"
+    )
+    run_rule = rule_for("POST", "/api/evolution/run")
+    assert run_rule.scope == "active" and run_rule.permission == Permission.MANAGE

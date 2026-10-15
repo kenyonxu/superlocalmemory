@@ -11,7 +11,7 @@ import logging
 from types import SimpleNamespace
 from typing import Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from superlocalmemory.server.config_file import read_config, update_config
@@ -31,11 +31,58 @@ def _require_read(request: Request) -> None:
     require_permission(request, Permission.READ, profile=get_active_profile())
 
 
-def _require_manage(request: Request) -> None:
+def _require_manage(request: Request, *, installation_wide: bool = True) -> None:
     """Guard evolution mutations with the same RBAC boundary as v3 settings."""
-    from superlocalmemory.server.rbac_enforce import require_manage
+    from superlocalmemory.access.rbac import Permission
+    from superlocalmemory.server.rbac_enforce import require_global_manage, require_permission
 
-    require_manage(request)
+    if installation_wide:
+        require_global_manage(request)
+    else:
+        require_permission(request, Permission.MANAGE, profile=get_active_profile())
+
+
+def _activator(installation_wide: bool, quarantine_dir_name: str = ""):
+    """Select the destination and verified source for this workspace."""
+    from superlocalmemory.evolution.workspace_artifacts import workspace_activator
+
+    return workspace_activator(MEMORY_DIR, get_active_profile(),
+                               installation_wide=installation_wide,
+                               quarantine_dir_name=quarantine_dir_name)
+
+
+def _candidate_source(store, record, profile_id: str):
+    """Recover the quarantined directory from its persisted verification receipt."""
+    import dataclasses
+    import json
+
+    if record.quarantine_dir_name:
+        return record
+    transitions = store.get_transitions(record.id, profile_id)
+    verified = next((row for row in reversed(transitions)
+                     if row["to_status"] == "verified_quarantined"), None)
+    if verified is None:
+        return record
+    metadata = json.loads(verified["metadata"])
+    return dataclasses.replace(record, quarantine_dir_name=metadata.get("quarantine_dir_name", ""))
+
+
+def _rollback_scope(body) -> bool:
+    """The activation receipt, not a client flag, determines rollback authority."""
+    import json
+
+    from superlocalmemory.evolution.evolution_store import EvolutionStore
+
+    if not body.record_id:
+        return bool(body.installation_wide)
+    store = EvolutionStore(str(MEMORY_DIR / "memory.db"))
+    transitions = store.get_transitions(body.record_id, get_active_profile())
+    active = next((row for row in reversed(transitions) if row["to_status"] == "active"), None)
+    # Pre-scope activations used the global live root.
+    scope = bool(json.loads(active["metadata"]).get("installation_wide", True)) if active else False
+    if body.installation_wide is not None and body.installation_wide != scope:
+        raise HTTPException(409, detail="Rollback scope does not match the activation receipt")
+    return scope
 
 
 def _read_evolution_config() -> dict:
@@ -72,8 +119,10 @@ def evolution_status(request: Request):
         enabled = evo_cfg.get("enabled", False)
         backend_setting = evo_cfg.get("backend", "auto")
         backend = (
-            detect_backend() if enabled and backend_setting == "auto"
-            else backend_setting if enabled
+            detect_backend()
+            if enabled and backend_setting == "auto"
+            else backend_setting
+            if enabled
             else "none"
         )
         db_path = str(MEMORY_DIR / "memory.db")
@@ -150,7 +199,7 @@ def evolution_disable(request: Request):
 @router.post("/api/evolution/run")
 def evolution_run(request: Request):
     """Manually trigger an evolution cycle."""
-    _require_manage(request)
+    _require_manage(request, installation_wide=False)
     try:
         from superlocalmemory.evolution.skill_evolver import SkillEvolver
 
@@ -174,7 +223,8 @@ def evolution_run(request: Request):
             confirm_model=evo_cfg.get("confirm_model", ""),
         )
         evolver = SkillEvolver(
-            db_path, SimpleNamespace(evolution=evolution_config)
+            db_path, SimpleNamespace(evolution=evolution_config), profile_id=profile,
+            activator=_activator(False),
         )
         result = evolver.run_consolidation_cycle(profile)
 
@@ -193,6 +243,27 @@ class EvolutionConfigUpdate(BaseModel):
     confirm_model: Optional[str] = None
 
 
+def _config_error(body):
+    from superlocalmemory.evolution.model_selection import _MODEL_ALIASES, is_local_model
+
+    accepted_models = set(_MODEL_ALIASES) | {"", "auto"}
+    accepted_backends = {"auto", "claude", "ollama", "anthropic", "openai"}
+
+    for field in ("mutation_model", "verify_model", "confirm_model"):
+        val = getattr(body, field)
+        if val is not None and val not in accepted_models and not is_local_model(val):
+            allowed = ", ".join(["auto", *sorted(_MODEL_ALIASES)])
+            return {"ok": False, "error": f"{field} must be one of: {allowed}"}
+    if body.backend is not None and body.backend not in accepted_backends:
+        return {
+            "ok": False,
+            "error": f"backend must be one of: {', '.join(sorted(accepted_backends))}",
+        }
+    if body.max_evolutions_per_cycle is not None and not 0 < body.max_evolutions_per_cycle <= 50:
+        return {"ok": False, "error": "max_evolutions_per_cycle must be 1..50"}
+    return None
+
+
 @router.post("/api/evolution/config")
 def evolution_config(request: Request, body: EvolutionConfigUpdate):
     """Update evolution config from the dashboard (v3.7.9).
@@ -203,24 +274,9 @@ def evolution_config(request: Request, body: EvolutionConfigUpdate):
     """
     _require_manage(request)
     try:
-        from superlocalmemory.evolution.model_selection import _MODEL_ALIASES
-
-        accepted_models = set(_MODEL_ALIASES) | {"", "auto"}
-        accepted_backends = {"auto", "claude", "ollama", "anthropic", "openai"}
-
-        for field in ("mutation_model", "verify_model", "confirm_model"):
-            val = getattr(body, field)
-            if val is not None and val not in accepted_models:
-                allowed = ", ".join(["auto", *sorted(_MODEL_ALIASES)])
-                return {"ok": False, "error": f"{field} must be one of: {allowed}"}
-        if body.backend is not None and body.backend not in accepted_backends:
-            return {
-                "ok": False,
-                "error": f"backend must be one of: {', '.join(sorted(accepted_backends))}",
-            }
-        if (body.max_evolutions_per_cycle is not None
-                and not 0 < body.max_evolutions_per_cycle <= 50):
-            return {"ok": False, "error": "max_evolutions_per_cycle must be 1..50"}
+        error = _config_error(body)
+        if error:
+            return error
 
         def _apply(evo: dict) -> None:
             for field in (
@@ -240,14 +296,17 @@ def evolution_config(request: Request, body: EvolutionConfigUpdate):
 
         evo = _update_evolution_config(_apply)
 
-        return {"ok": True, "config": {
-            "enabled": evo.get("enabled", False),
-            "backend": evo.get("backend", "auto"),
-            "max_evolutions_per_cycle": evo.get("max_evolutions_per_cycle", 3),
-            "mutation_model": evo.get("mutation_model", ""),
-            "verify_model": evo.get("verify_model", ""),
-            "confirm_model": evo.get("confirm_model", ""),
-        }}
+        return {
+            "ok": True,
+            "config": {
+                "enabled": evo.get("enabled", False),
+                "backend": evo.get("backend", "auto"),
+                "max_evolutions_per_cycle": evo.get("max_evolutions_per_cycle", 3),
+                "mutation_model": evo.get("mutation_model", ""),
+                "verify_model": evo.get("verify_model", ""),
+                "confirm_model": evo.get("confirm_model", ""),
+            },
+        }
     except Exception:
         logger.exception("evolution_config error")
         return {"ok": False, "error": "Internal server error"}
@@ -310,14 +369,16 @@ def evolution_lineage(request: Request, skill_name: str = ""):
             root = entry.get("parent_skill_id") or entry["skill_name"]
             if root not in tree:
                 tree[root] = {"root": root, "evolutions": []}
-            tree[root]["evolutions"].append({
-                "id": entry["id"],
-                "skill_name": entry["skill_name"],
-                "evolution_type": entry["evolution_type"],
-                "status": entry["status"],
-                "generation": entry["generation"],
-                "created_at": entry["created_at"],
-            })
+            tree[root]["evolutions"].append(
+                {
+                    "id": entry["id"],
+                    "skill_name": entry["skill_name"],
+                    "evolution_type": entry["evolution_type"],
+                    "status": entry["status"],
+                    "generation": entry["generation"],
+                    "created_at": entry["created_at"],
+                }
+            )
 
         return {
             "lineage": lineage,
@@ -356,6 +417,8 @@ class ApproveSkillRequest(BaseModel):
     """
 
     record_id: str
+    installation_wide: bool = False
+    reviewed_hash: str = ""
 
 
 _APPROVABLE = ("verified_quarantined", "promoted")
@@ -364,95 +427,23 @@ _APPROVABLE = ("verified_quarantined", "promoted")
 @router.post("/api/evolution/approve")
 def evolution_approve(request: Request, body: ApproveSkillRequest):
     """Activate a quarantined skill mutation after human approval."""
-    _require_manage(request)
+    _require_manage(request, installation_wide=body.installation_wide)
     try:
+        from superlocalmemory.evolution.approval import approve
         from superlocalmemory.evolution.evolution_store import EvolutionStore
-        from superlocalmemory.evolution.skill_activator import SkillActivator
-        from superlocalmemory.evolution.types import EvolutionStatus
 
-        profile_id = get_active_profile()
         store = EvolutionStore(str(MEMORY_DIR / "memory.db"))
 
+        profile_id = get_active_profile()
         record = store.get_record(body.record_id, profile_id)
-        if record is None:
-            return {"success": False, "error": "No such evolution candidate"}
-
-        # Prefer the transition chain over the record's own column: the chain is
-        # the audited history and the column is a cache of its last entry.
-        latest = store.get_latest_status(body.record_id, profile_id)
-        current = (latest.value if latest is not None
-                   else getattr(record.status, "value", ""))
-
-        if current not in _APPROVABLE:
-            # Refusing an already-active candidate matters: activating twice
-            # would overwrite the backup taken the first time with the mutation
-            # itself, and the rollback target would become the thing being
-            # rolled back.
-            return {
-                "success": False,
-                "error": (
-                    f"Candidate is {current!r}; only a verified candidate "
-                    "awaiting approval can be activated"
-                ),
-                "status": current,
-            }
-
-        if not record.quarantine_dir_name:
-            return {
-                "success": False,
-                "error": "Candidate has no quarantined artifact to activate",
-            }
-
-        actor = "dashboard"
-
-        # Approval is recorded BEFORE the file moves, activation after. The
-        # order matters in both directions:
-        #
-        # * recording both afterwards means a successful activation whose log
-        #   write fails leaves the skill live and the record saying it is not —
-        #   so the next approval attempt is allowed, and activating twice
-        #   overwrites the backup that rollback restores from.
-        # * recording both beforehand would claim a mutation is live when the
-        #   file move failed.
-        #
-        # Approved-then-nothing is a state a person can act on. Live-but-unknown
-        # is not.
-        store.append_transition(
-            body.record_id, profile_id,
-            EvolutionStatus(current), EvolutionStatus.APPROVED,
-            actor_id=actor, reason="approved by request",
+        source = _candidate_source(store, record, profile_id) if record else None
+        dir_name = source.quarantine_dir_name if source else ""
+        return approve(
+            store, profile_id, body.record_id, body.reviewed_hash,
+            _activator(body.installation_wide, dir_name or ""),
+            recover=lambda r: _candidate_source(store, r, profile_id),
+            active_metadata={"installation_wide": body.installation_wide},
         )
-        try:
-            activation = SkillActivator().activate(
-                record.skill_name, record.quarantine_dir_name, actor_id=actor,
-            )
-        except Exception as exc:
-            # The approval stands and the mutation did not go live. Recorded as
-            # such rather than left dangling.
-            store.append_transition(
-                body.record_id, profile_id,
-                EvolutionStatus.APPROVED, EvolutionStatus.REJECTED,
-                actor_id=actor, reason=f"activation failed: {exc}",
-            )
-            raise
-        store.append_transition(
-            body.record_id, profile_id,
-            EvolutionStatus.APPROVED, EvolutionStatus.ACTIVE,
-            actor_id=actor, reason="activated from quarantine",
-            metadata={"content_hash": activation.get("content_hash", "")},
-        )
-
-        return {
-            "success": True,
-            "record_id": body.record_id,
-            "skill_name": record.skill_name,
-            "status": EvolutionStatus.ACTIVE.value,
-            "live_path": activation.get("live_path"),
-            "backup_path": activation.get("backup_path"),
-            "content_hash": activation.get("content_hash"),
-            # So the caller knows how to undo it without reading the source.
-            "rollback": "POST /api/evolution/rollback",
-        }
     except FileNotFoundError as exc:
         return {"success": False, "error": f"Quarantined artifact missing: {exc}"}
     except Exception:
@@ -466,6 +457,7 @@ class RollbackSkillRequest(BaseModel):
     #: reverses. Without it the file is restored and the log still says active,
     #: which reads as "this mutation is live" forever.
     record_id: str = ""
+    installation_wide: Optional[bool] = None
 
 
 @router.post("/api/evolution/rollback")
@@ -476,13 +468,18 @@ def evolution_rollback(request: Request, body: RollbackSkillRequest):
     loop is that a verified mutation can still be a bad one, and finding that
     out happens after it is live.
     """
-    _require_manage(request)
+    installation_wide = _rollback_scope(body)
+    _require_manage(request, installation_wide=installation_wide)
     try:
         from superlocalmemory.evolution.evolution_store import EvolutionStore
-        from superlocalmemory.evolution.skill_activator import SkillActivator
         from superlocalmemory.evolution.types import EvolutionStatus
 
-        result = SkillActivator().rollback(body.skill_name)
+        if body.record_id:
+            store = EvolutionStore(str(MEMORY_DIR / "memory.db"))
+            record = store.get_record(body.record_id, get_active_profile())
+            if record is None or record.skill_name != body.skill_name:
+                return {"success": False, "error": "No such evolution candidate"}
+        result = _activator(installation_wide).rollback(body.skill_name)
 
         # Record the reversal. A restored file with the log still reading
         # "active" says the mutation is live when it is not, and that is the
@@ -493,10 +490,12 @@ def evolution_rollback(request: Request, body: RollbackSkillRequest):
                 pid = get_active_profile()
                 latest = store.get_latest_status(body.record_id, pid)
                 store.append_transition(
-                    body.record_id, pid,
+                    body.record_id,
+                    pid,
                     latest or EvolutionStatus.ACTIVE,
                     EvolutionStatus.ROLLED_BACK,
-                    actor_id="dashboard", reason="rolled back by request",
+                    actor_id="dashboard",
+                    reason="rolled back by request",
                 )
             except Exception as exc:  # pragma: no cover — the file is restored
                 logger.warning("rollback recorded no transition: %s", exc)

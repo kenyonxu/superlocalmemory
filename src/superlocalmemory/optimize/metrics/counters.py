@@ -74,7 +74,7 @@ class MetricsCollector:
         Stored in compress_bytes_original/after fields for DB schema compat; unit is word-count.
 
         ``lossy`` distinguishes a Layer-2 lossy (LLMLingua prose) run from a
-        lossless Layer-1/JSON-minify run; tracked in memory (not yet persisted).
+        Layer-1 normalize / JSON-minify run; tracked in memory (not yet persisted).
         """
         with self._data_lock:
             self._compress_runs += 1

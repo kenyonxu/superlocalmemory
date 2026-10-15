@@ -33,14 +33,14 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import date, timezone
 from pathlib import Path
+
+from superlocalmemory.storage.database import visible_fact_clause_for_connection
 
 from .base import (
     clean_llm_summary,
     format_highlight,
     SUMMARY_SYSTEM_PROMPT,
-    COVERAGE_FULL,
     COVERAGE_INSUFFICIENT,
     COVERAGE_NO_SESSION,
     COVERAGE_PARTIAL,
@@ -48,7 +48,9 @@ from .base import (
     GENERATED_BY_EXTRACTIVE,
     GENERATED_BY_LLM_B,
     GENERATED_BY_LLM_C,
+    HiddenOf,
     SummaryResult,
+    without_hidden,
     get_mode_str,
 )
 
@@ -70,6 +72,8 @@ def generate_session_summary(
     session_id: str,
     profile_id: str = "default",
     config: object | None = None,
+    *,
+    hidden_of: HiddenOf | None = None,
 ) -> SummaryResult:
     """Generate a Session Summary for a specific session.
 
@@ -101,15 +105,17 @@ def generate_session_summary(
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")
         try:
+            # Withheld and deleted rows are not memories a person may be shown.
+            visible = visible_fact_clause_for_connection(conn)
             rows = conn.execute(
-                """
+                f"""
                 SELECT fact_id, content, created_at, importance, lifecycle
                 FROM   atomic_facts
                 WHERE  profile_id  = ?
                   AND  session_id  = ?
-                  AND  lifecycle  != 'archived'
-                ORDER  BY importance DESC, created_at ASC
-                """,
+                  AND  lifecycle  != 'archived'{visible}
+                ORDER  BY importance DESC, created_at ASC, fact_id ASC
+                """,  # noqa: S608 - the clause is built from constants only
                 (profile_id, session_id),
             ).fetchall()
         finally:
@@ -128,6 +134,8 @@ def generate_session_summary(
             generated_by=GENERATED_BY_EXTRACTIVE,
             metadata={"session_id": session_id, "error": str(exc)},
         )
+
+    rows = without_hidden([dict(r) for r in rows], hidden_of)
 
     # ── coverage decision ─────────────────────────────────────────────────────
     if not rows:
@@ -230,8 +238,9 @@ def _try_llm(
         result = _call_cloud_llm(prompt, facts, config)
         if result:
             return result, GENERATED_BY_LLM_C
-        # fall through to Mode B
-    if mode in ("b", "c"):
+    # Mode C uses the configured provider only: the Ollama path below
+    # would post to the cloud host in config.llm.api_base.
+    if mode == "b":
         result = _call_ollama(prompt, facts, config)
         if result:
             return result, GENERATED_BY_LLM_B
@@ -247,6 +256,8 @@ def _call_ollama(
     try:
         import json
         import urllib.request
+
+        from superlocalmemory.core import outbound_http
 
         api_base = "http://localhost:11434"
         model = "llama3.2"
@@ -274,7 +285,7 @@ def _call_ollama(
             data=payload,
             headers={"Content-Type": "application/json"},
         )
-        resp = urllib.request.urlopen(req, timeout=timeout)
+        resp = outbound_http.urlopen(req, timeout=timeout)
         data = json.loads(resp.read().decode())
         text = clean_llm_summary(data.get("response", ""))
         return text if text and len(text) > 20 else None

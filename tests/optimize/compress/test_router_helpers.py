@@ -1,8 +1,6 @@
 """Tests for module-level helper functions in router.py."""
 from __future__ import annotations
 
-import json
-import re
 
 from superlocalmemory.optimize.compress.router import (
     _detect_language,

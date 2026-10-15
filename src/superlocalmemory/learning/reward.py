@@ -302,13 +302,20 @@ class EngagementRewardModel:
                 isolation_level=None,  # autocommit — we manage txns ourselves
                 check_same_thread=False,
             )
-            self._conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS * 10}")
-            # M-P-02: daemon bootstrap owns journal_mode=WAL; flipping it
-            # here contradicts ``hooks/_outcome_common.py``'s policy ("must
-            # not flip the journal mode under a live daemon"). synchronous
-            # is connection-scoped and safe to keep.
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-            self._conn.row_factory = sqlite3.Row
+            try:
+                self._conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS * 10}")
+                # M-P-02: daemon bootstrap owns journal_mode=WAL; flipping it
+                # here contradicts ``hooks/_outcome_common.py``'s policy ("must
+                # not flip the journal mode under a live daemon"). synchronous
+                # is connection-scoped and safe to keep.
+                self._conn.execute("PRAGMA synchronous=NORMAL")
+                self._conn.row_factory = sqlite3.Row
+            except BaseException:
+                # Setup failed: close it now, or the file stays open (Windows
+                # then cannot delete or replace it) for as long as the error lives.
+                self._conn.close()
+                self._conn = None
+                raise
         return self._conn
 
     def close(self) -> None:
@@ -666,11 +673,10 @@ class EngagementRewardModel:
             return _FALLBACK_REWARD
 
         # S9-W1 C1: feed the settled reward into the shadow router so
-        # LLD-10 ShadowTest / ModelRollback see live A/B signals. Reward
-        # in [0, 1] is the NDCG@10 proxy per LLD-08 — it is computed from
-        # engagement signals (cite/edit/dwell/requery) which directly
-        # reflect recall quality. Fail-soft so router issues never poison
-        # the finalize_outcome return contract.
+        # LLD-10 ShadowTest / ModelRollback see live A/B signals. The value
+        # is an ENGAGEMENT reward in [0, 1] (cite/edit/dwell/requery), not an
+        # NDCG@10 — it has no ranked relevance list. Fail-soft
+        # so router issues never poison the finalize_outcome return contract.
         if _qid:
             try:
                 from superlocalmemory.core import recall_pipeline as _rp
@@ -682,7 +688,7 @@ class EngagementRewardModel:
                     learning_db=_learn_db,
                     profile_id=_pid,
                     query_id=str(_qid),
-                    ndcg_at_10=float(reward),
+                    reward=float(reward),
                 )
             except Exception as exc:  # noqa: BLE001 — defence in depth
                 logger.debug("feed_recall_settled failed (non-fatal): %s", exc)

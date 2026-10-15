@@ -1,0 +1,94 @@
+{"category": "keyword_question", "expected": ["code-ensure-daemon"], "qid": "gd-r-code-ensure-daemon", "question": "duplicate daemons?"}
+{"category": "keyword_question", "expected": ["code-http421"], "qid": "gd-r-code-http421", "question": "anything on host name fix turn"}
+{"category": "keyword_question", "expected": ["code-qjl-bits"], "qid": "gd-r-code-qjl-bits", "question": "stores under 50k facts"}
+{"category": "keyword_question", "expected": ["code-rrf-k"], "qid": "gd-r-code-rrf-k", "question": "items flattened?"}
+{"category": "keyword_question", "expected": ["code-wal"], "qid": "gd-r-code-wal", "question": "anything on WAL busy_timeout 5000"}
+{"category": "keyword_question", "expected": ["code-migration-runner"], "qid": "gd-r-code-migration-runner", "question": "anything on applies files named M0NN_"}
+{"category": "keyword_question", "expected": ["code-no-floor-env"], "qid": "gd-r-code-no-floor-env", "question": "what about Setting SLM_RECALL_NO_FLOOR switches"}
+{"category": "keyword_question", "expected": ["code-parse-window"], "qid": "gd-r-code-parse-window", "question": "parse_window accepts phrases?"}
+{"category": "keyword_question", "expected": ["code-speaker-regex"], "qid": "gd-r-code-speaker-regex", "question": "regex A-Za-z strips speaker?"}
+{"category": "keyword_question", "expected": ["code-warmup-sync"], "qid": "gd-r-code-warmup-sync", "question": "300 blocks cross-encoder"}
+{"category": "keyword_question", "expected": ["code-fts5"], "qid": "gd-r-code-fts5", "question": "triggers fact keyword-searchable"}
+{"category": "keyword_question", "expected": ["code-recall-limit"], "qid": "gd-r-code-recall-limit", "question": "MCP recall tool caps?"}
+{"category": "keyword_question", "expected": ["ver-4125"], "qid": "gd-r-ver-4125", "question": "anything on scoring ships"}
+{"category": "keyword_question", "expected": ["ver-hub-034"], "qid": "gd-r-ver-hub-034", "question": "validate against MCP schema?"}
+{"category": "keyword_question", "expected": ["ver-4124"], "qid": "gd-r-ver-4124", "question": "what about 4.1.24 narrow release multimodal"}
+{"category": "keyword_question", "expected": ["ver-py314"], "qid": "gd-r-ver-py314", "question": "what about wheels lag behind vector"}
+{"category": "keyword_question", "expected": ["ver-node22"], "qid": "gd-r-ver-node22", "question": "anything on Node job fails"}
+{"category": "keyword_question", "expected": ["ver-pydantic"], "qid": "gd-r-ver-pydantic", "question": "garbage-collector crash?"}
+{"category": "keyword_question", "expected": ["acr-csls"], "qid": "gd-r-acr-csls", "question": "what about subtracts item average similarity"}
+{"category": "keyword_question", "expected": ["acr-rrf"], "qid": "gd-r-acr-rrf", "question": "means reciprocal rank?"}
+{"category": "keyword_question", "expected": ["acr-fsrs"], "qid": "gd-r-acr-fsrs", "question": "FSRS stability grows"}
+{"category": "keyword_question", "expected": ["acr-sla"], "qid": "gd-r-acr-sla", "question": "percent monthly uptime hour?"}
+{"category": "keyword_question", "expected": ["acr-gdpr"], "qid": "gd-r-acr-gdpr", "question": "what about erasure request delete memory"}
+{"category": "keyword_question", "expected": ["acr-mrr"], "qid": "gd-r-acr-mrr", "question": "anything on reciprocal rank"}
+{"category": "keyword_question", "expected": ["id-asdk-receipt"], "qid": "gd-r-id-asdk-receipt", "question": "amount 0.00 USD status?"}
+{"category": "keyword_question", "expected": ["id-session-stub"], "qid": "gd-r-id-session-stub", "question": "stored recalls?"}
+{"category": "keyword_question", "expected": ["id-req-503"], "qid": "gd-r-id-req-503", "question": "embedding worker"}
+{"category": "keyword_question", "expected": ["id-commit-revert"], "qid": "gd-r-id-commit-revert", "question": "strings like 4.1.25"}
+{"category": "keyword_question", "expected": ["id-ticket-ops4471"], "qid": "gd-r-id-ticket-ops4471", "question": "what about job skipped"}
+{"category": "keyword_question", "expected": ["id-order-ssd"], "qid": "gd-r-id-order-ssd", "question": "Order ORD-2026-000917?"}
+{"category": "keyword_question", "expected": ["id-license-key"], "qid": "gd-r-id-license-key", "question": "anything on evaluation tier expires"}
+{"category": "keyword_question", "expected": ["id-container"], "qid": "gd-r-id-container", "question": "sha256:4b1e0c9a7d2f tagged slm-worker:2026-09-30 pushed"}
+{"category": "keyword_question", "expected": ["ppl-nadia"], "qid": "gd-r-ppl-nadia", "question": "Okafor reviews storage?"}
+{"category": "keyword_question", "expected": ["ppl-tomas"], "qid": "gd-r-ppl-tomas", "question": "Rivera maintains Windows installer?"}
+{"category": "keyword_question", "expected": ["ppl-mei"], "qid": "gd-r-ppl-mei", "question": "zero-LLM mode"}
+{"category": "keyword_question", "expected": ["ppl-oskar"], "qid": "gd-r-ppl-oskar", "question": "still owns tests?"}
+{"category": "keyword_question", "expected": ["prod-lumen"], "qid": "gd-r-prod-lumen", "question": "Astro ships client-side framework"}
+{"category": "keyword_question", "expected": ["prod-orbit"], "qid": "gd-r-prod-orbit", "question": "codename remote sync"}
+{"category": "keyword_question", "expected": ["prod-quill"], "qid": "gd-r-prod-quill", "question": "anything on Markdown vaults"}
+{"category": "keyword_question", "expected": ["dec-sqlite"], "qid": "gd-r-dec-sqlite", "question": "anything on support rejected"}
+{"category": "keyword_question", "expected": ["dec-agpl"], "qid": "gd-r-dec-agpl", "question": "AGPL plus commercial licence"}
+{"category": "keyword_question", "expected": ["dec-no-telemetry"], "qid": "gd-r-dec-no-telemetry", "question": "sent home default"}
+{"category": "keyword_question", "expected": ["dec-batch-releases"], "qid": "gd-r-dec-batch-releases", "question": "fixes blocker justifies"}
+{"category": "keyword_question", "expected": ["dec-reranker"], "qid": "gd-r-dec-reranker", "question": "what about reranker because larger"}
+{"category": "keyword_question", "expected": ["dec-two-agents"], "qid": "gd-r-dec-two-agents", "question": "agents run?"}
+{"category": "keyword_question", "expected": ["ev-fd-leak"], "qid": "gd-r-ev-fd-leak", "question": "what about leaked file"}
+{"category": "keyword_question", "expected": ["ev-meetup"], "qid": "gd-r-ev-meetup", "question": "loops paper small?"}
+{"category": "keyword_question", "expected": ["ev-m057"], "qid": "gd-r-ev-m057", "question": "what about M057 migration"}
+{"category": "keyword_question", "expected": ["ev-laptop"], "qid": "gd-r-ev-laptop", "question": "what about old laptop battery"}
+{"category": "keyword_question", "expected": ["ne-de-backup"], "qid": "gd-r-ne-de-backup", "question": "what about Die Sicherung"}
+{"category": "keyword_question", "expected": ["ne-es-restart"], "qid": "gd-r-ne-es-restart", "question": "anything on reinicia cada domingo las"}
+{"category": "keyword_question", "expected": ["ne-fr-key"], "qid": "gd-r-ne-fr-key", "question": "tous les"}
+{"category": "keyword_question", "expected": ["ne-pt-report"], "qid": "gd-r-ne-pt-report", "question": "primeiro dia"}
+{"category": "keyword_question", "expected": ["pp-dash-port-a", "pp-dash-port-b"], "qid": "gd-r-pp-dash-port-a", "question": "web dashboard listens"}
+{"category": "keyword_question", "expected": ["pp-dash-port-b", "pp-dash-port-a"], "qid": "gd-r-pp-dash-port-b", "question": "what about serves browser dashboard"}
+{"category": "keyword_question", "expected": ["pp-retention-a", "pp-retention-b"], "qid": "gd-r-pp-retention-a", "question": "logs deleted"}
+{"category": "keyword_question", "expected": ["pp-retention-b", "pp-retention-a"], "qid": "gd-r-pp-retention-b", "question": "anything on tool output three"}
+{"category": "keyword_question", "expected": ["pp-coffee-a", "pp-coffee-b"], "qid": "gd-r-pp-coffee-a", "question": "happens second Thursday?"}
+{"category": "keyword_question", "expected": ["pp-coffee-b", "pp-coffee-a"], "qid": "gd-r-pp-coffee-b", "question": "Thursday lunch hold retrospective?"}
+{"category": "keyword_question", "expected": ["audit-db"], "qid": "gd-r-audit-db", "question": "database Redis"}
+{"category": "keyword_question", "expected": ["audit-backup"], "qid": "gd-r-audit-backup", "question": "what about kept days"}
+{"category": "keyword_question", "expected": ["audit-owner"], "qid": "gd-r-audit-owner", "question": "Priya Sen?"}
+{"category": "keyword_question", "expected": ["audit-quote"], "qid": "gd-r-audit-quote", "question": "leaving tomorrow?"}
+{"category": "keyword_question", "expected": ["audit-alex"], "qid": "gd-r-audit-alex", "question": "what about Alex Morgan"}
+{"category": "keyword_question", "expected": ["audit-alexa"], "qid": "gd-r-audit-alexa", "question": "anything on works platform"}
+{"category": "keyword_question", "expected": ["audit-speaker"], "qid": "gd-r-audit-speaker", "question": "anything on payroll Alexa Morgan use"}
+{"category": "keyword_question", "expected": ["audit-smith"], "qid": "gd-r-audit-smith", "question": "John Smith?"}
+{"category": "keyword_question", "expected": ["audit-postgres"], "qid": "gd-r-audit-postgres", "question": "anything on PostgREST separate HTTP API"}
+{"category": "keyword_question", "expected": ["audit-token"], "qid": "gd-r-audit-token", "question": "what about expire minutes Refresh tokens"}
+{"category": "keyword_question", "expected": ["audit-support"], "qid": "gd-r-audit-support", "question": "Orchid support coverage Monday"}
+{"category": "keyword_question", "expected": ["audit-rollout"], "qid": "gd-r-audit-rollout", "question": "June July 2026 because?"}
+{"category": "keyword_question", "expected": ["audit-port"], "qid": "gd-r-audit-port", "question": "production API"}
+{"category": "keyword_question", "expected": ["audit-cost"], "qid": "gd-r-audit-cost", "question": "what about 1870.50 excluding"}
+{"category": "keyword_question", "expected": ["audit-nomove"], "qid": "gd-r-audit-nomove", "question": "anything on Tundra data remain"}
+{"category": "keyword_question", "expected": ["audit-code"], "qid": "gd-r-audit-code", "question": "what about attempt Retries stop attempts"}
+{"category": "keyword_question", "expected": ["audit-pref"], "qid": "gd-r-audit-pref", "question": "concise pull request descriptions?"}
+{"category": "keyword_question", "expected": ["audit-date"], "qid": "gd-r-audit-date", "question": "what about Patel rotated Orchid"}
+{"category": "keyword_question", "expected": ["audit-unknown"], "qid": "gd-r-audit-unknown", "question": "what about Kestrel CFO salary"}
+{"category": "keyword_question", "expected": ["audit-timezone"], "qid": "gd-r-audit-timezone", "question": "handoff occurs"}
+{"category": "keyword_question", "expected": ["audit-allergy"], "qid": "gd-r-audit-allergy", "question": "what about Smith allergic"}
+{"category": "keyword_question", "expected": ["audit-trip"], "qid": "gd-r-audit-trip", "question": "Kyoto April 2026 Alex?"}
+{"category": "keyword_question", "expected": ["audit-vpn"], "qid": "gd-r-audit-vpn", "question": "emergency VPN recovery phrase"}
+{"category": "keyword_question", "expected": ["audit-old-status"], "qid": "gd-r-audit-old-status", "question": "2026-01-15 Kestrel primary owner"}
+{"category": "keyword_question", "expected": ["audit-new-status"], "qid": "gd-r-audit-new-status", "question": "Alexa Morgan replacing?"}
+{"category": "keyword_question", "expected": ["audit-old-db"], "qid": "gd-r-audit-old-db", "question": "what about Atlas used MySQL"}
+{"category": "keyword_question", "expected": ["audit-new-db"], "qid": "gd-r-audit-new-db", "question": "what about PostgreSQL main database replacing"}
+{"category": "keyword_question", "expected": ["audit-multi-a"], "qid": "gd-r-audit-multi-a", "question": "what about lead Priya Sen"}
+{"category": "keyword_question", "expected": ["audit-multi-b"], "qid": "gd-r-audit-multi-b", "question": "anything on prefers Python data analysis"}
+{"category": "keyword_question", "expected": ["audit-not-allowed"], "qid": "gd-r-audit-not-allowed", "question": "what about release deployment forbidden"}
+{"category": "keyword_question", "expected": ["ops-cedar-0"], "qid": "gd-r-ops-cedar-0", "question": "what about 6100 Alice Chen"}
+{"category": "keyword_question", "expected": ["ops-cedar-1"], "qid": "gd-r-ops-cedar-1", "question": "recovery checklist"}
+{"category": "keyword_question", "expected": ["ops-audit-0000"], "qid": "gd-r-ops-audit-0000", "question": "ticket AUDIT-0000"}
+{"category": "keyword_question", "expected": ["ops-audit-0001"], "qid": "gd-r-ops-audit-0001", "question": "what about team decided"}
+{"category": "keyword_question", "expected": ["ops-audit-0005"], "qid": "gd-r-ops-audit-0005", "question": "AUDIT-0005 saved recovery command"}

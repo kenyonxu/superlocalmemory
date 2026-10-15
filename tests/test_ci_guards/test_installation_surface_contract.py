@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 ACTIVE_INSTALL_SURFACES = (
     "README.md",
+    "docs/getting-started.md",
+    "scripts/get-slm.sh",
     "CONTRIBUTING.md",
     "docs/install-linux.md",
     "docs/troubleshooting.md",

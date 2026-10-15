@@ -6,13 +6,10 @@ import hashlib as _hashlib
 import json as _json_mod
 import logging
 import threading
-import time
 from abc import ABC, abstractmethod
 from typing import Any, Callable
 
 # C-08: precomputed hash for the common "default" tenant — avoids sha256 on every request
-_DEFAULT_TENANT_HASH: str = _hashlib.sha256(b"default").hexdigest()
-
 from superlocalmemory.optimize.cache.exact import ExactCache
 from superlocalmemory.optimize.cache.invalidation import InvalidationEngine
 from superlocalmemory.optimize.cache.key_builder import CacheConfig, KeyBuilder
@@ -20,9 +17,11 @@ from superlocalmemory.optimize.cache.stampede import StampedeShield
 from superlocalmemory.optimize.metrics.counters import MetricsCollector
 from superlocalmemory.optimize.proxy.lifecycle import (
     CachedResponse,
-    ProxyRequest,
     ProviderResponse,
+    ProxyRequest,
 )
+
+_DEFAULT_TENANT_HASH: str = _hashlib.sha256(b"default").hexdigest()
 
 logger = logging.getLogger(__name__)
 
@@ -79,38 +78,10 @@ class NoOpSemantic(SemanticTier):
         return False
 
 
-class _LazySemanticEmbedder:
-    """Start the canonical embedding service only after an opted-in lookup."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._service = None
-
-    def __call__(self, text: str) -> list[float] | None:
-        if self._service is None:
-            with self._lock:
-                if self._service is None:
-                    from superlocalmemory.core.config import SLMConfig
-                    from superlocalmemory.core.embeddings import EmbeddingService
-
-                    self._service = EmbeddingService(SLMConfig.load().embedding)
-        return self._service.embed(text)
-
-    @property
-    def dimension(self) -> int:
-        from superlocalmemory.core.config import SLMConfig
-
-        return int(SLMConfig.load().embedding.dimension)
-
-    def close(self) -> None:
-        service = self._service
-        self._service = None
-        if service is not None:
-            try:
-                service.unload()
-            except Exception:
-                pass
-
+# Compatibility import for callers of the previous factory location.
+from superlocalmemory.optimize.cache.semantic_embedder import (  # noqa: E402
+    LazySemanticEmbedder as _LazySemanticEmbedder,
+)
 
 # ---------------------------------------------------------------------------
 # Metrics

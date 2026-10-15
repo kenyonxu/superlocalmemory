@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 
 def _import_module():
     from superlocalmemory.core import error_envelope as ee

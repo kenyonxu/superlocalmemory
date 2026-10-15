@@ -1,122 +1,39 @@
-# Active Memory (V3.1)
+# Active Memory
 
-This page describes the active-memory components introduced in V3.1. The
-current release includes local feedback, outcome, co-retrieval, and adaptive
-ranking machinery. It does not guarantee that ranking improves for every
-corpus, and it does not treat result exposure as proof of relevance.
+Active memory is the part of SLM that learns from how recalled memories are used. Recall itself is read-only: searching never changes anything. What changes SLM's behaviour over time is feedback that you or your assistant report afterwards, and that feedback is recorded in a separate learning database. This page explains what gets recorded, what it can change, and what it deliberately does not.
 
-## How It Works
-
-Recall can emit local telemetry that later feedback or outcomes can qualify:
+## The loop
 
 ```
-Recall → Exposure telemetry → Explicit feedback/outcome → Adaptive ranking
+Recall  ->  the assistant uses (or ignores) the memories  ->  feedback or an outcome is reported  ->  learning store  ->  optional re-ranking
 ```
 
-The feedback/ranking path itself can operate locally. Provider-backed
-extraction or other optional integrations have separate network and token
-behavior.
+A recall response carries a `query_id`. When the assistant reports back, it can pass that id, which ties the report to that exact recall rather than to a guess about which memories overlap in time. Being returned is not treated as being useful: a memory that was merely shown is an exposure, and only an explicit report turns it into a signal.
 
-## Three Learning Phases
+## The two reports
 
-| Phase | Signals Needed | What Changes |
-|-------|---------------|-------------|
-| **1. Baseline** | Insufficient labeled outcomes | Configured retrieval and reranking |
-| **2. Rule-Based** | Local signals available | Declared heuristic ranking adjustments |
-| **3. ML Model** | Training gate satisfied | Optional local learned ranker |
+`report_feedback` is a quick verdict on one memory. The value is `relevant` (the default), `irrelevant` or `partial`. `report_outcome` is a verdict on how a piece of work went after using one or more memories, given as a comma-separated list of memory ids plus `success`, `failure` or `partial`, with an optional note. SLM turns an outcome into a reward of 1.0 for success, 0.5 for partial and 0.0 for failure. Sending the same `report_id` twice records nothing new, so a retry is safe. Both tools respect profiles and the visibility rules of [Governance](Governance): a web app can report only on memories it is allowed to see, and an id it cannot see is answered like an id that does not exist.
 
-Signal counts and training readiness depend on actual use and explicit outcome
-coverage. V3.7 publishes no time-to-training guarantee.
+Feedback is written to the learning database (`learning.db` in your data folder). If that write fails, the reply says so plainly (`durable: false`) and points to `slm doctor`, because a signal that was not saved cannot influence anything. On success the reply includes the running `total_signals` and the current `phase`.
 
-## Four Learning Signals
+## What the signals can change
 
-### 1. Co-Retrieval
-When memories are retrieved together repeatedly, they form implicit connections. The system learns that these memories are related — even if they don't share keywords.
+The signals feed three phases of an adaptive ranker, counted per profile.
 
-### 2. Lifecycle signals
-Recency, access, trust, and lifecycle state can affect internal ranking utility.
-They do not change `relevance_score` or `memory_confidence` into answer
-probabilities. See [Score Contract v2](Retrieval-Score-Contract).
+| Phase | When | What orders the results |
+|---|---|---|
+| 1 | Fewer than 50 signals | The normal pipeline: fusion and the reranker |
+| 2 | 50 signals or more | A rule-based adjustment using the learned signals |
+| 3 | 200 signals or more, and a verified learned model is present | A learned model (LightGBM) trained from your own signals |
 
-### 3. Channel Performance
-Current candidate producers are dense semantic, BM25 lexical, temporal,
-Hopfield associative, and spreading activation. Entity-graph information is a
-post-fusion score enhancement in the current implementation.
+The decisive point is that none of this reorders recall unless you switch it on. Adaptive ranking is off by default. It runs only when the environment variable `SLM_RANKING` is set to `v1`, `v2` or `v2-ensemble`; any other value, or no value, means off. An upgrade never turns it on, because the project's position is that a memory system's answers should change when the evidence changes, not because a learned weight drifted. Until you enable it, feedback is still recorded, but results come back in the usual order. The score fields that recall returns are explained in [Retrieval Score Contract](Retrieval-Score-Contract); learning never turns a relevance score into a probability that an answer is right.
 
-### 4. Entropy Gap
-When new content arrives, the system measures how "surprising" it is relative to existing memories. High-entropy content (genuinely new information) gets prioritized for deeper indexing.
+## What it does not promise
 
-## Auto-Capture
+Adaptive ranking needs representative feedback to help, and the signal counts depend entirely on how much feedback you give. SLM publishes no time-to-benefit figure and no guarantee that ranking improves on every store. If you want to judge it on your own data, enable it for a while, keep reporting, and compare with `slm trace`, which shows how each channel scored a result ([How Recall Works](How-Recall-Works)).
 
-SLM can automatically detect and store decisions, bug fixes, and preferences from your conversations:
+## Related
 
-```bash
-slm observe "We decided to use PostgreSQL because of JSONB support"
-# Auto-captured: decision (confidence: 0.75)
-```
+[Auto-Memory](Auto-Memory) covers what gets captured and loaded automatically. [Living Brain](Living-Brain) covers decay, consolidation and the other background learning. [MCP Tools](MCP-Tools) lists `report_feedback` and `report_outcome` with their arguments, and [Multi-Agent Memory](Multi-Agent-Memory) explains how several agents share one store.
 
-Detection patterns:
-- **Decisions**: "decided", "chose", "switched to", "using X because"
-- **Bug fixes**: "fixed", "root cause was", "resolved by"
-- **Preferences**: "always use", "prefer", "convention is"
-
-## Auto-Recall (Session Context)
-
-At the start of every session, the system can automatically inject relevant context:
-
-```bash
-slm session-context  # Returns top-10 relevant memories for current project
-```
-
-### Claude Code Hooks (Invisible Integration)
-
-```bash
-slm hooks install  # One-time setup
-```
-
-This explicitly installs supported Claude Code hooks. The current package
-installers do not install hooks or edit IDE configuration implicitly.
-
-## MCP Tools
-
-Three new MCP tools for AI assistants:
-
-| Tool | Purpose | When to Call |
-|------|---------|-------------|
-| `session_init` | Get project context | Once at session start |
-| `observe` | Auto-capture content | After decisions, bug fixes, preferences |
-| `report_feedback` | Explicit learning signal | When a recalled memory was useful/not useful |
-
-## Sleep-Time Consolidation
-
-A background maintenance process runs periodically:
-- Decays confidence on unused memories
-- Deduplicates near-identical facts
-- Generates behavioral patterns from accumulated data
-- Auto-retrains the ML ranker when enough signals accumulate
-
-Trigger manually: `slm consolidate` or via the dashboard's Learning tab.
-
-## Dashboard
-
-The Learning tab shows:
-- **Signal count** and phase progression (0 → 20 → 200)
-- **Tech preferences** learned from your memories
-- **Temporal patterns** (when you work on what)
-- **Channel performance** (which retrieval channel works best)
-
-The Behavioral tab shows:
-- **Learned patterns** with confidence scores
-- **Outcome tracking** (success/failure/partial)
-- **Cross-project pattern transfer**
-
-## Limitations
-
-Adaptive ranking needs representative feedback and held-out evaluation. A
-retrieved fact is only an exposure event until explicit feedback or a qualified
-outcome exists. V3.7 does not publish a uniqueness claim, guaranteed learning
-curve, or calibrated answer-confidence result for this subsystem.
-
----
-
-Part of [Qualixar](https://qualixar.com) | Author: [Varun Pratap Bhardwaj](https://varunpratap.com)
+Code: `mcp/tools_active.py` (`report_feedback`), `mcp/tools_v28.py` (`report_outcome`), `learning/ranker.py` (`PHASE_2_THRESHOLD`, `PHASE_3_THRESHOLD`), `core/recall_pipeline.py` (`_resolve_ranking_mode`), `learning/outcome_events.py`.

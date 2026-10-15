@@ -89,6 +89,12 @@
       .replace(/'/g, '&#39;');
   }
 
+  var MESH_EVENT_LABELS = { peer_registered: 'joined the mesh', peer_deregistered: 'left the mesh',
+                            peer_muted: 'muted', peer_renamed: 'renamed', peer_retired: 'retired' };
+  function meshEventLabel(type) {
+    return MESH_EVENT_LABELS[type] || String(type || '').replace(/_/g, ' ');
+  }
+
   function badgeCls(st) {
     return st === 'active' ? 'ok' : st === 'stale' ? 'warn' : 'danger';
   }
@@ -189,7 +195,7 @@
             // Conversation log
             '<div class="ask-log" id="od-mesh-cv-log"' +
               ' style="flex:1;max-height:none;padding:16px;display:flex;flex-direction:column;gap:10px">' +
-              '<div style="text-align:center;color:var(--fg-3);font-size:13px;margin-top:30px">' +
+              '<div style="text-align:center;color:var(--fg-2);font-size:13px;margin-top:30px">' +
                 'Select a peer to start messaging' +
               '</div>' +
             '</div>' +
@@ -512,7 +518,8 @@
     events.forEach(function (e) {
       var payload = {};
       try { payload = JSON.parse(e.payload || '{}'); } catch (err) { payload = {}; }
-      var key = payload.project_path || '(unknown project)';
+      // G-L4: plain words, and the same ones Bot messages uses.
+      var key = payload.project_path || 'Sessions without a project';
       var cur = byProject[key];
       if (!cur) {
         byProject[key] = { path: key, count: 1, last: e.created_at, type: e.event_type };
@@ -541,7 +548,7 @@
         '<span class="mono" style="flex:1;font-size:12.5px" title="' + escapeHtml(r.path) + '">' +
           escapeHtml(label) + '</span>' +
         '<span style="font-size:12px;color:var(--fg-2);margin:0 10px">' +
-          escapeHtml(String(r.type || '').replace(/_/g, ' ')) + '</span>' +
+          escapeHtml(meshEventLabel(r.type)) + '</span>' +
         '<span style="font-size:12px;color:var(--fg-3)">' +
           escapeHtml(timeAgo(r.last)) + '</span>' +
       '</div>';

@@ -330,7 +330,7 @@ async def test_handle_models_exception_fail_open() -> None:
 @pytest.mark.asyncio
 async def test_anthropic_messages_with_compress_hook() -> None:
     """Messages with compress hook active → compress path (lines 100-103)."""
-    from superlocalmemory.optimize.proxy.lifecycle import CachedResponse, ProviderResponse
+    from superlocalmemory.optimize.proxy.lifecycle import CachedResponse
 
     class _CompressHook:
         def __init__(self):

@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -68,12 +67,12 @@ def disabled_file():
 def _write_settings(settings_path: Path, data: dict) -> None:
     """Helper: write settings.json with given data."""
     settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(json.dumps(data, indent=2) + "\n")
+    settings_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def _read_settings(settings_path: Path) -> dict:
     """Helper: read settings.json."""
-    return json.loads(settings_path.read_text())
+    return json.loads(settings_path.read_text(encoding="utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -171,16 +170,16 @@ class TestHookDefinitions:
         defs = hooks_mod._hook_definitions()
         # v3.6.18: [0] = mandate (5000ms), [1] = start (15000ms)
         mandate_hook = defs["SessionStart"][0]["hooks"][0]
-        assert mandate_hook["timeout"] == 5000
+        assert mandate_hook["timeout"] == 5  # seconds (Claude Code hooks spec)
         assert mandate_hook["type"] == "command"
         start_hook = defs["SessionStart"][1]["hooks"][0]
-        assert start_hook["timeout"] == 15000
+        assert start_hook["timeout"] == 15  # seconds (Claude Code hooks spec)
         assert start_hook["type"] == "command"
 
     def test_stop_has_timeout(self):
         defs = hooks_mod._hook_definitions()
         stop_hook = defs["Stop"][0]["hooks"][0]
-        assert stop_hook["timeout"] == 10000
+        assert stop_hook["timeout"] == 10  # seconds (Claude Code hooks spec)
 
     def test_checkpoint_matcher(self):
         defs = hooks_mod._hook_definitions()
@@ -197,13 +196,13 @@ class TestHookDefinitions:
     def test_gate_timeout_is_fast(self):
         defs = hooks_mod._hook_definitions(include_gate=True)
         gate_hook = defs["PreToolUse"][0]["hooks"][0]
-        assert gate_hook["timeout"] == 500
+        assert gate_hook["timeout"] == 2  # seconds (Claude Code hooks spec)
 
     def test_init_done_timeout_is_fast(self):
         defs = hooks_mod._hook_definitions(include_gate=True)
         init_done = defs["PostToolUse"][0]
         assert init_done["matcher"] == "mcp__superlocalmemory__session_init"
-        assert init_done["hooks"][0]["timeout"] == 500
+        assert init_done["hooks"][0]["timeout"] == 2  # seconds (Claude Code hooks spec)
 
     def test_commands_use_error_wrapping(self):
         """Value-add hooks should have error absorption wrappers."""
@@ -295,7 +294,7 @@ class TestInstallHooks:
     def test_install_writes_version_file(self, version_file):
         hooks_mod.install_hooks()
         assert version_file.exists()
-        assert version_file.read_text().strip() == hooks_mod.HOOKS_VERSION
+        assert version_file.read_text(encoding="utf-8").strip() == hooks_mod.HOOKS_VERSION
 
     def test_install_returns_hooks_added(self):
         result = hooks_mod.install_hooks()
@@ -334,7 +333,7 @@ class TestInstallHooks:
 
     def test_install_clears_disabled_marker(self, disabled_file, version_dir):
         version_dir.mkdir(parents=True, exist_ok=True)
-        disabled_file.write_text("removed by user\n")
+        disabled_file.write_text("removed by user\n", encoding="utf-8")
         assert disabled_file.exists()
 
         hooks_mod.install_hooks()
@@ -388,7 +387,7 @@ class TestRemoveHooks:
         hooks_mod.install_hooks()
         hooks_mod.remove_hooks()
         assert disabled_file.exists()
-        assert "removed by user" in disabled_file.read_text()
+        assert "removed by user" in disabled_file.read_text(encoding="utf-8")
 
     def test_remove_deletes_version_file(self, version_file):
         hooks_mod.install_hooks()
@@ -472,7 +471,7 @@ class TestCheckStatus:
         hooks_mod.install_hooks()
         # Simulate older version
         version_dir.mkdir(parents=True, exist_ok=True)
-        version_file.write_text("3.3.5")
+        version_file.write_text("3.3.5", encoding="utf-8")
         status = hooks_mod.check_status()
         assert status["needs_upgrade"] is True
         assert status["version"] == "3.3.5"
@@ -513,14 +512,14 @@ class TestAutoInstallIfNeeded:
     def test_auto_install_respects_disabled(self, disabled_file, version_dir):
         """Returns None when .hooks-disabled marker exists."""
         version_dir.mkdir(parents=True, exist_ok=True)
-        disabled_file.write_text("removed by user\n")
+        disabled_file.write_text("removed by user\n", encoding="utf-8")
         result = hooks_mod.auto_install_if_needed()
         assert result is None
 
     def test_fast_path_version_match(self, version_file, version_dir):
         """Returns None immediately when installed version matches current."""
         version_dir.mkdir(parents=True, exist_ok=True)
-        version_file.write_text(hooks_mod.HOOKS_VERSION)
+        version_file.write_text(hooks_mod.HOOKS_VERSION, encoding="utf-8")
         result = hooks_mod.auto_install_if_needed()
         assert result is None
 
@@ -529,11 +528,11 @@ class TestAutoInstallIfNeeded:
         # Pre-install to have valid settings
         hooks_mod.install_hooks()
         # Simulate older version
-        version_file.write_text("3.3.5")
+        version_file.write_text("3.3.5", encoding="utf-8")
         result = hooks_mod.auto_install_if_needed()
         assert result is not None
         assert result["success"] is True
-        assert version_file.read_text().strip() == hooks_mod.HOOKS_VERSION
+        assert version_file.read_text(encoding="utf-8").strip() == hooks_mod.HOOKS_VERSION
 
     def test_auto_install_uses_no_gate(self, settings_path):
         """Auto-install always uses include_gate=False.
@@ -589,7 +588,7 @@ class TestUpgradeHooks:
     def test_upgrade_preserves_gate_off(self, version_file):
         hooks_mod.install_hooks(include_gate=False)
         # Simulate older version
-        version_file.write_text("3.3.5")
+        version_file.write_text("3.3.5", encoding="utf-8")
         result = hooks_mod.upgrade_hooks()
         assert result["upgraded"] is True
         assert result["from_version"] == "3.3.5"
@@ -598,7 +597,7 @@ class TestUpgradeHooks:
 
     def test_upgrade_preserves_gate_on(self, version_file, settings_path):
         hooks_mod.install_hooks(include_gate=True)
-        version_file.write_text("3.3.5")
+        version_file.write_text("3.3.5", encoding="utf-8")
         result = hooks_mod.upgrade_hooks()
         assert result["upgraded"] is True
         assert result["gate_enabled"] is True
@@ -607,9 +606,9 @@ class TestUpgradeHooks:
 
     def test_upgrade_writes_current_version(self, version_file):
         hooks_mod.install_hooks()
-        version_file.write_text("3.3.4")
+        version_file.write_text("3.3.4", encoding="utf-8")
         hooks_mod.upgrade_hooks()
-        assert version_file.read_text().strip() == hooks_mod.HOOKS_VERSION
+        assert version_file.read_text(encoding="utf-8").strip() == hooks_mod.HOOKS_VERSION
 
     def test_upgrade_preserves_non_slm_hooks(self, settings_path, version_file):
         non_slm = {"hooks": [{"type": "command", "command": "mypy --strict $FILE"}]}
@@ -617,7 +616,7 @@ class TestUpgradeHooks:
         data = _read_settings(settings_path)
         data["hooks"]["PostToolUse"].insert(0, non_slm)
         _write_settings(settings_path, data)
-        version_file.write_text("3.3.5")
+        version_file.write_text("3.3.5", encoding="utf-8")
 
         hooks_mod.upgrade_hooks()
         data = _read_settings(settings_path)
@@ -726,7 +725,7 @@ class TestEdgeCases:
     def test_install_with_malformed_settings(self, settings_path):
         """If settings.json has non-JSON content, install should handle it."""
         settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings_path.write_text("not json at all")
+        settings_path.write_text("not json at all", encoding="utf-8")
         result = hooks_mod.install_hooks()
         # _read_settings will raise, caught in install_hooks
         assert result["success"] is False or len(result["errors"]) > 0
@@ -758,7 +757,7 @@ class TestEdgeCases:
     def test_settings_json_pretty_formatted(self, settings_path):
         """settings.json should be pretty-printed (indent=2)."""
         hooks_mod.install_hooks()
-        content = settings_path.read_text()
+        content = settings_path.read_text(encoding="utf-8")
         assert "  " in content  # indented
         assert content.endswith("\n")
 
@@ -772,14 +771,14 @@ class TestEdgeCases:
     def test_check_status_with_corrupt_version_file(self, version_file, version_dir):
         """Status handles unreadable version file gracefully."""
         version_dir.mkdir(parents=True, exist_ok=True)
-        version_file.write_text("")
+        version_file.write_text("", encoding="utf-8")
         status = hooks_mod.check_status()
         assert status["version"] == ""
 
     def test_version_file_content(self, version_file):
         """Version file should contain the exact HOOKS_VERSION string."""
         hooks_mod.install_hooks()
-        assert version_file.read_text() == hooks_mod.HOOKS_VERSION
+        assert version_file.read_text(encoding="utf-8") == hooks_mod.HOOKS_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -813,7 +812,7 @@ class TestFullLifecycle:
         hooks_mod.install_hooks(include_gate=True)
 
         # Simulate older version
-        version_file.write_text("3.3.4")
+        version_file.write_text("3.3.4", encoding="utf-8")
 
         # Upgrade
         result = hooks_mod.upgrade_hooks()

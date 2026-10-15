@@ -23,10 +23,11 @@ if TYPE_CHECKING:
     from superlocalmemory.core.hooks import HookRegistry
     from superlocalmemory.storage.database import DatabaseManager
 
+from superlocalmemory.core.receipt_guard import keeps_own_fact
+from superlocalmemory.encoding.entity_validity import valid_names
 from superlocalmemory.storage.erasure_fence import is_erasing
 from superlocalmemory.storage.models import (
     AtomicFact,
-    FactType,
     MemoryRecord,
 )
 
@@ -79,6 +80,7 @@ def _record_correction_candidate(
         CorrectionActor,
         CorrectionCaseError,
         CorrectionPredecessorBusyError,
+        open_case_id,
         propose_on_connection,
     )
 
@@ -90,13 +92,32 @@ def _record_correction_candidate(
         operation_id, "correction-proposal", profile_id, predecessor_fact_id,
         successor_fact_id, reason_code,
     )
+    from superlocalmemory.core.remember_replaces import ledger_actor_id
+
     actor = CorrectionActor(
-        actor_id=trusted_actor_id,
+        # A local writer's install-token id (158-165 bytes) is longer than the
+        # ledger holds (128): every machine candidate from the Python API, the
+        # daemon-less CLI or MCP was refused and only logged. Same digest
+        # mapping as replacements use, so one writer is one ledger id.
+        actor_id=ledger_actor_id(trusted_actor_id),
         actor_kind="host_attested",
         trust_tier="canonical_writer",
     )
     try:
         with db.raw_connection() as conn:
+            # The ledger holds one open case per memory. A candidate for a
+            # memory that already has one (another fact of this save, or an
+            # earlier save, suspected the same older memory) leaves it as it
+            # is: it may be under review or already decided, and cases are
+            # history that nothing replaces. Checked inside this transaction,
+            # so the check and the insert cannot race.
+            open_id = open_case_id(conn, profile_id, predecessor_fact_id)
+            if open_id is not None and open_id != case_id:
+                logger.debug(
+                    "Correction candidate for %s skipped: %s already has open case %s",
+                    successor_fact_id, predecessor_fact_id, open_id,
+                )
+                return
             propose_on_connection(
                 conn,
                 case_id=case_id,
@@ -241,7 +262,10 @@ def _record_fact_entity_association(
                 return
             # (a) partial migration: insert with count_applied=1 (no historical-
             # rowid check needed — all associations in this state are
-            # post-migration). ON CONFLICT DO NOTHING makes this retry-safe.
+            # post-migration). A row ``store_fact`` already wrote for the
+            # entity index (storage/entity_index.py) is uncounted and is
+            # claimed exactly as a fresh insert would be; a counted one is
+            # left alone, which keeps this retry-safe.
             fallback = db.execute(
                 "INSERT INTO fact_entity_associations "
                 "(profile_id,fact_id,entity_id,first_operation_id,count_applied) "
@@ -250,7 +274,9 @@ def _record_fact_entity_association(
                 "JOIN atomic_facts AS fact "
                 "ON fact.fact_id=? AND fact.profile_id=? "
                 "WHERE entity.entity_id=? AND entity.profile_id=? "
-                "ON CONFLICT(profile_id,fact_id,entity_id) DO NOTHING "
+                "ON CONFLICT(profile_id,fact_id,entity_id) DO UPDATE SET "
+                "count_applied=1,first_operation_id=excluded.first_operation_id "
+                "WHERE fact_entity_associations.count_applied=0 "
                 "RETURNING count_applied",
                 (
                     profile_id, fact_id, entity_id, operation_id,
@@ -295,73 +321,11 @@ def enrich_fact(
     entity_resolver: Any,
     temporal_parser: Any,
 ) -> AtomicFact:
-    """Enrich fact with embeddings, entities, temporal, emotional data."""
-    from superlocalmemory.encoding.emotional import emotional_importance_boost, tag_emotion
-    from superlocalmemory.encoding.signal_inference import infer_signal
-
-    # v3.8.4 D: if the fact already carries a sync-embedded vector (warm-guard
-    # path in store_fast), reuse it — avoids a redundant embed call in the
-    # materializer and keeps the vector consistent with the one indexed in the
-    # vector store at write time.
-    if fact.embedding is not None:
-        embedding = fact.embedding
-        fisher_mean = fact.fisher_mean
-        fisher_variance = fact.fisher_variance
-        # fisher_params are computed in the warm-guard path too, but guard
-        # against the edge case where they weren't (e.g. compute_fisher_params
-        # raised after embed succeeded).
-        if (fisher_mean is None or fisher_variance is None) and embedder and embedding:
-            fisher_mean, fisher_variance = embedder.compute_fisher_params(embedding)
-    else:
-        embedding = embedder.embed(fact.content) if embedder else None
-        fisher_mean, fisher_variance = (None, None)
-        if embedder and embedding:
-            fisher_mean, fisher_variance = embedder.compute_fisher_params(embedding)
-
-    canonical = {}
-    if entity_resolver and fact.entities:
-        canonical = entity_resolver.resolve(fact.entities, profile_id)
-
-    temporal = {}
-    if temporal_parser:
-        temporal = temporal_parser.extract_dates_from_text(fact.content)
-
-    emotion = tag_emotion(fact.content)
-    signal = infer_signal(fact.content)
-
-    # Strategy A: initialize Langevin position near origin (ACTIVE zone).
-    # New facts start as ACTIVE; dynamics will evolve them based on access patterns.
-    langevin_pos = _init_langevin_position(dim=8)
-
-    return AtomicFact(
-        fact_id=fact.fact_id, memory_id=record.memory_id,
-        profile_id=profile_id, content=fact.content,
-        fact_type=fact.fact_type, entities=fact.entities,
-        canonical_entities=list(canonical.values()),
-        observation_date=fact.observation_date or record.session_date,
-        referenced_date=fact.referenced_date or temporal.get("referenced_date"),
-        interval_start=fact.interval_start or temporal.get("interval_start"),
-        interval_end=fact.interval_end or temporal.get("interval_end"),
-        confidence=fact.confidence,
-        importance=min(1.0, fact.importance + emotional_importance_boost(emotion)),
-        evidence_count=fact.evidence_count,
-        source_turn_ids=fact.source_turn_ids, session_id=record.session_id,
-        embedding=embedding, fisher_mean=fisher_mean, fisher_variance=fisher_variance,
-        langevin_position=langevin_pos,
-        emotional_valence=emotion.valence, emotional_arousal=emotion.arousal,
-        signal_type=signal, created_at=fact.created_at,
-        pinned=getattr(fact, 'pinned', False),
-        # v3.6.15 multi-scope: scope is a per-MEMORY property — every fact
-        # derived from a memory inherits the memory's scope. The record is
-        # authoritative; fact-extractor output never carries scope, so reading
-        # it off the fact (as before) silently downgraded extracted facts to
-        # 'personal' and broke `--scope global` on the common extraction path.
-        scope=(getattr(record, 'scope', None)
-               or getattr(fact, 'scope', None) or 'personal'),
-        shared_with=(getattr(record, 'shared_with', None)
-                     if getattr(record, 'scope', None) in ('shared', 'global')
-                     else getattr(fact, 'shared_with', None)),
-    )
+    """Enrich fact fields while preserving access, kind, pin and lifecycle metadata."""
+    from superlocalmemory.core.enriched_fact import enrich
+    return enrich(fact, record, profile_id, embedder=embedder,
+                  entity_resolver=entity_resolver, temporal_parser=temporal_parser,
+                  init_position=_init_langevin_position)
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +347,8 @@ def _upsert_fact_vectors(fact, profile_id, ann_index, vector_store, embedder=Non
     """
     if not getattr(fact, "embedding", None) and embedder is not None and fact.content:
         try:
-            fact.embedding = embedder.embed(fact.content)
+            from superlocalmemory.core.bounded_embedding import embed_source
+            fact.embedding = embed_source(embedder, fact.content)
         except Exception as _emb_exc:  # pragma: no cover - defensive
             _reraise_materialization_deferral(_emb_exc)
             logger.debug("on-demand embed failed for %s: %s", fact.fact_id, _emb_exc)
@@ -513,7 +478,11 @@ def _drop_resurrected_facts(
         vec_store_ok = vector_store is not None and getattr(vector_store, "available", False)
         try:
             if vec_store_ok:
-                vector_store.delete(fid)
+                from superlocalmemory.retrieval.vector_store import classify_delete
+
+                if classify_delete(vector_store.delete(fid)).failed:
+                    logger.error(
+                        "resurrection undo: the vector of %s could not be removed", fid[:16])
             if ann_index is not None and hasattr(ann_index, "remove"):
                 ann_index.remove(fid)
             bm25 = getattr(retrieval_engine, "_bm25", None) if retrieval_engine else None
@@ -579,6 +548,7 @@ def run_store(
     precompleted_derivation_stages: frozenset[str] = frozenset(),
     materialization_progress: dict[str, Any] | None = None,
     materialization_checkpoint: Any = None,
+    kind_classifier: Any = None,
 ) -> list[str]:
     """Store content and extract structured facts. Returns fact_ids.
 
@@ -595,6 +565,12 @@ def run_store(
         "profile_id": profile_id,
         "content_preview": content[:100],
     }
+    # What the audit entry binds: the text's hash and who saved it (L-16, L-15).
+    from superlocalmemory.core.agent_attribution import audit_fields
+    from superlocalmemory.core.audit_record import content_hash as _content_hash
+
+    hook_ctx["content_hash"] = _content_hash(content)
+    hook_ctx.update(audit_fields(metadata))
     if not pre_authorized:
         hooks.run_pre("store", hook_ctx)
 
@@ -620,8 +596,9 @@ def run_store(
         try:
             from superlocalmemory.core.injection import is_low_quality
             if is_low_quality(content):
-                logger.debug("Store rejected (low-quality content): %s...",
-                             content[:80].replace("\n", " "))
+                # Rejected text is saved nowhere; a log line would be its only copy,
+                # and a log is not covered by an erasure.
+                logger.debug("Store rejected (low-quality content, %d chars)", len(content))
                 return []
         except Exception:
             pass  # Best-effort gate; store succeeds if import fails
@@ -693,8 +670,10 @@ def run_store(
     provenance_complete = provenance is not None
 
     try:
+        from superlocalmemory.encoding.speaker_spans import with_actor
+        context_source = with_actor(content, record.speaker, record.role)
         facts = fact_extractor.extract_facts(
-            turns=[content], session_id=session_id,
+            turns=[context_source], session_id=session_id,
             session_date=parsed_date, speaker_a=speaker,
         )
         extraction_complete = facts is not None
@@ -718,82 +697,34 @@ def run_store(
     if facts is None:
         facts = []
 
-    # V3.3.11: Also store raw content as a verbatim fact to preserve details
-    # that fact extraction may abstract away (dates, names, specifics).
-    # This ensures BM25 and semantic search can always find the original text.
-    # V3.3.12: Extract entities from verbatim content so entity channel + temporal
-    # channel can find it (was entities=[] which blinded the entity-graph and temporal signals).
-    # V3.3.20: Stronger verbatim filter — skip greetings, filler, short phrases.
-    # Verbatim facts with just "Hey! How are you?" dilute embeddings and add noise.
-    _MIN_VERBATIM_WORDS = 8
-    if (not queryable_facts
-            and content.strip()
-            and len(content.strip()) >= 40
-            and len(content.strip().split()) >= _MIN_VERBATIM_WORDS):
-        import re as _re
-        _verbatim_text = content.strip()
-        # Extract entities using the same regex as fact_extractor
-        _ent_re = _re.compile(r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+){0,3})\b")
-        _entity_set = {m.group(1) for m in _ent_re.finditer(_verbatim_text)}
-        # Also extract all-caps abbreviations (NYU, MIT, etc.) — dedup with first set
-        _entity_set |= {m.group(1) for m in _re.finditer(r'\b([A-Z]{2,})\b', _verbatim_text)}
-        _verbatim_entities = sorted(_entity_set)
-        verbatim = AtomicFact(
-            fact_id=uuid.uuid4().hex[:16],
-            content=_verbatim_text,
-            fact_type=FactType.EPISODIC,
-            entities=_verbatim_entities,
-            session_id=session_id,
-            observation_date=parsed_date,
-            confidence=0.9,
-            importance=0.5,
-            scope=scope,
-            shared_with=shared_with,
-        )
-        # Avoid duplicate if extraction already produced the exact same text
-        extracted_texts = {f.content.strip().lower() for f in facts}
-        if verbatim.content.strip().lower() not in extracted_texts:
-            facts.append(verbatim)
-
-    if queryable_facts:
-        # Replace any extractor-produced copy of the complete raw turn with the
-        # already-queryable projection, then promote that stable fact ID in
-        # place.  Large inputs may have a clamped queryable projection, so the
-        # projection itself is authoritative for the verbatim retrieval unit.
-        raw_text = content.strip().lower()
-        facts = [
-            fact for fact in facts
-            if fact.content.strip().lower() != raw_text
-            and fact.fact_id not in queryable_ids
-        ]
-        facts.extend(queryable_facts)
-
-    # V3.3.21: If fact extraction produced nothing (short input like "this is test"),
-    # store the raw content as a minimal fact. User explicitly called `slm remember` —
-    # their data should NEVER be silently dropped. The min-length and min-word filters
-    # are designed for automatic conversation extraction, not explicit user storage.
-    if not facts and content.strip():
-        facts = [AtomicFact(
-            fact_id=uuid.uuid4().hex[:16],
-            content=content.strip(),
-            fact_type=FactType.SEMANTIC,
-            entities=[],
-            session_id=session_id,
-            observation_date=parsed_date,
-            confidence=0.7,
-            importance=0.3,
-            scope=scope,
-            shared_with=shared_with,
-        )]
+    from superlocalmemory.core.source_fact_set import source_fact_set
+    facts, protected_source_ids = source_fact_set(
+        facts, content, record, queryable_facts,
+        getattr(config.store, "max_verbatim_chars", 24000),
+        db=db,
+        max_derived=config.encoding.max_facts_per_chunk,
+        coverage_limit=config.encoding.coverage_facts_per_memory,
+    )
 
     if not facts:
         return []
 
-    if type_router:
-        facts = type_router.route_facts(facts)
+    # The extractor already classified every derived fact. Reclassifying here
+    # made one extra LLM call (or embedding call) per fact without new evidence.
+
+    # Kinds: the caller's declared kind (confirmed) or a suggestion (label only).
+    from superlocalmemory.core.kind_assignment import assign_kinds, kind_update_columns
+    facts = assign_kinds(facts, metadata=metadata, source_type=ingestion_source_type,
+                         classifier=kind_classifier, db=db)
 
     stored_ids: list[str] = []
+    # Facts this save created (not an older fact a duplicate merged into). A
+    # machine correction between two of them hid the save's own newer
+    # statement from recall while the case waited for review: 37% of the
+    # machine cases on a 22k-fact store paired two facts of one save.
+    created_ids: set[str] = set(queryable_ids)
     for fact in facts:
+        merged_into_older = False
         try:
             if _fact_is_tombstoned(db, profile_id, fact.fact_id):
                 continue
@@ -862,6 +793,7 @@ def run_store(
                 "emotional_valence": fact.emotional_valence,
                 "emotional_arousal": fact.emotional_arousal,
                 "signal_type": fact.signal_type,
+                **kind_update_columns(fact, db),
             })
             if fact.embedding:
                 _deferred_canonical_embedding = (
@@ -875,7 +807,10 @@ def run_store(
                 action = consolidator.consolidate(
                     fact,
                     profile_id,
-                    exclude_fact_ids=queryable_ids,
+                    exclude_fact_ids=(queryable_ids | created_ids
+                                      if fact.fact_id in protected_source_ids else queryable_ids),
+                    # Stored by this save, not yet in the vector index.
+                    pending_fact_ids=tuple(stored_ids),
                 )
             except Exception as _consolidate_exc:
                 # P0-1 (remember-write-03): a consolidate failure (e.g. LLM
@@ -889,21 +824,21 @@ def run_store(
                 consolidation_complete = False
                 action = None
 
+            if action is not None and keeps_own_fact(action, is_queryable_promotion, created_ids):
+                action = None  # another memory's duplicate: keep this memory's own fact
             if action is not None:
                 if action.action_type.value == "noop":
-                    # A canonical ingestion projection already exists before
-                    # enrichment. Reconcile it against pre-existing facts and
-                    # remove it when consolidation proves it is a duplicate.
+                    # Same-save duplicate: fold this save's projection into its sibling.
                     target_id = action.existing_fact_id
                     if is_queryable_promotion and target_id:
                         db.delete_fact(fact.fact_id)
-                        # The original promoted fact was deleted; its deferred
-                        # canonical embedding write must not happen.
+                        # Deleted: its deferred canonical embedding write must not happen.
                         _deferred_canonical_embedding = None
                     existing_fact = db.get_fact(target_id) if target_id else None
                     if existing_fact is None:
                         continue
                     fact = existing_fact
+                    merged_into_older = target_id not in created_ids
 
                 if action.action_type.value in ("update", "supersede"):
                     # A consolidator UPDATE/SUPERSEDE is a review-required
@@ -918,7 +853,7 @@ def run_store(
                             f"missing fact {action.new_fact_id}"
                         )
                     fact = proposed_fact
-                    if action.existing_fact_id:
+                    if action.existing_fact_id and action.existing_fact_id not in created_ids:
                         _record_correction_candidate(
                             db,
                             operation_id=ingestion_operation_id,
@@ -940,6 +875,12 @@ def run_store(
         elif not is_queryable_promotion:
             db.store_fact(fact)
 
+        if fact.fact_id in protected_source_ids and consolidator:
+            link_source = getattr(consolidator, "link_source", None)
+            if callable(link_source):
+                link_source(fact, profile_id, tuple(stored_ids))
+        if not merged_into_older:
+            created_ids.add(fact.fact_id)
         if fact.fact_id not in stored_ids:
             stored_ids.append(fact.fact_id)
             if materialization_progress is not None:
@@ -1021,15 +962,19 @@ def run_store(
             except Exception as exc:
                 logger.debug("Sheaf check skipped: %s", exc)
 
+        from superlocalmemory.storage.event_time import valid_from as _event_start
+
+        # Event-time start is mandatory even without a contradiction validator.
+        # fill_only: a duplicate re-save (merged into an older fact) must
+        # never replace a start a correction or extraction already set.
+        db.store_temporal_validity(
+            fact_id=fact.fact_id, profile_id=profile_id,
+            valid_from=_event_start(fact),
+            fill_only=True,
+        )
         # Phase 4: Temporal validation and contradiction detection
         if temporal_validator:
             try:
-                db.store_temporal_validity(
-                    fact_id=fact.fact_id,
-                    profile_id=profile_id,
-                    valid_from=fact.observation_date,
-                    valid_until=None,
-                )
                 invalidations = temporal_validator.validate_and_invalidate(
                     new_fact=fact,
                     profile_id=profile_id,
@@ -1041,6 +986,8 @@ def run_store(
                     )
                     for candidate in invalidations:
                         predecessor_fact_id = str(candidate.get("old_fact_id") or "")
+                        if predecessor_fact_id in created_ids:
+                            continue  # two facts of this same save
                         _record_correction_candidate(
                             db,
                             operation_id=ingestion_operation_id,
@@ -1284,11 +1231,13 @@ def run_store_fact_direct(
         fact.memory_id = record.memory_id
 
     if not fact.embedding and embedder:
-        fact.embedding = embedder.embed(fact.content)
+        from superlocalmemory.core.bounded_embedding import embed_source
+        fact.embedding = embed_source(embedder, fact.content)
         if fact.embedding:
             fact.fisher_mean, fact.fisher_variance = (
                 embedder.compute_fisher_params(fact.embedding)
             )
+    fact.entities = valid_names(list(fact.entities or []), fact.content)
     if entity_resolver and fact.entities:
         canonical = entity_resolver.resolve(
             fact.entities, profile_id,

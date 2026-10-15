@@ -40,7 +40,6 @@ from superlocalmemory.optimize.proxy.lifecycle import (
 )
 from superlocalmemory.optimize.proxy.server import ProxyApp, build_proxy_router
 from superlocalmemory.optimize.proxy.vertex_surface import (
-    _VERTEX_PATH_RE,
     _build_vertex_upstream_url,
     _parse_vertex_path,
     _validate_vertex_path,

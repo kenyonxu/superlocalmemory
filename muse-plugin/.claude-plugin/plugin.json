@@ -1,0 +1,20 @@
+{
+  "author": {
+    "name": "Qualixar",
+    "url": "https://github.com/qualixar/superlocalmemory"
+  },
+  "description": "SuperLocalMemory for Muse CLI: local-first agent memory skills, agents and session hooks. Run `slm connect muse` first; it adds the MCP server to Muse.",
+  "displayName": "SuperLocalMemory",
+  "homepage": "https://superlocalmemory.com",
+  "keywords": [
+    "memory",
+    "mcp",
+    "agents",
+    "local-first",
+    "context-compression"
+  ],
+  "license": "AGPL-3.0-or-later",
+  "name": "superlocalmemory",
+  "repository": "https://github.com/qualixar/superlocalmemory",
+  "version": "4.2.6"
+}

@@ -17,6 +17,8 @@ const shellSource = readFileSync(
 
 function harness(options = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>
+    <div class="scrim" id="scrim"></div>
+    <button id="menuBtn" aria-label="Open menu"></button>
     <aside id="sidebar"></aside>
     <main id="main-content">
       <div id="dashboard-pane" class="tab-pane active"></div>
@@ -48,6 +50,29 @@ function harness(options = {}) {
 }
 
 describe('OD shell navigation lifecycle', function () {
+  it('closes the phone menu once a page is chosen (audit 4.1.20 L7)', function () {
+    const window = harness();
+    window.slmShell({ active: 'dashboard-pane' });
+    const doc = window.document;
+    const sidebar = doc.getElementById('sidebar');
+    const scrim = doc.getElementById('scrim');
+    const menuBtn = doc.getElementById('menuBtn');
+
+    menuBtn.click();
+    assert.ok(sidebar.classList.contains('open'), 'the menu opens');
+    assert.ok(scrim.classList.contains('on'));
+    assert.equal(menuBtn.getAttribute('aria-expanded'), 'true');
+
+    doc.querySelector('[data-tab="memories-pane"]').click();
+    assert.ok(!sidebar.classList.contains('open'), 'choosing a page closes the menu');
+    assert.ok(!scrim.classList.contains('on'), 'and removes the scrim');
+    assert.equal(menuBtn.getAttribute('aria-expanded'), 'false');
+
+    menuBtn.click();
+    doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+    assert.ok(!sidebar.classList.contains('open'), 'Escape closes it too');
+  });
+
   it('mounts an OD pane once and never invokes its legacy tab loader', function () {
     const window = harness();
     let odRenders = 0;
@@ -148,7 +173,12 @@ describe('OD shell navigation lifecycle', function () {
     assert.equal(replacement.style.display, 'none');
 
     releaseRefresh();
-    await new Promise(function (resolve) { window.setTimeout(resolve, 5); });
+    // The refresh settles through several promise and timer hops; on a busy machine 5 ms is
+    // not enough. Wait for the snapshot to go (or 2 s), then check.
+    for (let waited = 0; waited < 2000; waited += 10) {
+      if (!window.document.querySelector('[data-slm-stale-for="memories-pane"]')) break;
+      await new Promise(function (resolve) { window.setTimeout(resolve, 10); });
+    }
     assert.equal(
       window.document.querySelector('[data-slm-stale-for="memories-pane"]'),
       null,
@@ -156,6 +186,40 @@ describe('OD shell navigation lifecycle', function () {
     );
     assert.equal(window.document.getElementById('memories-pane').textContent, 'fresh');
     assert.equal(requests, 2);
+    window.close();
+  });
+
+  it('changing page never scrolls the page itself, only the sidebar list', async function () {
+    // scrollIntoView on the sidebar link also scrolled the page, hiding each
+    // pane's first line under the sticky top bar.
+    const window = harness();
+    const scrolled = [];
+    window.HTMLElement.prototype.scrollIntoView = function () { scrolled.push(this); };
+    window.slmShell({ active: 'dashboard-pane' });
+    const doc = window.document;
+    const link = doc.querySelector('[data-tab="memories-pane"]');
+    const list = link.closest('.nav');
+    assert.ok(list, 'the sidebar links sit in their own scrolling list');
+
+    link.getBoundingClientRect = () => ({ top: 900, bottom: 940 });
+    list.getBoundingClientRect = () => ({ top: 100, bottom: 800 });
+    link.click();
+
+    assert.deepEqual(scrolled, [], 'nothing asked the browser to scroll the page');
+    assert.equal(list.scrollTop, 140, 'the list moved just enough to show the link');
+    await new Promise((resolve) => setTimeout(resolve, 600));  // the shell's empty-pane retry
+    window.close();
+  });
+
+  it('changing page brings the page itself back to the top', async function () {
+    // The page scrolls on <body>, which window.scrollTo does not move.
+    const window = harness();
+    window.slmShell({ active: 'dashboard-pane' });
+    const doc = window.document;
+    doc.body.scrollTop = 86;
+    doc.querySelector('[data-tab="memories-pane"]').click();
+    assert.equal(doc.body.scrollTop, 0, 'the page starts at its first line');
+    await new Promise((resolve) => setTimeout(resolve, 600));  // the shell's empty-pane retry
     window.close();
   });
 });

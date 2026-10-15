@@ -17,12 +17,10 @@ Covers:
 
 from __future__ import annotations
 
-import math
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
 from superlocalmemory.core.store_pipeline import _init_langevin_position
 from superlocalmemory.core.maintenance import (

@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
-
-import pytest
 
 from superlocalmemory.mcp.tools_context import (
     MAX_CALLS_PER_MINUTE,
@@ -58,7 +55,7 @@ def test_redaction_applied_to_memories():
     def _secrets(_q, _l, _p):
         return [{"id": "x", "text": "sk-" + "a" * 40, "score": 0.5}]
     out = prestage_context("any", recall_fn=_secrets)
-    assert "REDACTED" in out["memories"][0]["text"]
+    assert "[redacted]" in out["memories"][0]["text"]
 
 
 def test_empty_query_rejected():

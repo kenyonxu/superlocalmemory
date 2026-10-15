@@ -466,21 +466,20 @@ class TemporalValidator:
         """Find contradiction candidates by entity overlap when sheaf unavailable."""
         candidates: list[str] = []
         try:
+            from superlocalmemory.encoding.entity_fact_lookup import entity_facts
+
             for entity in new_fact.canonical_entities[:5]:
-                rows = self._db.execute(
-                    "SELECT DISTINCT fact_id FROM atomic_facts "
-                    "WHERE profile_id = ? AND fact_id != ? "
-                    "AND canonical_entities_json LIKE ?",
-                    (profile_id, new_fact.fact_id, f"%{entity}%"),
-                )
-                for row in rows:
-                    candidates.append(dict(row)["fact_id"])
+                for fact_id, _entities in entity_facts(
+                    self._db, entity, profile_id, limit=11,
+                ):
+                    if fact_id != new_fact.fact_id and fact_id not in candidates:
+                        candidates.append(fact_id)
         except Exception as exc:
             logger.debug(
                 "Entity candidate search failed for fact %s: %s",
                 new_fact.fact_id, exc,
             )
-        return list(set(candidates))[:10]
+        return candidates[:10]
 
     def _get_fact_content(self, fact_id: str) -> str | None:
         """Get fact content by ID."""

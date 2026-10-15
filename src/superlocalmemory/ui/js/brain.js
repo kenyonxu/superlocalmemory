@@ -350,7 +350,7 @@
     wrap.appendChild(EL('p', {
       className: 'brain-help',
       text: 'I found ' + pending + ' historic feedback rows from before '
-        + "v3.4.21. Migrate them into the new learning tables so I can "
+        + "the current learning tables. Migrate them into those tables so I can "
         + 'use them to train the LightGBM ranker. Your memories are '
         + 'untouched — this only copies feedback metadata forward.',
     }));
@@ -1259,7 +1259,7 @@
       hasCandidate ? String(sp.active_candidate_id) : 'none',
     ));
     grid.appendChild(kv(
-      'Paired observations', String(sp.paired_observations || 0),
+      'Live-test observations', String(sp.paired_observations || 0),
     ));
     grid.appendChild(kv(
       'Rollbacks (90d)', String(sp.rollback_count_90d || 0),

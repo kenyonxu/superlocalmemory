@@ -50,7 +50,7 @@ def _validate_profile(profile_id: str) -> str:
 
 
 @router.get("/api/tiers/stats")
-async def tier_stats(profile_id: str | None = None):
+def tier_stats(profile_id: str | None = None):
     """Get tier distribution stats."""
     # Default to the ACTIVE profile, never the literal "default" — otherwise
     # tier counts reflect the default profile regardless of which is active.

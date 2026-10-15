@@ -7,7 +7,7 @@
 //   GET /api/agents/memory-activity?limit=20 →
 //   { ok, profile_id, total_memories, agent_count,
 //     agents: [{agent_id, count, last_active, source_types:[..]}],  // desc by count
-//     recent: [{agent_id, content, created_at, source_type, session_id}] }
+//     recent: [{agent_id, verified, writer, content, created_at, source_type, session_id}] }
 //
 // CRIT fixes baked in:
 //   C1 — all agent_id / content / source_type values through escapeHtml() before innerHTML
@@ -113,13 +113,13 @@
           ' style="display:none;background:var(--warn-soft);border:1px solid var(--warn);' +
                   'border-radius:var(--r-md);padding:12px 16px;margin-bottom:16px;' +
                   'align-items:center;justify-content:space-between;gap:12px">' +
-          '<span style="color:var(--warn);font-size:13.5px" id="od-agents-err-msg">' +
+          '<span style="color:var(--warn-text);font-size:13.5px" id="od-agents-err-msg">' +
             'Could not load agent memory data' +
           '</span>' +
           '<button id="od-agents-retry"' +
             ' style="padding:5px 12px;font-size:12.5px;border-radius:var(--r-md);' +
                     'border:1px solid var(--warn);background:transparent;' +
-                    'color:var(--warn);cursor:pointer;font-weight:600">' +
+                    'color:var(--warn-text);cursor:pointer;font-weight:600">' +
             'Retry' +
           '</button>' +
         '</div>' +
@@ -225,9 +225,8 @@
           '</div>' +
           '<h3 style="font-size:15px;margin-bottom:6px">No multi-agent memory yet</h3>' +
           '<p style="font-size:12.5px;color:var(--fg-2);max-width:44ch;line-height:1.55">' +
-            'Connect agents via the CrewAI, LangChain, LangGraph, Semantic Kernel, ' +
-            'or Agent Framework adapters. Each stamps <code>SLM_AGENT_ID</code> on ' +
-            'every write so their activity appears here.' +
+            'When an AI app connected to this memory saves something, it appears ' +
+            'here under that app’s name. Connect an app with <code>slm connect</code>.' +
           '</p>' +
         '</div>';
       return;
@@ -260,6 +259,14 @@
             '</div>' +
             '<span class="badge ok">' + count.toLocaleString() + '</span>' +
           '</div>' +
+          // L-15/G-M2: say how many saves the connection vouched for.
+          (Number(a.claimed || 0) > 0
+            ? '<div style="font-size:11.5px;color:var(--fg-3);margin-bottom:6px" ' +
+                'title="The agent name on these saves was given by the caller, ' +
+                'not by a connection configured for this agent.">' +
+                Number(a.claimed).toLocaleString() + ' claimed by the caller, ' +
+                Number(a.verified || 0).toLocaleString() + ' from its connection</div>'
+            : '') +
           '<div style="font-size:12px;color:var(--fg-2);margin-bottom:6px">' +
             '<span class="dim">source types</span>' +
           '</div>' +
@@ -361,7 +368,12 @@
                 ' style="width:22px;height:22px;font-size:10px;background:' + avatarBg + '">' +
                 letter +
               '</span>' +
-              '<span class="mono" style="font-size:12px" title="' + agIdFull + '">' + agId + '</span>' +
+              '<span class="mono" style="font-size:12px" title="' + agIdFull +
+                (r.writer ? ' — written by ' + escapeHtml(String(r.writer)) : '') + '">' + agId + '</span>' +
+              (r.verified === false
+                ? '<span class="dim" style="font-size:10.5px" title="The caller gave this ' +
+                  'name; no connection vouched for it.">claimed</span>'
+                : '') +
             '</span>' +
           '</td>' +
           '<td style="max-width:340px;font-size:13px;padding:7px 12px 7px 0"' +
@@ -434,12 +446,12 @@
     if (grid) {
       grid.innerHTML =
         '<div style="grid-column:1/-1;text-align:center;padding:32px;' +
-          'color:var(--fg-3);font-size:13px">Agent activity unavailable — see the message above.</div>';
+          'color:var(--fg-2);font-size:13px">Agent activity unavailable — see the message above.</div>';
     }
     var table = document.getElementById('od-agents-table');
     if (table) {
       table.innerHTML =
-        '<div style="text-align:center;padding:32px;color:var(--fg-3);font-size:13px">' +
+        '<div style="text-align:center;padding:32px;color:var(--fg-2);font-size:13px">' +
           'Recent memories unavailable — see the message above.' +
         '</div>';
     }

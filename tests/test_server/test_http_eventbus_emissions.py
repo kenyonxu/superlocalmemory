@@ -13,7 +13,6 @@ All tests mock the EventBus so no database or daemon is required.
 
 from __future__ import annotations
 
-import time
 from types import SimpleNamespace
 import unittest.mock as mock
 

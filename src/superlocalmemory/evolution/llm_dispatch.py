@@ -6,7 +6,8 @@
 
 Enforces MASTER-PLAN D2 (no top-tier "O-family" Claude models, no
 ``gpt-4-turbo``) and LLD-00 §5 (every LLM-bound prompt passes through
-``redact_secrets(aggression='high')`` FIRST).
+``redact_for_hosted_judge`` FIRST: the high-aggression scan with every
+credential replaced by ``[redacted]`` — no type and no last four characters).
 
 Every evolution LLM call funnels through :func:`_dispatch_llm`. Writes an
 audit row to ``evolution_llm_cost_log`` after the dispatch succeeds — the
@@ -35,12 +36,11 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
-from superlocalmemory.core.security_primitives import (
-    redact_secrets,
-    run_subprocess_safe,
-)
+from superlocalmemory.core import outbound_http
+from superlocalmemory.core.security_primitives import run_subprocess_safe
+from superlocalmemory.retrieval.hosted_redaction import redact_for_hosted_judge
 
 logger = logging.getLogger(__name__)
 
@@ -106,9 +106,7 @@ def _get_cost_conn(learning_db: Path) -> sqlite3.Connection:
         # (embedded interpreter, non-POSIX fork path), detect pid drift
         # and reset before handing out a potentially-corrupt handle.
         current_pid = os.getpid()
-        if _COST_CONN_OWNER_PID is not None and (
-            _COST_CONN_OWNER_PID != current_pid
-        ):
+        if _COST_CONN_OWNER_PID is not None and (_COST_CONN_OWNER_PID != current_pid):
             _COST_CONN_CACHE.clear()
         _COST_CONN_OWNER_PID = current_pid
         conn = _COST_CONN_CACHE.get(key)
@@ -153,13 +151,15 @@ if hasattr(os, "register_at_fork"):
 # ``opus`` instead; that catches every Claude O-family id variant without
 # putting the banned literal anywhere in source.
 
-ALLOWED_LLM_MODELS: frozenset[str] = frozenset({
-    "claude-haiku-4-5",
-    "claude-sonnet-4-6",
-    "ollama:llama3",
-    "ollama:qwen2.5",
-    "openai:gpt-4o-mini",
-})
+ALLOWED_LLM_MODELS: frozenset[str] = frozenset(
+    {
+        "claude-haiku-4-5",
+        "claude-sonnet-4-6",
+        "ollama:llama3",
+        "ollama:qwen2.5",
+        "openai:gpt-4o-mini",
+    }
+)
 
 FORBIDDEN_MODEL_SUBSTRINGS: tuple[str, ...] = ("opus", "gpt-4-turbo")
 
@@ -191,7 +191,10 @@ MAX_TOKENS_CAP: int = 8000
 
 
 def _call_claude_cli_backend(
-    prompt: str, *, model: str, max_tokens: int,
+    prompt: str,
+    *,
+    model: str,
+    max_tokens: int,
 ) -> str:
     """Spawn ``claude --model <model>`` via ``run_subprocess_safe``.
 
@@ -205,16 +208,26 @@ def _call_claude_cli_backend(
         cli_model = "sonnet"
 
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False,
+        mode="w",
+        suffix=".txt",
+        delete=False,
     ) as f:
         f.write(prompt)
         prompt_file = f.name
 
     try:
         result = run_subprocess_safe(
-            ["claude", "--model", cli_model, "--print", "--no-input",
-             "--max-tokens", str(max_tokens),
-             "--prompt-file", prompt_file],
+            [
+                "claude",
+                "--model",
+                cli_model,
+                "--print",
+                "--no-input",
+                "--max-tokens",
+                str(max_tokens),
+                "--prompt-file",
+                prompt_file,
+            ],
             timeout=120.0,
             env={
                 "CLAUDE_CODE_ENTRYPOINT": "cli",
@@ -235,7 +248,10 @@ def _call_claude_cli_backend(
 
 
 def _call_ollama_backend(
-    prompt: str, *, model: str, max_tokens: int,
+    prompt: str,
+    *,
+    model: str,
+    max_tokens: int,
 ) -> str:
     """Call local Ollama HTTP API for LLM completion.
 
@@ -246,12 +262,14 @@ def _call_ollama_backend(
     import urllib.request
 
     ollama_model = model.split(":", 1)[1] if model.startswith("ollama:") else model
-    payload = _json.dumps({
-        "model": ollama_model,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"num_predict": max_tokens},
-    }).encode()
+    payload = _json.dumps(
+        {
+            "model": ollama_model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"num_predict": max_tokens},
+        }
+    ).encode()
 
     try:
         req = urllib.request.Request(
@@ -260,7 +278,8 @@ def _call_ollama_backend(
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310
+        # Through the gate: a local Ollama is never reached through a proxy.
+        with outbound_http.urlopen(req, timeout=120) as resp:
             data = _json.loads(resp.read())
             return data.get("response", "") or ""
     except Exception as exc:  # noqa: BLE001
@@ -269,7 +288,10 @@ def _call_ollama_backend(
 
 
 def _call_claude_api_backend(
-    prompt: str, *, model: str, max_tokens: int,
+    prompt: str,
+    *,
+    model: str,
+    max_tokens: int,
 ) -> str:
     """Call the Anthropic Messages API directly.
 
@@ -303,7 +325,10 @@ def _call_claude_api_backend(
 
 
 def _call_openai_api_backend(
-    prompt: str, *, model: str, max_tokens: int,
+    prompt: str,
+    *,
+    model: str,
+    max_tokens: int,
 ) -> str:
     """Call the OpenAI Chat Completions API directly.
 
@@ -345,7 +370,10 @@ def _call_openai_api_backend(
 
 
 def _fail_closed_backend(
-    prompt: str, *, model: str, max_tokens: int,
+    prompt: str,
+    *,
+    model: str,
+    max_tokens: int,
 ) -> str:
     """S9-SKEP-14: explicit fail-closed backend for unroutable models.
 
@@ -356,8 +384,8 @@ def _fail_closed_backend(
     user money without anyone noticing.
     """
     logger.warning(
-        "llm_dispatch: no backend registered for model=%r — "
-        "fail-closed (returning empty string)", model,
+        "llm_dispatch: no backend registered for model=%r — fail-closed (returning empty string)",
+        model,
     )
     return ""
 
@@ -410,13 +438,12 @@ def _validate_model(model: str) -> None:
     lowered = model.lower()
     for forbidden in FORBIDDEN_MODEL_SUBSTRINGS:
         if forbidden in lowered:
-            raise ValueError(
-                f"forbidden model: {model!r} (contains {forbidden!r})"
-            )
-    if model not in ALLOWED_LLM_MODELS:
+            raise ValueError(f"forbidden model: {model!r} (contains {forbidden!r})")
+    from superlocalmemory.evolution.model_selection import is_local_model
+
+    if model not in ALLOWED_LLM_MODELS and not is_local_model(model):
         raise ValueError(
-            f"model not in ALLOWED_LLM_MODELS: {model!r} "
-            f"(allowed: {sorted(ALLOWED_LLM_MODELS)})"
+            f"model not in ALLOWED_LLM_MODELS: {model!r} (allowed: {sorted(ALLOWED_LLM_MODELS)})"
         )
 
 
@@ -441,8 +468,7 @@ def _log_cost(
     """
     if not isinstance(profile_id, str) or not profile_id.strip():
         raise ValueError(
-            "evolution_llm_cost_log.profile_id must be a non-empty string "
-            f"(got {profile_id!r})"
+            f"evolution_llm_cost_log.profile_id must be a non-empty string (got {profile_id!r})"
         )
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
@@ -477,19 +503,15 @@ def _dispatch_llm(
     """Central choke-point for every evolution LLM call.
 
     Validates model against allow/deny lists, caps ``max_tokens``, runs the
-    prompt through ``redact_secrets(aggression='high')``, dispatches, and
+    prompt through ``redact_for_hosted_judge``, dispatches, and
     logs a redacted cost row. Raises ``ValueError`` on any contract breach.
     """
     _validate_model(model)
 
     if not isinstance(max_tokens, int) or max_tokens <= 0:
-        raise ValueError(
-            f"max_tokens must be a positive int, got {max_tokens!r}"
-        )
+        raise ValueError(f"max_tokens must be a positive int, got {max_tokens!r}")
     if max_tokens > MAX_TOKENS_CAP:
-        raise ValueError(
-            f"max_tokens {max_tokens} > {MAX_TOKENS_CAP} cap (LLD-11)"
-        )
+        raise ValueError(f"max_tokens {max_tokens} > {MAX_TOKENS_CAP} cap (LLD-11)")
     # S9-W2 H-SKEP-05: validate profile_id BEFORE paying for the LLM
     # call. Previously the check lived in _log_cost, AFTER the paid
     # Anthropic round-trip — a misconfigured profile with empty id would
@@ -497,13 +519,12 @@ def _dispatch_llm(
     # _llm_call's except. Net: cost incurred, no cost-log row, caller
     # may retry and burn more. Validate up-front, fail-closed, zero cost.
     if not isinstance(profile_id, str) or not profile_id.strip():
-        raise ValueError(
-            "profile_id must be a non-empty string "
-            f"(got {profile_id!r})"
-        )
+        raise ValueError(f"profile_id must be a non-empty string (got {profile_id!r})")
 
-    # LLD-00 §5 — redact BEFORE dispatch. Never log the raw prompt.
-    safe_prompt = redact_secrets(prompt, aggression="high")
+    # LLD-00 §5 — redact BEFORE dispatch. Never log the raw prompt. Every
+    # backend but a local Ollama is another machine (Anthropic, OpenAI, the
+    # claude CLI), so the prompt keeps no part of any credential.
+    safe_prompt = redact_for_hosted_judge(prompt)
 
     # S9-defer H-P-10: per-cycle retry-cost DoS guard. If the caller
     # (or an orchestrator layer) keeps retrying a failing dispatch on
@@ -515,15 +536,12 @@ def _dispatch_llm(
     # per cycle to 10; this is the per-cycle-ID guard for retries on
     # the SAME logical step (distinct from 10 different LLM calls for
     # 10 different steps).
-    _RETRY_CAP_PER_CYCLE = int(
-        os.environ.get("SLM_EVOLUTION_RETRY_CAP", "5")
-    )
+    _RETRY_CAP_PER_CYCLE = int(os.environ.get("SLM_EVOLUTION_RETRY_CAP", "5"))
     if cycle_id:
         try:
             _conn = _get_cost_conn(Path(learning_db))
             row = _conn.execute(
-                "SELECT COUNT(*) FROM evolution_llm_cost_log "
-                "WHERE profile_id = ? AND cycle_id = ?",
+                "SELECT COUNT(*) FROM evolution_llm_cost_log WHERE profile_id = ? AND cycle_id = ?",
                 (profile_id, cycle_id),
             ).fetchone()
             prior = int(row[0]) if row and row[0] is not None else 0
@@ -531,18 +549,21 @@ def _dispatch_llm(
                 logger.warning(
                     "evolution retry cap hit: profile=%s cycle_id=%s "
                     "prior=%d cap=%d — refusing dispatch",
-                    profile_id, cycle_id, prior, _RETRY_CAP_PER_CYCLE,
+                    profile_id,
+                    cycle_id,
+                    prior,
+                    _RETRY_CAP_PER_CYCLE,
                 )
-                raise RuntimeError(
-                    f"evolution retry cap exceeded for cycle {cycle_id}"
-                )
+                raise RuntimeError(f"evolution retry cap exceeded for cycle {cycle_id}")
         except sqlite3.Error:
             # Cost log unavailable — fail-open on this guard (the
             # outer EvolutionBudget still enforces the 10-call cap).
             pass
 
     response = _actual_llm_call(
-        safe_prompt, model=model, max_tokens=max_tokens,
+        safe_prompt,
+        model=model,
+        max_tokens=max_tokens,
     )
 
     # Cost-log row: lengths only, no text content. This guarantees the

@@ -18,8 +18,7 @@ Covers:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -255,6 +254,10 @@ class TestCheckConsistency:
 
         checker = SheafConsistencyChecker(db, contradiction_threshold=0.5)
         fact = _make_fact(embedding=[1.0, 0.0, 0.0])
+        fact.content = "Priya's status is active"
+        other = _make_fact("f2", [-1.0, 0.0, 0.0])
+        other.content = "Priya's status is inactive"
+        db.get_fact.return_value = other
         results = checker.check_consistency(fact, "default")
         assert len(results) == 1
         assert results[0].severity <= 1.0
@@ -292,13 +295,13 @@ class TestCheckConsistency:
         )
         db.get_edges_for_node.return_value = [edge1, edge2]
         # Return empty for embedding lookup
-        db.execute.return_value = []
+        db.get_fact.return_value = None
 
         checker = SheafConsistencyChecker(db)
         fact = _make_fact()
         results = checker.check_consistency(fact, "default")
         # Only checked once despite two edges to f2
-        assert db.execute.call_count == 1
+        assert db.get_fact.call_count == 1
 
     def test_threshold_clamped_to_valid_range(self) -> None:
         db = _make_mock_db()
@@ -339,6 +342,7 @@ class TestBatchContradictions:
         # Two facts with opposite embeddings sharing an entity
         f1 = _make_fact("f1", [1.0, 0.0, 0.0], ["shared_entity"])
         f2 = _make_fact("f2", [-1.0, 0.0, 0.0], ["shared_entity"])
+        f1.content, f2.content = "Priya's status is active", "Priya's status is inactive"
         results = checker.detect_contradictions_batch([f1, f2], "default")
         assert len(results) == 1
         assert results[0].edge_type == "entity"
@@ -349,6 +353,7 @@ class TestBatchContradictions:
         # Same entity appears twice => same pair, checked only once
         f1 = _make_fact("f1", [1.0, 0.0, 0.0], ["e1", "e2"])
         f2 = _make_fact("f2", [-1.0, 0.0, 0.0], ["e1", "e2"])
+        f1.content, f2.content = "Priya's status is active", "Priya's status is inactive"
         results = checker.detect_contradictions_batch([f1, f2], "default")
         # Should find at most 1 result (deduped across entity groups)
         assert len(results) == 1

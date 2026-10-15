@@ -167,6 +167,9 @@ def _wrap_python_cmd(hook_name: str) -> str:
 def _hook_definitions(include_gate: bool = False) -> dict[str, list]:
     """Build Claude Code hook entries.
 
+    ``timeout`` is in SECONDS (Claude Code hooks spec). Before 4.1.22 these
+    were written as milliseconds, so "15000" gave a hook about four hours.
+
     Critical path (gate, init-done): Shell built-ins. Cannot crash.
     Value-add (start, checkpoint, stop): Python with error wrapper.
     """
@@ -180,7 +183,7 @@ def _hook_definitions(include_gate: bool = False) -> dict[str, list]:
                     {
                         "type": "command",
                         "command": _wrap_python_cmd("mandate"),
-                        "timeout": 5000,
+                        "timeout": 5,
                     }
                 ]
             },
@@ -189,7 +192,7 @@ def _hook_definitions(include_gate: bool = False) -> dict[str, list]:
                     {
                         "type": "command",
                         "command": _wrap_python_cmd("start"),
-                        "timeout": 15000,
+                        "timeout": 15,
                     }
                 ]
             },
@@ -201,7 +204,7 @@ def _hook_definitions(include_gate: bool = False) -> dict[str, list]:
                     {
                         "type": "command",
                         "command": _wrap_python_cmd("checkpoint"),
-                        "timeout": 5000,
+                        "timeout": 5,
                     }
                 ],
             },
@@ -215,7 +218,7 @@ def _hook_definitions(include_gate: bool = False) -> dict[str, list]:
                     {
                         "type": "command",
                         "command": _wrap_python_cmd("post_tool_outcome"),
-                        "timeout": 5000,
+                        "timeout": 5,
                     }
                 ],
             },
@@ -227,7 +230,7 @@ def _hook_definitions(include_gate: bool = False) -> dict[str, list]:
                     {
                         "type": "command",
                         "command": _wrap_python_cmd("user_prompt_rehash"),
-                        "timeout": 5000,
+                        "timeout": 5,
                     }
                 ]
             },
@@ -242,7 +245,7 @@ def _hook_definitions(include_gate: bool = False) -> dict[str, list]:
                     {
                         "type": "command",
                         "command": _wrap_python_cmd("topic_shift"),
-                        "timeout": 3000,
+                        "timeout": 3,
                     }
                 ]
             },
@@ -253,13 +256,13 @@ def _hook_definitions(include_gate: bool = False) -> dict[str, list]:
                     {
                         "type": "command",
                         "command": _wrap_python_cmd("stop"),
-                        "timeout": 10000,
+                        "timeout": 10,
                     },
                     # LLD-09 Track A.2 — finalize pending outcomes at end.
                     {
                         "type": "command",
                         "command": _wrap_python_cmd("stop_outcome"),
-                        "timeout": 10000,
+                        "timeout": 10,
                     },
                     # Commit temporal summaries so session decisions survive beyond
                     # the git-state snapshot written by `slm hook stop`.
@@ -270,7 +273,7 @@ def _hook_definitions(include_gate: bool = False) -> dict[str, list]:
                             if sys.platform == "win32"
                             else "slm session close 2>/dev/null || true"
                         ),
-                        "timeout": 15000,
+                        "timeout": 15,
                     },
                 ]
             }
@@ -289,7 +292,7 @@ def _hook_definitions(include_gate: bool = False) -> dict[str, list]:
                 {
                     "type": "command",
                     "command": _wrap_python_cmd("before_web"),
-                    "timeout": 5000,
+                    "timeout": 5,
                 }
             ],
         }
@@ -302,7 +305,7 @@ def _hook_definitions(include_gate: bool = False) -> dict[str, list]:
                 {
                     "type": "command",
                     "command": _gate_cmd(),
-                    "timeout": 500,
+                    "timeout": 2,
                 }
             ],
         })
@@ -312,7 +315,7 @@ def _hook_definitions(include_gate: bool = False) -> dict[str, list]:
                 {
                     "type": "command",
                     "command": _init_done_cmd(),
-                    "timeout": 500,
+                    "timeout": 2,
                 }
             ],
         })
@@ -376,7 +379,7 @@ def _read_settings() -> dict:
             malformed, so callers can distinguish 'missing' from 'corrupt'.
     """
     if CLAUDE_SETTINGS.exists():
-        return json.loads(CLAUDE_SETTINGS.read_text())
+        return json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
     return {}
 
 
@@ -440,7 +443,7 @@ def install_hooks(include_gate: bool = False) -> dict:
         version_file = _version_file()
         disabled_file = _disabled_file()
         version_dir.mkdir(parents=True, exist_ok=True)
-        version_file.write_text(HOOKS_VERSION)
+        version_file.write_text(HOOKS_VERSION, encoding="utf-8")
         # Clear disabled marker — explicit install means user wants hooks
         if disabled_file.exists():
             disabled_file.unlink()
@@ -474,7 +477,7 @@ def remove_hooks() -> dict:
             version_file.unlink()
         # Mark as explicitly disabled — auto-install will respect this
         version_dir.mkdir(parents=True, exist_ok=True)
-        disabled_file.write_text("removed by user\n")
+        disabled_file.write_text("removed by user\n", encoding="utf-8")
     except Exception:
         pass
 
@@ -487,7 +490,7 @@ def check_status() -> dict:
     version_file = _version_file()
     if version_file.exists():
         try:
-            installed_version = version_file.read_text().strip()
+            installed_version = version_file.read_text(encoding="utf-8").strip()
         except Exception:
             pass
 
@@ -576,7 +579,7 @@ def auto_install_if_needed() -> dict | None:
 
         # Already installed and current → skip
         if version_file.exists():
-            installed = version_file.read_text().strip()
+            installed = version_file.read_text(encoding="utf-8").strip()
             if installed == HOOKS_VERSION:
                 return None
 
@@ -602,7 +605,7 @@ def auto_upgrade_check() -> None:
                 _migrate_legacy_hooks()
             return
 
-        installed = version_file.read_text().strip()
+        installed = version_file.read_text(encoding="utf-8").strip()
         if installed == HOOKS_VERSION:
             return
 
@@ -631,7 +634,7 @@ def _migrate_legacy_hooks() -> None:
             settings = _merge_hooks(settings, hook_defs)
             _write_settings(settings)
             _version_dir().mkdir(parents=True, exist_ok=True)
-            _version_file().write_text(HOOKS_VERSION)
+            _version_file().write_text(HOOKS_VERSION, encoding="utf-8")
             logger.info("Migrated legacy bash hooks to hybrid hooks (v%s)", HOOKS_VERSION)
     except Exception as exc:
         logger.debug("Legacy hook migration failed: %s", exc)

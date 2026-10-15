@@ -12,15 +12,14 @@ import gzip
 import hashlib
 import json
 import logging
-from typing import Any, Optional
+from typing import Optional
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File
-from fastapi.responses import StreamingResponse
 
+from .export_delivery import export_response
+from .export_memories import write_memories_export
 from .helpers import (
-    DB_PATH,
-    dict_factory,
     get_active_profile,
     get_db_connection,
     require_engine,
@@ -53,8 +52,15 @@ async def export_memories(
     format: str = Query("json", pattern="^(json|jsonl|csv)$"),
     category: Optional[str] = None,
     project_name: Optional[str] = None,
+    include_embeddings: bool = Query(
+        False, description="Include embeddings as base64 (omitted by default)"),
 ):
-    """Export memories as JSON, JSONL, or CSV."""
+    """Export memories as JSON, JSONL, or CSV.
+
+    The file is written to a temporary file first and sent only when whole, so a
+    failure is an error status and never a download that looks complete.
+    Embeddings are left out unless ``include_embeddings`` is set.
+    """
     # Bulk data export. This GET is not covered by the mutation middleware and
     # is reached both by a plain fetch and a top-level navigation, neither of
     # which carries a credential header — so gate on the loopback-trusted
@@ -62,124 +68,28 @@ async def export_memories(
     from superlocalmemory.server.write_identity import require_http_mutation_actor
     require_http_mutation_actor(request, getattr(request.app.state, "daemon_descriptor", None),
                                 actor_kind="data-export")
-    try:
+    # The actor check above admits any loopback process. The export is every
+    # memory of the active workspace, so it also needs READ on it: a signed-in
+    # user with that role, or the owner when the workspace does not require
+    # login. Company mode with no session is refused here (401).
+    from superlocalmemory.access.rbac import Permission
+    from superlocalmemory.server.rbac_enforce import require_permission
+    active_profile = get_active_profile()
+    require_permission(request, Permission.READ, profile=active_profile)
+
+    def write(fp) -> int:
         conn = get_db_connection()
-        conn.row_factory = dict_factory
-        cursor = conn.cursor()
-        active_profile = get_active_profile()
-
-        # Detect schema
         try:
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='atomic_facts'",
-            )
-            use_v3 = cursor.fetchone() is not None
-        except Exception:
-            use_v3 = False
+            return write_memories_export(
+                conn, fp, format, active_profile, category=category,
+                project_name=project_name, include_embeddings=include_embeddings)
+        finally:
+            conn.close()
 
-        if use_v3:
-            # Withheld summaries are excluded, and this is about IMPORT, not
-            # tidiness. Import re-ingests every record through the normal
-            # pipeline, which mints a fresh memory with quarantined = 0 — so an
-            # export taken here and imported anywhere would resurrect all 1,195
-            # model-written rows as though the owner had written them, on a
-            # machine where nothing had gone wrong. The repair would then have
-            # to run again there.
-            #
-            # Nothing the owner wrote is lost: these are derived artefacts, the
-            # consolidator regenerates them from the facts that ARE exported,
-            # and their text is kept in consolidated_summaries. (That table is
-            # not in this export either — it is a view, not a memory. Worth
-            # revisiting when export covers derived state.)
-            query = "SELECT * FROM atomic_facts WHERE profile_id = ?"
-            if _has_column(cursor, "atomic_facts", "quarantined"):
-                query += " AND COALESCE(quarantined, 0) = 0"
-            params = [active_profile]
-            if category:
-                query += " AND fact_type = ?"
-                params.append(category)
-            if project_name:
-                query += " AND session_id = ?"
-                params.append(project_name)
-            query += " ORDER BY created_at"
-        else:
-            query = "SELECT * FROM memories WHERE profile = ?"
-            params = [active_profile]
-            if category:
-                query += " AND category = ?"
-                params.append(category)
-            if project_name:
-                query += " AND project_name = ?"
-                params.append(project_name)
-            query += " ORDER BY created_at"
-
-        cursor.execute(query, params)
-        memories = cursor.fetchall()
-        conn.close()
-
-        if format == "jsonl":
-            content = "\n".join(json.dumps(m) for m in memories)
-            media_type = "application/x-ndjson"
-        elif format == "csv":
-            import csv
-            import io as _io
-            if memories:
-                buf = _io.StringIO()
-                fieldnames = list(memories[0].keys())
-                writer = csv.DictWriter(
-                    buf, fieldnames=fieldnames, extrasaction="ignore",
-                )
-                writer.writeheader()
-                for m in memories:
-                    writer.writerow({
-                        k: (json.dumps(v) if isinstance(v, (dict, list)) else v)
-                        for k, v in m.items()
-                    })
-                content = buf.getvalue()
-            else:
-                content = ""
-            media_type = "text/csv"
-        else:
-            content = json.dumps({
-                "version": "3.0.0",
-                "exported_at": datetime.now(timezone.utc).isoformat(),
-                "total_memories": len(memories),
-                "filters": {"category": category, "project_name": project_name},
-                "memories": memories,
-            }, indent=2)
-            media_type = "application/json"
-
-        ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-        if len(content) > 10000:
-            compressed = gzip.compress(content.encode())
-            return StreamingResponse(
-                io.BytesIO(compressed), media_type="application/gzip",
-                headers={
-                    "Content-Disposition": f"attachment; filename=memories_export_{ts}.{format}.gz",
-                },
-            )
-        return StreamingResponse(
-            io.BytesIO(content.encode()), media_type=media_type,
-            headers={
-                "Content-Disposition": f"attachment; filename=memories_export_{ts}.{format}",
-            },
-        )
-
-    except Exception:
-        raise _internal_error("Export error")
-
-
-def _has_column(cursor: Any, table: str, column: str) -> bool:
-    """Whether ``table`` carries ``column`` in this database.
-
-    Presence-guarded because ``quarantined`` arrives with a migration and this
-    route must keep working on a store the engine has not opened.
-    """
-    try:
-        cursor.execute(f"PRAGMA table_info({table})")
-        return any(row[1] == column for row in cursor.fetchall())
-    except Exception:  # noqa: BLE001 -- an export must not fail over a probe
-        return False
+    ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+    media = {"jsonl": "application/x-ndjson", "csv": "text/csv"}.get(format, "application/json")
+    return await export_response(
+        write, media_type=media, filename=f"memories_export_{ts}.{format}", gzip_over=10000)
 
 
 @router.post("/api/import")
@@ -240,6 +150,17 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
             IngestionState,
         )
 
+        from superlocalmemory.core.ingestion_command import IdempotencyConflict
+        from superlocalmemory.core.metadata_guard import strip_reserved_metadata
+        from superlocalmemory.memory_core import (
+            find_redacted_duplicate,
+            pii_redaction_enabled,
+            prepare_metadata,
+            prepare_user_text,
+        )
+
+        redact = pii_redaction_enabled(engine._config)
+
         command = build_engine_ingestion_command(engine)
         from superlocalmemory.server.write_identity import (
             authenticated_request_actor,
@@ -260,13 +181,8 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
                 if not memory_content:
                     errors.append(f"Memory {idx}: missing 'content' field")
                     continue
-                # Imported content is untrusted: scrub secrets before it reaches
-                # any durable or queryable store, exactly as the canonical
-                # ingest path does.
-                from superlocalmemory.core.ingest_policy import scrub_secrets_for_ingest
-                _scrub = scrub_secrets_for_ingest(memory_content)
-                if _scrub.redacted:
-                    memory_content = _scrub.content
+                # Imported exactly as exported, credentials included, like any
+                # other save: an export and re-import must round-trip unchanged.
 
                 metadata = {
                     "project_name": memory.get('project_name'),
@@ -279,8 +195,12 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
                 ):
                     if _field in memory:
                         metadata[_field] = memory[_field]
-                receipt, created = command.submit_with_status(IngestionRequest(
-                    content=memory_content,
+                prepared = prepare_user_text(engine._config, memory_content)
+                metadata, _ = prepare_metadata(
+                    strip_reserved_metadata(metadata), pii_redaction=redact,
+                )
+                request_obj = IngestionRequest(
+                    content=prepared.text,
                     profile_id=engine._profile_id,
                     source_type="http-import",
                     idempotency_key=f"import:{file_digest}:{idx}",
@@ -292,7 +212,18 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
                     session_date=memory.get('session_date') or "",
                     speaker=memory.get('speaker') or "",
                     role=memory.get('role') or "user",
-                ))
+                )
+                try:
+                    receipt, created = command.submit_with_status(request_obj)
+                except IdempotencyConflict:
+                    # Saved raw before redaction was on: the same text once
+                    # prepared is already present, not a failure.
+                    if find_redacted_duplicate(
+                        engine._db, request_obj, redact,
+                    ) is None:
+                        raise
+                    skipped += 1
+                    continue
                 completed = await asyncio.to_thread(command.materialize, receipt.operation_id)
                 if completed.state is not IngestionState.COMPLETE:
                     raise RuntimeError(

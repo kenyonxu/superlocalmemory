@@ -26,6 +26,8 @@ import logging
 import sqlite3
 from typing import Final
 
+from superlocalmemory.storage import scene_member_triggers as _scene_member_triggers
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -201,6 +203,18 @@ CREATE TABLE IF NOT EXISTS atomic_facts (
     -- DatabaseManager.get_facts_by_ids, which every channel's candidates are
     -- re-authorised through and which the engine hydrates from.
     quarantined        INTEGER NOT NULL DEFAULT 0,
+    -- Stored but never an answer (operational stubs such as "session ended");
+    -- listed only on request. Same enforcement point as quarantined (M060).
+    non_answer         INTEGER DEFAULT 0,
+    -- The user's own decision (0 = "this is an answer"); NULL = none. It wins
+    -- over the automatic stub rule forever (WP-19 review M1).
+    non_answer_user    INTEGER,
+    -- Memory kind (M052 on upgraded stores). NULL = untyped; no CHECK by design.
+    memory_kind            TEXT,
+    memory_kind_source     TEXT,
+    memory_kind_confidence REAL,
+    memory_kind_recipe     TEXT,
+    memory_kind_at         TEXT,
     langevin_position  TEXT,
 
     -- Emotional
@@ -504,39 +518,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_fact_members_lookup
     ON scene_fact_members (profile_id, fact_id, scene_id);
 CREATE INDEX IF NOT EXISTS idx_scene_fact_members_order
     ON scene_fact_members (scene_id, position);
-
-CREATE TRIGGER IF NOT EXISTS trg_scene_fact_members_insert
-AFTER INSERT ON memory_scenes
-BEGIN
-    DELETE FROM scene_fact_members WHERE scene_id = NEW.scene_id;
-    INSERT OR IGNORE INTO scene_fact_members
-        (profile_id, scene_id, fact_id, position)
-    SELECT NEW.profile_id, NEW.scene_id, af.fact_id, CAST(member.key AS INTEGER)
-    FROM json_each(
-        CASE WHEN json_valid(NEW.fact_ids_json)
-             THEN NEW.fact_ids_json ELSE '[]' END
-    ) AS member
-    JOIN atomic_facts AS af
-      ON af.fact_id = member.value
-     AND af.profile_id = NEW.profile_id;
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_scene_fact_members_update
-AFTER UPDATE OF profile_id, fact_ids_json ON memory_scenes
-BEGIN
-    DELETE FROM scene_fact_members WHERE scene_id = NEW.scene_id;
-    INSERT OR IGNORE INTO scene_fact_members
-        (profile_id, scene_id, fact_id, position)
-    SELECT NEW.profile_id, NEW.scene_id, af.fact_id, CAST(member.key AS INTEGER)
-    FROM json_each(
-        CASE WHEN json_valid(NEW.fact_ids_json)
-             THEN NEW.fact_ids_json ELSE '[]' END
-    ) AS member
-    JOIN atomic_facts AS af
-      ON af.fact_id = member.value
-     AND af.profile_id = NEW.profile_id;
-END;
-"""
+""" + _scene_member_triggers.DDL
 
 
 # ---------------------------------------------------------------------------
@@ -990,6 +972,10 @@ _ADDITIVE_COLUMNS: Final[tuple[tuple[str, str, str], ...]] = (
     # The column has to exist before its own index either way, so it belongs
     # here, where a store gets it at start regardless of migration state.
     ("atomic_facts", "pinned", "INTEGER NOT NULL DEFAULT 0"),
+    # WP-19: keeping operational stubs out of answers must not wait for the
+    # deferred M060 pass, and the visibility indexes cover it from the start.
+    ("atomic_facts", "non_answer", "INTEGER DEFAULT 0"),
+    ("atomic_facts", "non_answer_user", "INTEGER"),
 )
 
 
@@ -1016,6 +1002,17 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
             logger.warning(
                 "additive column %s.%s not applied: %s", table, column, exc,
             )
+
+
+#: M052's index, created only when the column exists: an index on a missing
+#: column would fail engine start on a store M052 has not reached (the ``pinned`` trap).
+def _create_memory_kind_index(conn: sqlite3.Connection) -> None:
+    try:
+        if any(r[1] == "memory_kind" for r in conn.execute("PRAGMA table_info(atomic_facts)")):
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_memory_kind ON atomic_facts "
+                         "(profile_id, memory_kind) WHERE memory_kind IS NOT NULL")
+    except sqlite3.Error as exc:
+        logger.warning("memory-kind index not created: %s", exc)
 
 
 def create_all_tables(conn: sqlite3.Connection) -> None:
@@ -1048,6 +1045,12 @@ def create_all_tables(conn: sqlite3.Connection) -> None:
     for ddl in V32_DDL:
         conn.executescript(ddl)
 
+    # The graph's change counter, part of the activation-cache key. After the
+    # V32 DDL: its triggers sit on association_edges and empty activation_cache.
+    from superlocalmemory.storage import fact_search_changes, graph_generation
+    conn.executescript(graph_generation.DDL + fact_search_changes.ddl(conn))
+    from superlocalmemory.core.overtaken_cases import ensure_table; ensure_table(conn)  # noqa: E702
+
     # Additive columns on tables that predate them.
     #
     # CREATE TABLE IF NOT EXISTS cannot add a column to a table that already
@@ -1058,6 +1061,13 @@ def create_all_tables(conn: sqlite3.Connection) -> None:
     # poisoned row from retrieval must not be contingent on a migration having
     # succeeded.
     _add_missing_columns(conn)
+    _create_memory_kind_index(conn)
+    from superlocalmemory.storage import recency_index, visibility_index
+    from superlocalmemory.storage.fts_residue import enable_quietly
+    visibility_index.ensure(conn)
+    recency_index.ensure(conn)
+    _scene_member_triggers.ensure(conn)  # 4.2.4 stores: a scene save scanned every fact
+    enable_quietly(conn)  # a deleted memory's words leave the keyword index at once
 
     # Seed schema version on first run.
     existing = conn.execute(
@@ -1082,6 +1092,12 @@ def drop_all_tables(conn: sqlite3.Connection) -> None:
     Args:
         conn: An open SQLite connection. Caller manages commit.
     """
+    # The graph counter's triggers reference V32 tables: drop them first.
+    from superlocalmemory.storage import fact_search_changes, graph_generation
+    for trigger in (*graph_generation.trigger_names(), *fact_search_changes.trigger_names()):
+        conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+    for table in (graph_generation.TABLE, fact_search_changes.TABLE, "correction_cases_overtaken"): conn.execute(f"DROP TABLE IF EXISTS {table}")  # noqa: E701
+
     # V32 tables first (they may FK to base tables)
     from superlocalmemory.storage.schema_v32 import V32_ROLLBACK
     for sql in V32_ROLLBACK:

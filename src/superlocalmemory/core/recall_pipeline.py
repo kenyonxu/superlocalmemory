@@ -113,27 +113,22 @@ def _preserve_exact_lexical_evidence(
     they must not demote a fact containing the caller's exact query behind
     semantically similar noise. This guard runs after every learned layer and
     changes only ordering; it does not introduce or bypass evidence.
+    What counts as an exact hit is defined once, in retrieval.exact_lexical,
+    which the kind-aware pass reads too so it never moves anything above it.
     """
-    normalized_query = " ".join(query.casefold().split())
-    if len(normalized_query) < 3 or len(response.results) < 2:
+    from superlocalmemory.retrieval.exact_lexical import (
+        bm25_strength,
+        is_exact_lexical_hit,
+        normalize_query,
+    )
+
+    normalized_query = normalize_query(query)
+    if len(response.results) < 2:
         return
-    exact = [
-        result
-        for result in response.results
-        if (
-            float((result.channel_scores or {}).get("bm25", 0.0) or 0.0) > 0.0
-            and normalized_query
-            in " ".join(result.fact.content.casefold().split())
-        )
-    ]
+    exact = [r for r in response.results if is_exact_lexical_hit(r, normalized_query)]
     if not exact:
         return
-    strongest = max(
-        exact,
-        key=lambda result: float(
-            (result.channel_scores or {}).get("bm25", 0.0) or 0.0,
-        ),
-    )
+    strongest = max(exact, key=bm25_strength)
     if response.results[0] is strongest:
         return
     response.results = [
@@ -159,34 +154,34 @@ def _preserve_exact_lexical_evidence(
 
 def feed_recall_settled(
     *,
-    memory_db: str,
     learning_db: str,
     profile_id: str,
     query_id: str,
-    ndcg_at_10: float,
+    reward: float | None = None,
+    ndcg_at_10: float | None = None,
+    memory_db: str = "",
 ) -> None:
-    """Route a settled recall's NDCG@10 into the shadow router.
+    """Route one settled recall's reward into the shadow router.
 
-    The arm is recomputed from ``query_id`` so callers don't need to
-    persist arm assignment anywhere — the router's determinism
-    guarantees the same arm decision at settle-time that was used at
-    recall-time.
+    Called when a recall's reward becomes known: an explicit outcome settling
+    its bandit play (``reward_from_outcomes``) or an engagement label being
+    finalized (``EngagementRewardModel.finalize_outcome``). The router credits
+    it to the arm recorded when the recall was SERVED (``shadow_assignments``);
+    a query served outside a test is ignored there.
 
-    Called from ``EngagementRewardModel.finalize_outcome`` (LLD-08 §4.2)
-    after the reward row is committed. Cheap on the hot path: one
-    singleton-cache read + one paired-list append.
+    ``ndcg_at_10`` is the pre-4.1.25 name of ``reward`` — the value was never
+    an NDCG. ``memory_db`` is accepted and unused.
     """
+    del memory_db
+    value = reward if reward is not None else ndcg_at_10
+    if value is None or not query_id:
+        return
     try:
         from superlocalmemory.core import shadow_router as _sr
         router = _sr.get_shadow_router(
-            memory_db=memory_db,
-            learning_db=learning_db,
-            profile_id=profile_id,
+            learning_db=learning_db, profile_id=profile_id,
         )
-        arm = router.route_query(query_id)
-        router.on_recall_settled(
-            query_id=query_id, arm=arm, ndcg_at_10=float(ndcg_at_10),
-        )
+        router.on_recall_settled(query_id=query_id, reward=float(value))
     except Exception as exc:  # pragma: no cover — defence in depth
         logger.debug("feed_recall_settled error: %s", exc)
 
@@ -271,8 +266,14 @@ class _ReadOnlyLearningView:
             timeout=0.25,
         )
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA query_only=ON")
-        connection.execute("PRAGMA busy_timeout=250")
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("PRAGMA busy_timeout=250")
+        except BaseException:
+            # Setup failed: close it now, or the file stays open (Windows
+            # then cannot delete or replace it) for as long as the error lives.
+            connection.close()
+            raise
         return connection
 
     def count_signals(self, profile_id: str) -> int:
@@ -374,6 +375,7 @@ def apply_ranking(
     record_plays: bool = True,
     memory_db_path: Any = None,
     play_sink: dict | None = None,
+    learning_db_path: Any = None,
 ) -> "RecallResponse":
     """Run the ranking pipeline at the requested version.
 
@@ -412,6 +414,7 @@ def apply_ranking(
             record_plays=record_plays,
             memory_db_path=memory_db_path,
             play_sink=play_sink,
+            learning_db_path=learning_db_path,
         )
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("apply_ranking ensemble step skipped: %s", exc)
@@ -514,6 +517,7 @@ def apply_adaptive_ranking(
         retrieval_time_ms=response.retrieval_time_ms,
         # v3.6.6: preserve evidence-floor signal across reranking rebuilds.
         no_confident_match=(len(new_results) == 0) and response.no_confident_match,
+        **_completeness_of(response),
     )
 
 
@@ -618,6 +622,7 @@ def apply_v2_adaptive_ranking(
             retrieval_time_ms=response.retrieval_time_ms,
             # v3.6.6: preserve evidence-floor signal across reranking rebuilds.
             no_confident_match=(len(new_results) == 0) and response.no_confident_match,
+            **_completeness_of(response),
         )
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("apply_v2_adaptive_ranking skipped: %s", exc)
@@ -662,8 +667,18 @@ def _rank_key(result) -> tuple[float, str]:
     return (-float(utility), result.fact.fact_id)
 
 
+def _question_key(query: str | None) -> str | None:
+    """A stable, text-free key for a question; None when there is no question."""
+    if query is None:
+        return None
+    from superlocalmemory.learning.bandit_draw import normalize_question
+
+    return hashlib.sha256(normalize_question(query).encode("utf-8")).hexdigest()[:16]
+
+
 def _apply_outcome_bonus(
     results: list, profile_id: str, memory_db_path: Any = None,
+    *, query: str | None = None,
 ) -> list:
     """Nudge ranking by whether each memory has demonstrably helped before.
 
@@ -733,7 +748,9 @@ def _apply_outcome_bonus(
             ))
         adjusted.sort(key=_rank_key)
         if adjusted:
-            RECENT_TOPS.record_top(profile_id, adjusted[0].fact.fact_id)
+            # Against the question, so asking it again is not another win.
+            RECENT_TOPS.record_top(profile_id, adjusted[0].fact.fact_id,
+                                   query_key=_question_key(query))
         return adjusted
     except Exception as exc:  # pragma: no cover — advisory, never fatal
         logger.debug("outcome bonus skipped: %s", exc)
@@ -863,13 +880,48 @@ def _resettle_shown_after_bias(
             r.fact.fact_id for r in results[:ADMIT_TOP_N]
             if getattr(r, "fact", None) is not None
         ]
-        if set(shown_now) == set(shown_before):
+        # Compare with what the play RECORDED when the sink knows it: a pass
+        # that ran in between (the exact-lexical guard) can make the caller's
+        # "before" list already equal to the final one while the stored record
+        # is stale.
+        recorded = play_sink.get("shown")
+        baseline = recorded if isinstance(recorded, list) else shown_before
+        if set(shown_now) == set(baseline):
             return
-        ContextualBandit(Path(learning_db), profile_id).record_shown(
+        if ContextualBandit(Path(learning_db), profile_id).record_shown(
             play_id, shown_now,
-        )
+        ):
+            play_sink["shown"] = list(shown_now)
     except Exception as exc:  # pragma: no cover — advisory
         logger.debug("shown-set correction skipped: %s", exc)
+
+
+def _note_order_replaced(
+    play_sink: dict, profile_id: str, response: Any, shown_before: list[str],
+) -> None:
+    """Tell the play its arm did not choose what was shown first.
+
+    Only when the opt-in hosted reorder replaced the order AND that changed the
+    shown top. The play still settles and the memories an outcome names are
+    still credited; only the arm's posterior is left alone, because the outcome
+    describes an order the arm did not produce. Never raises.
+    """
+    play_id = play_sink.get("play_id")
+    learning_db = play_sink.get("learning_db")
+    if not play_id or not learning_db:
+        return
+    try:
+        from superlocalmemory.retrieval.jev_rerank import STATUS_LISTWISE
+
+        if getattr(response, "reranker_status", "") != STATUS_LISTWISE:
+            return
+        if _top_ids(response.results) == list(shown_before):
+            return
+        from superlocalmemory.learning.bandit import ContextualBandit
+
+        ContextualBandit(Path(learning_db), profile_id).mark_order_replaced(play_id)
+    except Exception as exc:  # pragma: no cover — advisory
+        logger.debug("order-replaced note skipped: %s", exc)
 
 
 def _admit_to_working_memory(
@@ -977,10 +1029,12 @@ def apply_v2_bandit_ensemble(
         # samples the same arm from a read-only snapshot and returns
         # ``play_id=None``, so taking that branch means this query can never be
         # settled and the arm can never move off its prior.
+        # The draw is keyed by the question (never stored): the same question
+        # over the same posterior gets the same weights, hence the same order.
         choice = (
-            bandit.choose(context, query_id)
+            bandit.choose(context, query_id, draw_key=query)
             if record_plays
-            else bandit.choose_readonly(context)
+            else bandit.choose_readonly(context, draw_key=query)
         )
 
         # --- 2. apply channel weights -------------------------------------
@@ -994,6 +1048,11 @@ def apply_v2_bandit_ensemble(
             db = _ReadOnlyLearningView(db_path)
             signal_count = db.count_signals(profile_id)
             active_model = load_active(db, profile_id)
+            # While a retrained candidate is under test, half the recalls are
+            # ranked by it and the assignment is recorded.
+            from superlocalmemory.learning.shadow_serving import serving_model
+            active_model = serving_model(db_path, profile_id, query_id,
+                                         active_model)
         except Exception as exc:
             logger.debug("v2 bandit: model/signal load skipped: %s", exc)
 
@@ -1024,7 +1083,7 @@ def apply_v2_bandit_ensemble(
         # true by construction: the model cannot learn from a signal it
         # never sees, so there is no self-reinforcing loop to exclude.
         final_results = _apply_outcome_bonus(
-            final_results, profile_id, memory_db_path,
+            final_results, profile_id, memory_db_path, query=query,
         )
 
         # Give the play its evidence: which memories this query actually
@@ -1032,24 +1091,27 @@ def apply_v2_bandit_ensemble(
         # reference instead of falling through to the neutral default. Written
         # after the rerank because that is when the shown order is final.
         if choice.play_id:
+            shown_ids = [r.fact.fact_id for r in final_results[:5]]
+            recorded = False
             try:
-                bandit.record_shown(
-                    choice.play_id, [r.fact.fact_id for r in final_results[:5]],
-                )
+                recorded = bandit.record_shown(choice.play_id, shown_ids)
             except Exception as exc:  # pragma: no cover — never break a recall
                 logger.debug("v2 bandit record_shown skipped: %s", exc)
             if play_sink is not None:
                 # So the caller can correct this record if the order changes
-                # after this function returns.
+                # after this function returns — compared against the list
+                # actually stored, not one taken after later passes.
                 play_sink["play_id"] = choice.play_id
                 play_sink["learning_db"] = str(db_path)
+                if recorded:
+                    play_sink["shown"] = list(shown_ids)
 
-        # Recall is a query.  Implicit learning signals are deliberately
-        # disabled on this path: even a non-blocking enqueue eventually writes
-        # canonical/learning state and turns dashboard polling into contention.
-        # An explicit feedback command owns durable learning signals instead.
-        # NOTE: this gates the twenty-row exposure enqueue ONLY. The play above
-        # is recorded regardless — see this function's docstring.
+        # Exposure capture for the ranker's training rows. Off unless the
+        # caller asks (run_recall asks only in v2-ensemble mode): the enqueue
+        # is a put_nowait, the signal worker writes later, and the rows are
+        # exposures — the phase counter excludes them (signal_kinds).
+        # NOTE: this gates the exposure enqueue ONLY. The play above is
+        # recorded regardless — see this function's docstring.
         if record_signals:
             try:
                 top20 = final_results[:20]
@@ -1083,10 +1145,35 @@ def apply_v2_bandit_ensemble(
             retrieval_time_ms=response.retrieval_time_ms,
             # v3.6.6: preserve evidence-floor signal across ensemble rebuilds.
             no_confident_match=(len(final_results) == 0) and response.no_confident_match,
+            # A reorder does not make an incomplete or warming answer whole.
+            **_completeness_of(response),
         )
     except Exception as exc:  # pragma: no cover — defensive top-level
         logger.debug("apply_v2_bandit_ensemble skipped: %s", exc)
         return response
+
+
+def _completeness_of(response: RecallResponse) -> dict:
+    """What a rebuilt response must carry over to stay honest.
+
+    The ensemble and agentic steps build a new ``RecallResponse`` around a new
+    result list. Without these fields an answer whose channels were warming
+    or abandoned came out reading as complete, and its stage timings vanished.
+    """
+    return {
+        "incomplete_channels": tuple(getattr(response, "incomplete_channels", ()) or ()),
+        "channel_status": dict(getattr(response, "channel_status", {}) or {}),
+        "graph_lag_s": getattr(response, "graph_lag_s", None),
+        "stage_ms": dict(getattr(response, "stage_ms", {}) or {}),
+        # #150: a project filter that fell back to unfiltered results must
+        # still say so after a rebuild.
+        "project_scope": getattr(response, "project_scope", None),
+        # 4.1.22: a tag filter's note/reason must survive a rebuild too.
+        "tag_scope": getattr(response, "tag_scope", None),
+        # 4.1.25: the question's evidence features describe the question, not
+        # the result list, so a rebuild keeps them.
+        "query_evidence": dict(getattr(response, "query_evidence", {}) or {}),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1120,6 +1207,64 @@ def resolve_hot_path_fast(fast: bool | None, config: "SLMConfig") -> bool:
     return client_driven
 
 
+
+def _judge_sufficiency(retrieval_engine: Any, query: str, response: RecallResponse) -> Any:
+    """The verdict of the engine's answer check, or None (the previous behaviour).
+
+    Kept for direct callers; ``run_recall`` uses ``answer_check_stage`` itself so
+    that the recall's time budget and the per-recall request apply, and so that
+    the response says what became of the check.
+    """
+    from superlocalmemory.core.answer_check_stage import run_answer_check
+
+    return run_answer_check(retrieval_engine, query, response).verdict
+
+
+def _reorders(judge: Any) -> bool:
+    from superlocalmemory.core.answer_check_stage import reorders
+
+    return reorders(judge)
+
+
+def _rerank_and_judge(judge: Any, query: str, response: RecallResponse) -> Any:
+    from superlocalmemory.core.answer_check_stage import rerank_and_judge
+
+    return rerank_and_judge(judge, query, response, None).verdict
+
+
+def _apply_order(response: RecallResponse, order: tuple[int, ...]) -> bool:
+    from superlocalmemory.core.answer_check_stage import apply_order
+
+    return apply_order(response, order)
+
+
+def _top_ids(results: list) -> list[str]:
+    from superlocalmemory.core.working_memory import ADMIT_TOP_N
+
+    return [r.fact.fact_id for r in results[:ADMIT_TOP_N]
+            if getattr(r, "fact", None) is not None]
+
+
+def _engine_learning_db(config: Any) -> Path | None:
+    """``<base_dir>/learning.db`` for this engine's config, when it has one."""
+    base = getattr(config, "base_dir", None)
+    if not base:
+        return None
+    try:
+        return Path(base) / "learning.db"
+    except TypeError:  # a stand-in config in tests
+        return None
+
+
+def _metadata_reader(db: Any) -> Any:
+    """Tags/project per result for the support gate's optional bonus, when the
+    store can be read (a stand-in database cannot)."""
+    if not callable(getattr(db, "execute", None)):
+        return None
+    from superlocalmemory.core.support_stage import metadata_reader
+    return metadata_reader(db)
+
+
 def run_recall(
     query: str,
     profile_id: str,
@@ -1145,11 +1290,36 @@ def run_recall(
     known_as_of: str | None = None,
     valid_at: str | None = None,
     include_unknown: bool = False,
+    answer_check: str | None = None,
+    facets: Any = None,
+    query_id: str | None = None,
+    show_weak: bool = False,
+    include_related: bool = False,
 ) -> RecallResponse:
     """Recall relevant facts for a query.
 
+    4.1.25: when nothing in memory supports the question (the answer-support
+    gate, ``core/support_stage``), recall returns no results and a plain
+    ``abstention_note``; ``show_weak=True`` returns the weak matches instead,
+    each labelled ``weak``; ``include_related=True`` shows up to three close
+    memories of a real question, labelled ``related`` (people searching get
+    them; agents ask). Pinned memories and explicit filters keep their
+    existing behaviour.
+
+    ``query_id`` is this recall's one identity. The engine allocates it and
+    returns it on the response; the bandit play, the shadow assignment and
+    the exposure features are all recorded under the same id, so an outcome
+    that quotes it settles exactly this recall. A fresh id is
+    minted only for a direct caller that supplies none.
+
     Multi-scope: ``include_global`` / ``include_shared`` control which
     scopes participate in retrieval (passed through to retrieval engine).
+
+    ``answer_check``: ``"full"`` (the default — every recall a person or
+    agent asked for) or ``"no_reorder"`` (the check without the opt-in
+    reorder: the loop gate). Unknown values raise ValueError. A recall that is
+    not a question runs inside ``core.answer_check_scope.skip_answer_check()``
+    and is never judged.
 
     Pipeline: retrieval -> agentic sufficiency (if configured) -> post-recall updates.
 
@@ -1165,6 +1335,12 @@ def run_recall(
     all existing behaviour unchanged.
     """
     m = mode or config.mode
+    from superlocalmemory.retrieval.answer_check_status import normalize_request
+    answer_check = normalize_request(answer_check)
+    # The answer check's budget runs from here: what retrieval and ranking use
+    # is what the check cannot.
+    import time as _time_budget
+    _recall_started = _time_budget.monotonic()
 
     # v3.8.2: resolve the client-driven-agentic default when a caller left
     # ``fast`` unset (None). After this line ``fast`` is a concrete bool, so
@@ -1185,8 +1361,14 @@ def run_recall(
                            _label, (_time_t.monotonic() - _t0) * 1000.0)
 
     # The interactive path must retain the complete local retrieval contract.
-    # Only agentic verification can invoke an unbounded model round.
+    # Only agentic verification may call a language model during recall; the
+    # entity channel resolves names read-only (EntityResolver.lookup).
     extra_disabled = None
+    # 4.1.25: extra terms for the keyword channel only (retrieval/query_rewrite);
+    # passed only when the rewrite added something, so a stand-in engine that
+    # predates the parameter is never asked for it.
+    from superlocalmemory.retrieval.query_rewrite import rewrite as _rewrite
+    _lexical = _rewrite(query, mode=m, db=db, profile_id=profile_id, llm=llm, config=config)
     response = retrieval_engine.recall(
         query, profile_id, m, limit,
         extra_disabled_channels=extra_disabled,
@@ -1197,6 +1379,9 @@ def run_recall(
         known_as_of=known_as_of,
         valid_at=valid_at,
         include_unknown=include_unknown,
+        # Only when asked: a retrieval stand-in need not know about facets.
+        **({"facets": facets} if facets is not None and not facets.empty else {}),
+        **({"lexical_query": _lexical.lexical_query} if _lexical.added else {}),
     )
     _mark("retrieval(chan+rerank)")
 
@@ -1227,6 +1412,11 @@ def run_recall(
                     llm=llm,
                     top_k=limit,
                     query_type=response.query_type,
+                    # L2-08: the facet the caller asked for must survive the
+                    # internal verification round too — round 2 used to
+                    # re-retrieve with none, then REPLACE the already
+                    # filtered round-1 response with its unfiltered answer.
+                    facets=facets,
                 )
                 # Replace response results with enhanced facts if we got more
                 if len(enhanced_facts) > len(response.results):
@@ -1261,6 +1451,7 @@ def run_recall(
                         # v3.6.6: agentic round-2 may add facts; recompute flag.
                         no_confident_match=(len(enhanced_results[:limit]) == 0)
                         and response.no_confident_match,
+                        **_completeness_of(response),
                     )
             except Exception as exc:
                 logger.debug("Agentic sufficiency skipped: %s", exc)
@@ -1270,22 +1461,46 @@ def run_recall(
     # (SLM_RANKING=off|v1|v2|v2-ensemble) controls the pipeline. Legacy
     # SLM_V2_PIPELINE_DISABLED + SLM_BANDIT_DISABLED still honoured for
     # one-release back-compat. Identity when no active model.
+    # Bound before the try: everything after it reads the sink, and an empty
+    # sink is the "no play recorded" case every reader already handles.
+    play_sink: dict = {}
+    # What the cross-encoder scored, read before the learned layers rebuild
+    # the results; their order may then overturn only a near-tie of it.
+    _rerank_anchors = {
+        r.fact.fact_id: r.rerank_score for r in response.results
+        if getattr(r, "rerank_score", None) is not None
+    }
     try:
         import os as _os
         import uuid as _uuid
-        query_id = _uuid.uuid4().hex
+        query_id = str(query_id or "") or _uuid.uuid4().hex
         mode = _resolve_ranking_mode(_os.environ)
-        play_sink: dict = {}
+        # Exposure features are recorded (asynchronously, by the signal
+        # worker) only when the operator turned adaptive ranking on: they are
+        # the trainer's input, and without them no labelled row can exist.
+        # An exposure is never counted as feedback.
         response = apply_ranking(
             response, query, profile_id, query_id,
-            config=config, pipeline_version=mode, record_signals=False,
+            config=config, pipeline_version=mode,
+            record_signals=(mode == "v2-ensemble"),
             # the store THIS recall read from, so the outcome bonus
             # cannot resolve a different one
             memory_db_path=getattr(db, "db_path", None),
             play_sink=play_sink,
+            # ...and the learning store beside it: the play, the assignment
+            # and the exposure belong to the engine's store, not to whatever
+            # the default data root resolves to.
+            learning_db_path=_engine_learning_db(config),
         )
     except Exception as exc:
         logger.debug("Ranking pipeline skipped: %s", exc)
+    if _rerank_anchors and response.results:
+        from superlocalmemory.retrieval.reranker_lead import hold_reranker_lead
+
+        _shown_before_lead = _top_ids(response.results)
+        response.results = hold_reranker_lead(response.results, _rerank_anchors)
+        _resettle_shown_after_bias(play_sink, profile_id, response.results,
+                                   _shown_before_lead)
 
     # Continuity of attention, applied after every learned layer and outside
     # the ranking-version switch: a session's recent memories bias this answer
@@ -1315,14 +1530,88 @@ def run_recall(
             play_sink, profile_id, response.results, _shown_before,
         )
 
+    # #150: the session's / caller's project, preferred on the FINAL order:
+    # after learned ranking and continuity, which both rewrite ranking scores
+    # without knowing the project, and before the exact-hit pin and kind
+    # awareness, which keep their guarantees above it. Bounded by
+    # project_scope.BOOST on the final ranking key.
+    if response.results and facets is not None and getattr(facets, "prefer_project", None):
+        from superlocalmemory.retrieval import project_scope as _project_scope
+
+        _shown_before_project = _top_ids(response.results)
+        response.results = _project_scope.prefer_in_final_order(
+            response.results, _project_scope.preferred_in(db, response.results, facets))
+        _resettle_shown_after_bias(play_sink, profile_id, response.results,
+                                   _shown_before_project)
+
     _preserve_exact_lexical_evidence(response, query)
+
+    # Kind-aware ordering: "what did we decide" favours decisions, "current
+    # status" puts the newest confirmed current-state memory about the named
+    # subject first. Bounded, read-only, no model; never above the exact hit
+    # pinned just above; retrieval.kind_aware=False skips it (retrieval/kind_aware).
+    if response.results:
+        from superlocalmemory.core.working_memory import ADMIT_TOP_N as _KTOP
+        from superlocalmemory.retrieval import kind_aware, source_fidelity_flags
+        _shown_before_kind = [r.fact.fact_id for r in response.results[:_KTOP]
+                              if getattr(r, "fact", None) is not None]
+        response.results = source_fidelity_flags.flag_unverified(kind_aware.apply_for_recall(
+            response.results, query, profile_id, getattr(config, "retrieval", None),
+            engine=retrieval_engine, db=db), db, profile_id, response=response)
+        _resettle_shown_after_bias(play_sink, profile_id, response.results,
+                                   _shown_before_kind)
+
+    # A captured prompt is something the user asked an agent to do, not a fact
+    # about their work: last, so no earlier layer can lift it back above a
+    # memory an agent or the user saved (retrieval/request_memories).
+    if response.results:
+        from superlocalmemory.retrieval import request_memories
+
+        _shown_before_requests = _top_ids(response.results)
+        response.results = request_memories.settle_requests(
+            response.results, db, query, response.query_type)
+        _resettle_shown_after_bias(play_sink, profile_id, response.results,
+                                   _shown_before_requests)
     _mark("learning+ranking")
     # Deliberately no trust, Fisher, retention, lifecycle, popularity, or graph
     # mutation here.  Those state transitions require a separately authenticated
     # positive/negative outcome; merely returning a result is an exposure.
 
+    from superlocalmemory.core.answer_check_stage import build_trace, run_answer_check
     from superlocalmemory.core.score_contract import finalize_score_contract
-    finalize_score_contract(response)
+    _shown_before_judge = _top_ids(response.results)
+    _judge_t0 = _time_budget.monotonic()
+    outcome = run_answer_check(retrieval_engine, query, response,
+                               request=answer_check, recall_started=_recall_started,
+                               profile_id=profile_id)
+    _judge_t1 = _time_budget.monotonic()
+    _mark("sufficiency")
+    # The opt-in hosted reordering may have changed what is shown first; the
+    # play's evidence must name what the caller actually sees, and the arm the
+    # play credits must not be rewarded for an order it did not choose.
+    _note_order_replaced(play_sink, profile_id, response, _shown_before_judge)
+    _resettle_shown_after_bias(
+        play_sink, profile_id, response.results, _shown_before_judge,
+    )
+    from superlocalmemory.core import support_stage
+    from superlocalmemory.core.answer_check_scope import in_context_load
+    # A context load is not a question: it gets its memories, under the
+    # surface's token cap, instead of an abstention. Nor is "what am I working
+    # on": its answer is the newest memories (the recency strategy put them
+    # first), which no word of the question appears in, so a word-support test
+    # would call every right answer weak and say "That isn't in memory".
+    recency = getattr(response, "query_type", "") == "recency"
+    gated = support_stage.enabled(config) and not in_context_load() and not recency
+    support = support_stage.assess(
+        retrieval_engine, query, response, outcome.verdict, profile_id,
+        metadata=_metadata_reader(db)) if gated else None
+    finalize_score_contract(
+        response, verdict=None if recency else outcome.verdict, support=support,
+        show_weak=show_weak, include_related=include_related,
+        keep_results=recency or support_stage.explicit_filter(
+            facets, window, as_of=as_of, known_as_of=known_as_of, valid_at=valid_at))
+    response.answer_check_status = outcome.status
+    response.answer_check_detail = outcome.detail
 
     # LLD-00 §3 — stamp HMAC markers on every result so post_tool_outcome_hook
     # can validate fact_ids observed in downstream tool output.
@@ -1334,4 +1623,7 @@ def run_recall(
         _admit_to_working_memory(response.results, profile_id, _sid)
 
     _mark("TOTAL(fisher+trust+markers)")
+    response.answer_check_trace = build_trace(  # 4.1.20: Answer Check history
+        retrieval_engine, outcome, response, recall_started=_recall_started,
+        judge_started=_judge_t0, judge_ended=_judge_t1, ended=_time_budget.monotonic())
     return response

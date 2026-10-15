@@ -9,8 +9,6 @@ hopeless 404 three times before misreporting it.
 """
 from __future__ import annotations
 
-import pytest
-
 from superlocalmemory.cli.daemon import DaemonNotFound
 from superlocalmemory.mcp._daemon_proxy import DaemonPoolProxy
 

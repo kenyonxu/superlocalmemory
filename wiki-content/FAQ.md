@@ -1,190 +1,104 @@
-# FAQ — V4.0.5
+# FAQ
 
-Frequently asked questions about SuperLocalMemory V4.0.5.
+Short answers to the questions people ask most, each with a link to the page that explains it properly.
 
 ## General
 
 ### What is SuperLocalMemory?
 
-SuperLocalMemory is a persistent memory system for AI assistants. It stores your decisions, bug fixes, project context, and preferences locally, then automatically provides them to your AI in future sessions via 5-channel retrieval (semantic, BM25, temporal, Hopfield, spreading activation — plus graph enhancement). Your AI stops forgetting you.
+A memory for AI assistants that lives on your own computer. It keeps your decisions, bug fixes, preferences and project context, and gives the relevant ones back to your assistant in later sessions. Recall combines five retrieval methods and drops results that have no real evidence ([How Recall Works](How-Recall-Works)). The whole design is in [Architecture](Architecture).
 
-### Is it really free?
+### Is it free?
 
-Yes. SuperLocalMemory is open-source (GNU Affero General Public License v3.0 or later) and completely free. No usage limits, no credit system, no subscription. Forever.
+SLM is open source under the AGPL-3.0-or-later licence, with no usage limits, credits or subscription. A separate commercial licence exists for people who want to embed it in a closed-source product or run it as a hosted service without releasing their source (`COMMERCIAL-LICENSE.md` in the repository).
 
 ### Where is my data stored?
 
-Core memory is SQLite-backed inside the configured SLM data root. That root also contains configuration, logs, queues, models, and derived state. Mode C sends configured query or enrichment content to its provider; optional connectors, backup, and downloads have their own network behavior in every mode.
+In a folder on your computer, `~/.superlocalmemory` by default, with the main database in `memory.db`. The same folder holds configuration, logs, downloaded models and backups. Nothing leaves the machine unless you turn on a feature that sends it; [Privacy and Data Flow](Privacy-and-Data-Flow) lists each one.
 
-### Which IDEs and platforms are supported?
+### Which systems and tools are supported?
 
-Run `slm connect --list` for the release's documented client names. MCP-compatible clients can also be configured manually, but a client is considered verified only when it passes the release integration matrix. V4 platform boundary: **Apple Silicon macOS, 64-bit Windows, 64-bit Linux** — Intel Mac and 32-bit Windows are not supported (`cryptography==50.0.0`).
+Apple Silicon Macs, 64-bit Windows and 64-bit Linux. Intel Macs and 32-bit Windows are not supported. `slm connect --list` shows the editors and agents SLM can configure, and [IDE Setup](IDE-Setup) and [Plugins, Skills and Hooks](Plugins-Skills-and-Hooks) cover each one. Any other tool that speaks MCP can be pointed at `slm mcp` by hand.
 
 ### Does it work offline?
 
-Mode A and Mode B work fully offline. Mode C requires internet for the cloud LLM. Optional connectors, backup, and model downloads require network in any mode when explicitly enabled.
+Mode A and Mode B work offline once the models are downloaded; Mode B needs a model running on your machine. Mode C needs the network because it calls the endpoint or provider you set. Optional features such as cloud backup, connectors and model downloads use the network in any mode when you enable them ([Modes Explained](Modes-Explained)).
 
-## Installation
+## Install and update
 
-### What are the requirements?
+### What do I need?
 
-- **Python** 3.11 – 3.14 (required for V4 engine)
-- **Node.js** 18+ (if installing via npm)
-- **Platform:** Apple Silicon macOS, 64-bit Windows, or 64-bit Linux (Intel Mac / Win32 not supported)
-- Any supported IDE
-- For Mode B: Ollama with a pulled model
-- For Mode C: API key for your cloud LLM provider
+Python 3.12 to 3.14, and Node.js 18 or later if you install with npm. For Mode B, a local model server such as Ollama. For Mode C, a key for your provider. See [Installation](Installation).
 
-### How do I install it?
+### How do I install and update it?
 
 ```bash
-# npm (recommended)
 npm install -g superlocalmemory
 slm setup
-slm warmup    # Optional — pre-download embedding model
-
-# or inside an activated Python virtual environment
-python3 -m venv .venv
-source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install superlocalmemory
-slm setup
 ```
 
-See [Installation](Installation) for platform notes and troubleshooting.
+To update, run `npm install -g superlocalmemory@latest` (or the equivalent for pipx or pip), then `slm restart` and `slm doctor`. Your data folder is never touched by installing or updating. Refresh host integrations with `slm upgrade-hosts` ([Host Integration Upgrades](Host-Upgrades)).
 
-### How do I update?
+## Using it
 
-```bash
-npm install -g superlocalmemory@latest
-# or, while the SLM virtual environment is active:
-python -m pip install --upgrade superlocalmemory
-# then:
-slm restart && slm doctor
-```
+### Do I have to tell my assistant to remember and recall?
 
-### I am upgrading from V2. Will I lose my data?
+Not if it is connected through a plugin or hooks. Session context is loaded automatically and the assistant can pass decisions, bug fixes and preferences for capture ([Auto-Memory](Auto-Memory)). You can always save or search by hand with `slm remember` and `slm recall`.
 
-No. Run `slm migrate` (V2→V3 data migration) after updating — or `slm db migrate` for additive schema maintenance; they are different commands (see [CLI Reference](CLI-Reference)). All memories, profiles, and settings are preserved. A backup is created automatically. See [Migration from V2](Migration-from-V2) for details.
+### What do queryable, enriching, complete and failed mean?
 
-## Usage
+They are the stages of a save. `queryable` means the memory is durable and can be found by its wording. `enriching` means background work such as entities and summaries is running. `complete` means that work finished. `failed` means a stage failed and will be retried; the original text is kept, so nothing is lost. `slm ops list` shows operations that are stuck ([How Remember Works](How-Remember-Works)).
 
-### How does auto-recall work?
+### How do I see why a result was returned?
 
-When you start a conversation in your IDE, SuperLocalMemory automatically retrieves relevant memories and injects them into your AI's context via the MCP server (`slm mcp` or HTTP `http://127.0.0.1:8765/mcp/`). You do not need to call "recall" explicitly — it happens according to the client's configured instructions/hooks.
-
-### How do I store a memory?
-
-```bash
-slm remember "The deploy script needs AWS_REGION set to us-east-1"
-slm remember "Decision" --scope shared --shared-with team-a
-```
-
-### What do queryable, enriching, complete, and failed mean?
-
-- `queryable` means raw evidence and the SQLite relational/FTS projection are durable and recallable.
-- `enriching` means a lease-owning worker is running configured derivation stages.
-- `complete` means every declared derivation and configured projector succeeded (and a hash-verifiable manifest is sealed).
-- `failed` retains the raw evidence, error, attempt count, and retry timing; it is not silent data loss (see `slm ops list` / `list_failed_operations`).
-
-### How do I search memories?
-
-```bash
-slm recall "deploy configuration"
-```
-
-Current recall uses five candidate producers (semantic, BM25, temporal, Hopfield, spreading activation) plus entity-graph score enhancement.
-
-### How do I see which retrieval channels found what?
-
-```bash
-slm trace "deploy configuration"
-```
-
-This shows per-channel scores (Semantic, BM25, Temporal, Hopfield, Spreading Activation) for each result. Entity-graph data can enhance a post-fusion score but is not a separate recall channel. The current implementation is **five producers**, not four — earlier docs that said four-channel are obsolete.
+`slm trace "your question"` shows the score each retrieval channel gave every result. The five channels are semantic, keyword, temporal, associative (Hopfield) and spreading activation; the entity graph adjusts scores afterwards and is not a separate channel.
 
 ### How do I delete a memory?
 
-```bash
-slm forget "search query"     # Delete matching memories (with confirmation)
-slm delete <fact_id> --yes    # Delete one fact by ID (use slm list to find IDs)
-```
+`slm forget "query"` previews and deletes memories that match, after asking you (add `--dry-run` to only preview). `slm delete <id>` deletes one memory by its exact id, and `slm list` shows the ids. Erasing a whole profile, with a signed receipt, is covered in [GDPR](GDPR-Compliance).
 
-Use `slm ops list` or `list_failed_operations` (MCP, `power`/`whole` profile) to inspect stuck operations.
+### My assistant does not seem to remember anything.
+
+Check that SLM runs (`slm status`, `slm doctor`), that something is stored (`slm recall "test"`), that your editor was restarted after `slm connect`, and which profile is active (`slm profile list`). [Troubleshooting](Troubleshooting) goes further.
+
+### Recall returns irrelevant results.
+
+Make the question more specific, then use `slm trace` to see which channel brought the result. Recall tells you when it has nothing: "I don't have this exactly" with the closest memories labelled, or "That isn't in SuperLocalMemory." ([How Recall Works](How-Recall-Works)).
+
+## Answer check
+
+### What is the answer check?
+
+A second decision after recall. Recall says which memories are related; the answer check says whether the top ones actually answer the question, so an assistant can say "I don't have that" instead of presenting a related memory as the answer. It feeds the support check that decides whether recall returns results, only the closest labelled ones, or nothing with "That isn't in SuperLocalMemory." ([Answer Check](Answer-Check), [How Recall Works](How-Recall-Works)). On Apple Silicon it is installed by default and runs on your own Mac; opt out with `slm setup --no-laya` or `SLM_SKIP_LAYA=1`.
+
+### Does it send my memories anywhere?
+
+Only if you pick the online option, add your own key and tick the consent box. Each checked recall then sends the question and the top three memories to the provider you chose. The on-device option keeps everything on your computer.
 
 ## Modes
 
 ### Which mode should I use?
 
-- **Mode A** if you need privacy, compliance, or offline operation
-- **Mode B** if you want composed answers and have a capable machine (16GB+ RAM)
-- **Mode C** if you want maximum accuracy and cloud access is acceptable
+Mode A if you want privacy and offline use, with no language model in the memory path. Mode B if you have a machine that can run a local model. Mode C if you accept a cloud provider for the best answers. You can switch with `slm mode a`, `b` or `c`; your memories stay the same. Details: [Modes Explained](Modes-Explained).
 
-### Can I switch modes after setup?
+### How accurate is it?
 
-Yes: `slm mode a`, `slm mode b`, or `slm mode c`. Your memories are shared across all modes.
+The published results are on the LoCoMo conversation benchmark, with each number tied to its protocol, in [Research Foundations](Research-Foundations). They come from the architecture paper and are not a fresh run of the current package, so compare them only with results measured the same way. To measure your own installation, the repository has a benchmark harness (`benchmark/README.md`).
 
-### What are the accuracy differences?
-
-The V3 paper provides **published LoCoMo evidence carried into V4 (not a newly rerun V4 benchmark)** — `arXiv:2603.14588`:
-
-- **60.4%** Mode A Raw across 10 conversations / 1,276 questions with zero-LLM answer construction.
-- **74.8%** Mode A Retrieval across the same scope with local retrieval and GPT-4.1-mini answer synthesis.
-- **87.7%** Mode C on Conv-30 / 81 questions with cloud embeddings and GPT-4.1-mini answer generation and judge.
-
-The figures retain their original protocol scope; they are not a newly rerun V4 package benchmark and are not comparable across vendors without matching protocol (conversation scope, question count, retrieval stack, answer model, judge, release artifact). See the linked preprint for category results, ablations, and limitations. The non-rerun nature is explicit in [README](https://github.com/qualixar/superlocalmemory/blob/main/README.md#published-locomo-evidence-v3-architecture-carried-into-v4) and `docs/benchmarks.md`.
-
-## V4 Reliability Contract
-
-### What is actually verified with 2,200/2,200?
-
-Only one stress figure is verified in V4.0.0: **2,200/2,200 trials (100%)** from `benchmark/run_all.py --trials 200` (11 experiments × 200). Source: `benchmark/results/SUMMARY.md` (4.0.0, Python 3.13.13, macOS-26.5.2-arm64, 2026-08-08) and `benchmark/README.md` honesty notes (exp1 `embedding_metadata`-only without sqlite-vec ANN, exp2 lightweight `_TrackingOwner`, exp7 `_generation` set directly, etc.). No universal latency, p99, or throughput claim is made — use the measured `exp_governed_latency` p50 or run the harness on your own machine.
-
-## Privacy and Security
+## Privacy and governance
 
 ### Can anyone else see my memories?
 
-No. Your database is a local file on your machine. It is not synced, uploaded, or shared with anyone — including us — unless you explicitly enable Mesh peering, cloud backup, or a provider-backed mode.
+The database is a local file. It is not synced or uploaded unless you turn on Web access, cloud backup, SLM-Mesh peering or a provider-backed mode. Access across profiles is denied by default, and in company mode every action is checked against a role ([Governance](Governance), [Security, Company Mode and Teams](Security-Company-Mode-and-Teams)).
 
-### Does it guarantee regulatory compliance?
+### Is it GDPR compliant?
 
-No software package certifies the complete deployment. SLM supplies local storage, memory erasure (`slm forget`/`slm delete`) and dashboard profile erasure, provenance, retention, access-policy (RBAC — see [RBAC and Teams](RBAC-Teams)), and hash-chained audit controls (see [GDPR Compliance](GDPR-Compliance) and [Compliance](Compliance)); applicability and sufficiency depend on the operator, use case, configuration, providers, and surrounding systems.
+SLM ships the controls a GDPR programme needs: export, erasure with a verifiable receipt, retention rules, an audit trail and access control. Whether a deployment is compliant depends on how it is configured and run, so SLM does not claim certification ([GDPR](GDPR-Compliance), [Compliance](Compliance)).
 
-### Can I export my data?
+### Can I export or delete all my data?
 
-The database is a standard SQLite file at `~/.superlocalmemory/memory.db`. Use `slm evidence export` for a checksummed JSONL bundle (see `slm evidence --help` and [GDPR Compliance](GDPR-Compliance)), or copy the data root. Configuration, logs, queues, models, derived indexes, and optional backend state also live in the data root.
+`slm gdpr export --profile NAME --output FILE` exports a profile, and `slm gdpr erase --profile NAME --dry-run` previews an erasure that `--yes` makes final. Do not delete only `memory.db` and call it erased; configuration, logs, models and backups live elsewhere in the data folder.
 
-### Can I delete all my data?
+## Where do I find...
 
-`slm forget "query"` deletes matching memories, and `slm delete <fact_id>` deletes an exact fact. V4 does not expose a `slm profile delete` CLI command; non-default profiles can be erased through **Dashboard → Governance → Data Privacy → Erase** with typed confirmation. To delete the complete installation, follow the documented erasure/uninstall procedure — do not assume removing only `memory.db` covers configuration, logs, queues, models, derived indexes, and optional backend state.
-
-## Troubleshooting
-
-### My AI does not seem to remember anything.
-
-1. Check that SuperLocalMemory is running: `slm status` / `slm health`
-2. Check that you have stored memories: `slm recall "test" --json`
-3. Verify your IDE connection: restart the IDE after configuring MCP (`slm connect --list`)
-4. Check the active profile: `slm profile list`
-5. Inspect stuck ops: `slm ops list` or dashboard Operations
-
-### Recall returns irrelevant results.
-
-Try more specific queries. Use `slm trace "query"` to see which channels contribute — this helps diagnose whether the issue is semantic, keyword, temporal, associative, or entity matching.
-
-### The setup wizard does not detect my IDE.
-
-Use manual configuration. See [IDE Setup](IDE-Setup) for per-IDE config paths. Supported list via `slm connect --list`.
-
-### Where do I find Bounded Loops, Framework Adapters, GDPR/RBAC, Multi-Agent Memory?
-
-- Bounded Loops: [Bounded Loops](Bounded-Loops) + `slm loop --help` + MCP `slm_loop_*` (`code`/`full`/`power`/`whole`)
-- Framework Adapters: [Framework Adapters](Framework-Adapters) — 9 adapters under `ide/integrations/`
-- GDPR/RBAC: [GDPR Compliance](GDPR-Compliance), [RBAC and Teams](RBAC-Teams), [Compliance](Compliance)
-- Multi-Agent Memory: [Multi-Agent Memory](Multi-Agent-Memory) + `SLM_AGENT_ID`
-
-### Where can I report bugs?
-
-Open an issue at [github.com/qualixar/superlocalmemory/issues](https://github.com/qualixar/superlocalmemory/issues).
-
----
-*Part of [Qualixar](https://qualixar.com) | Created by [Varun Pratap Bhardwaj](https://varunpratap.com)*
+Bounded loops are in [Bounded Loops](Bounded-Loops), framework adapters in [Framework Adapters](Framework-Adapters), several agents sharing memory in [Multi-Agent Memory](Multi-Agent-Memory), and pictures and documents in [Pictures and Documents](Pictures-and-Documents). Bugs go to the [issue tracker](https://github.com/qualixar/superlocalmemory/issues).

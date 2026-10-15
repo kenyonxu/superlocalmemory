@@ -22,13 +22,13 @@ import logging
 import random
 import threading
 import time
+import uuid
 from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 
 from superlocalmemory.optimize.cache.boundary_store import (
     BoundaryStore,
-    PerItemBoundaryRecord,
 )
 from superlocalmemory.optimize.cache.centroid_store import (
     CentroidStore,
@@ -86,8 +86,12 @@ class VCacheSemantic(SemanticTier):
         self._config = config
         self._embedder = embedder
         self._embed_dim = embedding_dimension
+        self._initial_dimension = embedding_dimension
+        self._anonymous_space = "transient:" + uuid.uuid4().hex
+        self._anonymous_owner = embedder
+        self._space_id = self._anonymous_space
+        self._space_lock = threading.RLock()
         self._dimension_lock = threading.Lock()
-        # TODO(v3.7): when entry_count > 10_000, promote to sqlite-vec. Config flag: semantic_use_vec.
 
         self._boundary_store = BoundaryStore(
             db=db,
@@ -102,16 +106,15 @@ class VCacheSemantic(SemanticTier):
             embedding_dimension=embedding_dimension,
         )
         self._context_key_builder = ContextKeyBuilder(
-            window_turns=int(getattr(config, "semantic_context_window_turns", _DEFAULT_CONTEXT_WINDOW))
+            window_turns=int(getattr(config, "semantic_context_window_turns",
+                                     _DEFAULT_CONTEXT_WINDOW))
         )
 
-        # In-memory vector index: tenant_id → list of (entry_id, context_fp, vec)
         # Mutated by _set_inner() (under _index_lock) and rebuilt lazily
         # per-tenant by _lazy_warm_tenant().
         self._index: dict[str, list[tuple[str, str, np.ndarray]]] = {}
         self._index_lock = threading.RLock()
 
-        # RA-09 fix: per-tenant warm guard — prevents double-warm race.
         self._warming: set[str] = set()
         self._warming_lock = threading.Lock()
 
@@ -139,23 +142,17 @@ class VCacheSemantic(SemanticTier):
 
         Fail-open: any exception → log at WARNING + return None.
         """
+        with self._space_lock:
+            return self._lookup_in_space(req, tenant_id, embed)
+
+    def _lookup_in_space(self, req, tenant_id, embed):
         if not self.is_enabled():
             return None
         try:
-            if embed is None:
-                if self._embedder is None:
-                    return None
-                messages = _extract_messages(req)
-                system = _extract_system(req)
-                embed = self._embedder(self._build_query_text(messages, system))
-                if embed is None:
-                    return None
-            vec = np.asarray(embed, dtype=np.float32)
-            if not self._accept_dimension(vec):
-                logger.debug(
-                    "VCacheSemantic.lookup: skip — embed dim=%s (expected %s)",
-                    vec.shape, self._embed_dim,
-                )
+            from superlocalmemory.optimize.cache.semantic_space import prepare
+            query_text = self._build_query_text(_extract_messages(req), _extract_system(req))
+            vec = prepare(self, query_text, embed)
+            if vec is None:
                 return None
             return self._lookup_inner(req, tenant_id, vec)
         except Exception as exc:
@@ -201,72 +198,28 @@ class VCacheSemantic(SemanticTier):
         context_fp are derived internally (req → query text + tenant).
         Fail-open.
         """
+        with self._space_lock:
+            self._index_in_space(req, tenant_id, embed, resp)
+
+    def _index_in_space(self, req, tenant_id, embed, resp):
         if not self.is_enabled():
             return
+        from superlocalmemory.optimize.cache.semantic_space import persist_response, prepare
         try:
-            if embed is None:
-                if self._embedder is None:
-                    return
-                messages = _extract_messages(req)
-                system = _extract_system(req)
-                embed = self._embedder(self._build_query_text(messages, system))
-                if embed is None:
-                    return
             messages = _extract_messages(req)
-            system = _extract_system(req)
-            query_text = self._build_query_text(messages, system)
+            query_text = self._build_query_text(messages, _extract_system(req))
+            vector = prepare(self, query_text, embed)
+            if vector is None:
+                return
+            if tenant_id not in self._index:
+                self._lazy_warm_tenant(tenant_id)
             entry_id = self._derive_entry_id(tenant_id, query_text)
             context_fp = self._context_key_builder.build(messages, tenant_id)
-            self._set_inner(tenant_id, entry_id, embed, context_fp)
-            # Also persist the response under the surrogate entry_id so
-            # _fetch_response(entry_id) can retrieve it on a semantic hit.
+            self._set_inner(tenant_id, entry_id, vector, context_fp)
             if resp is not None:
-                try:
-                    import json as _json
-                    body = resp.body if hasattr(resp, "body") else (
-                        resp if isinstance(resp, dict) else None
-                    )
-                    if body is None and hasattr(resp, "body_bytes"):
-                        try:
-                            body = _json.loads(resp.body_bytes)
-                        except Exception:
-                            body = None
-                    if body is None and isinstance(resp, dict):
-                        body = resp
-                    if body is not None:
-                        value = _json.dumps(body, separators=(",", ":")).encode("utf-8")
-                        cache_key = f"sem:{entry_id}"
-                        # Use set_with_entry_id to pin entry_id = surrogate directly,
-                        # replacing the previous raw SQL UPDATE workaround.
-                        self._db.set_with_entry_id(
-                            key=cache_key,
-                            tenant_id=tenant_id,
-                            value=value,
-                            entry_id=entry_id,
-                            tags=["semantic"],
-                        )
-                        # Mark as semantic tier using CacheDB.execute (H-03 fix)
-                        try:
-                            self._db.execute(
-                                "UPDATE llmcache_entries SET cache_tier = 'semantic' "
-                                "WHERE cache_key = ? AND tenant_id = ?",
-                                (cache_key, tenant_id),
-                            )
-                        except Exception as exc:
-                            logger.debug(
-                                "VCacheSemantic.index_entry: cache_tier update failed (non-fatal): %s",
-                                exc,
-                            )
-                except Exception as exc:
-                    logger.debug(
-                        "VCacheSemantic.index_entry: response persist failed (non-fatal): %s",
-                        exc,
-                    )
+                persist_response(self._db, tenant_id, entry_id, resp)
         except Exception as exc:
-            logger.warning(
-                "VCacheSemantic.index_entry failed (fail-open): tenant=%s exc=%s",
-                tenant_id, exc, exc_info=True,
-            )
+            logger.warning("Semantic cache index failed for tenant=%s: %s", tenant_id, exc)
 
     def close(self) -> None:
         close = getattr(self._embedder, "close", None)
@@ -297,10 +250,6 @@ class VCacheSemantic(SemanticTier):
         cfg = self._config
         max_turns = int(getattr(cfg, "semantic_max_turns_for_semantic", _DEFAULT_MAX_TURNS))
         messages = _extract_messages(req)
-
-        # Step 1: Multi-turn guard — on long conversations nearest-neighbour
-        # reuse is riskiest, so skip semantic there. Honours the
-        # semantic_multiturn_guard kill-switch (default on).
         if bool(getattr(cfg, "semantic_multiturn_guard", True)):
             turn_count = self._context_key_builder.turn_count(messages)
             if turn_count > max_turns:
@@ -309,39 +258,30 @@ class VCacheSemantic(SemanticTier):
                     turn_count, max_turns,
                 )
                 return None
-
-        # Step 2: SAFE-CACHE centroid defense
+        with self._index_lock:
+            is_warm = tenant_id in self._index
+        if not is_warm:
+            self._lazy_warm_tenant(tenant_id)
         if bool(getattr(cfg, "semantic_centroid_defense", True)):
             distance_floor = float(
                 getattr(cfg, "semantic_centroid_distance_floor", _DEFAULT_CENTROID_FLOOR)
             )
             if self._centroid_store.is_adversarial(tenant_id, vec, distance_floor):
                 return None
-
-        # Step 3: Lazy per-tenant warm
-        with self._index_lock:
-            is_warm = tenant_id in self._index
-        if not is_warm:
-            self._lazy_warm_tenant(tenant_id)
-
-        # Step 4: ANN search
         context_fp = self._context_key_builder.build(messages, tenant_id)
         best_entry_id, best_score = self._ann_search(tenant_id, vec, context_fp)
         if best_entry_id is None:
             return None
-
-        # Step 5: vCache exploit/explore (MLE τ̂ via record_outcome updates)
         record = self._boundary_store.get(best_entry_id)
         delta = float(getattr(cfg, "semantic_error_target", _DEFAULT_ERROR_TARGET))
-        sem_return_threshold = float(getattr(cfg, "semantic_return_threshold", _DEFAULT_RETURN_THRESHOLD))
+        sem_return_threshold = float(getattr(
+            cfg, "semantic_return_threshold", _DEFAULT_RETURN_THRESHOLD))
         if record.should_explore(best_score, delta=delta, return_threshold=sem_return_threshold):
             logger.debug(
                 "VCacheSemantic: explore (score=%.4f entry=%s t_hat=%.4f)",
                 best_score, best_entry_id, record.t_hat,
             )
             return None
-
-        # Step 6: Dual-threshold decision
         return self._dual_threshold_decision(
             best_entry_id, best_score, cfg,
         )
@@ -363,7 +303,8 @@ class VCacheSemantic(SemanticTier):
         if response is None:
             return None
 
-        return_threshold = float(getattr(cfg, "semantic_return_threshold", _DEFAULT_RETURN_THRESHOLD))
+        return_threshold = float(getattr(
+            cfg, "semantic_return_threshold", _DEFAULT_RETURN_THRESHOLD))
         verify_lo = float(getattr(cfg, "semantic_verify_lo", _DEFAULT_VERIFY_LO))
 
         if score >= return_threshold:
@@ -397,7 +338,9 @@ class VCacheSemantic(SemanticTier):
             self._warming.add(tenant_id)
 
         try:
-            rows = self._db.get_all_vectors(tenant_id=tenant_id)
+            from superlocalmemory.optimize.cache.semantic_space import SpaceVectors
+            space_db = SpaceVectors(self._db, self._space_id)
+            rows = space_db.get_all_vectors(tenant_id=tenant_id)
             if not rows:
                 with self._index_lock:
                     self._index[tenant_id] = []
@@ -412,7 +355,7 @@ class VCacheSemantic(SemanticTier):
                     continue
             with self._index_lock:
                 self._index[tenant_id] = entries
-            self._centroid_store.rebuild_from_db(self._db, tenant_id)
+            self._centroid_store.rebuild_from_db(space_db, tenant_id)
         except Exception as exc:
             logger.warning(
                 "VCacheSemantic._lazy_warm_tenant failed (fail-open): tenant=%s exc=%s",
@@ -470,7 +413,7 @@ class VCacheSemantic(SemanticTier):
             tenant_id=tenant_id,
             vector=vec_bytes,
             meta={
-                "model": "configured-embedding-provider",
+                "model": self._space_id,
                 "dim": self._embed_dim,
                 "context_fp": context_fp,
             },
@@ -484,6 +427,10 @@ class VCacheSemantic(SemanticTier):
             # Persist the cold-start record only if it isn't already in DB
             self._boundary_store.save(existing)
 
+        self._update_index(tenant_id, entry_id, context_fp, vec)
+        self._centroid_store.update(tenant_id, vec)
+
+    def _update_index(self, tenant_id, entry_id, context_fp, vec):
         # Update in-memory index (dedupe + size cap)
         max_entries: int = int(
             getattr(self._config, "semantic_max_index_entries", 10000)
@@ -511,8 +458,6 @@ class VCacheSemantic(SemanticTier):
                         del self._index[_old]
                         break
 
-        # Update centroid
-        self._centroid_store.update(tenant_id, vec)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -567,15 +512,14 @@ class VCacheSemantic(SemanticTier):
             return f"{system}\n\n{last_user}"
         return last_user
 
-    @staticmethod
-    def _derive_entry_id(tenant_id: str, query_text: str) -> str:
+    def _derive_entry_id(self, tenant_id: str, query_text: str) -> str:
         """Derive a stable surrogate entry_id from tenant + query_text.
 
         INTERFACE-CONTRACT v2 §4: SemanticTier ABC does not pass entry_id.
         Caller (CacheManager) passes the real UUID at the exact tier; the
         semantic surrogate is deterministic and stable per query.
         """
-        payload = f"{tenant_id}:{query_text}"
+        payload = f"{tenant_id}:{self._space_id}:{query_text}"
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
         return f"sem:{digest}"
 

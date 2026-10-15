@@ -16,7 +16,6 @@ on factual queries and on the strength=0.0 identity guarantee.
 from __future__ import annotations
 
 import math
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 

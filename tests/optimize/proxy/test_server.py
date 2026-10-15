@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from fastapi import FastAPI
 
 from superlocalmemory.optimize.config.schema import OptimizeConfig
-from superlocalmemory.optimize.proxy.lifecycle import HookChain
 from superlocalmemory.optimize.proxy.server import ProxyApp, build_proxy_router, _load_hooks
 
 

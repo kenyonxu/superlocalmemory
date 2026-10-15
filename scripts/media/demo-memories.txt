@@ -1,0 +1,26 @@
+decision|We deploy the Orchard API blue-green; rolling back is a DNS flip that takes about a minute.
+decision|Priya Raman chose Postgres 16 over MySQL for the Orchard billing service because of row-level security.
+rule|Always run the migration dry-run before a release and attach its output to the release ticket.
+rule|Never deploy to production on a Friday afternoon; the on-call rotation has no backup that day.
+fact|The staging database is Postgres 16 on port 5433, refreshed from an anonymised snapshot every Sunday night.
+fact|The Orchard mobile app launched on 14 March 2026 and had 12,000 sign-ups in its first week.
+fact|Tomas Weber owns the payments integration with the Lumen payment provider and holds its sandbox API contact.
+fact|The nightly report job runs at 02:15 UTC and writes CSV files to the finance-exports bucket.
+status|The search rewrite is in review; Hana Kobayashi expects to merge it before the end of the sprint.
+status|The Lumen webhook retries are failing for about 2 percent of events; Tomas is investigating the signature check.
+plan|Next quarter we move the Orchard cache from Redis 6 to a managed Redis 7 cluster and drop the self-hosted nodes.
+opinion|Hana thinks the onboarding flow has too many steps and wants to cut the profile screen.
+how-to|To reset a staging tenant, run the tenant-reset script with the tenant slug, then re-seed with the demo fixtures.
+how-to|To rotate the Lumen API key, create the new key in the provider console, update the secret in the vault, then restart the payments workers.
+event|The Orchard outage on 3 May 2026 lasted 41 minutes and was caused by an expired TLS certificate on the edge proxy.
+decision|After the May outage we put certificate expiry alerts at 30, 14 and 3 days in the Orchard monitoring dashboard.
+fact|Orchard uses feature flags from a self-hosted flag service; the flag defaults live in the config repository.
+fact|The Orchard design system is called Grove and its tokens are published as an npm package every Tuesday.
+decision|Mira Okafor decided that customer-facing error messages never include internal ids, only a support code.
+rule|Pull requests need one approving review from the owning team and a green integration run before merge.
+fact|Our support hours are 08:00 to 18:00 Central European Time, Monday to Friday, with a pager for severity one.
+status|The data-retention review for Orchard is waiting on legal; the draft keeps invoices for seven years.
+plan|In the autumn we will add single sign-on for enterprise customers using SAML and SCIM provisioning.
+fact|Wren Dalgaard maintains the Orchard Android client; the iOS client is maintained by Isa Moreau.
+decision|We chose the Fastify framework for the Orchard gateway because it halved cold-start time in our benchmark.
+fact|The Orchard gateway handles about 900 requests per second at peak and is autoscaled between 4 and 20 pods.

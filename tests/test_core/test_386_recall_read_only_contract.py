@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 from superlocalmemory.storage.models import AtomicFact, RecallResponse, RetrievalResult
+from tests._recall_sources import recall_sources
 
 
 class _MockServer:
@@ -69,6 +70,10 @@ def test_386_engine_recall_attempts_no_canonical_dml(engine_with_mock_deps, monk
     violation because it contends with foreground remember calls.
     """
     engine = engine_with_mock_deps
+    response = _response()
+    # Establish the source before installing either independent mutation probe.
+    with recall_sources(engine._config.base_dir, response.results, db=engine._db):
+        pass
     attempted: list[str] = []
     original_execute = engine._db.execute
     # ``data_version`` is a second, independent witness: it changes whenever
@@ -83,7 +88,7 @@ def test_386_engine_recall_attempts_no_canonical_dml(engine_with_mock_deps, monk
         return original_execute(sql, params)
 
     monkeypatch.setattr(engine._db, "execute", query_only_execute)
-    monkeypatch.setattr(engine._retrieval_engine, "recall", lambda *args, **kwargs: _response())
+    monkeypatch.setattr(engine._retrieval_engine, "recall", lambda *args, **kwargs: response)
     monkeypatch.setattr(
         "superlocalmemory.infra.local_diagnostics.record_recall", lambda *args, **kwargs: None,
     )
@@ -95,6 +100,7 @@ def test_386_engine_recall_attempts_no_canonical_dml(engine_with_mock_deps, monk
         observer.close()
 
     assert result.results
+    assert result.source_fidelity_status == "checked"
     assert attempted == [], "\n".join(attempted)
     assert after_version == before_version
 
@@ -102,7 +108,10 @@ def test_386_engine_recall_attempts_no_canonical_dml(engine_with_mock_deps, monk
 def test_386_engine_recall_skips_write_capable_bandit(engine_with_mock_deps, monkeypatch):
     """The recall path cannot create a learning-db bandit play row."""
     engine = engine_with_mock_deps
-    monkeypatch.setattr(engine._retrieval_engine, "recall", lambda *args, **kwargs: _response())
+    response = _response()
+    with recall_sources(engine._config.base_dir, response.results, db=engine._db):
+        pass
+    monkeypatch.setattr(engine._retrieval_engine, "recall", lambda *args, **kwargs: response)
     monkeypatch.setattr(
         "superlocalmemory.core.recall_pipeline.apply_v2_bandit_ensemble",
         lambda *args, **kwargs: (_ for _ in ()).throw(
@@ -113,6 +122,7 @@ def test_386_engine_recall_skips_write_capable_bandit(engine_with_mock_deps, mon
     result = engine.recall("read-only contract", fast=True)
 
     assert result.results
+    assert result.source_fidelity_status == "checked"
 
 
 def test_386_v1_adaptive_ranking_reads_feedback_without_schema_writes(
@@ -260,7 +270,19 @@ def test_386_emergency_session_recall_opens_memory_db_read_only(tmp_path, monkey
     try:
         bootstrap.execute(
             "CREATE TABLE atomic_facts (fact_id TEXT PRIMARY KEY, content TEXT, "
-            "memory_id TEXT, created_at TEXT, profile_id TEXT)"
+            "memory_id TEXT, created_at TEXT, profile_id TEXT, observation_date TEXT)"
+        )
+        bootstrap.execute(
+            "CREATE TABLE memories (memory_id TEXT PRIMARY KEY, profile_id TEXT, "
+            "content TEXT, speaker TEXT, role TEXT)"
+        )
+        bootstrap.execute(
+            "CREATE TABLE derivation_lineage (profile_id TEXT, object_type TEXT, "
+            "object_id TEXT, unresolved_reason TEXT)"
+        )
+        bootstrap.execute(
+            "INSERT INTO memories VALUES "
+            "('memory-386', 'default', 'read only contract', '', 'user')"
         )
         bootstrap.execute(
             "CREATE VIRTUAL TABLE atomic_facts_fts USING fts5(fact_id, content)"
@@ -315,3 +337,4 @@ def test_386_emergency_session_recall_opens_memory_db_read_only(tmp_path, monkey
     assert "mode=ro" in str(path)
     assert mutations == []
     assert [item.fact.fact_id for item in response.results] == ["fact-386"]
+    assert response.metadata["source_fidelity_status"] == "checked"

@@ -83,10 +83,30 @@ def _resolve(content: str) -> str:
     return "semantic" if resolved == _PROSPECTIVE else resolved
 
 
+#: A plan a person filed as a plan is not this pass's to re-read: the wording
+#: rule is a guess and the person is the authority. Applied only on a store that
+#: has the memory-kind columns (M052); without them nothing is confirmed.
+_NOT_CONFIRMED = " AND COALESCE(memory_kind_source,'') NOT IN ('user','caller')"
+
+
+def _unconfirmed_clause(columns: set[str]) -> str:
+    return _NOT_CONFIRMED if "memory_kind_source" in columns else ""
+
+
 @contextlib.contextmanager
 def _held(conn: sqlite3.Connection):
     """Yield the connection the caller already owns, and leave it open."""
     yield conn
+
+
+@contextlib.contextmanager
+def _read_only(path: str):
+    """A short read-only connection: it never takes the store's write lock."""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10.0)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def apply(
@@ -110,55 +130,71 @@ def apply(
 
     with acquire() as probe:
         existing = {r[1] for r in probe.execute(f"PRAGMA table_info({_TABLE})")}
+        main = next((r[2] for r in probe.execute("PRAGMA database_list") if r[1] == "main"), "")
+    # Batches are READ without the write lock: finding 500 plans in rowid order
+    # reads the whole table when plans are few, and inside the process write
+    # lock that held a 27,689-fact store for 3.1 s (14 Oct 2026). Only the
+    # guarded UPDATE needs the lock. The migration runner's own connection is
+    # used as is.
+    read = acquire if conn is not None or not main else (lambda: _read_only(main))
     if "fact_type" not in existing or "content" not in existing:
         logger.info("M048: %s has no fact_type/content; nothing to re-read", _TABLE)
         return
+    unconfirmed = _unconfirmed_clause(existing)
 
     cursor = 0
     demoted = 0
     kept = 0
     while True:
-        with acquire() as active:
+        with read() as active:
             batch = active.execute(
                 f"SELECT rowid, fact_id, content FROM {_TABLE} "
-                f"WHERE rowid > ? AND fact_type = ? ORDER BY rowid LIMIT {_BATCH}",
+                f"WHERE rowid > ? AND fact_type = ?{unconfirmed} "
+                f"ORDER BY rowid LIMIT {_BATCH}",
                 (cursor, _PROSPECTIVE),
             ).fetchall()
-            if not batch:
-                break
-            cursor = batch[-1][0]
+        if not batch:
+            break
+        cursor = batch[-1][0]
 
-            moves: list[tuple[str, int]] = []
-            for rowid, _fact_id, content in batch:
-                resolved = _resolve(content)
-                if resolved == _PROSPECTIVE:
-                    kept += 1
-                    continue
-                moves.append((resolved, rowid))
+        # The wording is read with the lock released: on a running store each
+        # acquire() is the process write lock, and classifying 500 rows inside
+        # it held a 27,689-fact store's lock for 4.72 s (14 Oct 2026) while a
+        # remember and the event log waited. The UPDATE below re-checks the row.
+        moves: list[tuple[str, int]] = []
+        for rowid, _fact_id, content in batch:
+            resolved = _resolve(content)
+            if resolved == _PROSPECTIVE:
+                kept += 1
+                continue
+            moves.append((resolved, rowid))
 
-            if moves:
-                active.execute("BEGIN IMMEDIATE")
-                try:
-                    # Conditional on the row still being what was read, so a
-                    # concurrent write is not clobbered.
-                    changed = 0
-                    for new_type, rowid in moves:
-                        cur = active.execute(
-                            f"UPDATE {_TABLE} SET fact_type = ? "
-                            f"WHERE rowid = ? AND fact_type = '{_PROSPECTIVE}'",
-                            (new_type, rowid),
-                        )
-                        # Count what the guard let through, not what was
-                        # offered. A concurrent write can change the row
-                        # underneath, and a log line that reports the intention
-                        # as the outcome is how a receipt comes to overstate
-                        # what happened.
-                        changed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
-                    active.commit()
-                except Exception:
-                    active.rollback()
-                    raise
-                demoted += changed
+        if not moves:
+            continue
+        with acquire() as active:
+            active.execute("BEGIN IMMEDIATE")
+            try:
+                # Conditional on the row still being what was read, so a
+                # concurrent write is not clobbered.
+                changed = 0
+                for new_type, rowid in moves:
+                    cur = active.execute(
+                        f"UPDATE {_TABLE} SET fact_type = ? "
+                        f"WHERE rowid = ? AND fact_type = '{_PROSPECTIVE}'"
+                        f"{unconfirmed}",
+                        (new_type, rowid),
+                    )
+                    # Count what the guard let through, not what was
+                    # offered. A concurrent write can change the row
+                    # underneath, and a log line that reports the intention
+                    # as the outcome is how a receipt comes to overstate
+                    # what happened.
+                    changed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+                active.commit()
+            except Exception:
+                active.rollback()
+                raise
+        demoted += changed
 
     logger.info(
         "M048: re-read %d memories filed as plans; %d were, %d moved",
@@ -189,7 +225,8 @@ def verify(conn: sqlite3.Connection) -> bool:
         return True
 
     rows = conn.execute(
-        f"SELECT fact_id, content FROM {_TABLE} WHERE fact_type = ?",
+        f"SELECT fact_id, content FROM {_TABLE} WHERE fact_type = ?"
+        f"{_unconfirmed_clause(existing)}",
         (_PROSPECTIVE,),
     ).fetchall()
     if not rows:

@@ -23,11 +23,25 @@ from langchain_superlocalmemory import SuperLocalMemoryChatMessageHistory
 
 
 @pytest.fixture
-def tmp_db():
-    """Yield a path to a temporary SQLite database that is cleaned up after use."""
-    with tempfile.TemporaryDirectory() as d:
-        db = os.path.join(d, "test_memory.db")
-        yield db
+def tmp_db(monkeypatch):
+    """Close every owned engine before removing its temporary database folder."""
+    from langchain_superlocalmemory._v3_store import V3ChatStore
+
+    created = []
+    original = V3ChatStore.__init__
+
+    def tracked_init(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        created.append(self)
+
+    monkeypatch.setattr(V3ChatStore, "__init__", tracked_init)
+    with tempfile.TemporaryDirectory() as directory:
+        try:
+            yield os.path.join(directory, "test_memory.db")
+        finally:
+            for owned in created:
+                owned.close()
+
 
 
 @pytest.fixture

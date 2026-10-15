@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import json
-import os
 from argparse import Namespace
-from pathlib import Path
 
 import pytest
 
 
 @pytest.fixture
 def fake_recall():
-    def _fn(q, l, p):
+    # ``project`` (4.1.21, #150): prestage passes the working directory's
+    # project as recall's project filter; this fake answers the same either way.
+    def _fn(q, l, p, *, project=None):
         if "topics" in q:
             return [{"name": "Qualixar", "score": 0.9}]
         if "entities" in q:
@@ -35,7 +35,6 @@ def test_connect_orchestrates_all_detected(tmp_path, fake_recall, monkeypatch,
 
     from superlocalmemory.cli.context_commands import (
         build_default_adapters,
-        cmd_connect_cross_platform,
     )
     from superlocalmemory.hooks.ide_connector import CrossPlatformConnector
 

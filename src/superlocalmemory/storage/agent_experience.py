@@ -17,11 +17,17 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TypeVar
+from contextlib import closing
 
 from superlocalmemory.contracts.v402 import validate_agent_experience, validate_cognitive_turn
 
 _T = TypeVar("_T")
 _WRITE_DEADLINE_SECONDS = 0.90
+#: Waiting behind this process's own receipt writers is a queue, not SQLite
+#: contention: it has its own, longer bound. Counting it against the busy
+#: deadline lost receipts whenever several agents wrote at once on a loaded
+#: machine, although no other process held the database.
+_QUEUE_WAIT_SECONDS = 5.0
 _PROCESS_LOCKS: dict[str, threading.Lock] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
 _PROFILE_GATES: dict[str, "_ProfileAdmissionGate"] = {}
@@ -308,9 +314,10 @@ class AgentExperienceStore:
             raise ProfileAdmissionError("profile is inactive or closing for erasure")
 
     def _write(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
-        deadline = time.monotonic() + _WRITE_DEADLINE_SECONDS
-        if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
-            raise LearningWriteBusyError("learning receipt write deadline exceeded")
+        if not self._lock.acquire(timeout=_QUEUE_WAIT_SECONDS):
+            raise LearningWriteBusyError(
+                f"learning receipt writers in this process did not move for {_QUEUE_WAIT_SECONDS:.0f} s")
+        deadline = time.monotonic() + _WRITE_DEADLINE_SECONDS  # SQLite contention only
         try:
             while True:
                 conn: sqlite3.Connection | None = None
@@ -347,8 +354,16 @@ class AgentExperienceStore:
     def _read_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._path), timeout=0.5)
         conn.row_factory = sqlite3.Row
-        apply_journal_mode(conn)
-        conn.execute("PRAGMA busy_timeout=500")
+        try:
+            # Fork (f4dd873c): the journal mode comes from the central
+            # policy, not a hardcoded WAL here.
+            apply_journal_mode(conn)
+            conn.execute("PRAGMA busy_timeout=500")
+        except BaseException:
+            # Setup failed: close it now, or the file stays open (Windows
+            # then cannot delete or replace it) for as long as the error lives.
+            conn.close()
+            raise
         return conn
 
     @staticmethod
@@ -453,7 +468,7 @@ def purge_profile_receipts(
     path = Path(learning_db_path)
     if not path.exists():
         return 0
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         tables = {
             row[0]
             for row in conn.execute(
@@ -474,7 +489,7 @@ def purge_profile_receipts(
         if tables in (expected | optional, expected | execution, expected | optional | execution):
             from superlocalmemory.storage.migrations import M041_external_evidence_receipts as m041
 
-            with sqlite3.connect(path) as conn:
+            with closing(sqlite3.connect(path)) as conn, conn:
                 # Erasure needs a valid table, not its optional performance indexes.
                 # A damaged index must never strand profile-scoped evidence.
                 external_ok = (

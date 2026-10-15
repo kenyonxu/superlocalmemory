@@ -17,7 +17,6 @@ Author: Varun Pratap Bhardwaj / Qualixar
 from __future__ import annotations
 
 import sqlite3
-import time
 from pathlib import Path
 
 import pytest

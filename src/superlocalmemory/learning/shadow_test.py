@@ -1,30 +1,79 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
-# Part of SuperLocalMemory v3.4.22 — Track A.3 (LLD-10 / LLD-00 §8)
+# Part of SuperLocalMemory — LLD-10 shadow validation, rebuilt in 4.1.25
 
-"""Two-phase live-recall A/B shadow validator (LLD-10 §4 + LLD-00 §8).
+"""Live A/B validation of a retrained ranker: promote, reject, or keep going.
 
-Phase A (n=100, fast triage):
-    Early-stop ``promote`` ONLY if ``|effect| > MIN_STRONG_EFFECT`` AND
-    ``p < ALPHA_STRONG`` (strong signal path). Otherwise Phase B must
-    accumulate further paired recalls.
+WHAT WAS WRONG
+-----------------------------
+Each recall is routed to ONE arm — the active model or the candidate. The old
+validator enforced exactly that (a query id may live on one arm only) and then
+ran a *paired* t-test over the intersection of the two arms' query ids. The
+intersection of two disjoint sets is empty, so ``decide()`` returned
+``continue`` forever: a retrained ranker could never be promoted or rejected,
+however much evidence accumulated. Pairing by arrival index instead would have
+produced a number, but not a paired comparison: the k-th active query and the
+k-th candidate query are different questions.
 
-Phase B (n=885, full validation):
-    Bayesian-conservative sample size for σ=0.15, MDE=0.02, power 0.8,
-    two-sided α=0.05. Criterion: mean paired diff ≥ MIN_EFFECT AND
-    paired t-test p<0.05.
+THE DESIGN NOW
+--------------
+Disjoint randomized traffic is an **independent-groups** experiment. Each
+settled recall contributes one reward in ``[0, 1]`` to the arm that served it;
+the quantity under test is the difference of arm means,
+``D = mean(candidate) - mean(active)``.
 
-This module is a PURE state machine — no DB, no lightgbm, no network.
-Tests in ``tests/test_learning/test_shadow_test.py`` exercise it.
+Because the decision is re-evaluated after every observation (continuous
+monitoring), a fixed-sample test would inflate the false-promotion rate. We use
+a **mixture sequential probability ratio test** (mSPRT), the always-valid
+procedure described by Johari, Pekelis and Walsh, *Always Valid Inference:
+Bringing Sequential Analysis to A/B Testing* (arXiv:1512.04922; Section 5.2
+eq. (7)-(8) and the two-stream construction of Section 6.1 / Appendix B eq.
+(22)). The test rejects the null "no difference" the first time the mixture
+likelihood ratio reaches ``1/alpha``; Type I error is controlled at ``alpha``
+uniformly over the stopping time.
 
-Deterministic A/B routing: ``route_query(qid)`` returns ``'active'`` or
-``'candidate'`` by SHA-256 first-8-hex-char modulo-2. Bit-exact
-reproducible across daemon restart (LLD-10 §4.1).
+For normal data their two-stream statistic depends on the data only through
+the difference of means, distributed ``N(theta, 2 sigma^2 / n)`` with ``n``
+observations per arm (Appendix B). With a normal mixing distribution
+``H = N(0, gamma^2)`` the integral in (22) has a closed form. Writing ``V``
+for the variance of ``D``:
 
-No scipy dependency: for n<60 we use a tabled two-tailed critical-t
-value; for n≥60 the normal-approximation z≈1.96 applies. Fallback
-matches the existing ``consolidation_worker._shadow_test_improved``
-behaviour (hardcoded ``t > 2.0``).
+    Lambda = sqrt(V / (V + gamma^2)) * exp(gamma^2 D^2 / (2 V (V + gamma^2)))
+
+With equal arm sizes ``V = 2 sigma^2 / n`` and this is exactly (22). The
+closed form is our own evaluation of that integral, not quoted from the paper.
+SHA-256 routing gives arms of unequal size, so we use
+``V = s^2 (1/n_active + 1/n_candidate)``, the variance of a difference of two
+independent group means. That generalisation is ours too; the paper notes the
+approach extends to uneven allocation fixed in advance (Section 6.1), which a
+50/50 hash split is.
+
+Honest limits, stated rather than hidden:
+
+* Rewards are bounded (0, 0.5, 1 for explicit outcomes; engagement in
+  ``[0, 1]``), not normal, and ``s^2`` is a pooled plug-in estimate. The paper
+  says the analogous plug-in construction for binary data is only
+  *approximately* always valid, "for alpha small" (Section 6.1). We therefore
+  enforce ``MIN_PER_ARM`` observations before any decision and a variance
+  floor, and ``tests/test_learning/test_shadow_test.py`` measures the
+  false-promotion rate of the exact production code under A/A continuous
+  monitoring (it must stay below ``ALPHA``).
+* ``gamma`` (``MIX_SD``) is a design choice: 0.1 on a ``[0, 1]`` reward, the
+  scale of effect we care to detect. The paper shows the run-time-optimal
+  mixture depends on the prior over effects (Prop. 6) and that performance is
+  robust to misspecification (Section 5).
+
+Decision rule (``ALPHA`` = 0.05, two-sided):
+
+* ``promote`` — ``Lambda >= 1/ALPHA`` and ``D >= MIN_EFFECT``.
+* ``reject``  — ``Lambda >= 1/ALPHA`` and ``D < 0`` (significantly worse), or
+  both arms reached ``MAX_PER_ARM`` without a promotion (truncation; stopping
+  early can only lower Type I error).
+* ``continue`` otherwise.
+
+Replays are idempotent: the first observation for a query id wins, whichever
+arm it arrives on, in memory and in ``shadow_observations`` (whose
+``ndcg_at_10`` column name is historical — it stores the settled reward; the value was never an NDCG).
 """
 
 from __future__ import annotations
@@ -32,206 +81,68 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-from typing import Any, Final, Optional
+import sqlite3
+from datetime import datetime, timezone
+from typing import Final
 
 logger = logging.getLogger(__name__)
 
+__all__ = ("ShadowTest", "msprt_lambda")
 
-# S9-SKEP-01: resolve scipy.stats.t ONCE at module load, not on every
-# _critical_t call. Prior ``try: import`` at call-sites paid ~microsecond
-# lookup per invocation (cached via sys.modules, but not free) and the
-# bare ``except Exception`` silently swallowed ValueError/FloatingPointError
-# from scipy.stats.t.ppf itself — exactly the "early-stop more permissive
-# than α=0.01" defect the table interpolation was supposed to fix.
-#
-# After this cache:
-#   * ImportError/ModuleNotFoundError on first import → fall through to
-#     the table permanently.
-#   * Present-but-broken scipy (corrupt install, bad C-ext) → we still
-#     import it; errors in .ppf() propagate on the FIRST call and the
-#     caller sees it (not swallowed).
-_SCIPY_T: Optional[Any]
-try:
-    from scipy.stats import t as _scipy_t  # type: ignore[import-not-found]
-    _SCIPY_T = _scipy_t
-except (ImportError, ModuleNotFoundError):
-    _SCIPY_T = None
-
-
-# ---------------------------------------------------------------------------
-# Two-phase parameters — LLD-00 §8, LLD-10 §4.5
-# ---------------------------------------------------------------------------
-
-#: Phase A sample size (per LLD-00 §8 fast triage).
-_PHASE_A_N: Final[int] = 100
-
-#: Phase B sample size (statistical power for MDE=0.02 MRR at σ=0.15).
-_PHASE_B_N: Final[int] = 885
-
-#: Minimum acceptable mean paired improvement to promote (LLD-10 §4.5).
+#: Two-sided Type I error budget for the always-valid test.
+_ALPHA: Final[float] = 0.05
+#: Standard deviation of the normal mixing distribution over effects.
+_MIX_SD: Final[float] = 0.1
+#: Smallest improvement worth promoting, on the reward scale.
 _MIN_EFFECT: Final[float] = 0.02
+#: Observations per arm before any decision (plug-in variance stability).
+_MIN_PER_ARM: Final[int] = 30
+#: Truncation horizon per arm (kept from LLD-10's sample-size contract).
+_MAX_PER_ARM: Final[int] = 885
+#: Floor on the pooled variance, so a lucky streak of identical rewards
+#: cannot make the evidence look infinite.
+_VAR_FLOOR: Final[float] = 0.0025
 
-#: Phase A "strong signal" early-stop threshold: |effect| > 0.08 AND p<0.01.
-_MIN_STRONG_EFFECT: Final[float] = 0.08
-
-
-#: Significance level for Phase B (LLD-10 §4.5 + LLD-00 §8).
-#: S9-defer S9-STAT-07: two-look sequential design needs alpha spending.
-#: Without correction the family-wise false-promote probability was
-#: 1 - (1-0.01)(1-0.05) ≈ 0.0595 rather than the advertised 0.05. We
-#: now use Pocock boundaries that spread α across the two looks so
-#: the family-wise α is 0.05 as contracted.
-#: Pocock α_1 for 2-look design with overall α=0.05 is 0.0294; we use
-#: a conservative 0.001 for Phase A (making the first look a strong
-#: filter, not a contribution to family-wise α) and α=0.049 for Phase B
-#: so family-wise α is approximately 0.05.
-_ALPHA: Final[float] = 0.049
-
-#: Tighter significance level for Phase A early-stop (LLD-00 §8).
-#: Pocock-style: first look only fires on VERY strong evidence so the
-#: second look retains nearly the full α budget.
-_ALPHA_STRONG: Final[float] = 0.001
+_ARMS: Final[tuple[str, str]] = ("active", "candidate")
 
 
-# ---------------------------------------------------------------------------
-# Critical-t table — two-tailed (degrees of freedom → critical t)
-#
-# Stage 8 F4.B / H-02 (skeptic H-01) fix:
-#   The previous table had sparse rows (5, 10, 15, 20, 25, 30, 40, 60, 120)
-#   and a lookup that returned the critical-t of the next row AT OR ABOVE
-#   the requested df. For df values between rows (e.g. df=99, df=49, df=9)
-#   that returned a value LOWER than the true critical-t, making Phase A's
-#   strong-signal early-stop more permissive than the α=0.01 contract
-#   claims — i.e. the guard against promoting on noise was weaker than
-#   advertised.
-#
-# Fix applied here:
-#   1. Dense rows for df=1..30 (every integer — the regime where the
-#      t-distribution is most non-linear and small errors hurt most).
-#   2. Standard thinning for df=40, 50, 60, 80, 100, 120, 200, 10000 where
-#      the function is nearly flat.
-#   3. Linear interpolation between rows for any df not in the table.
-#   4. Optional ``scipy.stats.t.ppf`` preference when scipy is importable —
-#      this is already a transitive dep of lightgbm-learner, so when
-#      present we use it and skip the table entirely.
-#
-# All table values were cross-verified against scipy.stats.t.ppf within
-# ±0.001 at module import time. See tests/test_learning/test_shadow_test.py
-# (test_critical_t_matches_scipy_reference) for the regression guard.
-# ---------------------------------------------------------------------------
+def msprt_lambda(diff: float, var_diff: float, mix_sd: float = _MIX_SD) -> float:
+    """Normal-mixture likelihood ratio for an observed difference of means.
 
-_CRIT_T_05_TWO_TAIL: Final[tuple[tuple[int, float], ...]] = (
-    (1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571),
-    (6, 2.447), (7, 2.365), (8, 2.306), (9, 2.262), (10, 2.228),
-    (11, 2.201), (12, 2.179), (13, 2.160), (14, 2.145), (15, 2.131),
-    (16, 2.120), (17, 2.110), (18, 2.101), (19, 2.093), (20, 2.086),
-    (21, 2.080), (22, 2.074), (23, 2.069), (24, 2.064), (25, 2.060),
-    (26, 2.056), (27, 2.052), (28, 2.048), (29, 2.045), (30, 2.042),
-    (40, 2.021), (50, 2.009), (60, 2.000), (80, 1.990), (100, 1.984),
-    (120, 1.980), (200, 1.972), (10_000, 1.960),
-)
-
-#: Tighter α=0.01 table (two-tailed) for Phase A early-stop.
-_CRIT_T_01_TWO_TAIL: Final[tuple[tuple[int, float], ...]] = (
-    (1, 63.657), (2, 9.925), (3, 5.841), (4, 4.604), (5, 4.032),
-    (6, 3.707), (7, 3.499), (8, 3.355), (9, 3.250), (10, 3.169),
-    (11, 3.106), (12, 3.055), (13, 3.012), (14, 2.977), (15, 2.947),
-    (16, 2.921), (17, 2.898), (18, 2.878), (19, 2.861), (20, 2.845),
-    (21, 2.831), (22, 2.819), (23, 2.807), (24, 2.797), (25, 2.787),
-    (26, 2.779), (27, 2.771), (28, 2.763), (29, 2.756), (30, 2.750),
-    (40, 2.704), (50, 2.678), (60, 2.660), (80, 2.639), (100, 2.626),
-    (120, 2.617), (200, 2.601), (10_000, 2.576),
-)
-
-
-def _critical_t(df: int, *, alpha: float) -> float:
-    """Return the two-tailed critical t for ``df`` degrees of freedom.
-
-    Preference order:
-      1. ``scipy.stats.t.ppf(1 - alpha/2, df)`` when scipy is importable.
-      2. Exact tabled value when ``df`` is a table row.
-      3. Linear interpolation between adjacent table rows otherwise.
-
-    For ``df ≤ 0`` returns ``inf`` (caller's ``|t| > inf`` is always
-    False; no early-stop).
+    Computed in log space; returns ``inf`` rather than overflowing.
     """
-    if df <= 0:
-        return float("inf")
-
-    # Preference 1 — scipy, when importable (cached at module load).
-    # S9-SKEP-01: no silent `except Exception`. If scipy is present but
-    # .ppf() raises (corrupt install, NaN propagation), we let the
-    # error surface so callers see it; silently falling back to the
-    # table was the original bug that led to false-promote on noise.
-    if _SCIPY_T is not None:
-        return float(_SCIPY_T.ppf(1.0 - alpha / 2.0, df))
-
-    table = (
-        _CRIT_T_05_TWO_TAIL
-        if abs(alpha - 0.05) < 1e-9
-        else _CRIT_T_01_TWO_TAIL
-    )
-
-    # Preference 2 + 3 — exact row match or linear interpolation.
-    prev_df, prev_t = table[0]
-    if df <= prev_df:
-        return prev_t
-    for row_df, row_t in table[1:]:
-        if df == row_df:
-            return row_t
-        if df < row_df:
-            # Linear interpolation in df space — adequate at the
-            # resolution we keep (every integer for df≤30).
-            span = row_df - prev_df
-            frac = (df - prev_df) / span
-            return prev_t + frac * (row_t - prev_t)
-        prev_df, prev_t = row_df, row_t
-    return prev_t
+    v = max(float(var_diff), 1e-12)
+    g2 = float(mix_sd) ** 2
+    log_l = 0.5 * math.log(v / (v + g2)) + g2 * diff * diff / (2.0 * v * (v + g2))
+    return math.inf if log_l > 700.0 else math.exp(log_l)
 
 
-def _paired_t_stat(diffs: list[float]) -> tuple[float, float, float]:
-    """Return ``(mean, std_sample, t_stat)`` for a sequence of paired
-    differences. ``std_sample`` uses ddof=1. When ``len(diffs) < 2`` or
-    ``std == 0``, ``t_stat`` is ``inf`` if mean>0 else ``-inf``.
-    """
-    n = len(diffs)
+def _moments(acc: list[float]) -> tuple[int, float, float]:
+    """``(n, mean, sample variance)`` from running ``[n, sum, sum_sq]``."""
+    n = int(acc[0])
     if n == 0:
-        return 0.0, 0.0, 0.0
-    mean = sum(diffs) / n
+        return 0, 0.0, 0.0
+    mean = acc[1] / n
     if n < 2:
-        return mean, 0.0, math.copysign(math.inf, mean) if mean != 0 else 0.0
-    var = sum((d - mean) ** 2 for d in diffs) / (n - 1)
-    std = math.sqrt(var)
-    if std == 0.0:
-        return mean, 0.0, math.copysign(math.inf, mean) if mean != 0 else 0.0
-    t_stat = mean / (std / math.sqrt(n))
-    return mean, std, t_stat
-
-
-# ---------------------------------------------------------------------------
-# ShadowTest
-# ---------------------------------------------------------------------------
+        return n, mean, 0.0
+    return n, mean, max(0.0, (acc[2] - n * mean * mean) / (n - 1))
 
 
 class ShadowTest:
-    """Two-phase live-recall A/B validator.
+    """Independent-groups, always-valid A/B validator for one candidate.
 
-    Callers:
-      1. Route each incoming recall with ``route_query(qid)`` →
-         ``'active'`` | ``'candidate'``. Deterministic per ``qid`` for
-         bit-exact reproducibility across daemon restart.
-      2. After each recall's outcome settles, call
-         ``record_recall_pair(query_id=..., arm=..., ndcg_at_10=...)``.
-      3. Call ``decide()`` to get one of ``'promote' | 'reject' | 'continue'``.
+    Callers record one settled reward per query id with
+    :meth:`record_observation` (the arm comes from the persisted serve-time
+    assignment, never from a recomputation), then call :meth:`decide`.
     """
 
-    # Exposed for tests + manifest cross-reference.
-    PHASE_A_N: Final[int] = _PHASE_A_N
-    PHASE_B_N: Final[int] = _PHASE_B_N
-    MIN_EFFECT: Final[float] = _MIN_EFFECT
-    MIN_STRONG_EFFECT: Final[float] = _MIN_STRONG_EFFECT
     ALPHA: Final[float] = _ALPHA
-    ALPHA_STRONG: Final[float] = _ALPHA_STRONG
+    MIX_SD: Final[float] = _MIX_SD
+    MIN_EFFECT: Final[float] = _MIN_EFFECT
+    MIN_PER_ARM: Final[int] = _MIN_PER_ARM
+    MAX_PER_ARM: Final[int] = _MAX_PER_ARM
+    #: Kept for callers that read the old names: the truncation horizon.
+    PHASE_B_N: Final[int] = _MAX_PER_ARM
 
     def __init__(
         self,
@@ -242,283 +153,138 @@ class ShadowTest:
     ) -> None:
         self.profile_id = profile_id
         self.candidate_model_id = candidate_model_id
-        # Insertion-ordered lists of NDCG@10 values per arm.
-        self._active: list[float] = []
-        self._candidate: list[float] = []
-        # S9-defer H-ARC-01 (full): if ``learning_db`` is provided and
-        # the ``shadow_observations`` table (M012) exists, paired obs
-        # persist there and reload on restart. Old tests that construct
-        # ShadowTest without a DB path keep pure-in-memory semantics.
-        # Pair storage keyed by (query_id, arm) avoids duplicate inserts
-        # on crash-replay.
-        self._learning_db: str | None = learning_db
-        # S9-defer S9-STAT-08: replace by-index pairing with query_id
-        # pairing. Observations are keyed by (query_id, arm). ``decide``
-        # iterates the intersection of arm-keysets so "pair #7 in
-        # active" no longer silently pairs with "pair #7 in candidate"
-        # when the two streams diverge.
-        self._active_by_qid: dict[str, float] = {}
-        self._candidate_by_qid: dict[str, float] = {}
+        self._learning_db = learning_db
+        # query_id -> (arm, reward). One entry per query, first write wins.
+        self._obs: dict[str, tuple[str, float]] = {}
+        # Running [n, sum, sum of squares] per arm, so decide() is O(1).
+        self._acc: dict[str, list[float]] = {a: [0.0, 0.0, 0.0] for a in _ARMS}
         if learning_db:
             self._reload_from_db()
 
     # ------------------------------------------------------------------
-    # Persistence (M012 / H-ARC-01 full)
+    # Persistence
     # ------------------------------------------------------------------
 
-    def _reload_from_db(self) -> None:
-        """Populate in-memory state from ``shadow_observations`` on
-        daemon restart. Fail-soft — a missing table or schema error
-        leaves the instance in cold-start mode.
-        """
+    def _candidate_int(self) -> int | None:
         try:
-            import sqlite3 as _sq
-            cid = int(self.candidate_model_id)
-        except Exception:
-            return
-        try:
-            conn = _sq.connect(self._learning_db, timeout=2.0)  # type: ignore[arg-type]
-        except Exception:  # pragma: no cover — defensive
-            return
-        try:
-            try:
-                rows = conn.execute(
-                    "SELECT arm, query_id, ndcg_at_10 "
-                    "FROM shadow_observations "
-                    "WHERE candidate_id = ? "
-                    "ORDER BY recorded_at ASC",
-                    (cid,),
-                ).fetchall()
-            except Exception:
-                return  # table absent — M012 not yet applied.
-            for arm, qid, ndcg in rows:
-                if arm == "active":
-                    self._active.append(float(ndcg))
-                    self._active_by_qid[str(qid)] = float(ndcg)
-                elif arm == "candidate":
-                    self._candidate.append(float(ndcg))
-                    self._candidate_by_qid[str(qid)] = float(ndcg)
-        finally:
-            try:
-                conn.close()
-            except Exception:  # pragma: no cover
-                pass
+            return int(self.candidate_model_id)
+        except (TypeError, ValueError):
+            return None
 
-    def _persist_observation(
-        self, *, query_id: str, arm: str, ndcg: float,
-    ) -> None:
-        """Append one observation to ``shadow_observations``. Fail-soft."""
-        if not self._learning_db:
+    def _reload_from_db(self) -> None:
+        """Restore observations after a restart. Fail-soft on a cold store."""
+        cid = self._candidate_int()
+        if cid is None:
             return
         try:
-            import sqlite3 as _sq
-            cid = int(self.candidate_model_id)
-        except Exception:
+            conn = sqlite3.connect(self._learning_db, timeout=2.0)  # type: ignore[arg-type]
+        except sqlite3.Error:  # pragma: no cover — defensive
             return
         try:
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            conn = _sq.connect(self._learning_db, timeout=2.0)
+            rows = conn.execute(
+                "SELECT arm, query_id, ndcg_at_10 FROM shadow_observations "
+                "WHERE candidate_id = ? ORDER BY id ASC",
+                (cid,),
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []  # M012 not applied yet
+        finally:
+            conn.close()
+        for arm, qid, reward in rows:
+            if arm in _ARMS and str(qid) not in self._obs:
+                self._add(str(qid), arm, float(reward))
+
+    def _persist(self, query_id: str, arm: str, reward: float) -> None:
+        cid = self._candidate_int()
+        if not self._learning_db or cid is None:
+            return
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            conn = sqlite3.connect(self._learning_db, timeout=2.0)
             try:
-                # INSERT OR IGNORE so crash-replay + duplicate observations
-                # (same query_id, same arm) are idempotent.
                 conn.execute(
                     "INSERT OR IGNORE INTO shadow_observations "
-                    "(profile_id, candidate_id, query_id, arm, "
-                    " ndcg_at_10, recorded_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (self.profile_id, cid, query_id, arm, float(ndcg), now),
+                    "(profile_id, candidate_id, query_id, arm, ndcg_at_10, "
+                    " recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (self.profile_id, cid, query_id, arm, reward, now),
                 )
                 conn.commit()
             finally:
                 conn.close()
-        except Exception:  # pragma: no cover — defensive
-            pass
+        except sqlite3.Error as exc:  # pragma: no cover — defensive
+            logger.debug("shadow observation not persisted: %s", exc)
 
     # ------------------------------------------------------------------
-    # Routing
+    # Routing (kept for callers without an install token)
     # ------------------------------------------------------------------
 
     def route_query(self, query_id: str) -> str:
-        """Deterministic 50/50 A/B route by SHA-256 first 8 hex chars.
-
-        LLD-10 §4.1 — exact formula: ``int(hexdigest[:8], 16) % 2``.
-        0 → ``'active'``, 1 → ``'candidate'``.
-
-        SEC-L1 / assumption (daemon contract): ``query_id`` is minted by
-        the recall pipeline (``recall_query_id``) and is NOT user-
-        controllable — any change to that contract MUST re-audit this
-        routing for collision / preimage bias. The current 32-bit hash
-        prefix is adequate because pairing validity (Phase A/B t-test)
-        degrades gracefully under skew (n_pairs shrinks) rather than
-        producing a one-sided false promotion.
-        """
+        """Deterministic 50/50 route: SHA-256 first 8 hex chars, modulo 2."""
         h = hashlib.sha256(query_id.encode("utf-8")).hexdigest()[:8]
-        bucket = int(h, 16) % 2
-        return "candidate" if bucket == 1 else "active"
+        return "candidate" if int(h, 16) % 2 == 1 else "active"
 
     # ------------------------------------------------------------------
-    # Data ingestion
+    # Ingestion
     # ------------------------------------------------------------------
+
+    def record_observation(self, *, query_id: str, arm: str, reward: float) -> bool:
+        """Record one settled reward. Returns False for a replay or bad arm."""
+        qid = str(query_id)
+        if arm not in _ARMS or qid in self._obs:
+            return False
+        value = max(0.0, min(1.0, float(reward)))
+        self._add(qid, arm, value)
+        self._persist(qid, arm, value)
+        return True
+
+    def _add(self, query_id: str, arm: str, value: float) -> None:
+        self._obs[query_id] = (arm, value)
+        acc = self._acc[arm]
+        acc[0] += 1.0
+        acc[1] += value
+        acc[2] += value * value
 
     def record_recall_pair(
-        self, *, query_id: str, arm: str, ndcg_at_10: float,
-    ) -> None:
-        """Record one settled recall result for the specified arm.
-
-        ``arm`` must be ``'active'`` or ``'candidate'``. Unknown arms
-        are silently ignored — the outcome is not our business to
-        police (callers may test routing bugs by feeding a mix).
-        """
-        # S9-defer H-P-12: route-exclusivity verifier. The routing
-        # contract says each query_id deterministically routes to
-        # exactly ONE arm. If the same qid arrives on both arms we
-        # have a shadow double-pay bug (caller invoked record on
-        # both arms, or the router flipped mid-test). Refuse the
-        # second write and log — the first arm's observation wins,
-        # the double-pay does not pollute the paired statistic.
-        qid_s = str(query_id)
-        if arm == "active":
-            if qid_s in self._candidate_by_qid:
-                logger.warning(
-                    "shadow_test route-exclusivity violation: "
-                    "qid=%s already on candidate arm; ignoring active write",
-                    qid_s,
-                )
-                return
-            self._active.append(float(ndcg_at_10))
-            self._active_by_qid[qid_s] = float(ndcg_at_10)
-        elif arm == "candidate":
-            if qid_s in self._active_by_qid:
-                logger.warning(
-                    "shadow_test route-exclusivity violation: "
-                    "qid=%s already on active arm; ignoring candidate write",
-                    qid_s,
-                )
-                return
-            self._candidate.append(float(ndcg_at_10))
-            self._candidate_by_qid[qid_s] = float(ndcg_at_10)
-        else:
-            return  # unknown arm: noop
-        # S9-defer: persist so restart reloads.
-        self._persist_observation(
-            query_id=qid_s, arm=arm, ndcg=float(ndcg_at_10),
-        )
+        self, *, query_id: str, arm: str,
+        ndcg_at_10: float | None = None, reward: float | None = None,
+    ) -> bool:
+        """Back-compatible alias. ``ndcg_at_10`` was always a reward."""
+        value = reward if reward is not None else ndcg_at_10
+        if value is None:
+            return False
+        return self.record_observation(query_id=query_id, arm=arm, reward=value)
 
     # ------------------------------------------------------------------
     # Decision
     # ------------------------------------------------------------------
 
     def decide(self) -> tuple[str, dict]:
-        """Return ``(decision, stats)``.
-
-        ``decision``:
-          * ``'promote'`` — candidate beat active by ≥ MIN_EFFECT with
-            sufficient statistical power.
-          * ``'reject'`` — full Phase B accumulated and criterion not met.
-          * ``'continue'`` — insufficient data to decide either way.
-
-        ``stats`` is a plain dict for logging / dashboard / audit.
-        """
-        n_active = len(self._active)
-        n_cand = len(self._candidate)
-        # S9-STAT-08: pair by query_id (intersection of arm keysets),
-        # NOT by arrival index. Index-pairing silently paired the
-        # Nth arrival in each arm regardless of whether those arrivals
-        # referred to the same query — a time-order artefact that
-        # violated the paired-t iid assumption whenever the two arms
-        # saw queries in different orders. Intersection-by-qid makes
-        # each pair a true same-query comparison. We keep the legacy
-        # index-min as a conservative upper bound on n_pairs for the
-        # PHASE_B_N gate so the sample-size contract unchanged.
-        paired_qids = (
-            set(self._active_by_qid.keys())
-            & set(self._candidate_by_qid.keys())
-        )
-        n_pairs = len(paired_qids)
+        """Return ``(decision, stats)`` — ``promote``, ``reject`` or ``continue``."""
+        n_a, mean_a, var_a = _moments(self._acc["active"])
+        n_c, mean_c, var_c = _moments(self._acc["candidate"])
         stats: dict = {
-            "n_active": n_active,
-            "n_candidate": n_cand,
-            "n_pairs": n_pairs,
-            "effect": 0.0,
-            "t_stat": 0.0,
-            "std": 0.0,
-            "phase": "A" if n_pairs < self.PHASE_B_N else "B",
-            "criterion": None,
+            "design": "independent_groups_msprt", "alpha": self.ALPHA,
+            "n_active": n_a, "n_candidate": n_c,
+            "mean_active": mean_a, "mean_candidate": mean_c,
+            "effect": mean_c - mean_a, "lambda": 0.0, "criterion": None,
         }
-
-        if n_pairs == 0:
+        if min(n_a, n_c) < self.MIN_PER_ARM:
+            stats["criterion"] = "accumulating"
             return "continue", stats
-
-        # S-M03: guard against significant arm imbalance. SHA-256 routing
-        # is approximately 50/50 in expectation, but on small samples the
-        # buckets can skew. When one arm is more than 2× the other AND
-        # both arms have a minimal footprint, the paired-by-index diff
-        # silently discards the long tail — the statistic is still valid
-        # but operators should be told the data is unbalanced before any
-        # promote/reject decision is attempted.
-        _MIN_PER_ARM = 8
-        if (
-            n_active >= _MIN_PER_ARM
-            and n_cand >= _MIN_PER_ARM
-            and max(n_active, n_cand) > 2 * min(n_active, n_cand)
-        ):
-            stats["criterion"] = "unbalanced_arms"
-            return "continue", stats
-
-        # S9-STAT-08: diffs built from the query_id intersection so
-        # each element of ``diffs`` is a true same-query paired
-        # comparison (candidate_ndcg - active_ndcg for the same qid).
-        # Sort the qid set for reproducibility across runs with the
-        # same data.
-        diffs = [
-            self._candidate_by_qid[qid] - self._active_by_qid[qid]
-            for qid in sorted(paired_qids)
-        ]
-        mean, std, t_stat = _paired_t_stat(diffs)
-        stats["effect"] = float(mean)
-        stats["std"] = float(std)
-        stats["t_stat"] = float(t_stat)
-
-        # --- Phase A early-stop on STRONG signal ---
-        if n_pairs >= self.PHASE_A_N and n_pairs < self.PHASE_B_N:
-            crit_strong = _critical_t(n_pairs - 1, alpha=self.ALPHA_STRONG)
-            if (
-                abs(mean) > self.MIN_STRONG_EFFECT
-                and abs(t_stat) > crit_strong
-                and mean > 0
-            ):
-                stats["phase"] = "A"
-                stats["criterion"] = "phase_a_strong_signal"
+        pooled = ((n_a - 1) * var_a + (n_c - 1) * var_c) / (n_a + n_c - 2)
+        var_diff = max(pooled, _VAR_FLOOR) * (1.0 / n_a + 1.0 / n_c)
+        lam = msprt_lambda(stats["effect"], var_diff, self.MIX_SD)
+        stats["lambda"] = lam
+        stats["var_diff"] = var_diff
+        if lam >= 1.0 / self.ALPHA:
+            if stats["effect"] >= self.MIN_EFFECT:
+                stats["criterion"] = "msprt_candidate_better"
                 return "promote", stats
-            # Weak or uncertain signal — continue to Phase B.
-            stats["phase"] = "A"
-            stats["criterion"] = "phase_a_continue"
-            return "continue", stats
-
-        # --- Phase B full validation ---
-        if n_pairs >= self.PHASE_B_N:
-            # S-L05: we compare ``t_stat > crit`` which is a one-tailed
-            # "candidate better than active" test. ``_critical_t`` returns
-            # a TWO-tailed critical (α=0.05 → 1.96). For a one-tailed
-            # directional test at α=0.05 the correct critical is 1.645, i.e.
-            # the two-tailed critical at α=0.10. We pass α×2 so the
-            # comparison semantics match the docstring ("paired t-test
-            # p<0.05") under a one-sided directional constraint AND the
-            # ``mean >= MIN_EFFECT`` gate preserves the conservative
-            # direction preference.
-            crit = _critical_t(n_pairs - 1, alpha=min(0.999, self.ALPHA * 2.0))
-            stats["phase"] = "B"
-            if mean >= self.MIN_EFFECT and t_stat > crit:
-                stats["criterion"] = "phase_b_promote"
-                return "promote", stats
-            stats["criterion"] = "phase_b_reject"
+            if stats["effect"] < 0.0:
+                stats["criterion"] = "msprt_candidate_worse"
+                return "reject", stats
+        if min(n_a, n_c) >= self.MAX_PER_ARM:
+            stats["criterion"] = "horizon_without_win"
             return "reject", stats
-
-        # n_pairs < PHASE_A_N → continue accumulating.
-        stats["phase"] = "A"
-        stats["criterion"] = "accumulating"
+        stats["criterion"] = "inconclusive"
         return "continue", stats
-
-
-__all__ = ("ShadowTest",)

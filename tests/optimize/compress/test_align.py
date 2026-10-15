@@ -4,11 +4,8 @@ from __future__ import annotations
 from superlocalmemory.optimize.compress.align import (
     CacheAligner,
     AlignResult,
-    VolatileFinding,
-    _detect,
     _is_uuid,
     _is_iso8601,
-    _is_jwt_shape,
     _is_hex_hash,
     _split_tokens,
 )

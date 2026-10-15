@@ -47,8 +47,8 @@ class TestStartDaemonSubprocessHelper:
         assert result is True
         popen.assert_not_called()  # never spawned a subprocess
 
-    def test_spawns_subprocess_and_writes_pid_port_when_daemon_down(self, tmp_path) -> None:
-        """B1: helper spawns daemon, writes PID + port files, and delegates wait."""
+    def test_spawns_subprocess_and_leaves_pid_port_to_the_daemon_when_down(self, tmp_path) -> None:
+        """B1: helper spawns daemon and delegates wait; the daemon writes the record."""
         from superlocalmemory.cli import daemon as _daemon
 
         fake_proc = MagicMock()
@@ -62,10 +62,16 @@ class TestStartDaemonSubprocessHelper:
             result = _daemon._start_daemon_subprocess()
 
         assert result is True
-        popen.assert_called_once()
+        # One daemon launch. (On Windows, writing daemon.json also runs icacls
+        # through subprocess to make it owner-only; that is not a launch.)
+        launches = [c for c in popen.call_args_list
+                    if "superlocalmemory.server.unified_daemon" in c.args[0]]
+        assert len(launches) == 1, popen.call_args_list
         wait.assert_called_once()
-        assert (tmp_path / "daemon.pid").read_text() == "99999"
-        assert (tmp_path / "daemon.port").read_text() == str(_daemon._DEFAULT_PORT)
+        # The parent writes no pid/port mirrors; the daemon that owns the data
+        # folder does.
+        assert not (tmp_path / "daemon.pid").exists()
+        assert not (tmp_path / "daemon.port").exists()
 
     def test_returns_false_when_wait_for_daemon_times_out(self, tmp_path) -> None:
         """B1: helper propagates _wait_for_daemon's timeout result honestly."""
@@ -224,7 +230,7 @@ class TestRestartStep3UsesHelperNotEnsureDaemon:
             / "cli"
             / "commands.py"
         )
-        text = commands_py.read_text()
+        text = commands_py.read_text(encoding="utf-8")
 
         # Find the cmd_restart function body
         start = text.index("def cmd_restart(")

@@ -165,11 +165,12 @@ class OptimizeConfig:
     semantic_max_index_entries: int = 10000
     semantic_max_tenants: int = 10000
 
-    # Compress. Safe lossless compression (whitespace normalize + JSON minify) is
-    # ON by default; it runs proxy-free via the slm_compress tool and never
-    # touches code. Lossy prose (LLMLingua) stays gated behind compress_mode=
-    # "aggressive" + compress_prose. Set compress_enabled=False (slm optimize off)
-    # to disable entirely.
+    # Compress. Safe compression (prose blank-line normalize + value-preserving
+    # JSON minify) is ON by default; it runs proxy-free via the slm_compress
+    # tool and passes code through byte-for-byte. slm_compress keeps the
+    # original (CCR) whenever the output differs from the input. Lossy prose
+    # (LLMLingua) stays gated behind compress_mode="aggressive" + compress_prose.
+    # Set compress_enabled=False (slm optimize off) to disable entirely.
     compress_enabled: bool = True
     compress_mode: str = "safe"
     compress_prose: bool = False

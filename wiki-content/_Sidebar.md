@@ -1,40 +1,66 @@
-**SuperLocalMemory V4.0.5**
+**SuperLocalMemory**
 
 * [Home](Home)
 
-**Getting Started**
+**Start here**
 * [Installation](Installation)
-* [Quick Start Tutorial](Quick-Start-Tutorial)
 * [Getting Started](Getting-Started)
-* [Modes Explained](Modes-Explained)
 * [IDE Setup](IDE-Setup)
+* [Plugins, Skills and Hooks](Plugins-Skills-and-Hooks)
 * [Host Integration Upgrades](Host-Upgrades)
-* [Migration from V2](Migration-from-V2)
 
-**Reference**
-* [CLI Commands](CLI-Reference)
-* [MCP Tools](MCP-Tools) — 94 whole / 61 power / 49 full / 31 code / 16 core
+**How memory works**
+* [Architecture](Architecture)
+* [How Remember Works](How-Remember-Works)
+* [How Recall Works](How-Recall-Works)
 * [Retrieval Score Contract](Retrieval-Score-Contract)
+* [Answer Check](Answer-Check)
+* [Memory Kinds](Memory-Kinds)
+* [Modes Explained](Modes-Explained)
+* [Profiles](Profiles)
 * [Auto-Memory](Auto-Memory)
-* [Active Memory (V3.1)](Active-Memory)
+* [Active Memory](Active-Memory)
 
-**Integrations**
-* [Framework Adapters](Framework-Adapters) — 9 adapters
-* [Bounded Loops](Bounded-Loops)
+**The living system**
+* [Living Brain](Living-Brain)
+* [Knowledge Graph and Entities](Knowledge-Graph-and-Entities)
+* [Skill Evolution](Skill-Evolution)
+* [Health and Repair](Health-and-Repair)
 * [Multi-Agent Memory](Multi-Agent-Memory)
 
-**Architecture**
-* [Architecture Overview](V3-Architecture) — historical V3, carried into V4
-* [Capabilities and Operations](Capabilities-and-Operations)
-* [Published Benchmarks](V3-Architecture#benchmarks) — V3 LoCoMo, not a V4 rerun
-* [Mathematical Foundations](V3-Mathematical-Foundations) — historical V3
-* [V4 Reliability Contract](Home#v4-reliability-contract--verified-22002200-scoped) — 2,200/2,200, protocol `benchmark/run_all.py --trials 200`
-
-**Enterprise and Teams**
-* [RBAC and Teams](RBAC-Teams)
-* [GDPR Compliance](GDPR-Compliance)
+**Governance and trust**
+* [Governance](Governance)
+* [Security, Company Mode and Teams](Security-Company-Mode-and-Teams)
+* [Privacy and Data Flow](Privacy-and-Data-Flow)
+* [GDPR](GDPR-Compliance)
 * [Compliance](Compliance)
+* [Backup and Restore](Backup-and-Restore)
+* [Cloud Backup](Cloud-Backup)
+
+**Beyond text**
+* [Pictures and Documents](Pictures-and-Documents)
+* [Ingestion Adapters](Ingestion-Adapters)
+
+**Connected systems**
+* [Bots That Talk (SLM-Mesh)](Bots-That-Talk)
+* [Connect Web Apps (steps)](Connect-Web-Apps)
+* [Web Access and Connected Apps](Web-Access-and-Connected-Apps)
+* [Bounded Loops](Bounded-Loops)
+* [Framework Adapters](Framework-Adapters)
+* [Optimize](Optimize)
+
+**Operate and reference**
+* [Dashboard Tour](Dashboard-Tour)
+* [Configuration](Configuration)
+* [Embedding Models](Embedding-Models)
+* [CLI Reference](CLI-Reference)
+* [MCP Tools](MCP-Tools)
+* [Capabilities and Operations](Capabilities-and-Operations)
+* [Troubleshooting](Troubleshooting)
 * [FAQ](FAQ)
 
-**V2 Documentation**
-* [V2 Archive](v2-archive/)
+**Research**
+* [Research Foundations](Research-Foundations)
+
+**Archive**
+* [Archive](archive/Archive-Index)

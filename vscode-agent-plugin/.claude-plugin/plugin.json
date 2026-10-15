@@ -1,0 +1,21 @@
+{
+  "author": {
+    "name": "Qualixar",
+    "url": "https://github.com/qualixar/superlocalmemory"
+  },
+  "description": "SuperLocalMemory for VS Code agents: local-first agent memory, SLM-Mesh, skills and sub-agents, served by the `slm mcp` you installed.",
+  "displayName": "SuperLocalMemory",
+  "homepage": "https://superlocalmemory.com",
+  "keywords": [
+    "memory",
+    "mcp",
+    "agents",
+    "local-first",
+    "context-compression"
+  ],
+  "license": "AGPL-3.0-or-later",
+  "mcpServers": "./.mcp.json",
+  "name": "superlocalmemory",
+  "repository": "https://github.com/qualixar/superlocalmemory",
+  "version": "4.2.6"
+}

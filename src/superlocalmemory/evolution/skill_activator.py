@@ -27,13 +27,14 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+from superlocalmemory.evolution import backup_files
 from superlocalmemory.infra.data_root import canonical_data_root
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,9 @@ class SkillActivator:
         live_root: Path | None = None,
         backup_root: Path | None = None,
         quarantine_root: Path | None = None,
+        installation_wide: bool = True,
     ) -> None:
+        self._installation_wide = installation_wide
         self._live_root = live_root or LIVE_SKILLS_ROOT
         self._backup_root = backup_root or BACKUP_ROOT
         self._quarantine_root = quarantine_root or QUARANTINE_ROOT
@@ -82,18 +85,14 @@ class SkillActivator:
         # Fail-fast: detect traversal in raw name before sanitization.
         raw = Path(skill_name)
         if raw.is_absolute() or ".." in raw.parts:
-            raise ValueError(
-                f"skill_name {skill_name!r} contains path traversal sequences"
-            )
+            raise ValueError(f"skill_name {skill_name!r} contains path traversal sequences")
         safe = _SAFE_NAME_RE.sub("-", skill_name).lower()[:50] or "skill"
         target = (base / safe).resolve()
         base_resolved = base.resolve()
         # Audit P2-5: is_relative_to is not prefix-fragile (a sibling like
         # ".../skills-evil" cannot masquerade as being under ".../skills").
         if not target.is_relative_to(base_resolved):
-            raise ValueError(
-                f"skill_name {skill_name!r} escapes sandbox: {target}"
-            )
+            raise ValueError(f"skill_name {skill_name!r} escapes sandbox: {target}")
         return target
 
     def _quarantine_path(self, quarantine_dir_name: str) -> Path:
@@ -110,9 +109,7 @@ class SkillActivator:
         """
         raw = Path(quarantine_dir_name)
         if raw.is_absolute() or ".." in raw.parts:
-            raise ValueError(
-                f"quarantine_dir_name {quarantine_dir_name!r} contains path traversal"
-            )
+            raise ValueError(f"quarantine_dir_name {quarantine_dir_name!r} contains path traversal")
         root = self._quarantine_root.resolve()
         q_dir = (self._quarantine_root / quarantine_dir_name).resolve()
         if not q_dir.is_relative_to(root):
@@ -121,16 +118,25 @@ class SkillActivator:
             )
         q_path = (q_dir / "SKILL.md").resolve()
         if not q_path.is_relative_to(root):
-            raise ValueError(
-                f"quarantine artifact escapes sandbox: {q_path}"
-            )
+            raise ValueError(f"quarantine artifact escapes sandbox: {q_path}")
         return q_path
 
     def _live_path(self, skill_name: str) -> Path:
-        return self._safe_skill_dir(skill_name, self._live_root) / "SKILL.md"
+        root = self._live_root
+        if root == LIVE_SKILLS_ROOT:
+            codex_root = Path.home() / ".codex" / "skills"
+            codex_path = self._safe_skill_dir(skill_name, codex_root) / "SKILL.md"
+            if codex_path.is_file():
+                root = codex_root
+        return self._safe_skill_dir(skill_name, root) / "SKILL.md"
 
     def _backup_path(self, skill_name: str) -> Path:
-        return self._safe_skill_dir(skill_name, self._backup_root) / "SKILL.md.bak"
+        safe = self._safe_skill_dir(skill_name, self._backup_root)
+        digest = hashlib.sha256(skill_name.encode()).hexdigest()[:16]
+        backup = safe.with_name(f"{safe.name}-{digest}") / "SKILL.md.bak"
+        backup_files.checked(backup, self._backup_root)
+        backup_files.checked(backup.with_suffix(".target.json"), self._backup_root)
+        return backup
 
     # ------------------------------------------------------------------
     # Public API
@@ -142,129 +148,104 @@ class SkillActivator:
         quarantine_dir_name: str,
         *,
         actor_id: str = "",
+        expected_hash: str = "",
+        source_path: str = "",
     ) -> dict:
-        """Atomically activate a quarantined skill.
-
-        Steps:
-          1. Resolve quarantine_path using quarantine_dir_name and verify it exists.
-          2. Read quarantine content and compute SHA-256.
-          3. Write backup of existing live SKILL.md (if any) to backup_root.
-          4. Write quarantine content to live path via .tmp → os.replace.
-          5. Return activation metadata.
-
-        Args:
-            skill_name: The original skill identifier (CRIT-2), e.g. "brainstorming".
-            quarantine_dir_name: The sanitized quarantine subdir, e.g. "brainstorming-vabc12".
-            actor_id: Who triggered activation (e.g. "auto" or a user id).
-
-        Raises:
-            FileNotFoundError: Quarantine artifact does not exist.
-            ValueError: Path traversal detected in skill_name.
-            SkillActivationError: Any OS error after the backup was already written.
-        """
+        """Verify bytes, preserve the original, then atomically install them."""
         q_path = self._quarantine_path(quarantine_dir_name)
-        live_path = self._live_path(skill_name)  # raises ValueError on traversal
+        # A workspace-scoped activation never writes back to the installed
+        # source: that would change the skill for every workspace.
+        live_path = (
+            self._source_target(source_path)
+            if source_path and self._installation_wide
+            else self._live_path(skill_name)
+        )
         backup_path = self._backup_path(skill_name)
-
         if not q_path.exists():
-            raise FileNotFoundError(
-                f"Quarantine artifact not found: {q_path}"
-            )
-
+            raise FileNotFoundError(f"Quarantine artifact not found: {q_path}")
         content = q_path.read_bytes()
-        content_hash = hashlib.sha256(content).hexdigest()
-        ts = datetime.now(timezone.utc).isoformat()
+        digest = hashlib.sha256(content).hexdigest()
+        if expected_hash and digest != expected_hash:
+            raise ValueError("verified artifact digest mismatch")
+        backup_written = self._backup_live(live_path, backup_path)
+        self._remember_target(backup_path, live_path)
+        self._atomic_write(live_path, content)
+        logger.info("Activated skill %s (actor=%s)", skill_name, actor_id)
+        return {
+            "skill_name": skill_name,
+            "live_path": str(live_path),
+            "backup_path": str(backup_path) if backup_written else None,
+            "content_hash": digest,
+            "activated_at": datetime.now(timezone.utc).isoformat(),
+            "actor_id": actor_id,
+        }
 
-        # Step 3: backup existing live artifact BEFORE any overwrite
-        backup_path.parent.mkdir(parents=True, exist_ok=True)
-        backup_written = False
+    def _backup_live(self, live_path, backup_path):
         if live_path.exists():
-            shutil.copy2(live_path, backup_path)
-            backup_written = True
-            logger.info(
-                "skill_activator: backed up %s → %s",
-                live_path, backup_path,
-            )
+            backup_files.write(backup_path, live_path.read_bytes(), self._backup_root)
+            return True
+        return False
 
-        # Step 4: atomic write via .tmp → rename (same directory = same fs)
+    def _atomic_write(self, live_path, content):
         live_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = live_path.with_suffix(".tmp")
         try:
             tmp_path.write_bytes(content)
             os.replace(tmp_path, live_path)
         except OSError as exc:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise SkillActivationError(
-                f"atomic write failed for {live_path}: {exc}"
-            ) from exc
-
-        logger.info(
-            "skill_activator: activated %s @ %s (sha256=%s, actor=%s)",
-            skill_name, live_path, content_hash[:12], actor_id,
-        )
-        return {
-            "skill_name": skill_name,
-            "live_path": str(live_path),
-            "backup_path": str(backup_path) if backup_written else None,
-            "content_hash": content_hash,
-            "activated_at": ts,
-            "actor_id": actor_id,
-        }
+            tmp_path.unlink(missing_ok=True)
+            raise SkillActivationError(f"atomic write failed for {live_path}: {exc}") from exc
 
     def rollback(self, skill_name: str) -> dict:
-        """Restore the live SKILL.md from the backup written by activate().
-
-        If no backup exists, removes the live file (the skill was new).
-        Never raises on missing backup — logs a warning instead.
-
-        Args:
-            skill_name: The original skill identifier, same value used in activate().
-        """
-        live_path = self._live_path(skill_name)
-        backup_path = self._backup_path(skill_name)
-        ts = datetime.now(timezone.utc).isoformat()
-
+        """Restore the complete identity's recorded host target."""
+        backup_path, live_path = self._rollback_paths(skill_name)
         if backup_path.exists():
-            # Audit P2-4: restore atomically (tmp → os.replace) so a crash
-            # mid-rollback cannot leave a torn live SKILL.md.
-            live_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = live_path.with_suffix(".tmp")
-            tmp_path.write_bytes(backup_path.read_bytes())
-            os.replace(tmp_path, live_path)
-            logger.info(
-                "skill_activator: rolled back %s ← %s",
-                live_path, backup_path,
-            )
-            return {
-                "skill_name": skill_name,
-                "rolled_back": True,
-                "restored_from": str(backup_path),
-                "rolled_back_at": ts,
-            }
+            self._atomic_write(live_path, backup_files.read(backup_path, self._backup_root))
+            restored = str(backup_path)
         elif live_path.exists():
             live_path.unlink()
-            logger.warning(
-                "skill_activator: no backup for %s; removed live file",
-                skill_name,
-            )
-            return {
-                "skill_name": skill_name,
-                "rolled_back": True,
-                "restored_from": None,
-                "note": "no backup; live file removed",
-                "rolled_back_at": ts,
-            }
+            restored = None
         else:
-            logger.warning(
-                "skill_activator: rollback called but no live file for %s",
-                skill_name,
+            return {"skill_name": skill_name, "rolled_back": False, "note": "nothing to rollback"}
+        return {
+            "skill_name": skill_name,
+            "rolled_back": True,
+            "restored_from": restored,
+            "rolled_back_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _rollback_paths(self, skill_name):
+        backup = self._backup_path(skill_name)
+        manifest = backup.with_suffix(".target.json")
+        if not backup.exists() and not manifest.exists():
+            backup = self._safe_skill_dir(skill_name, self._backup_root) / "SKILL.md.bak"
+            manifest = backup.with_suffix(".target.json")
+        backup_files.checked(backup, self._backup_root)
+        backup_files.checked(manifest, self._backup_root)
+        if manifest.is_file():
+            live = self._source_target(
+                json.loads(backup_files.read(manifest, self._backup_root))["live_path"]
             )
-            return {
-                "skill_name": skill_name,
-                "rolled_back": False,
-                "note": "nothing to rollback",
-                "rolled_back_at": ts,
-            }
+        else:
+            live = self._safe_skill_dir(skill_name, self._live_root) / "SKILL.md"
+        return backup, live
+
+    def _source_target(self, source_path: str) -> Path:
+        target = Path(source_path).resolve()
+        roots = (
+            self._live_root,
+            Path.home() / ".codex" / "skills",
+            Path.home() / ".codex" / "plugins" / "cache",
+            Path.home() / ".claude" / "plugins",
+        )
+        if target.name != "SKILL.md" or not any(
+            target.is_relative_to(root.resolve()) for root in roots
+        ):
+            raise ValueError("skill source escapes the installed host directories")
+        return target
+
+    def _remember_target(self, backup_path, live_path):
+        manifest = backup_path.with_suffix(".target.json")
+        backup_files.write(
+            manifest, json.dumps({"live_path": str(live_path)}).encode(), self._backup_root
+        )

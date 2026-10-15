@@ -10,12 +10,8 @@ Default (unset / anything else): advertising DISABLED — backward-compat.
 
 from __future__ import annotations
 
-import threading
-from socket import inet_ntoa
-from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +135,6 @@ class TestOptInAdvertising:
         mock_zc_cls = MagicMock(return_value=mock_zc_instance)
 
         from superlocalmemory.mesh.discovery import _SERVICE_TYPE
-        from zeroconf import ServiceInfo  # real class for construction
 
         with patch(
             "superlocalmemory.mesh.discovery.Zeroconf", mock_zc_cls

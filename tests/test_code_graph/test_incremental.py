@@ -25,7 +25,6 @@ from superlocalmemory.code_graph.graph_engine import GraphEngine
 from superlocalmemory.code_graph.graph_store import GraphStore
 from superlocalmemory.code_graph.incremental import (
     IncrementalUpdater,
-    ParserProtocol,
     UpdateResult,
 )
 from superlocalmemory.code_graph.models import (
@@ -175,7 +174,7 @@ class TestBasicUpdate:
         self, updater: IncrementalUpdater, repo_root: Path
     ) -> None:
         (repo_root / "src").mkdir(parents=True)
-        (repo_root / "src/foo.py").write_text("def foo(): pass")
+        (repo_root / "src/foo.py").write_text("def foo(): pass", encoding="utf-8")
 
         parser = MockParser(repo_root)
         result = updater.update(["src/foo.py"], parser, repo_root)
@@ -189,7 +188,7 @@ class TestBasicUpdate:
         store: GraphStore,
     ) -> None:
         (repo_root / "src").mkdir(parents=True)
-        (repo_root / "src/foo.py").write_text("def foo(): pass")
+        (repo_root / "src/foo.py").write_text("def foo(): pass", encoding="utf-8")
 
         parser = MockParser(repo_root)
         # First update
@@ -204,13 +203,13 @@ class TestBasicUpdate:
         self, updater: IncrementalUpdater, repo_root: Path,
     ) -> None:
         (repo_root / "src").mkdir(parents=True)
-        (repo_root / "src/foo.py").write_text("def foo(): pass")
+        (repo_root / "src/foo.py").write_text("def foo(): pass", encoding="utf-8")
 
         parser = MockParser(repo_root)
         updater.update(["src/foo.py"], parser, repo_root)
 
         # Modify file
-        (repo_root / "src/foo.py").write_text("def foo(): return 42")
+        (repo_root / "src/foo.py").write_text("def foo(): return 42", encoding="utf-8")
         result = updater.update(["src/foo.py"], parser, repo_root)
 
         assert result.parsed == 1
@@ -228,7 +227,7 @@ class TestFileDeletion:
     ) -> None:
         # Pre-populate a file
         (repo_root / "src").mkdir(parents=True)
-        (repo_root / "src/foo.py").write_text("def foo(): pass")
+        (repo_root / "src/foo.py").write_text("def foo(): pass", encoding="utf-8")
 
         parser = MockParser(repo_root)
         updater.update(["src/foo.py"], parser, repo_root)
@@ -253,8 +252,8 @@ class TestDependentTracing:
         store: GraphStore,
     ) -> None:
         (repo_root / "src").mkdir(parents=True)
-        (repo_root / "src/a.py").write_text("def a(): pass")
-        (repo_root / "src/b.py").write_text("from a import a")
+        (repo_root / "src/a.py").write_text("def a(): pass", encoding="utf-8")
+        (repo_root / "src/b.py").write_text("from a import a", encoding="utf-8")
 
         # b.py imports from a.py
         parser = MockParserWithEdges({
@@ -266,7 +265,7 @@ class TestDependentTracing:
         initial_count = parser.parse_count
 
         # Now change a.py → b.py should be reparsed as dependent
-        (repo_root / "src/a.py").write_text("def a(): return 1")
+        (repo_root / "src/a.py").write_text("def a(): return 1", encoding="utf-8")
         result = updater.update(["src/a.py"], parser, repo_root)
 
         assert result.parsed == 1  # a.py
@@ -307,7 +306,7 @@ class TestErrorHandling:
         engine: GraphEngine,
     ) -> None:
         (repo_root / "src").mkdir(parents=True)
-        (repo_root / "src/foo.py").write_text("def foo(): pass")
+        (repo_root / "src/foo.py").write_text("def foo(): pass", encoding="utf-8")
 
         parser = MockParser(repo_root)
         # Build the graph first

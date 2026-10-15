@@ -11,6 +11,8 @@
 
     var STATE = {
         agents: [],
+        total: 0,
+        generation: 0,
         page: 0,
         pageSize: 25,
         sort: 'score-desc',
@@ -51,14 +53,14 @@
         if (!tbody) return;
 
         var agents = _sortedAgents();
-        var total = agents.length;
+        var total = STATE.total;
         var pageSize = Math.max(1, STATE.pageSize);
         var maxPage = Math.max(0, Math.ceil(total / pageSize) - 1);
         if (STATE.page > maxPage) STATE.page = maxPage;
         if (STATE.page < 0) STATE.page = 0;
         var start = STATE.page * pageSize;
         var end = Math.min(total, start + pageSize);
-        var slice = agents.slice(start, end);
+        var slice = agents;
 
         tbody.textContent = '';
         slice.forEach(function (a) {
@@ -130,35 +132,33 @@
     var TRUST_PANE_ID = 'operations-pane';
 
     async function loadTrustDashboard() {
+        var generation = ++STATE.generation;
         try {
-            var resp = await fetch('/api/v3/trust/dashboard');
+            var resp = await fetch('/api/dashboard/trust?limit=' + STATE.pageSize + '&offset=' + (STATE.page * STATE.pageSize) + '&sort=' + encodeURIComponent(STATE.sort));
             if (!resp.ok) {
                 // CRIT-1: pass lexically-scoped loadTrustDashboard (inside IIFE)
                 showPaneError(TRUST_PANE_ID, paneErrorMessage(resp.status), loadTrustDashboard, true);
                 return;
             }
             var data = await resp.json();
+            if (generation !== STATE.generation) return;
 
             clearPaneError(TRUST_PANE_ID, true);
 
             var agents = data.agents || [];
             STATE.agents = agents;
-            STATE.page = 0;
+            STATE.total = data.total || 0;
 
             var el;
             el = document.getElementById('trust-agent-count');
-            if (el) el.textContent = agents.length.toLocaleString();
+            if (el) el.textContent = STATE.total.toLocaleString();
 
-            var avg = agents.length > 0
-                ? (agents.reduce(function (s, a) {
-                    return s + (a.trust_score || 0);
-                }, 0) / agents.length).toFixed(3)
-                : '\u2014';
+            var avg = typeof data.avg_trust === 'number' ? data.avg_trust.toFixed(3) : '—';
             el = document.getElementById('trust-avg-score');
             if (el) el.textContent = avg;
 
             el = document.getElementById('trust-burst-count');
-            if (el) el.textContent = (data.alerts || []).length;
+            if (el) el.textContent = data.alert_count || 0;
 
             _renderPage();
         } catch (e) {
@@ -175,7 +175,7 @@
             sort.addEventListener('change', function () {
                 STATE.sort = sort.value;
                 STATE.page = 0;
-                _renderPage();
+                loadTrustDashboard();
             });
         }
         var pageSize = document.getElementById('trust-page-size');
@@ -183,7 +183,7 @@
             pageSize.addEventListener('change', function () {
                 STATE.pageSize = parseInt(pageSize.value, 10) || 25;
                 STATE.page = 0;
-                _renderPage();
+                loadTrustDashboard();
             });
         }
         var prev = document.getElementById('trust-prev-btn');
@@ -191,7 +191,7 @@
             prev.addEventListener('click', function () {
                 if (STATE.page > 0) {
                     STATE.page -= 1;
-                    _renderPage();
+                    loadTrustDashboard();
                 }
             });
         }
@@ -199,7 +199,7 @@
         if (next) {
             next.addEventListener('click', function () {
                 STATE.page += 1;
-                _renderPage();
+                loadTrustDashboard();
             });
         }
     }

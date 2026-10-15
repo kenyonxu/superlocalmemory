@@ -35,7 +35,7 @@ async function searchMemories() {
 // Export All / Search Results
 // ============================================================================
 
-function exportAll(format) {
+async function exportAll(format) {
     var url = '/api/export?format=' + encodeURIComponent(format);
     var category = document.getElementById('filter-category').value;
     var project = document.getElementById('filter-project').value;
@@ -44,7 +44,11 @@ function exportAll(format) {
     if (typeof showToast === 'function') {
         showToast('Preparing ' + format.toUpperCase() + ' export...');
     }
-    window.location.href = url;
+    // Fetch rather than navigate: a failed export is reported, not shown as a
+    // raw JSON error page, and a finished one says what it saved.
+    var result = await slmDownloadExport(url);
+    if (typeof showToast === 'function') showToast(slmExportMessage(result));
+    return result;
 }
 
 (function wireSearchInput() {

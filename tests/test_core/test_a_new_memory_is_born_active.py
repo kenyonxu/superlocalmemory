@@ -38,8 +38,6 @@ COLD boundary, 0.8, already equalled 1 - archive_threshold exactly.
 
 from __future__ import annotations
 
-import statistics
-
 import numpy as np
 import pytest
 
@@ -51,7 +49,6 @@ from superlocalmemory.math.langevin import (
     _RADIUS_ACTIVE,
     _RADIUS_COLD,
     _RADIUS_WARM,
-    LangevinDynamics,
 )
 
 _T = 0.3

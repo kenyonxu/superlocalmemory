@@ -6,7 +6,6 @@ LLD-03 §4.3.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from superlocalmemory.optimize.cache.centroid_store import (
     CentroidStore,

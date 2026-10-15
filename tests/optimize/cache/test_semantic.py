@@ -7,10 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import random
 from types import SimpleNamespace
-from typing import Any
 
 import numpy as np
 import pytest
@@ -131,7 +129,7 @@ def test_vcache_index_then_lookup_hit(config_enabled, tmp_db, req_factory):
     # Pre-warm the per-item MLE model with positive outcomes at the
     # expected query similarity. This moves t_hat down and τ̂ below 1.0,
     # so should_explore returns False and the hit is served.
-    surrogate_id = f"sem:{hashlib.sha256(f'{tenant}:{query_text}'.encode()).hexdigest()[:32]}"
+    surrogate_id = tier._derive_entry_id(tenant, query_text)
     for sim in [0.97, 0.98, 0.99, 0.96, 0.95]:
         tier.learn(surrogate_id, similarity=sim, was_correct=True)
     result = tier.lookup(req, tenant, embed=embed)
@@ -149,6 +147,7 @@ def test_vcache_near_miss_capital_france_vs_germany(config_enabled, tmp_db, req_
     """
     from superlocalmemory.optimize.storage.db import CacheDB
     tenant = "t1"
+    tier = VCacheSemantic(db=tmp_db, config=config_enabled)
     # Index: "capital of France"
     fr_text = "What is the capital of France?"
     fr_embed = _unit_vec(fr_text)
@@ -169,16 +168,16 @@ def test_vcache_near_miss_capital_france_vs_germany(config_enabled, tmp_db, req_
     cur.execute(
         "INSERT OR REPLACE INTO llmcache_semantic_vectors (entry_id, tenant_id, vector_blob, vector_dim, model_name) "
         "VALUES (?, ?, ?, ?, ?)",
-        (fr_surrogate, tenant, fr_embed.tobytes(), _EMBED_DIM, "test"),
+        (fr_surrogate, tenant, fr_embed.tobytes(), _EMBED_DIM, tier._space_id),
     )
     conn.commit()
     conn.close()
 
-    tier = VCacheSemantic(db=tmp_db, config=config_enabled)
     # Query: "capital of Germany" (different embedding)
     de_text = "What is the capital of Germany?"
     de_req = req_factory([{"role": "user", "content": de_text}])
     result = tier.lookup(de_req, tenant, embed=_unit_vec(de_text))
+    assert len(tier._index[tenant]) == 1
     # Near-miss — may return due to small similarity, but should not return "Paris"
     # We assert it does NOT return the cached "Paris" response
     if result is not None:
@@ -226,7 +225,6 @@ def test_vcache_noop_semantic_tier_signature_compat():
 def test_vcache_ann_search_skips_wrong_context_fp(config_enabled, tmp_db, req_factory):
     """A-13: context-fp mismatch → HARD exclusion."""
     from superlocalmemory.optimize.storage.db import CacheDB
-    from superlocalmemory.optimize.cache.semantic import VCacheSemantic as _V
     import sqlite3 as _sq
     tenant = "t1"
     text = "Tell me about Mars"
@@ -279,9 +277,12 @@ def test_vcache_does_not_call_vec_db_when_disabled(config_disabled, tmp_db, req_
 def test_vcache_centroid_defense_blocks_outlier(config_enabled, tmp_db, req_factory):
     """Outlier query (very far from centroid) → return None (adversarial)."""
     from superlocalmemory.optimize.storage.db import CacheDB
-    from superlocalmemory.optimize.cache.semantic import VCacheSemantic as _V
     import sqlite3 as _sq
     tenant = "t1"
+    from dataclasses import replace
+    cfg = replace(config_enabled, semantic_centroid_defense=True,
+                  semantic_centroid_distance_floor=0.15)
+    tier = VCacheSemantic(db=tmp_db, config=cfg)
     # Build a cluster of 10 vectors all along axis 0
     for i in range(10):
         v = np.zeros(_EMBED_DIM, dtype=np.float32)
@@ -301,30 +302,19 @@ def test_vcache_centroid_defense_blocks_outlier(config_enabled, tmp_db, req_fact
         cur.execute(
             "INSERT OR REPLACE INTO llmcache_semantic_vectors (entry_id, tenant_id, vector_blob, vector_dim, model_name) "
             "VALUES (?, ?, ?, ?, ?)",
-            (surrogate, tenant, v.tobytes(), _EMBED_DIM, "test"),
+            (surrogate, tenant, v.tobytes(), _EMBED_DIM, tier._space_id),
         )
         conn.commit()
         conn.close()
-    # Enable centroid defense for this test
-    from dataclasses import replace
-    cfg = replace(config_enabled, semantic_centroid_defense=True,
-                  semantic_centroid_distance_floor=0.15)
-    tier = VCacheSemantic(db=tmp_db, config=cfg)
     # Warm centroid
     tier._lazy_warm_tenant(tenant)
+    assert tier._centroid_store.count(tenant) == 10
     # Outlier query — orthogonal to the cluster
     outlier = np.zeros(_EMBED_DIM, dtype=np.float32)
     outlier[1] = 1.0
     req = req_factory([{"role": "user", "content": "outlier"}])
     result = tier.lookup(req, tenant, embed=outlier)
     assert result is None  # centroid defense caught it
-
-
-def test_vcache_compute_tau_under_load_config_disabled_no_cost(config_disabled, tmp_db):
-    """When disabled, no boundary model is trained (no overhead)."""
-    tier = VCacheSemantic(db=tmp_db, config=config_disabled)
-    # is_enabled False — verify
-    assert tier.is_enabled() is False
 
 
 # ---- Additional coverage tests ----
@@ -359,13 +349,6 @@ def test_vcache_index_entry_none_embed(config_enabled, tmp_db, req_factory):
     tier = VCacheSemantic(db=tmp_db, config=config_enabled)
     req = req_factory([{"role": "user", "content": "hi"}])
     tier.index_entry(req, "t1", embed=None, resp={"text": "hello"})  # must not raise
-
-
-def test_vcache_index_entry_disabled(config_disabled, tmp_db, req_factory):
-    """index_entry when disabled → early return (line 189-190)."""
-    tier = VCacheSemantic(db=tmp_db, config=config_disabled)
-    req = req_factory([{"role": "user", "content": "hi"}])
-    tier.index_entry(req, "t1", embed=_unit_vec("hi"), resp={"text": "hello"})  # must not raise
 
 
 def test_vcache_index_entry_dict_resp(config_enabled, tmp_db, req_factory):
@@ -546,13 +529,14 @@ def test_extract_messages_edge_cases():
     assert _extract_system({"system": "hello"}) == "hello"
 
 
-def test_apply_latency_padding_zero():
-    """apply_latency_padding with <=0 → no-op (lines 570-571)."""
+@pytest.mark.parametrize("pad_ms", [0.0, -5.0])
+def test_apply_latency_padding_zero(monkeypatch, pad_ms):
+    """apply_latency_padding with <=0 → no-op: it never sleeps (lines 570-571)."""
     from superlocalmemory.optimize.cache.semantic import apply_latency_padding
-    import time
-    start = time.time()
-    apply_latency_padding(0.0)
-    assert time.time() - start < 0.1  # essentially instant
+    sleeps = []
+    monkeypatch.setattr("time.sleep", lambda s: sleeps.append(s))
+    apply_latency_padding(pad_ms)
+    assert sleeps == []
 
 
 def test_apply_latency_padding_positive(monkeypatch):

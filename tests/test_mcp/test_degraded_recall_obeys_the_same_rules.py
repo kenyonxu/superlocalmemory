@@ -26,7 +26,11 @@ from pathlib import Path
 
 import pytest
 
-from superlocalmemory.storage.migrations import M011_archive_and_merge
+from superlocalmemory.storage.migrations import (
+    M011_archive_and_merge,
+    M018_ingestion_operations,
+    M019_derivation_lineage,
+)
 from superlocalmemory.storage.schema import create_all_tables
 
 _PROFILE = "default"
@@ -40,10 +44,8 @@ def store_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     create_all_tables(conn)
     # archive_status arrives with M011, not with create_all_tables.
     conn.executescript(M011_archive_and_merge.DDL)
-    conn.execute(
-        "INSERT INTO memories (memory_id, profile_id, content) "
-        "VALUES ('m1', ?, 'source')", (_PROFILE,),
-    )
+    M018_ingestion_operations.apply(conn)
+    M019_derivation_lineage.apply(conn)
     rows = [
         ("keep-live", f"The {_TOKEN} lists two approvers.", 0, "live"),
         ("hide-quarantined",
@@ -52,11 +54,16 @@ def store_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ("hide-retired", f"The {_TOKEN} lives in the old wiki space.", 0, "live"),
     ]
     for fid, content, quarantined, archive_status in rows:
+        memory_id = f"source-{fid}"
+        conn.execute(
+            "INSERT INTO memories (memory_id, profile_id, content) VALUES (?,?,?)",
+            (memory_id, _PROFILE, content),
+        )
         conn.execute(
             "INSERT INTO atomic_facts (fact_id, memory_id, profile_id, content,"
             " quarantined, archive_status, scope, created_at) VALUES "
-            "(?, 'm1', ?, ?, ?, ?, 'global', datetime('now'))",
-            (fid, _PROFILE, content, quarantined, archive_status),
+            "(?, ?, ?, ?, ?, ?, 'global', datetime('now'))",
+            (fid, memory_id, _PROFILE, content, quarantined, archive_status),
         )
     conn.execute(
         "INSERT INTO fact_temporal_validity (fact_id, profile_id,"
@@ -79,10 +86,12 @@ def test_the_fire_alarm_path_hides_what_every_other_path_hides(
     """Quarantined, archived and retired rows are all out of bounds here too."""
     from superlocalmemory.mcp.tools_active import _sqlite_emergency_recall
 
-    got = _ids(_sqlite_emergency_recall(_TOKEN, limit=20, profile_id=_PROFILE))
+    response = _sqlite_emergency_recall(_TOKEN, limit=20, profile_id=_PROFILE)
+    got = _ids(response)
     assert got == ["keep-live"], (
         f"degraded recall served rows no other path would: {got}"
     )
+    assert response.metadata["source_fidelity_status"] == "checked"
 
 
 def test_it_still_answers(store_dir: Path) -> None:

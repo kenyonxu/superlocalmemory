@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from superlocalmemory.core.config import AutoInvokeConfig
 from superlocalmemory.hooks.auto_invoker import AutoInvoker
 

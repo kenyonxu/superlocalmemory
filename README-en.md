@@ -7,7 +7,7 @@
 <p align="center"><strong>Multi-Scope Local Memory</strong><br/>
 <em>The multi-scope local memory system that keeps AI from forgetting.</em></p>
 
-<p align="center"><code>v4.2.0</code> · kernel merged from upstream SuperLocalMemory 4.1.11<br/>
+<p align="center"><code>v4.2.6</code> · kernel merged from upstream SuperLocalMemory 4.2.6<br/>
 Persistent memory for Claude Code, Cursor, Hermes Agent, and any MCP-compatible AI client</p>
 
 <p align="center">

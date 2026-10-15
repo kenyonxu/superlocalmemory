@@ -6,7 +6,6 @@ when the `except (ImportError, NoKeyringError)` tuple was evaluated.
 """
 import importlib
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest

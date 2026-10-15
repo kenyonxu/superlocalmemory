@@ -161,13 +161,63 @@ from superlocalmemory.storage.migrations import (
 )
 from superlocalmemory.storage.migrations import (
     M045_fact_outcome_score as _M045,
+)
+from superlocalmemory.storage.migrations import (
     M046_prospective_memory_has_its_own_name as _M046,
+)
+from superlocalmemory.storage.migrations import (
     M047_fisher_vectors_are_stored_like_every_other_vector as _M047,
+)
+from superlocalmemory.storage.migrations import (
     M048_upcoming_holds_only_what_is_upcoming as _M048,
+)
+from superlocalmemory.storage.migrations import (
     M049_a_schema_version_marker_is_one_row as _M049,
+)
+from superlocalmemory.storage.migrations import (
     M050_execution_learning_v2 as _M050,
+)
+from superlocalmemory.storage.migrations import (
     M051_lifecycle_is_recomputed_not_resampled as _M051,
-    M052_provenance_kind_column as _M052,
+)
+from superlocalmemory.storage.migrations import (
+    M052_memory_kinds as _M052,
+)
+from superlocalmemory.storage.migrations import (
+    M053_answer_check_history as _M053,
+)
+from superlocalmemory.storage.migrations import (
+    M054_saved_views as _M054,
+)
+from superlocalmemory.storage.migrations import (
+    M055_learning_attribution as _M055,
+)
+from superlocalmemory.storage.migrations import (
+    M056_recall_channel_indexes as _M056,
+)
+from superlocalmemory.storage.migrations import (
+    M057_temporal_retrieval_version as _M057,
+)
+from superlocalmemory.storage.migrations import (
+    M058_recall_fact_cover as _M058,
+)
+from superlocalmemory.storage.migrations import (
+    M059_erasure_visibility as _M059,
+)
+from superlocalmemory.storage.migrations import (
+    M060_memory_description as _M060,
+)
+from superlocalmemory.storage.migrations import (
+    M061_fact_hub_baseline as _M061,
+)
+from superlocalmemory.storage.migrations import (
+    M062_hook_bookkeeping_is_flagged as _M062,
+)
+from superlocalmemory.storage.migrations import (
+    M063_blank_temporal_dates_are_null as _M063,
+)
+from superlocalmemory.storage.migrations import (
+    M064_provenance_kind_column as _M064,
 )
 
 # Emit under the runner's logger name so operational log filters that key on
@@ -229,11 +279,30 @@ _MODULES = {
     _M050.NAME: _M050,
     _M051.NAME: _M051,
     _M052.NAME: _M052,
+    _M053.NAME: _M053,
+    _M054.NAME: _M054,
+    _M055.NAME: _M055,
+    _M056.NAME: _M056,
+    _M057.NAME: _M057,
+    _M058.NAME: _M058,
+    _M059.NAME: _M059,
+    _M060.NAME: _M060,
+    _M061.NAME: _M061,
+    _M062.NAME: _M062,
+    _M063.NAME: _M063,
+    _M064.NAME: _M064,
 }
 
 # Exact historical DDL fingerprints whose resulting schema is intentionally
 # accepted by the current migration. Unknown hashes are never reconciled.
 _KNOWN_EQUIVALENT_DDL_HASHES: dict[str, frozenset[str]] = {
+    _M057.NAME: frozenset({
+        # Original recounting triggers. M057.verify checks definitions;
+        # M057.repair upgrades them and rebuilds the counter before acceptance.
+        "1b33a4fa21a72714a8e6e95deb4509e644ce4410629ea2152d0deb6b903ab194",
+        # Incremental-trigger fix-up before fact_id was watched (PR 250 #3).
+        "79999b6dfcc6cec4250639b9db5f72da02063155bc6b9c4ec32600b9bccbff86",
+    }),
     _M002.NAME: frozenset({
         # v3.4.21 hardened copy-forward variant.
         "347eeb2ec8aac89f7cbf373da49ac9446be9ed150e6105c382c656cd22426d4b",
@@ -245,6 +314,11 @@ _KNOWN_EQUIVALENT_DDL_HASHES: dict[str, frozenset[str]] = {
         # operation_id uniqueness. Its standalone table is safely rebuilt by
         # M032.repair() into the profile-scoped receipt contract.
         "e45df41becba3d0c3342eca5ec3bd83aa899eef76943c819d2da73b4ca1625a7",
+    }),
+    _M053.NAME: frozenset({
+        # Unreleased 4.1.20 development table without the embed_ms / rerank_ms
+        # stage columns. M053.repair() adds them; no released build ran M053.
+        "3ff0b2d15dd73eb00ffae2347386234f015032e6889391924aa34ed9b8bb89e9",
     }),
 }
 
@@ -284,8 +358,14 @@ _MIGRATION_BUSY_TIMEOUT_MS = 15_000
 def _connect(db_path: Path) -> sqlite3.Connection:
     # isolation_level=None → we manage transactions explicitly via DDL.
     conn = sqlite3.connect(db_path, isolation_level=None)
-    conn.execute(f"PRAGMA busy_timeout = {_MIGRATION_BUSY_TIMEOUT_MS};")
-    conn.execute("PRAGMA foreign_keys = OFF;")
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {_MIGRATION_BUSY_TIMEOUT_MS};")
+        conn.execute("PRAGMA foreign_keys = OFF;")
+    except BaseException:
+        # Setup failed: close it now, or the file stays open (Windows
+        # then cannot delete or replace it) for as long as the error lives.
+        conn.close()
+        raise
     return conn
 
 

@@ -16,13 +16,11 @@ TDD suite. Tests for:
 
 from __future__ import annotations
 
-import os
 import pytest
 
 from superlocalmemory.core.config import StoreConfig
 from superlocalmemory.core.ingest_gate import (
     apply_ingest_gate,
-    IngestGateResult,
 )
 
 

@@ -5,7 +5,9 @@ import { readFile } from 'node:fs/promises';
 const root = new URL('../..', import.meta.url);
 
 async function source(relativePath) {
-  return readFile(new URL(relativePath, root), 'utf8');
+  const base = await readFile(new URL(relativePath, root), 'utf8');
+  if (relativePath.endsWith('od-backup.js')) return base + await readFile(new URL('src/superlocalmemory/ui/js/od-backup-layout.js', root), 'utf8');
+  return base;
 }
 
 describe('control-plane dashboard contracts', function () {
@@ -27,7 +29,7 @@ describe('control-plane dashboard contracts', function () {
     assert.match(backup, /X-Install-Token/);
     assert.match(backup, /tokenPromise = null/);
     assert.match(backup, /if \(!response\.ok\)/);
-    for (const endpoint of ['/api/backup/configure', '/api/backup/create', '/api/backup/sync']) {
+    for (const endpoint of ['/api/backup/configure', '/api/backup/recovery/create', '/api/backup/sync']) {
       assert.match(backup, new RegExp(endpoint.replaceAll('/', '\\/')));
     }
   });
@@ -37,6 +39,9 @@ describe('control-plane dashboard contracts', function () {
     assert.doesNotMatch(backup, /AES-256|encrypted with your local key|enable encrypted cloud|every snapshot is restorable/);
     assert.doesNotMatch(backup, /restoreBtn|>Restore</);
     assert.match(backup, /Plain SQLite/);
+    assert.match(backup, /encrypted on this computer before upload/);
+    assert.doesNotMatch(backup, /does not encrypt backup files|Plain SQLite copies upload/);
+    assert.match(backup, /window\.odRenderBackupEncryption\(authMutation, toast\)/);
     assert.match(backup, /last_sync_status/);
   });
 
@@ -55,7 +60,7 @@ describe('control-plane dashboard contracts', function () {
   it('exports through an authenticated POST instead of a state-changing navigation', async function () {
     const backup = await source('src/superlocalmemory/ui/js/od-backup.js');
     const legacySettings = await source('src/superlocalmemory/ui/js/settings.js');
-    assert.match(backup, /authMutation\('\/api\/backup\/export', 'POST'\)/);
+    assert.match(backup, /authMutation\('\/api\/backup\/recovery\/export', 'POST'\)/);
     assert.doesNotMatch(backup, /window\.location\.href\s*=\s*'\/api\/backup\/export'/);
     assert.match(legacySettings, /fetch\('\/api\/backup\/export', \{ method: 'POST' \}\)/);
     assert.doesNotMatch(legacySettings, /window\.location\.href\s*=\s*'\/api\/backup\/export'/);

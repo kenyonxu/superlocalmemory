@@ -90,8 +90,20 @@ def _rows_for_profile(db: Any, table: str, profile_id: str, order: str) -> list[
 
 def _write_jsonl(path: Path, rows: Iterable[dict]) -> tuple[str, int]:
     payload = "".join(f"{_canonical(row)}\n" for row in rows).encode("utf-8")
-    path.write_bytes(payload)
+    _write_private(path, payload)
     return _sha256_bytes(payload), payload.count(b"\n")
+
+
+def _write_private(path: Path, payload: bytes) -> None:
+    """The bundle holds a person's memories: owner-only from the first byte."""
+    import os
+
+    from superlocalmemory.infra.private_files import open_private_new
+
+    with os.fdopen(open_private_new(path), "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -222,10 +234,13 @@ def export_evidence_bundle(
     db: Any, profile_id: str, destination: str | Path,
 ) -> dict:
     """Export deterministic JSONL truth plus a checksum manifest."""
+    from superlocalmemory.infra.private_files import make_private_dir
+
     root = Path(destination)
-    root.mkdir(parents=True, exist_ok=True)
-    if any(root.iterdir()):
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if any(root.iterdir()):  # refuse before touching the permissions of a folder in use
         raise ValueError(f"destination must be empty: {root}")
+    make_private_dir(root)
 
     rows_by_file: dict[str, list[dict]] = {}
     for filename, table, order in _TABLES:
@@ -263,9 +278,9 @@ def export_evidence_bundle(
         "lineage_coverage": _lineage_coverage(rows_by_file, span_map),
         "unresolved_source_links": unresolved,
     }
-    (root / "manifest.json").write_text(
-        json.dumps(manifest, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
+    _write_private(
+        root / "manifest.json",
+        (json.dumps(manifest, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
     )
     return manifest
 

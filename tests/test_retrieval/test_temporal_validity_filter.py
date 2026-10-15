@@ -225,6 +225,8 @@ def test_correction_admission_keeps_fact_before_its_supersession() -> None:
 
     db.get_invalidated_fact_ids.side_effect = invalidated
     db.get_nonapplied_correction_successor_ids.return_value = set()
+    db.get_strict_temporal_inadmissible_fact_ids.return_value = set()
+    db.execute.return_value = [{"fact_id": "stale", "created_at": "2023-01-01"}]
     original = {"semantic": [("stale", 0.9)]}
 
     admitted = admit_correction_candidates(

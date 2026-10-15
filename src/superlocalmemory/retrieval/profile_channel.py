@@ -22,6 +22,8 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
+from superlocalmemory.retrieval.scope_policy import filter_authorized_results
+
 if TYPE_CHECKING:
     from superlocalmemory.storage.database import DatabaseManager
 
@@ -92,7 +94,7 @@ class ProfileChannel:
                         results.append((fid, 0.95))
 
         results.sort(key=lambda x: (-x[1], x[0]))
-        return results[:top_k]
+        return filter_authorized_results(self._db, results, profile_id)[:top_k]
 
     @staticmethod
     def _extract_entity_names(query: str) -> list[str]:

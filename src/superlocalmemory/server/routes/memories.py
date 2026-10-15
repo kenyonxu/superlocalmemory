@@ -9,13 +9,20 @@ import json
 import logging
 import re
 import uuid
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
+from anyio.from_thread import run as _on_loop  # body of a sync route
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from superlocalmemory.core.config import BROWSE_PAGE_SIZE
+from superlocalmemory.retrieval import remote_view
 from superlocalmemory.storage.database import (
+    stub_flag_sql_for_connection,
     visible_fact_clause_for_connection,
+)
+from superlocalmemory.storage.erasure_visibility import (
+    aggregate_erasure_clause,
+    memory_erasure_clause,
 )
 
 from .helpers import (
@@ -25,6 +32,9 @@ from .helpers import (
     get_db_connection,
     get_engine_lazy,
 )
+
+if TYPE_CHECKING:
+    from superlocalmemory.core.operation_request import OperationKind
 
 logger = logging.getLogger("superlocalmemory.routes.memories")
 router = APIRouter()
@@ -91,15 +101,19 @@ def _canonical_mutation_error(exc: Exception, detail: str) -> HTTPException:
     from superlocalmemory.core.remember_runtime import (
         CanonicalMutationConflict,
         CanonicalRememberUnavailable,
+        MutationTargetMissing,
     )
 
+    if isinstance(exc, MutationTargetMissing):
+        # Generic on purpose: the caller has already passed authorization, and
+        # the specific routes say what was missing.
+        return HTTPException(404, detail="Not found")
     if isinstance(exc, CanonicalMutationConflict):
         return HTTPException(409, detail=str(exc))
-    if isinstance(exc, CanonicalRememberUnavailable):
-        return HTTPException(
-            503,
-            detail="canonical mutation writer is temporarily unavailable",
-        )
+    if isinstance(exc, CanonicalRememberUnavailable):  # contention: nothing changed
+        return HTTPException(503, headers={"Retry-After": "3"}, detail=(
+            "the memory store is busy finishing other writes; nothing was changed. "
+            "Retry in a few seconds"))
     return _internal_error(detail)
 
 
@@ -119,12 +133,29 @@ def _mutation_runtime_or_missing_fact(
     raise HTTPException(503, detail="canonical mutation writer is not ready; retry shortly")
 
 
-def _admit_http_mutation(request: Request, operation: str) -> None:
+def _admit_http_mutation(
+    request: Request, operation: str, *, admission_kind: "OperationKind | None" = None,
+    profile: str | None = None,
+) -> None:
     """Route a memory HTTP mutation through OperationPolicyRegistry.evaluate().
 
     Called from _authorize_memory_mutation after RBAC passes. Raises HTTP 403
     if the policy registry denies the actor. Maps "delete" → FORGET,
-    "update" → CORRECT. Uses the server-derived principal and roles.
+    "update" → CORRECT (owner/admin only — this is a content *correction*,
+    which is why ``/replaces`` stays on CORRECT). Uses the server-derived
+    principal and its roles on ``profile`` (default: the active profile) --
+    the same profile RBAC just checked, so a role held elsewhere never stands
+    in for it.
+
+    ``admission_kind`` lets a caller that passes operation="update" for its
+    RBAC permission (WRITE) and hook name (unchanged, so the trust-gate
+    pre-hook still fires) override which OperationKind the policy registry
+    actually evaluates. Memory-kinds' set/confirm routes use this: they are
+    documented as a WRITE-level operation on a fact the active profile owns
+    (consistent with ``remember(kind=...)``), not the owner/admin-only
+    CORRECT contract a content edit requires — so they pass
+    ``admission_kind=OperationKind.REMEMBER`` instead of letting "update"
+    default to CORRECT.
     """
     from fastapi import HTTPException as _HTTPException
 
@@ -153,7 +184,7 @@ def _admit_http_mutation(request: Request, operation: str) -> None:
 
     principal_info = resolve_principal(request)
     principal = str(principal_info.get("user_id") or "")
-    actor_roles = resolve_actor_roles(request)
+    actor_roles = resolve_actor_roles(request, profile=profile)
     actor = resolve_actor(
         Transport.HTTP,
         tier=tier,
@@ -161,7 +192,10 @@ def _admit_http_mutation(request: Request, operation: str) -> None:
         principal=principal,
         roles=actor_roles,
     )
-    kind = OperationKind.FORGET if operation == "delete" else OperationKind.CORRECT
+    if admission_kind is not None:
+        kind = admission_kind
+    else:
+        kind = OperationKind.FORGET if operation == "delete" else OperationKind.CORRECT
     try:
         admit(kind, actor, mode=mode)
     except AdmissionDenied as exc:
@@ -171,6 +205,56 @@ def _admit_http_mutation(request: Request, operation: str) -> None:
         ) from exc
 
 
+class _UnknownRoutedProfile(LookupError):
+    """A request routed to a profile that does not exist."""
+
+    def __init__(self, profile_id: str) -> None:
+        super().__init__(profile_id)
+        self.profile_id = profile_id
+
+
+def _unknown_profile_response(profile_id: str):
+    """The same 404 body POST /remember gives for an unknown routed profile."""
+    from starlette.responses import JSONResponse
+
+    from superlocalmemory.server.routed_profile import unknown_profile_body
+
+    return JSONResponse(unknown_profile_body(profile_id), status_code=404)
+
+
+def _announce(event_type: str, payload: dict, actor: str) -> None:
+    """Tell the live event stream about a delete or a correction.
+
+    Announced here, by the daemon route every surface uses (dashboard, CLI,
+    MCP), so each change is seen once whichever surface made it. Best-effort:
+    the event bus never affects the answer.
+    """
+    from superlocalmemory.server.unified_daemon import _emit_event
+
+    _emit_event(event_type, payload, source_agent=actor or "dashboard")
+
+
+def _routed_mutation_error(exc: Exception, profile: str | None, detail: str):
+    """The answer to a failed routed mutation: the routed profile was deleted
+    between the route's check and the writer's own is an unknown profile, not
+    a server error. Anything else maps as for an active-profile mutation."""
+    from superlocalmemory.core.remember_runtime import UnknownMutationProfile
+
+    if profile is not None and isinstance(exc, (UnknownMutationProfile, _UnknownRoutedProfile)):
+        return _unknown_profile_response(profile)
+    raise _canonical_mutation_error(exc, detail)
+
+
+def _routed_profile(value) -> str | None:
+    """A request's ``profile_id``: None means the active profile; not text is a 422."""
+    from superlocalmemory.server.routed_profile import RoutedProfileError, routed_profile_id
+
+    try:
+        return routed_profile_id(value)
+    except RoutedProfileError as exc:
+        raise HTTPException(422, detail=str(exc)) from exc
+
+
 def _authorize_memory_mutation(
     request: Request,
     operation: str,
@@ -178,14 +262,21 @@ def _authorize_memory_mutation(
     *,
     content_preview: str = "",
     run_pre_hook: bool = True,
-    profile_id: str | None = None,
+    admission_kind: "OperationKind | None" = None,
+    profile: str | None = None,
 ):
     """Authenticate a mutation, optionally gating route-owned direct SQL.
 
-    ``profile_id`` (spec section 3/5, per-request routing): a non-empty value
-    authorizes the mutation against THAT profile instead of the active one —
-    pure routing, the active-profile pointer is never read or moved. None/empty
-    keeps the legacy active-profile path byte-identical.
+    ``admission_kind`` is forwarded to ``_admit_http_mutation`` unchanged; see
+    its docstring. It does not affect the RBAC permission (still keyed off
+    ``operation``) or the hook name run below (still ``operation``) — only
+    which ``OperationKind`` the policy registry evaluates.
+
+    ``profile`` is a per-request routed profile, or None for the active one.
+    Routed, the caller's role and the operation policy are checked on THAT
+    profile, and only then is its existence revealed (``_UnknownRoutedProfile``),
+    so a caller without access cannot probe which profiles exist. Pure
+    routing: the active-profile pointer is never read or moved.
     """
     from superlocalmemory.server.write_identity import require_write_actor
 
@@ -194,23 +285,30 @@ def _authorize_memory_mutation(
         getattr(request.app.state, "daemon_descriptor", None),
         actor_kind="dashboard",
     )
-    routed_profile = (profile_id or "").strip() or None
     # RBAC (C3): on top of machine auth, enforce the caller's role on the
-    # target profile (routed) or the active profile (legacy). delete →
-    # DELETE; every other mutation → WRITE.
+    # profile acted on. delete → DELETE; every other mutation → WRITE.
     from superlocalmemory.access.rbac import Permission as _Perm
     from superlocalmemory.server.rbac_enforce import require_permission as _rbac_require
     _rbac_require(
         request,
         _Perm.DELETE if operation == "delete" else _Perm.WRITE,
-        profile=routed_profile,
+        profile=profile,
     )
     # Phase 1: admission gateway — policy registry decision for this route.
-    _admit_http_mutation(request, operation)
+    _admit_http_mutation(
+        request, operation, admission_kind=admission_kind, profile=profile,
+    )
     engine = _get_engine(request)
     if engine is None:
         raise HTTPException(503, detail="Engine not initialized")
-    effective_profile = routed_profile or engine.profile_id
+    if profile is not None:
+        if not engine._db.execute(
+            "SELECT 1 AS one FROM profiles WHERE profile_id = ?", (profile,),
+        ):
+            raise _UnknownRoutedProfile(profile)
+        logger.info("per-request profile routing: %s %s profile=%s",
+                    request.method, request.url.path, profile)
+    effective_profile = profile or engine.profile_id
     context = {
         "operation": operation,
         "agent_id": actor_id,
@@ -248,11 +346,56 @@ def _routed_profile_rejection(engine, req_profile: str):
     return JSONResponse(_unknown_profile_body(req_profile), status_code=404)
 
 
+def _authorize_review_read(request: Request, profile: str | None):
+    """``(engine, profile_id)`` for reading review cases: READ, not WRITE.
+
+    A viewer is the role meant to audit, so it may see pending corrections and
+    overtaken cases; acting on them stays WRITE (4.1.25 audit G-M5: listings
+    went through the mutation check and told a viewer it had tried to write).
+    The caller's role is checked before the profile's existence is revealed.
+    """
+    from superlocalmemory.access.rbac import Permission as _Perm
+    from superlocalmemory.server.rbac_enforce import require_permission as _rbac_require
+
+    _rbac_require(request, _Perm.READ, profile=profile)
+    engine = _get_engine(request)
+    if engine is None:
+        raise HTTPException(503, detail="Engine not initialized")
+    if profile is not None and not engine._db.execute(
+        "SELECT 1 AS one FROM profiles WHERE profile_id = ?", (profile,),
+    ):
+        raise _UnknownRoutedProfile(profile)
+    return engine, profile or engine.profile_id
+
+
 def _preview(content: str | None) -> str:
     """Truncate content for preview display."""
     if not content:
         return ""
     return content[:100] + "..." if len(content) > 100 else content
+
+
+def _scope_where_clause(scope: str | None, active_profile: str) -> tuple[str, list]:
+    """The v3 "which rows is this view allowed to see" WHERE fragment + params.
+
+    Shared by ``get_memories`` and ``get_memory_kind_counts`` so the counts a
+    kind chip shows are drawn from exactly the rows that filtering by that
+    chip would then list — a second hand-written copy of this is how the
+    withheld-rows leak (``visible_fact_clause_for_connection``, see the
+    comment above it in ``get_memories``) happened in the first place.
+    """
+    esc = active_profile.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    shared_pat = f'%"{esc}"%'
+    if scope == "global":
+        return "scope = 'global'", []
+    if scope == "shared":
+        return "scope = 'shared' AND shared_with LIKE ? ESCAPE '\\'", [shared_pat]
+    if scope == "all":
+        return (
+            "(profile_id = ? OR scope = 'global' "
+            "OR (scope = 'shared' AND shared_with LIKE ? ESCAPE '\\'))"
+        ), [active_profile, shared_pat]
+    return "profile_id = ?", [active_profile]
 
 
 def _has_table(cursor, name: str) -> bool:
@@ -271,7 +414,7 @@ def _fetch_graph_data(
     if use_v3:
         # Recency-first: get the most recent nodes, then find their edges.
         # LEFT JOIN fact_importance for graph metrics (v3.4.1 — additive only).
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT af.fact_id as id, af.content, af.fact_type as category,
                    af.confidence as importance, af.session_id as project_name,
                    af.created_at,
@@ -280,6 +423,7 @@ def _fetch_graph_data(
             LEFT JOIN fact_importance fi
                 ON af.fact_id = fi.fact_id AND fi.profile_id = ?
             WHERE af.profile_id = ? AND af.confidence >= ?
+            {visible_fact_clause_for_connection(cursor.connection, "af")}
             ORDER BY af.created_at DESC
             LIMIT ?
         """, (profile, profile, min_importance / 10.0, max_nodes))
@@ -323,9 +467,10 @@ def _fetch_graph_data(
         # Compute clusters from memory_scenes
         clusters = []
         try:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT scene_id, theme, fact_ids_json
                 FROM memory_scenes WHERE profile_id = ?
+                {aggregate_erasure_clause(cursor.connection, "memory_scenes")}
             """, (profile,))
             for row in cursor.fetchall():
                 fact_ids = []
@@ -425,13 +570,25 @@ def _fetch_edges_v2(cursor, memory_ids: list) -> list:
 
 
 @router.get("/api/memories")
-async def get_memories(
+def get_memories(
     request: Request,
     category: Optional[str] = None,
+    kind: Optional[str] = Query(
+        None,
+        description=(
+            "One of the nine memory kinds (core/storage/memory_kinds.py), "
+            "e.g. 'decision' or 'rule'. v3 stores only — a legacy (v2) store "
+            "has no memory_kind column and ignores this filter."
+        ),
+    ),
     project_name: Optional[str] = None,
     cluster_id: Optional[int] = None,
     min_importance: Optional[int] = None,
     tags: Optional[str] = None,
+    fact_id: Optional[str] = Query(
+        None, max_length=64, pattern=r"^[A-Za-z0-9_-]+$",
+        description="Only this memory (a source opened from recall on the dashboard).",
+    ),
     limit: int = Query(BROWSE_PAGE_SIZE, ge=1, le=200),
     offset: int = Query(0, ge=0),
     filter: Optional[str] = Query(
@@ -458,6 +615,7 @@ async def get_memories(
       with ``lifecycle='cold'`` AND no positive reward in 60 days.
       Makes "memory decay" tangible to the operator.
     """
+    conn = None
     try:
         conn = get_db_connection()
         conn.row_factory = dict_factory
@@ -470,23 +628,7 @@ async def get_memories(
             # Scope view clause. Default (scope=None) is this-profile-only —
             # identical isolation to before. Other values widen the view to
             # global and/or shared-with-this-profile memories.
-            _esc = active_profile.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            _shared_pat = f'%"{_esc}"%'
-            if scope == "global":
-                scope_where = "scope = 'global'"
-                scope_params = []
-            elif scope == "shared":
-                scope_where = "scope = 'shared' AND shared_with LIKE ? ESCAPE '\\'"
-                scope_params = [_shared_pat]
-            elif scope == "all":
-                scope_where = (
-                    "(profile_id = ? OR scope = 'global' "
-                    "OR (scope = 'shared' AND shared_with LIKE ? ESCAPE '\\'))"
-                )
-                scope_params = [active_profile, _shared_pat]
-            else:
-                scope_where = "profile_id = ?"
-                scope_params = [active_profile]
+            scope_where, scope_params = _scope_where_clause(scope, active_profile)
 
             # Withheld rows are excluded from BOTH the page and the total. On
             # the author's store this list served 24 model-authored summaries
@@ -494,11 +636,36 @@ async def get_memories(
             # real ones -- the count a user reads, inflated by exactly the
             # 1,299 rows 4.0.10 withheld.
             visible = visible_fact_clause_for_connection(conn)
+            # Stored stubs are listed and counted like any memory, flagged
+            # ("stub" badge); only recall leaves them out (WP-19).
+            stub_flag = stub_flag_sql_for_connection(conn)
+            # project_name: NOT session_id (that is a different field — see
+            # mcp/tools_core.py's remember(), which stores them separately in
+            # the same metadata dict). The project a memory was saved under
+            # (remember(project=...), `slm remember --project`) lives in
+            # memories.metadata_json->>'project' (core/project_identity.py
+            # storable_project()); retrieval.project_scope.stored_projects()
+            # reads it the same way for project-aware recall. This mirrors
+            # that lookup as a correlated subquery instead of a JOIN so the
+            # unqualified column names below (content, category, created_at...)
+            # can't collide with the legacy v2 `memories` table's own columns
+            # of the same name.
+            # fact_type is selected TWICE on purpose: once aliased "category"
+            # (unchanged, pre-existing display field) and once under its own
+            # name, because storage.memory_kinds.kind_fields() reads a
+            # "fact_type" key for its legacy-kind fallback — it does not know
+            # about this route's "category" alias. memory_kind/_source/
+            # _confidence are the M052 columns kind_fields reads for the
+            # confirmed/suggested branches.
             query = (
                 "SELECT fact_id as id, memory_id, content, fact_type as category, "
+                "fact_type, memory_kind, memory_kind_source, memory_kind_confidence, "
                 "confidence as importance, access_count, "
                 "created_at, created_at as updated_at, "
-                "session_id as project_name, scope, shared_with "
+                "(SELECT CASE WHEN json_valid(m.metadata_json) "
+                " THEN json_extract(m.metadata_json, '$.project') END "
+                " FROM memories m WHERE m.memory_id = atomic_facts.memory_id) "
+                f"as project_name, scope, shared_with, {stub_flag} AS stub "
                 f"FROM atomic_facts WHERE {scope_where}{visible}"
             )
             params = list(scope_params)
@@ -529,12 +696,26 @@ async def get_memories(
             count_params.append(category)
         if project_name:
             if use_v3:
-                query += " AND session_id = ?"
+                # Same metadata_json->>'project' lookup as the SELECT above,
+                # as an EXISTS so it works unchanged in the COUNT query too.
+                _project_filter = (
+                    " AND EXISTS (SELECT 1 FROM memories m "
+                    "WHERE m.memory_id = atomic_facts.memory_id "
+                    "AND json_valid(m.metadata_json) "
+                    "AND json_extract(m.metadata_json, '$.project') = ?)"
+                )
+                query += _project_filter
+                count_base += _project_filter
             else:
                 query += " AND project_name = ?"
+                count_base += " AND project_name = ?"
             params.append(project_name)
-            count_base += " AND project_name = ?" if not use_v3 else " AND session_id = ?"
             count_params.append(project_name)
+        if fact_id and use_v3:
+            query += " AND fact_id = ?"
+            params.append(fact_id)
+            count_base += " AND fact_id = ?"
+            count_params.append(fact_id)
         if cluster_id is not None and not use_v3:
             query += " AND cluster_id = ?"
             params.append(cluster_id)
@@ -603,29 +784,167 @@ async def get_memories(
                     ")"
                 )
 
-        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
+        kind_truncated = False
+        if kind and use_v3:
+            # The nine kinds aren't a SQL-expressible predicate — a row's
+            # DISPLAYED kind depends on confirmed/suggested/confidence-
+            # threshold/legacy-fallback precedence (kind_fields), the exact
+            # same rule `slm list`/recall use (core/kind_query.py). So this
+            # grows the SAME WHERE-clause fetch window core.kind_query's own
+            # `_windowed_kind_fetch` uses, classifies each row in Python, and
+            # paginates the filtered result — rather than re-deriving the
+            # precedence as a one-off SQL CASE that could drift from theirs.
+            from superlocalmemory.core.kind_query import (
+                WINDOWED_FETCH_HARD_CAP,
+                InvalidKind,
+                engine_display_min_confidence,
+                resolve_kind,
+            )
+            from superlocalmemory.retrieval.kind_filter import overfetch_limit
+            from superlocalmemory.storage.memory_kinds import kind_fields
 
-        cursor.execute(query, params)
-        memories = cursor.fetchall()
+            try:
+                resolved_kind = resolve_kind(kind)
+            except InvalidKind as exc:
+                raise HTTPException(400, detail=str(exc)) from exc
 
-        cursor.execute(count_base, count_params)
-        total = cursor.fetchone()['total']
+            if resolved_kind is None:
+                memories, total = [], 0
+            else:
+                threshold = engine_display_min_confidence(_get_engine(request))
+                needed = offset + limit
+                window = min(max(overfetch_limit(needed), needed), WINDOWED_FETCH_HARD_CAP)
+                matched: list = []
+                while True:
+                    cursor.execute(
+                        query + " ORDER BY created_at DESC LIMIT ?", params + [window],
+                    )
+                    batch = cursor.fetchall()
+                    for row in batch:
+                        row.update(kind_fields(row, display_min_confidence=threshold))
+                    matched = [r for r in batch if r.get("memory_kind") == resolved_kind]
+                    if len(matched) >= needed or len(batch) < window:
+                        kind_truncated = (
+                            len(matched) < needed
+                            and len(batch) >= window
+                            and window >= WINDOWED_FETCH_HARD_CAP
+                        )
+                        break
+                    if window >= WINDOWED_FETCH_HARD_CAP:
+                        kind_truncated = True
+                        break
+                    window = min(window * 4, WINDOWED_FETCH_HARD_CAP)
+                total = len(matched)
+                memories = matched[offset:offset + limit]
+        else:
+            query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
 
-        conn.close()
+            cursor.execute(query, params)
+            memories = cursor.fetchall()
 
-        return {
+            cursor.execute(count_base, count_params)
+            total = cursor.fetchone()['total']
+
+            if use_v3:
+                from superlocalmemory.core.kind_query import engine_display_min_confidence
+                from superlocalmemory.storage.memory_kinds import kind_fields
+
+                threshold = engine_display_min_confidence(_get_engine(request))
+                for row in memories:
+                    row.update(kind_fields(row, display_min_confidence=threshold))
+
+        if use_v3:
+            for row in memories:
+                row["stub"] = bool(row.get("stub"))
+        response = {
             "memories": memories, "total": total,
             "limit": limit, "offset": offset,
             "has_more": (offset + limit) < total,
         }
+        if kind and use_v3:
+            # Honest about the bound: more matches may exist past the window
+            # this looked at (same contract as core.kind_query.list_recent_facts'
+            # own `truncated` out-param) — never silently under-reported.
+            response["kind_filter_truncated"] = kind_truncated
+        return response
+
+    except HTTPException:
+        # An explicit, already-correct response (e.g. the 400 above for an
+        # unparseable `kind`) — must not be flattened into a generic 500.
+        raise
+    except Exception:
+        raise _internal_error("Database error")
+    finally:
+        if conn is not None:  # also on the 400 and 500 paths
+            conn.close()
+
+
+@router.get("/api/memories/kind-counts")
+def get_memory_kind_counts(
+    request: Request,
+    scope: Optional[str] = Query(
+        None, description="Same 'shared'|'global'|'all' scope view as /api/memories.",
+    ),
+):
+    """How many visible memories display as each of the nine kinds.
+
+    Backs the Memories -> All memories filter chips. One pass over the
+    (lightweight — four columns, no content) visible rows classifies each
+    with the exact same ``kind_fields`` precedence ``GET /api/memories``'s
+    own ``kind=`` filter uses, instead of the dashboard firing one
+    ``?category=X&limit=1`` request per legacy fact_type (which could only
+    ever count the four legacy buckets, never the nine kinds that fan out
+    from them).
+    """
+    try:
+        conn = get_db_connection()
+        conn.row_factory = dict_factory
+        cursor = conn.cursor()
+        active_profile = get_active_profile()
+
+        if not _has_table(cursor, 'atomic_facts'):
+            # A legacy (v2) store has no memory_kind column at all.
+            conn.close()
+            return {"counts": {}, "truncated": False}
+
+        from superlocalmemory.core.kind_query import (
+            WINDOWED_FETCH_HARD_CAP,
+            engine_display_min_confidence,
+        )
+        from superlocalmemory.storage.memory_kinds import kind_fields
+
+        scope_where, scope_params = _scope_where_clause(scope, active_profile)
+        visible = visible_fact_clause_for_connection(conn)
+        cursor.execute(
+            "SELECT fact_type, memory_kind, memory_kind_source, memory_kind_confidence "
+            f"FROM atomic_facts WHERE {scope_where}{visible} "
+            "ORDER BY created_at DESC LIMIT ?",
+            scope_params + [WINDOWED_FETCH_HARD_CAP + 1],
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        truncated = len(rows) > WINDOWED_FETCH_HARD_CAP
+        rows = rows[:WINDOWED_FETCH_HARD_CAP]
+
+        threshold = engine_display_min_confidence(_get_engine(request))
+        counts: dict[str, int] = {}
+        for row in rows:
+            fields = kind_fields(row, display_min_confidence=threshold)
+            kind_value = fields["memory_kind"]
+            if kind_value is None:  # "untyped" — no kind and no mappable legacy type
+                continue
+            counts[kind_value] = counts.get(kind_value, 0) + 1
+
+        return {"counts": counts, "truncated": truncated}
 
     except Exception:
         raise _internal_error("Database error")
 
 
 @router.get("/api/graph")
-async def get_graph(
+def get_graph(
     request: Request,
     max_nodes: int = Query(100, ge=10, le=10000),
     min_importance: int = Query(1, ge=1, le=10),
@@ -658,6 +977,17 @@ async def get_graph(
         raise _internal_error("Graph error")
 
 
+def _presented(results: list) -> list:
+    """Search rows with the stored scope, sharing and project (UX-12)."""
+    from superlocalmemory.server.search_presentation import with_stored_fields
+
+    conn = get_db_connection()
+    try:
+        return with_stored_fields(conn, results)
+    finally:
+        conn.close()
+
+
 @router.post("/api/search")
 async def search_memories(request: Request, body: SearchRequest):
     """Semantic search using the daemon's in-process engine.
@@ -670,7 +1000,33 @@ async def search_memories(request: Request, body: SearchRequest):
     search from >15s timeout to <1s warm.
 
     Falls back to direct DB LIKE search if engine is unavailable.
+
+    ``kind`` (L3-20) narrows to one of the nine memory kinds, the same
+    filter MCP's ``search`` and ``list_recent`` already take. Refused
+    (422, INVALID_KIND) before any retrieval if it does not parse.
     """
+    from superlocalmemory.core.kind_query import InvalidKind, resolve_kind
+    # READ on the caller's own workspace, and the search below runs there only.
+    # This POST is not gated by the GET-only RBAC middleware; without it a
+    # person signed in to one workspace searched the owner's active one.
+    from superlocalmemory.server.routes.v3_api import _resolve_profile
+    _search_profile = _resolve_profile(request)
+    try:
+        parsed_kind = resolve_kind(getattr(body, "kind", ""))
+    except InvalidKind as exc:
+        from superlocalmemory.server.kind_error import invalid_kind_http
+        raise invalid_kind_http(exc)
+    # T-window: prefer an explicit ``window`` spec; otherwise derive a range
+    # from the legacy date_from/date_to pair when both are set. 4.1.20 (R5):
+    # checked here, before anything runs — an unreadable one is a 400, never a
+    # search that silently ignores it.
+    _window = getattr(body, "window", None) or ""
+    if not _window and getattr(body, "date_from", None) and getattr(body, "date_to", None):
+        _window = f"{body.date_from}..{body.date_to}"
+    from superlocalmemory.server.time_filter_error import checked_window_or_400
+    _window = checked_window_or_400(_window)
+    if not isinstance(_window, str):
+        return _window
     from superlocalmemory.core.recall_gate import begin_recall, end_recall
     begin_recall()
     try:
@@ -694,26 +1050,35 @@ async def search_memories(request: Request, body: SearchRequest):
         if engine is not None:
             loop = asyncio.get_running_loop()
             t0 = _time.monotonic()
-            # T-window: prefer an explicit ``window`` spec; otherwise derive a
-            # range from the legacy date_from/date_to pair when both are set.
-            _window = getattr(body, "window", None) or ""
-            if not _window and getattr(body, "date_from", None) and getattr(body, "date_to", None):
-                _window = f"{body.date_from}..{body.date_to}"
             # v3.8.3: bound the synchronous recall. Under a concurrent
             # maintenance pass or a busy embedder it can run tens of seconds
             # and the browser aborts the fetch. If it exceeds the budget we
             # fall through to the fast keyword search below, so the dashboard
             # ALWAYS returns instead of failing with an abort.
+            # A kind filter narrows AFTER retrieval (below), so ask for more
+            # than ``body.limit`` up front — the same over-fetch contract
+            # core.kind_query's list/search helpers use for the other two
+            # doors — or a kind-filtered search could come back with fewer
+            # than ``limit`` results even when enough actually exist.
+            from superlocalmemory.retrieval.kind_filter import overfetch_limit
+            _search_limit = overfetch_limit(body.limit) if parsed_kind else body.limit
+            # Tagged as a dashboard test, so it never counts as agent traffic.
+            from superlocalmemory.core.answer_check_history import call_as_dashboard
             _recall_future = loop.run_in_executor(
                 None,
-                lambda: engine.recall(
-                    body.query, limit=body.limit, fast=True,
+                lambda: call_as_dashboard(
+                    engine.recall, body.query, limit=_search_limit, fast=True,
+                    profile_id=_search_profile,
                     window=_window or None,
+                    # 4.1.25: a person searching sees close memories of a real
+                    # question (labelled related); the toggle shows every weak one.
+                    include_related=True,
+                    **({"show_weak": True} if body.show_weak else {}),
                     # Name the surface. A recall with no name leaves no record
                     # an outcome can be matched to, and a search typed into the
                     # dashboard is one continuous thread of use, not a
                     # conversation turn.
-                    session_id=f"dashboard:{get_active_profile()}",
+                    session_id=f"dashboard:{_search_profile}",
                 ),
             )
             # A run_in_executor thread cannot be cancelled, and wait_for() on it
@@ -741,16 +1106,32 @@ async def search_memories(request: Request, body: SearchRequest):
                 response = None
             if response is not None:
                 elapsed_ms = round((_time.monotonic() - t0) * 1000, 1)
+                from superlocalmemory.core.kind_query import engine_display_min_confidence
                 from superlocalmemory.server.recall_serializer import (
                     recall_response_metadata,
                     serialize_recall_response,
                 )
+                # Results that came from a picture or a document page get a
+                # ``media`` block (the same one GET /recall adds), so the
+                # dashboard's "Find a picture" box can show the picture. One
+                # batched read; empty, with no query, when images are off.
+                from superlocalmemory.retrieval.media_channel import memory_sources
+                _memory_ids = list({
+                    r.fact.memory_id for r in response.results[:_search_limit]
+                    if r.fact.memory_id
+                })
                 results, no_confident_match = serialize_recall_response(
                     response,
-                    limit=body.limit,
+                    limit=_search_limit,
+                    source_map=memory_sources(engine._db, _memory_ids),
                     per_fact_max=300,
                     total_max=max(300, body.limit * 300),
+                    display_min_confidence=engine_display_min_confidence(engine),
                 )
+                if parsed_kind:
+                    results = [r for r in results
+                              if r.get("memory_kind") == parsed_kind][:body.limit]
+                results = _presented(results)  # UX-12: scope, sharing, project
                 return {
                     "query": body.query,
                     "results": results,
@@ -766,37 +1147,82 @@ async def search_memories(request: Request, body: SearchRequest):
         conn = get_db_connection()
         conn.row_factory = dict_factory
         cursor = conn.cursor()
-        active_profile = get_active_profile()
-        cursor.execute("""
-            SELECT fact_id, content, confidence as memory_confidence,
-                   fact_type as category, created_at
-            FROM atomic_facts
-            WHERE profile_id = ? AND content LIKE ?
-            ORDER BY confidence DESC LIMIT ?
-        """, (active_profile, f'%{body.query}%', body.limit))
-        rows = cursor.fetchall()
-        conn.close()
+        active_profile = _search_profile
+        # Degraded-lexical fallback: a plain equality filter, not the
+        # over-fetch-then-trim windowing core.kind_query's helpers use for
+        # list/search's primary paths (this is a raw connection, not a
+        # DatabaseManager, and this path only runs when the main engine is
+        # unavailable or over its time budget). Stores without the M052 kind
+        # columns (has_kind_columns False) ignore the filter rather than
+        # erroring on an unknown column.
+        has_kind_columns = any(
+            row.get("name") == "memory_kind" for row in cursor.execute(
+                "PRAGMA table_info(atomic_facts)").fetchall()
+        )
+        apply_kind_filter = bool(parsed_kind) and has_kind_columns
+        kind_clause = " AND memory_kind = ?" if apply_kind_filter else ""
+        kind_params = (parsed_kind,) if apply_kind_filter else ()
+        # memory_kind_source/_confidence and the bare fact_type (selected
+        # again, alongside the existing "fact_type as category" alias) are
+        # what kind_fields() below needs for its confirmed/suggested/legacy
+        # precedence — the same five fields the primary (engine) path's
+        # serialize_recall_response() already attaches. Without them this
+        # fallback could only ever show the raw memory_kind column, with no
+        # legacy-fact_type fallback for the ~pre-4.1.19 majority of rows
+        # that have none, and degraded mode would show kinds differently
+        # from — not "the same way as" — normal recall.
+        kind_select = ", memory_kind, memory_kind_source, memory_kind_confidence, fact_type" if has_kind_columns else ""
+        # Same word-based match as the daemon's /recall fallback, so the
+        # dashboard, CLI and MCP find the same rows (server/recall_fallback.py).
+        from superlocalmemory.server.recall_fallback import (
+            abandoned_channel_metadata, keyword_match_sql)
+        sql = keyword_match_sql(body.query, column="content")
+        rows = [] if sql is None else cursor.execute(f"""
+            SELECT fact_id, memory_id, profile_id, content, confidence as memory_confidence,
+                   fact_type as category, created_at{kind_select}
+            FROM atomic_facts WHERE profile_id = ? AND {sql[0]}{kind_clause}
+            {visible_fact_clause_for_connection(conn)}
+            ORDER BY {sql[2]}, confidence DESC LIMIT ?
+        """, (active_profile, *sql[1], *kind_params, *sql[3],
+              body.limit * 3)).fetchall()  # over-fetch: the tiers below filter
+        from superlocalmemory.retrieval.fallback_fidelity import admit_fallback
+        from superlocalmemory.server.recall_serializer import recall_response_metadata
+        rows, fidelity = admit_fallback(rows, conn, active_profile, close_db=True)
+        _tier, _note = "", ""
+        if not apply_kind_filter:  # 4.1.25: the same tiers as the daemon's fallback
+            from superlocalmemory.server.recall_fallback import _tiered
+            rows, _tier, _note = _tiered(body.query, rows, body.show_weak, True)
+            for row in rows:
+                row["tier"] = row.pop("_tier", "")
+        rows = rows[:body.limit]
 
-        results = [{
-            **row,
-            "score": None,
-            "relevance_score": None,
-            "ranking_score": None,
-            "confidence": row.get("memory_confidence"),
-            "rank_position": position,
-        } for position, row in enumerate(rows, start=1)]
+        if has_kind_columns:
+            from superlocalmemory.core.kind_query import engine_display_min_confidence
+            from superlocalmemory.storage.memory_kinds import kind_fields
+
+            _threshold = engine_display_min_confidence(engine)
+            for row in rows:
+                row.update(kind_fields(row, display_min_confidence=_threshold))
+
+        results = _presented([{
+            **row, "score": None, "relevance_score": None, "ranking_score": None,
+            "confidence": row.get("memory_confidence"), "rank_position": position,
+        } for position, row in enumerate(rows, start=1)])
 
         return {
             "query": body.query, "results": results, "total": len(results),
+            **recall_response_metadata(fidelity),
             "query_type": "text_search", "retrieval_time_ms": 0,
-            "retrieval_mode": "degraded_lexical",
+            "retrieval_mode": "degraded_lexical", **abandoned_channel_metadata(),
             "score_contract_version": "2",
-            "calibration_status": "uncalibrated",
-            "calibration_id": None,
+            "calibration_status": "uncalibrated", "calibration_id": None,
             "answer_confidence": None,
-            "abstained": not bool(results),
+            "abstained": not bool(results), "answerability": "unjudged",  # never checked
+            "answerability_reason": "unavailable" if results else "no_results",
             "abstention_reason": None if results else "no_candidates",
             "no_confident_match": False,
+            **({"tier": _tier} if _tier else {}),
+            **({"abstention_note": _note} if _note else {}),
         }
 
     except Exception:
@@ -805,174 +1231,8 @@ async def search_memories(request: Request, body: SearchRequest):
         end_recall()
 
 
-@router.get("/api/summary")
-async def get_summary(request: Request, kind: str = "day", target: str = ""):
-    """Readable summary of memories: a day, a project, or one session (#113).
-
-    The dashboard surface for the summary layer. 4.0.6 shipped the generators
-    with no caller, 4.0.7 added the CLI, 4.0.8 adds this and the MCP tool — the
-    "no command, tool or endpoint" gap, closed at the third point.
-
-    Always returns ``coverage`` and ``source_fact_ids``: a summary that hides how
-    much it covered is the opaque generic summary issue #113 warned against.
-    Reads memory.db directly; never runs during remember or recall.
-    """
-    from datetime import date as _date, timedelta as _timedelta
-
-    kind = (kind or "day").strip().lower()
-    if kind not in ("day", "project", "session"):
-        raise HTTPException(status_code=400, detail=f"unknown summary kind '{kind}'")
-
-    profile = get_active_profile()
-    from superlocalmemory.infra.data_root import state_path
-    db_path = state_path("memory.db")
-    if not db_path.exists():
-        raise HTTPException(status_code=404, detail="no memory database")
-
-    # Pass the loaded config so Mode B/C write the summary. Omitting it silently
-    # forces the extractive path for every caller regardless of mode.
-    try:
-        from superlocalmemory.core.config import SLMConfig
-        cfg = SLMConfig.load()
-    except Exception:
-        cfg = None
-
-    try:
-        if kind == "day":
-            from superlocalmemory.summaries import generate_daily_reflection
-            day = (target or "").strip() or _date.today().isoformat()
-            if day == "today":
-                day = _date.today().isoformat()
-            elif day == "yesterday":
-                day = (_date.today() - _timedelta(days=1)).isoformat()
-            result = generate_daily_reflection(db_path, day, profile, cfg)
-        elif kind == "project":
-            if not (target or "").strip():
-                raise HTTPException(status_code=400, detail="project requires target")
-            from superlocalmemory.summaries import generate_project_work_log
-            result = generate_project_work_log(db_path, target.strip(), profile, cfg)
-        else:
-            if not (target or "").strip():
-                raise HTTPException(status_code=400, detail="session requires target")
-            from superlocalmemory.summaries import generate_session_summary
-            result = generate_session_summary(db_path, target.strip(), profile, cfg)
-    except HTTPException:
-        raise
-    except Exception:
-        raise _internal_error("Summary generation error")
-
-    # Say why, not just what. The response already reported that a summary was
-    # assembled rather than written; someone seeing a plainer result than they
-    # expected still had no way to learn that a written one needs a model, and
-    # would reasonably read the feature as broken.
-    from superlocalmemory.core.mode_capability import llm_capability
-
-    generated = str(getattr(result, "generated_by", "") or "")
-    return {
-        "kind": result.kind,
-        "profile_id": result.profile_id,
-        "summary": result.content,
-        "coverage": result.coverage,
-        "generated_by": result.generated_by,
-        "source_fact_ids": result.source_fact_ids,
-        "source_count": len(result.source_fact_ids),
-        "metadata": result.metadata,
-        "capability": llm_capability(
-            cfg,
-            # This call has just been made, so its outcome is the honest answer
-            # about availability -- better than asking the configuration again.
-            llm_reachable=generated.startswith("llm"),
-        ),
-    }
-
-
-@router.get("/api/summary/projects")
-async def get_summary_projects(request: Request):
-    """Projects SuperLocalMemory has actually observed, for the summary picker.
-
-    WHY THIS EXISTS
-    ---------------
-    SLM is installed globally and the dashboard is a browser tab — it has no
-    working directory, so there is no such thing as "this project" from the
-    server's point of view. 4.0.8 shipped a "This project" button that sent an
-    empty target and produced "project requires target" every time. A button
-    that cannot know its own answer is the wrong control; a list of the projects
-    we have seen is the right one.
-
-    Scope comes from ``tool_events.project_path`` — the directory an agent was
-    working in when it called SLM. Deliberately NOT ``entity_profiles.
-    project_name``, which has exactly one distinct value on a real store (see
-    the note at the top of summaries/project_work_log.py).
-
-    ``tool_events`` is a bounded ring buffer, so this lists recently active
-    projects rather than every project in history. ``truncated`` says so
-    honestly instead of implying the list is exhaustive.
-    """
-    profile = get_active_profile()
-    try:
-        conn = get_db_connection()
-        # get_db_connection() hands back a SHARED read connection, and other
-        # handlers set row_factory on it. Never index these rows positionally —
-        # whichever handler ran last decides whether r[0] is a column or a
-        # KeyError. Name the columns and read them by name.
-        conn.row_factory = dict_factory
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT project_path AS path, COUNT(*) AS events
-              FROM tool_events
-             WHERE project_path IS NOT NULL AND project_path != ''
-               AND profile_id = ?
-             GROUP BY project_path
-             ORDER BY events DESC
-             LIMIT 50
-            """,
-            (profile,),
-        )
-        rows = cursor.fetchall()
-        total = cursor.execute(
-            "SELECT COUNT(*) AS n FROM tool_events"
-        ).fetchone()["n"]
-    except Exception:
-        raise _internal_error("Project list error")
-
-    projects = [
-        {
-            "path": r["path"],
-            "events": r["events"],
-            "label": _project_label(r["path"]),
-        }
-        for r in rows
-    ]
-    return {
-        "projects": projects,
-        "profile_id": profile,
-        # Surfaced so the UI can explain an unexpectedly short list rather than
-        # leaving the user to assume their project was never recorded.
-        "truncated": total >= _TOOL_EVENT_RING_SIZE,
-        "event_rows": total,
-    }
-
-
-#: tool_events is capped; at the cap the project list is a recent window, not history.
-_TOOL_EVENT_RING_SIZE = 2000
-
-
-def _project_label(path: str) -> str:
-    """Short, human label for a project path.
-
-    Full paths are long and share prefixes ("/Users/x/Documents/official/..."),
-    so a dropdown of raw paths is unreadable. Last two segments keep sibling
-    projects distinguishable without the noise.
-    """
-    parts = [p for p in str(path).replace("\\", "/").split("/") if p]
-    if not parts:
-        return str(path)
-    return "/".join(parts[-2:]) if len(parts) > 1 else parts[-1]
-
-
 @router.get("/api/clusters")
-async def get_clusters(request: Request):
+def get_clusters(request: Request):
     """Get cluster information with member counts and statistics."""
     try:
         conn = get_db_connection()
@@ -983,10 +1243,11 @@ async def get_clusters(request: Request):
 
         # V3 schema: memory_scenes stores fact_ids_json (JSON array)
         if _has_table(cursor, 'memory_scenes'):
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT scene_id as cluster_id, theme, fact_ids_json,
                        entity_ids_json, created_at as first_memory
                 FROM memory_scenes WHERE profile_id = ?
+                {aggregate_erasure_clause(cursor.connection, "memory_scenes")}
                 ORDER BY created_at DESC
             """, (profile,))
             raw_scenes = cursor.fetchall()
@@ -1023,7 +1284,8 @@ async def get_clusters(request: Request):
                 except (json.JSONDecodeError, TypeError):
                     pass
             total_facts = cursor.execute(
-                "SELECT COUNT(*) as c FROM atomic_facts WHERE profile_id = ?",
+                "SELECT COUNT(*) as c FROM atomic_facts WHERE profile_id = ?"
+                f"{visible_fact_clause_for_connection(conn)}",
                 (profile,),
             ).fetchone()['c']
             unclustered = total_facts - len(all_scene_fact_ids)
@@ -1060,7 +1322,7 @@ async def get_clusters(request: Request):
 
 
 @router.get("/api/clusters/{cluster_id}")
-async def get_cluster_detail(
+def get_cluster_detail(
     request: Request,
     cluster_id: str,
     limit: int = Query(BROWSE_PAGE_SIZE, ge=1, le=200),
@@ -1076,7 +1338,8 @@ async def get_cluster_detail(
             # Get fact IDs from the scene's JSON array
             cursor.execute(
                 "SELECT fact_ids_json, theme FROM memory_scenes "
-                "WHERE scene_id = ? AND profile_id = ?",
+                "WHERE scene_id = ? AND profile_id = ?"
+                f"{aggregate_erasure_clause(conn, 'memory_scenes')}",
                 (cluster_id, profile),
             )
             scene_row = cursor.fetchone()
@@ -1093,6 +1356,7 @@ async def get_cluster_detail(
                                confidence as importance, created_at
                         FROM atomic_facts
                         WHERE profile_id = ? AND fact_id IN ({ph})
+                        {visible_fact_clause_for_connection(conn)}
                         ORDER BY confidence DESC
                     """, [profile] + fact_ids[:limit])
                 else:
@@ -1150,7 +1414,7 @@ async def get_cluster_detail(
 
 
 @router.get("/api/memories/{memory_id}/facts")
-async def get_memory_facts(request: Request, memory_id: str):
+def get_memory_facts(request: Request, memory_id: str):
     """Get original memory text with all its child atomic facts.
 
     v3.7.8: previously routed through WorkerPool.shared(), a subprocess
@@ -1175,6 +1439,10 @@ async def get_memory_facts(request: Request, memory_id: str):
         )
         original = mem_map.get(memory_id, "")
         facts = engine._db.get_facts_by_memory_id(memory_id, active_profile)
+        if memory_id not in mem_map and not facts:
+            probe = getattr(type(engine._db), "is_memory_erasing", None)
+            if callable(probe) and probe(engine._db, memory_id, active_profile):
+                raise HTTPException(status_code=404, detail="Memory not found")
         fact_list = [
             {
                 "fact_id": f.fact_id,
@@ -1202,7 +1470,7 @@ async def get_memory_facts(request: Request, memory_id: str):
 
 
 @router.get("/api/memories/{memory_id}/detail")
-async def get_memory_detail(request: Request, memory_id: str):
+def get_memory_detail(request: Request, memory_id: str):
     """Full memory row + all child atomic facts (for dashboard modal)."""
     try:
         conn = get_db_connection()
@@ -1213,7 +1481,8 @@ async def get_memory_detail(request: Request, memory_id: str):
         cursor.execute(
             "SELECT memory_id, content, session_id, speaker, role, "
             "session_date, created_at, metadata_json "
-            "FROM memories WHERE memory_id = ? AND profile_id = ?",
+            "FROM memories WHERE memory_id = ? AND profile_id = ?"
+            f"{memory_erasure_clause(conn)}",
             (memory_id, active_profile),
         )
         mem = cursor.fetchone()
@@ -1224,7 +1493,8 @@ async def get_memory_detail(request: Request, memory_id: str):
         cursor.execute(
             "SELECT fact_id, content, fact_type, confidence, importance, "
             "access_count, created_at, entities_json "
-            "FROM atomic_facts WHERE memory_id = ? AND profile_id = ? "
+            "FROM atomic_facts WHERE memory_id = ? AND profile_id = ?"
+            f"{visible_fact_clause_for_connection(conn)} "
             "ORDER BY created_at ASC",
             (memory_id, active_profile),
         )
@@ -1253,7 +1523,7 @@ async def get_memory_detail(request: Request, memory_id: str):
 
 
 @router.get("/api/facts/{fact_id}")
-async def get_fact_detail(request: Request, fact_id: str):
+def get_fact_detail(request: Request, fact_id: str):
     """Single atomic fact detail (for fact popup)."""
     try:
         conn = get_db_connection()
@@ -1267,8 +1537,10 @@ async def get_fact_detail(request: Request, fact_id: str):
             "f.entities_json, f.canonical_entities_json, f.session_id, "
             "m.content AS source_memory_content "
             "FROM atomic_facts f "
-            "LEFT JOIN memories m ON f.memory_id = m.memory_id "
-            "WHERE f.fact_id = ? AND f.profile_id = ?",
+            "LEFT JOIN memories m ON f.memory_id = m.memory_id AND f.profile_id = m.profile_id"
+            f"{memory_erasure_clause(conn, 'm')} "
+            "WHERE f.fact_id = ? AND f.profile_id = ?"
+            f"{visible_fact_clause_for_connection(conn, 'f')}",
             (fact_id, active_profile),
         )
         row = cursor.fetchone()
@@ -1353,29 +1625,40 @@ def _code_links_for_fact(fact_id: str) -> list[dict]:
         return []
 
 
+def _refuse_if_hidden(caller_view: str, engine, profile_id: str, fact_ids: list[str],
+                      detail: str) -> None:
+    """404 ``detail`` when a remote caller (``caller_view``) may not see one of ``fact_ids``.
+
+    The answer is the one for an id that does not exist. A local caller (no view) passes.
+    """
+    view = remote_view.parse_view(caller_view)
+    if view and remote_view.hidden_among(view, engine._db, profile_id, fact_ids):
+        raise HTTPException(status_code=404, detail=detail)
+
+
 @router.delete("/api/memories/{fact_id}")
-async def delete_memory(request: Request, fact_id: str, profile_id: str = ""):
+def delete_memory(request: Request, fact_id: str, profile_id: str = "",
+                  caller_view: str = ""):
     """Delete a specific memory (atomic fact) by ID.
 
-    ``?profile_id=`` routes this one delete to that profile (recall
-    convention): pure routing, unknown id is a structured 404, and the
-    active-profile pointer is never read or moved. Empty keeps the legacy
-    active-profile path.
+    ``profile_id`` names the profile the memory belongs to, authorized like a
+    routed remember (role and policy on THAT profile, before its existence is
+    revealed); without it, the active profile.
+
+    ``caller_view`` is set when a remote app asks (see ``retrieval/remote_view``).
+    It may delete only what it may see: a memory its recall would hide (a
+    connected-folder file, a picture or page not cleared for remote apps) is
+    answered exactly like an id that does not exist.
     """
-    req_profile = (profile_id or "").strip()
-    engine, active_profile, hook_context = _authorize_memory_mutation(
-        request, "delete", fact_id, run_pre_hook=False,
-        profile_id=req_profile or None,
-    )
+    profile = _routed_profile(profile_id)
     try:
-        if req_profile:
-            rejection = _routed_profile_rejection(engine, req_profile)
-            if rejection is not None:
-                return rejection
-            logger.info(
-                "per-request profile routing: DELETE /api/memories/{fact_id} "
-                "profile=%s", req_profile,
-            )
+        engine, target_profile, hook_context = _authorize_memory_mutation(
+            request, "delete", fact_id, run_pre_hook=False, profile=profile,
+        )
+    except _UnknownRoutedProfile as exc:
+        return _unknown_profile_response(exc.profile_id)
+    _refuse_if_hidden(caller_view, engine, target_profile, [fact_id], "Memory not found")
+    try:
         from superlocalmemory.core.mutations import delete_fact_authorized
 
         # The canonical mutation writer is bound to the ACTIVE profile (its
@@ -1383,11 +1666,11 @@ async def delete_memory(request: Request, fact_id: str, profile_id: str = ""):
         # db-direct branch inside the authorized erasure flow that offline
         # callers use; delete_fact_authorized's own tenant lookup provides
         # the 404 for a fact outside the routed profile.
-        if req_profile:
+        if profile:
             canonical_runtime = None
         else:
             canonical_runtime = _mutation_runtime_or_missing_fact(
-                request, engine, active_profile, fact_id,
+                request, engine, target_profile, fact_id,
             )
         result = delete_fact_authorized(
             engine,
@@ -1396,7 +1679,7 @@ async def delete_memory(request: Request, fact_id: str, profile_id: str = ""):
             source_agent_id="dashboard",
             canonical_runtime=canonical_runtime,
             idempotency_key=_mutation_idempotency_key(request),
-            profile_id=req_profile or None,
+            profile_id=target_profile,
         )
         if not result.get("ok"):
             if result.get("retryable"):
@@ -1405,6 +1688,8 @@ async def delete_memory(request: Request, fact_id: str, profile_id: str = ""):
                     detail="Erasure incomplete (projection residue); retry shortly",
                 )
             raise HTTPException(status_code=404, detail="Memory not found")
+        _announce("memory.deleted", {"fact_id": fact_id, "profile_id": target_profile},
+                  hook_context["agent_id"])
         return {
             "success": True,
             "deleted": fact_id,
@@ -1414,11 +1699,11 @@ async def delete_memory(request: Request, fact_id: str, profile_id: str = ""):
     except HTTPException:
         raise
     except Exception as exc:
-        raise _canonical_mutation_error(exc, "Delete error")
+        return _routed_mutation_error(exc, profile, "Delete error")
 
 
 @router.post("/api/memories/{fact_id}/forget")
-async def forget_memory(request: Request, fact_id: str):
+def forget_memory(request: Request, fact_id: str):
     """S9-DASH-08: soft-forget a fact — flip archive_status='archived'.
 
     Non-destructive: the row stays in ``atomic_facts`` for audit and
@@ -1448,7 +1733,7 @@ async def forget_memory(request: Request, fact_id: str):
 
 
 @router.post("/api/memories/{fact_id}/merge")
-async def merge_memory(request: Request, fact_id: str):
+def merge_memory(request: Request, fact_id: str):
     """S9-DASH-08: merge this fact into another (keep the other).
 
     Body: ``{into: <kept_fact_id>}``.
@@ -1462,7 +1747,7 @@ async def merge_memory(request: Request, fact_id: str):
         run_pre_hook=False,
     )
     try:
-        body = await request.json()
+        body = _on_loop(request.json)
         kept = str((body or {}).get("into", "")).strip()
         if not kept:
             raise HTTPException(400, "Body field 'into' is required")
@@ -1569,7 +1854,8 @@ def _parse_curation_updates(body: dict) -> dict:
 
 
 @router.patch("/api/memories/{fact_id}", status_code=202)
-async def edit_memory(request: Request, fact_id: str, profile_id: str = ""):
+def edit_memory(request: Request, fact_id: str, profile_id: str = "",
+                caller_view: str = ""):
     """Edit one memory — two revision paths, split on ``content``.
 
     Content revision (body carries ``content``): the EXISTING correction
@@ -1583,12 +1869,16 @@ async def edit_memory(request: Request, fact_id: str, profile_id: str = ""):
     ``db.update_fact`` — the fact_id NEVER changes (deepmaid's historical
     references must stay resolvable), and the response is a plain 200.
 
-    ``?profile_id=`` routes this one mutation to that profile (recall
-    convention): pure routing, unknown id is a structured 404, and the
-    active-profile pointer is never read or moved.
+    A ``profile_id`` in the body (or as the ``?profile_id=`` query parameter,
+    the curation surface's convention) names the profile the memory belongs
+    to, authorized like a routed remember; without it, the active profile.
+
+    ``caller_view`` is set when a remote app asks: a memory its recall would
+    hide is answered like an id that does not exist.
     """
+    profile = None
     try:
-        body = await request.json()
+        body = _on_loop(request.json)
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="body must be a JSON object")
         raw_content = body.get("content")
@@ -1602,28 +1892,34 @@ async def edit_memory(request: Request, fact_id: str, profile_id: str = ""):
             raise HTTPException(status_code=400, detail="content is required")
         if not new_content and not curation:
             raise HTTPException(status_code=400, detail="content is required")
+        # Routing anchor, both conventions: the fork's ?profile_id= query
+        # parameter and upstream's body key. The query parameter wins — it is
+        # the explicit URL-level anchor the curation surface documents.
+        profile = _routed_profile(profile_id or body.get("profile_id"))
+        if new_content:
+            # Prepared before anything uses it: the hook preview, the stored
+            # successor, the event and the response all carry the prepared text.
+            from superlocalmemory.memory_core import prepare_user_text
 
-        req_profile = (profile_id or "").strip()
-        # NOTE: the second return value is the EFFECTIVE profile (the routed
-        # one when set, else the engine's active profile) — the engine's own
-        # active pointer stays available as engine.profile_id.
+            new_content = prepare_user_text(
+                getattr(getattr(request.app.state, "engine", None), "_config", None),
+                new_content,
+            ).text
         engine, target_profile, hook_context = _authorize_memory_mutation(
             request,
             "update",
             fact_id,
             content_preview=new_content,
             run_pre_hook=False,
-            profile_id=req_profile or None,
+            profile=profile,
         )
-        if req_profile:
-            rejection = _routed_profile_rejection(engine, req_profile)
-            if rejection is not None:
-                return rejection
+        _refuse_if_hidden(caller_view, engine, target_profile, [fact_id], "Memory not found")
+        if profile:
             logger.info(
                 "per-request profile routing: PATCH /api/memories/{fact_id} "
-                "profile=%s", req_profile,
+                "profile=%s", profile,
             )
-        if new_content and req_profile and req_profile != engine.profile_id:
+        if new_content and profile and profile != engine.profile_id:
             # Pre-flight rejection BEFORE any durable mutation: the curation
             # fields would commit against the routed profile, but the content
             # correction that follows can only resolve against the ACTIVE
@@ -1638,7 +1934,7 @@ async def edit_memory(request: Request, fact_id: str, profile_id: str = ""):
                     "success": False,
                     "error": {
                         "code": "routed_content_correction_unsupported",
-                        "profile_id": req_profile,
+                        "profile_id": profile,
                         "message": (
                             "content corrections run on the daemon's active "
                             "profile; route a curation-only body "
@@ -1669,7 +1965,7 @@ async def edit_memory(request: Request, fact_id: str, profile_id: str = ""):
                 curation,
                 trusted_actor_id=hook_context["agent_id"],
                 source_agent_id="dashboard",
-                profile_id=req_profile or None,
+                profile_id=target_profile,
             )
             if not curated.get("ok"):
                 raise HTTPException(
@@ -1695,8 +1991,7 @@ async def edit_memory(request: Request, fact_id: str, profile_id: str = ""):
             return JSONResponse(payload, status_code=200)
 
         from superlocalmemory.core.mutations import update_fact_authorized
-
-        result = update_fact_authorized(
+        result = update_fact_authorized(  # embeds, may wait: never on the request loop
             engine,
             fact_id,
             new_content,
@@ -1704,12 +1999,18 @@ async def edit_memory(request: Request, fact_id: str, profile_id: str = ""):
             source_agent_id="dashboard",
             canonical_runtime=_canonical_mutation_runtime(request),
             idempotency_key=_mutation_idempotency_key(request),
+            profile_id=target_profile,
         )
         if not result.get("ok"):
             raise HTTPException(status_code=404, detail="Memory not found")
         if result.get("unchanged"):
             return {"success": True, "fact_id": fact_id, "content": new_content, "unchanged": True}
         correction = result["correction_case"]
+        _announce("memory.updated", {
+            "fact_id": fact_id, "successor_fact_id": result["successor_fact_id"],
+            "case_id": correction.get("case_id"), "profile_id": target_profile,
+            "status": "proposed", "content_preview": new_content[:120],
+        }, hook_context["agent_id"])
         return {
             "success": True,
             "fact_id": fact_id,
@@ -1722,19 +2023,23 @@ async def edit_memory(request: Request, fact_id: str, profile_id: str = ""):
     except HTTPException:
         raise
     except Exception as exc:
-        raise _canonical_mutation_error(exc, "Edit error")
+        return _routed_mutation_error(exc, profile, "Edit error")
 
 
 @router.post("/api/corrections/{case_id}/{action}")
-async def review_correction(request: Request, case_id: str, action: str):
-    """Apply, reject, or roll back an active-profile correction case.
+def review_correction(request: Request, case_id: str, action: str, caller_view: str = ""):
+    """Apply, reject, or roll back a correction case.
 
     The caller authenticates through the daemon boundary.  It cannot select a
-    profile, fact scope, or trust tier; the canonical writer rechecks all of
-    those fields in its one SQLite transaction.
+    fact scope or trust tier; the canonical writer rechecks those in its one
+    SQLite transaction.  It may name a ``profile_id``, authorized exactly like
+    a routed remember: its role and the correction policy on THAT profile,
+    before the profile's existence is revealed.  Without one, the case is
+    looked up in the active profile.
     """
+    profile = None
     try:
-        body = await request.json()
+        body = _on_loop(request.json)
         if action not in {"apply", "reject", "rollback"}:
             raise HTTPException(422, detail="action must be apply, reject, or rollback")
         expected_version = body.get("expected_version") if isinstance(body, dict) else None
@@ -1747,11 +2052,21 @@ async def review_correction(request: Request, case_id: str, action: str):
             raise HTTPException(422, detail="event_valid_until must be an RFC3339 timestamp")
         if event_valid_until is not None and action != "apply":
             raise HTTPException(422, detail="event_valid_until is permitted only for apply")
-        engine, active_profile, hook_context = _authorize_memory_mutation(
-            request, "update", case_id, run_pre_hook=False
+        profile = _routed_profile(body.get("profile_id") if isinstance(body, dict) else None)
+        engine, target_profile, hook_context = _authorize_memory_mutation(
+            request, "update", case_id, run_pre_hook=False, profile=profile,
         )
+        if remote_view.parse_view(caller_view):
+            # A remote app reviews only a case whose memories it may see.
+            try:
+                case = _correction_store_for(engine, target_profile).get_case(case_id)
+                named = [case.predecessor_fact_id, case.successor_fact_id]
+            except Exception:  # noqa: BLE001 - not found / not in profile: the normal path answers
+                named = []
+            _refuse_if_hidden(caller_view, engine, target_profile,
+                              [n for n in named if n], "Correction case not found")
         result = _canonical_mutation_runtime(request).transition_correction(
-            active_profile,
+            target_profile,
             case_id,
             action=action,
             expected_version=expected_version,
@@ -1764,12 +2079,26 @@ async def review_correction(request: Request, case_id: str, action: str):
         if action in {"apply", "rollback"}:
             from superlocalmemory.core.mutations import purge_profile_context_cache
 
-            purge_profile_context_cache(engine, active_profile)
+            purge_profile_context_cache(engine, target_profile)
         engine._hooks.run_post("update", hook_context)
+        _announce("memory.updated", {"case_id": case_id, "profile_id": target_profile,
+                                     "status": action}, hook_context["agent_id"])
         return {"success": True, "correction_case": result}
     except HTTPException:
         raise
+    except _UnknownRoutedProfile as exc:
+        return _unknown_profile_response(exc.profile_id)
     except Exception as exc:
+        from superlocalmemory.core.remember_runtime import (
+            CaseNotInProfile,
+            UnknownMutationProfile,
+        )
+
+        # Deleted between the route's check and the writer's own.
+        if isinstance(exc, UnknownMutationProfile) and profile is not None:
+            return _unknown_profile_response(profile)
+        if isinstance(exc, CaseNotInProfile):
+            raise HTTPException(404, detail="Correction case not found") from exc
         raise _canonical_mutation_error(exc, "Correction review error")
 
 
@@ -1807,42 +2136,64 @@ def _correction_store_for(engine, active_profile: str):
 
 
 @router.get("/api/corrections")
-async def list_corrections(request: Request, limit: int = 100):
-    """List bounded review metadata for the active owning profile."""
+def list_corrections(request: Request, limit: int = 100, profile_id: str = "",
+                     caller_view: str = ""):
+    """List bounded review metadata for one profile: the routed one when
+    ``profile_id`` names it (authorized like a routed review), else the active one."""
     try:
-        engine, active_profile, _context = _authorize_memory_mutation(
-            request, "update", "correction-list", run_pre_hook=False
-        )
-        cases = _correction_store_for(engine, active_profile).list_cases(active_profile, limit=limit)
-        return {"success": True, "corrections": [_correction_case_response(case) for case in cases]}
+        profile = _routed_profile(profile_id)
+        engine, target_profile = _authorize_review_read(request, profile)
+        cases = _correction_store_for(engine, target_profile).list_cases(
+            target_profile, limit=limit)
+        from superlocalmemory.server.routes.overtaken import overtaken_for  # a user action closed
+        corrections = [_correction_case_response(case) for case in cases]
+        overtaken = overtaken_for(engine, target_profile, limit)
+        view = remote_view.parse_view(caller_view)
+        if view:  # a remote caller: no case that names a memory it may not see
+            named = [f for c in (*corrections, *overtaken)
+                     for f in (c.get("predecessor_fact_id"), c.get("successor_fact_id"))]
+            hidden = remote_view.hidden_among(view, engine._db, target_profile, named)
+            keep = lambda c: not {c.get("predecessor_fact_id"), c.get("successor_fact_id")} & hidden  # noqa: E731
+            corrections = [c for c in corrections if keep(c)]
+            overtaken = [c for c in overtaken if keep(c)]
+        return {"success": True, "corrections": corrections, "overtaken": overtaken}
     except HTTPException:
         raise
+    except _UnknownRoutedProfile as exc:
+        return _unknown_profile_response(exc.profile_id)
     except Exception as exc:
         raise _canonical_mutation_error(exc, "Correction list error")
 
 
 @router.get("/api/corrections/{case_id}")
-async def get_correction(request: Request, case_id: str):
-    """Get one active-profile correction case without exposing raw memory text."""
+def get_correction(request: Request, case_id: str, profile_id: str = ""):
+    """Get one correction case without exposing raw memory text, from the
+    routed profile when ``profile_id`` names it, else from the active one."""
     try:
-        engine, active_profile, _context = _authorize_memory_mutation(
-            request, "update", case_id, run_pre_hook=False
-        )
-        case = _correction_store_for(engine, active_profile).get_case(case_id)
+        profile = _routed_profile(profile_id)
+        engine, target_profile = _authorize_review_read(request, profile)
+        case = _correction_store_for(engine, target_profile).get_case(case_id)
         return {"success": True, "correction": _correction_case_response(case)}
     except HTTPException:
         raise
+    except _UnknownRoutedProfile as exc:
+        return _unknown_profile_response(exc.profile_id)
     except Exception as exc:
-        from superlocalmemory.storage.correction_cases import CorrectionNotFoundError
+        from superlocalmemory.storage.correction_cases import (
+            CorrectionAuthorizationError,
+            CorrectionNotFoundError,
+        )
 
-        if isinstance(exc, CorrectionNotFoundError):
+        # Another profile's case is "not found" here, exactly like a missing
+        # one, so a lookup cannot tell which ids exist elsewhere.
+        if isinstance(exc, (CorrectionNotFoundError, CorrectionAuthorizationError)):
             raise HTTPException(404, detail="Correction case not found") from exc
         raise _canonical_mutation_error(exc, "Correction lookup error")
 
 
 
 @router.patch("/api/memories/{fact_id}/scope")
-async def set_memory_scope(request: Request, fact_id: str):
+def set_memory_scope(request: Request, fact_id: str):
     """Set a memory's scope (personal | shared | global) + shared_with.
 
     Body: {"scope": "shared", "shared_with": "alice,bob"}. shared_with accepts a
@@ -1852,7 +2203,7 @@ async def set_memory_scope(request: Request, fact_id: str):
     fact). This is the write side of multi-scope sharing from the dashboard.
     """
     try:
-        body = await request.json()
+        body = _on_loop(request.json)
         scope = (body.get("scope") or "").strip().lower()
         if scope not in _VALID_SCOPES:
             raise HTTPException(400, detail=f"scope must be one of {_VALID_SCOPES}")

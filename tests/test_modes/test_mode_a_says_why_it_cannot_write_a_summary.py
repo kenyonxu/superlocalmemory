@@ -19,8 +19,6 @@ there is, and identical wherever it appears.
 
 from __future__ import annotations
 
-import pytest
-
 from superlocalmemory.core.config import Mode, SLMConfig
 from superlocalmemory.core.mode_capability import llm_capability
 
@@ -143,9 +141,11 @@ class TestTheSummaryRouteReturnsIt:
         """A helper nothing calls explains nothing."""
         import inspect
 
-        from superlocalmemory.server.routes import memories
+        from superlocalmemory.server.routes import summaries
 
-        source = inspect.getsource(memories.get_summary)
+        # The route builds its response through _summary_payload.
+        assert "_summary_payload(" in inspect.getsource(summaries.get_summary)
+        source = inspect.getsource(summaries._summary_payload)
         assert "llm_capability" in source
         assert '"capability"' in source
 
@@ -156,8 +156,9 @@ class TestTheSummaryRouteReturnsIt:
         import superlocalmemory
 
         js = (
-            Path(superlocalmemory.__file__).parent / "ui" / "js" / "od-memories.js"
-        ).read_text()
+            # 4.1.21: the Summaries pane moved to its own file.
+            Path(superlocalmemory.__file__).parent / "ui" / "js" / "od-summaries.js"
+        ).read_text(encoding="utf-8")
         assert "d.capability" in js or "capability" in js
         assert "cap.message" in js, (
             "the dashboard receives the explanation and does not show it"

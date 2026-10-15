@@ -1,0 +1,509 @@
+# Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
+# Licensed under AGPL-3.0-or-later - see LICENSE file
+# Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
+
+"""The daemon's side of the image-and-text worker (``multimodal_worker.py``).
+
+One worker process, started on first use and stopped when idle or too large;
+one request at a time. A recall never starts it: ``embed_query`` answers None
+while it is cold and warms it in the background. Nothing here touches the text
+embedder, and nothing starts a process while the feature is off.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import queue
+import subprocess
+import threading
+import time
+from pathlib import Path
+from typing import Any, Literal
+
+from superlocalmemory.core import ram_lock
+from superlocalmemory.infra import proc_memory
+from superlocalmemory.runtimes import media_models, worker_limits, worker_log
+from superlocalmemory.runtimes.features import media_enabled, register_media_stop_hook
+from superlocalmemory.runtimes.ports import MediaEmbedderPort
+
+logger = logging.getLogger(__name__)
+
+WORKER_PATH = Path(__file__).resolve().parent / "multimodal_worker.py"
+DEFAULT_IDLE_S = 1800.0
+DEFAULT_RSS_LIMIT_MB = media_models.DEFAULT_RSS_LIMIT_MB
+MAX_TEXTS, MAX_PATHS = 64, 16
+_QUIT_WAIT_S = 2.0
+#: How often the footprint of a worker that is answering a request is read.
+WATCH_INTERVAL_S = 0.5
+#: While a model loads its footprint legitimately passes the steady-state cap; only a runaway is stopped.
+LOAD_CAP_FACTOR = 1.5
+MEMORY_STOP_MESSAGE = ("The image model needed too much memory for that and was stopped. "
+                       "Try a smaller picture or document.")
+
+
+class MediaWorkerError(RuntimeError):
+    """The worker could not answer. The text is plain language."""
+
+
+class MediaWorkerMemoryError(MediaWorkerError):
+    """The worker was not started because the computer is short of free memory."""
+
+
+class MediaWorkerWarming(MediaWorkerError):
+    """The worker is starting; ask again shortly."""
+
+
+class _Dead(Exception):
+    """The worker process ended (internal; leads to one restart)."""
+
+
+class _OverCap(Exception):
+    """The worker passed its memory cap while answering and was stopped (internal; never replayed)."""
+
+
+def _env_number(name: str, default: float) -> float:
+    try:
+        return float(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+def _test_mode() -> bool:
+    return os.environ.get("SLM_TEST_ISOLATION") == "1"
+
+
+#: Library chatter the worker's stderr would otherwise put in the daemon log as warnings.
+_QUIET_LIBRARIES = {"HF_HUB_DISABLE_PROGRESS_BARS": "1", "TQDM_DISABLE": "1",
+                    "TRANSFORMERS_VERBOSITY": "error", "TRANSFORMERS_NO_ADVISORY_WARNINGS": "1"}
+
+
+class MediaWorkerClient(MediaEmbedderPort):
+    def __init__(self, env: Any, *, model_id: str, revision: str, idle_s: float | None = None,
+                 rss_limit_mb: int | None = None, request_timeout_s: float = 120.0,
+                 load_timeout_s: float = 600.0, role: str = "") -> None:
+        if model_id.startswith("fake:") and not _test_mode():
+            raise ValueError("fake models are for tests only")
+        self._env, self.model_id, self.revision = env, model_id, revision
+        self.role = role  # "image": a vision-only model that never embeds text
+        self.idle_s = float(idle_s if idle_s is not None else _env_number("SLM_MEDIA_WORKER_IDLE_S", DEFAULT_IDLE_S))
+        self.rss_limit_mb = int(rss_limit_mb if rss_limit_mb is not None
+                                else _env_number("SLM_MEDIA_WORKER_RSS_LIMIT_MB",
+                                                         media_models.rss_limit_mb_for(model_id)))
+        self.request_timeout_s, self.load_timeout_s = request_timeout_s, load_timeout_s
+        self.watch_interval_s = WATCH_INTERVAL_S
+        self.dim = 0
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        self._replies: queue.Queue = queue.Queue()
+        self._loaded = False
+        self._next_id = 0
+        self._timer: threading.Timer | None = None
+        self._warming = threading.Event()
+        self._halted = False
+        self._drain: threading.Thread | None = None  # carries the worker's stderr into the log
+
+    # -- state ----------------------------------------------------------------
+    @property
+    def root(self) -> Path:
+        """The managed environment this client's worker runs from."""
+        return Path(self._env.root)
+
+    @property
+    def pid(self) -> int | None:
+        proc = self._proc
+        return proc.pid if proc is not None and proc.poll() is None else None
+
+    def is_warm(self) -> bool:
+        return self._loaded and self.pid is not None
+
+    # -- process --------------------------------------------------------------
+    def _model_arg(self) -> str:
+        weights = Path(self._env.weights_dir())
+        if not self.model_id.startswith("fake:") and weights.is_dir() and any(weights.iterdir()):
+            return str(weights)
+        return self.model_id
+
+    def _max_pixels(self) -> int:
+        profile = media_models.profile_for(self.model_id)
+        return profile.image_max_pixels if profile is not None else 0
+
+    def _worker_env(self) -> dict[str, str]:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+        for key, value in _QUIET_LIBRARIES.items():  # progress bars are not problems for the daemon log
+            env.setdefault(key, value)
+        if not _test_mode():
+            env.pop("SLM_MEDIA_WORKER_FAKE", None)
+        env.pop(worker_limits.DATA_LIMIT_ENV, None)  # only the value computed here, never one inherited
+        env.update(worker_limits.data_limit_env(self.rss_limit_mb))
+        return env
+
+    def _spawn(self) -> None:
+        root = Path(self._env.root)
+        proc = subprocess.Popen([str(self._env.python()), "-I", str(WORKER_PATH)], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                                cwd=str(root) if root.is_dir() else None, env=self._worker_env())
+        replies: queue.Queue = queue.Queue()
+
+        def pump() -> None:
+            try:
+                for line in proc.stdout:  # type: ignore[union-attr]
+                    replies.put(line)
+            except (OSError, ValueError):
+                pass
+            replies.put(None)
+
+        threading.Thread(target=pump, daemon=True, name="media-worker-reader").start()
+        self._drain = worker_log.start_drain(proc.stderr)  # type: ignore[arg-type]
+        self._proc, self._replies, self._loaded = proc, replies, False
+
+    def _kill(self) -> None:
+        proc, self._proc, self._loaded = self._proc, None, False
+        if proc is None:
+            return
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        for stream in (proc.stdin, proc.stdout):
+            try:
+                stream.close()  # type: ignore[union-attr]
+            except Exception:  # noqa: BLE001 - already closed
+                pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:  # noqa: BLE001 - nothing more can be done
+            pass
+        drain, self._drain = self._drain, None
+        worker_log.stop_drain(drain, proc.stderr)
+
+    def _over_cap(self, pid: int, cap_mb: float) -> bool:
+        """True when the worker holds more than ``cap_mb`` right now (an unreadable footprint is not over)."""
+        return cap_mb > 0 and self._rss_mb(pid) > cap_mb
+
+    def _next_reply(self, deadline: float, cap_mb: float, pid: int) -> str | None:
+        """The next line from the worker, watching its footprint every ``watch_interval_s`` while waiting."""
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._kill()
+                raise MediaWorkerError(
+                    "The model worker timed out and was stopped. "
+                    "Run slm doctor to check setup, then try again with a shorter text "
+                    "or smaller file.")
+            try:
+                return self._replies.get(timeout=min(self.watch_interval_s, remaining) if cap_mb > 0 else remaining)
+            except queue.Empty:
+                pass
+            if self._over_cap(pid, cap_mb):
+                logger.warning("image worker passed its memory limit (%d MB) during a request; stopping it",
+                               int(cap_mb))
+                self._kill()
+                raise _OverCap()
+
+    def _roundtrip(self, payload: dict, timeout_s: float, *, cap_mb: float | None = None) -> dict:
+        """One request and its reply. While waiting, a worker over ``cap_mb`` (default: its cap) is stopped."""
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            raise _Dead()
+        cap = float(self.rss_limit_mb if cap_mb is None else cap_mb)
+        self._next_id += 1
+        want = self._next_id
+        try:
+            proc.stdin.write(json.dumps({**payload, "id": want}) + "\n")  # type: ignore[union-attr]
+            proc.stdin.flush()  # type: ignore[union-attr]
+        except (OSError, ValueError):
+            raise _Dead() from None
+        deadline = time.monotonic() + timeout_s
+        try:
+            while True:
+                line = self._next_reply(deadline, cap, proc.pid)
+                if line is None:
+                    raise _Dead()
+                try:
+                    reply = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(reply, dict) and reply.get("id") == want:
+                    return reply
+        except _OverCap:
+            raise MediaWorkerError(MEMORY_STOP_MESSAGE) from None
+
+    def _load_cap_mb(self) -> float:
+        """The footprint at which a loading worker is stopped; 0 when this client has no cap."""
+        if self.rss_limit_mb <= 0:
+            return 0.0
+        return max(self.rss_limit_mb, media_models.load_mb_for(self.model_id)) * LOAD_CAP_FACTOR
+
+    def _start_locked(self) -> None:
+        """Spawn and load; the RAM reservation covers both so only one heavy start runs at a time."""
+        if self.pid is not None and self._loaded:
+            return
+        self._kill()
+        need = 0 if self.model_id.startswith("fake:") else media_models.load_mb_for(self.model_id)
+        try:
+            with ram_lock.ram_reservation("media-model-load", required_mb=need, timeout_s=self.load_timeout_s):
+                self._spawn()
+                reply = self._roundtrip({"cmd": "load", "model": self._model_arg(), "revision": self.revision,
+                                         "role": self.role, "max_pixels": self._max_pixels(), "hf_home": str(self._env.weights_dir()), "device": "auto"},
+                                        self.load_timeout_s, cap_mb=self._load_cap_mb())
+        except RuntimeError as exc:
+            if isinstance(exc, MediaWorkerError):
+                raise
+            if "timeout" in str(exc).lower():
+                raise MediaWorkerError(
+                    f"Waited {self.load_timeout_s:g} seconds for another model load to release "
+                    "the memory reservation. Try again when that load finishes; "
+                    "check slm doctor if it stays busy.") from exc
+            raise MediaWorkerMemoryError(
+                f"Not enough free memory to load the model right now ({exc}). "
+                "Close other large applications, then try again.") from exc
+        except OSError as exc:
+            raise MediaWorkerError(
+                "The model worker could not be started. Run slm media enable to repair "
+                "the managed environment, then try again.") from exc
+        if not reply.get("ok"):
+            self._kill()
+            raise MediaWorkerError(
+                f"The model could not be loaded: "
+                f"{reply.get('error') or 'worker refused the load'}. "
+                "Run slm media enable to repair the environment and weights, then try again.")
+        self.dim, self._loaded = int(reply.get("dim", 0)), True
+
+    # -- requests -------------------------------------------------------------
+    def _request_locked(self, cmd: str, retry: bool = True, **fields: Any) -> dict:
+        self._halted = False
+        self._cancel_timer()
+        try:
+            for attempt in (0, 1):
+                try:
+                    self._start_locked()
+                    reply = self._roundtrip({"cmd": cmd, **fields}, self.request_timeout_s)
+                    break
+                except _Dead:
+                    self._kill()
+                    if attempt or not retry or self._halted:
+                        raise MediaWorkerError("The model worker stopped unexpectedly. "
+                                               "Run slm doctor, then try again.") from None
+        finally:
+            self._after_request()
+        if not reply.get("ok"):
+            raise MediaWorkerError(
+                f"The model worker could not process the request: "
+                f"{reply.get('error') or 'worker refused the request'}. "
+                "Check slm doctor; try a shorter text or smaller file.")
+        return reply
+
+    def _request(self, cmd: str, retry: bool = True, **fields: Any) -> dict:
+        with self._lock:
+            return self._request_locked(cmd, retry, **fields)
+
+    def _after_request(self) -> None:
+        pid = self.pid
+        if pid is None:
+            return
+        if self.rss_limit_mb > 0 and self._rss_mb(pid) > self.rss_limit_mb:
+            logger.warning("image worker is over its memory limit (%d MB); stopping it", self.rss_limit_mb)
+            self._kill()
+            return
+        self._timer = threading.Timer(self.idle_s, self._idle_expired)
+        self._timer.daemon = True
+        self._timer.start()
+
+    @staticmethod
+    def _rss_mb(pid: int) -> float:
+        """What the worker holds (physical footprint on macOS, where RSS under-reports); 0.0 = unknown."""
+        return proc_memory.process_memory_mb(pid)
+
+    def _cancel_timer(self) -> None:
+        timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def _idle_expired(self) -> None:
+        if not self._lock.acquire(blocking=False):
+            return  # busy: the finishing request sets a new timer
+        try:
+            self._stop_locked(graceful=True)
+        finally:
+            self._lock.release()
+
+    def _stop_locked(self, *, graceful: bool) -> None:
+        self._cancel_timer()
+        proc = self._proc
+        if graceful and proc is not None and proc.poll() is None:
+            try:
+                proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")  # type: ignore[union-attr]
+                proc.stdin.flush()  # type: ignore[union-attr]
+                proc.wait(timeout=_QUIT_WAIT_S)
+            except Exception:  # noqa: BLE001 - killed below
+                pass
+        self._kill()
+
+    def stop(self) -> None:
+        """Stop the worker now. Safe to call twice and from any thread."""
+        self._halted = True
+        if self._lock.acquire(timeout=3.0):
+            try:
+                self._stop_locked(graceful=False)
+            finally:
+                self._lock.release()
+        else:
+            self._kill()  # a request is stuck: end the process so it gives the lock back
+
+    # -- public API -----------------------------------------------------------
+    def warm_up(self) -> None:
+        """Start and load the worker in the background; returns at once."""
+        if self._warming.is_set() or self.is_warm():
+            return
+        self._warming.set()
+
+        def run() -> None:
+            try:
+                with self._lock:
+                    self._halted = False
+                    self._start_locked()
+                    self._after_request()
+            except Exception as exc:  # noqa: BLE001 - warming is best effort
+                logger.info("image worker warm-up failed: %s", exc)
+            finally:
+                self._warming.clear()
+
+        threading.Thread(target=run, daemon=True, name="media-worker-warmup").start()
+
+    @staticmethod
+    def _checked(check, *args: Any) -> None:
+        """Run an input check from ``worker_limits``; a refusal becomes the client's own error."""
+        try:
+            check(*args)
+        except worker_limits.InputTooLarge as exc:
+            raise MediaWorkerError(str(exc)) from None
+
+    def embed_texts(self, texts: list[str], *, prompt: Literal["SearchQuery", "Document"]) -> list[list[float]]:
+        self._checked(worker_limits.check_texts, texts)
+        out: list[list[float]] = []
+        for i in range(0, len(texts), MAX_TEXTS):
+            out += self._request("embed_text", texts=texts[i:i + MAX_TEXTS], prompt=prompt)["vectors"]
+        return out
+
+    def embed_images(self, paths: list[Path], *, wait_cold: bool = True) -> list[list[float]]:
+        for path in paths:
+            self._checked(worker_limits.check_image_file, path)
+        if not wait_cold and not self.is_warm():
+            self.warm_up()
+            raise MediaWorkerWarming("The image model is starting. Try again in a moment.")
+        out: list[list[float]] = []
+        for i in range(0, len(paths), MAX_PATHS):
+            out += self._request("embed_image", paths=[str(p) for p in paths[i:i + MAX_PATHS]])["vectors"]
+        return out
+
+    def _image_request(self, cmd: str, wait_cold: bool, **fields: Any) -> dict:
+        self._checked(worker_limits.check_image_file, fields["path"])
+        if not wait_cold and not self.is_warm():
+            self.warm_up()
+            raise MediaWorkerWarming("The image model is starting. Try again in a moment.")
+        reply = self._request(cmd, **fields)
+        return {k: v for k, v in reply.items() if k not in ("ok", "id")}
+
+    def prepare_image(self, path: Path | str, out_dir: Path | str, *, wait_cold: bool = True,
+                      classify: bool = True) -> dict:
+        """Strip metadata, make a thumbnail and a perceptual hash; results are files in ``out_dir``.
+
+        ``classify=False`` leaves out the subject classifier (for a rasterised document page).
+        """
+        fields: dict[str, Any] = {"path": str(path), "out_dir": str(out_dir)}
+        if not classify:
+            fields["classify"] = False
+        return self._image_request("prepare_image", wait_cold, **fields)
+
+    def ocr_image(self, path: Path | str, *, wait_cold: bool = True) -> dict:
+        """The text in an image: ``{"engine": ..., "text": ...}`` (engine ``none`` when none is installed)."""
+        return self._image_request("ocr_image", wait_cold, path=str(path))
+
+    def embed_query(self, text: str, *, wait_s: float = 0.3) -> list[float] | None:
+        """For recall: a vector only if the worker is already warm and free; otherwise None."""
+        if len(text) > worker_limits.MAX_TEXT_CHARS:
+            return None
+        if not self.is_warm():
+            self.warm_up()
+            return None
+        if not self._lock.acquire(timeout=wait_s):
+            return None
+        try:
+            return self._request_locked("embed_text", texts=[text], prompt="SearchQuery")["vectors"][0]
+        except MediaWorkerError as exc:
+            logger.info("image worker query failed: %s", exc)
+            return None
+        finally:
+            self._lock.release()
+
+
+# -- factory --------------------------------------------------------------------
+
+_CLIENTS: dict[tuple[str, str, str, str], MediaWorkerClient] = {}
+_CLIENTS_LOCK = threading.Lock()
+
+
+def live_clients() -> list[MediaWorkerClient]:
+    """The clients that already exist in this process; creates nothing and starts nothing."""
+    with _CLIENTS_LOCK:
+        return list(_CLIENTS.values())
+
+
+def _shared_client(managed: Any, model_id: str, revision: str, role: str, *,
+                   stop_hook: bool = True) -> MediaWorkerClient:
+    """The one client per (folder, model, revision, role) in this process."""
+    key = (str(managed.root), model_id, revision, role)
+    with _CLIENTS_LOCK:
+        client = _CLIENTS.get(key)
+        if client is None:
+            client = _CLIENTS[key] = MediaWorkerClient(managed, model_id=model_id, revision=revision, role=role)
+            if stop_hook:
+                register_media_stop_hook(client.stop)
+        return client
+
+
+def media_embedder(*, env: Any = None, data_root: str | Path | None = None, model_id: str | None = None,
+                   revision: str | None = None) -> MediaWorkerClient | None:
+    """The shared client, or None unless images and documents are on and the environment is ready.
+
+    Starts nothing: the worker starts on the first request.
+    """
+    if not media_enabled(data_root):
+        return None
+    from superlocalmemory.runtimes.media_env import media_env
+    from superlocalmemory.runtimes.space_plan import current_space_plan
+
+    managed = env or media_env(root=Path(data_root) / "runtimes" / "media" if data_root is not None else None)
+    if managed.status().state != "ready":
+        return None
+    role = ""
+    if model_id is None:  # the image model is the plan's: the paired vision model or the separate one
+        plan = current_space_plan(data_root)
+        model_id, revision = plan.image_model, plan.image_revision if revision is None else revision
+        role = "image" if plan.mode == "paired" else ""
+    return _shared_client(managed, model_id, "" if revision is None else revision, role)
+
+
+def text_loadout_role(data_root: str | Path | None = None) -> str:
+    """``""`` (the full model) while pictures are on, so text and pictures share one process; else ``"text"``."""
+    return "" if media_enabled(data_root) else "text"
+
+
+def text_embedder(*, env: Any, data_root: str | Path | None, model_id: str,
+                  revision: str = "") -> MediaWorkerClient | None:
+    """The shared client that makes text vectors, or None unless the environment is ready.
+
+    Not gated on the pictures switch: the text provider is chosen in the embedding settings. The
+    text-only loadout is used when pictures are off. It never registers the stop hook: the picture
+    channel owns that single slot. Starts nothing.
+    """
+    if env.status().state != "ready":
+        return None
+    role = text_loadout_role(data_root)
+    return _shared_client(env, model_id, revision, role, stop_hook=False)
+
+
+__all__ = ["MediaWorkerClient", "MediaWorkerError", "MediaWorkerWarming", "WORKER_PATH", "live_clients", "media_embedder",
+           "text_embedder", "text_loadout_role"]

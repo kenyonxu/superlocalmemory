@@ -21,11 +21,12 @@ import math
 import os
 import re
 import secrets as _secrets
-import stat
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+
+from superlocalmemory.core import credential_shapes
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +239,17 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"-----BEGIN [A-Z ]+-----"), "PRIVATE_KEY"),
 )
 
+#: Shapes ``detect_secrets`` adds to the replaced ones above; ``redact_secrets`` does not use them.
+#: The two ``sk-`` shapes are anchored copies, so a word like ``risk-assessment-for-review`` is no key;
+#: ``detect_secrets`` uses these instead of the unanchored ones in ``_SECRET_PATTERNS``.
+_DETECT_ONLY_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?<![A-Za-z0-9-])sk-ant-[A-Za-z0-9_\-]{20,}"), "ANTHROPIC"),
+    (re.compile(r"(?<![A-Za-z0-9-])sk-[A-Za-z0-9_\-]{20,}"), "OPENAI"),
+    (re.compile(r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{16}\b"), "AWS"),
+    (re.compile(r"(?i)\baws_secret_access_key\s*[=:]\s*\S{40}"), "AWS_SECRET"),
+    (credential_shapes._URL_PASSWORD, "URL_PASSWORD"),
+)
+
 # LLD-00 §5 high-aggression patterns (P0.3). Stricter than the defaults:
 # they match concrete, well-known secret shapes only, and are tried FIRST
 # so their specific labels win over the broader 'OPENAI'/'ANTHROPIC' fallbacks.
@@ -274,6 +286,36 @@ _HIGH_AGGRESSION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 _VALID_AGGRESSION = frozenset({"normal", "high"})
+
+
+@dataclass(frozen=True)
+class SecretHit:
+    """One credential-shaped span: ``text[start:end]`` is the match."""
+
+    kind: str
+    start: int
+    end: int
+
+
+def detect_secrets(text: str) -> list[SecretHit]:
+    """The credential shapes found in ``text``, in order, without overlaps.
+
+    Detection only. It uses the named key shapes (the ones ``redact_secrets`` replaces,
+    plus the vendor token shapes of ``credential_shapes``) and never an entropy test, so a sha256 hex string or any other long
+    random-looking word is not a hit.
+    """
+    if not isinstance(text, str) or not text:
+        return []
+    found: list[SecretHit] = []
+    plain = tuple(item for item in _SECRET_PATTERNS if item[1] not in ("ANTHROPIC", "OPENAI"))
+    for pattern, kind in (*plain, *credential_shapes.TOKEN_SHAPES, *_DETECT_ONLY_PATTERNS):
+        found.extend(SecretHit(kind, m.start(), m.end()) for m in pattern.finditer(text))
+    found.sort(key=lambda h: (h.start, -(h.end - h.start)))
+    hits: list[SecretHit] = []
+    for hit in found:
+        if not hits or hit.start >= hits[-1].end:
+            hits.append(hit)
+    return hits
 
 
 def _shannon_entropy(s: str) -> float:
@@ -336,6 +378,15 @@ def redact_secrets(text: str, *, entropy_threshold: float = 4.5,
                 last4 = matched[-4:] if len(matched) >= 4 else matched
                 return f"[REDACTED:{_label}:{last4}]"
             out = pat.sub(_sub_high, out)
+        # S-H3 (4.1.18): credentials inside ordinary syntax — a connection-URL
+        # password, short Bearer/Basic credentials, ``?token=`` — for text
+        # leaving the machine. See ``core.credential_shapes``.
+        out = credential_shapes.redact_connection_secrets(out)
+
+    # Known vendor formats the patterns below miss (Slack user/app tokens,
+    # Stripe keys, webhook URLs, a PEM key's body). Both aggressions: nothing
+    # ordinary carries these prefixes, and a key must never be stored as is.
+    out = credential_shapes.redact_token_shapes(out)
 
     for pat, label in _SECRET_PATTERNS:
         def _sub(match: re.Match[str], _label: str = label) -> str:
@@ -343,6 +394,12 @@ def redact_secrets(text: str, *, entropy_threshold: float = 4.5,
             last4 = matched[-4:] if len(matched) >= 4 else matched
             return f"[REDACTED:{_label}:{last4}]"
         out = pat.sub(_sub, out)
+
+    if aggression == "high":
+        # Values after credential labels (``password=…``, ``"api_key": "…"``,
+        # a hex or UUID key after a key-like label). Last of the pattern
+        # passes, so a known token keeps its specific label.
+        out = credential_shapes.redact_labelled_values(out)
 
     # S9-W2 L-SEC-01: skip strings that already look like a REDACTED
     # marker so the entropy sweep doesn't double-redact and lose the
@@ -368,17 +425,15 @@ def redact_secrets(text: str, *, entropy_threshold: float = 4.5,
     token_re = re.compile(r"[A-Za-z0-9_\-./+]{%d,}" % window)
     _pure_upper_snake = re.compile(r"^[A-Z_]+$")
 
-    def _entropy_sub(match: re.Match[str]) -> str:
-        token = match.group(0)
-        # L-SEC-01: preserve REDACTED markers emitted by earlier passes.
-        if _redacted_marker_re.search(token):
-            return token
+    def _entropy_token(token: str) -> str:
         # S9-SKEP-12: pure UPPER_SNAKE is a legitimate-constant shape
         # ONLY when its entropy is below the secret threshold. A 24-char
         # all-caps mnemonic backup code or a hand-typed token does clear
         # 4.5 bits Shannon entropy and should be redacted — the old
         # unconditional skip let such secrets through. We now require
         # BOTH "looks like a constant" AND "low entropy" before skipping.
+        if len(token) < window:
+            return token
         entropy = _shannon_entropy(token)
         if _pure_upper_snake.match(token) and entropy < entropy_threshold:
             return token
@@ -386,6 +441,22 @@ def redact_secrets(text: str, *, entropy_threshold: float = 4.5,
             last4 = token[-4:]
             return f"[REDACTED:ENTROPY:{last4}]"
         return token
+
+    def _entropy_sub(match: re.Match[str]) -> str:
+        token = match.group(0)
+        # L-SEC-01: preserve REDACTED markers emitted by earlier passes.
+        if _redacted_marker_re.search(token):
+            return token
+        # 4.1.18: a URL or a file path is judged one segment at a time. As a
+        # whole, a mixed-case path such as ``/Users/<name>/Documents/<repo>``
+        # or ``//github.com/<org>/<repo>/blob/main/CHANGELOG.md`` clears the
+        # threshold and used to be destroyed — at storage time, for good.
+        # A long random segment inside one is still redacted. Base64 keys
+        # never contain a dot and rarely start with a slash, so they stay
+        # judged whole.
+        if "/" in token and (token.startswith("/") or "." in token):
+            return "/".join(_entropy_token(part) for part in token.split("/"))
+        return _entropy_token(token)
 
     out = token_re.sub(_entropy_sub, out)
     return out
@@ -666,6 +737,8 @@ __all__ = (
     "safe_resolve_identifier",
     "verify_sha256",
     "redact_secrets",
+    "SecretHit",
+    "detect_secrets",
     "ensure_install_token",
     "verify_install_token",
     "run_subprocess_safe",

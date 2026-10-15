@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import contextlib
 import pathlib
-import sqlite3
 import time
 
 import pytest

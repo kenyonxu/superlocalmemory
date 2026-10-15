@@ -8,6 +8,8 @@
 
 var _CLUSTERS_STATE = {
     clusters: [],
+    total: 0,
+    generation: 0,
     page: 0,
     pageSize: 25,
     sort: 'members-desc',
@@ -37,7 +39,7 @@ function _renderClustersPage() {
     if (!container) return;
 
     var all = _sortClusters(_CLUSTERS_STATE.clusters);
-    var total = all.length;
+    var total = _CLUSTERS_STATE.total;
     var pageSize = Math.max(1, _CLUSTERS_STATE.pageSize);
     var maxPage = Math.max(0, Math.ceil(total / pageSize) - 1);
     if (_CLUSTERS_STATE.page > maxPage) _CLUSTERS_STATE.page = maxPage;
@@ -68,7 +70,7 @@ function _renderClustersPage() {
         return;
     }
 
-    renderClusters(all.slice(start, end));
+    renderClusters(all);
 }
 
 function _wireClustersControls() {
@@ -78,7 +80,7 @@ function _wireClustersControls() {
         sort.addEventListener('change', function () {
             _CLUSTERS_STATE.sort = sort.value;
             _CLUSTERS_STATE.page = 0;
-            _renderClustersPage();
+            loadClusters();
         });
     }
     var pageSize = document.getElementById('clusters-page-size');
@@ -87,7 +89,7 @@ function _wireClustersControls() {
         pageSize.addEventListener('change', function () {
             _CLUSTERS_STATE.pageSize = parseInt(pageSize.value, 10) || 25;
             _CLUSTERS_STATE.page = 0;
-            _renderClustersPage();
+            loadClusters();
         });
     }
     var prev = document.getElementById('clusters-prev-btn');
@@ -96,7 +98,7 @@ function _wireClustersControls() {
         prev.addEventListener('click', function () {
             if (_CLUSTERS_STATE.page > 0) {
                 _CLUSTERS_STATE.page -= 1;
-                _renderClustersPage();
+                loadClusters();
             }
         });
     }
@@ -105,22 +107,24 @@ function _wireClustersControls() {
         next._wired = true;
         next.addEventListener('click', function () {
             _CLUSTERS_STATE.page += 1;
-            _renderClustersPage();
+            loadClusters();
         });
     }
 }
 
 async function loadClusters() {
+    var generation = ++_CLUSTERS_STATE.generation;
     _wireClustersControls();
     if (typeof showLoading === 'function') {
         showLoading('clusters-list', 'Loading clusters...');
     }
     try {
-        var response = await fetch('/api/clusters');
+        var response = await fetch('/api/dashboard/clusters?limit=' + _CLUSTERS_STATE.pageSize + '&offset=' + (_CLUSTERS_STATE.page * _CLUSTERS_STATE.pageSize) + '&sort=' + encodeURIComponent(_CLUSTERS_STATE.sort));
         if (!response.ok) throw new Error('HTTP ' + response.status);
         var data = await response.json();
+        if (generation !== _CLUSTERS_STATE.generation) return;
+        _CLUSTERS_STATE.total = data.total_clusters || 0;
         _CLUSTERS_STATE.clusters = data.clusters || [];
-        _CLUSTERS_STATE.page = 0;
         _renderClustersPage();
     } catch (error) {
         console.error('Error loading clusters:', error);
@@ -140,7 +144,7 @@ function renderClusters(clusters) {
         return;
     }
 
-    var colors = ['#667eea', '#f093fb', '#4facfe', '#43e97b', '#fa709a', '#30cfd0', '#764ba2', '#f5576c'];
+    var colors = ['#667eea', '#f093fb', '#4facfe', '#9B82FF', '#fa709a', '#B8A6FF', '#764ba2', '#f5576c'];
     container.textContent = '';
 
     clusters.forEach(function(cluster, idx) {

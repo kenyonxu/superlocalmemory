@@ -44,7 +44,7 @@ def _load_v3_types():
     except ImportError as exc:  # pragma: no cover - defensive
         raise ImportError(
             "SuperLocalMemory V3 is not installed in this Python environment. "
-            "Install it with: python -m pip install superlocalmemory."
+            "Install SLM in its own environment and set SLM_ENGINE_PYTHON to its Python executable."
         ) from exc
     return SLMConfig, MemoryEngine, Mode
 
@@ -88,6 +88,22 @@ class V3CrewAIStore:
     Framework-free: no ``crewai`` import. All records are plain dicts.
     """
 
+    def __new__(cls, db_path):
+        import os
+
+        python = os.environ.get("SLM_ENGINE_PYTHON")
+        if python:
+            import importlib.util
+
+            bridge = Path(__file__).with_name("_engine_bridge.py")
+            if not bridge.exists():  # source checkout; wheel bundles a regular file
+                bridge = Path(__file__).resolve().parents[2] / "_engine_bridge.py"
+            spec = importlib.util.spec_from_file_location("_slm_engine_bridge", bridge)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module.RemoteStore(python, __file__, cls.__name__, db_path)
+        return super().__new__(cls)
+
     def __init__(self, db_path: str | Path) -> None:
         SLMConfig, MemoryEngine, Mode = _load_v3_types()
         path = Path(db_path).expanduser().resolve()
@@ -109,6 +125,7 @@ class V3CrewAIStore:
             raise ValueError(
                 f"record content exceeds maximum size of {MAX_CONTENT_BYTES} bytes"
             )
+        importance = record.get("importance")
         now = _now_iso()
         existing = self._get_envelope(record_id)
         created = existing["created_at"] if existing else now
@@ -121,7 +138,7 @@ class V3CrewAIStore:
             "embedding": list(record.get("embedding") or []),
             "scope": str(record.get("scope", "/")),
             "categories": list(record.get("categories") or []),
-            "importance": float(record.get("importance") if record.get("importance") is not None else 0.5),
+            "importance": float(0.5 if importance is None else importance),
             "source": record.get("source"),
             "private": bool(record.get("private", False)),
             "metadata": dict(record.get("metadata") or {}),

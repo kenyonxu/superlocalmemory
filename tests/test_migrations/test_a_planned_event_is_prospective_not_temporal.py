@@ -577,7 +577,6 @@ def test_a_copy_that_drops_rowid_is_caught(gapped_store, monkeypatch):
     real_rebuild = M046._rebuild
     monkeypatch.setattr(M046, "_rebuild_fts", lambda conn: None)
 
-    import re as _re
 
     def rebuild_without_rowid(conn):
         # Reproduce _rebuild, minus naming rowid on either side.

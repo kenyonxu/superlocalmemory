@@ -15,8 +15,6 @@ Covers IMPLEMENTATION-MANIFEST-v3.4.22-FINAL.md §P0.5.
 
 from __future__ import annotations
 
-import os
-import signal
 import subprocess
 import sys
 import textwrap
@@ -98,7 +96,7 @@ def test_ram_reservation_timeout_raises(tmp_lock: Path) -> None:
                                            timeout_s=0.5):
                 pytest.fail("should not enter body")
     finally:
-        release_flag.write_text("go")
+        release_flag.write_text("go", encoding="utf-8")
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:  # pragma: no cover — defensive

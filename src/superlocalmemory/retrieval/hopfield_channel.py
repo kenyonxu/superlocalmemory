@@ -120,14 +120,17 @@ class HopfieldChannel:
         if include_shared is None:
             include_shared = bool(getattr(self, "include_shared", False))
         try:
-            with self._cache_lock:
-                return self._search_inner(
-                    query,
-                    profile_id,
-                    top_k,
-                    include_global=include_global,
-                    include_shared=include_shared,
-                )
+            # 4.2.4: the cache lock guards the full-matrix cache only (small
+            # stores). Held around every search, concurrent recalls on a large
+            # store queued behind each other here: ~120 ms of work took 1.7-4.2 s
+            # with a few agents recalling at once.
+            return self._search_inner(
+                query,
+                profile_id,
+                top_k,
+                include_global=include_global,
+                include_shared=include_shared,
+            )
         except Exception as exc:
             # HR-06: Return [] on any error
             logger.warning("Hopfield channel error: %s", exc)
@@ -203,12 +206,13 @@ class HopfieldChannel:
                 include_shared=include_shared,
             )
 
-        # Tiny store (or no VS): build (cached) full matrix.
-        memory_matrix, fact_ids = self._get_memory_matrix(
-            profile_id,
-            include_global=include_global,
-            include_shared=include_shared,
-        )
+        # Tiny store (or no VS): build (cached) full matrix, under the lock.
+        with self._cache_lock:
+            memory_matrix, fact_ids = self._get_memory_matrix(
+                profile_id,
+                include_global=include_global,
+                include_shared=include_shared,
+            )
         if memory_matrix is None or len(fact_ids) == 0:
             return []
         if vs_ok and len(fact_ids) > self._config.prefilter_candidates:
@@ -220,6 +224,8 @@ class HopfieldChannel:
                 include_global=include_global,
                 include_shared=include_shared,
             )
+        # The matrix is a snapshot: a rebuild replaces the attribute, never
+        # mutates this array, so scoring needs no lock.
         results = self._search_full_matrix(
             q_vec, memory_matrix, fact_ids, top_k,
         )
@@ -312,29 +318,30 @@ class HopfieldChannel:
         # The ANN index is owner-profile partitioned.  Supplement it with
         # opted-in cross-profile facts, then authorize the combined candidates
         # through the canonical DB predicate below.
-        external_facts = self._db.get_external_visible_facts(
+        # #147: id + embedding only, for the supplement and for Stage 2.
+        external_embeddings = self._db.get_external_visible_embeddings(
             profile_id,
             include_global=include_global,
             include_shared=include_shared,
         )
         combined = {fact_id: score for fact_id, score in knn_results}
         query_norm = float(np.linalg.norm(query))
-        for fact in external_facts:
-            embedding = getattr(fact, "embedding", None)
-            if embedding is None or len(embedding) != self._config.dimension:
+        for ext_id, vector in external_embeddings:
+            if vector.shape != (self._config.dimension,):
                 continue
-            vector = np.array(embedding, dtype=np.float32)
             denominator = query_norm * float(np.linalg.norm(vector))
             if denominator <= 1e-8:
                 continue
             score = (float(np.dot(query, vector) / denominator) + 1.0) / 2.0
-            combined[fact.fact_id] = max(combined.get(fact.fact_id, 0.0), score)
+            combined[ext_id] = max(combined.get(ext_id, 0.0), score)
         if not combined:
             return []
 
-        # Stage 2: Load candidate facts
+        # Stage 2: Load candidate embeddings. Same authorization predicate and
+        # row order as get_facts_by_ids (the sub-matrix sums in row order), but
+        # without hydrating every candidate a second time.
         candidate_ids = list(combined)
-        candidates = self._db.get_facts_by_ids(
+        candidates = self._db.get_fact_embeddings_by_ids(
             candidate_ids, profile_id,
             include_global=include_global,
             include_shared=include_shared,
@@ -345,11 +352,10 @@ class HopfieldChannel:
         # Stage 3: Build sub-matrix
         sub_embeddings: list[np.ndarray] = []
         sub_ids: list[str] = []
-        for fact in candidates:
-            emb = getattr(fact, "embedding", None)
-            if emb is not None and len(emb) == self._config.dimension:
-                sub_embeddings.append(np.array(emb, dtype=np.float32))
-                sub_ids.append(fact.fact_id)
+        for cand_id, emb in candidates:
+            if emb.shape == (self._config.dimension,):
+                sub_embeddings.append(emb)
+                sub_ids.append(cand_id)
 
         if not sub_embeddings:
             return []

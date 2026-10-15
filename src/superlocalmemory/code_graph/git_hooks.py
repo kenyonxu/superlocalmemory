@@ -12,7 +12,6 @@ git state, never blocks the commit. Idempotent installation.
 from __future__ import annotations
 
 import logging
-import os
 import stat
 import subprocess
 import time
@@ -62,7 +61,7 @@ def install_post_commit_hook(repo_root: str | Path) -> dict:
         hook_path.parent.mkdir(parents=True, exist_ok=True)
 
         if hook_path.exists():
-            content = hook_path.read_text()
+            content = hook_path.read_text(encoding="utf-8")
 
             # Idempotent check
             if _HOOK_MARKER in content:
@@ -70,13 +69,13 @@ def install_post_commit_hook(repo_root: str | Path) -> dict:
 
             # Append to existing hook
             new_content = content.rstrip() + "\n" + _HOOK_CONTENT
-            hook_path.write_text(new_content)
+            hook_path.write_text(new_content, encoding="utf-8")
             _make_executable(hook_path)
             return {"success": True, "action": "appended"}
 
         # Create new hook
         new_content = "#!/bin/sh\n" + _HOOK_CONTENT
-        hook_path.write_text(new_content)
+        hook_path.write_text(new_content, encoding="utf-8")
         _make_executable(hook_path)
         return {"success": True, "action": "installed"}
 
@@ -105,7 +104,7 @@ def uninstall_post_commit_hook(repo_root: str | Path) -> dict:
         if not hook_path.exists():
             return {"success": True, "action": "not_found"}
 
-        content = hook_path.read_text()
+        content = hook_path.read_text(encoding="utf-8")
 
         if _HOOK_MARKER not in content:
             return {"success": True, "action": "not_found"}
@@ -131,7 +130,7 @@ def uninstall_post_commit_hook(repo_root: str | Path) -> dict:
             # Hook file is now empty, remove it
             hook_path.unlink()
         else:
-            hook_path.write_text(new_content + "\n")
+            hook_path.write_text(new_content + "\n", encoding="utf-8")
 
         return {"success": True, "action": "removed"}
 

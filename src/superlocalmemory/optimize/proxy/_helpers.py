@@ -376,10 +376,11 @@ async def _fail_open_forward(proxy: Any, request: Request, upstream_url: str) ->
         )
     try:
         body_bytes = await request.body()
-        fwd_headers = {
-            k: v for k, v in request.headers.items()
-            if k.lower() not in _HOP_BY_HOP
-        }
+        # Fallback must not forward dashboard cookies or local SLM keys.
+        fwd_headers = _build_forward_headers(
+            request, _ANTHROPIC_FORWARD_HEADERS | _OPENAI_FORWARD_HEADERS
+            | _GEMINI_NATIVE_FORWARD_HEADERS | _VERTEX_FORWARD_HEADERS,
+        )
         upstream_resp = await proxy.http_client.request(
             method=request.method,
             url=upstream_url,

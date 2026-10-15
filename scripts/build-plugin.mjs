@@ -20,12 +20,11 @@
  *   node scripts/build-plugin.mjs [--check] [--quiet] [--help]
  */
 
-'use strict';
-
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import process from 'node:process';
+import { cursorPlan } from './build-cursor-plugin.mjs';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -185,6 +184,8 @@ export function renderPluginJson(manifest) {
     description: manifest.marketplace.description,
     displayName: manifest.displayName || manifest.pluginName,
     keywords: manifest.keywords || [],
+    homepage: 'https://superlocalmemory.com',
+    license: 'AGPL-3.0-or-later',
     mcpServers: './.mcp.json',
     name: manifest.pluginName,
     repository: manifest.repository || '',
@@ -193,7 +194,6 @@ export function renderPluginJson(manifest) {
   // Claude Code automatically loads the conventional plugin/hooks/hooks.json.
   // Declaring it in the manifest as well makes current Claude Code load it
   // twice and rejects the whole plugin as a duplicate hook file.
-  obj.mcpServers = './.mcp.json';
   return stableStringify(obj);
 }
 
@@ -393,6 +393,10 @@ export function buildPlan(root, manifest) {
   // .claude-plugin/marketplace.json at REPO ROOT (not plugin root)
   // ---------------------------------------------------------------------------
   plan.set(path.join(root, '.claude-plugin', 'marketplace.json'), renderMarketplaceJson(manifest));
+  // Cursor format (Grok Bot): .cursor-plugin/ manifests, mcp.cursor.json, logo,
+  // and the curated cursor-skills/ subset (built from the skills already
+  // rendered into `plan` above).
+  cursorPlan(root, manifest, pluginRoot, plan).forEach((content, p) => plan.set(p, content));
 
   // ---------------------------------------------------------------------------
   // Agents (verbatim)
@@ -449,7 +453,7 @@ export function buildPlan(root, manifest) {
   // ---------------------------------------------------------------------------
   // Root-level plugin-src files → plugin/ (.mcp.json, settings.json, requirements.txt)
   // ---------------------------------------------------------------------------
-  const rootFiles = ['.mcp.json', 'settings.json', 'requirements.txt'];
+  const rootFiles = ['.mcp.json', 'settings.json', 'requirements.txt', 'requirements-cpu-torch.txt'];
   for (const fname of rootFiles) {
     const srcFile = path.join(root, 'plugin-src', fname);
     if (fs.existsSync(srcFile)) {
@@ -472,21 +476,16 @@ export function buildPlan(root, manifest) {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // CLAUDE.md from rules/CLAUDE.md.fragment → plugin/CLAUDE.md
-  // ---------------------------------------------------------------------------
-  const claudeFragmentPath = path.join(root, 'plugin-src', 'rules', 'CLAUDE.md.fragment');
-  if (fs.existsSync(claudeFragmentPath)) {
-    let fragmentContent = fs.readFileSync(claudeFragmentPath, 'utf8');
-    // Stamp the current version into the fragment's `SuperLocalMemory vX.Y.Z`
-    // markers so plugin/CLAUDE.md never drifts from the manifest version
-    // (previously copied verbatim → shipped a stale version to every session).
-    fragmentContent = fragmentContent.replace(
-      /SuperLocalMemory v\d+\.\d+\.\d+/g,
-      `SuperLocalMemory v${manifest.version}`,
-    );
-    plan.set(path.join(pluginRoot, 'CLAUDE.md'), fragmentContent);
-  }
+  // The Claude plugin directory needs a README (with a plain account of what the
+  // hooks do and where data goes) and the licence beside the manifest (4.2.6).
+  plan.set(path.join(pluginRoot, 'README.md'),
+    fs.readFileSync(path.join(root, 'plugin-src', 'docs', 'README.md'), 'utf8'));
+  plan.set(path.join(pluginRoot, 'LICENSE'), fs.readFileSync(path.join(root, 'LICENSE'), 'utf8'));
+
+  // No plugin/CLAUDE.md: Claude Code does not load a CLAUDE.md at a plugin's
+  // root, and `claude plugin validate --strict` (the plugin directory's gate)
+  // refuses it (4.2.6). Every rule in rules/CLAUDE.md.fragment is taught by the
+  // skills; Codex, Antigravity and Hermes still ship it as their own rules file.
 
   return plan;
 }

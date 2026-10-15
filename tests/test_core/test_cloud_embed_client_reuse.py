@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from superlocalmemory.core.config import EmbeddingConfig
 from superlocalmemory.core.embeddings import EmbeddingService

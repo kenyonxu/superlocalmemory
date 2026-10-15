@@ -14,7 +14,7 @@ The Hopfield update is equivalent to single-head self-attention:
 Key properties:
   - Energy function: E(xi) = -logsumexp(beta * X @ xi) + beta/2 * ||xi||^2
   - Update rule: xi_new = X' @ softmax(beta * X @ xi)
-  - Beta: 1/sqrt(d) (inverse temperature)
+  - Beta: sqrt(d) for unit-norm patterns (configurable inverse temperature)
   - Storage capacity: O(exp(d/2)) -- exponential in dimension
   - Convergence: 1 step for well-separated patterns
 
@@ -27,41 +27,12 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any
 
 import numpy as np
 
+from superlocalmemory.core.hopfield_config import HopfieldConfig
+
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Configuration (local definition; Delivery Lead moves to core/config.py)
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class HopfieldConfig:
-    """Modern Continuous Hopfield Network configuration.
-
-    Based on Ramsauer et al. (2020): "Hopfield Networks is All You Need"
-    Energy: E(xi) = -log(sum_i exp(B * xi' * x_i)) + B/2 * ||xi||^2
-    Update: xi_new = X' @ softmax(B * X @ xi)
-    Beta:   B = 1/sqrt(d) where d = dimension
-
-    Storage capacity: O(e^{d/2}) -- exponential in dimension.
-    For d=768: theoretical capacity >> millions of patterns.
-    """
-
-    enabled: bool = True
-    dimension: int = 768
-    max_iterations: int = 1
-    convergence_epsilon: float = 1e-6
-    prefilter_threshold: int = 10_000
-    # MUST match HopfieldConfig.prefilter_candidates in core/config.py, where the
-    # reasoning for the value is written. This stage decides final membership, so
-    # this number is a hard limit on which memories can be returned at all.
-    prefilter_candidates: int = 500
-    skip_threshold: int = 100_000
-    cache_ttl_seconds: float = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -98,12 +69,20 @@ class ModernHopfieldNetwork:
     """
 
     def __init__(self, config: HopfieldConfig) -> None:
-        """Initialize with config. Computes beta = 1/sqrt(d).
-
-        HR-01: Beta MUST be 1/sqrt(d), no other values.
-        """
+        """Choose attention scaling for the unit-norm pattern contract."""
+        if config.dimension <= 0:
+            raise ValueError("dimension must be positive")
         self._config = config
-        self._beta: float = 1.0 / math.sqrt(config.dimension)  # HR-01
+        # Ramsauer et al., arXiv:2008.02217, attention/update equations:
+        # beta is a free inverse temperature, not a mandated 1/sqrt(d).
+        # Author implementation permits explicit scaling (checked 2026-10-11):
+        # https://github.com/ml-jku/hopfield-layers/blob/master/hflayers/functional.py
+        # Scaling sqrt(d)-norm Q/K by 1/sqrt(d) is equivalent to scaling
+        # our unit-norm Q/K by sqrt(d). Tiny logits instead average the corpus.
+        beta = getattr(config, "beta", None)
+        self._beta = math.sqrt(config.dimension) if beta is None else float(beta)
+        if not math.isfinite(self._beta) or self._beta <= 0:
+            raise ValueError("beta must be finite and positive")
 
     # -- Public API ---------------------------------------------------------
 

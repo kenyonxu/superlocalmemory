@@ -13,7 +13,6 @@ Covers:
 
 from __future__ import annotations
 
-import pytest
 
 from superlocalmemory.encoding.signal_inference import (
     infer_signal,

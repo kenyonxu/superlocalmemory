@@ -46,7 +46,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
-    from superlocalmemory.storage.database import DatabaseManager
+    pass
 
 from superlocalmemory.core.config import ForgettingConfig
 
@@ -57,16 +57,17 @@ logger = logging.getLogger(__name__)
 # Data types
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class MemoryStrength:
     """Computed strength for a single memory."""
 
     fact_id: str
-    strength: float             # S(m) in [S_MIN, S_MAX]
-    access_component: float     # alpha * log(1 + access_count)
+    strength: float  # S(m) in [S_MIN, S_MAX]
+    access_component: float  # alpha * log(1 + access_count)
     importance_component: float  # beta * importance
     confirmation_component: float  # gamma * confirmation_count
-    emotional_component: float    # delta * emotional_salience
+    emotional_component: float  # delta * emotional_salience
 
 
 class FactRetentionInput(TypedDict):
@@ -74,11 +75,11 @@ class FactRetentionInput(TypedDict):
 
     fact_id: str
     access_count: int
-    importance: float              # PageRank score from fact_importance
-    confirmation_count: int        # Mapped from atomic_facts.evidence_count
-    emotional_salience: float      # Mapped from atomic_facts.emotional_valence
-    last_accessed_at: str          # ISO 8601 datetime string
-    trust_score: float             # Source trust in [0, 1]. Default 1.0.
+    importance: float  # PageRank score from fact_importance
+    confirmation_count: int  # Mapped from atomic_facts.evidence_count
+    emotional_salience: float  # Mapped from atomic_facts.emotional_valence
+    last_accessed_at: str  # ISO 8601 datetime string
+    trust_score: float  # Source trust in [0, 1]. Default 1.0.
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +143,8 @@ class EbbinghausCurve:
         if math.isnan(r) or math.isinf(r):
             logger.warning(
                 "retention(): NaN/Inf detected (lambda_=%f, t=%f), returning 0.0",
-                lambda_, hours_since_access,
+                lambda_,
+                hours_since_access,
             )
             return 0.0
 
@@ -173,8 +175,10 @@ class EbbinghausCurve:
 
         cfg = self._config
         baseline = self.memory_strength(
-            access_count=0, importance=0.5,
-            confirmation_count=0, emotional_salience=0.0,
+            access_count=0,
+            importance=0.5,
+            confirmation_count=0,
+            emotional_salience=0.0,
         )
         # The reference retention is FIXED, not read from config. Deriving the
         # clock from the configured ``archive_threshold`` would mean a caller
@@ -185,9 +189,7 @@ class EbbinghausCurve:
         # retention lands in; they do not decide how fast retention falls.
         decades = -math.log(_ARCHIVE_REFERENCE_RETENTION)
         baseline_hours = (ARCHIVE_AFTER_DAYS * 24.0) / decades
-        scaled = baseline_hours * (
-            max(strength, cfg.min_strength) / max(baseline, 1e-6)
-        )
+        scaled = baseline_hours * (max(strength, cfg.min_strength) / max(baseline, 1e-6))
         return min(scaled, baseline_hours * 1000.0)
 
     def trust_modulated_retention(
@@ -295,7 +297,9 @@ class EbbinghausCurve:
         )
 
     def spaced_repetition_update(
-        self, current_strength: float, hours_since_last_access: float,
+        self,
+        current_strength: float,
+        hours_since_last_access: float,
     ) -> float:
         """Boost strength on re-access (spaced repetition effect).
 
@@ -350,16 +354,10 @@ class EbbinghausCurve:
         return _ZONE_WEIGHTS.get(zone, 0.0)
 
     def batch_compute_retention(
-        self, facts: list[FactRetentionInput],
+        self,
+        facts: list[FactRetentionInput],
     ) -> list[dict]:
-        """Compute retention for a batch of facts.
-
-        Args:
-            facts: List of FactRetentionInput dicts.
-
-        Returns:
-            List of dicts with fact_id, retention, strength, zone.
-        """
+        """Compute trust-weighted decay while retaining learned repetition strength."""
         now = datetime.now(UTC)
         results: list[dict] = []
 
@@ -370,35 +368,45 @@ class EbbinghausCurve:
             emotional_salience = fact["emotional_salience"]
             last_accessed_at = fact["last_accessed_at"]
 
-            # Compute hours since last access
-            try:
-                last_dt = datetime.fromisoformat(last_accessed_at)
-                # Ensure timezone-aware
-                if last_dt.tzinfo is None:
-                    last_dt = last_dt.replace(tzinfo=UTC)
-                hours_since = (now - last_dt).total_seconds() / 3600.0
-            except (ValueError, TypeError):
-                hours_since = 0.0
+            hours_since = _hours_since(last_accessed_at, now)
 
             strength = self.memory_strength(
-                access_count, importance, confirmation_count, emotional_salience,
+                access_count,
+                importance,
+                confirmation_count,
+                emotional_salience,
             )
+            strength = max(strength, float(fact.get("memory_strength", 0.0)))
             trust = fact.get("trust_score", 1.0)
             # Scaled to the store's timescale before decay is applied. Without
             # this, anything older than a few days computes R ~ 0 and is filed
             # `forgotten` regardless of how often it is used. GitHub #136.
             ret = self.trust_modulated_retention(
-                hours_since, self.store_scaled_strength(strength), trust,
+                hours_since,
+                self.store_scaled_strength(strength),
+                trust,
             )
             zone = self.lifecycle_zone(ret)
 
-            results.append({
-                "fact_id": fact["fact_id"],
-                "retention": ret,
-                "strength": strength,
-                "zone": zone,
-                "access_count": access_count,
-                "last_accessed_at": last_accessed_at,
-            })
+            results.append(
+                {
+                    "fact_id": fact["fact_id"],
+                    "retention": ret,
+                    "strength": strength,
+                    "zone": zone,
+                    "access_count": access_count,
+                    "last_accessed_at": last_accessed_at,
+                }
+            )
 
         return results
+
+
+def _hours_since(value, now):
+    try:
+        last = datetime.fromisoformat(value)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=UTC)
+        return (now - last).total_seconds() / 3600.0
+    except (ValueError, TypeError):
+        return 0.0

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import socket
 from pathlib import Path
 
@@ -65,14 +64,8 @@ def _is_pid_alive(pid: int) -> bool:
         import psutil
         return psutil.pid_exists(pid)
     except ImportError:
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            # Process exists but we lack permission to signal it — treat as alive.
-            return True
+        from superlocalmemory.core.platform_utils import is_pid_alive
+        return is_pid_alive(pid)  # one owned by another user counts as alive
 
 
 def _pid_create_time(pid: int) -> float | None:
@@ -358,7 +351,11 @@ def expire_stale_mesh_locks(db_path: Path) -> int:
 
     now = datetime.now(timezone.utc).isoformat()
     try:
-        conn = sqlite3.connect(str(db_path), timeout=2.0)
+        # mode=rw: a store that does not exist is not created by clearing its
+        # leases (a plain connect would leave an empty database behind).
+        conn = sqlite3.connect(
+            f"{Path(db_path).absolute().as_uri()}?mode=rw", uri=True, timeout=2.0,
+        )
         try:
             # G-07: BEGIN IMMEDIATE prevents a concurrent write from seeing our
             # DELETE mid-flight.  On OperationalError (DB locked by another

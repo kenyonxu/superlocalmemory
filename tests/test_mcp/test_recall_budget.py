@@ -15,7 +15,6 @@ TDD RED suite. Tests for:
 
 from __future__ import annotations
 
-import pytest
 
 from superlocalmemory.core.config import RetrievalConfig
 from superlocalmemory.server.recall_serializer import (

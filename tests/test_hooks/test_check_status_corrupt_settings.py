@@ -12,8 +12,6 @@ WP-J: check_status() must distinguish 'missing' from 'corrupt' settings.json.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -32,7 +30,7 @@ class TestCheckStatusCorruptSettings:
     def test_corrupt_json_returns_installed_none(self, tmp_path):
         """Corrupt settings.json must yield installed=None (indeterminate), not False."""
         corrupt_file = tmp_path / "settings.json"
-        corrupt_file.write_text("{invalid json}")
+        corrupt_file.write_text("{invalid json}", encoding="utf-8")
 
         with _patch_settings_path(str(corrupt_file)):
             from superlocalmemory.hooks import claude_code_hooks
@@ -50,7 +48,7 @@ class TestCheckStatusCorruptSettings:
     def test_corrupt_json_has_error_field_mentioning_json(self, tmp_path):
         """Corrupt settings.json must include an 'error' field mentioning parse/JSON."""
         corrupt_file = tmp_path / "settings.json"
-        corrupt_file.write_text("{invalid json}")
+        corrupt_file.write_text("{invalid json}", encoding="utf-8")
 
         with _patch_settings_path(str(corrupt_file)):
             from superlocalmemory.hooks import claude_code_hooks
@@ -105,7 +103,7 @@ class TestCheckStatusCorruptSettings:
     def test_valid_settings_without_hooks_returns_installed_false(self, tmp_path):
         """Valid settings.json with no SLM hooks must still return installed=False."""
         valid_file = tmp_path / "settings.json"
-        valid_file.write_text(json.dumps({"theme": "dark"}))
+        valid_file.write_text(json.dumps({"theme": "dark"}), encoding="utf-8")
 
         with _patch_settings_path(str(valid_file)):
             from superlocalmemory.hooks import claude_code_hooks
@@ -124,7 +122,7 @@ class TestCheckStatusCorruptSettings:
     def test_corrupt_json_hook_types_empty(self, tmp_path):
         """Corrupt settings.json: hook_types should be empty (can't parse them)."""
         corrupt_file = tmp_path / "settings.json"
-        corrupt_file.write_text('{"hooks": {bad}}')
+        corrupt_file.write_text('{"hooks": {bad}}', encoding="utf-8")
 
         with _patch_settings_path(str(corrupt_file)):
             from superlocalmemory.hooks import claude_code_hooks

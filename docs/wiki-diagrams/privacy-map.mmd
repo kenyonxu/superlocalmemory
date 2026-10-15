@@ -1,0 +1,18 @@
+flowchart TB
+    subgraph HERE["Stays on this computer"]
+        MEM["Memories, vectors, graph, pictures"]
+        LOC["Local models<br/>embedder, reranker, Laya, OCR, Ollama"]
+    end
+    MEM --- LOC
+    HF["Hugging Face"] -.->|"one-time download"| LOC
+    MEM --> GATE["Outbound gate<br/>credentials replaced by redacted"]
+    MEM -->|"opt-in, encrypted first"| BK["GitHub or Google Drive backup"]
+    MEM -->|"Web access on"| GW["Connection gateway"]
+    GATE -->|"Mode C"| LLM["Language model provider"]
+    GATE -->|"endpoint set"| EMB["Embedding endpoint"]
+    GATE -->|"endpoint set"| RR["Remote reranker"]
+    GATE -->|"consent and key"| JEV["Jev"]
+    classDef out fill:#FFF4E0,stroke:#C27A00,color:#1F2340
+    classDef gate fill:#EEF0FF,stroke:#4B4FD6,color:#1F2340,stroke-width:3px
+    class LLM,EMB,RR,JEV,BK,GW,HF out
+    class GATE gate

@@ -4,7 +4,6 @@ Seeds a temp ingestion_operations table and verifies per-agent grouping,
 profile isolation, the unknown-agent bucket, and recency ordering.
 """
 
-import asyncio
 import sqlite3
 
 from superlocalmemory.server.routes import agents as agents_route
@@ -40,9 +39,7 @@ def _call(tmp_path, monkeypatch, limit=20):
     _seed(str(db))
     monkeypatch.setattr(agents_route, "DB_PATH", db)
     monkeypatch.setattr(helpers, "get_active_profile", lambda: "default")
-    return asyncio.run(
-        agents_route.get_agent_memory_activity(request=None, limit=limit)
-    )
+    return agents_route.get_agent_memory_activity(request=None, limit=limit)
 
 
 def test_per_agent_grouping_and_totals(tmp_path, monkeypatch):
@@ -77,7 +74,7 @@ def test_missing_table_is_graceful(tmp_path, monkeypatch):
     sqlite3.connect(str(db)).close()  # exists but no ingestion_operations
     monkeypatch.setattr(agents_route, "DB_PATH", db)
     monkeypatch.setattr(helpers, "get_active_profile", lambda: "default")
-    res = asyncio.run(agents_route.get_agent_memory_activity(request=None, limit=20))
+    res = agents_route.get_agent_memory_activity(request=None, limit=20)
     assert res["ok"] is True
     assert res["total_memories"] == 0
     assert res["agents"] == [] and res["recent"] == []

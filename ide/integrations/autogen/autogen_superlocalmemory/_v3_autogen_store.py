@@ -58,6 +58,19 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _retrieval_metadata(caller_metadata, fact_id):
+    """Add provenance without overwriting any caller-owned metadata field."""
+    metadata = dict(caller_metadata or {})
+    key = "_slm"
+    if key in metadata:
+        key = "_slm_retrieval"
+        suffix = 1
+        while key in metadata:
+            key = f"_slm_retrieval_{suffix}"
+            suffix += 1
+    return {**metadata, key: {"fact_id": fact_id}}
+
+
 class V3AutogenStore:
     """Append-only memory store backed by a SuperLocalMemory engine.
 
@@ -161,12 +174,16 @@ class V3AutogenStore:
         except Exception:
             return []
         out: list[dict] = []
+        # https://microsoft.github.io/autogen/stable/reference/python/autogen_core.memory.html
         for result in resp.results:
+            fact = result.fact
+            owned = (getattr(fact, "session_id", "") or "").startswith(_MEM_PREFIX)
+            parsed = self._parse(fact.content) if owned else None
+            item = parsed or {"content": fact.content, "mime_type": "text/plain", "metadata": {}}
             out.append({
-                "content": result.fact.content,
+                **item,
                 "score": float(result.score),
-                "metadata": {"fact_id": result.fact.fact_id},
-                "mime_type": "text/plain",
+                "metadata": _retrieval_metadata(item["metadata"], fact.fact_id),
             })
         return out
 

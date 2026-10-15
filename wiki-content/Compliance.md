@@ -90,16 +90,12 @@ slm profile switch client-a
 ```
 
 Shared and global scopes are opt-in. Profiles are not an operating-system,
-process, or tenant-security boundary; deployment isolation and the V3.7 scope
+process, or tenant-security boundary; deployment isolation and the scope
 matrix remain required for sensitive workloads.
 
 ### Trust Scoring
 
-Every agent that interacts with SuperLocalMemory has a Bayesian trust score (0.0 to 1.0):
-
-- Agents below the trust threshold are blocked from write and delete operations
-- Trust is updated based on outcome reports
-- View trust scores via the dashboard (Trust tab)
+Every agent has a Bayesian trust score from 0.0 to 1.0. A new score starts at 0.5. A write is refused when the score is below 0.3, and a delete when it is below 0.5. Those limits are `SLM_TRUST_WRITE_THRESHOLD` and `SLM_TRUST_DELETE_THRESHOLD`. Reads stay open unless `SLM_TRUST_READ_GATE=1`; the read limit then defaults to 0.1 (`SLM_TRUST_READ_THRESHOLD`). The score moves when a signal is recorded, including a successful store, a recall hit, a confirmation, a contradiction or an access. An outcome report is a learning record and does not change this score. The dashboard shows the scores under Governance, on the Trust tab.
 
 ### Hash-chained audit trail
 

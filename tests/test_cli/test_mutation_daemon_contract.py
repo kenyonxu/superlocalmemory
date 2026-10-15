@@ -24,7 +24,10 @@ def test_delete_routes_to_resident_daemon(capsys) -> None:
     ):
         cmd_delete(args)
 
-    request.assert_called_once_with("DELETE", "/api/memories/fact-1")
+    request.assert_called_once_with(
+        "DELETE", "/api/memories/fact-1", preserve_not_found=True,
+        preserve_conflict=True,
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["success"] is True
     assert payload["data"]["deleted"] == "fact-1"
@@ -57,6 +60,8 @@ def test_update_routes_to_resident_daemon(capsys) -> None:
         "PATCH",
         "/api/memories/fact%201",
         {"content": "Updated content."},
+        preserve_not_found=True,
+        preserve_conflict=True,
     )
     payload = json.loads(capsys.readouterr().out)
     assert payload["success"] is True

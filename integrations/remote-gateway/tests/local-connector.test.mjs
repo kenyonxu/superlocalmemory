@@ -1,0 +1,61 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+const module = await import('../src/local-connector.ts').catch(() => ({}));
+const { LocalRelaySession, connectorSocketOptions } = module;
+const request = (changes={}) => JSON.stringify({v:1,kind:'request',id:'operation-1',generation:3,deadlineAt:Date.now()+1000,headers:[['content-type','application/json']],bodyBase64:Buffer.from('{"jsonrpc":"2.0","id":1,"method":"ping"}').toString('base64'),...changes});
+function setup(fetcher=async()=>new Response('{"ok":true}',{headers:{'content-type':'application/json'}})) {
+  const sent=[], closed=[];
+  const session = new LocalRelaySession({origin:'http://127.0.0.1:9999/mcp/', originHeaders:{'X-Install-Token':'local-test'}, fetcher, send:text=>sent.push(JSON.parse(text)), close:code=>closed.push(code)});
+  return {session,sent,closed};
+}
+test('missing implementation is the explicit RED signal',()=>assert.equal(typeof LocalRelaySession,'function'));
+test('ready handshake precedes origin execution',async()=>{let calls=0;const s=setup(async()=>{calls++;return new Response('');});await s.session.receive(request());assert.equal(calls,0);assert.equal(s.closed.length,1);});
+test('request uses fixed loopback origin and private local header',async()=>{let observed;const s=setup(async(url,opts)=>{observed={url,opts};return new Response('result');});await s.session.receive('{"v":1,"kind":"ready","generation":3}');await s.session.receive(request());assert.equal(observed.url,'http://127.0.0.1:9999/mcp/');assert.equal(observed.opts.redirect,'error');assert.equal(observed.opts.headers.get('X-Install-Token'),'local-test');assert.equal(observed.opts.headers.has('Authorization'),false);assert.equal(s.sent[0].status,200);assert.equal(Buffer.from(s.sent[0].bodyBase64,'base64').toString(),'result');});
+test('approved modern parameters are forwarded using immutable local schema',async()=>{let headers;const params=['mcp-param-query'];const session=new LocalRelaySession({origin:'http://127.0.0.1:9999/mcp',originHeaders:{},codecOptions:{requestParamHeaders:params},fetcher:async(_,o)=>{headers=o.headers;return new Response('');},send(){},close(){}});params.push('mcp-param-unapproved');await session.receive('{"v":1,"kind":"ready","generation":3}');await session.receive(request({headers:[['mcp-param-query','value']]}));assert.equal(headers.get('mcp-param-query'),'value');headers=undefined;await session.receive(request({headers:[['mcp-param-unapproved','value']]}));assert.equal(headers,undefined);});
+test('refuses remote, credential-bearing, query and non-MCP origins',()=>{for(const origin of ['http://example.com/mcp/','http://localhost/mcp/','http://u:p@127.0.0.1/mcp/','http://127.0.0.1/mcp/?url=x','http://127.0.0.1/admin'])assert.throws(()=>new LocalRelaySession({origin,originHeaders:{},send(){},close(){}}));});
+test('stale generation cannot hit origin',async()=>{let calls=0;const s=setup(async()=>{calls++;return new Response('');});await s.session.receive('{"v":1,"kind":"ready","generation":3}');await s.session.receive(request({generation:2}));assert.equal(calls,0);assert.equal(s.closed.length,1);});
+test('expired request is refused before local call',async()=>{let calls=0;const s=setup(async()=>{calls++;return new Response('');});await s.session.receive('{"v":1,"kind":"ready","generation":3}');await s.session.receive(request({deadlineAt:0}));assert.equal(calls,0);assert.equal(s.sent[0].status,504);});
+test('origin failure is sanitized',async()=>{const s=setup(async()=>{throw Error('SECRET detail');});await s.session.receive('{"v":1,"kind":"ready","generation":3}');await s.session.receive(request());assert.equal(s.sent[0].status,502);assert.ok(!JSON.stringify(s.sent).includes('SECRET'));});
+test('bodyless origin response is preserved',async()=>{const s=setup(async()=>new Response(null,{status:204}));await s.session.receive('{"v":1,"kind":"ready","generation":3}');await s.session.receive(request());assert.equal(s.sent[0].bodyBase64,'');assert.equal(s.sent[0].status,204);});
+test('response body is capped while reading',async()=>{const s=setup(async()=>new Response(new Uint8Array(4194305)));await s.session.receive('{"v":1,"kind":"ready","generation":3}');await s.session.receive(request());assert.equal(s.sent[0].status,502);});
+test('remote cancellation aborts local fetch and emits no success',async()=>{let signal,finish;const s=setup(async(_,opts)=>{signal=opts.signal;return new Promise(resolve=>{finish=resolve;});});await s.session.receive('{"v":1,"kind":"ready","generation":3}');const pending=s.session.receive(request());await s.session.receive(JSON.stringify({v:1,kind:'cancel',id:'operation-1',generation:3}));assert.equal(signal.aborted,true);finish(new Response('late'));await pending;assert.equal(s.sent.length,0);});
+test('socket shutdown fences late responses',async()=>{let finish;const s=setup(async()=>new Promise(resolve=>{finish=resolve;}));await s.session.receive('{"v":1,"kind":"ready","generation":3}');const pending=s.session.receive(request());s.session.stop();finish(new Response('late'));await pending;assert.equal(s.sent.length,0);});
+test('duplicate ready is a protocol violation',async()=>{const s=setup();await s.session.receive('{"v":1,"kind":"ready","generation":3}');await s.session.receive('{"v":1,"kind":"ready","generation":3}');assert.equal(s.closed.length,1);});
+test('socket config binds device authorization to curated WSS endpoint',()=>{const opts=connectorSocketOptions('wss://connect.superlocalmemory.com/connector','a'.repeat(40));assert.equal(opts.url,'wss://connect.superlocalmemory.com/connector');assert.equal(opts.options.headers.Authorization,'Bearer '+ 'a'.repeat(40));assert.equal(opts.options.followRedirects,false);assert.equal(opts.options.perMessageDeflate,false);});
+test('socket config rejects unapproved hosts and token URL leaks',()=>{for(const url of ['ws://connect.superlocalmemory.com/connector','wss://evil.com/connector','wss://connect.superlocalmemory.com/connector?token=x'])assert.throws(()=>connectorSocketOptions(url,'a'.repeat(40)));});
+test('real install token contract rejects invented alias',()=>assert.throws(()=>new LocalRelaySession({origin:'http://127.0.0.1:9999/mcp',originHeaders:{'X-SLM-Install-Token':'x'},send(){},close(){}})));
+test('cancellation releases stalled origin body reader',async()=>{let canceled=false;const s=setup(async()=>new Response(new ReadableStream({cancel(){canceled=true;}})));await s.session.receive('{"v":1,"kind":"ready","generation":3}');const pending=s.session.receive(request());await new Promise(resolve=>setImmediate(resolve));await s.session.receive('{"v":1,"kind":"cancel","id":"operation-1","generation":3}');await pending;assert.equal(canceled,true);assert.equal(s.sent.length,0);});
+test('timeout releases stalled origin body and reports uncertainty',async()=>{let canceled=false;const s=setup(async()=>new Response(new ReadableStream({cancel(){canceled=true;}})));await s.session.receive('{"v":1,"kind":"ready","generation":3}');await s.session.receive(request({deadlineAt:Date.now()+25}));assert.equal(canceled,true);assert.equal(s.sent[0].status,504);});
+test('absolute deadline wins even when timer is delayed',async()=>{const s=setup(async()=>{const until=Date.now()+30;while(Date.now()<until){}return new Response('late');});await s.session.receive('{"v":1,"kind":"ready","generation":3}');await s.session.receive(request({deadlineAt:Date.now()+20}));assert.equal(s.sent[0].status,504);});
+test('malformed handshake stops session without origin side effects',async()=>{const s=setup();await s.session.receive('bad');await s.session.receive('{"v":1,"kind":"ready","generation":3}');assert.equal(s.closed.length,1);assert.equal(s.sent.length,0);});
+test('overlong deadline is refused',async()=>{const s=setup();await s.session.receive('{"v":1,"kind":"ready","generation":3}');await s.session.receive(request({deadlineAt:Date.now()+40000}));assert.equal(s.sent[0].status,400);});
+test('untrusted response headers cannot leak origin cookies',async()=>{const s=setup(async()=>new Response('ok',{headers:{'set-cookie':'secret','location':'https://evil.com','content-type':'application/json'}}));await s.session.receive('{"v":1,"kind":"ready","generation":3}');await s.session.receive(request());assert.deepEqual(s.sent[0].headers,[['content-type','application/json']]);});
+for(const status of [301,302,303,307,308])test(`a real ${status} from the local daemon is refused and the API key goes nowhere else`,async()=>{
+  const {createServer}=await import('node:http');
+  const seen=[];
+  const target=createServer((req,res)=>{seen.push(req.headers);req.resume();res.end('ok');});
+  await new Promise(resolve=>target.listen(0,'127.0.0.1',resolve));
+  const targetPort=target.address().port;
+  const squatter=createServer((req,res)=>{req.resume();res.writeHead(status,{location:`http://127.0.0.1:${targetPort}/stolen`});res.end();});
+  await new Promise(resolve=>squatter.listen(0,'127.0.0.1',resolve));
+  try {
+    const sent=[], closed=[];
+    const session=new LocalRelaySession({origin:`http://127.0.0.1:${squatter.address().port}/mcp`,
+      originHeaders:{'X-SLM-API-Key':'api-key-must-not-travel'},send:text=>sent.push(JSON.parse(text)),close:code=>closed.push(code)});
+    await session.receive('{"v":1,"kind":"ready","generation":3}');
+    await session.receive(request());
+    assert.equal(sent.length,1);
+    assert.equal(sent[0].status,502);
+    assert.equal(seen.length,0,'the redirect target was contacted');
+    assert.ok(!JSON.stringify(sent).includes('stolen'));
+    assert.equal(closed.length,0);
+  } finally {
+    await new Promise(resolve=>squatter.close(resolve));
+    await new Promise(resolve=>target.close(resolve));
+  }
+});
+test('the API key header is accepted only for a loopback 127.0.0.1 origin',()=>{
+  for(const origin of ['http://localhost:8765/mcp','http://192.168.1.5:8765/mcp','https://127.0.0.1:8765/mcp','http://example.com/mcp'])
+    assert.throws(()=>new LocalRelaySession({origin,originHeaders:{'X-SLM-API-Key':'k'},send(){},close(){}}),/invalid_local_origin/);
+  assert.doesNotThrow(()=>new LocalRelaySession({origin:'http://127.0.0.1:8765/mcp',originHeaders:{'X-SLM-API-Key':'k'},send(){},close(){}}));
+});

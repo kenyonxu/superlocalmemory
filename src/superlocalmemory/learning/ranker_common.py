@@ -25,7 +25,72 @@ __all__ = (
     "_build_training_matrix",
     "_shadow_test_improved",
     "_compute_eval_metrics",
+    "holdout_metrics",
+    "split_by_query",
 )
+
+
+def split_by_query(rows: list[dict], *, holdout_share: int = 5
+                   ) -> tuple[list[dict], list[dict]]:
+    """Query-disjoint train/holdout split, deterministic per query id.
+
+    Roughly 1 in ``holdout_share`` queries is held out. Every row of a query
+    lands on the same side, so the holdout measures generalisation to unseen
+    queries rather than memorisation of seen ones (the
+    old metrics and shadow gate were computed on the training rows).
+    """
+    import hashlib
+
+    train: list[dict] = []
+    holdout: list[dict] = []
+    for row in rows:
+        qid = str(row.get("query_id") or "")
+        digest = hashlib.sha256(qid.encode("utf-8")).hexdigest()[:8]
+        (holdout if int(digest, 16) % holdout_share == 0 else train).append(row)
+    return train, holdout
+
+
+def _ndcg_at_k(scores, labels, k: int = 10) -> float:
+    """NDCG@k with the labeler's graded gains (0, 1, 3, 7, 15)."""
+    import numpy as np
+
+    gains = [0, 1, 3, 7, 15]
+    order = np.argsort(-np.asarray(scores, dtype=float), kind="stable")
+    dcg = sum(gains[int(labels[i])] / np.log2(r + 2)
+              for r, i in enumerate(order[:k]))
+    ideal = sorted((int(x) for x in labels), reverse=True)[:k]
+    idcg = sum(gains[g] / np.log2(r + 2) for r, g in enumerate(ideal))
+    return float(dcg / idcg) if idcg > 0 else 0.0
+
+
+def holdout_metrics(booster, rows: list[dict], feature_names) -> dict:
+    """True NDCG@10 of ``booster`` on held-out queries, against labels.
+
+    Also reports the retrieval order's NDCG@10 on the same queries (rows in
+    recorded position order) as the baseline. Groups with fewer than two rows
+    or no positive label are skipped — NDCG is undefined there.
+    """
+    import numpy as np
+
+    X, y, groups = _build_training_matrix(rows, feature_names)
+    if not groups:
+        return {"holdout_queries": 0}
+    model, base, used, lo = [], [], 0, 0
+    for g in groups:
+        hi = lo + g
+        yg = y[lo:hi]
+        if g >= 2 and int(np.max(yg)) > 0:
+            model.append(_ndcg_at_k(booster.predict(X[lo:hi]), yg))
+            base.append(_ndcg_at_k(-np.arange(g, dtype=float), yg))
+            used += 1
+        lo = hi
+    if not used:
+        return {"holdout_queries": 0}
+    return {
+        "holdout_queries": used,
+        "holdout_ndcg_at_10": float(np.mean(model)),
+        "holdout_ndcg_at_10_retrieval_order": float(np.mean(base)),
+    }
 
 
 def _build_training_matrix(rows: list[dict], feature_names):

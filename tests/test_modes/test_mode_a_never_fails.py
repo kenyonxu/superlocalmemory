@@ -93,6 +93,20 @@ def test_a_memory_can_be_stored_with_no_network(mode_a_engine):
     assert fact_ids, "Mode A could not store a memory without a network"
 
 
+def test_model_free_store_completes_lexical_materialization(mode_a_engine):
+    """No queued work is abandoned when optional vector stages have no model."""
+    import json
+
+    mode_a_engine.store("Frankfurt hosts the offline build runner.")
+    rows = mode_a_engine._db.execute(
+        "SELECT state, derivation_state_json FROM ingestion_operations",
+    )
+    assert rows and {row["state"] for row in rows} == {"complete"}
+    stages = json.loads(rows[0]["derivation_state_json"])
+    assert stages["fts"] and stages["bm25"]
+    assert stages["embeddings"] and stages["ann"] and stages["vector"]
+
+
 def test_a_memory_can_be_found_with_no_network(mode_a_engine):
     for text in _FACTS:
         mode_a_engine.store(text)

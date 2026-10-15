@@ -26,9 +26,13 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from superlocalmemory.access.rbac import RbacError
+from superlocalmemory.access.rbac import LastAdminError, RbacError
+from superlocalmemory.access.rbac_admin import (
+    AuditUnavailable, AuthorityError, audited, check_identity_authority, record,
+)
 from superlocalmemory.server.rbac_enforce import (
-    get_rbac_engine, principal_info, require_manage, resolve_principal,
+    get_rbac_engine, principal_info, require_global_manage, require_manage,
+    resolve_principal,
 )
 
 logger = logging.getLogger("superlocalmemory.routes.rbac")
@@ -101,6 +105,8 @@ class UpdateUserRequest(BaseModel):
     display_name: Optional[str] = None
     password: Optional[str] = None
     status: Optional[str] = None
+    # Self-service password change proves the current password (OPS-27).
+    current_password: Optional[str] = None
 
 
 class MemberRequest(BaseModel):
@@ -121,9 +127,18 @@ class PolicyRequest(BaseModel):
 # -- helpers --
 
 def _machine_guard(request: Request) -> None:
-    """Prove machine auth (operator / dashboard) before any RBAC route."""
+    """Prove machine auth (operator / dashboard) before any RBAC route.
+
+    In company mode (require_login on) a credential is mandatory: the loopback
+    shortcut for credential-less callers is off.
+    """
+    from superlocalmemory.server.rbac_enforce import require_machine_credential
     from superlocalmemory.server.write_identity import require_http_mutation_actor
 
+    rbac = get_rbac_engine(request.app.state)
+    if rbac is not None and rbac.require_login():
+        require_machine_credential(request)
+        return
     broker = getattr(request.app.state, "mesh_broker", None)
     require_http_mutation_actor(
         request,
@@ -151,23 +166,26 @@ def _session_token(request: Request) -> str:
             or (request.cookies.get(_SESSION_COOKIE, "") or ""))
 
 
-def _require_authority_over_user(request: Request, target_user_id: str) -> None:
-    """Reject modifying a user the caller has no authority over (IDOR guard).
+def _http_error(exc: Exception) -> HTTPException:
+    """One mapping for refusals from account administration."""
+    if isinstance(exc, AuditUnavailable):
+        return HTTPException(503, detail=str(exc))
+    if isinstance(exc, AuthorityError):
+        return HTTPException(403, detail=str(exc))
+    if isinstance(exc, LastAdminError):
+        return HTTPException(409, detail=str(exc))
+    # SEC-H-02 carve-out: RbacError messages are intentional domain validation
+    # messages (e.g. "Username already exists"), safe for the admin console.
+    return HTTPException(400, detail=str(exc))
 
-    The machine owner is root. A logged-in admin may only act on a user who
-    shares at least one workspace on which the admin holds MANAGE.
-    """
-    from superlocalmemory.access.rbac import Permission
 
-    principal = resolve_principal(request)
-    if principal["kind"] == "owner":
-        return
-    rbac = _engine(request)
-    target_profiles = rbac.list_user_profiles(target_user_id)
-    if any(rbac.has_permission(principal["user_id"], p["profile_id"], Permission.MANAGE)
-           for p in target_profiles):
-        return
-    raise HTTPException(403, detail="You have no authority over this user.")
+def _account_id(rbac, username: str) -> str:
+    """The account a sign-in named, for the audit trail (never the password)."""
+    wanted = (username or "").strip()
+    for user in rbac.list_users():
+        if user["username"] == wanted:
+            return str(user["user_id"])
+    return "unknown-username"
 
 
 # -- identity --
@@ -176,15 +194,21 @@ def _require_authority_over_user(request: Request, target_user_id: str) -> None:
 async def login(req: LoginRequest, request: Request, response: Response):
     _machine_guard(request)
     uname = (req.username or "").strip()
-    if _login_blocked(uname):
-        raise HTTPException(429, detail="Too many attempts. Try again later.")
     rbac = _engine(request)
+    if _login_blocked(uname):
+        record(rbac, "login", actor="anonymous", outcome="throttled",
+               account=_account_id(rbac, uname))
+        raise HTTPException(429, detail="Too many attempts. Try again later.")
     user = rbac.verify_credentials(req.username, req.password)
     if not user:
         _login_note(uname, ok=False)
+        record(rbac, "login", actor="anonymous", outcome="failed",
+               account=_account_id(rbac, uname))
         raise HTTPException(401, detail="Invalid username or password")
     _login_note(uname, ok=True)
     token = rbac.create_session(user["user_id"])
+    record(rbac, "login", actor=f"user:{user['user_id']}", outcome="ok",
+           session="created")
     # HttpOnly cookie so dashboard JS never has to hold the session token;
     # Secure when served over HTTPS (behind a TLS proxy).
     response.set_cookie(
@@ -206,19 +230,26 @@ async def logout(request: Request, response: Response):
     rbac = _engine(request)
     token = _session_token(request)
     if token:
+        user = rbac.resolve_session(token)
         rbac.revoke_session(token)
+        from superlocalmemory.server.caller_workspace import session_workspaces
+
+        session_workspaces(request.app.state).forget(token)
+        if user:
+            record(rbac, "logout", actor=f"user:{user['user_id']}", outcome="ok",
+                   session="revoked")
     response.delete_cookie(_SESSION_COOKIE, path="/")
     return {"ok": True}
 
 
 @router.get("/whoami")
-async def whoami(request: Request):
+def whoami(request: Request):
     _machine_guard(request)
     return principal_info(request)
 
 
 @router.get("/status")
-async def status(request: Request):
+def status(request: Request):
     _machine_guard(request)
     rbac = _engine(request)
     return {
@@ -231,7 +262,7 @@ async def status(request: Request):
 # -- user administration (MANAGE) --
 
 @router.get("/users")
-async def list_users(request: Request):
+def list_users(request: Request):
     _machine_guard(request)
     principal = require_manage(request)
     rbac = _engine(request)
@@ -256,74 +287,98 @@ async def create_user(req: CreateUserRequest, request: Request):
     _machine_guard(request)
     principal = require_manage(request)
     rbac = _engine(request)
+    prof = req.profile_id or _active_profile()
     # Granting a role on a workspace requires MANAGE on THAT workspace.
     if req.role:
-        require_manage(request, profile=req.profile_id or _active_profile())
-    try:
+        require_manage(request, profile=prof)
+
+    def _create():
         user = rbac.create_user(
             req.username, req.password, display_name=req.display_name,
             created_by=principal["username"],
         )
         if req.role:
-            rbac.set_membership(
-                req.profile_id or _active_profile(), user["user_id"],
-                req.role, added_by=principal["username"],
-            )
-    except RbacError as e:
-        # SEC-H-02 carve-out: RbacError messages are intentional domain
-        # validation messages (e.g. "Username already exists") and are safe
-        # to surface to the admin console. Log for audit trail.
+            rbac.set_membership(prof, user["user_id"], req.role,
+                                added_by=principal["username"])
+        return user
+
+    try:
+        user = audited(rbac, "user_create", principal, _create,
+                       profile=prof if req.role else "", new_role=req.role or None)
+    except (RbacError, AuditUnavailable) as e:
         logger.warning("rbac create_user rejected: %s", e)
-        raise HTTPException(400, detail=str(e))
+        raise _http_error(e)
     return {"ok": True, "user": user}
+
+
+def _changed_fields(req: UpdateUserRequest) -> list[str]:
+    fields = []
+    if req.status is not None:
+        fields.append("status")
+    if req.display_name is not None:
+        fields.append("display_name")
+    if req.password is not None:
+        fields.append("password")
+    return fields
+
+
+def _apply_update(rbac, user_id: str, req: UpdateUserRequest) -> None:
+    if req.status is not None:
+        rbac.set_status(user_id, req.status)
+    if req.display_name is not None:
+        rbac.set_display_name(user_id, req.display_name)
+    if req.password is not None:
+        rbac.set_password(user_id, req.password)
 
 
 @router.patch("/users/{user_id}")
 async def update_user(user_id: str, req: UpdateUserRequest, request: Request):
+    """Change an account's password, status or name (global to the account).
+
+    The computer's owner, the person themselves (a password change proves the
+    current one), or an administrator of every workspace the account belongs
+    to. A scoped administrator changes roles instead (OPS-27).
+    """
     _machine_guard(request)
-    require_manage(request)
-    _require_authority_over_user(request, user_id)
+    principal = resolve_principal(request)
+    if principal.get("kind") != "user":
+        principal = require_manage(request)
     rbac = _engine(request)
+    fields = _changed_fields(req)
     try:
-        if req.display_name is not None or req.status is not None:
-            if req.status is not None:
-                rbac.set_status(user_id, req.status)
-            if req.display_name is not None:
-                # display_name update via direct engine call
-                conn = rbac._conn()
-                try:
-                    conn.execute(
-                        "UPDATE rbac_users SET display_name=? WHERE user_id=?",
-                        (req.display_name, user_id),
-                    )
-                    conn.commit()
-                finally:
-                    conn.close()
-        if req.password is not None:
-            rbac.set_password(user_id, req.password)
-    except RbacError as e:
+        for field in fields:
+            check_identity_authority(rbac, principal, user_id, field=field,
+                                     current_password=req.current_password)
+        audited(rbac, "user_update", principal, lambda: _apply_update(rbac, user_id, req),
+                target_user=user_id, fields=fields, new_status=req.status,
+                sessions_revoked=bool(req.password is not None or req.status == "disabled"))
+    except (RbacError, AuditUnavailable) as e:
         logger.warning("rbac update_user rejected: %s", e)
-        raise HTTPException(400, detail=str(e))
+        raise _http_error(e)
     return {"ok": True, "user": rbac.get_user(user_id)}
 
 
 @router.delete("/users/{user_id}")
 async def delete_user(user_id: str, request: Request):
     _machine_guard(request)
-    require_manage(request)
-    _require_authority_over_user(request, user_id)
+    principal = require_manage(request)
+    rbac = _engine(request)
     try:
-        _engine(request).delete_user(user_id)
-    except RbacError as e:
-        logger.warning("rbac delete_user not found: %s", e)
-        raise HTTPException(404, detail=str(e))
+        check_identity_authority(rbac, principal, user_id, field="delete")
+        if rbac.get_user(user_id) is None:
+            raise HTTPException(404, detail="User not found.")
+        audited(rbac, "user_delete", principal, lambda: rbac.delete_user(user_id),
+                target_user=user_id)
+    except (RbacError, AuditUnavailable) as e:
+        logger.warning("rbac delete_user rejected: %s", e)
+        raise _http_error(e)
     return {"ok": True}
 
 
 # -- membership administration (MANAGE) --
 
 @router.get("/members")
-async def list_members(request: Request, profile_id: Optional[str] = None):
+def list_members(request: Request, profile_id: Optional[str] = None):
     _machine_guard(request)
     prof = profile_id or _active_profile()
     # MANAGE on the TARGET workspace, not merely the active one — otherwise an
@@ -338,12 +393,16 @@ async def set_member(req: MemberRequest, request: Request):
     prof = req.profile_id or _active_profile()
     principal = require_manage(request, profile=prof)
     rbac = _engine(request)
+    old = rbac.get_role(req.user_id, prof)
     try:
-        m = rbac.set_membership(prof, req.user_id, req.role,
-                                added_by=principal["username"])
-    except RbacError as e:
+        m = audited(rbac, "role_change", principal,
+                    lambda: rbac.set_membership(prof, req.user_id, req.role,
+                                                added_by=principal["username"]),
+                    profile=prof, target_user=req.user_id,
+                    old_role=old.value if old else None, new_role=req.role)
+    except (RbacError, AuditUnavailable) as e:
         logger.warning("rbac set_membership rejected: %s", e)
-        raise HTTPException(400, detail=str(e))
+        raise _http_error(e)
     return {"ok": True, "membership": m}
 
 
@@ -351,8 +410,17 @@ async def set_member(req: MemberRequest, request: Request):
 async def remove_member(req: RemoveMemberRequest, request: Request):
     _machine_guard(request)
     prof = req.profile_id or _active_profile()
-    require_manage(request, profile=prof)
-    _engine(request).remove_membership(prof, req.user_id)
+    principal = require_manage(request, profile=prof)
+    rbac = _engine(request)
+    old = rbac.get_role(req.user_id, prof)
+    try:
+        audited(rbac, "membership_remove", principal,
+                lambda: rbac.remove_membership(prof, req.user_id),
+                profile=prof, target_user=req.user_id,
+                old_role=old.value if old else None)
+    except (RbacError, AuditUnavailable) as e:
+        logger.warning("rbac remove_membership rejected: %s", e)
+        raise _http_error(e)
     return {"ok": True}
 
 
@@ -361,6 +429,17 @@ async def remove_member(req: RemoveMemberRequest, request: Request):
 @router.post("/policy")
 async def set_policy(req: PolicyRequest, request: Request):
     _machine_guard(request)
-    require_manage(request)
-    _engine(request).set_require_login(req.require_login)
+    # One setting for every workspace: MANAGE on the active one is not enough.
+    principal = require_global_manage(request)
+    rbac = _engine(request)
+    old = rbac.require_login()
+    try:
+        audited(rbac, "policy_change", principal,
+                lambda: rbac.set_require_login(req.require_login),
+                setting="require_login", old_value=old, new_value=req.require_login)
+    except (RbacError, AuditUnavailable) as e:
+        raise _http_error(e)
     return {"ok": True, "require_login": req.require_login}
+
+
+__all__ = ["router"]

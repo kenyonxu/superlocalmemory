@@ -15,7 +15,7 @@
 
         :root {
             --slm-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            --slm-gradient-success: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+            --slm-gradient-success: linear-gradient(135deg, #7C5CFF 0%, #FF2E88 100%);
             --slm-gradient-info: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
             --slm-gradient-warning: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
         }
@@ -45,7 +45,7 @@
         #ng-account-widget:hover { background: rgba(255,255,255,0.06) !important; }
         .account-dest-item { padding: 6px 0; display: flex; align-items: center; gap: 8px; }
         .account-dest-badge { font-size: 10px; padding: 1px 6px; border-radius: 4px; }
-        .account-dest-badge.synced { background: rgba(0,212,170,0.15); color: #00D4AA; }
+        .account-dest-badge.synced { background: rgba(124,92,255,0.16); color: #A794FF; }
         .account-dest-badge.failed { background: rgba(255,71,87,0.15); color: #ff4757; }
         .account-dest-badge.never { background: rgba(255,255,255,0.06); color: #888; }
 

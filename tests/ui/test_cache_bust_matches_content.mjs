@@ -47,7 +47,44 @@ const UI = join(__dirname, '../../src/superlocalmemory/ui');
 //: Files whose cache-bust param is content-derived. Add a file here once its
 //: `?v=` is switched from a hand-picked number to a content hash.
 const HASHED = ['od-brain.js', 'od-graph.js', 'fact-detail.js', 'od-memories.js',
-                'od-optimize.js', 'od-mesh.js', 'od-boundedloops.js'];
+                'od-optimize.js', 'od-mesh.js', 'od-boundedloops.js',
+                // 4.1.20: the nav and Settings change with the Answer Check tab;
+                // a hand-numbered ?v= would keep serving the old nav after upgrade.
+                'od-shell.js', 'od-settings.js', 'od-answercheck.js', 'od-answercheck-tryit.js',
+                // 4.1.20 audit: the Memory activity fix and the Automatic answer-check
+                // state lived in files a browser could keep serving from cache.
+                'dashboard.js', 'answer-check.js', 'recall-lab.js', 'modal.js', 'od-team.js', 'od-signin-gate.js', 'od-sources.js', 'od-source-button.js', 'od-startup.js', 'od-polish.js',
+                // 4.1.21 (#113): the Summaries and Saved views panes.
+                'od-summaries.js', 'od-views.js',
+                // 4.1.21: the Ops Health table now explains an unconfirmed deletion;
+                // a stale copy would keep showing a bare "Exhausted" row.
+                'od-ops-health.js',
+                // 4.1.21: the live event stream subscribes to memory.captured;
+                // a stale copy would keep listening for an event nobody emits.
+                'events.js', 'od-connections.js', 'od-mcp.js',
+                // 4.1.22: Settings shows a running embedding re-index; a stale copy
+                // would keep answering a started switch with "Saved".
+                'od-reindex.js', 'od-decay-preview.js',
+                // 4.1.23: the Connected apps pane. The sidebar entry, the pane and the
+                // internet-connection flow all moved; a stale copy of any of these
+                // would keep showing the flow inside MCP & Tools.
+                'od-apps-ui.js', 'od-apps-list.js', 'od-apps.js',
+                // 4.1.23: Health → Memory store.
+                'od-store-check.js',
+                // 4.1.25: images and documents card; the restart function moved to be shared.
+                'od-features.js', 'od-operations.js', 'od-media.js',
+                'od-botmessages.js',
+                // 4.1.25: the Folders section inside the Documents & Images pane.
+                'od-sources.js',
+                // 4.1.25: the Upgrade memory engine card in Settings.
+                'od-engine-upgrade.js',
+                // 4.1.25 launch polish: the Find a picture box.
+                'od-media-find.js', 'od-local-apps.js', 'od-daemon-controls.js',
+                'od-health.js', 'od-components.js',
+                // 4.2.2: the first-run Welcome card on the Dashboard pane.
+                'od-welcome.js'];
+//: Stylesheets stamped the same way (static/css/<name>?v=<sha256[:8]>).
+const HASHED_CSS = ['od-apps.css', 'design-system.css'];
 
 describe('cache-bust params match file content', function () {
   const html = readFileSync(join(UI, 'index.html'), 'utf8');
@@ -68,6 +105,24 @@ describe('cache-bust params match file content', function () {
         'Returning users will be served the OLD file and will see none of your ' +
         'changes — which reads as "the fix does not work". Re-stamp it (see the ' +
         'snippet at the top of this test file).');
+    });
+  }
+});
+
+describe('stylesheet cache-bust params match file content', function () {
+  const html = readFileSync(join(UI, 'index.html'), 'utf8');
+
+  for (const name of HASHED_CSS) {
+    it(`${name} is stamped with its own content hash`, function () {
+      const bytes = readFileSync(join(UI, 'css', name));
+      const expected = createHash('sha256').update(bytes).digest('hex').slice(0, 8);
+      const m = html.match(
+        new RegExp(`static/css/${name.replace('.', '\\.')}\\?v=([0-9a-f]+)`),
+      );
+      assert.ok(m, `index.html does not reference static/css/${name} with a ?v= param`);
+      assert.equal(m[1], expected,
+        `${name} was edited without re-stamping its cache-bust param ` +
+        `(index.html says ?v=${m[1]}, content hash is ?v=${expected}).`);
     });
   }
 });

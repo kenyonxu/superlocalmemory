@@ -19,7 +19,6 @@ lost.set() before the thread exits.
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 import time
 
@@ -29,7 +28,6 @@ from superlocalmemory.core.ingestion_command import (
     IngestionCommand,
     IngestionOperationRepository,
     IngestionRequest,
-    IngestionState,
     LeaseLost,
 )
 from superlocalmemory.storage import schema

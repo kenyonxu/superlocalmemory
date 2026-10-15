@@ -105,11 +105,23 @@
     }
   }
 
+  function adapterBadge(adapter) {
+    if (adapter.state === 'completed') return ['Import complete', 'ng-badge-success'];
+    if (adapter.state === 'failed') {
+      return [adapter.setup_error ? 'Setup needs attention' : 'Failed', 'ng-badge-error'];
+    }
+    if (adapter.state === 'running') return ['Running', 'ng-badge-success'];
+    return adapter.enabled ? ['Enabled (Stopped)', 'ng-badge-warning'] : ['Disabled', 'ng-badge-neutral'];
+  }
+
   function renderAdapterCard(adapter, info) {
     var isEnabled = adapter.enabled;
     var isRunning = adapter.running;
-    var statusText = isRunning ? 'Running' : (isEnabled ? 'Enabled (Stopped)' : 'Disabled');
-    var statusClass = isRunning ? 'ng-badge-success' : (isEnabled ? 'ng-badge-warning' : 'ng-badge-neutral');
+    // Text and colour both come from the state the API reports; a setup
+    // problem is only flagged for an adapter that is turned on.
+    var badge = adapterBadge(adapter);
+    var statusText = badge[0];
+    var statusClass = badge[1];
 
     return '<div class="ng-glass" style="padding:24px;margin-bottom:16px">' +
       // Header
@@ -127,18 +139,21 @@
         '<div style="display:flex;gap:8px">' +
           (isEnabled ?
             (isRunning ?
-              '<button class="ng-btn" data-act-click="adapter-action" data-adapter="' + adapter.name + '" data-adapter-action="stop">' +
+              '<button class="ng-btn" data-act-click="adapter-action" data-adapter="' + escapeHtml(adapter.name) + '" data-adapter-action="stop">' +
                 '<i class="bi bi-stop-circle"></i> Stop</button>' :
-              '<button class="ng-btn ng-btn-accent" data-act-click="adapter-action" data-adapter="' + adapter.name + '" data-adapter-action="start">' +
+              '<button class="ng-btn ng-btn-accent" data-act-click="adapter-action" data-adapter="' + escapeHtml(adapter.name) + '" data-adapter-action="start">' +
                 '<i class="bi bi-play-circle"></i> Start</button>'
             ) +
-            '<button class="ng-btn" data-act-click="adapter-action" data-adapter="' + adapter.name + '" data-adapter-action="disable" style="color:var(--ng-status-error)">' +
+            '<button class="ng-btn" data-act-click="adapter-action" data-adapter="' + escapeHtml(adapter.name) + '" data-adapter-action="disable" style="color:var(--ng-status-error)">' +
               '<i class="bi bi-x-circle"></i> Disable</button>' :
-            '<button class="ng-btn ng-btn-accent" data-act-click="adapter-action" data-adapter="' + adapter.name + '" data-adapter-action="enable">' +
+            '<button class="ng-btn ng-btn-accent" data-act-click="adapter-action" data-adapter="' + escapeHtml(adapter.name) + '" data-adapter-action="enable">' +
               '<i class="bi bi-power"></i> Enable</button>'
           ) +
         '</div>' +
       '</div>' +
+      // Setup failures are recoverable and visible without reading logs.
+      (adapter.setup_error ? '<p role="status">' + escapeHtml(adapter.setup_error) + '</p>' : '') +
+      '<button class="ng-btn" data-adapter-config="' + escapeHtml(adapter.name) + '">Configure local import</button>' +
       // Description
       '<p style="color:var(--ng-text-secondary);font-size:0.875rem;margin-bottom:12px">' + info.description + '</p>' +
       // Details grid
@@ -200,4 +215,29 @@
       '</div>' +
     '</div>';
   }
+  function escapeHtml(text) { return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+  document.addEventListener('click', function (e) {
+    var button = e.target.closest('[data-adapter-config]');
+    if (!button) return;
+    var name = button.dataset.adapterConfig;
+    var label = name === 'transcript' ? 'Transcript folder' : name === 'gmail' ? 'MBOX file' : 'ICS file';
+    var box = document.createElement('div');
+    box.className = 'card'; box.setAttribute('role', 'region');
+    var field = document.createElement('input');
+    field.setAttribute('aria-label', label); field.placeholder = 'Path to the ' + label.toLowerCase() + ' inside an import folder';
+    var save = document.createElement('button'); save.textContent = 'Save setup'; save.className = 'ng-btn';
+    var close = document.createElement('button'); close.textContent = 'Cancel'; close.className = 'ng-btn';
+    var status = document.createElement('p'); status.setAttribute('role', 'status');
+    box.append(label, field, save, close, status); button.after(box); field.focus();
+    close.addEventListener('click', function () { box.remove(); button.focus(); });
+    save.addEventListener('click', function () {
+      save.disabled = true;
+      fetch('/api/adapters/configure', { method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({name:name, path:field.value}) })
+        .then(function (r) { return r.json().then(function (d) {
+          if (!r.ok || !d.ok) throw new Error(d.detail || d.error || 'Setup could not be saved.');
+          box.remove(); window.loadIngestionStatus();
+        }); }).catch(function (err) { status.textContent = err.message; save.disabled = false; });
+    });
+  });
 })();

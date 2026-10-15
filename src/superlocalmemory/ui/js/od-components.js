@@ -41,12 +41,8 @@
         fix = '<div class="muted" style="margin-top:2px;font-size:12px">'
             + 'SLM repairs this automatically.</div>';
       } else {
-        fix = '<div style="margin-top:4px;display:flex;gap:6px;align-items:center">'
-            + '<code style="font-size:12px;background:var(--bg-2,#0002);'
-            + 'padding:2px 6px;border-radius:4px">' + esc(c.fix_cmd) + '</code>'
-            + '<button class="od-copy-fix" data-cmd="' + esc(c.fix_cmd) + '" '
-            + 'style="font-size:11px;padding:1px 6px;cursor:pointer">Copy</button>'
-            + '</div>';
+        fix = '<div style="margin-top:4px"><a href="#settings-pane">Review settings</a>'
+            + ' · Use Repair in Daemon controls to check this installation.</div>';
       }
     }
     return '<div style="padding:8px 0;border-bottom:1px solid var(--border,#8881)">'
@@ -87,8 +83,8 @@
           : '')
       + '</div>'
       + '<div class="muted" style="font-size:11px;margin-top:6px">'
-      + 'SLM auto-repairs fixable items on start. Copy a command for anything '
-      + 'it can’t install for you.</div>';
+      + 'SLM auto-repairs fixable items on start. Use Retry now, Repair or Review settings '
+      + 'for anything that needs attention.</div>';
 
     el.innerHTML = head + summary
       + '<div>' + comps.map(rowHtml).join('') + '</div>' + actions;

@@ -89,11 +89,18 @@ _KNOWN_DEAD: dict[str, str] = {
     "code_graph/watcher.py": "seeded 4.0.6 — triage",
     "core/embedding_worker.py": "ALIVE — subprocess-spawned by infra/self_heal.py",
     "core/engine_lock.py": "seeded 4.0.6 — triage",
-    "core/rate_limit.py": "seeded 4.0.6 — triage",
     "core/recall_worker.py": "ALIVE — subprocess-spawned by infra/self_heal.py",
     "core/reranker_worker.py": "ALIVE — subprocess reranker backend",
+    "server/backup_restore_worker.py": "ALIVE — run with python -m by server/routes/backup_recovery.py",
+    "core/laya_worker.py": "ALIVE — run by file path in Laya's own Python, which cannot "
+                           "import this package (retrieval/sufficiency.py, core/laya_runtime.py)",
+    "runtimes/multimodal_worker.py": "ALIVE — run by file path inside the managed media environment, "
+                                     "which cannot import this package (runtimes/worker_client.py)",
+    "runtimes/media_image_ops.py": "ALIVE — run by path inside the managed environment, "
+                                   "loaded by runtimes/multimodal_worker.py",
+    "runtimes/pdf_parse.py": "ALIVE — run by path inside the managed environment, "
+                             "which cannot import this package (documents/runner.py)",
     "dynamics/activation_guided_quantization.py": "seeded 4.0.6 — triage",
-    "infra/cache_manager.py": "seeded 4.0.6 — triage",
     "ingestion/calendar_adapter.py": "seeded 4.0.6 — triage",
     "ingestion/gmail_adapter.py": "seeded 4.0.6 — triage",
     "ingestion/transcript_adapter.py": "seeded 4.0.6 — triage",
@@ -107,10 +114,6 @@ _KNOWN_DEAD: dict[str, str] = {
     "learning/project_context.py": "seeded 4.0.6 — triage",
     "mcp/cli_fallback.py": "DEAD — no importer at all, not even a test",
     "optimize/metrics/exporters.py": "seeded 4.0.6 — triage",
-    "server/routes/abstraction.py": "seeded 4.0.6 — triage (route registry?)",
-    "server/routes/chat.py": "seeded 4.0.6 — triage (route registry?)",
-    "server/routes/insights.py": "seeded 4.0.6 — triage (route registry?)",
-    "server/routes/timeline.py": "seeded 4.0.6 — triage (route registry?)",
     "server/ui.py": "seeded 4.0.6 — triage",
     "storage/migration_v33.py": "seeded 4.0.6 — triage",
 }
@@ -190,9 +193,24 @@ def _importers_by_stem() -> dict[str, set[pathlib.Path]]:
     for path in _SRC.rglob("*.py"):
         if "__pycache__" in path.parts:
             continue
-        for name in _module_names_imported_by([path]):
+        for name in _module_names_imported_by([path]) | _routers_loaded_by_name(path):
             index.setdefault(name, set()).add(path)
     return index
+
+
+def _routers_loaded_by_name(path: pathlib.Path) -> set[str]:
+    """Route modules a daemon imports by name in its optional-router loop
+    (``for _mod_name in ("learning", ..., "integrity"): __import__(...)``).
+    A module named there IS wired; one that is missing from the loop is not."""
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    if "superlocalmemory.server.routes.{_mod_name}" not in text:
+        return set()
+    import re
+
+    names: set[str] = set()
+    for group in re.findall(r"for _mod_name in \(([^)]*)\)", text):
+        names.update(re.findall(r'"([a-z_]+)"', group))
+    return names
 
 
 def test_no_new_dead_modules(_importers_by_stem) -> None:

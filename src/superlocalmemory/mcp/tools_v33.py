@@ -29,6 +29,16 @@ from superlocalmemory.infra.data_root import state_path
 from superlocalmemory.mcp.shared import authorize_mcp_mutation
 
 
+class DaemonDidNotComplete(RuntimeError):
+    """The daemon is running but did not complete a request it was sent."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(
+            f"Your memory service is running but could not finish {path}. "
+            "Nothing was run on this machine instead; try again shortly."
+        )
+
+
 def _try_daemon_post(path: str, body: dict, timeout_s: float = 60.0) -> dict | None:
     """POST to the daemon, return parsed dict or None if daemon unavailable.
 
@@ -38,21 +48,28 @@ def _try_daemon_post(path: str, body: dict, timeout_s: float = 60.0) -> dict | N
     execution.
     """
     try:
-        from superlocalmemory.cli.daemon import _get_port, is_daemon_running
+        # Through daemon_request, the one place that verifies the daemon's
+        # identity and forwards the caller's own connection: its user session,
+        # its workspace binding and its agent name. A bare POST carried none of
+        # these, so the daemon ran maintenance against the shared default
+        # workspace instead of the caller's bound one.
+        from superlocalmemory.cli.daemon import DaemonRefused, daemon_request, is_daemon_running
         if not is_daemon_running():
             return None
-        import json as _json
-        import urllib.request as _urq
-        port = _get_port()
-        req = _urq.Request(
-            f"http://127.0.0.1:{port}{path}",
-            data=_json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with _urq.urlopen(req, timeout=timeout_s) as resp:
-            raw = resp.read().decode() or "{}"
-        return _json.loads(raw)
+        try:
+            answer = daemon_request("POST", path, body, timeout_seconds=timeout_s)
+        except DaemonRefused:
+            # An answer, not an outage: running it locally would perform as the
+            # machine owner what the workspace just declined.
+            raise
+        if answer is None:
+            # The daemon is up but did not complete the request (an error
+            # status, a missing workspace, a timeout). A local run here would
+            # act on this process's workspace, not the caller's bound one.
+            raise DaemonDidNotComplete(path)
+        return answer
+    except (DaemonRefused, DaemonDidNotComplete):
+        raise
     except Exception as exc:
         logger.warning("daemon POST %s failed: %s", path, exc)
         return None
@@ -163,6 +180,8 @@ def register_v33_tools(server, get_engine: Callable) -> None:
         Args:
             dry_run: If True, compute stats but don't apply changes.
         """
+        from dataclasses import replace
+
         try:
             engine = get_engine()
             pid = engine.profile_id
@@ -176,7 +195,8 @@ def register_v33_tools(server, get_engine: Callable) -> None:
             )
 
             ebbinghaus = EbbinghausCurve(engine._config.forgetting)
-            polar = PolarQuantEncoder(engine._config.quantization.polar)
+            polar = PolarQuantEncoder(replace(engine._config.quantization.polar,
+                                              dimension=engine._config.embedding.dimension))
             qjl = QJLEncoder(engine._config.quantization.qjl)
             qstore = QuantizedEmbeddingStore(
                 engine._db, polar, qjl, engine._config.quantization,
@@ -235,12 +255,17 @@ def register_v33_tools(server, get_engine: Callable) -> None:
             # MCP process. Fall back to local import only if no daemon.
             import asyncio
             # blocking urllib (60s timeout) — keep it off the MCP event loop.
+            # No workspace is named: the daemon resolves the caller's own from
+            # the binding and session forwarded with the request, and says which
+            # one it acted on. Naming this process's engine profile would
+            # override that binding (PR 248 re-check, N10).
             daemon_result = await asyncio.to_thread(
-                _try_daemon_post, "/consolidate/cognitive", {"profile_id": pid},
+                _try_daemon_post, "/consolidate/cognitive", {},
             )
             if daemon_result is not None:
+                acted_on = daemon_result.get("profile_id") or pid
                 _emit_event("ccq.consolidation_complete", {
-                    "profile_id": pid,
+                    "profile_id": acted_on,
                     "clusters_processed": daemon_result.get("clusters_processed", 0),
                     "blocks_created": daemon_result.get("blocks_created", 0),
                 })
@@ -248,7 +273,7 @@ def register_v33_tools(server, get_engine: Callable) -> None:
                     "success": True,
                     "clusters_processed": daemon_result.get("clusters_processed", 0),
                     "blocks_created": daemon_result.get("blocks_created", 0),
-                    "profile_id": pid,
+                    "profile_id": acted_on,
                     "via": "daemon",
                 }
 
@@ -288,16 +313,21 @@ def register_v33_tools(server, get_engine: Callable) -> None:
     # 4. get_soft_prompts — Retrieve active soft prompts
     # ------------------------------------------------------------------
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def get_soft_prompts() -> dict:
+    async def get_soft_prompts(profile_id: str = "") -> dict:
         """Get active soft prompts (auto-learned user patterns).
 
         Returns soft prompt templates generated from behavioral
         patterns. These are injected into conversation context to
-        personalize AI responses.
+        personalize AI responses. ``profile_id`` reads another profile's
+        (empty = the active one).
         """
         try:
+            from superlocalmemory.mcp.request_profile import tool_profile
+
             engine = get_engine()
-            pid = engine.profile_id
+            pid, refused = tool_profile(engine, profile_id)
+            if refused:
+                return refused
 
             rows = engine._db.execute(
                 "SELECT prompt_id, category, content, confidence, "
@@ -387,16 +417,21 @@ def register_v33_tools(server, get_engine: Callable) -> None:
     # 6. get_retention_stats — Memory retention zone distribution
     # ------------------------------------------------------------------
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def get_retention_stats() -> dict:
+    async def get_retention_stats(profile_id: str = "") -> dict:
         """Get memory retention statistics (zone distribution, decay rates).
 
         Queries the fact_retention table for zone counts and average
         retention scores per zone. Shows how memories are distributed
-        across the Ebbinghaus decay lifecycle.
+        across the Ebbinghaus decay lifecycle. ``profile_id`` reads another
+        profile's (empty = the active one).
         """
         try:
+            from superlocalmemory.mcp.request_profile import tool_profile
+
             engine = get_engine()
-            pid = engine.profile_id
+            pid, refused = tool_profile(engine, profile_id)
+            if refused:
+                return refused
 
             # Zone distribution counts
             rows = engine._db.execute(
@@ -456,12 +491,13 @@ def register_v33_tools(server, get_engine: Callable) -> None:
             import asyncio
             # blocking urllib — keep it off the MCP event loop.
             daemon_result = await asyncio.to_thread(
-                _try_daemon_post, "/maintenance/run", {"profile_id": pid},
+                _try_daemon_post, "/maintenance/run", {},
             )
             if daemon_result is not None:
-                daemon_result.setdefault("success", True)
-                daemon_result["via"] = "daemon"
-                return daemon_result
+                # The daemon names the workspace it ran against ("profile").
+                return {**daemon_result, "success": daemon_result.get("success", True),
+                        "via": "daemon",
+                        "profile": daemon_result.get("profile") or pid}
 
             authorization = authorize_mcp_mutation(
                 engine,

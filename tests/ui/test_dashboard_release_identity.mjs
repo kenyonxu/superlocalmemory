@@ -22,8 +22,11 @@ const standaloneUi = readFileSync(
 );
 
 describe('dashboard release identity', () => {
-  it('identifies the dashboard as V4 and declares an absolute SVG favicon', () => {
-    assert.match(html, /<title>SuperLocalMemory V4 — Dashboard<\/title>/);
+  it('titles the dashboard without a version number and declares an absolute SVG favicon', () => {
+    assert.match(html, /<title>SuperLocalMemory — Dashboard<\/title>/);
+    assert.doesNotMatch(html, /<title>[^<]*\bV[0-9]/);
+    assert.doesNotMatch(html, /<h[1-6][^>]*>[^<]*(<[^>]+>[^<]*)*\bV[34]\b/);
+    assert.doesNotMatch(html, /V3 Active/);
     assert.match(html, /href="\/static\/favicon\.svg"/);
     assert.doesNotMatch(html, /<title>SuperLocalMemory V3 — Dashboard<\/title>/);
   });

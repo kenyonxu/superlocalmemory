@@ -47,11 +47,18 @@ CODEX_MCP_CONFIG = CODEX_PLUGIN / ".codex" / "config.toml"
 
 # 7 skills — must match plugin/skills/
 EXPECTED_SKILLS = [
+    # 4.1.22: slm-bot-memory and slm-getting-started-bot, written for a
+    # headless/hook-less bot host, ship in the full skill set too (the
+    # content generalizes beyond Grok Bot — e.g. several Claude Code windows
+    # sharing one SLM_DATA_DIR hit the same cross-agent-memory questions).
+    "slm-bot-memory",
     "slm-cache",
     "slm-compress",
+    "slm-getting-started-bot",
     "slm-governance",
     "slm-graph",
     "slm-loop",
+    "slm-media",
     "slm-mesh",
     "slm-profile",
     "slm-recall",
@@ -59,6 +66,7 @@ EXPECTED_SKILLS = [
     "slm-scope",
     "slm-session",
     "slm-status",
+    "slm-web-access",
 ]
 
 # Core SLM rule keywords that MUST appear in AGENTS.md
@@ -495,12 +503,9 @@ class TestSkills:
 class TestBackwardCompat:
     """Additive-only constraint: existing shipped files must not be modified."""
 
-    def test_plugin_claude_md_unmodified(self) -> None:
-        """plugin/CLAUDE.md must still exist (we did not modify it)."""
-        p = REPO / "plugin" / "CLAUDE.md"
-        assert p.exists(), (
-            "plugin/CLAUDE.md must still exist — codex-plugin is additive, not a replacement"
-        )
+    def test_codex_keeps_its_own_rules_file(self) -> None:
+        """codex-plugin/AGENTS.md carries the rules (plugin/CLAUDE.md was dropped in 4.2.6)."""
+        assert (REPO / "codex-plugin" / "AGENTS.md").exists()
 
     def test_plugin_mcp_json_unmodified(self) -> None:
         """plugin/.mcp.json must still exist."""

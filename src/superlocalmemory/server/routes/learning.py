@@ -709,7 +709,9 @@ def get_patterns():
 @router.post("/api/learning/backup")
 def learning_backup(request: Request):
     """Backup learning.db to a timestamped file."""
-    _require_manage(request)
+    from superlocalmemory.server.rbac_enforce import require_global_manage
+
+    require_global_manage(request)
     try:
         if not LEARNING_DB.exists():
             return {"success": False, "error": "No learning.db found"}
@@ -717,7 +719,10 @@ def learning_backup(request: Request):
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_name = f"learning.db.backup_{timestamp}"
         backup_path = MEMORY_DIR / backup_name
-        shutil.copy2(str(LEARNING_DB), str(backup_path))
+        # A copy of what SLM learned is as private as learning.db itself.
+        from superlocalmemory.infra.private_files import copy_private
+
+        copy_private(LEARNING_DB, backup_path)
 
         return {
             "success": True, "filename": backup_name,
@@ -820,7 +825,9 @@ def learning_migrate_legacy(request: Request):
     with ``is_synthetic=1`` to preserve provenance; the trainer must be
     invoked with ``include_synthetic=True`` to use them.
     """
-    _require_manage(request)
+    from superlocalmemory.server.rbac_enforce import require_global_manage
+
+    require_global_manage(request)
     if not LEARNING_AVAILABLE:
         return {"success": False, "error": "Learning system not available"}
     try:

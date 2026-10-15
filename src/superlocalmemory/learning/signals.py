@@ -404,9 +404,15 @@ class LearningSignals:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, timeout=10)
-        apply_journal_mode(conn)
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.row_factory = sqlite3.Row
+        try:
+            apply_journal_mode(conn)
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.row_factory = sqlite3.Row
+        except BaseException:
+            # Setup failed: close it now, or the file stays open (Windows
+            # then cannot delete or replace it) for as long as the error lives.
+            conn.close()
+            raise
         return conn
 
     # ------------------------------------------------------------------
@@ -578,11 +584,25 @@ class LearningSignals:
             pass
 
     @staticmethod
-    def decay_confidence(db_path: str, profile_id: str, rate: float = 0.001) -> int:
-        """Decay confidence on unused facts. Floor: 0.1."""
+    def decay_confidence(db_path: str, profile_id: str, rate: float = 0.001,
+                         *, dry_run: bool = False) -> int:
+        """Decay confidence on unused facts. Floor: 0.1.
+
+        ``dry_run`` counts the facts that would decay and writes nothing.
+        """
         try:
             conn = sqlite3.connect(db_path, timeout=10)
             conn.execute("PRAGMA busy_timeout=5000")
+            if dry_run:
+                try:
+                    row = conn.execute(
+                        "SELECT COUNT(*) FROM atomic_facts "
+                        "WHERE profile_id = ? AND access_count = 0 "
+                        "AND created_at < datetime('now', '-7 days')",
+                        (profile_id,)).fetchone()
+                finally:
+                    conn.close()
+                return int(row[0] or 0) if row else 0
             cursor = conn.execute(
                 "UPDATE atomic_facts SET confidence = MAX(0.1, confidence - ?) "
                 "WHERE profile_id = ? AND access_count = 0 "

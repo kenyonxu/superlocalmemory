@@ -728,7 +728,6 @@ def test_bit_width_cap_at_maximum() -> None:
 
 def test_nan_centrality_in_batch() -> None:
     """NaN from centrality computation defaults to 0.0 (line 167-168)."""
-    import math as _math
     db = MagicMock()
     config = SAGQConfig()
 

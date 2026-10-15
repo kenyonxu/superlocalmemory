@@ -41,11 +41,13 @@ class TestExtractQueryEntities:
         assert "alice" in names
         assert "bob" in names
 
-    def test_title_cased_fallback(self) -> None:
-        # All lowercase — title() should produce proper nouns
-        result = extract_query_entities("what did alice do?")
-        names = [n.lower() for n in result]
-        assert "alice" in names
+    def test_lower_case_words_are_not_title_cased_into_names(self) -> None:
+        # 4.1.25: title-casing made every word a name ("zxqv plorth wimble"
+        # gave three). Lower-case words get an exact-only lookup instead.
+        from superlocalmemory.retrieval.entity_channel import query_plain_words
+
+        assert extract_query_entities("what did alice do?") == []
+        assert "alice" in query_plain_words("what did alice do?")
 
     def test_quoted_phrases(self) -> None:
         result = extract_query_entities('Tell me about "Project Alpha"')
@@ -239,14 +241,16 @@ class TestEntityGraphChannelSearch:
         db = MagicMock()
         _authorize_all_mock_candidates(db)
         resolver = MagicMock()
-        resolver.resolve.return_value = {"Alice": "e_alice"}
+        resolver.lookup.return_value = {"Alice": "e_alice"}
         db.get_facts_by_entity.return_value = [_mock_fact("f1")]
         db.get_edges_for_node.return_value = []
         db.execute.return_value = []
 
         ch = EntityGraphChannel(db, entity_resolver=resolver, max_hops=1)
         results = ch.search("What did Alice do?", "default")
-        resolver.resolve.assert_called_once()
+        resolver.lookup.assert_called_once()
+        # A search must never use the resolver's writing path.
+        resolver.resolve.assert_not_called()
         assert len(results) > 0
 
     def test_discover_entities_from_facts(self) -> None:
@@ -285,3 +289,67 @@ class TestEntityGraphChannelSearch:
         results = ch.search("What did Alice do?", "default")
         # Should have found facts via both Alice and discovered Bob
         assert len(results) > 0
+
+
+# ---------------------------------------------------------------------------
+# Supersession penalty (4.1.18)
+# ---------------------------------------------------------------------------
+
+class TestSupersessionPenalty:
+    """A ``supersedes`` edge must not cut a fact's activation.
+
+    The penalty multiplied the edge's SOURCE by 0.3 "because this fact was
+    replaced" — but every writer and reader agrees the source is the NEWER
+    fact (storage/models.py: "Newer fact replaces older"; the sheaf checker
+    writes source = the fact being stored). So the current memory was the one
+    suppressed. Measured on Varun's store: source was newer on 4,481 of 4,786
+    edges. And the edges are not supersessions at all: all of them come from
+    the sheaf consistency check, and 0 of 34 hand-judged were real. Flipping
+    the direction would only move the damage onto 1,603 older facts.
+    """
+
+    @staticmethod
+    def _channel(edges, created):
+        from unittest.mock import MagicMock as _MM
+
+        db = _MM()
+
+        def execute(sql, params=()):
+            if "FROM graph_edges" in sql:
+                wanted = [t for t in ("contradiction", "supersedes") if f"'{t}'" in sql]
+                return [dict(e) for e in edges if e["edge_type"] in wanted]
+            if "FROM atomic_facts" in sql:
+                return [{"fact_id": f, "created_at": t} for f, t in created.items()]
+            return []
+
+        db.execute.side_effect = execute
+        return EntityGraphChannel(db)
+
+    def test_the_newer_fact_is_not_suppressed_by_its_own_supersedes_edge(self) -> None:
+        ch = self._channel(
+            [{"source_id": "new", "target_id": "old", "edge_type": "supersedes"}],
+            {"new": "2026-09-26T00:00:00", "old": "2026-09-06T00:00:00"},
+        )
+        activation = {"new": 1.0, "old": 1.0}
+        ch._suppress_contradictions(activation, "default")
+        assert activation["new"] == 1.0
+
+    def test_a_supersedes_edge_alone_never_lowers_any_activation(self) -> None:
+        ch = self._channel(
+            [{"source_id": "a", "target_id": "b", "edge_type": "supersedes"},
+             {"source_id": "c", "target_id": "a", "edge_type": "supersedes"}],
+            {"a": "2026-09-10", "b": "2026-09-01", "c": "2026-09-20"},
+        )
+        activation = {"a": 1.0, "b": 1.0, "c": 1.0}
+        ch._suppress_contradictions(activation, "default")
+        assert activation == {"a": 1.0, "b": 1.0, "c": 1.0}
+
+    def test_contradiction_still_lowers_the_older_fact(self) -> None:
+        """Deliberately unchanged in 4.1.18; pinned so the fix cannot drift it."""
+        ch = self._channel(
+            [{"source_id": "a", "target_id": "b", "edge_type": "contradiction"}],
+            {"a": "2026-09-01", "b": "2026-09-20"},
+        )
+        activation = {"a": 1.0, "b": 1.0}
+        ch._suppress_contradictions(activation, "default")
+        assert activation == {"a": 0.5, "b": 1.0}

@@ -7,7 +7,7 @@
 LLD-05 §7. Exposes a single MCP tool that returns top-K redacted memories
 for a given query. Guardrails:
   - Rate limit 30 calls / minute (token bucket; A11).
-  - Every returned text passes through ``redact_secrets`` (A9).
+  - Every returned text passes through ``redact_for_hosted_judge`` (A9).
   - JSON response size bound ≤ 16 KB.
 """
 
@@ -23,7 +23,7 @@ from typing import Callable
 
 from mcp.types import ToolAnnotations
 
-from superlocalmemory.core.security_primitives import redact_secrets
+from superlocalmemory.retrieval.hosted_redaction import redact_for_hosted_judge
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ def _cap_memory(memory: dict, *, max_text_bytes: int = 2048) -> dict:
     text = memory.get("text", "")
     if not isinstance(text, str):
         text = str(text)
-    text = redact_secrets(text)
+    text = redact_for_hosted_judge(text)
     if len(text.encode("utf-8")) > max_text_bytes:
         text = text.encode("utf-8")[:max_text_bytes].decode("utf-8", "ignore")
     score = float(memory.get("score", 0.0) or 0.0)
@@ -101,7 +101,7 @@ def prestage_context(
     query: str,
     *,
     limit: int = 5,
-    profile_id: str = "default",
+    profile_id: str = "",
     session_id: str = "default",
     recall_fn: PrestageRecallFn,
     limiter: _RateLimiter | None = None,
@@ -216,11 +216,12 @@ def register_prestage_tool(server, recall_fn: PrestageRecallFn,
     async def prestage_context(  # noqa: F811 — MCP tool surface name
         query: str,
         limit: int = 5,
-        profile_id: str = "default",
+        profile_id: str = "",
         as_of: str | None = None,
     ) -> dict:
         """Proactively return top-K memories for a query.
 
+        ``profile_id`` names the profile to read; empty = the active profile.
         Optional ``as_of`` (ISO 8601 UTC) for point-in-time context retrieval.
         """
         session_id = session_id_fn() if session_id_fn else "default"

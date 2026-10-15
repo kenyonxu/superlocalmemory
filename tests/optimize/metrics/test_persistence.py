@@ -2,9 +2,7 @@
 # Licensed under AGPL-3.0-or-later
 """Tests for MetricsPersistence (optimize/metrics/persistence.py)."""
 
-import threading
 import time
-from pathlib import Path
 
 import pytest
 

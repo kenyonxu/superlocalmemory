@@ -31,6 +31,17 @@ from superlocalmemory.infra.backup_obligations import (
     erase_profile_from_snapshot,
 )
 from superlocalmemory.infra.data_root import DynamicStatePath, canonical_data_root
+from superlocalmemory.infra.private_files import (
+    create_private_file,
+    make_private_dir,
+    tighten_tree,
+)
+from superlocalmemory.storage.backup import (
+    RESTORE_LOCK_WAIT_SECONDS,
+    LiveStoreWriteError,
+    _backup_via_sqlite_api,
+    _write_into_live_db,
+)
 
 logger = logging.getLogger("superlocalmemory.backup")
 
@@ -65,12 +76,28 @@ MANAGED_DATABASES: tuple[str, ...] = (
     "code_graph.db",    # Code knowledge graph: symbols, references
     "pending.db",       # Pending operations queue
     "audit.db",         # Legacy audit (pre-v3.4)
+    "media.db",         # Images and documents: items, pages, media vectors, jobs
 )
 
 
 # ---------------------------------------------------------------------------
 # Coherent multi-store backup set
 # ---------------------------------------------------------------------------
+
+
+def _as_utc(value: object) -> Optional[datetime]:
+    """A saved instant as an aware UTC datetime, or ``None`` when it is not a date.
+
+    ``create_backup`` saves an aware UTC time; comparing it to the naive local
+    ``datetime.now()`` raised, and the handler took "cannot compare" to mean
+    "overdue", so every scheduler check took another full backup. An older,
+    naive value is read as local time, as the code that wrote it meant it.
+    """
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return None
+    return parsed.astimezone(timezone.utc)  # a naive value is taken as local time
 
 
 class BackupVerificationError(Exception):
@@ -121,6 +148,8 @@ class BackupCoordinator:
         managed_databases: Ordered tuple of DB filenames to include.
         base_dir: Directory where the live databases reside.
         backup_dir: Directory where backup sets are written.
+        lock_wait_seconds: How long a restore waits for another connection
+            to release a live store before failing.
     """
 
     def __init__(
@@ -128,10 +157,12 @@ class BackupCoordinator:
         managed_databases: tuple[str, ...],
         base_dir: Path,
         backup_dir: Path,
+        lock_wait_seconds: float = RESTORE_LOCK_WAIT_SECONDS,
     ) -> None:
         self._managed_databases = managed_databases
         self._base_dir = Path(base_dir)
         self._backup_dir = Path(backup_dir)
+        self._lock_wait_seconds = lock_wait_seconds
 
     # ------------------------------------------------------------------
     # Public API
@@ -166,7 +197,9 @@ class BackupCoordinator:
         set_id = uuid.uuid4().hex[:16]
         epoch = int(time.time())
         staging_dir = self._backup_dir / f".staging_{set_id}"
-        staging_dir.mkdir(parents=True, exist_ok=True)
+        # Every file in a backup set is a copy of memory: owner-only.
+        make_private_dir(self._backup_dir)
+        make_private_dir(staging_dir)
 
         existing_dbs = [
             db for db in self._managed_databases
@@ -191,6 +224,7 @@ class BackupCoordinator:
             if lance_src.is_dir():
                 lance_staging = staging_dir / "lance"
                 shutil.copytree(str(lance_src), str(lance_staging))
+                tighten_tree(lance_staging)
                 logger.info(
                     "Backup set %s: captured lance/ directory (%d items)",
                     set_id,
@@ -229,10 +263,17 @@ class BackupCoordinator:
 
         # Phase 6: atomic publish
         staging_dir.rename(final_dir)
+        create_private_file(final_dir / "manifest.json")
         (final_dir / "manifest.json").write_text(
-            json.dumps(asdict(manifest), indent=2)
+            json.dumps(asdict(manifest), indent=2),
+            encoding="utf-8",
         )
 
+        # The picture and PDF originals are files, not rows: they sit in the same mirror
+        # (backup_dir/media-originals) that BackupManager keeps, one copy shared by both.
+        from superlocalmemory.infra import backup_media
+
+        backup_media.sync_originals_quietly(self._base_dir, self._backup_dir)
         return manifest
 
     def restore_from_manifest(self, manifest: BackupSetManifest) -> None:
@@ -246,17 +287,23 @@ class BackupCoordinator:
             BackupRestoreError on any failure.
 
         Phase B — Pre-restore snapshot:
-            Copy the current live version of every store being restored into a
-            ``<store>.pre_restore`` sibling file, and the current ``lance/``
-            directory (if present) to ``lance.pre_restore/``. These snapshots
-            allow a full rollback if the write phase is interrupted.
+            Snapshot every live store being restored into a
+            ``<store>.pre_restore`` sibling through the SQLite backup API, so
+            the snapshot includes committed transactions still in the store's
+            ``-wal`` (a file copy of the main database omits them). The current
+            ``lance/`` directory (if present) is copied to ``lance.pre_restore/``.
+            These snapshots allow a full rollback if the write phase fails.
 
-        Phase C — Staged write:
-            Copy each backup file to a ``<store>.restore_staging`` temporary,
-            then rename it into place. If any step raises, all pre-restore
-            snapshots are copied back to their live locations before the error
-            is re-raised, returning the live set to its original coherent state.
-            On full success, all snapshot files are removed.
+        Phase C — Write through SQLite:
+            Write each backup into its live store through the SQLite backup
+            API, as one transaction per store, so the store's ``-wal`` stays
+            paired with it (see ``_write_into_live_store``). A failed write is
+            rolled back by SQLite itself. If any step raises, every store that
+            was already written is restored from its pre-restore snapshot the
+            same way, returning the live set to its original coherent state.
+            On full success, all snapshot files are removed. If the rollback
+            itself fails, the snapshots are kept and named in the error, as
+            they are then the only copy of the pre-restore state.
 
         The ``lance/`` directory companion is handled with the same snapshot and
         rollback discipline: if the backup set contains a ``lance/`` subdirectory
@@ -315,7 +362,7 @@ class BackupCoordinator:
                 target = self._base_dir / entry.store_name
                 snapshot = target.parent / f"{entry.store_name}.pre_restore"
                 if target.exists():
-                    shutil.copy2(str(target), str(snapshot))
+                    _backup_via_sqlite_api(target, snapshot)
                 pre_restore_map[target] = snapshot
 
             live_lance = self._base_dir / "lance"
@@ -333,13 +380,15 @@ class BackupCoordinator:
                 f"Pre-restore snapshot failed, no live files were modified: {exc}"
             ) from exc
 
-        # Phase C: Write restored files into the live directory.
+        # Phase C: Write restored content into the live stores.
+        # Only stores in `written` changed; a store whose write raised was left
+        # untouched by SQLite and needs no rollback.
+        written: list[Path] = []
         try:
             for entry in manifest.stores:
                 target = self._base_dir / entry.store_name
-                staging = target.parent / f"{entry.store_name}.restore_staging"
-                shutil.copy2(entry.file_path, str(staging))
-                staging.rename(target)
+                self._write_into_live_store(Path(entry.file_path), target)
+                written.append(target)
 
             if lance_backup is not None:
                 live_lance = self._base_dir / "lance"
@@ -361,10 +410,11 @@ class BackupCoordinator:
                 exc,
             )
             rollback_errors: list[str] = []
-            for target, snapshot in pre_restore_map.items():
+            for target in written:
+                snapshot = pre_restore_map[target]
                 if snapshot.exists():
                     try:
-                        shutil.copy2(str(snapshot), str(target))
+                        self._write_into_live_store(snapshot, target)
                     except Exception as rb_exc:
                         rollback_errors.append(f"{target.name}: {rb_exc}")
             # Roll back the lance/ directory if a snapshot was taken.
@@ -377,13 +427,18 @@ class BackupCoordinator:
                 except Exception as rb_exc:
                     rollback_errors.append(f"lance/: {rb_exc}")
 
-            self._cleanup_pre_restore_snapshots(pre_restore_map, pre_restore_lance)
-
             if rollback_errors:
+                # Keep the snapshots: they are now the only copy of what was
+                # live before this restore began.
+                kept = [str(p) for p in pre_restore_map.values() if p.exists()]
+                if pre_restore_lance is not None and pre_restore_lance.exists():
+                    kept.append(str(pre_restore_lance))
                 raise BackupRestoreError(
                     f"Restore failed and rollback encountered errors: "
-                    f"{'; '.join(rollback_errors)}. Original error: {exc}"
+                    f"{'; '.join(rollback_errors)}. Pre-restore snapshots kept "
+                    f"at: {', '.join(kept) or 'none'}. Original error: {exc}"
                 ) from exc
+            self._cleanup_pre_restore_snapshots(pre_restore_map, pre_restore_lance)
             raise BackupRestoreError(
                 f"Restore write phase failed; live files rolled back to "
                 f"pre-restore state: {exc}"
@@ -391,6 +446,12 @@ class BackupCoordinator:
 
         # Phase C succeeded — remove pre-restore snapshots.
         self._cleanup_pre_restore_snapshots(pre_restore_map, pre_restore_lance)
+
+        # The library database is back: put back the originals its rows point at.
+        if any(entry.store_name == "media.db" for entry in manifest.stores):
+            from superlocalmemory.infra import backup_media
+
+            backup_media.restore_originals_quietly(self._base_dir, self._backup_dir)
 
         # Phase D — GDPR obligation replay (invariant: no restore may resurrect
         # erased personal data).  Must run AFTER live files are in place and
@@ -450,7 +511,11 @@ class BackupCoordinator:
                     pass
 
     def _sqlite_backup(self, src: Path, dest: Path) -> None:
-        """Copy a SQLite database using the Online Backup API (hot copy)."""
+        """Copy a SQLite database using the Online Backup API (hot copy).
+
+        The copy is created owner-only before SQLite writes into it.
+        """
+        create_private_file(dest)
         src_conn = sqlite3.connect(str(src))
         dst_conn = sqlite3.connect(str(dest))
         try:
@@ -458,6 +523,24 @@ class BackupCoordinator:
         finally:
             dst_conn.close()
             src_conn.close()
+
+    def _write_into_live_store(self, source: Path, target: Path) -> None:
+        """Make ``target`` hold exactly ``source``'s content, written by SQLite.
+
+        Keeps a live store's ``-wal`` paired with the file it describes; see
+        ``storage.backup._write_into_live_db`` for why a rename cannot.
+
+        Raises:
+            BackupRestoreError: if ``source``'s ``-wal`` is not empty, if
+                another connection holds ``target``'s write lock for longer
+                than ``lock_wait_seconds``, or if ``target`` is a WAL database
+                whose page size differs from ``source``'s.
+        """
+        try:
+            _write_into_live_db(
+                source, target, lock_wait_seconds=self._lock_wait_seconds)
+        except LiveStoreWriteError as exc:
+            raise BackupRestoreError(str(exc)) from exc
 
     @staticmethod
     def _cleanup_pre_restore_snapshots(
@@ -520,12 +603,12 @@ class BackupManager:
     # ------------------------------------------------------------------
 
     def _ensure_backup_dir(self) -> None:
-        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        make_private_dir(self.backup_dir)
 
     def _load_config(self) -> Dict:
         if self._config_file.exists():
             try:
-                raw = json.loads(self._config_file.read_text())
+                raw = json.loads(self._config_file.read_text(encoding="utf-8"))
                 defaults = self._default_config()
                 for k in defaults:
                     raw.setdefault(k, defaults[k])
@@ -547,7 +630,7 @@ class BackupManager:
     def _save_config(self) -> None:
         try:
             self._config_file.parent.mkdir(parents=True, exist_ok=True)
-            self._config_file.write_text(json.dumps(self.config, indent=2))
+            self._config_file.write_text(json.dumps(self.config, indent=2), encoding="utf-8")
         except IOError as exc:
             logger.error("Failed to save backup config: %s", exc)
 
@@ -578,12 +661,12 @@ class BackupManager:
         last = self.config.get("last_backup")
         if not last:
             return True
-        try:
-            last_dt = datetime.fromisoformat(last)
-            interval = timedelta(hours=self.config.get("interval_hours", DEFAULT_INTERVAL_HOURS))
-            return datetime.now() >= last_dt + interval
-        except (ValueError, TypeError):
+        last_dt = _as_utc(last)
+        if last_dt is None:
+            logger.warning("backup_config.last_backup %r is not a date; a backup is due", last)
             return True
+        interval = timedelta(hours=self.config.get("interval_hours", DEFAULT_INTERVAL_HOURS))
+        return datetime.now(timezone.utc) >= last_dt + interval
 
     def check_and_backup(self) -> Optional[str]:
         """Create a backup only when one is due. Returns filename or ``None``."""
@@ -613,6 +696,7 @@ class BackupManager:
         backup_path = self.backup_dir / backup_name
 
         try:
+            create_private_file(backup_path)
             source = sqlite3.connect(str(self.db_path))
             dest = sqlite3.connect(str(backup_path))
             try:
@@ -629,6 +713,7 @@ class BackupManager:
 
             # v3.4.10: Backup ALL .db files in the SLM directory
             self._backup_all_dbs(timestamp, suffix)
+            self._backup_media_originals()
 
             self._enforce_retention()
             return backup_name
@@ -659,6 +744,7 @@ class BackupManager:
                 prefix = db_file.stem
                 name = f"{prefix}-{timestamp}{suffix}.db"
                 path = self.backup_dir / name
+                create_private_file(path)
                 src = sqlite3.connect(str(db_file))
                 dst = sqlite3.connect(str(path))
                 try:
@@ -678,6 +764,17 @@ class BackupManager:
                 )
         if backed_up:
             logger.info("Backed up %d companion databases", backed_up)
+
+    def _backup_media_originals(self) -> None:
+        """Keep the picture and PDF originals beside the media.db copy (see ``backup_media``)."""
+        from superlocalmemory.infra import backup_media
+
+        backup_media.sync_originals_quietly(self.db_path.parent, self.backup_dir)
+
+    def _restore_media_originals(self) -> None:
+        from superlocalmemory.infra import backup_media
+
+        backup_media.restore_originals_quietly(self.db_path.parent, self.backup_dir)
 
     def _enforce_retention(self) -> None:
         """Remove old backups exceeding the configured max."""
@@ -782,6 +879,8 @@ class BackupManager:
                     src.close()
 
             logger.info("Restored: %s -> %s", filename, target.name)
+            if target_name == "media.db":
+                self._restore_media_originals()
 
             # GDPR obligation replay — prevent a restore from resurrecting
             # previously erased personal data.  Failure is fatal: return False
@@ -839,13 +938,13 @@ class BackupManager:
         next_backup = None
 
         if self.config.get("enabled") and self.config.get("last_backup"):
-            try:
-                last_dt = datetime.fromisoformat(self.config["last_backup"])
-                interval = timedelta(hours=self.config.get("interval_hours", DEFAULT_INTERVAL_HOURS))
-                nxt = last_dt + interval
-                next_backup = nxt.isoformat() if nxt > datetime.now() else "overdue"
-            except (ValueError, TypeError):
+            last_dt = _as_utc(self.config["last_backup"])
+            if last_dt is None:
                 next_backup = "unknown"
+            else:
+                hours = self.config.get("interval_hours", DEFAULT_INTERVAL_HOURS)
+                nxt = last_dt + timedelta(hours=hours)
+                next_backup = nxt.isoformat() if nxt > datetime.now(timezone.utc) else "overdue"
 
         hours = self.config.get("interval_hours", DEFAULT_INTERVAL_HOURS)
         if hours >= 168:
@@ -897,6 +996,22 @@ def _replay_obligations_after_restore(
         BackupRestoreError: if any obligation cannot be replayed.  The caller
             must treat the restore as failed and surface this to the operator.
     """
+    # Targeted erasures (one memory, one person's mentions) are journalled outside
+    # every backup; whatever snapshot is being restored, they are erased again.
+    try:
+        from superlocalmemory.infra.erased_subjects import replay_all
+
+        replayed = replay_all(data_root, restored_db_paths)
+    except Exception as exc:  # noqa: BLE001
+        raise BackupRestoreError(
+            f"Replaying targeted erasures into the restored store failed: {exc}.  "
+            "The restored database may contain memories that were erased on request.  "
+            "Manual remediation required."
+        ) from exc
+    if replayed["facts"] or replayed["entities"]:
+        logger.info("Restore replay: re-erased %d row(s) of targeted erasures",
+                    sum(replayed.values()))
+
     store = BackupObligationStore(data_root)
     obligations = store.list_pending_for_snapshot(snapshot_key)
 
@@ -965,10 +1080,11 @@ def _replay_obligations_after_restore(
                     "data.  Manual remediation required."
                 ) from exc
 
-    # Discharge obligations for this specific snapshot so they do not block
-    # the completeness flag for future erasures of the same profile.
-    discharged = store.discharge_for_snapshot(snapshot_key, "replayed_on_restore")
+    # The obligation is NOT discharged: the live store is clean again, but the
+    # snapshot still holds the profile, and the next restore of it must replay
+    # this erasure too. It ends when the snapshot is removed or re-read clean.
+    noted = store.mark_replayed(snapshot_key)
     logger.info(
-        "Obligation replay: discharged %d obligations for snapshot %s",
-        discharged, snapshot_key,
+        "Obligation replay: re-erased the live store for %d obligation(s) of snapshot %s",
+        noted, snapshot_key,
     )

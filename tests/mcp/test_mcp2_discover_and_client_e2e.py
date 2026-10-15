@@ -12,7 +12,6 @@ These are the load-bearing proofs that SLM speaks MCP 2026-07-28 on mcp==2.0.0.
 
 from __future__ import annotations
 
-import json
 import os
 
 import pytest

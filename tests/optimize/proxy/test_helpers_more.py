@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 
 import httpx
 import pytest
@@ -19,7 +18,6 @@ from superlocalmemory.optimize.proxy._helpers import (
     _stream_forward,
 )
 from superlocalmemory.optimize.proxy.lifecycle import (
-    CachedResponse,
     HookChain,
     ProviderResponse,
     ProxyRequest,

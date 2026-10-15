@@ -18,7 +18,7 @@
 - **基线红:** main 现有 16 个既有红(12 README 契约 + test_is_stale + hermes inventory + enrich×2)——gate 验收=**不新增红**;上游修复消掉的部分记录数字,不追功。
 - **冲突总策略(spec §8):** `maintenance.py` 等被上游重写的文件**以上游为基底**,fork 侧只存活审计表(§5)中"未碰"项的补丁;禁止手搓混合体。
 - **迁移铁律:** 上游 M052(memory_kinds)-M063 原样进;fork 旧 M052 改名 M064,production migration_log 的历史记录不动;`_schema_version=64`。
-- **卫生:** 落盘文件无真实身份路径(`/home/kai-remote`)——`tests/test_repo_hygiene.py` 咬过本仓库两次。
+- **卫生:** 落盘文件无真实身份路径(`/home/yourusername` 等真实身份)——`tests/test_repo_hygiene.py` 咬过本仓库两次。
 - **AGENTS.md:** 本环境无 gitnexus MCP;每次提交前人工核对 `git diff --stat` 范围(等效 detect_changes),写入报告。
 - **生产隔离:** 生产 daemon 跑 editable(main),main 合并推送后、daemon 重启前生产行为不变;部署是 Task 8(🔒 主人逐步确认,有序重启铁律:gateway 先停→daemon 重启→gateway 后起)。
 - **已知 flake:** 全量 gate `-n 8` 有既有 load flake;孤立串行复验通过=不阻塞,其他新红必须停下报告。

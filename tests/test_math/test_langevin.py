@@ -22,9 +22,6 @@ import pytest
 from superlocalmemory.math.langevin import (
     LangevinDynamics,
     _MAX_NORM,
-    _RADIUS_ACTIVE,
-    _RADIUS_COLD,
-    _RADIUS_WARM,
     _project_to_ball,
     _resize_position,
 )

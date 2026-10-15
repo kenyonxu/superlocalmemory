@@ -141,8 +141,14 @@ def open_memory_db() -> sqlite3.Connection:
         timeout=2.0,
         isolation_level=None,  # autocommit — each statement is its own txn
     )
-    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        conn.row_factory = sqlite3.Row
+    except BaseException:
+        # Setup failed: close it now, or the file stays open (Windows
+        # then cannot delete or replace it) for as long as the error lives.
+        conn.close()
+        raise
     return conn
 
 
@@ -175,7 +181,7 @@ def load_session_state(session_id: str) -> dict:
     if p is None or not p.exists():
         return {}
     try:
-        raw = p.read_text()
+        raw = p.read_text(encoding="utf-8")
         obj = json.loads(raw)
         if isinstance(obj, dict):
             return obj
@@ -219,7 +225,7 @@ def save_session_state(session_id: str, state: dict) -> None:
             finally:
                 os.close(fd)
         else:  # pragma: no cover — Windows path
-            tmp.write_text(data)
+            tmp.write_text(data, encoding="utf-8")
         os.replace(tmp, p)
     except Exception:
         # Best-effort cleanup of orphaned tmp — M-PERF-05.

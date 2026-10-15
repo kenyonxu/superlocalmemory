@@ -35,11 +35,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from superlocalmemory.core.config import SLMConfig, RetrievalConfig
 from superlocalmemory.core.engine import MemoryEngine
 from superlocalmemory.storage.models import (
-    AtomicFact,
-    FactType,
     Mode,
     RecallResponse,
-    RetrievalResult,
 )
 
 pytestmark = pytest.mark.slow

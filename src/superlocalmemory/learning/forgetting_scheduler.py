@@ -23,7 +23,6 @@ License: AGPL-3.0-or-later
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from datetime import UTC, datetime
@@ -36,6 +35,28 @@ if TYPE_CHECKING:
     from superlocalmemory.storage.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
+
+
+#: Access rows written by SLM's own maintenance, not by anyone using a memory.
+#: Consolidation logs one per source it archives; counting it as a use raised
+#: the source's strength and the next decay pass reactivated every source the
+#: consolidation had just archived.
+_INTERNAL_ACCESS_SQL = "('consolidation')"
+
+#: A source a consolidation archived stays out of the decay pass — its
+#: archive is a decision, not a score — until a GENUINE access after the
+#: consolidation (a recall or search that reached it) brings it back.
+_CONSOLIDATED_SOURCE_SQL = (
+    " AND NOT EXISTS ("
+    "  SELECT 1 FROM ccq_consolidated_blocks ccb, "
+    "       json_each(ccb.source_fact_ids) je"
+    "  WHERE ccb.profile_id = ? AND je.value = f.fact_id"
+    "    AND NOT EXISTS ("
+    "      SELECT 1 FROM fact_access_log a"
+    "      WHERE a.fact_id = f.fact_id AND a.profile_id = ?"
+    f"       AND a.access_type NOT IN {_INTERNAL_ACCESS_SQL}"
+    "        AND a.accessed_at > ccb.created_at))"
+)
 
 
 class ForgettingScheduler:
@@ -59,99 +80,33 @@ class ForgettingScheduler:
         # Track last run time per profile for interval enforcement
         self._last_run_times: dict[str, float] = {}
 
-    def run_decay_cycle(
-        self, profile_id: str, *, force: bool = False, dry_run: bool = False,
-    ) -> dict:
-        """Run a full decay cycle for all facts in a profile.
+    def run_decay_cycle(self, profile_id: str, *, force=False, dry_run=False) -> dict:
+        """Plan decay from canonical inputs; persist only outside dry-run."""
+        from superlocalmemory.learning.lifecycle_policy import apply_configured_policy
 
-        Fetches facts, computes retention, upserts results, and
-        soft-deletes forgotten facts.
-
-        Args:
-            profile_id: Profile to process.
-            force: If True, bypass interval check.
-            dry_run: Compute transitions without persisting retention or lifecycle.
-
-        Returns:
-            Stats dict: {total, active, warm, cold, archive, forgotten,
-                         transitions, skipped}.
-        """
-        # Interval check (Test 21)
         now = time.monotonic()
         last_run = self._last_run_times.get(profile_id)
-        if not force and last_run is not None:
-            elapsed_minutes = (now - last_run) / 60.0
-            if elapsed_minutes < self._config.scheduler_interval_minutes:
-                return {"skipped": True, "reason": "within_interval"}
-
-        # Step 1: Fetch all facts with metadata
-        facts_data = self._fetch_facts_with_metadata(profile_id)
-
-        if not facts_data:
-            if not dry_run:
-                self._last_run_times[profile_id] = now
-            return {
-                "total": 0, "active": 0, "warm": 0, "cold": 0,
-                "archive": 0, "forgotten": 0, "transitions": 0,
-            }
-
-        # Step 2: Get existing retention data for transition tracking
-        existing_zones = self._get_existing_zones(profile_id, facts_data)
-
-        # Step 3: Compute retention scores via EbbinghausCurve
-        retention_results = self._ebbinghaus.batch_compute_retention(facts_data)
-
-        # Step 4: Batch UPSERT into fact_retention
+        if (
+            not force
+            and last_run is not None
+            and (now - last_run) / 60.0 < self._config.scheduler_interval_minutes
+        ):
+            return {"skipped": True, "reason": "within_interval"}
+        facts = self._fetch_facts_with_metadata(profile_id)
+        previous = self._get_existing_zones(profile_id, facts)
+        results = apply_configured_policy(
+            self._db, self._ebbinghaus.batch_compute_retention(facts), profile_id
+        )
+        stats, forgotten = _retention_stats(results, previous)
         if not dry_run:
-            self._db.batch_upsert_retention(retention_results, profile_id)
-
-        # Step 5: Count zones and transitions
-        zone_counts = {"active": 0, "warm": 0, "cold": 0, "archive": 0, "forgotten": 0}
-        transitions = 0
-        forgotten_fact_ids: list[str] = []
-
-        for result in retention_results:
-            zone = result["zone"]
-            zone_counts[zone] = zone_counts.get(zone, 0) + 1
-
-            # Track transitions
-            old_zone = existing_zones.get(result["fact_id"])
-            if old_zone is not None and old_zone != zone:
-                transitions += 1
-
-            # Collect forgotten facts for soft-delete
-            if zone == "forgotten":
-                forgotten_fact_ids.append(result["fact_id"])
-
-        # Step 6: Soft-delete forgotten facts (HR-04)
-        if not dry_run:
-            for fact_id in forgotten_fact_ids:
+            self._db.batch_upsert_retention(results, profile_id)
+            for fact_id in forgotten:
                 self._soft_delete_with_audit(fact_id, profile_id)
-
-        # Update last run time
-        if not dry_run:
             self._last_run_times[profile_id] = now
-
-        return {
-            "total": len(retention_results),
-            "active": zone_counts["active"],
-            "warm": zone_counts["warm"],
-            "cold": zone_counts["cold"],
-            "archive": zone_counts["archive"],
-            "forgotten": zone_counts["forgotten"],
-            "transitions": transitions,
-        }
+        return stats
 
     def on_access_event(self, fact_id: str, profile_id: str) -> None:
-        """Handle real-time access event with spaced repetition update.
-
-        Called from access_log.store_access() hook.
-        HR-09: Idempotent — reads current state, computes from scratch.
-
-        Args:
-            fact_id: Accessed fact ID.
-            profile_id: Profile ID.
-        """
+        """Refresh strength and the access clock without losing repetition on decay."""
         # Fetch current retention data
         current = self._db.get_retention(fact_id, profile_id)
         if current is None:
@@ -162,21 +117,12 @@ class ForgettingScheduler:
         current_strength = float(current["memory_strength"])
         last_accessed = current.get("last_accessed_at", "")
 
-        # Compute hours since last access
-        hours_since = 0.0
-        if last_accessed:
-            try:
-                last_dt = datetime.fromisoformat(last_accessed)
-                if last_dt.tzinfo is None:
-                    last_dt = last_dt.replace(tzinfo=UTC)
-                now_dt = datetime.now(UTC)
-                hours_since = max(0.0, (now_dt - last_dt).total_seconds() / 3600.0)
-            except (ValueError, TypeError):
-                hours_since = 0.0
+        hours_since = _hours_since(last_accessed)
 
         # Spaced repetition update (HR-07: only increases strength)
         new_strength = self._ebbinghaus.spaced_repetition_update(
-            current_strength, hours_since,
+            current_strength,
+            hours_since,
         )
 
         # Recompute retention with new strength
@@ -195,98 +141,36 @@ class ForgettingScheduler:
             last_accessed_at=now_iso,
             lifecycle_zone=new_zone,
         )
+        # Legacy UPSERT does not update its timestamp on conflict.
+        self._db.execute(
+            "UPDATE fact_retention SET last_accessed_at=? WHERE fact_id=? AND profile_id=?",
+            (now_iso, fact_id, profile_id),
+        )
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
     def _fetch_facts_with_metadata(self, profile_id: str) -> list[dict]:
-        """Fetch all non-core-memory facts with access, importance, and emotion data.
+        """Read profile-scoped use, protection and trust before any lifecycle write."""
+        from superlocalmemory.learning.forgetting_metadata import (
+            attach_canonical_trust,
+            metadata_query,
+        )
 
-        Uses the query from LLD Section 2.4 with A-HIGH-02/03 fixes:
-        - confirmation_count mapped from atomic_facts.evidence_count
-        - emotional_salience from atomic_facts.emotional_valence
-        """
-        # V3.3.26: Trust-weighted forgetting — look up trust score for
-        # the agent that created each fact. Falls back to 1.0 if trust_scores
-        # table or created_by column is unavailable.
-        trust_available = self._has_trust_tables()
-        if trust_available:
-            sql = (
-                "SELECT f.fact_id, "
-                "  COALESCE(al.access_count, 0) as access_count, "
-                "  COALESCE(fi.pagerank_score, 0.0) as importance, "
-                "  COALESCE(f.evidence_count, 0) as confirmation_count, "
-                "  f.created_at, "
-                "  COALESCE(r.last_accessed_at, f.created_at) as last_accessed_at, "
-                "  COALESCE(f.emotional_valence, 0.0) as emotional_salience, "
-                "  COALESCE(ts.trust_score, 1.0) as trust_score "
-                "FROM atomic_facts f "
-                "LEFT JOIN ("
-                "  SELECT fact_id, COUNT(*) as access_count "
-                "  FROM fact_access_log WHERE profile_id = ? GROUP BY fact_id"
-                ") al ON f.fact_id = al.fact_id "
-                "LEFT JOIN fact_importance fi "
-                "  ON f.fact_id = fi.fact_id AND fi.profile_id = ? "
-                "LEFT JOIN fact_retention r "
-                "  ON f.fact_id = r.fact_id AND r.profile_id = ? "
-                "LEFT JOIN trust_scores ts "
-                "  ON ts.target_id = f.created_by "
-                "  AND ts.target_type = 'agent' "
-                "  AND ts.profile_id = ? "
-                "WHERE f.profile_id = ? "
-                "AND f.fact_id NOT IN ("
-                "  SELECT json_each.value "
-                "  FROM core_memory_blocks, json_each(core_memory_blocks.source_fact_ids) "
-                "  WHERE core_memory_blocks.profile_id = ?"
-                ")"
-            )
-            params = (profile_id,) * 6
-        else:
-            sql = (
-                "SELECT f.fact_id, "
-                "  COALESCE(al.access_count, 0) as access_count, "
-                "  COALESCE(fi.pagerank_score, 0.0) as importance, "
-                "  COALESCE(f.evidence_count, 0) as confirmation_count, "
-                "  f.created_at, "
-                "  COALESCE(r.last_accessed_at, f.created_at) as last_accessed_at, "
-                "  COALESCE(f.emotional_valence, 0.0) as emotional_salience "
-                "FROM atomic_facts f "
-                "LEFT JOIN ("
-                "  SELECT fact_id, COUNT(*) as access_count "
-                "  FROM fact_access_log WHERE profile_id = ? GROUP BY fact_id"
-                ") al ON f.fact_id = al.fact_id "
-                "LEFT JOIN fact_importance fi "
-                "  ON f.fact_id = fi.fact_id AND fi.profile_id = ? "
-                "LEFT JOIN fact_retention r "
-                "  ON f.fact_id = r.fact_id AND r.profile_id = ? "
-                "WHERE f.profile_id = ? "
-                "AND f.fact_id NOT IN ("
-                "  SELECT json_each.value "
-                "  FROM core_memory_blocks, json_each(core_memory_blocks.source_fact_ids) "
-                "  WHERE core_memory_blocks.profile_id = ?"
-                ")"
-            )
-            params = (profile_id,) * 5
-
-        rows = self._db.execute(sql, params)
-
-        facts: list[dict] = []
-        for row in rows:
-            d = dict(row)
-            facts.append({
-                "fact_id": d["fact_id"],
-                "access_count": int(d["access_count"]),
-                "importance": float(d["importance"]),
-                "confirmation_count": int(d["confirmation_count"]),
-                "emotional_salience": float(d["emotional_salience"]),
-                "last_accessed_at": str(d["last_accessed_at"]),
-                "trust_score": float(d.get("trust_score", 1.0)),
-            })
-        return facts
+        consolidated = (
+            _CONSOLIDATED_SOURCE_SQL if self._has_table("ccq_consolidated_blocks") else ""
+        )
+        sql = metadata_query(self._db, _INTERNAL_ACCESS_SQL, consolidated)
+        rows = [
+            dict(row) for row in self._db.execute(sql, (profile_id,) * (7 if consolidated else 5))
+        ]
+        return attach_canonical_trust(self._db, rows, profile_id)
 
     def _get_existing_zones(
-        self, profile_id: str, facts_data: list[dict],
+        self,
+        profile_id: str,
+        facts_data: list[dict],
     ) -> dict[str, str]:
         """Get existing lifecycle zones for transition tracking."""
         fact_ids = [f["fact_id"] for f in facts_data]
@@ -295,16 +179,14 @@ class ForgettingScheduler:
         retention_rows = self._db.batch_get_retention(fact_ids, profile_id)
         return {r["fact_id"]: r["lifecycle_zone"] for r in retention_rows}
 
-    def _has_trust_tables(self) -> bool:
-        """Check if trust_scores table and created_by column exist."""
+    def _has_table(self, name: str) -> bool:
+        """Whether ``name`` exists (an old store may predate it)."""
         try:
-            self._db.execute(
-                "SELECT 1 FROM trust_scores LIMIT 0", (),
+            return bool(
+                self._db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+                )
             )
-            self._db.execute(
-                "SELECT created_by FROM atomic_facts LIMIT 0", (),
-            )
-            return True
         except Exception:
             return False
 
@@ -325,12 +207,15 @@ class ForgettingScheduler:
             return
         logger.info(
             "Soft-deleting forgotten fact: fact_id=%s, profile_id=%s",
-            fact_id, profile_id,
+            fact_id,
+            profile_id,
         )
         self._db.soft_delete_fact(fact_id, profile_id)
 
     def _has_recent_positive_reward(
-        self, fact_id: str, profile_id: str,
+        self,
+        fact_id: str,
+        profile_id: str,
     ) -> bool:
         """True if fact has an outcome_reward > 0.3 in the last 60 days.
 
@@ -348,15 +233,21 @@ class ForgettingScheduler:
             # fall through to the legacy execute-path if the DB wrapper
             # does not expose a ``.conn`` handle.
             raw_conn = getattr(self._db, "conn", None) or getattr(
-                self._db, "_conn", None,
+                self._db,
+                "_conn",
+                None,
             )
             if raw_conn is not None:
                 from superlocalmemory.learning.fact_outcome_joins import (
                     has_recent_positive_reward,
                 )
+
                 return has_recent_positive_reward(
-                    raw_conn, profile_id, fact_id,
-                    min_reward=0.3, window_days=60,
+                    raw_conn,
+                    profile_id,
+                    fact_id,
+                    min_reward=0.3,
+                    window_days=60,
                 )
             # Fallback: use the DB wrapper with JSON1 SQL inline.
             rows = self._db.execute(
@@ -373,3 +264,27 @@ class ForgettingScheduler:
             return bool(rows)
         except Exception:
             return False
+
+
+def _retention_stats(results, previous):
+    counts = {zone: 0 for zone in ("active", "warm", "cold", "archive", "forgotten")}
+    transitions, forgotten = 0, []
+    for result in results:
+        counts[result["zone"]] += 1
+        old = previous.get(result["fact_id"])
+        transitions += int(old is not None and old != result["zone"])
+        if result["zone"] == "forgotten":
+            forgotten.append(result["fact_id"])
+    return {"total": len(results), **counts, "transitions": transitions}, forgotten
+
+
+def _hours_since(value):
+    if not value:
+        return 0.0
+    try:
+        last = datetime.fromisoformat(value)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=UTC)
+        return max(0.0, (datetime.now(UTC) - last).total_seconds() / 3600.0)
+    except (ValueError, TypeError):
+        return 0.0

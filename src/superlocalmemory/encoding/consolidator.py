@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Protocol
+from typing import Any, Protocol
 
 from superlocalmemory.core.config import EncodingConfig
 from superlocalmemory.storage.database import DatabaseManager
@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Protocols (avoid tight coupling to concrete classes)
 # ---------------------------------------------------------------------------
+
 
 class Embedder(Protocol):
     """Anything that produces an embedding vector from text."""
@@ -59,12 +60,31 @@ class LLM(Protocol):
 # Negation patterns for Mode A keyword contradiction detection
 # ---------------------------------------------------------------------------
 
-_NEGATION_MARKERS: frozenset[str] = frozenset({
-    "not", "no longer", "never", "stopped", "quit", "left",
-    "changed", "moved", "divorced", "fired", "resigned",
-    "broke up", "ended", "cancelled", "dropped", "switched",
-    "former", "ex-", "previously", "used to", "no more",
-})
+_NEGATION_MARKERS: frozenset[str] = frozenset(
+    {
+        "not",
+        "no longer",
+        "never",
+        "stopped",
+        "quit",
+        "left",
+        "changed",
+        "moved",
+        "divorced",
+        "fired",
+        "resigned",
+        "broke up",
+        "ended",
+        "cancelled",
+        "dropped",
+        "switched",
+        "former",
+        "ex-",
+        "previously",
+        "used to",
+        "no more",
+    }
+)
 
 # Score thresholds (match EncodingConfig defaults)
 _NOOP_THRESHOLD = 0.95
@@ -74,6 +94,7 @@ _MATCH_THRESHOLD = 0.85
 # ---------------------------------------------------------------------------
 # MemoryConsolidator
 # ---------------------------------------------------------------------------
+
 
 class MemoryConsolidator:
     """Decides ADD/UPDATE/SUPERSEDE/NOOP for each incoming fact.
@@ -98,6 +119,72 @@ class MemoryConsolidator:
         self._embedder = embedder
         self._llm = llm
         self._cfg = config or EncodingConfig()
+        #: Exact nearest-neighbour source (sqlite-vec or the in-memory index),
+        #: shared with recall. None: fall back to reading every fact.
+        self._vectors: Any = None
+
+    def use_vector_source(self, vectors: Any) -> None:
+        """Search neighbours through recall's vector source instead of reading
+        and decoding every fact of the profile, once per new fact (measured on
+        a 21,847-fact store: about 7.7 s per fact, twice per fact)."""
+        self._vectors = vectors
+
+    def _similar(
+        self,
+        new_fact: AtomicFact,
+        profile_id: str,
+        k: int,
+        exclude: set[str],
+        pending: tuple[str, ...] = (),
+    ) -> list[tuple[AtomicFact, float]]:
+        """The ``k`` most similar visible facts with cosine > 0.5, best first.
+
+        Through the vector source: an exact top-k, then each hit loaded through
+        the profile's visibility rules (``get_facts_by_ids``), so a withheld or
+        deleted fact is never a candidate. The same set the full scan returns
+        whenever that scan saw every fact (stores under its 50,000 cap).
+
+        ``pending`` are the facts this save already stored. Their vectors are
+        indexed only once the save commits, so the vector source cannot return
+        them yet; they are scored here directly, as the full scan did. Without
+        them a memory's facts were never linked to, or de-duplicated against,
+        each other.
+        """
+        skip = set(exclude) | {new_fact.fact_id}
+        vectors = self._vectors
+        if vectors is not None and getattr(vectors, "available", True) and k > 0:
+            try:
+                hits = vectors.search(
+                    new_fact.embedding, top_k=k + len(skip), profile_id=profile_id
+                )
+            except Exception as exc:  # noqa: BLE001 — fall back, never fail a save
+                logger.debug("consolidation neighbour search fell back (%s)", type(exc).__name__)
+            else:
+                ids = list(
+                    dict.fromkeys(
+                        fid for fid in (*(fid for fid, _ in hits), *pending) if fid not in skip
+                    )
+                )
+                facts = {f.fact_id: f for f in self._db.get_facts_by_ids(ids, profile_id)}
+                out = []
+                for fid in ids:
+                    fact = facts.get(fid)
+                    if fact is None or fact.embedding is None:
+                        continue
+                    sim = _compute_similarity(new_fact.embedding, fact.embedding)
+                    if sim > 0.5:
+                        out.append((fact, sim))
+                out.sort(key=lambda t: (-t[1], t[0].fact_id))
+                return out[:k]
+        scored = []
+        for fact in self._db.get_all_facts(profile_id):
+            if fact.fact_id in skip:
+                continue
+            sim = _compute_similarity(new_fact.embedding, fact.embedding)
+            if sim > 0.5:
+                scored.append((fact, sim))
+        scored.sort(key=lambda t: (-t[1], t[0].fact_id))
+        return scored[:k]
 
     # -- Public API ---------------------------------------------------------
 
@@ -107,6 +194,7 @@ class MemoryConsolidator:
         profile_id: str,
         *,
         exclude_fact_ids: set[str] | frozenset[str] | None = None,
+        pending_fact_ids: tuple[str, ...] | list[str] = (),
     ) -> ConsolidationAction:
         """Consolidate *new_fact* against existing knowledge.
 
@@ -116,15 +204,22 @@ class MemoryConsolidator:
         queryable projection.  That projection is evidence being promoted,
         not pre-existing knowledge, and must not suppress its derived facts as
         near-duplicates.
+
+        ``pending_fact_ids`` are the facts the same save stored before this
+        one (not yet in the vector index); see ``_similar``.
         """
+        pending = tuple(pending_fact_ids or ())
         candidates = self._find_candidates(
             new_fact,
             profile_id,
             exclude_fact_ids=exclude_fact_ids,
+            pending=pending,
         )
 
         if not candidates:
-            return self._execute_add(new_fact, profile_id, reason="no matching facts")
+            return self._execute_add(
+                new_fact, profile_id, reason="no matching facts", pending=pending
+            )
 
         best_fact, best_score = candidates[0]
 
@@ -133,38 +228,65 @@ class MemoryConsolidator:
             # Check contradiction BEFORE declaring NOOP.
             if self._is_contradicting(new_fact, best_fact):
                 return self._execute_supersede(
-                    new_fact, best_fact, profile_id,
+                    new_fact,
+                    best_fact,
+                    profile_id,
                     reason=f"contradiction detected (score={best_score:.3f})",
+                    pending=pending,
+                )
+            from superlocalmemory.encoding.source_fidelity import check_fact_against_source
+
+            if not (
+                check_fact_against_source(new_fact.content, best_fact.content).ok
+                and check_fact_against_source(best_fact.content, new_fact.content).ok
+            ):
+                return self._execute_add(
+                    new_fact, profile_id, reason="different source values", pending=pending
                 )
             return self._execute_noop(
-                new_fact, best_fact, profile_id,
+                new_fact,
+                best_fact,
+                profile_id,
                 reason=f"near-duplicate (score={best_score:.3f})",
             )
 
         if best_score > _MATCH_THRESHOLD:
             if self._is_contradicting(new_fact, best_fact):
                 return self._execute_supersede(
-                    new_fact, best_fact, profile_id,
+                    new_fact,
+                    best_fact,
+                    profile_id,
                     reason=f"contradiction detected (score={best_score:.3f})",
+                    pending=pending,
                 )
             if new_fact.fact_type == best_fact.fact_type:
                 return self._execute_update(
-                    new_fact, best_fact, profile_id,
+                    new_fact,
+                    best_fact,
+                    profile_id,
                     reason=f"refines existing (score={best_score:.3f})",
+                    pending=pending,
                 )
 
         return self._execute_add(
-            new_fact, profile_id,
+            new_fact,
+            profile_id,
             reason=f"new information (best_score={best_score:.3f})",
+            pending=pending,
         )
 
+    def link_source(self, fact: AtomicFact, profile_id: str, pending: tuple[str, ...] = ()) -> None:
+        """Link the protected source projection without consolidating or replacing it."""
+        self._create_semantic_edges(fact, profile_id, pending)
+
     def get_consolidation_history(
-        self, profile_id: str, limit: int = 50,
+        self,
+        profile_id: str,
+        limit: int = 50,
     ) -> list[ConsolidationAction]:
         """Recent consolidation actions for audit/debugging."""
         rows = self._db.execute(
-            "SELECT * FROM consolidation_log WHERE profile_id = ? "
-            "ORDER BY timestamp DESC LIMIT ?",
+            "SELECT * FROM consolidation_log WHERE profile_id = ? ORDER BY timestamp DESC LIMIT ?",
             (profile_id, limit),
         )
         return [
@@ -188,41 +310,27 @@ class MemoryConsolidator:
         profile_id: str,
         *,
         exclude_fact_ids: set[str] | frozenset[str] | None = None,
+        pending: tuple[str, ...] = (),
     ) -> list[tuple[AtomicFact, float]]:
-        """Find and score candidate matches from existing facts.
-
-        Uses two signals:
-        1. Entity overlap — ``get_facts_by_entity`` for each canonical entity.
-        2. Semantic similarity — cosine of embedding vectors.
-
-        Returns sorted list of (fact, combined_score), descending.
-        """
+        """Rank same-context candidates using the available entity and semantic evidence."""
         seen_ids: set[str] = set(exclude_fact_ids or ())
         candidate_facts: list[AtomicFact] = []
-
-        # --- entity-based candidates ---
         for entity in new_fact.canonical_entities:
             for fact in self._db.get_facts_by_entity(entity, profile_id):
                 if fact.fact_id not in seen_ids:
                     seen_ids.add(fact.fact_id)
                     candidate_facts.append(fact)
-
-        # --- semantic candidates (top-K by embedding) ---
         if new_fact.embedding is not None and self._embedder is not None:
-            all_facts = self._db.get_all_facts(profile_id)
-            semantic_scored: list[tuple[AtomicFact, float]] = []
-            for fact in all_facts:
-                if fact.fact_id in seen_ids:
-                    continue
-                sim = _compute_similarity(new_fact.embedding, fact.embedding)
-                if sim > 0.5:
-                    semantic_scored.append((fact, sim))
-            semantic_scored.sort(key=lambda t: t[1], reverse=True)
-            for fact, _ in semantic_scored[: self._cfg.max_consolidation_candidates]:
+            semantic_scored = self._similar(
+                new_fact, profile_id, self._cfg.max_consolidation_candidates, seen_ids, pending
+            )
+            for fact, _ in semantic_scored:
                 if fact.fact_id not in seen_ids:
                     seen_ids.add(fact.fact_id)
                     candidate_facts.append(fact)
+        from superlocalmemory.storage.fact_context import same_context_candidates
 
+        candidate_facts = same_context_candidates(self._db, new_fact, candidate_facts)
         # --- score all candidates ---
         scored: list[tuple[AtomicFact, float]] = []
         for cand in candidate_facts:
@@ -231,18 +339,26 @@ class MemoryConsolidator:
                 set(cand.canonical_entities),
             )
             semantic_sim = _compute_similarity(
-                new_fact.embedding, cand.embedding,
+                new_fact.embedding,
+                cand.embedding,
             )
-            combined = 0.4 * entity_overlap + 0.6 * semantic_sim
+            # Missing entities are absent evidence, rather than a 40% penalty.
+            # When both sides name entities, keep disagreement meaningful.
+            combined = (
+                0.4 * entity_overlap + 0.6 * semantic_sim
+                if new_fact.canonical_entities and cand.canonical_entities
+                else semantic_sim
+            )
             scored.append((cand, combined))
-
         scored.sort(key=lambda t: t[1], reverse=True)
         return scored
 
     # -- Contradiction detection --------------------------------------------
 
     def _is_contradicting(
-        self, fact_a: AtomicFact, fact_b: AtomicFact,
+        self,
+        fact_a: AtomicFact,
+        fact_b: AtomicFact,
     ) -> bool:
         """Detect if *fact_a* contradicts *fact_b*.
 
@@ -254,7 +370,9 @@ class MemoryConsolidator:
         return self._keyword_contradiction_check(fact_a, fact_b)
 
     def _keyword_contradiction_check(
-        self, fact_a: AtomicFact, fact_b: AtomicFact,
+        self,
+        fact_a: AtomicFact,
+        fact_b: AtomicFact,
     ) -> bool:
         """Heuristic: check negation markers in either fact's content."""
         text_a = fact_a.content.lower()
@@ -275,7 +393,9 @@ class MemoryConsolidator:
         return False
 
     def _llm_contradiction_check(
-        self, fact_a: AtomicFact, fact_b: AtomicFact,
+        self,
+        fact_a: AtomicFact,
+        fact_b: AtomicFact,
     ) -> bool:
         """Ask the LLM whether two facts contradict each other."""
         assert self._llm is not None  # guarded by caller
@@ -286,20 +406,30 @@ class MemoryConsolidator:
             "Answer ONLY 'yes' or 'no'."
         )
         response = self._llm.generate(
-            prompt, system="You are a precise fact-checker.",
+            prompt,
+            system="You are a precise fact-checker.",
         )
         return response.strip().lower().startswith("yes")
 
     # -- Action executors ---------------------------------------------------
 
     def _execute_add(
-        self, new_fact: AtomicFact, profile_id: str, *, reason: str,
+        self,
+        new_fact: AtomicFact,
+        profile_id: str,
+        *,
+        reason: str,
+        pending: tuple[str, ...] = (),
     ) -> ConsolidationAction:
         """Store the new fact and link to related facts via semantic edges."""
         self._db.store_fact(new_fact)
-        self._create_semantic_edges(new_fact, profile_id)
+        self._create_semantic_edges(new_fact, profile_id, pending)
         action = self._log_action(
-            ConsolidationActionType.ADD, new_fact.fact_id, "", profile_id, reason,
+            ConsolidationActionType.ADD,
+            new_fact.fact_id,
+            "",
+            profile_id,
+            reason,
         )
         logger.debug("ADD fact %s: %s", new_fact.fact_id, reason)
         return action
@@ -311,18 +441,23 @@ class MemoryConsolidator:
         profile_id: str,
         *,
         reason: str,
+        pending: tuple[str, ...] = (),
     ) -> ConsolidationAction:
         """Persist a proposed refinement without rewriting the predecessor."""
         self._db.store_fact(new_fact)
-        self._create_semantic_edges(new_fact, profile_id)
+        self._create_semantic_edges(new_fact, profile_id, pending)
         action = self._log_action(
             ConsolidationActionType.UPDATE,
-            new_fact.fact_id, existing.fact_id,
-            profile_id, reason,
+            new_fact.fact_id,
+            existing.fact_id,
+            profile_id,
+            reason,
         )
         logger.debug(
             "UPDATE proposal %s -> %s: %s",
-            existing.fact_id, new_fact.fact_id, reason,
+            existing.fact_id,
+            new_fact.fact_id,
+            reason,
         )
         return action
 
@@ -333,18 +468,23 @@ class MemoryConsolidator:
         profile_id: str,
         *,
         reason: str,
+        pending: tuple[str, ...] = (),
     ) -> ConsolidationAction:
         """Persist a proposed successor without changing the predecessor."""
         self._db.store_fact(new_fact)
-        self._create_semantic_edges(new_fact, profile_id)
+        self._create_semantic_edges(new_fact, profile_id, pending)
         action = self._log_action(
             ConsolidationActionType.SUPERSEDE,
-            new_fact.fact_id, existing.fact_id,
-            profile_id, reason,
+            new_fact.fact_id,
+            existing.fact_id,
+            profile_id,
+            reason,
         )
         logger.debug(
             "SUPERSEDE proposal %s -> %s: %s",
-            existing.fact_id, new_fact.fact_id, reason,
+            existing.fact_id,
+            new_fact.fact_id,
+            reason,
         )
         return action
 
@@ -357,14 +497,14 @@ class MemoryConsolidator:
         reason: str,
     ) -> ConsolidationAction:
         """Near-duplicate — just bump access count on existing."""
-        self._db.update_fact(
-            existing.fact_id,
-            {"access_count": existing.access_count + 1},
-        )
+        # A repeated write is evidence, not a retrieval access. Only the
+        # retrieval path increments access_count.
         action = self._log_action(
             ConsolidationActionType.NOOP,
-            new_fact.fact_id, existing.fact_id,
-            profile_id, reason,
+            new_fact.fact_id,
+            existing.fact_id,
+            profile_id,
+            reason,
         )
         logger.debug("NOOP for %s (dup of %s): %s", new_fact.fact_id, existing.fact_id, reason)
         return action
@@ -372,28 +512,30 @@ class MemoryConsolidator:
     # -- Helpers ------------------------------------------------------------
 
     def _create_semantic_edges(
-        self, new_fact: AtomicFact, profile_id: str,
+        self,
+        new_fact: AtomicFact,
+        profile_id: str,
+        pending: tuple[str, ...] = (),
     ) -> None:
         """Link new fact to top-K most similar existing facts."""
         if new_fact.embedding is None:
             return
-        all_facts = self._db.get_all_facts(profile_id)
-        scored: list[tuple[str, float]] = []
-        for fact in all_facts:
-            if fact.fact_id == new_fact.fact_id:
-                continue
-            sim = _compute_similarity(new_fact.embedding, fact.embedding)
-            if sim > 0.5:
-                scored.append((fact.fact_id, sim))
-        scored.sort(key=lambda t: t[1], reverse=True)
-        for target_id, weight in scored[: self._cfg.semantic_edge_top_k]:
-            self._db.store_edge(GraphEdge(
-                profile_id=profile_id,
-                source_id=new_fact.fact_id,
-                target_id=target_id,
-                edge_type=EdgeType.SEMANTIC,
-                weight=weight,
-            ))
+        scored = [
+            (f.fact_id, sim)
+            for f, sim in self._similar(
+                new_fact, profile_id, self._cfg.semantic_edge_top_k, set(), pending
+            )
+        ]
+        for target_id, weight in scored:
+            self._db.store_edge(
+                GraphEdge(
+                    profile_id=profile_id,
+                    source_id=new_fact.fact_id,
+                    target_id=target_id,
+                    edge_type=EdgeType.SEMANTIC,
+                    weight=weight,
+                )
+            )
 
     def _merge_facts(self, existing_text: str, new_text: str) -> str:
         """Use LLM to merge two fact statements into one richer fact."""
@@ -430,9 +572,13 @@ class MemoryConsolidator:
             " existing_fact_id, reason, timestamp) "
             "VALUES (?,?,?,?,?,?,?)",
             (
-                action.action_id, action.profile_id,
-                action.action_type.value, action.new_fact_id,
-                action.existing_fact_id, action.reason, action.timestamp,
+                action.action_id,
+                action.profile_id,
+                action.action_type.value,
+                action.new_fact_id,
+                action.existing_fact_id,
+                action.reason,
+                action.timestamp,
             ),
         )
         return action
@@ -442,8 +588,10 @@ class MemoryConsolidator:
 # Module-level helpers (pure functions, no side effects)
 # ---------------------------------------------------------------------------
 
+
 def _compute_similarity(
-    emb_a: list[float] | None, emb_b: list[float] | None,
+    emb_a: list[float] | None,
+    emb_b: list[float] | None,
 ) -> float:
     """Cosine similarity between two embedding vectors.
 

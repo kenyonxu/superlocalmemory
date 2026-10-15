@@ -320,6 +320,33 @@ class CozoDBGraphBackend:
                         created_at, updated_at}
         """, {"entity_id": entity_id})
 
+    def remove_profile(self, profile_id: str) -> None:
+        """Remove every node, edge and fact bridge filed under ``profile_id``.
+
+        Erasing a profile's facts one at a time leaves the entity nodes behind,
+        and a node carries the name it was created with. This removes the
+        profile's whole share of the graph; the profile id is a bound parameter.
+        """
+        self._db.run("""
+            ?[fact_id, entity_id, profile_id] :=
+                *fact_entity{fact_id, entity_id, profile_id}, profile_id = $pid
+            :rm fact_entity {fact_id, entity_id => profile_id}
+        """, {"pid": profile_id})
+        self._db.run("""
+            ?[from_id, to_id, edge_type, weight, metadata, profile_id, created_at] :=
+                *edge{from_id, to_id, edge_type, weight, metadata, profile_id, created_at},
+                profile_id = $pid
+            :rm edge {from_id, to_id, edge_type => weight, metadata, profile_id, created_at}
+        """, {"pid": profile_id})
+        self._db.run("""
+            ?[id, name, entity_type, tier, properties, profile_id, created_at, updated_at] :=
+                *entity{id, name, entity_type, tier, properties, profile_id,
+                        created_at, updated_at},
+                profile_id = $pid
+            :rm entity {id => name, entity_type, tier, properties, profile_id,
+                        created_at, updated_at}
+        """, {"pid": profile_id})
+
     def remove_fact_candidacy(self, fact_id: str) -> None:
         """Stop a fact being *offered* as a candidate, without touching the graph.
 

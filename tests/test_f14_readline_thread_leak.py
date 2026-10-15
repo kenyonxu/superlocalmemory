@@ -8,8 +8,6 @@ import os
 import threading
 import time
 
-import pytest
-
 from superlocalmemory.core.embeddings import EmbeddingService
 
 

@@ -85,8 +85,22 @@
         esc(who.profile) + '</code></div>' +
         '<button class="btn sm" id="od-team-logout">Sign out</button></div>';
     }
-    return '<div>Operating as the <strong>machine owner</strong> (full control). ' +
-      'Sign in as a user below to act with a specific role.</div>';
+    return '<div>You are the <strong>owner of this computer</strong> with full control. ' +
+      '<strong>You never need to sign in</strong> to use SuperLocalMemory here.</div>';
+  }
+
+  // Users and roles are for a shared workspace (a team on one server). Until a
+  // user exists there is nothing to sign in with, so the form is not shown:
+  // showing it made people think SLM needed a password. There is no default
+  // account and never a default password: a known password would open every
+  // install that is reachable from a network (CWE-1393).
+  function noUsersNote() {
+    return '<div class="card" style="margin-top:12px;max-width:640px"><div class="card-pad">' +
+      '<p style="margin:0 0 6px"><strong>Signing in is optional.</strong></p>' +
+      '<p class="muted" style="margin:0">It is only for a shared workspace where several people ' +
+      'use one SuperLocalMemory with different roles. Add a user below and choose their password ' +
+      'yourself; they sign in with it. SuperLocalMemory never ships a default account or password.</p>' +
+      '</div></div>';
   }
 
   function loginForm() {
@@ -115,7 +129,14 @@
         '<td><select class="input sm od-team-role" data-uid="' + esc(u.user_id) + '">' +
         '<option value="">— none —</option>' + roleOptions(role) + '</select></td>' +
         '<td>' + esc(u.status) + '</td>' +
-        '<td><button class="btn sm danger od-team-del" data-uid="' + esc(u.user_id) +
+        '<td class="row" style="gap:6px;flex-wrap:wrap">' +
+        '<button class="btn sm od-team-reset" data-uid="' + esc(u.user_id) +
+        '" data-uname="' + esc(u.username) + '">Reset password</button>' +
+        '<button class="btn sm od-team-status" data-uid="' + esc(u.user_id) +
+        '" data-uname="' + esc(u.username) + '" data-next="' +
+        (u.status === 'disabled' ? 'active' : 'disabled') + '">' +
+        (u.status === 'disabled' ? 'Enable' : 'Disable') + '</button>' +
+        '<button class="btn sm danger od-team-del" data-uid="' + esc(u.user_id) +
         '" data-uname="' + esc(u.username) + '">Remove</button></td>' +
         '</tr>';
     }).join('');
@@ -129,11 +150,21 @@
       '<div class="card-head"><h4 style="margin:0">Users &amp; roles</h4></div>' +
       '<div class="card-pad">' +
       '<div id="od-team-users">' + usersTable(users, members) + '</div>' +
+      // Reset-password form, shown for one account at a time (UX-21).
+      '<div id="od-team-reset" class="row" style="display:none;gap:8px;flex-wrap:wrap;' +
+      'align-items:center;margin-top:10px">' +
+      '<span id="od-team-reset-who"></span>' +
+      '<input id="od-team-reset-pass" class="input sm" type="password" placeholder="New password (min 8)" autocomplete="new-password">' +
+      '<input id="od-team-reset-again" class="input sm" type="password" placeholder="Repeat it" autocomplete="new-password">' +
+      '<button class="btn sm primary" id="od-team-reset-save">Set password</button>' +
+      '<button class="btn sm" id="od-team-reset-cancel">Cancel</button></div>' +
       '<div class="row" style="gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">' +
       '<input id="od-team-new-user" class="input sm" placeholder="Username">' +
       '<input id="od-team-new-name" class="input sm" placeholder="Display name (optional)">' +
       '<input id="od-team-new-pass" class="input sm" type="password" placeholder="Password (min 8)">' +
-      '<select id="od-team-new-role" class="input sm">' + roleOptions('member') + '</select>' +
+      '<select id="od-team-new-role" class="input sm">' +
+      // The first person added runs the workspace; later ones start as members.
+      roleOptions(users.length ? 'member' : 'admin') + '</select>' +
       '<button class="btn sm primary" id="od-team-add-btn">Add user</button>' +
       '</div><p class="muted" id="od-team-msg" style="margin:8px 0 0"></p>' +
       '</div></div>' +
@@ -154,7 +185,8 @@
     var body = container.querySelector('#od-team-body');
     if (!body) return;
     var html = identityLine(who);
-    if (who.kind !== 'user') html += loginForm();
+    var anyUsers = (status && status.user_count > 0) || users.length > 0;
+    if (who.kind !== 'user') html += anyUsers ? loginForm() : noUsersNote();
     if (canManage) html += manageBlock(status, users, members);
     else if (who.kind === 'user') {
       html += '<p class="muted" style="margin-top:12px">Your role does not include ' +
@@ -209,21 +241,102 @@
       });
     }
 
-    // Role change dropdowns
+    var showError = function (r, fallback) {
+      var msg = q('od-team-msg');
+      if (msg) {
+        msg.style.color = '#ff7b7b';
+        msg.textContent = (r && r.data && (r.data.detail || r.data.error)) || fallback;
+      }
+    };
+
+    // Role change dropdowns. A refused change keeps its message on screen and
+    // puts the dropdown back (UX-20: the page used to reload over the error).
     container.querySelectorAll('.od-team-role').forEach(function (sel) {
+      var before = sel.value;
       sel.addEventListener('change', function () {
         var uid = sel.getAttribute('data-uid');
         var role = sel.value;
-        var msg = q('od-team-msg');
-        var done = function (r) {
-          if (!r.ok && msg) msg.textContent = (r.data && r.data.detail) || 'Role change failed.';
-          reload();
+        var self = who && who.kind === 'user' && who.user_id === uid;
+        var apply = function () {
+          var req = role
+            ? postJSON('/api/rbac/members', { user_id: uid, role: role })
+            : postJSON('/api/rbac/members', { user_id: uid }, 'DELETE');
+          req.then(function (r) {
+            if (r.ok) { reload(); return; }
+            sel.value = before;
+            showError(r, 'Role change failed.');
+          });
         };
-        if (!role) {
-          postJSON('/api/rbac/members', { user_id: uid }, 'DELETE').then(done);
-        } else {
-          postJSON('/api/rbac/members', { user_id: uid, role: role }).then(done);
-        }
+        if (!self) { apply(); return; }
+        window.confirmDestructive({
+          title: 'Change your own access',
+          target: 'your role on this workspace',
+          consequence: role === 'admin' ? 'You stay an administrator.'
+            : 'You will no longer be able to manage users here.',
+          confirmLabel: 'Change my role',
+        }).then(function (confirmed) {
+          if (confirmed) { apply(); } else { sel.value = before; }
+        });
+      });
+    });
+
+    // Reset password (UX-21): the control the sign-in screen points to.
+    var resetBox = q('od-team-reset');
+    var resetUid = '';
+    container.querySelectorAll('.od-team-reset').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        resetUid = btn.getAttribute('data-uid');
+        var label = q('od-team-reset-who');
+        if (label) label.textContent = 'New password for ' + btn.getAttribute('data-uname') + ':';
+        if (resetBox) resetBox.style.display = 'flex';
+        var first = q('od-team-reset-pass');
+        if (first) first.focus();
+      });
+    });
+    var resetCancel = q('od-team-reset-cancel');
+    if (resetCancel) {
+      resetCancel.addEventListener('click', function () {
+        resetUid = '';
+        if (resetBox) resetBox.style.display = 'none';
+      });
+    }
+    var resetSave = q('od-team-reset-save');
+    if (resetSave) {
+      resetSave.addEventListener('click', function () {
+        var p1 = (q('od-team-reset-pass') || {}).value || '';
+        var p2 = (q('od-team-reset-again') || {}).value || '';
+        if (p1.length < 8) { showError(null, 'The password must be at least 8 characters.'); return; }
+        if (p1 !== p2) { showError(null, 'The two passwords differ.'); return; }
+        postJSON('/api/rbac/users/' + encodeURIComponent(resetUid), { password: p1 }, 'PATCH')
+          .then(function (r) {
+            if (!r.ok) { showError(r, 'Could not set the password.'); return; }
+            var msg = q('od-team-msg');
+            if (msg) {
+              msg.style.color = '';
+              msg.textContent = 'Password set. Their other sessions are signed out.';
+            }
+            if (resetBox) resetBox.style.display = 'none';
+          });
+      });
+    }
+
+    // Disable / enable an account.
+    container.querySelectorAll('.od-team-status').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var next = btn.getAttribute('data-next');
+        var act = function () {
+          postJSON('/api/rbac/users/' + encodeURIComponent(btn.getAttribute('data-uid')),
+                   { status: next }, 'PATCH').then(function (r) {
+            if (r.ok) { reload(); } else { showError(r, 'Could not change the account.'); }
+          });
+        };
+        if (next !== 'disabled') { act(); return; }
+        window.confirmDestructive({
+          title: 'Disable account',
+          target: '"' + btn.getAttribute('data-uname') + '"',
+          consequence: 'They are signed out and cannot sign in until enabled again.',
+          confirmLabel: 'Disable',
+        }).then(function (confirmed) { if (confirmed) act(); });
       });
     });
 
@@ -239,7 +352,9 @@
           confirmLabel: 'Remove',
         }).then(function(confirmed) {
           if (!confirmed) return;
-          postJSON('/api/rbac/users/' + encodeURIComponent(uid), {}, 'DELETE').then(reload);
+          postJSON('/api/rbac/users/' + encodeURIComponent(uid), {}, 'DELETE').then(function (r) {
+            if (r.ok) { reload(); } else { showError(r, 'Could not remove the account.'); }
+          });
         });
       });
     });

@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import sys
-import time
 from pathlib import Path
 
 from superlocalmemory.ingestion.base_adapter import BaseAdapter, AdapterConfig, IngestItem
@@ -64,7 +63,7 @@ class TranscriptAdapter(BaseAdapter):
                     if event.is_directory:
                         return
                     path = Path(event.src_path)
-                    if path.suffix.lower() in _WATCH_EXTENSIONS:
+                    if self._adapter._admissible(path):
                         self._adapter._pending_files.append(path)
 
             self._observer = Observer()
@@ -75,9 +74,7 @@ class TranscriptAdapter(BaseAdapter):
             logger.warning("watchdog not installed — polling mode only")
 
         # Also scan for existing files on first run
-        for path in self._watch_dir.iterdir():
-            if path.suffix.lower() in _WATCH_EXTENSIONS and path.is_file():
-                self._pending_files.append(path)
+        self._scan_existing()
 
         super().run()
 
@@ -85,6 +82,21 @@ class TranscriptAdapter(BaseAdapter):
         if self._observer:
             self._observer.stop()
             self._observer.join()
+
+    def _admissible(self, path: Path) -> bool:
+        """A transcript file directly in the folder; never a link out of it."""
+        if path.is_symlink() or path.suffix.lower() not in _WATCH_EXTENSIONS:
+            return False
+        try:
+            inside = path.resolve(strict=True).parent == self._watch_dir.resolve()
+        except OSError:
+            return False
+        return inside and path.is_file() and not path.name.startswith(".")
+
+    def _scan_existing(self) -> None:
+        for path in sorted(self._watch_dir.iterdir()):
+            if self._admissible(path):
+                self._pending_files.append(path)
 
     def fetch_items(self) -> list[IngestItem]:
         """Return pending transcript files as IngestItems."""
@@ -149,12 +161,20 @@ if __name__ == "__main__":
     watch_dir = ""
     adapters_path = _adapters_config_path()
     if adapters_path.exists():
-        cfg = json.loads(adapters_path.read_text())
+        cfg = json.loads(adapters_path.read_text(encoding="utf-8"))
         watch_dir = cfg.get("transcript", {}).get("watch_dir", "")
 
     if not watch_dir:
         print("No watch_dir configured. Set it in ~/.superlocalmemory/adapters.json")
         print('  {"transcript": {"enabled": true, "watch_dir": "/path/to/transcripts"}}')
+        sys.exit(1)
+
+    from superlocalmemory.infra.data_root import canonical_data_root
+    from superlocalmemory.ingestion.import_roots import saved_path_error
+
+    refused = saved_path_error("transcript", {"watch_dir": watch_dir}, canonical_data_root())
+    if refused:
+        print(refused)
         sys.exit(1)
 
     adapter = TranscriptAdapter(watch_dir=watch_dir)

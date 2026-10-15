@@ -145,9 +145,11 @@
     var c = card();
     c.appendChild(elmt('h2', { text: 'Sign in', style: 'font-size:18px;margin:0 0 6px' }));
     c.appendChild(elmt('p', {
-      text: 'Use the admin username and password created when this workspace '
-        + 'was set up. SuperLocalMemory has no default password. Forgot it? '
-        + 'An admin can reset it from Settings › Access.',
+      text: 'Use the username and password you were given for this workspace. '
+        + 'SuperLocalMemory has no default password. Forgot it? An administrator '
+        + 'can set a new one in Governance › Access & Users (Reset password). If no '
+        + 'administrator can sign in, the person who runs SLM on this computer can '
+        + 'run: slm team reset-password <username>',
       style: 'font-size:12.5px;opacity:0.7;margin:0 0 16px',
     }));
     var user = { id: 'slm-gate-user', placeholder: 'Username', autocomplete: 'username' };
@@ -191,7 +193,7 @@
         + 'workspace. Choose an admin username and password right here in your '
         + 'browser — no config files or terminal needed. For your security '
         + 'there is no default login. You can add people or change this later '
-        + 'under Settings › Access.',
+        + 'under Governance › Access & Users.',
       style: 'font-size:12.5px;opacity:0.7;margin:0 0 16px',
     }));
     c.appendChild(field('Username', { id: 'slm-gate-nu', placeholder: 'e.g. admin', autocomplete: 'username' }));
@@ -236,15 +238,34 @@
   }
 
   // ─── Decision flow ──────────────────────────────────────────────────────────
+  // A session that has ended (signed out, expired, revoked) is refused
+  // everywhere; it never falls back to the machine owner (OPS-24). Drop it so
+  // the page can carry on as the owner (login optional) or ask to sign in.
+  function dropEndedSession(who) {
+    if (!who || !who.session_invalid) return Promise.resolve(false);
+    return api('/api/rbac/logout', 'POST', {}).then(function () { return true; },
+                                                     function () { return true; });
+  }
+
   function decide() {
     api('/api/rbac/status', 'GET').then(function (r) {
       var s = (r && r.data) || {};
-      if (!r.ok || !s.require_login) { removeOverlay(); return; }   // Personal mode
+      if (!r.ok || !s.require_login) {                                 // Personal mode
+        api('/api/rbac/whoami', 'GET').then(function (w) {
+          dropEndedSession(w && w.data).then(function (dropped) {
+            if (dropped) { window.location.reload(); return; }
+            removeOverlay();
+          });
+        }).catch(function () { removeOverlay(); });
+        return;
+      }
       if ((s.user_count || 0) === 0) { showCreateAdmin(); return; } // First run
       api('/api/rbac/whoami', 'GET').then(function (w) {
         var who = (w && w.data) || {};
         if (w.ok && who.kind === 'user') { removeOverlay(); return; } // Already signed in
-        showLogin();
+        dropEndedSession(who).then(function (dropped) {
+          showLogin(dropped ? 'Your session ended. Sign in again.' : '');
+        });
       }).catch(function () { removeOverlay(); });                    // Fail open
     }).catch(function () { removeOverlay(); });                      // Fail open
   }

@@ -10,7 +10,6 @@ Tests each step of the algorithm independently (Implementation Rule 11).
 from __future__ import annotations
 
 import math
-import sqlite3
 from unittest.mock import MagicMock
 
 import numpy as np

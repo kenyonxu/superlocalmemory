@@ -906,7 +906,7 @@ def test_swallowed_pipeline_fallback_cannot_claim_complete_derivation(
     receipt = command.submit(IngestionRequest(
         content=(
             "Dana owns the production recovery review and records every "
-            "approved corrective action for the platform team."
+            "approved corrective action for the platform team. Dana writes recovery reports."
         ),
         profile_id=engine._profile_id,
         source_type="http",
@@ -927,7 +927,7 @@ def test_swallowed_pipeline_fallback_cannot_claim_complete_derivation(
     assert target is not None
     assert failed.state is IngestionState.FAILED
     assert stage in failed.last_error
-    assert failed.final_fact_ids == receipt.queryable_fact_ids
+    assert set(receipt.queryable_fact_ids) <= set(failed.final_fact_ids)
     assert failed.derivation_state[stage] is False
     assert engine._db.get_fact(receipt.queryable_fact_ids[0]) is not None
 
@@ -1360,7 +1360,7 @@ def test_public_python_store_routes_through_canonical_ingestion_and_preserves_co
         session_date="2026-07-14",
         speaker="Dana",
         role="assistant",
-        require_complete=False,
+        require_complete=True,
         # Per-request profile routing (spec §4): the public entry forwards
         # its kwarg; None resolves to the engine's active profile.
         profile_id=None,

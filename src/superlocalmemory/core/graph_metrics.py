@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -130,6 +131,31 @@ def _short_connection(db: Any) -> Any:
         )
     yield conn
     conn.commit()
+
+@contextmanager
+def _read_connection(db: Any) -> Any:
+    """A connection for a READ, which never takes the store's write lock.
+
+    ``_short_connection`` goes through ``raw_connection``, which takes the
+    process-wide write lock even to read. Reading every edge of a large store
+    that way held it for 60 s on a 22k-fact store (4.1.21): saves and edits
+    failed and enrichment lost its lease meanwhile. A ``DatabaseManager``
+    store is read through a query-only snapshot instead; the consolidation
+    proxy (a bare connection) keeps its own connection.
+    """
+    if callable(getattr(type(db), "raw_connection", None)) and getattr(db, "db_path", None):
+        from superlocalmemory.storage.read_connection import read_only_snapshot
+
+        with read_only_snapshot(db) as conn:
+            yield conn
+        return
+    with _short_connection(db) as conn:
+        yield conn
+
+
+#: Rows written per transaction, so the write lock is released between them
+#: and an interactive save never waits behind the whole table.
+_WRITE_CHUNK = 500
 
 #: PageRank damping. Matches the previous whole-graph pass so scores stay
 #: comparable across the version that introduced this module.
@@ -335,7 +361,7 @@ def _projection_is_current(db: Any, profile_id: str) -> bool:
 
         if not projection_outbox.is_available(db):
             return True
-        with _short_connection(db) as conn:
+        with _read_connection(db) as conn:
             row = conn.execute(
                 "SELECT COUNT(*) FROM projection_outbox WHERE profile_id = ?",
                 (profile_id,),
@@ -346,6 +372,68 @@ def _projection_is_current(db: Any, profile_id: str) -> bool:
         return False
 
 
+def read_graph(conn: sqlite3.Connection, profile_id: str) -> tuple[list[str], list[tuple[str, str, float]]]:
+    """The profile's visible fact ids and logical edges, in deterministic order."""
+    nodes = _visible_fact_ids(conn, profile_id)
+    edges = [
+        (str(source), str(target), float(weight))
+        for source, target, _etype, weight, _pid
+        in iter_logical_edges(conn, profile_id)
+    ]
+    return nodes, edges
+
+
+def metrics_rows(profile_id: str, nodes: list[str], edges: list[tuple[str, str, float]],
+                 damping: float, pagerank: dict[str, float],
+                 communities: dict[str, int]) -> dict[str, Any]:
+    """``fact_importance`` rows from the engine's output; identical wherever it runs."""
+    notes: list[str] = []
+    # An engine only sees nodes that appear in an edge. Everything else is a
+    # visible fact with no graph position, and it gets the teleport share -- the
+    # value PageRank would give a node nothing links to.
+    node_set = set(nodes)
+    total = len(node_set)
+    base = (1.0 - damping) / float(total)
+    connected = {fid for fid in pagerank if fid in node_set}
+    isolated = node_set - connected
+    # Leave room for the isolated mass so the whole table still sums to ~1 and
+    # the ranker's absolute thresholds keep meaning what they meant.
+    headroom = max(0.0, 1.0 - base * len(isolated))
+    connected_mass = sum(pagerank[fid] for fid in connected) or 1.0
+
+    degree: dict[str, int] = {}
+    for source, target, _weight in edges:
+        degree[source] = degree.get(source, 0) + 1
+        degree[target] = degree.get(target, 0) + 1
+    divisor = float(total - 1) if total > 1 else 1.0
+
+    bridges = _bridge_scores(edges, total)
+    if bridges is None:
+        notes.append(f"bridge scores skipped above {BRIDGE_NODE_LIMIT} facts")
+
+    rows: list[tuple[Any, ...]] = []
+    for fact_id in nodes:
+        if fact_id in connected:
+            score = pagerank[fact_id] / connected_mass * headroom
+        else:
+            score = base
+        community = communities.get(fact_id)
+        rows.append((
+            fact_id,
+            profile_id,
+            round(float(score), 9),
+            int(community) if community is not None else None,
+            round(degree.get(fact_id, 0) / divisor, 6),
+            round(float((bridges or {}).get(fact_id, 0.0)), 6),
+        ))
+
+    return {
+        "rows": rows, "facts": total, "edges": len(edges), "connected": len(connected),
+        "isolated": len(isolated), "communities": len({c for c in communities.values()}),
+        "bridges_computed": bridges is not None, "notes": notes,
+    }
+
+
 def compute_graph_metrics(
     db: Any,
     profile_id: str,
@@ -353,6 +441,7 @@ def compute_graph_metrics(
     backend: Any = None,
     damping: float = DEFAULT_DAMPING,
     prefer: str = "networkx",
+    isolate: bool = False,
 ) -> GraphMetricsReport:
     """Recompute ``fact_importance`` for one profile. Returns what it did.
 
@@ -362,16 +451,39 @@ def compute_graph_metrics(
     pass that writes nothing and a store with no facts are different events, and
     the previous implementation reported both as ``node_count: 0``.
     """
+    # One pass per profile and store at a time: a pass that read the graph
+    # earlier must not finish after a newer one and delete the rows that pass
+    # wrote for facts stored in between. A second pass waits, then reads afresh.
+    with _pass_lock(db, profile_id):
+        return _compute_graph_metrics(db, profile_id, backend=backend, damping=damping,
+                                      prefer=prefer, isolate=isolate)
+
+
+_PASS_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_PASS_LOCKS_GUARD = threading.Lock()
+
+
+def _pass_lock(db: Any, profile_id: str) -> threading.Lock:
+    path = getattr(db, "db_path", None) or getattr(db, "_db_path", None) or id(db)
+    key = (str(path), str(profile_id))
+    with _PASS_LOCKS_GUARD:
+        return _PASS_LOCKS.setdefault(key, threading.Lock())
+
+
+def _compute_graph_metrics(db: Any, profile_id: str, *, backend: Any, damping: float,
+                           prefer: str, isolate: bool) -> GraphMetricsReport:
     started = time.monotonic()
     notes: list[str] = []
+    if isolate and prefer != "cozo":
+        # The whole computation in a separate low-priority process
+        # (core/graph_metrics_process.py); this process only writes the rows.
+        from superlocalmemory.core.graph_metrics_process import compute_rows_in_child
+
+        return _store_computed(db, profile_id, started, notes,
+                               compute_rows_in_child(db, profile_id, damping))
     try:
-        with _short_connection(db) as conn:
-            nodes = _visible_fact_ids(conn, profile_id)
-            edges = [
-                (str(source), str(target), float(weight))
-                for source, target, _etype, weight, _pid
-                in iter_logical_edges(conn, profile_id)
-            ]
+        with _read_connection(db) as conn:
+            nodes, edges = read_graph(conn, profile_id)
     except Exception as exc:  # noqa: BLE001
         return GraphMetricsReport(
             profile_id=profile_id,
@@ -427,52 +539,39 @@ def compute_graph_metrics(
                 notes=tuple(notes),
             )
 
-    # An engine only sees nodes that appear in an edge. Everything else is a
-    # visible fact with no graph position, and it gets the teleport share -- the
-    # value PageRank would give a node nothing links to.
-    node_set = set(nodes)
-    total = len(node_set)
-    base = (1.0 - damping) / float(total)
-    connected = {fid for fid in pagerank if fid in node_set}
-    isolated = node_set - connected
-    # Leave room for the isolated mass so the whole table still sums to ~1 and
-    # the ranker's absolute thresholds keep meaning what they meant.
-    headroom = max(0.0, 1.0 - base * len(isolated))
-    connected_mass = sum(pagerank[fid] for fid in connected) or 1.0
+    computed = metrics_rows(profile_id, nodes, edges, damping, pagerank, communities)
+    computed["engine"] = engine
+    return _store_computed(db, profile_id, started, notes, computed)
 
-    degree: dict[str, int] = {}
-    for source, target, _weight in edges:
-        degree[source] = degree.get(source, 0) + 1
-        degree[target] = degree.get(target, 0) + 1
-    divisor = float(total - 1) if total > 1 else 1.0
 
-    bridges = _bridge_scores(edges, total)
-    if bridges is None:
-        notes.append(f"bridge scores skipped above {BRIDGE_NODE_LIMIT} facts")
-
-    rows: list[tuple[Any, ...]] = []
-    for fact_id in nodes:
-        if fact_id in connected:
-            score = pagerank[fact_id] / connected_mass * headroom
-        else:
-            score = base
-        community = communities.get(fact_id)
-        rows.append((
-            fact_id,
-            profile_id,
-            round(float(score), 9),
-            int(community) if community is not None else None,
-            round(degree.get(fact_id, 0) / divisor, 6),
-            round(float((bridges or {}).get(fact_id, 0.0)), 6),
-        ))
-
+def _store_computed(db: Any, profile_id: str, started: float, notes: list[str],
+                    computed: dict[str, Any]) -> GraphMetricsReport:
+    """Write rows computed here or in the child process; the report either way."""
+    if computed.get("empty"):  # nothing visible: nothing written, as before
+        return GraphMetricsReport(
+            profile_id=profile_id, engine="none",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            notes=("no visible facts",),
+        )
+    if computed.get("error"):
+        return GraphMetricsReport(
+            profile_id=profile_id, engine=computed.get("engine", "networkx"),
+            facts=computed.get("facts", 0), edges=computed.get("edges", 0),
+            error=computed["error"],
+            duration_ms=int((time.monotonic() - started) * 1000),
+            notes=tuple(notes) + tuple(computed.get("notes", ())),
+        )
+    notes = notes + list(computed.get("notes", ()))
+    rows = computed["rows"]
+    engine, total = computed["engine"], computed["facts"]
+    edges_n, connected_n, isolated_n = computed["edges"], computed["connected"], computed["isolated"]
     try:
         removed = _write(db, profile_id, rows)
     except Exception as exc:  # noqa: BLE001
         return GraphMetricsReport(
             profile_id=profile_id, engine=engine, facts=total,
-            edges=len(edges), connected=len(connected),
-            isolated=len(isolated),
+            edges=edges_n, connected=connected_n,
+            isolated=isolated_n,
             error=f"metrics computed but not stored: {exc}",
             duration_ms=int((time.monotonic() - started) * 1000),
             notes=tuple(notes),
@@ -482,62 +581,87 @@ def compute_graph_metrics(
         profile_id=profile_id,
         engine=engine,
         facts=total,
-        edges=len(edges),
-        connected=len(connected),
-        isolated=len(isolated),
-        communities=len({c for c in communities.values()}),
+        edges=edges_n,
+        connected=connected_n,
+        isolated=isolated_n,
+        communities=computed["communities"],
         written=len(rows),
         removed=removed,
-        bridges_computed=bridges is not None,
+        bridges_computed=computed["bridges_computed"],
         duration_ms=int((time.monotonic() - started) * 1000),
         notes=tuple(notes),
     )
 
 
-def _write(db: Any, profile_id: str, rows: list[tuple[Any, ...]]) -> int:
-    """Replace this profile's rows in one transaction.
+#: Longest one chunk waits for in-flight recalls, so steady recall traffic slows
+#: the write-back but can never stop it.
+_RECALL_YIELD_MAX_SECONDS = 30.0
 
-    Deleting first is what makes the table a projection rather than an
-    accumulation: a fact that has since been withheld or erased must lose its
-    row, or the ranker keeps scoring something recall will never return. The
-    delete and the insert share a transaction so no recall ever sees the
-    intermediate state where the profile has no metrics at all.
+
+def _yield_to_recalls() -> None:
+    """Wait while a person's recall runs (bounded). Writing 22k rows beside a
+    recall stretched it to 6.1 s on a 22k-fact store (sampled); the rows are a
+    background projection and can land a moment later."""
+    from superlocalmemory.core import recall_gate
+
+    deadline = time.monotonic() + _RECALL_YIELD_MAX_SECONDS
+    while recall_gate.in_flight() > 0 and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+def _write(db: Any, profile_id: str, rows: list[tuple[Any, ...]]) -> int:
+    """Replace this profile's rows, a bounded chunk per transaction.
+
+    Deleting what is no longer visible is what makes the table a projection
+    rather than an accumulation: a fact that has since been withheld or erased
+    must lose its row, or the ranker keeps scoring something recall will never
+    return.
+
+    One transaction for the whole table held the store's write lock for 2.3 s
+    on a 22k-fact store - longer than an edit's 2 s budget, so edits failed
+    whenever a pass landed. Each chunk now commits on its own. Rows are
+    upserted, never deleted and re-inserted, so between chunks a recall sees
+    some scores from this pass and some from the last one, never a profile
+    with no metrics at all.
     """
-    removed = 0
-    with _short_connection(db) as conn:
-        _ensure_bridge_column(conn)
-        keep = {row[0] for row in rows}
+    with _read_connection(db) as conn:
         existing = {
             str(r[0]) for r in conn.execute(
                 "SELECT fact_id FROM fact_importance WHERE profile_id = ?",
                 (profile_id,),
             ).fetchall()
         }
-        stale = existing - keep
-        for index in range(0, len(list(stale)), 800):
-            chunk = list(stale)[index:index + 800]
-            placeholders = ",".join("?" for _ in chunk)
+    stale = sorted(existing - {row[0] for row in rows})
+    with _short_connection(db) as conn:
+        _ensure_bridge_column(conn)
+    for index in range(0, len(stale), 800):
+        _yield_to_recalls()  # a delete takes the same write lock as an insert
+        chunk = stale[index:index + 800]
+        placeholders = ",".join("?" for _ in chunk)
+        with _short_connection(db) as conn:
             conn.execute(
                 f"DELETE FROM fact_importance WHERE profile_id = ? "
                 f"AND fact_id IN ({placeholders})",
                 (profile_id, *chunk),
             )
-            removed += len(chunk)
-        conn.executemany(
-            "INSERT INTO fact_importance "
-            "(fact_id, profile_id, pagerank_score, community_id, "
-            " degree_centrality, bridge_score, computed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, datetime('now')) "
-            "ON CONFLICT(fact_id) DO UPDATE SET "
-            "  profile_id = excluded.profile_id, "
-            "  pagerank_score = excluded.pagerank_score, "
-            "  community_id = excluded.community_id, "
-            "  degree_centrality = excluded.degree_centrality, "
-            "  bridge_score = excluded.bridge_score, "
-            "  computed_at = excluded.computed_at",
-            rows,
-        )
-    return removed
+    for index in range(0, len(rows), _WRITE_CHUNK):
+        _yield_to_recalls()
+        with _short_connection(db) as conn:
+            conn.executemany(
+                "INSERT INTO fact_importance "
+                "(fact_id, profile_id, pagerank_score, community_id, "
+                " degree_centrality, bridge_score, computed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, datetime('now')) "
+                "ON CONFLICT(fact_id) DO UPDATE SET "
+                "  profile_id = excluded.profile_id, "
+                "  pagerank_score = excluded.pagerank_score, "
+                "  community_id = excluded.community_id, "
+                "  degree_centrality = excluded.degree_centrality, "
+                "  bridge_score = excluded.bridge_score, "
+                "  computed_at = excluded.computed_at",
+                rows[index:index + _WRITE_CHUNK],
+            )
+    return len(stale)
 
 
 def _ensure_bridge_column(conn: sqlite3.Connection) -> None:
@@ -570,7 +694,7 @@ def metrics_are_stale(db: Any, profile_id: str) -> tuple[bool, str]:
     column.
     """
     try:
-        with _short_connection(db) as conn:
+        with _read_connection(db) as conn:
             from superlocalmemory.storage.database import (
                 visible_fact_clause_for_connection,
             )

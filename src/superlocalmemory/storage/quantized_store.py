@@ -117,11 +117,12 @@ class QuantizedEmbeddingStore:
             return False
 
     def load(
-        self, fact_id: str, profile_id: str,
+        self, fact_id: str, profile_id: str, *, include_qjl: bool = True,
     ) -> QuantizedEmbedding | None:
         """Load a quantized embedding by fact_id and profile_id.
 
-        Returns None if not found.
+        Returns None if not found. Repair can skip the optional sketch with
+        ``include_qjl=False`` so corrupt sketches do not hide valid base data.
         """
         try:
             rows = self._db.execute(
@@ -139,7 +140,7 @@ class QuantizedEmbeddingStore:
                 radius=float(row["radius"]),
                 angle_indices=bytes(row["angle_indices"]),
                 bit_width=int(row["bit_width"]),
-                qjl_bits=bytes(row["qjl_bits"]) if row["qjl_bits"] else None,
+                qjl_bits=bytes(row["qjl_bits"]) if include_qjl and row["qjl_bits"] else None,
             )
         except Exception as exc:
             logger.error("load failed for fact_id=%s: %s", fact_id, exc)
@@ -160,6 +161,22 @@ class QuantizedEmbeddingStore:
         the legacy all-quantized-row behavior.
         Returns [(fact_id, similarity)] sorted descending.
         """
+        rows = self._search_rows(profile_id, bit_widths)
+        results = []
+        for row in rows:
+            try:
+                result = self._score_row(query_embedding, dict(row))
+                if not np.isfinite(result[1]):
+                    raise ValueError("non-finite quantized score")
+                results.append(result)
+            except (ValueError, TypeError, IndexError, KeyError) as exc:
+                logger.warning("Quantized fact_id=%s skipped; repair base embedding: %s",
+                               row["fact_id"], exc)
+        results.sort(key=lambda x: (-x[1], x[0]))
+        return results[:top_k]
+
+    def _search_rows(self, profile_id, bit_widths):
+        """Read persisted precision tiers without forgotten rows."""
         if bit_widths is not None and not bit_widths:
             return []
         try:
@@ -188,37 +205,32 @@ class QuantizedEmbeddingStore:
             logger.error("search query failed: %s", exc)
             return []
 
-        if not rows:
-            return []
+        return rows
 
-        # Build QuantizedEmbedding objects and compute similarities
-        results: list[tuple[str, float]] = []
-        for row in rows:
-            d = dict(row)
-            qe = QuantizedEmbedding(
-                fact_id=d["fact_id"],
-                radius=float(d["radius"]),
-                angle_indices=bytes(d["angle_indices"]),
-                bit_width=int(d["bit_width"]),
-                qjl_bits=bytes(d["qjl_bits"]) if d["qjl_bits"] else None,
-            )
-
-            sim = self._polar.approximate_similarity(query_embedding, qe)
-
-            # QJL correction (HR-07: optional)
-            if qe.qjl_bits and self._qjl:
-                correction = self._qjl.estimate_correction(
-                    query_embedding, qe.qjl_bits,
-                )
-                sim += correction
-
-            results.append((qe.fact_id, sim))
-
-        # Sort by descending similarity; use fact_id as the tie-break so that
-        # two facts with identical approximate similarity always return in the
-        # same order regardless of SQLite storage layout or insertion sequence.
-        results.sort(key=lambda x: (-x[1], x[0]))
-        return results[:top_k]
+    def _score_row(self, query_embedding: NDArray, row: dict) -> tuple[str, float]:
+        """Convert the corrected inner product to original-vector cosine units."""
+        qe = QuantizedEmbedding(
+            fact_id=row["fact_id"], radius=float(row["radius"]),
+            angle_indices=bytes(row["angle_indices"]), bit_width=int(row["bit_width"]),
+            qjl_bits=bytes(row["qjl_bits"]) if row["qjl_bits"] else None,
+        )
+        if not qe.qjl_bits or self._qjl is None:
+            return qe.fact_id, self._polar.approximate_similarity(query_embedding, qe)
+        denominator = float(np.linalg.norm(query_embedding)) * qe.radius
+        if denominator < 1e-12:
+            return qe.fact_id, 0.0
+        inner_product = float(np.dot(query_embedding, self._polar.decode(qe)))
+        try:
+            if len(qe.qjl_bits) == (self._config.qjl.projection_dim + 7) // 8:
+                raise ValueError("legacy signs lack residual magnitude")
+            correction = self._qjl.estimate_correction(query_embedding, qe.qjl_bits)
+            if not np.isfinite(correction):
+                raise ValueError("non-finite QJL correction")
+        except (ValueError, TypeError) as exc:
+            logger.warning("QJL fact_id=%s unavailable; using base score; repair with "
+                           "slm quantize --execute: %s", qe.fact_id, exc)
+            return qe.fact_id, self._polar.approximate_similarity(query_embedding, qe)
+        return qe.fact_id, (inner_product + correction) / denominator
 
     # -- Compression helpers -----------------------------------------------
 

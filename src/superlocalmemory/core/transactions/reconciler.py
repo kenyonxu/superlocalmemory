@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib as _hashlib
 import hmac as _hmac
 import json
 import sqlite3

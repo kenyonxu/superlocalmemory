@@ -36,10 +36,14 @@ async function loadCompliance() {
         // Task C: show chain-integrity indicator
         var chainEl = document.getElementById('cp-chain-integrity');
         if (chainEl && auditData) {
-            var ok = auditData.chain_verified !== false;
-            chainEl.innerHTML = ok
-                ? '<span class="badge bg-success"><i class="bi bi-shield-check"></i> Chain verified</span>'
-                : '<span class="badge bg-danger"><i class="bi bi-shield-x"></i> Chain integrity issue</span>';
+            // Say what the check covered (server label); never "verified" by default.
+            var ok = auditData.chain_verified === true;
+            var label = auditData.integrity_label || (ok ? 'Order verified' : 'Integrity not checked');
+            var badgeEl = document.createElement('span');
+            badgeEl.className = 'badge ' + (ok ? 'bg-success' : 'bg-danger');
+            badgeEl.textContent = label;
+            chainEl.textContent = '';
+            chainEl.appendChild(badgeEl);
         }
     } catch (error) {
         console.error('Error loading compliance:', error);
@@ -64,7 +68,7 @@ function renderCompliancePolicies(data) {
     if (policies.length === 0) {
         var empty = document.createElement('div');
         empty.className = 'text-center text-muted py-3';
-        empty.textContent = 'No retention policies configured. Create one above or use the set_retention_policy MCP tool.';
+        empty.textContent = 'No retention policies yet. Create one above.';
         container.appendChild(empty);
         return;
     }

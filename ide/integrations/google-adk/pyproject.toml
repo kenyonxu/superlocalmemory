@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Google ADK BaseMemoryService backed by a local SuperLocalMemory data root"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
-requires-python = ">=3.11,<3.15"
+requires-python = ">=3.12,<3.15"
 authors = [
     { name = "Varun Pratap Bhardwaj" },
 ]
@@ -21,9 +21,11 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+# Upstream dependency contract opened 2026-10-11:
+# https://pypi.org/pypi/google-adk/json
+# SLM runs separately through SLM_ENGINE_PYTHON; do not embed its runtime here.
 dependencies = [
     "google-adk>=2.5.0",
-    "superlocalmemory>=3.6.23,<5",
 ]
 
 [project.urls]
@@ -33,6 +35,13 @@ Repository = "https://github.com/qualixar/superlocalmemory"
 
 [tool.hatch.build.targets.wheel]
 packages = ["google_adk_superlocalmemory"]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+package = "google_adk_superlocalmemory"
+
+[tool.hatch.build.targets.sdist]
+include = ["google_adk_superlocalmemory", "hatch_build.py", "pyproject.toml", "README.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

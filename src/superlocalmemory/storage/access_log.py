@@ -60,6 +60,10 @@ class AccessLog:
                 "VALUES (?, ?, ?, ?, ?)",
                 (log_id, fact_id, profile_id, access_type, session_id),
             )
+            if access_type != "consolidation":
+                from superlocalmemory.storage.retention_access import advance_clock
+
+                advance_clock(self._db, fact_id, profile_id, log_id)
             return log_id
         except Exception as exc:
             logger.debug("store_access failed for fact_id=%s: %s", fact_id, exc)
@@ -79,14 +83,19 @@ class AccessLog:
         count = 0
         for fact_id in fact_ids:
             result = self.store_access(
-                fact_id, profile_id, access_type, session_id,
+                fact_id,
+                profile_id,
+                access_type,
+                session_id,
             )
             if result:
                 count += 1
         return count
 
     def get_latest_access_time(
-        self, fact_id: str, profile_id: str,
+        self,
+        fact_id: str,
+        profile_id: str,
     ) -> str | None:
         """Most recent access timestamp for a fact.
 
@@ -107,14 +116,14 @@ class AccessLog:
             return None
 
     def get_access_count(
-        self, fact_id: str, profile_id: str,
+        self,
+        fact_id: str,
+        profile_id: str,
     ) -> int:
         """Total access count for a fact."""
         try:
             rows = self._db.execute(
-                "SELECT COUNT(*) AS c "
-                "FROM fact_access_log "
-                "WHERE fact_id = ? AND profile_id = ?",
+                "SELECT COUNT(*) AS c FROM fact_access_log WHERE fact_id = ? AND profile_id = ?",
                 (fact_id, profile_id),
             )
             if rows:
@@ -125,7 +134,9 @@ class AccessLog:
             return 0
 
     def get_all_access_times(
-        self, profile_id: str, limit: int = 1000,
+        self,
+        profile_id: str,
+        limit: int = 1000,
     ) -> dict[str, str]:
         """Latest access time for all facts in a profile.
 
@@ -147,7 +158,10 @@ class AccessLog:
             return {}
 
     def get_frequently_accessed(
-        self, profile_id: str, min_count: int = 3, limit: int = 100,
+        self,
+        profile_id: str,
+        min_count: int = 3,
+        limit: int = 100,
     ) -> list[tuple[str, int]]:
         """Facts accessed at least min_count times.
 

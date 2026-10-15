@@ -14,7 +14,6 @@ Covers:
 
 from __future__ import annotations
 
-import sqlite3
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -41,8 +40,6 @@ def _make_app():
 def _mock_slm_config():
     """Build a mock SLMConfig with consolidation defaults."""
     from superlocalmemory.core.config import (
-        ConsolidationConfig,
-        EmbeddingConfig,
         SLMConfig,
     )
     from superlocalmemory.storage.models import Mode

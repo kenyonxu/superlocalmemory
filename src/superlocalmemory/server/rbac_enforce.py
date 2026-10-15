@@ -17,17 +17,26 @@ Principal model
 * **owner** — the machine operator (already proved machine auth via
   write_identity; no user session). In personal mode the owner bypasses RBAC
   (all permissions). When the org turns on *require_login* (company mode) the
-  owner bypass is disabled and a user session is mandatory.
+  owner bypass is disabled for data and a user session is mandatory. The owner
+  keeps MANAGE only through the daemon capability (a 0600 file that is never
+  served over HTTP: the CLI break-glass for a locked-out admin). The install
+  token and an API key are NOT authority to administer: the install token is
+  handed to any loopback caller by ``GET /internal/token`` and an API key
+  reaches the LAN, so either one alone would let anyone switch company mode
+  off and read everyone's data. Administration then needs a signed-in user who
+  holds MANAGE. A session token that does not resolve is refused (401) rather
+  than treated as the owner. With no users enrolled yet the owner is still the
+  machine, so the first administrator can be created.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import HTTPException, Request
 
 from superlocalmemory.access.rbac import Permission, Role, permissions_for_role
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +65,106 @@ def _session_token(request: Request) -> str:
         return ""
 
 
+def has_machine_credential(request: Request) -> bool:
+    """True when the caller presents a valid machine credential.
+
+    Daemon capability, install token (loopback only) or API key. A bare
+    loopback peer with no credential is NOT a machine credential.
+    """
+    from superlocalmemory.server.write_identity import require_write_actor
+
+    try:
+        require_write_actor(
+            request,
+            getattr(request.app.state, "daemon_descriptor", None),
+            actor_kind="rbac-owner",
+        )
+    except HTTPException:
+        return False
+    return True
+
+
+def has_daemon_capability(request: Request) -> bool:
+    """True when the caller presents this daemon's private capability.
+
+    The capability lives in a 0600 file next to the daemon and is never served
+    over HTTP, so holding it proves access to this user's files.
+    """
+    from superlocalmemory.server.write_identity import require_daemon_actor
+
+    try:
+        require_daemon_actor(request, getattr(request.app.state, "daemon_descriptor", None))
+    except HTTPException:
+        return False
+    return True
+
+
+def company_mode_active(rbac: Any | None) -> bool:
+    """Company mode: users are enrolled and the workspace requires login."""
+    try:
+        return bool(rbac is not None and rbac.require_login() and rbac.user_count() > 0)
+    except Exception:  # noqa: BLE001 - an unreadable policy is treated as strict
+        return rbac is not None
+
+
+def require_machine_credential(request: Request) -> None:
+    """Reject (403) a caller that holds no valid machine credential."""
+    if not has_machine_credential(request):
+        raise HTTPException(
+            403,
+            detail=(
+                "This workspace requires login: administration needs the "
+                "local install token, the daemon capability or an API key."
+            ),
+        )
+
+
+INVALID_SESSION_MESSAGE = (
+    "Your session has ended (signed out, expired or revoked). Sign in again, "
+    "or remove the old session to continue as this computer's owner."
+)
+
+
+def _accounts_exist(rbac: Any) -> bool:
+    """Whether any team account exists. Unreadable counts as yes (fail closed)."""
+    try:
+        return rbac.user_count() > 0
+    except Exception:  # noqa: BLE001 - an unreadable store is not "no accounts"
+        return True
+
+
+def presented_session_user(rbac: Any | None, token: str) -> tuple[dict | None, bool]:
+    """``(user, refused)`` for a session token a caller presented.
+
+    ``refused`` is True when a token was presented, team accounts exist and the
+    token names nobody (signed out, expired, revoked, disabled, forged). That
+    caller once held, or claims, a user's limited role; it must never fall
+    back to the machine owner, in any mode (4.1.25 audit OPS-24: a viewer's
+    revoked session became the owner on its next request when login was
+    optional). With no accounts at all a stray token is ignored, so a single
+    operator with an old cookie is unchanged.
+    """
+    if rbac is None or not token:
+        return None, False
+    user = rbac.resolve_session(token)
+    if user:
+        return user, False
+    return None, _accounts_exist(rbac)
+
+
 def resolve_principal(request: Request) -> dict:
-    """Resolve the caller to a user (valid session) or the machine owner."""
+    """Resolve the caller to a user (valid session) or the machine owner.
+
+    A session token that does not resolve (expired, revoked, forged) is
+    refused with 401 in every mode once team accounts exist; it never silently
+    becomes the owner. Only a caller that presents no session is the owner.
+    """
     rbac = get_rbac_engine(request.app.state)
-    token = _session_token(request)
-    if rbac is not None and token:
-        user = rbac.resolve_session(token)
-        if user:
-            return {"kind": "user", **user}
+    user, refused = presented_session_user(rbac, _session_token(request))
+    if user:
+        return {"kind": "user", **user}
+    if refused:
+        raise HTTPException(401, detail=INVALID_SESSION_MESSAGE)
     return dict(OWNER_PRINCIPAL)
 
 
@@ -90,15 +191,31 @@ def require_permission(
     prof = profile or _active_profile()
 
     if principal["kind"] == "owner":
-        # The machine operator is root — they always retain MANAGE (they have
-        # shell access to the box regardless), so company mode can never lock
-        # administration out of the dashboard. require_login only gates the
-        # owner's DATA operations, forcing per-user login for read/write/etc.
-        if require_login and permission != Permission.MANAGE:
-            raise HTTPException(
-                401,
-                detail="Login required: this workspace enforces per-user access.",
-            )
+        # In company mode the owner keeps MANAGE only through the daemon
+        # capability (command-line break-glass): "no session" alone is any
+        # local process, and the install token / an API key are reachable by
+        # one. require_login also gates the owner's DATA operations.
+        if require_login:
+            if permission != Permission.MANAGE:
+                raise HTTPException(
+                    401,
+                    detail=(
+                        "Login required: this workspace enforces per-user "
+                        "access."
+                    ),
+                )
+            if company_mode_active(rbac):
+                if not has_daemon_capability(request):
+                    raise HTTPException(
+                        403,
+                        detail=(
+                            "Administration of a workspace that requires login "
+                            "needs a signed-in administrator, or the daemon "
+                            "capability from the command line."
+                        ),
+                    )
+            else:
+                require_machine_credential(request)  # first administrator
         return principal  # personal mode — operator is owner
 
     # Logged-in user: always enforced against their role.
@@ -115,6 +232,72 @@ def require_permission(
 def require_manage(request: Request, *, profile: str | None = None) -> dict:
     """Guard for user/role administration (MANAGE permission)."""
     return require_permission(request, Permission.MANAGE, profile=profile)
+
+
+GLOBAL_MANAGE_MESSAGE = (
+    "Your role does not allow changing this setting: it applies to every "
+    "workspace on this computer, so only the computer's owner or an "
+    "administrator of every workspace can change it."
+)
+
+
+def installation_workspaces(rbac: Any) -> frozenset[str]:
+    """Every workspace on this installation: those with members and those stored.
+
+    A workspace nobody belongs to still counts: switching company mode off,
+    for one, would open it to anyone. An unreadable profile list adds nothing
+    (the member list alone still decides), never a reason to say yes.
+    """
+    spaces = set(rbac.list_member_workspaces())
+    try:
+        from superlocalmemory.server.routes.helpers import _get_db_profiles
+
+        spaces.update(str(p["profile_id"]) for p in _get_db_profiles() if p.get("profile_id"))
+    except Exception:  # noqa: BLE001 - the membership list is the floor
+        logger.debug("installation workspaces: profile list unreadable", exc_info=True)
+    return frozenset(spaces)
+
+
+def holds_global_manage(rbac: Any, user_id: str) -> bool:
+    """True when ``user_id`` administers every workspace on this installation."""
+    if rbac is None:
+        return False
+    spaces = installation_workspaces(rbac)
+    return bool(spaces) and all(
+        rbac.has_permission(user_id, space, Permission.MANAGE) for space in spaces
+    )
+
+
+def require_global_manage(request: Request) -> dict:
+    """Authorize a change to installation-wide state (one setting for everyone).
+
+    The policy that turns login on or off, the Jev consent and key, the
+    provider, the embedding model, Optimize, restarts: none of these belongs
+    to one workspace, so MANAGE on the active one is not enough (4.1.25 PR 248
+    review, finding 1: an administrator of ``sales`` switched company mode off
+    for ``default``). Allowed: the machine owner under the same rules as any
+    MANAGE (personal mode, or the daemon capability in company mode), or a
+    signed-in user who administers every workspace.
+    """
+    principal = resolve_principal(request)
+    if principal["kind"] != "user":
+        return require_permission(request, Permission.MANAGE)
+    rbac = get_rbac_engine(request.app.state)
+    if holds_global_manage(rbac, principal["user_id"]):
+        return principal
+    raise HTTPException(403, detail=GLOBAL_MANAGE_MESSAGE)
+
+
+def has_global_manage(request: Request) -> bool:
+    """Whether the caller holds installation-wide authority (never raises)."""
+    try:
+        require_global_manage(request)
+    except HTTPException:
+        return False
+    except Exception:  # noqa: BLE001 - authority that cannot be read is not held
+        logger.warning("installation authority could not be read", exc_info=True)
+        return False
+    return True
 
 
 def resolve_actor_roles(request: Request, *, profile: str | None = None):
@@ -170,9 +353,18 @@ def principal_info(request: Request) -> dict:
     """Rich identity for /whoami: principal + role + effective permissions on
     the active profile. Never raises — used by the dashboard to render UI."""
     rbac = get_rbac_engine(request.app.state)
-    principal = resolve_principal(request)
+    session_invalid = False
+    try:
+        principal = resolve_principal(request)
+    except HTTPException:
+        # An expired session: the dashboard asks who it is before it shows the
+        # login form. Report the unauthenticated view and say the session is
+        # over, so the page can drop it (every other request is refused).
+        principal = dict(OWNER_PRINCIPAL)
+        session_invalid = True
     prof = _active_profile()
     info = {
+        "session_invalid": session_invalid,
         "kind": principal["kind"],
         "user_id": principal["user_id"],
         "username": principal["username"],
@@ -184,7 +376,12 @@ def principal_info(request: Request) -> dict:
     if principal["kind"] == "owner":
         # Owner has every permission (personal mode) unless login is required.
         info["role"] = "owner"
-        info["permissions"] = [p.value for p in Permission]
+        # A logged-out owner of a company workspace can do nothing from here.
+        company = company_mode_active(rbac)
+        info["permissions"] = (
+            [] if company and not has_daemon_capability(request)
+            else [p.value for p in Permission]
+        )
         return info
     role = rbac.get_role(principal["user_id"], prof) if rbac is not None else None
     info["role"] = role.value if role else None

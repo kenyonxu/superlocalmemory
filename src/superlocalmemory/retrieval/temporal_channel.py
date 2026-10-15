@@ -14,12 +14,18 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from dateutil.parser import ParserError, parse as dateutil_parse
+from dateutil.parser import ParserError
+from dateutil.parser import parse as dateutil_parse
 
 from superlocalmemory.encoding.temporal_parser import TemporalParser
+from superlocalmemory.retrieval.fact_cover import fact_table
+from superlocalmemory.retrieval.request_memories import demotes_requests, request_fact_ids
+from superlocalmemory.retrieval.scope_policy import authorized_topk, filter_authorized_results
+from superlocalmemory.retrieval.temporal_slice_cache import TemporalSliceCache
 from superlocalmemory.storage.database import _scope_where
 
 if TYPE_CHECKING:
@@ -28,6 +34,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_PROXIMITY_DAYS: float = 365.0
+#: Facts the recency fallback returns, and the most it reads to find them when
+#: captured prompts take some of the newest slots.
+_WANTED = 50
+_WIDEST = 3200
+_PROPER_RE = re.compile(r"\b([A-Z][a-z]+)\b")
 
 
 def _as_utc(dt: datetime | None) -> datetime | None:
@@ -73,6 +84,7 @@ class TemporalChannel:
 
     def __init__(self, db: DatabaseManager) -> None:
         self._db = db
+        self._slice_cache = TemporalSliceCache()
 
     def search(
         self,
@@ -139,6 +151,7 @@ class TemporalChannel:
                     profile_id,
                     include_global=include_global,
                     include_shared=include_shared,
+                    skip_requests=demotes_requests(query),
                 )
             if not entity_results:
                 return recent
@@ -148,7 +161,10 @@ class TemporalChannel:
                 # that is what this channel was asked about; entity matches
                 # follow, and anything already present keeps its better place.
                 seen = {fid for fid, _ in recent}
-                return recent + [(f, s) for f, s in entity_results if f not in seen]
+                return filter_authorized_results(
+                    self._db, recent + [(f, s) for f, s in entity_results if f not in seen],
+                    profile_id, include_global=include_global, include_shared=include_shared,
+                )
 
         events = self._load_events(
             profile_id, include_global=include_global, include_shared=include_shared,
@@ -187,7 +203,10 @@ class TemporalChannel:
                     scored[fid] = max(scored.get(fid, 0.0), best)
 
         results = sorted(scored.items(), key=lambda x: (-x[1], x[0]))
-        return results[:top_k]
+        return authorized_topk(
+            self._db, results, profile_id, top_k,
+            include_global=include_global, include_shared=include_shared,
+        )
 
     def _entity_temporal_search(
         self,
@@ -196,22 +215,14 @@ class TemporalChannel:
         include_global: bool | None = None,
         include_shared: bool | None = None,
     ) -> list[tuple[str, float]]:
-        """Metadata-first: find temporal events for entities mentioned in query.
-
-        "When did Alice do X?" → SQL filter by entity_id for Alice → return
-        all temporal facts about Alice. High precision for entity+time queries.
-        """
+        """Resolve scoped entity events in the original temporal rank order."""
         if include_global is None:
             include_global = bool(getattr(self, "include_global", False))
         if include_shared is None:
             include_shared = bool(getattr(self, "include_shared", False))
-        import re
-        _PROPER_RE = re.compile(r"\b([A-Z][a-z]+)\b")
         names = [m.group(1) for m in _PROPER_RE.finditer(query)]
-        # Also try title-cased version for lowercase queries
         if not names:
             names = [m.group(1) for m in _PROPER_RE.finditer(query.title())]
-        # Filter out common words from title-casing
         _stop = {"What", "When", "Where", "Who", "Which", "How", "Does", "Did",
                  "The", "That", "This", "There", "Then", "Have", "Has", "Had",
                  "About", "After", "Before", "From", "With", "Would", "Could",
@@ -220,7 +231,6 @@ class TemporalChannel:
         names = [n for n in names if n not in _stop]
         if not names:
             return []
-
         results: list[tuple[str, float]] = []
         seen: set[str] = set()
         where, params = _scope_where(
@@ -229,30 +239,14 @@ class TemporalChannel:
             include_shared=include_shared,
             prefix="af",
         )
-
         for name in names[:3]:  # Limit to first 3 entity mentions
-            # An empty name would match the placeholder entity that dated
-            # facts with no resolved entity attach their temporal events to
-            # (core/store_pipeline.py::_ensure_unresolved_entity, whose
-            # canonical_name is ''). Entity extraction does not produce an
-            # empty name, so this guard costs nothing and removes the one way
-            # the placeholder could ever surface as a real entity match.
             if not name or not name.strip():
                 continue
-            # Resolve the entity and event in one scope-filtered query. Looking
-            # up the entity only in the requester's profile made global events
-            # owned by another profile undiscoverable before authorization was
-            # even evaluated.
             rows = self._db.execute(
                 "SELECT te.fact_id FROM temporal_events AS te "
                 "JOIN canonical_entities AS ce ON ce.entity_id = te.entity_id "
-                "JOIN atomic_facts AS af ON af.fact_id = te.fact_id "
-                f"WHERE {where} AND LOWER(ce.canonical_name) = LOWER(?) "
-                # The score below is derived from each row's POSITION in this
-                # result. Position must reflect temporal order so that the comment
-                # "first events more likely relevant" holds: oldest fact first,
-                # tie-broken by fact_id so two facts created in the same instant
-                # produce the same score on two runs.
+                f"JOIN {fact_table(self._db)} ON af.fact_id = te.fact_id "
+                f"WHERE {where} AND ce.canonical_name COLLATE NOCASE = ? "
                 "ORDER BY af.created_at ASC, te.fact_id ASC",
                 (*params, name),
             )
@@ -260,11 +254,8 @@ class TemporalChannel:
                 fid = dict(row)["fact_id"]
                 if fid not in seen:
                     seen.add(fid)
-                    # Rank by position (first events more likely relevant) instead
-                    # of flat 0.85 which loses discrimination
                     rank_score = 0.85 - len(seen) * 0.02
                     results.append((fid, max(0.3, rank_score)))
-
         return results
 
     def _load_events(
@@ -292,19 +283,14 @@ class TemporalChannel:
             include_shared=include_shared,
             prefix="af",
         )
-        # The bound has to match what the caller is looking for. Taking the
-        # newest 5,000 rows is right when the question is "what is recent", and
-        # wrong when it is "what happened in March 2024" — those events carry old
-        # rowids and were simply never loaded, so the answer was missing rather
-        # than slow. When a target date is known, bound by proximity to THAT date
-        # instead; the scan stays bounded either way.
+        key = (profile_id, bool(include_global), bool(include_shared), near_date)
+        return self._slice_cache.load(
+            self._db, key, lambda: self._read_events(where, params, near_date))
+
+    def _read_events(self, where: str, params: list,
+                     near_date: str | None) -> list[dict]:
+        """The original SQL and ordering, including same-fact event ties."""
         if near_date is not None:
-            # Include events that carry only interval_start/interval_end with no
-            # referenced_date or observation_date. The original filter required
-            # at least one of the point-date columns to be non-NULL, which
-            # excluded duration events ("during March 2024") entirely. The
-            # ORDER BY now uses the best available date column so that duration
-            # events are ranked by their interval_start when no point date exists.
             rows = self._db.execute(
                 "SELECT te.fact_id, te.observation_date, te.referenced_date, "
                 "te.interval_start, te.interval_end, af.created_at "
@@ -314,9 +300,6 @@ class TemporalChannel:
                 "  AND (te.referenced_date IS NOT NULL "
                 "       OR te.observation_date IS NOT NULL "
                 "       OR te.interval_start IS NOT NULL) "
-                # Thousands of events can tie on the proximity expression when
-                # they share a date, and a tie with no secondary key is broken by
-                # storage order. That decides which of them survive the LIMIT.
                 "ORDER BY ABS(julianday(COALESCE(te.referenced_date, "
                 "                               te.observation_date, "
                 "                               te.interval_start)) "
@@ -336,11 +319,43 @@ class TemporalChannel:
             )
         return [dict(r) for r in rows]
 
+
+    def _newest_rows(self, where: str, params: list, skip_requests: bool) -> list:
+        """The 50 newest visible, non-stub facts, minus captured prompts if asked.
+
+        The SQL stays answerable from ``idx_facts_recent`` alone (see
+        storage/recency_index.py: a join to ``memories`` would read every
+        row's 40 KB of vectors again, 5.8 s cold on a 22k-fact store), so
+        prompts are removed afterwards, from a batched lookup on the few rows
+        read. A burst of prompts can fill the first fifty; the read then widens
+        fourfold, up to ``_WIDEST``, instead of returning fewer than fifty.
+        """
+        limit = _WANTED
+        while True:
+            rows = self._db.execute(
+                "SELECT af.fact_id, af.created_at "
+                "FROM atomic_facts AS af "
+                f"WHERE {where}"
+                f"{self._db.visible_fact_clause('af', exclude_non_answer=True)} "
+                "  AND af.created_at >= datetime('now', '-90 days') "
+                "ORDER BY af.created_at DESC, af.fact_id ASC "
+                f"LIMIT {limit}",
+                (*params,),
+            )
+            if not skip_requests:
+                return rows
+            requests = request_fact_ids(self._db, (dict(r).get("fact_id") for r in rows))
+            kept = [r for r in rows if dict(r).get("fact_id") not in requests]
+            if len(kept) >= _WANTED or len(rows) < limit or limit >= _WIDEST:
+                return kept[:_WANTED]
+            limit = min(limit * 4, _WIDEST)
+
     def _recency_fallback(
         self,
         profile_id: str,
         include_global: bool | None,
         include_shared: bool | None,
+        skip_requests: bool = True,
     ) -> list[tuple[str, float]]:
         """Return recently created facts with Gaussian age-decay scoring.
 
@@ -381,16 +396,16 @@ class TemporalChannel:
         # The recency fallback is where these rows won before: they have no
         # temporal_events at all, so they reached the top through created_at
         # alone. Fifty slots, and 1,195 withheld rows all written recently.
-        rows = self._db.execute(
-            "SELECT af.fact_id, af.created_at "
-            "FROM atomic_facts AS af "
-            f"WHERE {where}"
-            f"{self._db.visible_fact_clause('af')} "
-            "  AND af.created_at >= datetime('now', '-90 days') "
-            "ORDER BY af.created_at DESC, af.fact_id ASC "
-            "LIMIT 50",
-            (*params,),
-        )
+        #
+        # Stored stubs (hook bookkeeping) are kept out of the SQL, not just out
+        # of the result: recall drops them only after these fifty slots are
+        # spent, so on a store where ~1,056 of 5,443 facts written in 7 days
+        # were bookkeeping, the newest fifty were mostly rows that were then
+        # thrown away, and "What am I working on?" was answered from what
+        # little was left. Captured prompts (the user's own instructions to an
+        # agent, not what they are working on) are left out too, unless the
+        # question asks about what they asked.
+        rows = self._newest_rows(where, params, skip_requests)
 
         best: dict[str, float] = {}
         for row in rows:

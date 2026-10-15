@@ -168,7 +168,7 @@ def run_bounded_loop(
             return Outcome(Status.DONE, "gate-passed", lap, run_id)
 
         if no_progress(lap_changes, bounds.no_progress_window):
-            emit("halt", Verdict(False, "no-progress"), result)
+            emit("halt", Verdict(False, f"no-progress; {verdict.detail}"), result)
             return Outcome(Status.HALT, "no-progress", lap, run_id)
 
         emit("continue", verdict, result)

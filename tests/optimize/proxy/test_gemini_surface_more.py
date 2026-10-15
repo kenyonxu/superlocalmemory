@@ -7,9 +7,9 @@ import pytest
 from fastapi import FastAPI
 
 from superlocalmemory.optimize.config.schema import OptimizeConfig
+from superlocalmemory.optimize.proxy._helpers import _MockTransport
 from superlocalmemory.optimize.proxy.lifecycle import HookChain
 from superlocalmemory.optimize.proxy.server import ProxyApp, build_proxy_router
-from superlocalmemory.optimize.proxy._helpers import _MockTransport
 
 
 @pytest.mark.asyncio
@@ -80,10 +80,12 @@ async def test_gemini_openai_compat_passthrough() -> None:
 
 @pytest.mark.asyncio
 async def test_gemini_openai_compat_models_get() -> None:
-    """GET /v1beta/openai/models passthrough."""
+    """GET /v1beta/openai/models requires provider auth before passthrough."""
     config = OptimizeConfig.from_dict({})
+    captured = []
 
     async def handler(request):
+        captured.append(request)
         return httpx.Response(200, json={"data": []})
 
     proxy = ProxyApp(config=config)
@@ -95,9 +97,14 @@ async def test_gemini_openai_compat_models_get() -> None:
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
-        resp = await client.get("/v1beta/openai/models")
+        refused = await client.get("/v1beta/openai/models")
+        assert refused.status_code == 401
+        assert not captured
+        resp = await client.get("/v1beta/openai/models",
+                                headers={"authorization": "Bearer test"})
 
     assert resp.status_code == 200
+    assert captured[0].headers["authorization"] == "Bearer test"
     await proxy.http_client.aclose()
 
 

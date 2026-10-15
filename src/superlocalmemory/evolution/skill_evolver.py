@@ -1,6 +1,5 @@
 # Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
 # Licensed under AGPL-3.0-or-later - see LICENSE file
-# Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
 """Skill Evolver — orchestrates the full evolution pipeline.
 
@@ -14,68 +13,70 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 
 from __future__ import annotations
 
-import dataclasses
-import difflib
-import hashlib
 import json
 import logging
 import os
-import re
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from superlocalmemory.infra.data_root import canonical_data_root
-from superlocalmemory.evolution.types import (
-    EvolutionCandidate,
-    EvolutionRecord,
-    EvolutionStatus,
-    EvolutionType,
-    TriggerType,
-)
-from superlocalmemory.evolution.evolution_store import EvolutionStore
-from superlocalmemory.evolution.triggers import (
-    DegradationTrigger,
-    HealthCheckTrigger,
-    PostSessionTrigger,
-)
-from superlocalmemory.evolution import mutation_generator as mutgen
 from superlocalmemory.evolution import blind_verifier as verifier
+from superlocalmemory.evolution import mutation_generator as mutgen
 from superlocalmemory.evolution.budget import (
     BudgetExhausted,
     EvolutionBudget,
 )
+from superlocalmemory.evolution.evolution_store import EvolutionStore
 from superlocalmemory.evolution.llm_dispatch import _dispatch_llm
 from superlocalmemory.evolution.model_selection import (
     _MODEL_ALIASES,
     _resolve_model_alias,
     resolve_evolution_models,
 )
+from superlocalmemory.evolution.skill_artifacts import SkillArtifacts
+from superlocalmemory.evolution.triggers import (
+    DegradationTrigger,
+    HealthCheckTrigger,
+    PostSessionTrigger,
+)
+from superlocalmemory.evolution.types import (
+    EvolutionCandidate,
+)
+from superlocalmemory.infra.data_root import canonical_data_root
 
 logger = logging.getLogger(__name__)
 
-# Resolve the quarantine location under the selected runtime data root so a
-# custom SLM_DATA_DIR is honored rather than always writing under the home dir.
 EVOLVED_SKILLS_DIR = canonical_data_root() / "quarantine" / "skills"
 
-# Model aliasing + per-step selection live in ``model_selection`` — a single
-# source of truth shared with the config layer. ``_MODEL_ALIASES`` and
-# ``_resolve_model_alias`` are imported above and re-exported here for
-# callers/tests that still reference them via ``skill_evolver``.
-__all__ = ["SkillEvolver", "detect_backend", "_resolve_model_alias"]
+__all__ = ["SkillEvolver", "detect_backend", "_resolve_model_alias", "_MODEL_ALIASES"]
 
 
 def _ollama_running() -> bool:
     """Return True if a local Ollama daemon answers on the default port."""
     try:
         import urllib.request
+
         req = urllib.request.Request(
-            "http://127.0.0.1:11434/api/tags", method="GET",
+            "http://127.0.0.1:11434/api/tags",
+            method="GET",
         )
         with urllib.request.urlopen(req, timeout=2):  # noqa: S310
             return True
     except Exception:
         return False
+
+
+def _ollama_models() -> tuple[str, ...]:
+    """Discover installed models only; never pull or alter the shared server."""
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=2) as response:
+            data = json.load(response)
+        names = tuple(item["name"] for item in data.get("models", []) if "name" in item)
+        preferred = "llama3.2:latest"
+        return tuple(sorted(names, key=lambda name: (name != preferred, name)))
+    except (OSError, ValueError, KeyError, TypeError):
+        return ()
 
 
 def detect_backend() -> str:
@@ -85,15 +86,12 @@ def detect_backend() -> str:
     """
     import shutil
 
-    # 1. Claude CLI available?
     if shutil.which("claude"):
         return "claude"
 
-    # 2. Ollama running?
     if _ollama_running():
         return "ollama"
 
-    # 3. API key set?
     if os.environ.get("ANTHROPIC_API_KEY"):
         return "anthropic"
     if os.environ.get("OPENAI_API_KEY"):
@@ -102,7 +100,7 @@ def detect_backend() -> str:
     return "none"
 
 
-class SkillEvolver:
+class SkillEvolver(SkillArtifacts):
     """Main orchestrator for skill evolution.
 
     Call `run_consolidation_cycle()` from the consolidation pipeline.
@@ -128,30 +126,13 @@ class SkillEvolver:
         self._health = HealthCheckTrigger(db_path, profile_id=profile_id)
         self._config = config
         self._backend: str | None = None
-        # ResolvedModels, resolved lazily & cached via _get_models().
         self._models = None
         self._profile_id = profile_id
         self._current_cycle_id: str | None = None
-        # Injectable activator for testing (CRIT-2).
         self._activator = activator
 
-        # SB-3: SkillEvolver always holds a budget. Default one is rooted
-        # at ~/.superlocalmemory so production callers pick it up
-        # automatically. Tests inject their own.
         if budget is None:
             slm_home = canonical_data_root()
-            # ``learning_db`` must be learning.db: migration M010 creates
-            # evolution_llm_cost_log there. Every production caller
-            # (consolidation_engine, routes/evolution, MCP, CLI) passes
-            # memory.db as db_path, so handing db_path straight to the budget
-            # pointed it at a database where that table does not exist. Every
-            # evolution cycle then died with "no such table:
-            # evolution_llm_cost_log" — swallowed at debug level in
-            # consolidation step 11, so skill evolution silently never ran.
-            #
-            # Redirect only for the exact production filename. Tests pass
-            # ":memory:" or their own tmp file and must keep the old behaviour,
-            # rather than having a learning.db invented beside them.
             learning_db = Path(self._db_path)
             if learning_db.name == "memory.db":
                 learning_db = learning_db.parent / "learning.db"
@@ -162,12 +143,10 @@ class SkillEvolver:
             )
         self._budget = budget
 
-        # Phase 2 (Module 8): tamper-evident audit chain for evolution events.
-        # Never use ":memory:" in production — use file path next to db_path.
         if audit_chain is None:
             from superlocalmemory.compliance.audit import AuditChain
+
             if self._db_path == ":memory:":
-                # In-memory DB is test-only; use in-memory audit too.
                 audit_chain = AuditChain(":memory:")
             else:
                 audit_db = Path(self._db_path).parent / "audit.db"
@@ -189,7 +168,9 @@ class SkillEvolver:
         if evo_cfg is not None and hasattr(evo_cfg, "auto_approve"):
             return bool(evo_cfg.auto_approve)
         return os.environ.get("SLM_EVO_AUTO_APPROVE", "").strip() in (
-            "1", "true", "True",
+            "1",
+            "true",
+            "True",
         )
 
     def _get_activator(self):
@@ -197,6 +178,7 @@ class SkillEvolver:
         if self._activator is not None:
             return self._activator
         from superlocalmemory.evolution.skill_activator import SkillActivator
+
         return SkillActivator()
 
     def _get_backend(self) -> str:
@@ -230,9 +212,13 @@ class SkillEvolver:
         evo_cfg = getattr(self._config, "evolution", None)
         if evo_cfg is None:
             from superlocalmemory.core.config import EvolutionConfig
+
             evo_cfg = EvolutionConfig()
         self._models = resolve_evolution_models(
-            evo_cfg, backend, ollama_available=_ollama_running(),
+            evo_cfg,
+            backend,
+            ollama_available=_ollama_running(),
+            installed_models=_ollama_models() if backend == "ollama" else None,
         )
         return self._models
 
@@ -245,12 +231,20 @@ class SkillEvolver:
         so the consolidation worker can continue cleanly.
         """
         if not self._is_enabled():
-            return {"enabled": False, "message": "Evolution disabled. Enable via: slm config set evolution.enabled true"}
+            return {
+                "enabled": False,
+                "message": "Evolution disabled. Enable via: slm config set evolution.enabled true",
+            }
 
         backend = self._get_backend()
         if backend == "none":
-            return {"enabled": True, "backend": "none",
-                    "message": "No LLM backend available. Install Claude Code, Ollama, or set an API key."}
+            return {
+                "enabled": True,
+                "backend": "none",
+                "message": (
+                    "No LLM backend available. Install Claude Code, Ollama, or set an API key."
+                ),
+            }
 
         try:
             with self._budget.cycle() as _b:
@@ -267,28 +261,34 @@ class SkillEvolver:
                 "aborted": True,
                 "budget_exhausted": True,
                 "dimension": getattr(exc, "dimension", None),
-                "candidates": 0, "evolved": 0, "rejected": 0, "skipped": 0,
+                "candidates": 0,
+                "evolved": 0,
+                "rejected": 0,
+                "skipped": 0,
             }
         finally:
             self._current_cycle_id = None
 
     def _run_consolidation_body(
-        self, profile_id: str, backend: str,
+        self,
+        profile_id: str,
+        backend: str,
     ) -> dict:
         """Inner consolidation loop — runs under an open budget cycle."""
         self._store.reset_cycle(profile_id)
         results = {
-            "candidates": 0, "evolved": 0, "rejected": 0,
-            "skipped": 0, "quarantined": 0, "backend": backend,
+            "candidates": 0,
+            "evolved": 0,
+            "rejected": 0,
+            "skipped": 0,
+            "quarantined": 0,
+            "backend": backend,
         }
 
-        # Prune recovered skills from anti-loop tracking
         active_degraded = self._degradation.get_active_degraded(profile_id)
         self._store.prune_recovered(active_degraded)
 
-        # Trigger 2: Degradation
         candidates = self._degradation.scan(profile_id)
-        # Trigger 3: Health check (runs every Nth cycle)
         candidates.extend(self._health.scan(profile_id))
 
         results["candidates"] = len(candidates)
@@ -310,13 +310,17 @@ class SkillEvolver:
 
         logger.info(
             "Evolution cycle: %d candidates, %d evolved, %d rejected, %d skipped",
-            results["candidates"], results["evolved"],
-            results["rejected"], results["skipped"],
+            results["candidates"],
+            results["evolved"],
+            results["rejected"],
+            results["skipped"],
         )
         return results
 
     def run_post_session(
-        self, session_id: str, profile_id: str = "default",
+        self,
+        session_id: str,
+        profile_id: str = "default",
     ) -> dict:
         """Run after a session ends. Checks trigger 1.
 
@@ -335,15 +339,21 @@ class SkillEvolver:
                 getattr(exc, "dimension", "?"),
             )
             return {
-                "enabled": True, "aborted": True, "budget_exhausted": True,
+                "enabled": True,
+                "aborted": True,
+                "budget_exhausted": True,
                 "dimension": getattr(exc, "dimension", None),
-                "candidates": 0, "evolved": 0, "rejected": 0,
+                "candidates": 0,
+                "evolved": 0,
+                "rejected": 0,
             }
         finally:
             self._current_cycle_id = None
 
     def _run_post_session_body(
-        self, session_id: str, profile_id: str,
+        self,
+        session_id: str,
+        profile_id: str,
     ) -> dict:
         results = {"candidates": 0, "evolved": 0, "rejected": 0}
 
@@ -363,7 +373,9 @@ class SkillEvolver:
         return results
 
     def evolve_candidate(
-        self, candidate: EvolutionCandidate, profile_id: str = "default",
+        self,
+        candidate: EvolutionCandidate,
+        profile_id: str = "default",
     ) -> str:
         """Evolve a single candidate under a budget cycle (audit-10 fix).
 
@@ -386,256 +398,17 @@ class SkillEvolver:
             )
             return "skipped"
 
-    def _process_candidate(
-        self, candidate: EvolutionCandidate, profile_id: str,
-    ) -> str:
-        """Process a single evolution candidate through the governed state machine.
+    def _process_candidate(self, candidate: EvolutionCandidate, profile_id: str) -> str:
+        """Keep orchestration stages separate from model and artifact adapters."""
+        from superlocalmemory.evolution.candidate_pipeline import CandidatePipeline
 
-        State machine (Phase 2):
-          CANDIDATE (insert_record once)
-            → LLM confirm gate
-                fail → append_transition(CANDIDATE, REJECTED) → return "rejected"
-            → Generate mutation
-                fail → append_transition(CANDIDATE, FAILED) → return "rejected"
-            → Blind verify
-                fail → append_transition(CANDIDATE, REJECTED) → return "rejected"
-                pass → append_transition(CANDIDATE, VERIFIED_QUARANTINED)
-                     → emit audit "skill_promotion"
-          VERIFIED_QUARANTINED
-            → no auto_approve → return "quarantined"
-            → auto_approve → append_transition(VQ, APPROVED)
-          APPROVED
-            → activate()
-                success → append_transition(APPROVED, ACTIVE) → emit "skill_activation"
-                        → return "evolved"
-                fail    → append_transition(APPROVED, ROLLED_BACK)
-                        → emit "skill_activation_failed" → return "rejected"
-
-        Returns one of: "evolved", "rejected", "skipped", "quarantined"
-        """
-        from superlocalmemory.evolution.skill_activator import SkillActivationError
-
-        now = datetime.now(timezone.utc).isoformat()
-        record_id = hashlib.sha256(
-            f"{candidate.skill_name}:{candidate.trigger.value}:{now}".encode(),
-        ).hexdigest()[:16]
-
-        # Anti-loop: check if already addressed
-        context_hash = hashlib.sha256(
-            json.dumps(list(candidate.evidence)).encode(),
-        ).hexdigest()[:12]
-
-        if self._store.is_addressed(candidate.skill_name, context_hash):
-            return "skipped"
-
-        if self._store.has_exceeded_attempts(candidate.skill_name, profile_id):
-            logger.info(
-                "Skill %s exceeded max attempts, flagging for review",
-                candidate.skill_name,
-            )
-            return "skipped"
-
-        # Mark as addressed (even on reject — prevents repeated scans)
-        self._store.mark_addressed(candidate.skill_name, context_hash)
-
-        # Step 1: Read original skill content
-        original_content = self._read_skill_content(candidate.skill_name)
-
-        # CRIT-1: insert_record is called EXACTLY ONCE per candidate.
-        # All subsequent state changes use append_transition with this record_id.
-        record = EvolutionRecord(
-            id=record_id,
-            skill_name=candidate.skill_name,
-            parent_skill_id=candidate.skill_name,
-            evolution_type=candidate.evolution_type,
-            trigger=candidate.trigger,
-            status=EvolutionStatus.CANDIDATE,
-            evidence=candidate.evidence,
-            original_content=original_content[:2000],
-            created_at=now,
-        )
-        self._store.insert_record(record, profile_id)
-
-        # Step 2: LLM confirmation gate (strict JSON parse)
-        confirmed = self._llm_confirm(candidate, original_content)
-        if not confirmed:
-            self._store.append_transition(
-                record_id, profile_id,
-                EvolutionStatus.CANDIDATE, EvolutionStatus.REJECTED,
-                reason="llm_confirmation_rejected",
-            )
-            return "rejected"
-
-        # Step 3: Generate mutation
-        prompt = mutgen.build_mutation_prompt(candidate, original_content)
-        evolved_content = self._generate_mutation(prompt)
-        if not evolved_content:
-            self._store.append_transition(
-                record_id, profile_id,
-                EvolutionStatus.CANDIDATE, EvolutionStatus.FAILED,
-                reason="mutation_generation_failed",
-            )
-            return "rejected"
-
-        # Step 4: Blind verification (independent model from generator)
-        description = self._extract_description(evolved_content)
-        v_prompt = verifier.build_verification_prompt(
-            candidate.skill_name, description, evolved_content,
-        )
-        v_result = self._blind_verify(v_prompt)
-        if not v_result.passed:
-            self._store.append_transition(
-                record_id, profile_id,
-                EvolutionStatus.CANDIDATE, EvolutionStatus.REJECTED,
-                reason=f"blind_verification: {v_result.reasoning}",
-            )
-            return "rejected"
-
-        # Step 5: Write to quarantine (returns path + dir_name — CRIT-2)
-        diff = self._compute_diff(original_content, evolved_content)
-        skill_path, dir_name = self._write_evolved_skill(
-            candidate, evolved_content, record_id,
-        )
-
-        # Compute generation from parent history
-        parent_history = self._store.get_skill_history(
-            candidate.skill_name, profile_id, limit=1,
-        )
-        parent_gen = (
-            parent_history[0].generation
-            if parent_history and parent_history[0].status == EvolutionStatus.PROMOTED
-            else 0
-        )
-
-        # CANDIDATE → VERIFIED_QUARANTINED
-        self._store.append_transition(
-            record_id, profile_id,
-            EvolutionStatus.CANDIDATE, EvolutionStatus.VERIFIED_QUARANTINED,
-            reason="blind_verified",
-            metadata={
-                "quarantine_dir_name": dir_name,
-                "diff_summary": self._summarize_diff(diff),
-                "generation": parent_gen + 1,
-            },
-        )
-        self._store.record_evolution_attempt(profile_id)
-
-        # Phase 2 (Module 8): emit "skill_promotion" audit event
-        evolved_hash = hashlib.sha256(evolved_content.encode()).hexdigest()
-        self._audit.log(
-            operation="skill_promotion",
-            agent_id=self._profile_id,
-            profile_id=self._profile_id,
-            content_hash=evolved_hash,
-            metadata={
-                "record_id": record_id,
-                "skill_name": candidate.skill_name,
-                "evolution_type": candidate.evolution_type.value,
-                "trigger": candidate.trigger.value,
-                "quarantine_dir": dir_name,
-            },
-        )
-
-        logger.info(
-            "Evolved skill: %s (%s via %s) → quarantine %s",
-            candidate.skill_name, candidate.evolution_type.value,
-            candidate.trigger.value, skill_path,
-        )
-
-        # Check auto-approve — if off, stop here for human review
-        if not self._is_auto_approve():
-            return "quarantined"
-
-        # VERIFIED_QUARANTINED → APPROVED (auto)
-        actor_id = "auto"
-        self._store.append_transition(
-            record_id, profile_id,
-            EvolutionStatus.VERIFIED_QUARANTINED, EvolutionStatus.APPROVED,
-            actor_id=actor_id, reason="auto_approved",
-        )
-
-        # APPROVED → ACTIVE or ROLLED_BACK
-        activator = self._get_activator()
-        try:
-            activation_result = activator.activate(
-                candidate.skill_name, dir_name, actor_id=actor_id,
-            )
-            self._store.append_transition(
-                record_id, profile_id,
-                EvolutionStatus.APPROVED, EvolutionStatus.ACTIVE,
-                actor_id=actor_id,
-                metadata={"live_path": activation_result.get("live_path", "")},
-            )
-            self._audit.log(
-                operation="skill_activation",
-                agent_id=actor_id,
-                profile_id=self._profile_id,
-                content_hash=activation_result["content_hash"],
-                metadata={
-                    "record_id": record_id,
-                    "skill_name": candidate.skill_name,
-                    "live_path": activation_result["live_path"],
-                    "backup_path": activation_result.get("backup_path"),
-                },
-            )
-            return "evolved"
-        except (SkillActivationError, FileNotFoundError, ValueError, OSError) as exc:
-            # Audit P1-1: broaden the catch. A missing quarantine artifact raises
-            # FileNotFoundError and a path-traversal guard raises ValueError; both
-            # previously escaped after APPROVED was recorded, leaving the machine
-            # stuck at APPROVED with no terminal transition.
-            # Audit P1-2: actually PERFORM the rollback instead of only logging
-            # one. The terminal status is honest — ROLLED_BACK only if a restore
-            # happened, otherwise FAILED (nothing was written to live).
-            try:
-                rb = activator.rollback(candidate.skill_name)
-                rolled_back = bool(rb.get("rolled_back"))
-            except Exception as rb_exc:  # rollback must never mask the original error
-                logger.error(
-                    "skill rollback errored for %s: %s",
-                    candidate.skill_name, rb_exc,
-                )
-                rolled_back = False
-            end_status = (
-                EvolutionStatus.ROLLED_BACK if rolled_back
-                else EvolutionStatus.FAILED
-            )
-            self._store.append_transition(
-                record_id, profile_id,
-                EvolutionStatus.APPROVED, end_status,
-                actor_id=actor_id, reason=str(exc),
-            )
-            self._audit.log(
-                operation="skill_activation_failed",
-                agent_id=actor_id,
-                profile_id=self._profile_id,
-                content_hash="",
-                metadata={
-                    "record_id": record_id,
-                    "skill_name": candidate.skill_name,
-                    "error": str(exc),
-                    "rolled_back": rolled_back,
-                },
-            )
-            logger.error(
-                "skill activation failed for %s: %s (%s)",
-                candidate.skill_name, exc,
-                "rolled back" if rolled_back else "failed, nothing to roll back",
-            )
-            return "rejected"
-
-    # ------------------------------------------------------------------
-    # LLM calls — single-line funnel through evolution.llm_dispatch
-    # ------------------------------------------------------------------
-    #
-    # SB-2: every LLM call goes through ``_dispatch_llm``. That function
-    # owns model validation, redact_secrets, backend registry, and the
-    # cost-log write. No other code in this module touches a backend.
-    # SB-4: ``_dispatch_llm`` routes the claude-CLI path through
-    # ``run_subprocess_safe`` — no bare ``subprocess.run`` here.
+        return CandidatePipeline(self, candidate, profile_id).run()
 
     def _llm_call(
-        self, prompt: str, max_tokens: int = 500, model: str = "haiku",
+        self,
+        prompt: str,
+        max_tokens: int = 500,
+        model: str = "haiku",
     ) -> str:
         """Funnel a prompt through :func:`_dispatch_llm`.
 
@@ -649,8 +422,6 @@ class SkillEvolver:
         if backend == "none":
             return ""
 
-        # Charge the budget BEFORE dispatching so the cap is protective.
-        # If budget is exhausted we degrade gracefully (empty string).
         try:
             self._budget.charge_llm_call()
             self._budget.check_time()
@@ -658,10 +429,6 @@ class SkillEvolver:
             logger.info("evolution _llm_call skipped: %s", exc)
             return ""
         except RuntimeError:
-            # charge_llm_call/check_time outside cycle() — shouldn't
-            # happen in production wiring, but if a caller invokes
-            # _llm_call without opening a cycle (e.g. tests), let it
-            # pass so legacy behaviour is preserved.
             pass
 
         resolved_model = _resolve_model_alias(model)
@@ -675,19 +442,10 @@ class SkillEvolver:
                 cycle_id=self._current_cycle_id,
             )
         except ValueError as exc:
-            # A ValueError from _dispatch_llm is a CONTRACT breach, not a
-            # runtime/transport failure: forbidden or unlisted model,
-            # non-positive max_tokens, max_tokens over MAX_TOKENS_CAP, or
-            # an empty profile_id. Every one is a misconfiguration in our
-            # own wiring — e.g. a caller requesting more tokens than the
-            # ceiling, which is exactly how mutation generation died
-            # silently for releases. Log at ERROR so it surfaces in logs
-            # and CI instead of masquerading as a normal "no LLM"
-            # fail-closed. Behaviour is unchanged: we still return "" so a
-            # consolidation cycle degrades gracefully rather than crashing.
             logger.error(
                 "evolution dispatch misconfigured — no evolution this "
-                "call (returning empty string): %s", exc,
+                "call (returning empty string): %s",
+                exc,
             )
             return ""
         except Exception as exc:  # noqa: BLE001 — fail-closed
@@ -711,13 +469,12 @@ class SkillEvolver:
         if not response:
             return False
         stripped = response.strip()
-        # Find first JSON object — LLM may emit leading explanation text.
         start = stripped.find("{")
         end = stripped.rfind("}")
         if start == -1 or end == -1 or end <= start:
             return False
         try:
-            obj = json.loads(stripped[start:end + 1])
+            obj = json.loads(stripped[start : end + 1])
         except (json.JSONDecodeError, ValueError):
             return False
         if not isinstance(obj, dict):
@@ -726,7 +483,9 @@ class SkillEvolver:
         return isinstance(decision, str) and decision.lower() == "approve"
 
     def _build_confirm_prompt(
-        self, candidate: EvolutionCandidate, original: str,
+        self,
+        candidate: EvolutionCandidate,
+        original: str,
     ) -> str:
         """Build the strict-JSON LLM confirmation prompt."""
         return (
@@ -748,12 +507,13 @@ class SkillEvolver:
         """
         prompt = self._build_confirm_prompt(candidate, original)
         response = self._llm_call(
-            prompt, max_tokens=100, model=self._get_models().confirm,
+            prompt,
+            max_tokens=100,
+            model=self._get_models().confirm,
         )
         if not response:
             logger.warning(
-                "LLM confirmation gate: empty response, "
-                "skipping evolution for %s",
+                "LLM confirmation gate: empty response, skipping evolution for %s",
                 candidate.skill_name,
             )
             return False  # Fail-closed: no LLM = no evolution
@@ -761,7 +521,8 @@ class SkillEvolver:
         if not approved:
             logger.info(
                 "LLM confirmation gate rejected %s (response: %.80r)",
-                candidate.skill_name, response,
+                candidate.skill_name,
+                response,
             )
         return approved
 
@@ -774,7 +535,9 @@ class SkillEvolver:
         mutation_model = self._get_models().mutation
         for attempt in range(mutgen.MAX_APPLY_RETRIES):
             response = self._llm_call(
-                prompt, max_tokens=4000, model=mutation_model,
+                prompt,
+                max_tokens=4000,
+                model=mutation_model,
             )
             if not response:
                 return None
@@ -786,7 +549,9 @@ class SkillEvolver:
                 prompt = mutgen.build_retry_prompt(prompt, error, attempt + 1)
             else:
                 prompt = mutgen.build_retry_prompt(
-                    prompt, "No valid SKILL.md content found in output", attempt + 1,
+                    prompt,
+                    "No valid SKILL.md content found in output",
+                    attempt + 1,
                 )
         return None
 
@@ -798,131 +563,14 @@ class SkillEvolver:
         generator can't grade its own homework.
         """
         response = self._llm_call(
-            prompt, max_tokens=500, model=self._get_models().verify,
+            prompt,
+            max_tokens=500,
+            model=self._get_models().verify,
         )
         if not response:
             return verifier.VerificationResult(
-                passed=False, confidence=0.0, reasoning="No LLM response",
+                passed=False,
+                confidence=0.0,
+                reasoning="No LLM response",
             )
         return verifier.parse_verification_response(response)
-
-    # ------------------------------------------------------------------
-    # Skill I/O
-    # ------------------------------------------------------------------
-
-    def _read_skill_content(self, skill_name: str) -> str:
-        """Read a skill's SKILL.md content. Searches known skill directories."""
-        search_dirs = [
-            Path.home() / ".claude" / "skills",
-            Path.home() / ".claude" / "plugins",
-            EVOLVED_SKILLS_DIR,
-        ]
-
-        # Handle namespaced skills (e.g., "superpowers:brainstorming")
-        if ":" in skill_name:
-            parts = skill_name.split(":")
-            search_patterns = [
-                f"**/{parts[-1]}/SKILL.md",
-                f"**/{skill_name.replace(':', '/')}/SKILL.md",
-                f"**/skills/{parts[-1]}/SKILL.md",
-            ]
-        else:
-            search_patterns = [f"**/{skill_name}/SKILL.md"]
-
-        for search_dir in search_dirs:
-            if not search_dir.exists():
-                continue
-            for pattern in search_patterns:
-                matches = list(search_dir.glob(pattern))
-                if matches:
-                    try:
-                        return matches[0].read_text(encoding="utf-8")
-                    except OSError:
-                        continue
-
-        return ""
-
-    def _write_evolved_skill(
-        self,
-        candidate: EvolutionCandidate,
-        content: str,
-        record_id: str,
-    ) -> tuple[Path, str]:
-        """Write evolved SKILL.md to the quarantine directory for review.
-
-        Returns (skill_path, dir_name) — both are needed by _process_candidate:
-          - skill_path: the Path to the written SKILL.md (for logging)
-          - dir_name: the quarantine subdirectory name (CRIT-2; passed to SkillActivator)
-
-        The dir_name is DISTINCT from candidate.skill_name. It is the sanitized,
-        versioned subdirectory inside the quarantine root, e.g. "brainstorming-vabc12".
-        """
-        EVOLVED_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-
-        # Build directory name. skill_name derives from a behavioral-assertion
-        # trigger (any non-whitespace), so sanitize for ALL evolution types —
-        # "../../.claude/settings" must not escape EVOLVED_SKILLS_DIR.
-        base_name = re.sub(r"[^a-zA-Z0-9_-]", "-",
-                           candidate.skill_name).lower()[:50] or "skill"
-        if candidate.evolution_type == EvolutionType.FIX:
-            dir_name = f"{base_name}-v{record_id[:6]}"
-        elif candidate.evolution_type == EvolutionType.DERIVED:
-            # Extract name from evolved content frontmatter
-            name_match = re.search(r"name:\s*(.+)", content)
-            dir_name = name_match.group(1).strip() if name_match else f"{base_name}-derived"
-            dir_name = re.sub(r"[^a-zA-Z0-9_-]", "-", dir_name).lower()[:50]
-        else:
-            dir_name = base_name
-        dir_name = dir_name or "skill"
-
-        skill_dir = EVOLVED_SKILLS_DIR / dir_name
-        # Defense in depth: never write outside the evolved-skills directory.
-        if not str(skill_dir.resolve()).startswith(str(EVOLVED_SKILLS_DIR.resolve())):
-            raise ValueError(f"evolved skill path escapes sandbox: {dir_name!r}")
-        skill_dir.mkdir(parents=True, exist_ok=True)
-
-        skill_path = skill_dir / "SKILL.md"
-        skill_path.write_text(content, encoding="utf-8")
-
-        # Write metadata sidecar (CRIT-2: includes quarantine_dir_name for recovery)
-        meta = {
-            "skill_id": dir_name,
-            "parent_skill_id": candidate.skill_name,
-            "evolution_type": candidate.evolution_type.value,
-            "trigger": candidate.trigger.value,
-            "record_id": record_id,
-            "quarantine_dir_name": dir_name,
-            "evidence": list(candidate.evidence),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        meta_path = skill_dir / ".skill_meta.json"
-        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-
-        return skill_path, dir_name
-
-    # ------------------------------------------------------------------
-    # Utilities
-    # ------------------------------------------------------------------
-
-    def _extract_description(self, content: str) -> str:
-        """Extract description from SKILL.md frontmatter."""
-        match = re.search(r"description:\s*(.+?)(?:\n|---)", content)
-        return match.group(1).strip() if match else "Skill for AI agent tasks"
-
-    def _compute_diff(self, original: str, evolved: str) -> str:
-        if not original:
-            return "(new skill — no original to diff)"
-        diff = difflib.unified_diff(
-            original.splitlines(keepends=True),
-            evolved.splitlines(keepends=True),
-            fromfile="original",
-            tofile="evolved",
-            n=3,
-        )
-        return "".join(diff)
-
-    def _summarize_diff(self, diff: str) -> str:
-        """Count additions and removals."""
-        additions = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
-        removals = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
-        return f"+{additions}/-{removals} lines"

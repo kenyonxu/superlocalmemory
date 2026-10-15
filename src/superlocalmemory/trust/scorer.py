@@ -22,10 +22,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import logging
-import math
 from datetime import UTC, datetime
-
-from superlocalmemory.storage.models import TrustScore
 
 logger = logging.getLogger(__name__)
 

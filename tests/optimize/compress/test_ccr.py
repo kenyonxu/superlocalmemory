@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 from superlocalmemory.optimize.compress.ccr import CCRStore
 
 

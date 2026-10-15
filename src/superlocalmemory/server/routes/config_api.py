@@ -51,8 +51,8 @@ def _require_admin(request: Request) -> None:
     this BEFORE the handler's try/except so the 401/403 is not swallowed into a
     500.
     """
-    from superlocalmemory.server.rbac_enforce import require_manage
-    require_manage(request)
+    from superlocalmemory.server.rbac_enforce import require_global_manage
+    require_global_manage(request)
 
 # ---------------------------------------------------------------------------
 # Allowed backend values
@@ -284,13 +284,16 @@ def put_storage_config(request: Request, body: StorageConfigUpdate):
 
 
 @router.get("/daemon/config")
-def get_daemon_config():
+def get_daemon_config(request: Request = None):
     """Return current daemon configuration."""
     try:
         data = _read_config()
+        from superlocalmemory.cli.deployment import configured_port
+        identity = getattr(request.app.state, "daemon_descriptor", None) if request else None
         return {
             "idle_timeout": data.get("daemon_idle_timeout", 0),
-            "port": data.get("daemon_port", 8765),
+            "port": identity.port if identity else configured_port(data.get("daemon_port")),
+            "configured_port": data.get("daemon_port", 8765),
             "legacy_port": data.get("daemon_legacy_port", 8767),
             "enable_legacy_port": data.get("daemon_enable_legacy_port", True),
         }
@@ -640,6 +643,39 @@ def get_ollama_models():
         }
     except Exception:
         logger.exception("get_ollama_models failed")
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+
+@router.get("/models/catalog")
+def get_models_catalog():
+    """The model catalogue plus what to recommend on THIS computer (4.1.22).
+
+    Installed models come from ``get_ollama_models`` (the same one /api/tags
+    read, so no second probe); ``local_recommendations`` ranks them by SLM's
+    own extraction test and suggests pulls that fit this machine's memory.
+    """
+    from superlocalmemory.core import model_catalog
+    from superlocalmemory.core.machine import total_ram_gb
+
+    try:
+        ollama = get_ollama_models()
+        ollama = ollama if isinstance(ollama, dict) else {}
+        names = [m.get("name", "") for m in ollama.get("installed", [])]
+        ram = round(total_ram_gb(), 1) or None
+        recs = model_catalog.recommend_local_llms(ram, names)
+        return {
+            **model_catalog.catalog(),
+            "machine": {"ram_gb": ram},
+            "ollama": {"reachable": bool(ollama.get("reachable")),
+                       "detail": ollama.get("detail", ""), "installed": names},
+            "local_recommendations": [
+                {"model": r.model_id, "installed": r.installed, "fits": r.fits,
+                 "reason": r.reason, "label": r.entry.label if r.entry else r.model_id}
+                for r in recs],
+            "best_local_llm": model_catalog.best_local_llm(ram, names),
+        }
+    except Exception:
+        logger.exception("get_models_catalog failed")
         return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 

@@ -130,7 +130,15 @@ class TestSubConfigs:
     def test_math_defaults(self) -> None:
         mc = MathConfig()
         assert mc.fisher_temperature == 15.0
-        assert mc.sheaf_at_encoding is True
+        # 4.1.18: off by default. A measured A/B on a real store showed the
+        # sheaf check changes no recall answer, while it costs time on every
+        # store and every maintenance pass. The code is kept; True re-enables it.
+        assert mc.sheaf_at_encoding is False
+
+    def test_every_mode_inherits_the_sheaf_default(self) -> None:
+        """The mode presets build their own MathConfig; none may switch it back on."""
+        for mode in Mode:
+            assert SLMConfig.for_mode(mode).math.sheaf_at_encoding is False, mode
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +160,9 @@ class TestSLMConfigForMode:
         assert cfg.mode == Mode.B
         assert cfg.llm.is_available is True
         assert cfg.llm.provider == "ollama"
-        assert cfg.llm.model == "llama3.2"
+        # 4.1.22: the catalogue default, not the old llama3.2 (it invented facts).
+        from superlocalmemory.core.model_catalog import DEFAULT_LOCAL_LLM
+        assert cfg.llm.model == DEFAULT_LOCAL_LLM != "llama3.2"
         assert cfg.embedding.is_cloud is False
         assert cfg.temporal_validator.mode == "b"
 
@@ -167,7 +177,8 @@ class TestSLMConfigForMode:
         )
         assert cfg.mode == Mode.C
         assert cfg.embedding.is_cloud is True
-        assert cfg.embedding.dimension == 3072
+        from superlocalmemory.core.model_catalog import OPENAI_EMBEDDING_DIMENSION
+        assert cfg.embedding.dimension == OPENAI_EMBEDDING_DIMENSION == 1536
         assert cfg.embedding.deployment_name == "embed-deploy"
         assert cfg.llm.is_available is True
         assert cfg.llm.provider == "openrouter"
@@ -194,6 +205,30 @@ class TestSLMConfigForMode:
         assert cfg.embedding.is_cloud is False
         assert cfg.embedding.dimension == 768
         assert cfg.embedding.model_name == "nomic-ai/nomic-embed-text-v1.5"
+
+    def test_mode_b_honours_a_custom_ollama_base_url(self) -> None:
+        """4.1.22: a non-default ollama_base_url (another host, another port)
+        must survive the template, not silently revert to localhost:11434."""
+        cfg = SLMConfig.for_mode(
+            Mode.B, embedding_ollama_base_url="http://ollama-box:9999",
+            embedding_ollama_model="mxbai-embed-large",
+        )
+        assert cfg.embedding.ollama_base_url == "http://ollama-box:9999"
+        assert cfg.embedding.ollama_model == "mxbai-embed-large"
+
+    def test_mode_b_defaults_the_ollama_base_url_when_unset(self) -> None:
+        cfg = SLMConfig.for_mode(Mode.B)
+        assert cfg.embedding.ollama_base_url == "http://localhost:11434"
+        assert cfg.embedding.ollama_model == "nomic-embed-text"
+
+    def test_mode_a_with_an_explicit_ollama_provider_honours_the_base_url(self) -> None:
+        """Mode A can also auto-detect provider="ollama" for embeddings; the
+        same custom host must survive there too, not just in Mode B."""
+        cfg = SLMConfig.for_mode(
+            Mode.A, embedding_provider="ollama",
+            embedding_ollama_base_url="http://ollama-box:9999",
+        )
+        assert cfg.embedding.ollama_base_url == "http://ollama-box:9999"
 
 
 # ---------------------------------------------------------------------------
@@ -244,12 +279,28 @@ class TestV332OnnxCrossEncoderConfig:
         cfg = SLMConfig.for_mode(Mode.C)
         assert cfg.retrieval.use_cross_encoder is True
 
+    def test_save_then_load_round_trips_a_custom_ollama_base_url(self, tmp_path: Path) -> None:
+        """4.1.22: a persisted embedding.ollama_base_url (and ollama_model)
+        used to be written and then silently dropped on the next load,
+        always reverting to http://localhost:11434 -- the save/load pair
+        is now a real round trip."""
+        cfg = SLMConfig.for_mode(
+            Mode.B, base_dir=tmp_path,
+            embedding_ollama_base_url="http://ollama-box:9999",
+            embedding_ollama_model="mxbai-embed-large",
+        )
+        cfg_path = tmp_path / "config.json"
+        cfg.save(cfg_path, mode_change=True)
+        loaded = SLMConfig.load(cfg_path)
+        assert loaded.embedding.ollama_base_url == "http://ollama-box:9999"
+        assert loaded.embedding.ollama_model == "mxbai-embed-large"
+
     def test_save_persists_onnx_fields(self, tmp_path: Path) -> None:
         import json
         cfg = SLMConfig.for_mode(Mode.A, base_dir=tmp_path)
         cfg_path = tmp_path / "config.json"
         cfg.save(cfg_path)
-        data = json.loads(cfg_path.read_text())
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
         assert data["retrieval"]["cross_encoder_model"] == "cross-encoder/ms-marco-MiniLM-L-12-v2"
         assert data["retrieval"]["cross_encoder_backend"] == ""
 
@@ -275,7 +326,7 @@ class TestV332OnnxCrossEncoderConfig:
                 "use_cross_encoder": False,
             },
         }
-        cfg_path.write_text(json.dumps(old_config))
+        cfg_path.write_text(json.dumps(old_config), encoding="utf-8")
         loaded = SLMConfig.load(cfg_path)
         # Explicit False is RESPECTED — not overwritten
         assert loaded.retrieval.use_cross_encoder is False
@@ -299,7 +350,7 @@ class TestV332OnnxCrossEncoderConfig:
             },
             "retrieval": {"rrf_k": 60},
         }
-        cfg_path.write_text(json.dumps(old_config))
+        cfg_path.write_text(json.dumps(old_config), encoding="utf-8")
         loaded = SLMConfig.load(cfg_path)
         # When use_cross_encoder is absent, setdefault enables it
         assert loaded.retrieval.use_cross_encoder is True
@@ -324,7 +375,7 @@ class TestV332OnnxCrossEncoderConfig:
                 "cross_encoder_model": "cross-encoder/ms-marco-MiniLM-L-12-v2",
             },
         }
-        cfg_path.write_text(json.dumps(post_config))
+        cfg_path.write_text(json.dumps(post_config), encoding="utf-8")
         loaded = SLMConfig.load(cfg_path)
         # Should respect user's explicit choice
         assert loaded.retrieval.use_cross_encoder is False

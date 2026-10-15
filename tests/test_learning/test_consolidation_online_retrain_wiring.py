@@ -211,15 +211,16 @@ def _seed_learning_feedback(db_path: Path, *, profile_id: str, n: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_should_retrain_false_when_no_outcomes(learning_db: Path) -> None:
-    """With no active model row, _should_retrain is False — legacy
-    cold-start owns first training."""
+def test_cold_start_goes_through_the_shadow_cycle(learning_db: Path) -> None:
+    """With no model row at all, _should_retrain is True: since 4.1.25 a
+    first model is a candidate tested live, not an untested active (the
+    shadow cycle itself refuses when there is too little labelled data)."""
     from superlocalmemory.learning.consolidation_worker import ConsolidationWorker
 
     worker = ConsolidationWorker(
         memory_db=":memory:", learning_db=str(learning_db),
     )
-    assert worker._should_retrain(profile_id="p") is False
+    assert worker._should_retrain(profile_id="p") is True
 
 
 def test_should_retrain_true_at_50_outcomes(learning_db: Path) -> None:
@@ -307,14 +308,14 @@ def test_run_routes_to_online_when_should_retrain_true(
     assert stats.get("online_retrain") is not None
 
 
-def test_run_routes_to_legacy_when_outcomes_below_50_but_signals_above_200(
+def test_run_never_installs_an_untested_model_through_the_legacy_path(
     learning_db: Path, memory_db: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Legacy cold-start path remains reachable for profiles whose
-    active model has not yet accumulated 50 outcomes."""
+    """250 feedback signals and no model: the shadow cycle runs (it persists
+    a CANDIDATE), and the legacy path — which activated a model with no live
+    test — is not invoked automatically any more."""
     from superlocalmemory.learning import consolidation_worker as cw_mod
 
-    # NO active model seeded → _should_retrain returns False.
     _seed_learning_feedback(learning_db, profile_id="p", n=250)
 
     shadow_called = {"flag": False}
@@ -322,7 +323,7 @@ def test_run_routes_to_legacy_when_outcomes_below_50_but_signals_above_200(
 
     def _fake_shadow_cycle(**kw):
         shadow_called["flag"] = True
-        return {}
+        return {"candidate_persisted": True}
 
     def _fake_legacy(self, pid, sc):
         legacy_called["flag"] = True
@@ -336,8 +337,8 @@ def test_run_routes_to_legacy_when_outcomes_below_50_but_signals_above_200(
     )
     stats = worker.run(profile_id="p", dry_run=False)
 
-    assert shadow_called["flag"] is False
-    assert legacy_called["flag"] is True
+    assert shadow_called["flag"] is True
+    assert legacy_called["flag"] is False
     assert stats.get("retrained") is True
 
 

@@ -17,6 +17,7 @@ import hashlib
 import logging
 import os
 import time
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from fnmatch import fnmatch
 from pathlib import Path
@@ -29,7 +30,6 @@ from superlocalmemory.code_graph.models import (
     GraphEdge,
     GraphNode,
     NodeKind,
-    ParseResult,
 )
 from superlocalmemory.code_graph.resolver import ImportResolver
 from superlocalmemory.storage.models import _new_id
@@ -312,7 +312,7 @@ class CodeParser:
                 rel = full_path.relative_to(repo_root)
                 skip = False
                 for pattern in self._config.exclude_patterns:
-                    if fnmatch(str(rel), pattern) or fnmatch(filename, pattern):
+                    if fnmatch(rel.as_posix(), pattern) or fnmatch(filename, pattern):
                         skip = True
                         break
                 if skip:
@@ -347,7 +347,7 @@ class CodeParser:
         tree = parser.parse(source_bytes)
         root = tree.root_node
 
-        file_path_str = str(file_path)
+        file_path_str = Path(file_path).as_posix()  # one form on every OS
         content_hash = _sha256(source_bytes)
 
         # Create File node
@@ -463,11 +463,11 @@ class CodeParser:
                     nodes, edges, file_import_map = self.parse_file(
                         rel_path, source_bytes, language
                     )
-                    import_maps_by_file[str(rel_path)] = file_import_map
+                    import_maps_by_file[rel_path.as_posix()] = file_import_map
                     all_nodes.extend(nodes)
                     all_edges.extend(edges)
                     all_file_records.append(FileRecord(
-                        file_path=str(rel_path),
+                        file_path=rel_path.as_posix(),
                         content_hash=_sha256(source_bytes),
                         mtime=(repo_root / rel_path).stat().st_mtime,
                         language=language,
@@ -492,12 +492,16 @@ class CodeParser:
             config_dict["repo_root"] = str(self._config.repo_root)
 
             workers = min(self._config.parallel_workers, len(tasks))
-            with ProcessPoolExecutor(max_workers=workers) as executor:
+            # spawn, not fork: a forked worker would inherit the daemon's instance-lock fd
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=multiprocessing.get_context("spawn"),
+            ) as executor:
                 future_map = {}
                 for rel_path, source_bytes, language in tasks:
                     future = executor.submit(
                         _parse_file_standalone,
-                        str(rel_path),
+                        rel_path.as_posix(),
                         source_bytes,
                         language,
                         config_dict,
@@ -522,10 +526,10 @@ class CodeParser:
                     file_nodes = result["nodes"]
                     file_edges = result["edges"]
                     # Collect per-file import map for Strategy 1 resolution.
-                    import_maps_by_file[str(rel_path)] = result.get("import_map", {})
+                    import_maps_by_file[rel_path.as_posix()] = result.get("import_map", {})
 
                     # Build the full parse result with file node and CONTAINS edges
-                    file_path_str = str(rel_path)
+                    file_path_str = rel_path.as_posix()
                     content_hash = _sha256(source_bytes)
 
                     file_node = GraphNode(

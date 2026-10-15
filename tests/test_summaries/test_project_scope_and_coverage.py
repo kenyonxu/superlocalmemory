@@ -62,6 +62,10 @@ def _make_db(tmp_path, *, events: int, facts: int, profile: str = "default"):
             importance REAL, lifecycle TEXT, canonical_entities_json TEXT,
             created_at TEXT
         );
+        CREATE TABLE memories (
+            memory_id TEXT PRIMARY KEY, profile_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
         """
     )
     for i in range(events):
@@ -129,13 +133,17 @@ class TestProjectPickerEndpoint:
     """The picker replaces a control that could not work. Keep it wired."""
 
     def test_endpoint_is_registered(self):
-        from superlocalmemory.server.routes import memories
+        # Test the registered HTTP surface, including nested routers.
+        from fastapi import FastAPI
 
-        paths = {r.path for r in memories.router.routes}
+        from superlocalmemory.server.routes import summaries
+        app = FastAPI()
+        app.include_router(summaries.router)
+        paths = set(app.openapi()["paths"])
         assert "/api/summary/projects" in paths
 
     def test_label_shortens_long_paths_but_keeps_siblings_distinct(self):
-        from superlocalmemory.server.routes.memories import _project_label
+        from superlocalmemory.server.routes.summaries import _project_label
 
         a = "/Users/alice/Documents/official/Call-off-tool/goep-serviceTool"
         b = "/Users/alice/Documents/official/testing - automation"
@@ -145,7 +153,7 @@ class TestProjectPickerEndpoint:
 
     @pytest.mark.parametrize("path", ["", "/", "widget"])
     def test_label_never_raises_on_degenerate_paths(self, path):
-        from superlocalmemory.server.routes.memories import _project_label
+        from superlocalmemory.server.routes.summaries import _project_label
 
         assert isinstance(_project_label(path), str)
 
@@ -154,7 +162,7 @@ class TestProjectPickerEndpoint:
         silent summary of everything."""
         import inspect
 
-        from superlocalmemory.server.routes import memories
+        from superlocalmemory.server.routes import summaries
 
-        src = inspect.getsource(memories.get_summary)
+        src = inspect.getsource(summaries.get_summary)
         assert "project requires target" in src

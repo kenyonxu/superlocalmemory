@@ -28,7 +28,7 @@ class _PrometheusExporter:
     """Thin wrapper around prometheus_client for SLM Optimize metrics."""
 
     def __init__(self) -> None:
-        from prometheus_client import Counter, Gauge, start_http_server
+        from prometheus_client import Counter, Gauge
 
         self._cache_hits = Counter(
             "slm_cache_hits_total", "Total cache hits"

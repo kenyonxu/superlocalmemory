@@ -1,6 +1,5 @@
 """Tests for Behavioral System — Task 13 of V3 build."""
 import pytest
-from pathlib import Path
 from superlocalmemory.learning.behavioral import BehavioralPatternStore
 from superlocalmemory.learning.outcomes import OutcomeTracker
 

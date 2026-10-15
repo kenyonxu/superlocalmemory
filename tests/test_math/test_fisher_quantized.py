@@ -34,7 +34,6 @@ import pytest
 from superlocalmemory.math.fisher import FisherRaoMetric
 from superlocalmemory.math.fisher_quantized import FRQADConfig, FRQADMetric
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -218,11 +217,7 @@ class TestFRQADMonotonic:
         sim_4 = frqad.similarity(mu_a, var_a, 32, mu_b, var_b, 4)
         sim_2 = frqad.similarity(mu_a, var_a, 32, mu_b, var_b, 2)
 
-        # V3.3.12: Additive variance — differences within arccosh numerical precision
-        # at high bit-widths. Only extreme gap (32 vs 2) is guaranteed monotonic.
-        assert sim_32 > sim_2 - 0.01, (
-            f"32-bit must beat 2-bit: {sim_32} vs {sim_2}"
-        )
+        assert sim_32 > sim_8 > sim_4 > sim_2
 
 
 # ---------------------------------------------------------------------------
@@ -259,16 +254,15 @@ class TestFRQADNonNegativity:
 
 class TestFRQADIdentity:
     def test_frqad_metric_identity(self, frqad: FRQADMetric) -> None:
-        """d(x, x) = 0 when same embedding and same bit-width."""
+        """Float32 self-distance is zero; lower fidelity adds explicit penalty."""
         mu = np.array([0.5, -0.3, 0.8, 0.1])
         mu = mu / np.linalg.norm(mu)
         var = np.full(4, 0.5)
 
         for bw in (2, 4, 8, 32):
             d = frqad.distance(mu, var, bw, mu, var, bw)
-            assert d == pytest.approx(0.0, abs=1e-10), (
-                f"d(x,x) must be 0 at bw={bw}, got {d}"
-            )
+            expected = 2 * 0.5 * (1 - bw / 32)
+            assert d == pytest.approx(expected, abs=1e-10)
 
 
 # ---------------------------------------------------------------------------

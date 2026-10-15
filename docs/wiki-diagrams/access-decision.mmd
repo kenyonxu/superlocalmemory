@@ -1,0 +1,17 @@
+flowchart TD
+    R["Request to read or change memory"] --> A["Who is calling?<br/>daemon capability, install token, API key,<br/>signed-in session, or nothing<br/>(token and nothing: this computer only)"]
+    A --> S{"Signed-in user session?"}
+    S -->|"yes"| U{"Role on this profile allows it?"}
+    U -->|"admin: read, write, delete, share, manage<br/>member: read, write, share<br/>viewer: read"| OK["Allowed"]
+    U -->|"no membership, or role too low"| NO1["Refused 403"]
+    S -->|"session invalid while login is required"| NO2["Refused 401: sign in again"]
+    S -->|"no session: machine owner"| M{"Company mode?<br/>login required and at least one user"}
+    M -->|"no: personal mode"| OK2["Everything allowed"]
+    M -->|"yes: data action"| NO3["Refused: login required"]
+    M -->|"yes: manage action"| CAP{"Daemon capability present?<br/>slm team, run on this computer"}
+    CAP -->|"yes"| OK3["Allowed: break-glass"]
+    CAP -->|"no"| NO4["Refused: needs a signed-in administrator"]
+    classDef good fill:#EAF6EA,stroke:#3B7A3B,color:#1F2340
+    classDef bad fill:#FDEDEE,stroke:#B3363E,color:#1F2340
+    class OK,OK2,OK3 good
+    class NO1,NO2,NO3,NO4 bad

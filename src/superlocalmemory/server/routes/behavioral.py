@@ -29,66 +29,6 @@ _MAX_OUTCOME_FACT_IDS = 100
 _MAX_FACT_ID_LENGTH = 200
 
 
-def _outcome_insert(
-    conn,
-    *,
-    outcome_id: str,
-    profile: str,
-    fact_ids_json: str,
-    outcome: str,
-    context_json: str,
-    now_iso: str,
-    reward: float,
-    recall_query_id: str,
-) -> tuple[str, tuple]:
-    """Build the ``action_outcomes`` INSERT from the columns that exist.
-
-    ``reward``, ``settled``, ``settled_at`` and ``recall_query_id`` all arrive
-    with M006, which is a DEFERRED migration — it runs after engine init, not
-    during ``apply_all``. This handler has always named them unconditionally, so
-    on a store where M006 has not run it raised ``no such column`` and returned
-    ``success: false`` for a write that could perfectly well have been recorded
-    without them.
-
-    ``recall_query_id`` is the one that matters for learning: it is what lets a
-    bandit play be settled from this report. The column has existed since M006
-    and was never written — 0 of 162 rows on a live store carry one — so
-    every play fell through to the neutral 120-second default and 165 arms sat
-    at alpha == beta. Recording it is the join key that closes the loop.
-
-    Degrading per column rather than per statement means an unmigrated store
-    still records the outcome; it just cannot attribute it to a play, which is
-    the honest reduction in capability.
-    """
-    columns = ["outcome_id", "profile_id", "query", "fact_ids_json",
-               "outcome", "context_json", "timestamp"]
-    values: list = [outcome_id, profile, "", fact_ids_json, outcome,
-                    context_json, now_iso]
-    try:
-        present = {
-            row[1] for row in conn.execute("PRAGMA table_info(action_outcomes)")
-        }
-    except Exception:  # pragma: no cover — defensive
-        present = set()
-
-    for name, value in (
-        ("reward", reward),
-        ("settled", 1),
-        ("settled_at", now_iso),
-        ("recall_query_id", recall_query_id),
-    ):
-        if name in present:
-            columns.append(name)
-            values.append(value)
-
-    placeholders = ", ".join("?" * len(columns))
-    sql = (
-        f"INSERT INTO action_outcomes ({', '.join(columns)}) "
-        f"VALUES ({placeholders})"
-    )
-    return sql, tuple(values)
-
-
 class ReportOutcomeRequest(BaseModel):
     """Bounded explicit outcome payload accepted from dashboard clients."""
 
@@ -101,11 +41,15 @@ class ReportOutcomeRequest(BaseModel):
     outcome: Literal["success", "failure", "partial"]
     action_type: StrictStr = Field(default="other", max_length=80)
     context: StrictStr = Field(default="", max_length=1000)
-    #: Which recall this outcome judges, if the caller knows. Optional because
-    #: recall does not currently return its query_id to callers, so nothing can
-    #: supply one yet; when it is absent the settler falls back to overlap
-    #: between ``memory_ids`` and the memories a play recorded showing.
+    #: Which recall this outcome judges: the ``query_id`` recall returned.
+    #: Optional; when it is absent the settler falls back to overlap between
+    #: ``memory_ids`` and the memories a play recorded showing.
     recall_query_id: StrictStr = Field(default="", max_length=64)
+    #: Provenance, stored with the event. ``cli`` is what ``slm outcome`` sends.
+    source: Literal["rest", "dashboard", "cli"] = "rest"
+    agent_id: StrictStr = Field(default="", max_length=120)
+    #: Optional idempotency key: a retry with the same key records nothing new.
+    report_id: StrictStr = Field(default="", max_length=128)
 
     @field_validator("memory_ids")
     @classmethod
@@ -146,26 +90,6 @@ def _authorize_outcome_write(request: Request) -> None:
     """Run authorization before FastAPI validates the request body."""
     _require_write(request)
     request.state.outcome_write_authorized = True
-
-
-def _validate_profile_fact_ids(
-    conn: sqlite3.Connection,
-    *,
-    profile_id: str,
-    fact_ids: list[str],
-) -> None:
-    """Reject missing or foreign-profile facts before an outcome is stored."""
-    placeholders = ",".join("?" for _ in fact_ids)
-    rows = conn.execute(
-        "SELECT fact_id FROM atomic_facts "
-        f"WHERE profile_id = ? AND fact_id IN ({placeholders})",
-        (profile_id, *fact_ids),
-    ).fetchall()
-    if {str(row[0]) for row in rows} != set(fact_ids):
-        raise HTTPException(
-            status_code=422,
-            detail="Every memory_id must identify a fact in the active profile",
-        )
 
 
 # Feature detection
@@ -415,13 +339,10 @@ def report_outcome(request: Request, data: ReportOutcomeRequest):
         context: str (optional)
     }
 
-    S9-DASH-02: previously this handler passed a path string to
-    ``OutcomeTracker(db)`` (which expects a DatabaseManager) and also
-    targeted ``learning.db`` — but ``action_outcomes`` lives in
-    ``memory.db`` (M006). Both failures were silent. This rewrite
-    writes directly to ``action_outcomes`` with a reward label derived
-    from ``outcome``:
-      success=1.0, failure=0.0, partial=0.5
+    Stored through ``learning.outcome_events.write_outcome`` — the same
+    writer MCP and the CLI use — so a report means the same thing on every
+    surface: reward success=1.0 / partial=0.5 / failure=0.0, settlement
+    fields, recall attribution, provenance, and idempotence.
     """
     if not getattr(request.state, "outcome_write_authorized", False):
         _require_write(request)
@@ -434,66 +355,42 @@ def report_outcome(request: Request, data: ReportOutcomeRequest):
     action_type = data.action_type
     context_note = data.context
 
-    import uuid
-    from datetime import datetime, timezone
-
-    reward_map = {"success": 1.0, "failure": 0.0, "partial": 0.5}
-    reward = reward_map[outcome]
-    now_iso = datetime.now(timezone.utc).isoformat()
-    outcome_id = str(uuid.uuid4())
-    memory_db_path = MEMORY_DIR / "memory.db"
+    from superlocalmemory.learning.outcome_events import (
+        OutcomeReport,
+        UnknownMemories,
+        write_outcome,
+    )
 
     try:
         profile = get_active_profile()
-        context_dict = {
-            "note": context_note,
-            "action_type": action_type,
-            "source": "dashboard_report_outcome",
-        }
-        # memory_write acquires the process write lock (serialises in-process)
-        # and sets PRAGMA busy_timeout (cross-process writers wait, not error).
-        with memory_write(memory_db_path) as conn:
-            _validate_profile_fact_ids(
-                conn,
-                profile_id=profile,
-                fact_ids=memory_ids,
-            )
-            conn.execute(
-                *_outcome_insert(
-                    conn,
-                    outcome_id=outcome_id,
-                    profile=profile,
-                    fact_ids_json=json.dumps(memory_ids),
-                    outcome=outcome,
-                    context_json=json.dumps(context_dict),
-                    now_iso=now_iso,
-                    reward=reward,
-                    recall_query_id=data.recall_query_id,
-                ),
-            )
-
+        report = OutcomeReport(
+            profile_id=profile, fact_ids=tuple(memory_ids), outcome=outcome,
+            surface=data.source, recall_query_id=data.recall_query_id,
+            agent_id=data.agent_id, note=context_note,
+            idempotency_key=data.report_id,
+            extra={"action_type": action_type,
+                   "source": "dashboard_report_outcome"},
+        )
+        # The one writer every surface shares.
         try:
-            from superlocalmemory.learning.source_quality import (
-                update_source_quality_for_reward,
-            )
-            update_source_quality_for_reward(
-                memory_db_path=memory_db_path,
+            written = write_outcome(
+                report, memory_db_path=_memory_db_path(),
                 learning_db_path=_learning_db_path(),
-                profile_id=profile,
-                outcome_id=outcome_id,
-                fact_ids=[str(memory_id) for memory_id in memory_ids],
-                reward=reward,
             )
-        except Exception as exc:  # noqa: BLE001 - outcome write already committed
-            logger.debug("source-quality explicit outcome feed skipped: %s", exc)
-
+        except UnknownMemories:
+            raise HTTPException(
+                status_code=422,
+                detail="Every memory_id must identify a fact in the active profile",
+            ) from None
         return {
-            "success": True, "outcome_id": outcome_id,
+            "success": True, "outcome_id": written.outcome_id,
             "active_profile": profile,
-            "reward": reward,
+            "reward": written.reward,
+            "duplicate": not written.created,
+            "attributed": written.attributed,
             "message": (
                 f"Recorded {outcome} outcome for {len(memory_ids)} "
-                f"memories (reward={reward})"
+                f"memories (reward={written.reward})"
             ),
         }
     except HTTPException:

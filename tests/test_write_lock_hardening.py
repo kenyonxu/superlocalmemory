@@ -114,7 +114,6 @@ def test_ensure_and_delete_profile_in_db(tmp_path, monkeypatch):
 
     # Patch DB_PATH used by helpers to point at our temp DB.
     import superlocalmemory.server.routes.helpers as helpers_mod
-    from superlocalmemory.infra.data_root import DynamicStatePath
 
     # We need DB_PATH.exists() to return True and str(DB_PATH) to be our path.
     class _FakeDBPath:

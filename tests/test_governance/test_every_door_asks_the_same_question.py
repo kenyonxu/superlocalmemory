@@ -52,9 +52,17 @@ class TestEveryEntryPointReadsBothSettings:
         return "_company_mode_active" in inspect.getsource(function)
 
     def test_the_mcp_gate_reads_both(self):
-        from superlocalmemory.core.admission import admits
+        # The MCP gate and the default READ gate both ask caller_actor, which
+        # is where the two switches are read (4.1.25: one place for every
+        # MCP/CLI identity decision, so a presented session is always a user).
+        import inspect as _inspect
 
-        assert self._reads_both(admits)
+        from superlocalmemory.core.admission import admits, caller_actor
+        from superlocalmemory.mcp import tool_gate
+
+        assert self._reads_both(caller_actor)
+        assert "caller_actor(" in _inspect.getsource(admits)
+        assert "caller_actor(" in _inspect.getsource(tool_gate._refused)
 
     def test_the_command_line_gate_reads_both(self):
         from superlocalmemory.core.admission import gate_cli_mutation

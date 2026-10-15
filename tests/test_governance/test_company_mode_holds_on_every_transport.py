@@ -148,14 +148,51 @@ class TestPersonalModeGainsNoFriction:
         assert workspace["rbac"].require_login() is False
         assert _attempt()["success"] is True
 
-    def test_a_stray_session_token_changes_nothing(self, workspace) -> None:
+    def test_a_stray_session_token_changes_nothing_without_accounts(
+        self, workspace, monkeypatch,
+    ) -> None:
+        """No team accounts at all: a token cannot name anyone, so it is ignored."""
         import os
 
+        import superlocalmemory.core.admission as admission
+
+        monkeypatch.setattr(admission, "_accounts_exist", lambda: False)
         os.environ["SLM_USER_SESSION"] = "whatever"
         try:
             assert _attempt()["success"] is True
         finally:
             os.environ.pop("SLM_USER_SESSION", None)
+
+    def test_an_ended_session_is_refused_not_promoted_to_owner(self, workspace) -> None:
+        """OPS-24 on this transport: with accounts and login optional, a session
+        that names nobody (signed out, expired, forged) is refused. Before
+        4.1.25 it was ignored and the caller wrote as the machine owner."""
+        import os
+
+        os.environ["SLM_USER_SESSION"] = "whatever"
+        try:
+            result = _attempt()
+        finally:
+            os.environ.pop("SLM_USER_SESSION", None)
+        assert result["success"] is False
+        assert result["reason"] == "authentication_required"
+
+    def test_a_viewer_session_is_held_to_viewer_when_login_is_optional(
+        self, workspace,
+    ) -> None:
+        import os
+
+        os.environ["SLM_USER_SESSION"] = workspace["rbac"].create_session(
+            workspace["viewer"]["user_id"])
+        try:
+            result = _attempt()
+        finally:
+            os.environ.pop("SLM_USER_SESSION", None)
+        assert result["success"] is False
+        assert result["reason"] == "insufficient_roles"
+
+    def test_no_session_is_still_the_owner_when_login_is_optional(self, workspace) -> None:
+        assert _attempt()["success"] is True
 
 
 class TestCompanyModeOnTheAgentTransport:

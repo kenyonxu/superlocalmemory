@@ -1,8 +1,6 @@
 # Teams, Users, and Access Control (RBAC)
-> SuperLocalMemory V4 Documentation
-> https://superlocalmemory.com | Part of Qualixar
 
-V4 includes multi-user access control to SLM (from the 3.8 line). This page covers roles, workspace
+SLM includes multi-user access control. This page covers roles, workspace
 membership, the login gate, and how to operate RBAC from the CLI, API, and
 dashboard.
 
@@ -43,7 +41,14 @@ The login gate controls whether the dashboard and API require authenticated sess
 | Setting | Behavior | Recommended for |
 |---------|----------|-----------------|
 | `require_login = false` | Loopback caller is trusted as owner. No authentication enforced. | Personal single-user installs |
-| `require_login = true` | Every dashboard and API request requires a valid session. | Team and enterprise deployments |
+| `require_login = true` | Reading and saving memories needs a signed-in user. The machine owner can still manage users and settings without signing in. | Team and enterprise deployments, and Macs shared by several user accounts |
+
+With login required, every state-changing route asks for a role, and the check
+runs before the request body is read, so a refusal is always 401 (sign in) or 403
+(your role does not allow it), never 422 or 500. Once users are enrolled, the
+install token or an API key alone no longer administers the workspace: that needs a
+signed-in admin, or `slm team` run on the SLM computer by the user who runs SLM
+([Company mode](company-mode.md)).
 
 Personal installs ship with `require_login = false`. No default credentials are
 included. Enterprise installs (set via the installer or `slm reconfigure`) ship
@@ -59,12 +64,8 @@ the machine.
 
 ### Enabling login
 
-```bash
-slm config set security.require_login true
-slm restart
-```
-
-After restart, the dashboard prompts for credentials. Session cookies are
+In the dashboard, open **Team → Access policy** and turn on company mode. It
+takes effect at once; the dashboard then prompts for credentials. Session cookies are
 `HttpOnly`. Set `SLM_DASHBOARD_HTTPS=1` to add the `Secure` flag.
 
 ---
@@ -81,15 +82,15 @@ slm profile switch <name>     # switch active workspace
 slm profile create <name>     # create a new workspace
 ```
 
-Verified in `src/superlocalmemory/cli/main.py`: `profile` accepts only `list | switch | create` (`choices=["list", "switch", "create"]`). There is no `slm profile users …` subcommand. User and membership administration is via the RBAC HTTP API and the dashboard (see below).
+`slm profile` accepts only `list`, `switch` and `create`. There is no `slm profile users` subcommand. User and membership administration is via the RBAC HTTP API and the dashboard (see below).
 
 ### Via dashboard
 
 The **Governance → Access & Users** tab shows the user list for the current workspace. Admins can invite, assign roles, and remove users.
 
-### Via HTTP API (RBAC routes in `src/superlocalmemory/server/routes/rbac.py`)
+### Via HTTP API
 
-All routes are under `/api/rbac/*` and require machine auth (`require_http_mutation_actor`); user/membership/policy admin further requires `MANAGE` (`src/superlocalmemory/server/rbac_enforce.py: require_manage`).
+All routes are under `/api/rbac/*` and require SLM's own credential (see [Auth write gate](auth-write-gate.md)); user, membership and policy administration further requires the `MANAGE` permission.
 
 | Method & Path | Purpose |
 |---|---|
@@ -107,6 +108,13 @@ All routes are under `/api/rbac/*` and require machine auth (`require_http_mutat
 | `POST /api/rbac/policy` `{require_login}` | Toggle login gate |
 
 Workspace membership commands require `MANAGE` on the **target** profile, and modifying a user other than yourself requires authority over that user (owner or an admin who shares a `MANAGE` workspace).
+
+Settings → [Answer check](answer-check.md) follows the same rule as every
+other dashboard setting: viewing the current status is open to anyone who
+can reach the dashboard, but changing it — switching modes, saving or
+removing a key, setting up or removing the on-device model, or changing
+consent — requires `MANAGE`. A member without it sees the controls but
+cannot use them.
 
 ---
 
@@ -137,10 +145,18 @@ Full docs: [docs/shared-memory.md](./shared-memory.md)
 
 ## Audit trail
 
-Every access-control event is recorded in the hash-chained audit trail:
-user creation, role change, login attempt, session creation, workspace membership
-change. The audit trail cannot be retroactively modified without breaking the
-chain.
+Access-control events are recorded in the hash-chained audit trail
+(`access.*` entries): user creation, update and deletion, role change,
+membership removal and policy change (each as requested, then with its outcome;
+a change is refused if the trail cannot record it), and sign-in (successful,
+failed or throttled) and sign-out. Entries name the acting account, the
+affected account and workspace, old and new role; never a password or token.
+
+Each entry's hash covers every stored field, its details included, so editing
+any of them breaks the chain. Entries written by an older release are checked for
+order and core fields only, and the dashboard says so. The chain is
+plain SHA-256 with an external count-and-head anchor: it detects edits and
+truncation, but someone able to rewrite both files could recompute it.
 
 View the audit trail in the **Governance → Audit** dashboard tab or via CLI:
 
@@ -162,6 +178,17 @@ slm diagnostics export /tmp/audit-report.json
 - Install token: the install token (used by the dashboard and IDE configs)
   is stored in memory only and scoped to loopback addresses in company mode.
   Rotate it with `slm rotate-token`.
+- Skill evolution is per workspace: candidates, approvals, backups and
+  quarantine are kept apart for each workspace, an approval applies to the
+  workspace it was made in, and a setting that spans the whole installation needs
+  authority over every workspace ([Skill evolution](skill-evolution.md)).
+- Memory health actions (pause, resume, Fix, Undo) need `MANAGE`; reading its
+  report is store-wide maintenance information, so it needs `MANAGE` too
+  ([Memory health](memory-health.md)).
+- Shared Macs: in a personal install the local service trusts every program on
+  the computer, including programs run by another user account. On a Mac shared
+  by several accounts, turn on company mode. See
+  [Shared Macs](SECURITY-encryption-at-rest.md#shared-macs-and-other-multi-user-computers).
 
 ---
 
@@ -174,4 +201,4 @@ slm diagnostics export /tmp/audit-report.json
 
 ---
 
-*SuperLocalMemory V4 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*
+*SuperLocalMemory — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*

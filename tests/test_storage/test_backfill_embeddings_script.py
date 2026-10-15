@@ -29,12 +29,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import math
 import sqlite3
 import sys
 from pathlib import Path
-
-import pytest
 
 # ---------------------------------------------------------------------------
 # Import the module under test from scripts/ (not in the package pythonpath)

@@ -37,7 +37,6 @@ def test_startup_coverage_check_enterprise_mode_raises_on_missing_policy(monkeyp
     from superlocalmemory.core.admission import coverage_self_check
     from superlocalmemory.core.config import DEPLOYMENT_ENTERPRISE
     from superlocalmemory.core.operation_policy_registry import OperationPolicyRegistry
-    from superlocalmemory.core.operation_request import OperationKind
 
     gapped_registry = OperationPolicyRegistry({})
 

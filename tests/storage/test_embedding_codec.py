@@ -10,10 +10,7 @@ These tests exercise:
 from __future__ import annotations
 
 import json
-import math
 import sqlite3
-import struct
-import tempfile
 from pathlib import Path
 
 import numpy as np

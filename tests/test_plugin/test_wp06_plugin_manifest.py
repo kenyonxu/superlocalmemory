@@ -31,10 +31,11 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+
+from tests._portable import committed_executable
 
 # ---------------------------------------------------------------------------
 # Paths — DOC-CORRECT layout
@@ -208,10 +209,15 @@ class TestMcpJson:
         # If command is a launcher wrapper, args can be empty
         # If command is the direct slm binary, args must include 'mcp'
         if "slm-launch" in cmd:
-            # Launcher passes mcp internally — args should be empty
-            assert args == [] or args == ["mcp"], (
-                f"With slm-launch wrapper, args must be [] or ['mcp'], got {args!r}"
-            )
+            # Launcher passes mcp internally. #139: the args are cmd.exe's on
+            # Windows (${ComSpec}); the POSIX launcher ignores them.
+            # test_mcp_command_per_platform.py checks both expansions.
+            if cmd.startswith("${ComSpec:-"):
+                assert args[:3] == ["/d", "/s", "/c"] and args[-1].endswith("slm mcp"), args
+            else:
+                assert args == [] or args == ["mcp"], (
+                    f"With slm-launch wrapper, args must be [] or ['mcp'], got {args!r}"
+                )
         else:
             # Direct binary — must pass 'mcp'
             assert args == ["mcp"], (
@@ -483,27 +489,18 @@ class TestGeneratorRoundTrip:
     def test_ensure_venv_sh_is_executable(self) -> None:
         p = PLUGIN_ROOT / "scripts" / "ensure-venv.sh"
         assert p.exists(), "plugin/scripts/ensure-venv.sh must exist"
-        import stat
-        mode = p.stat().st_mode
-        assert mode & stat.S_IXUSR, (
-            f"ensure-venv.sh must be user-executable (+x), mode={oct(mode)}"
-        )
+        assert committed_executable(p), "ensure-venv.sh must be user-executable (+x)"
 
-    def test_build_generator_emits_claude_md(self) -> None:
-        """Generator must emit plugin/CLAUDE.md from rules/CLAUDE.md.fragment."""
-        assert (PLUGIN_ROOT / "CLAUDE.md").exists(), (
-            "plugin/CLAUDE.md must exist after build (from rules/CLAUDE.md.fragment)"
-        )
+    def test_no_unloaded_claude_md_at_the_plugin_root(self) -> None:
+        """Claude Code does not load a root CLAUDE.md and --strict validation refuses it."""
+        assert not (PLUGIN_ROOT / "CLAUDE.md").exists()
 
-    def test_claude_md_matches_fragment(self) -> None:
-        """CLAUDE.md content must match the fragment source."""
-        fragment = PLUGIN_SRC / "rules" / "CLAUDE.md.fragment"
-        claude_md = PLUGIN_ROOT / "CLAUDE.md"
-        assert fragment.exists(), f"Source fragment missing: {fragment}"
-        assert claude_md.exists(), f"plugin/CLAUDE.md missing"
-        assert fragment.read_text(encoding="utf-8") == claude_md.read_text(encoding="utf-8"), (
-            "plugin/CLAUDE.md content does not match plugin-src/rules/CLAUDE.md.fragment"
-        )
+    def test_the_skills_teach_every_rule_of_the_fragment(self) -> None:
+        """Dropping plugin/CLAUDE.md loses no rule: the skills carry each one."""
+        skills = " ".join(p.read_text(encoding="utf-8")
+                          for p in (PLUGIN_ROOT / "skills").glob("*/SKILL.md"))
+        for rule in ("session_init", "replaces=", "update_memory", "close_session"):
+            assert rule in skills, rule
 
     def test_mcp_json_matches_source(self) -> None:
         src = PLUGIN_SRC / ".mcp.json"

@@ -39,7 +39,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
+from superlocalmemory.storage import store_signature
 from superlocalmemory.storage.memory_write import memory_write
 
 logger = logging.getLogger("superlocalmemory.access.rbac")
@@ -85,6 +87,41 @@ def permissions_for_role(role: Role) -> frozenset[Permission]:
 
 class RbacError(ValueError):
     """Raised for invalid RBAC operations (bad role, duplicate user, ...)."""
+
+
+class LastAdminError(RbacError):
+    """The change would leave a workspace with no active administrator."""
+
+
+def _admin_workspaces(conn: sqlite3.Connection, user_id: str) -> list[str]:
+    """Workspaces where ``user_id`` is an active administrator."""
+    return [row[0] for row in conn.execute(
+        "SELECT m.profile_id FROM rbac_memberships m JOIN rbac_users u "
+        "ON u.user_id = m.user_id WHERE m.user_id=? AND m.role='admin' "
+        "AND u.status='active'", (user_id,),
+    )]
+
+
+def _ensure_admin_remains(conn: sqlite3.Connection, user_id: str,
+                          profiles: list[str]) -> None:
+    """Refuse when ``user_id`` is the last active admin of any of ``profiles``.
+
+    Runs inside the caller's write transaction (BEGIN IMMEDIATE), so two
+    administrators demoting each other at once cannot both pass: the second
+    sees the first one's change (4.1.25 audit UX-20: one dropdown change
+    removed the last administrator and with it every way back in the UI).
+    """
+    for profile in profiles:
+        others = conn.execute(
+            "SELECT COUNT(*) FROM rbac_memberships m JOIN rbac_users u "
+            "ON u.user_id = m.user_id WHERE m.profile_id=? AND m.role='admin' "
+            "AND u.status='active' AND m.user_id != ?", (profile, user_id),
+        ).fetchone()[0]
+        if not others:
+            raise LastAdminError(
+                f"'{profile}' would have no administrator left. Add another "
+                "administrator to it before changing this person's access."
+            )
 
 
 def _now() -> str:
@@ -136,13 +173,21 @@ class RbacEngine:
 
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
+        #: key -> (store signature when read, value). See ``get_policy``.
+        self._policy_memo: dict[str, tuple[Any, str]] = {}
 
     # -- connection -------------------------------------------------------
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, timeout=_BUSY_TIMEOUT_MS / 1000)
-        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
-        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+            conn.row_factory = sqlite3.Row
+        except BaseException:
+            # Setup failed: close it now, or the file stays open (Windows
+            # then cannot delete or replace it) for as long as the error lives.
+            conn.close()
+            raise
         return conn
 
     # -- users ------------------------------------------------------------
@@ -197,10 +242,24 @@ class RbacEngine:
             # A password change invalidates every existing session.
             conn.execute("DELETE FROM rbac_sessions WHERE user_id=?", (user_id,))
 
+    def set_display_name(self, user_id: str, display_name: str) -> None:
+        name = (display_name or "").strip()
+        if not name:
+            raise RbacError("Display name cannot be empty.")
+        with memory_write(self._db_path) as conn:
+            cur = conn.execute(
+                "UPDATE rbac_users SET display_name=? WHERE user_id=?", (name[:120], user_id),
+            )
+            if cur.rowcount == 0:
+                raise RbacError("User not found.")
+
     def set_status(self, user_id: str, status: str) -> None:
         if status not in ("active", "disabled"):
             raise RbacError("status must be 'active' or 'disabled'.")
         with memory_write(self._db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if status == "disabled":
+                _ensure_admin_remains(conn, user_id, _admin_workspaces(conn, user_id))
             cur = conn.execute(
                 "UPDATE rbac_users SET status=? WHERE user_id=?", (status, user_id)
             )
@@ -211,6 +270,8 @@ class RbacEngine:
 
     def delete_user(self, user_id: str) -> None:
         with memory_write(self._db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_admin_remains(conn, user_id, _admin_workspaces(conn, user_id))
             conn.execute("DELETE FROM rbac_sessions WHERE user_id=?", (user_id,))
             conn.execute("DELETE FROM rbac_memberships WHERE user_id=?", (user_id,))
             cur = conn.execute("DELETE FROM rbac_users WHERE user_id=?", (user_id,))
@@ -366,10 +427,13 @@ class RbacEngine:
         except ValueError:
             raise RbacError(f"Invalid role '{role}'. Use admin/member/viewer.")
         with memory_write(self._db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             if not conn.execute(
                 "SELECT 1 FROM rbac_users WHERE user_id=?", (user_id,)
             ).fetchone():
                 raise RbacError("User not found.")
+            if role_enum is not Role.ADMIN and profile_id in _admin_workspaces(conn, user_id):
+                _ensure_admin_remains(conn, user_id, [profile_id])
             conn.execute(
                 "INSERT INTO rbac_memberships (profile_id, user_id, role, added_at, added_by) "
                 "VALUES (?, ?, ?, ?, ?) "
@@ -381,6 +445,9 @@ class RbacEngine:
 
     def remove_membership(self, profile_id: str, user_id: str) -> None:
         with memory_write(self._db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if profile_id in _admin_workspaces(conn, user_id):
+                _ensure_admin_remains(conn, user_id, [profile_id])
             conn.execute(
                 "DELETE FROM rbac_memberships WHERE profile_id=? AND user_id=?",
                 (profile_id, user_id),
@@ -425,17 +492,44 @@ class RbacEngine:
         finally:
             conn.close()
 
+    def list_member_workspaces(self) -> list[str]:
+        """Every workspace at least one account belongs to (sorted)."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT profile_id FROM rbac_memberships ORDER BY profile_id"
+            ).fetchall()
+            return [row[0] for row in rows]
+        finally:
+            conn.close()
+
     # -- policy settings --------------------------------------------------
 
     def get_policy(self, key: str, default: str = "") -> str:
+        """The stored value, re-read only when something was committed since.
+
+        Every request asks ``require_login()``. Opening a connection for each
+        ask put a database open on the service's request loop, so one slow open
+        froze every request in flight. A commit by any process changes the
+        store's signature (storage/store_signature), read BEFORE the value, so
+        a changed policy is seen on the very next ask; an unreadable signature
+        means no reuse.
+        """
+        sig = store_signature.of(self._db_path)
+        hit = self._policy_memo.get(key)
+        if sig is not None and hit is not None and hit[0] == sig:
+            return hit[1] if hit[1] is not None else default
         conn = self._conn()
         try:
             row = conn.execute(
                 "SELECT value FROM rbac_settings WHERE key=?", (key,)
             ).fetchone()
-            return row["value"] if row else default
         finally:
             conn.close()
+        value = row["value"] if row else None
+        if sig is not None:
+            self._policy_memo = {**self._policy_memo, key: (sig, value)}
+        return value if value is not None else default
 
     def set_policy(self, key: str, value: str) -> None:
         with memory_write(self._db_path) as conn:

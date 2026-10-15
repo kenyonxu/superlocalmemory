@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
-
 from superlocalmemory.storage.migrations import M021_ingestion_log_profile as M
 
 

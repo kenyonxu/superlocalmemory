@@ -20,7 +20,7 @@ Covers:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -28,7 +28,6 @@ from superlocalmemory.retrieval.bm25_channel import BM25Channel, tokenize
 from superlocalmemory.storage import schema as real_schema
 from superlocalmemory.storage.database import DatabaseManager
 from superlocalmemory.storage.models import AtomicFact, MemoryRecord
-
 
 # ---------------------------------------------------------------------------
 # tokenize()
@@ -87,6 +86,15 @@ class TestBM25ChannelMocked:
         db = MagicMock()
         db.get_all_bm25_tokens.return_value = tokens_map or {}
         db.get_all_facts.return_value = facts or []
+        # Corpus lookup and canonical ID authorization are distinct contracts.
+        # Only the FTS query is unavailable in this legacy-store mock.
+        def visible_ids(ids, profile_id, *, include_global=False, include_shared=False):
+            tokens = db.get_all_bm25_tokens(
+                profile_id, include_global=include_global, include_shared=include_shared,
+            )
+            allowed = set(tokens) | {f.fact_id for f in (facts or [])}
+            return set(ids) & allowed
+        db.visible_fact_ids.side_effect = visible_ids
         # v3.5.0: BM25Channel.search() now tries the FTS5 fast path first and
         # only falls back to the in-memory rank_bm25 path when the FTS5 table
         # is unavailable. These unit tests validate that in-memory fallback, so

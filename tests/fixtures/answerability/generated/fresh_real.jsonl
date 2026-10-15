@@ -1,0 +1,94 @@
+{"category": "keyword_question", "expected": ["code-ensure-daemon"], "qid": "gf-r-code-ensure-daemon", "question": "started duplicate daemons slow - details?"}
+{"category": "keyword_question", "expected": ["code-http421"], "qid": "gf-r-code-http421", "question": "tell me different host"}
+{"category": "keyword_question", "expected": ["code-qjl-bits"], "qid": "gf-r-code-qjl-bits", "question": "notes on quantizer keeps per"}
+{"category": "keyword_question", "expected": ["code-rrf-k"], "qid": "gf-r-code-rrf-k", "question": "notes on candidate pools"}
+{"category": "keyword_question", "expected": ["code-wal"], "qid": "gf-r-code-wal", "question": "tell me errors under concurrent writers"}
+{"category": "keyword_question", "expected": ["code-migration-runner"], "qid": "gf-r-code-migration-runner", "question": "notes on files named M0NN_ numeric"}
+{"category": "keyword_question", "expected": ["code-no-floor-env"], "qid": "gf-r-code-no-floor-env", "question": "tell me ship default config"}
+{"category": "keyword_question", "expected": ["code-parse-window"], "qid": "gf-r-code-parse-window", "question": "pair UTC datetimes None - details?"}
+{"category": "keyword_question", "expected": ["code-speaker-regex"], "qid": "gf-r-code-speaker-regex", "question": "tell me such Alice cross-encoder scores"}
+{"category": "keyword_question", "expected": ["code-warmup-sync"], "qid": "gf-r-code-warmup-sync", "question": "tell me cross-encoder worker loaded"}
+{"category": "keyword_question", "expected": ["code-fts5"], "qid": "gf-r-code-fts5", "question": "fact keyword-searchable moment"}
+{"category": "keyword_question", "expected": ["code-recall-limit"], "qid": "gf-r-code-recall-limit", "question": "tell me CANONICAL_RECALL_LIMIT MCP recall"}
+{"category": "keyword_question", "expected": ["ver-4125"], "qid": "gf-r-ver-4125", "question": "Release 4.1.25 adds hub-corrected - details?"}
+{"category": "keyword_question", "expected": ["ver-hub-034"], "qid": "gf-r-ver-hub-034", "question": "tool results validate"}
+{"category": "keyword_question", "expected": ["ver-4124"], "qid": "gf-r-ver-4124", "question": "tell me ingestion fix dashboard patch"}
+{"category": "keyword_question", "expected": ["ver-py314"], "qid": "gf-r-ver-py314", "question": "Python 3.14 supported"}
+{"category": "keyword_question", "expected": ["ver-node22"], "qid": "gf-r-ver-node22", "question": "MCP conformance harness"}
+{"category": "keyword_question", "expected": ["ver-pydantic"], "qid": "gf-r-ver-pydantic", "question": "notes on pydantic-core 2.46.4 upgrade path"}
+{"category": "keyword_question", "expected": ["acr-csls"], "qid": "gf-r-acr-csls", "question": "local scaling"}
+{"category": "keyword_question", "expected": ["acr-rrf"], "qid": "gf-r-acr-rrf", "question": "adds rank item - details?"}
+{"category": "keyword_question", "expected": ["acr-fsrs"], "qid": "gf-r-acr-fsrs", "question": "tell me used often decay more"}
+{"category": "keyword_question", "expected": ["acr-sla"], "qid": "gf-r-acr-sla", "question": "tell me uptime hour response"}
+{"category": "keyword_question", "expected": ["acr-gdpr"], "qid": "gf-r-acr-gdpr", "question": "queue vectors purge"}
+{"category": "keyword_question", "expected": ["acr-mrr"], "qid": "gf-r-acr-mrr", "question": "tell me 1/rank first correct answer"}
+{"category": "keyword_question", "expected": ["id-asdk-receipt"], "qid": "gf-r-id-asdk-receipt", "question": "sandbox plan app - details?"}
+{"category": "keyword_question", "expected": ["id-session-stub"], "qid": "gf-r-id-session-stub", "question": "3f9c2a7e-51b4-4d0a-9e6f-2c8b1d7a4e90 ended"}
+{"category": "keyword_question", "expected": ["id-req-503"], "qid": "gf-r-id-req-503", "question": "503 embedding worker - details?"}
+{"category": "keyword_question", "expected": ["id-commit-revert"], "qid": "gf-r-id-commit-revert", "question": "tokenizer change because split"}
+{"category": "keyword_question", "expected": ["id-ticket-ops4471"], "qid": "gf-r-id-ticket-ops4471", "question": "skipped profile research - details?"}
+{"category": "keyword_question", "expected": ["id-order-ssd"], "qid": "gf-r-id-order-ssd", "question": "notes on Order ORD-2026-000917 replacement"}
+{"category": "keyword_question", "expected": ["id-license-key"], "qid": "gf-r-id-license-key", "question": "expires December 2026"}
+{"category": "keyword_question", "expected": ["id-container"], "qid": "gf-r-id-container", "question": "Container image sha256:4b1e0c9a7d2f tagged"}
+{"category": "keyword_question", "expected": ["ppl-nadia"], "qid": "gf-r-ppl-nadia", "question": "notes on Nadia Okafor reviews storage"}
+{"category": "keyword_question", "expected": ["ppl-tomas"], "qid": "gf-r-ppl-tomas", "question": "Windows installer - details?"}
+{"category": "keyword_question", "expected": ["ppl-mei"], "qid": "gf-r-ppl-mei", "question": "notes on benchmarked LoCoMo reported"}
+{"category": "keyword_question", "expected": ["ppl-oskar"], "qid": "gf-r-ppl-oskar", "question": "tell me Oskar Lindqvist wrote Hopfield"}
+{"category": "keyword_question", "expected": ["prod-lumen"], "qid": "gf-r-prod-lumen", "question": "tell me dashboard rewrite"}
+{"category": "keyword_question", "expected": ["prod-orbit"], "qid": "gf-r-prod-orbit", "question": "tell me conflict resolver"}
+{"category": "keyword_question", "expected": ["prod-quill"], "qid": "gf-r-prod-quill", "question": "tell me Quill note importer reads"}
+{"category": "keyword_question", "expected": ["dec-sqlite"], "qid": "gf-r-dec-sqlite", "question": "support rejected"}
+{"category": "keyword_question", "expected": ["dec-agpl"], "qid": "gf-r-dec-agpl", "question": "chose AGPL plus commercial"}
+{"category": "keyword_question", "expected": ["dec-no-telemetry"], "qid": "gf-r-dec-no-telemetry", "question": "Decision nothing - details?"}
+{"category": "keyword_question", "expected": ["dec-batch-releases"], "qid": "gf-r-dec-batch-releases", "question": "tell me fixes blocker"}
+{"category": "keyword_question", "expected": ["dec-reranker"], "qid": "gf-r-dec-reranker", "question": "larger modernbert reranker"}
+{"category": "keyword_question", "expected": ["dec-two-agents"], "qid": "gf-r-dec-two-agents", "question": "run once because - details?"}
+{"category": "keyword_question", "expected": ["ev-fd-leak"], "qid": "gf-r-ev-fd-leak", "question": "tell me leaked file descriptors daemon"}
+{"category": "keyword_question", "expected": ["ev-meetup"], "qid": "gf-r-ev-meetup", "question": "2026 presented bounded"}
+{"category": "keyword_question", "expected": ["ev-m057"], "qid": "gf-r-ev-m057", "question": "notes on 2026 M057 migration took"}
+{"category": "keyword_question", "expected": ["ev-laptop"], "qid": "gf-r-ev-laptop", "question": "laptop battery - details?"}
+{"category": "keyword_question", "expected": ["ne-de-backup"], "qid": "gf-r-ne-de-backup", "question": "Uhr und die - details?"}
+{"category": "keyword_question", "expected": ["ne-es-restart"], "qid": "gf-r-ne-es-restart", "question": "tell me pruebas reinicia cada domingo"}
+{"category": "keyword_question", "expected": ["ne-fr-key"], "qid": "gf-r-ne-fr-key", "question": "chiffrement est tous"}
+{"category": "keyword_question", "expected": ["ne-pt-report"], "qid": "gf-r-ne-pt-report", "question": "dia cada"}
+{"category": "keyword_question", "expected": ["pp-dash-port-a", "pp-dash-port-b"], "qid": "gf-r-pp-dash-port-a", "question": "notes on listens port"}
+{"category": "keyword_question", "expected": ["pp-dash-port-b", "pp-dash-port-a"], "qid": "gf-r-pp-dash-port-b", "question": "notes on 9765 serves browser dashboard"}
+{"category": "keyword_question", "expected": ["pp-retention-a", "pp-retention-b"], "qid": "gf-r-pp-retention-a", "question": "tell me Raw tool"}
+{"category": "keyword_question", "expected": ["pp-retention-b", "pp-retention-a"], "qid": "gf-r-pp-retention-b", "question": "output three weeks"}
+{"category": "keyword_question", "expected": ["pp-coffee-a", "pp-coffee-b"], "qid": "gf-r-pp-coffee-a", "question": "tell me second Thursday afternoon"}
+{"category": "keyword_question", "expected": ["pp-coffee-b", "pp-coffee-a"], "qid": "gf-r-pp-coffee-b", "question": "notes on hold retrospective"}
+{"category": "keyword_question", "expected": ["audit-db"], "qid": "gf-r-audit-db", "question": "Project Kestrel uses - details?"}
+{"category": "keyword_question", "expected": ["audit-backup"], "qid": "gf-r-audit-backup", "question": "tell me run 02:40 UTC daily"}
+{"category": "keyword_question", "expected": ["audit-owner"], "qid": "gf-r-audit-owner", "question": "tell me Priya Sen owns"}
+{"category": "keyword_question", "expected": ["audit-quote"], "qid": "gf-r-audit-quote", "question": "said leaving tomorrow stay - details?"}
+{"category": "keyword_question", "expected": ["audit-alex"], "qid": "gf-r-audit-alex", "question": "payroll automation - details?"}
+{"category": "keyword_question", "expected": ["audit-alexa"], "qid": "gf-r-audit-alexa", "question": "tell me payroll automation works platform"}
+{"category": "keyword_question", "expected": ["audit-speaker"], "qid": "gf-r-audit-speaker", "question": "Morgan use Rust payroll"}
+{"category": "keyword_question", "expected": ["audit-smith"], "qid": "gf-r-audit-smith", "question": "Smith manages Canada"}
+{"category": "keyword_question", "expected": ["audit-postgres"], "qid": "gf-r-audit-postgres", "question": "notes on Postgres database server PostgREST"}
+{"category": "keyword_question", "expected": ["audit-token"], "qid": "gf-r-audit-token", "question": "tell me tokens expire"}
+{"category": "keyword_question", "expected": ["audit-support"], "qid": "gf-r-audit-support", "question": "notes on 09:00 17:00 UTC"}
+{"category": "keyword_question", "expected": ["audit-rollout"], "qid": "gf-r-audit-rollout", "question": "Atlas rollout postponed June"}
+{"category": "keyword_question", "expected": ["audit-port"], "qid": "gf-r-audit-port", "question": "API listens port 9327"}
+{"category": "keyword_question", "expected": ["audit-cost"], "qid": "gf-r-audit-cost", "question": "tell me Juniper monthly infrastructure budget"}
+{"category": "keyword_question", "expected": ["audit-nomove"], "qid": "gf-r-audit-nomove", "question": "remain Frankfurt region rejected - details?"}
+{"category": "keyword_question", "expected": ["audit-code"], "qid": "gf-r-audit-code", "question": "Retries stop attempts"}
+{"category": "keyword_question", "expected": ["audit-pref"], "qid": "gf-r-audit-pref", "question": "tell me prefers concise pull request"}
+{"category": "keyword_question", "expected": ["audit-date"], "qid": "gf-r-audit-date", "question": "notes on certificate expiry 2026-08-18"}
+{"category": "keyword_question", "expected": ["audit-unknown"], "qid": "gf-r-audit-unknown", "question": "notes on CFO salary recorded Nobody"}
+{"category": "keyword_question", "expected": ["audit-timezone"], "qid": "gf-r-audit-timezone", "question": "daily on-call"}
+{"category": "keyword_question", "expected": ["audit-allergy"], "qid": "gf-r-audit-allergy", "question": "tell me Smith allergic peanuts"}
+{"category": "keyword_question", "expected": ["audit-trip"], "qid": "gf-r-audit-trip", "question": "Alex Morgan visited"}
+{"category": "keyword_question", "expected": ["audit-vpn"], "qid": "gf-r-audit-vpn", "question": "recovery phrase fictional-canary-blue-otter synthetic - details?"}
+{"category": "keyword_question", "expected": ["audit-old-status"], "qid": "gf-r-audit-old-status", "question": "primary owner Alex - details?"}
+{"category": "keyword_question", "expected": ["audit-new-status"], "qid": "gf-r-audit-new-status", "question": "Kestrel primary - details?"}
+{"category": "keyword_question", "expected": ["audit-old-db"], "qid": "gf-r-audit-old-db", "question": "Atlas used"}
+{"category": "keyword_question", "expected": ["audit-new-db"], "qid": "gf-r-audit-new-db", "question": "Atlas uses PostgreSQL main - details?"}
+{"category": "keyword_question", "expected": ["audit-multi-a"], "qid": "gf-r-audit-multi-a", "question": "tell me project lead Priya"}
+{"category": "keyword_question", "expected": ["audit-multi-b"], "qid": "gf-r-audit-multi-b", "question": "notes on Python data"}
+{"category": "keyword_question", "expected": ["audit-not-allowed"], "qid": "gf-r-audit-not-allowed", "question": "release deployment forbidden Fridays"}
+{"category": "keyword_question", "expected": ["ops-cedar-0"], "qid": "gf-r-ops-cedar-0", "question": "Cedar deployment uses port"}
+{"category": "keyword_question", "expected": ["ops-cedar-1"], "qid": "gf-r-ops-cedar-1", "question": "notes on Cedar recovery checklist"}
+{"category": "keyword_question", "expected": ["ops-audit-0000"], "qid": "gf-r-ops-audit-0000", "question": "owns project kestrel deployment - details?"}
+{"category": "keyword_question", "expected": ["ops-audit-0001"], "qid": "gf-r-ops-audit-0001", "question": "keep PostgreSQL ledger service"}
+{"category": "keyword_question", "expected": ["ops-audit-0005"], "qid": "gf-r-ops-audit-0005", "question": "notes on recovery command python"}

@@ -11,7 +11,6 @@ embedding compression, storage, and audit trail.
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
@@ -635,12 +634,25 @@ def test_parse_date_multiple_formats():
 
 
 def test_temporal_midpoint_empty():
-    """_temporal_midpoint returns current time for empty list."""
+    """No known dates -> no centroid. It used to substitute 'now' (BRN-32)."""
     from superlocalmemory.encoding.cognitive_consolidator import _temporal_midpoint
 
-    result = _temporal_midpoint([])
-    assert isinstance(result, str)
-    assert len(result) > 10  # ISO format string
+    assert _temporal_midpoint([]) == ""
+
+
+def test_parse_date_accepts_every_iso_spelling_slm_writes():
+    """BRN-32: offsets and Z returned None, which disabled the window."""
+    from datetime import datetime, timezone
+
+    from superlocalmemory.encoding.cognitive_consolidator import _parse_date
+
+    want = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for raw in ("2026-01-01", "2026-01-01T00:00:00", "2026-01-01 00:00:00",
+                "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00.000000+00:00", "2026-01-01T05:30:00+05:30",
+                "2025-12-31T19:00:00-05:00"):
+        assert _parse_date(raw) == want, raw
+    assert _parse_date("not a date") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1136,10 +1148,9 @@ def test_temporal_subcluster_with_none_dates(db, profile_id):
 
     sub_clusters = cons._temporal_subcluster(["f1", "f2", "f3"], fact_map)
 
-    # All 3 should be in one sub-cluster (None dates don't split)
-    total_facts = sum(len(sc) for sc in sub_clusters)
-    assert total_facts == 3
-    assert "f2" in sub_clusters[0]  # None-date fact is included
+    # A fact with no known date cannot be shown to be inside the window, so
+    # it joins no cluster (BRN-32: it used to join whichever was open).
+    assert sub_clusters == [["f1", "f3"]]
 
 
 # ---------------------------------------------------------------------------

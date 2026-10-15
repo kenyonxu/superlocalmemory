@@ -15,8 +15,11 @@ obligations`` — one per (profile_id, snapshot_path) pair — so that:
      data re-erased from the restored store before any caller can read it
      (restore-replay invariant).
 
-  3. Obligations age out automatically when a snapshot exceeds the configured
-     retention window, keeping the ledger finite.
+  3. An obligation ends only when the snapshot is gone from disk or has been
+     re-read and found clean. The retention window makes it OVERDUE (reported,
+     never dropped): a backup that still holds a person's data is still
+     something to erase after 90 days, and a ledger that forgets it would let
+     a restore resurrect that person without a word.
 
 IMPORTANT: backup_obligations.db is intentionally NOT in MANAGED_DATABASES
 and is therefore never backed up itself.  This prevents a restore from loading
@@ -26,10 +29,12 @@ stale obligation state.
 from __future__ import annotations
 from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
+import enum
 import logging
 import sqlite3
 import time
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger("superlocalmemory.infra.backup_obligations")
@@ -47,7 +52,9 @@ CREATE TABLE IF NOT EXISTS backup_obligations (
     recorded_at      REAL NOT NULL,
     status           TEXT NOT NULL DEFAULT 'pending',
     discharged_at    REAL,
-    discharge_reason TEXT
+    discharge_reason TEXT,
+    kind             TEXT NOT NULL DEFAULT 'contains',
+    last_replayed_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_bko_profile
     ON backup_obligations(profile_id, status);
@@ -84,9 +91,17 @@ class BackupObligationStore:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path))
         conn.row_factory = sqlite3.Row
-        apply_journal_mode(conn)
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        try:
+            # Fork (f4dd873c): the journal mode comes from the central
+            # policy, not a hardcoded WAL here.
+            apply_journal_mode(conn)
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except BaseException:
+            # Setup failed: close it now, or the file stays open (Windows
+            # then cannot delete or replace it) for as long as the error lives.
+            conn.close()
+            raise
         return conn
 
     def _ensure_schema(self) -> None:
@@ -96,9 +111,20 @@ class BackupObligationStore:
                     stmt = stmt.strip()
                     if stmt:
                         conn.execute(stmt)
+                self._add_missing_columns(conn)
                 conn.commit()
         except Exception as exc:  # noqa: BLE001
             logger.warning("BackupObligationStore: schema init failed: %s", exc)
+
+    @staticmethod
+    def _add_missing_columns(conn: sqlite3.Connection) -> None:
+        """A ledger written by an earlier release gains the columns it lacks (O(1))."""
+        have = {row[1] for row in conn.execute("PRAGMA table_info(backup_obligations)")}
+        if "kind" not in have:
+            conn.execute("ALTER TABLE backup_obligations "
+                         "ADD COLUMN kind TEXT NOT NULL DEFAULT 'contains'")
+        if "last_replayed_at" not in have:
+            conn.execute("ALTER TABLE backup_obligations ADD COLUMN last_replayed_at REAL")
 
     # ------------------------------------------------------------------
     # Write path
@@ -111,25 +137,53 @@ class BackupObligationStore:
         snapshot_path: str,
         snapshot_epoch: int,
         retention_days: int = 90,
+        kind: str = "contains",
     ) -> str:
-        """Record one outstanding obligation.  Returns the obligation_id."""
+        """Record one outstanding obligation.  Returns the obligation_id.
+
+        ``kind`` is ``"contains"`` (the snapshot was read and holds the profile)
+        or ``"unreadable"`` (it could not be read, so it cannot be shown clean).
+        Raises when the obligation cannot be written: a swallowed failure here
+        is an erasure that forgets its own backups.
+        """
         oid = uuid.uuid4().hex
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT obligation_id FROM backup_obligations WHERE profile_id=? "
+                "AND snapshot_path=? AND status='pending'",
+                (profile_id, str(snapshot_path))).fetchone()
+            if existing is not None:
+                return str(existing[0])
+            conn.execute(
+                "INSERT INTO backup_obligations "
+                "(obligation_id, profile_id, erasure_id, snapshot_path, "
+                " snapshot_epoch, retention_days, recorded_at, status, kind) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                (
+                    oid, profile_id, erasure_id, str(snapshot_path),
+                    int(snapshot_epoch), int(retention_days), time.time(), kind,
+                ),
+            )
+            conn.commit()
+        return oid
+
+    def mark_replayed(self, snapshot_path: str) -> int:
+        """Note that a restore of this snapshot re-erased the profile from the live store.
+
+        The obligation stays pending: the SNAPSHOT still holds the data, and the
+        next restore of it must replay the erasure again.
+        """
         try:
             with self._connect() as conn:
-                conn.execute(
-                    "INSERT OR IGNORE INTO backup_obligations "
-                    "(obligation_id, profile_id, erasure_id, snapshot_path, "
-                    " snapshot_epoch, retention_days, recorded_at, status) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
-                    (
-                        oid, profile_id, erasure_id, str(snapshot_path),
-                        int(snapshot_epoch), int(retention_days), time.time(),
-                    ),
-                )
+                cur = conn.execute(
+                    "UPDATE backup_obligations SET last_replayed_at=? "
+                    "WHERE snapshot_path=? AND status='pending'",
+                    (time.time(), str(snapshot_path)))
                 conn.commit()
+                return cur.rowcount
         except Exception as exc:  # noqa: BLE001
-            logger.warning("BackupObligationStore.record failed: %s", exc)
-        return oid
+            logger.warning("BackupObligationStore.mark_replayed: %s", exc)
+            return 0
 
     def discharge(self, obligation_id: str, reason: str) -> None:
         """Mark a single obligation as discharged."""
@@ -165,31 +219,88 @@ class BackupObligationStore:
     # Read path
     # ------------------------------------------------------------------
 
-    def _discharge_aged_out(self) -> int:
-        """Auto-discharge obligations whose snapshot has aged past retention."""
+    def _discharge_removed(self) -> int:
+        """Discharge obligations whose snapshot is no longer on disk.
+
+        Verified removal is the one thing read paths may conclude on their own
+        (a ``stat``). Age is not: see the module docstring.
+        """
         try:
             with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT obligation_id, snapshot_path FROM backup_obligations "
+                    "WHERE status='pending'").fetchall()
+                gone = [r["obligation_id"] for r in rows
+                        if not Path(r["snapshot_path"]).exists()]
                 now = time.time()
-                cur = conn.execute(
-                    "UPDATE backup_obligations "
-                    "SET status='discharged', discharged_at=?, "
-                    "    discharge_reason='snapshot_aged_out' "
-                    "WHERE status='pending' "
-                    "  AND (snapshot_epoch + retention_days * 86400) < ?",
-                    (now, now),
-                )
+                for oid in gone:
+                    conn.execute(
+                        "UPDATE backup_obligations SET status='discharged', discharged_at=?, "
+                        "discharge_reason='snapshot_removed' WHERE obligation_id=?",
+                        (now, oid))
                 conn.commit()
-                return cur.rowcount
+                return len(gone)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("BackupObligationStore._discharge_aged_out: %s", exc)
+            logger.warning("BackupObligationStore._discharge_removed: %s", exc)
             return 0
 
+    def list_overdue(self, profile_id: str | None = None) -> list[dict]:
+        """Pending obligations whose retention window has passed: still to be erased."""
+        self._discharge_removed()
+        now = time.time()
+        try:
+            with self._connect() as conn:
+                sql = ("SELECT * FROM backup_obligations WHERE status='pending' "
+                       "AND (snapshot_epoch + retention_days * 86400) < ?")
+                params: tuple = (now,)
+                if profile_id is not None:
+                    sql += " AND profile_id=?"
+                    params = (now, profile_id)
+                return [dict(r) for r in conn.execute(sql, params).fetchall()]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("BackupObligationStore.list_overdue: %s", exc)
+            return []
+
+    def reconcile(self, profile_id: str | None = None) -> dict[str, int]:
+        """Re-read every pending snapshot; discharge only those PROVEN clean or gone.
+
+        A snapshot that still holds the profile, or cannot be read, stays
+        pending. Returns ``{"discharged": n, "still_holding": n, "unreadable": n}``.
+        """
+        self._discharge_removed()
+        out = {"discharged": 0, "still_holding": 0, "unreadable": 0}
+        for row in self._pending_rows(profile_id):
+            verdict = _verdict_of(Path(row["snapshot_path"]), row["profile_id"])
+            if verdict is SnapshotVerdict.CLEAN:
+                self.discharge(row["obligation_id"], "snapshot_verified_clean")
+                out["discharged"] += 1
+            elif verdict is SnapshotVerdict.CONTAINS:
+                out["still_holding"] += 1
+            else:
+                out["unreadable"] += 1
+        return out
+
+    def _pending_rows(self, profile_id: str | None) -> list[dict]:
+        try:
+            with self._connect() as conn:
+                if profile_id is None:
+                    rows = conn.execute(
+                        "SELECT * FROM backup_obligations WHERE status='pending'").fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM backup_obligations WHERE status='pending' "
+                        "AND profile_id=?", (profile_id,)).fetchall()
+                return [dict(r) for r in rows]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("BackupObligationStore._pending_rows: %s", exc)
+            return []
+
     def count_pending(self, profile_id: str) -> int:
-        """Count pending obligations for *profile_id* (auto-discharges aged-out first).
+        """Count pending obligations for *profile_id* (gone snapshots are discharged first).
 
         Fail-closed: if the store is unreadable, returns 1 to block completeness.
         """
-        self._discharge_aged_out()
+        self._discharge_removed()
         try:
             with self._connect() as conn:
                 row = conn.execute(
@@ -221,8 +332,8 @@ class BackupObligationStore:
             return []
 
     def list_pending_for_profile(self, profile_id: str) -> list[dict]:
-        """Return all pending obligations for *profile_id* (auto-discharges first)."""
-        self._discharge_aged_out()
+        """Return pending obligations for *profile_id* (gone snapshots are discharged first)."""
+        self._discharge_removed()
         try:
             with self._connect() as conn:
                 rows = conn.execute(
@@ -241,94 +352,140 @@ class BackupObligationStore:
 # ---------------------------------------------------------------------------
 
 
+class SnapshotVerdict(enum.Enum):
+    """What reading one snapshot established. ``UNKNOWN`` is not ``CLEAN``."""
+
+    CLEAN = "clean"
+    CONTAINS = "contains"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class ScanReport:
+    """Snapshots that hold a profile, and snapshots that could not be read."""
+
+    hits: list[tuple[str, int]] = field(default_factory=list)
+    unreadable: list[tuple[str, int]] = field(default_factory=list)
+
+
+#: Tables whose rows name a profile but are the PROOF of its erasure, kept by
+#: design in the live store too (receipts, the hash-chained audit trail). A
+#: backup holding only these holds none of the person's data.
+_PROOF_TABLES = frozenset({"erasure_receipts", "audit_chain"})
+_DB_SUFFIXES = (".db", ".sqlite", ".sqlite3")
+
+
+def _table_holds_profile(conn: sqlite3.Connection, table: str, profile_id: str) -> bool:
+    cols = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
+    if "profile_id" in cols:
+        return conn.execute(
+            f'SELECT 1 FROM "{table}" WHERE profile_id=? LIMIT 1', (profile_id,),
+        ).fetchone() is not None
+    # The code graph has no profile column: its repository and symbol names are
+    # installation-level personal data, so any content flags it.
+    return table == "graph_nodes" and conn.execute(
+        'SELECT 1 FROM "graph_nodes" LIMIT 1').fetchone() is not None
+
+
+def inspect_snapshot(db_path: Path, profile_id: str) -> SnapshotVerdict:
+    """Read one snapshot file (read-only) and say whether it holds ``profile_id``.
+
+    Every real table is looked at (virtual ones are indexes over those), not a
+    short list: a backup of ``learning.db`` or ``pending.db`` holds a person's
+    words just as a backup of ``memory.db`` does. Anything that stops the read
+    (a corrupt or encrypted file, a permission error, an unexpected schema) is
+    ``UNKNOWN``: an unreadable copy cannot be shown not to hold the data.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error as exc:
+        logger.warning("backup snapshot %s cannot be opened: %s", Path(db_path).name, exc)
+        return SnapshotVerdict.UNKNOWN
+    try:
+        tables = [row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+            "AND sql NOT LIKE 'CREATE VIRTUAL%'").fetchall()]
+        for table in tables:
+            if table not in _PROOF_TABLES and _table_holds_profile(conn, table, profile_id):
+                return SnapshotVerdict.CONTAINS
+        return SnapshotVerdict.CLEAN
+    except (sqlite3.Error, OSError) as exc:
+        logger.warning("backup snapshot %s cannot be read (%s): not treating it as clean",
+                       Path(db_path).name, exc)
+        return SnapshotVerdict.UNKNOWN
+    finally:
+        conn.close()
+
+
+def _verdict_of(snapshot: Path, profile_id: str) -> SnapshotVerdict:
+    """Verdict for a snapshot file or a backup-set directory (worst case wins)."""
+    files = ([f for f in sorted(snapshot.iterdir()) if f.suffix in _DB_SUFFIXES]
+             if snapshot.is_dir() else [snapshot])
+    verdicts = [inspect_snapshot(f, profile_id) for f in files]
+    if SnapshotVerdict.CONTAINS in verdicts:
+        return SnapshotVerdict.CONTAINS
+    if SnapshotVerdict.UNKNOWN in verdicts or not verdicts:
+        # No database inside (a graph or vector store, say) cannot be shown clean.
+        return SnapshotVerdict.UNKNOWN
+    return SnapshotVerdict.CLEAN
+
+
+def scan_backup_snapshots(backup_dir: Path, profile_id: str) -> ScanReport:
+    """Scan *backup_dir* for snapshots holding *profile_id*, and note unreadable ones.
+
+    Handles per-file backups (``*.db``) and ``backup_XXXX/`` sets (a directory
+    with a ``manifest.json``). A snapshot that cannot be read is reported in
+    ``unreadable``, never skipped.
+    """
+    backup_dir = Path(backup_dir)
+    report = ScanReport()
+    if not backup_dir.exists():
+        return report
+    for candidate in sorted(backup_dir.iterdir()):
+        if candidate.name.startswith(".") or candidate.is_symlink():
+            continue
+        is_set = candidate.is_dir() and (candidate / "manifest.json").exists()
+        if not (is_set or (candidate.is_file() and candidate.suffix in _DB_SUFFIXES)):
+            continue
+        verdict = _verdict_of(candidate, profile_id)
+        entry = (str(candidate), int(candidate.stat().st_mtime))
+        if verdict is SnapshotVerdict.CONTAINS:
+            report.hits.append(entry)
+        elif verdict is SnapshotVerdict.UNKNOWN:
+            report.unreadable.append(entry)
+    return report
+
+
 def scan_backup_snapshots_for_profile(
     backup_dir: Path,
     profile_id: str,
 ) -> list[tuple[str, int]]:
-    """Scan *backup_dir* for snapshots containing *profile_id*'s data.
+    """Snapshots that hold *profile_id*, as ``(path, epoch)``.
 
-    Returns a list of (snapshot_path_str, epoch) tuples.  Handles both legacy
-    per-file backups (``*.db`` files) and new-style BackupCoordinator sets
-    (``backup_XXXX/`` directories containing a ``manifest.json``).
+    Unreadable snapshots are not in this list; use :func:`scan_backup_snapshots`
+    to see them. Every caller that records obligations must.
     """
-    backup_dir = Path(backup_dir)
-    results: list[tuple[str, int]] = []
-
-    if not backup_dir.exists():
-        return results
-
-    # New-style backup sets: backup_XXXX/ directories with manifest.json.
-    # Record obligation at the set-directory level (one obligation per set).
-    for candidate in sorted(backup_dir.iterdir()):
-        if not candidate.is_dir() or not (candidate / "manifest.json").exists():
-            continue
-        hit = False
-        for db_file in candidate.glob("*.db"):
-            if _snapshot_db_contains_profile(db_file, profile_id):
-                hit = True
-                break
-        if hit:
-            epoch = int(candidate.stat().st_mtime)
-            results.append((str(candidate), epoch))
-
-    # Legacy per-file backups: ``memory-YYYYMMDD-HHMMSS.db``, etc.
-    for db_file in sorted(backup_dir.glob("*.db")):
-        if db_file.name.startswith("."):
-            continue
-        if _snapshot_db_contains_profile(db_file, profile_id):
-            epoch = int(db_file.stat().st_mtime)
-            results.append((str(db_file), epoch))
-
-    return results
+    return scan_backup_snapshots(backup_dir, profile_id).hits
 
 
 def _snapshot_db_contains_profile(db_path: Path, profile_id: str) -> bool:
-    """Return True if the SQLite file at *db_path* contains rows for *profile_id*.
+    """True only when the file was read and holds the profile (kept for old callers)."""
+    return inspect_snapshot(db_path, profile_id) is SnapshotVerdict.CONTAINS
 
-    Opens read-only (immutable) to avoid side-effects.  Returns False on any
-    error so an unreadable snapshot does not block erasure; caller logs the
-    warning separately.
-    """
+
+def _is_media_snapshot(db_path: Path) -> bool:
+    """True for a copy of media.db (images and documents)."""
+    if not Path(db_path).name.startswith("media"):
+        return False
     try:
-        uri = f"file:{db_path}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, timeout=5)
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
         try:
-            tables = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-            for table in ("profiles", "atomic_facts", "memories", "graph_nodes"):
-                if table not in tables:
-                    continue
-                cols = {
-                    row[1]
-                    for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
-                }
-                if "profile_id" not in cols:
-                    # graph_nodes has no profile_id — flag unconditionally as personal
-                    if table == "graph_nodes":
-                        row = conn.execute(
-                            "SELECT 1 FROM graph_nodes LIMIT 1"
-                        ).fetchone()
-                        if row is not None:
-                            return True
-                    continue
-                row = conn.execute(
-                    f"SELECT 1 FROM {table} WHERE profile_id=? LIMIT 1",
-                    (profile_id,),
-                ).fetchone()
-                if row is not None:
-                    return True
+            return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                "AND name='media_items'").fetchone() is not None
         finally:
             conn.close()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "_snapshot_db_contains_profile: error reading %s: %s — treating as clean",
-            db_path.name, exc,
-        )
-    return False
+    except sqlite3.Error:
+        return False
 
 
 def erase_profile_from_snapshot(db_path: Path, profile_id: str) -> dict[str, int]:
@@ -338,6 +495,10 @@ def erase_profile_from_snapshot(db_path: Path, profile_id: str) -> dict[str, int
     refuse to mark the restore complete when personal data cannot be purged.
     """
     deleted: dict[str, int] = {}
+    if _is_media_snapshot(db_path):  # vectors and originals need the media store's own scrub
+        from superlocalmemory.media.erasure import scrub_snapshot
+
+        return scrub_snapshot(db_path, profile_id)
     # isolation_level=None → autocommit so VACUUM can run outside any transaction.
     conn = sqlite3.connect(str(db_path))
     conn.isolation_level = None

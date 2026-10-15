@@ -138,7 +138,12 @@ def _sync_vector_ann(
     elif operation == "delete":
         if vector_store is not None:
             try:
-                vector_store.delete(fact_id)
+                from superlocalmemory.retrieval.vector_store import classify_delete
+
+                if classify_delete(vector_store.delete(fact_id)).failed:
+                    # The erasure receipt (VectorOwner) reports the residue; say so here too.
+                    logger.warning(
+                        "vector_store.delete failed for %s: a vector may remain", fact_id[:16])
             except Exception as exc:
                 logger.warning("vector_store.delete failed for %s: %s", fact_id[:16], exc)
         if ann_index is not None:
@@ -445,6 +450,46 @@ def _finalize_erasure(
         }
 
 
+def _refuse_if_correction_protected(db: Any, profile_id: str, fact_id: str) -> None:
+    """Refuse before the erasure removes a single projection (see module doc)."""
+    from superlocalmemory.core.correction_protection import (
+        blocking_cases,
+        protection_message,
+    )
+    from superlocalmemory.core.remember_runtime import CanonicalMutationConflict
+
+    cases = blocking_cases(db, profile_id, fact_id)
+    if cases:
+        raise CanonicalMutationConflict(protection_message(cases))
+
+
+def _delete_canonical(
+    engine: Any, fact_id: str, profile_id: str, content_preview: str, *,
+    trusted_actor_id: str, canonical_runtime: Any | None, idempotency_key: str | None,
+) -> str | None:
+    """The last protection check and the fact delete, in one transaction.
+
+    Returns the content preview, or None when the writer no longer found the
+    fact. Raises ``CanonicalMutationConflict`` when the fact is protected.
+    """
+    if canonical_runtime is not None:
+        result = dict(canonical_runtime.delete_fact(
+            profile_id, fact_id, idempotency_key=idempotency_key,
+        ))
+        if not result.get("ok"):
+            return None
+        return content_preview or str(result.get("content_preview", ""))
+    from superlocalmemory.core.overtaken_cases import cases_naming, overtake
+
+    with engine._db.transaction():  # the delete and the cases it closes: one txn
+        _refuse_if_correction_protected(engine._db, profile_id, fact_id)
+        overtake(engine._db, cases_naming(engine._db, [fact_id]),
+                 user_action="delete", actor_id=trusted_actor_id,
+                 operation_id=f"delete:{fact_id}")
+        engine._db.delete_fact(fact_id, profile_id=profile_id)
+    return content_preview
+
+
 def delete_fact_authorized(
     engine: Any,
     fact_id: str,
@@ -492,6 +537,13 @@ def delete_fact_authorized(
     exists = bool(rows)
     content_preview = dict(rows[0]).get("content", "")[:80] if exists else ""
     memory_id = dict(rows[0]).get("memory_id") if exists else None
+    from superlocalmemory.core import delete_refusal, erasure_scrub
+
+    entity_ids: list[str] = []
+    if exists:  # a refused delete also heals a stale tombstone (delete_refusal)
+        delete_refusal.refuse_early(engine, profile_id, fact_id)
+        entity_ids = erasure_scrub.entities_of(engine._db, profile_id, fact_id)
+        erasure_scrub.prepare(engine._db)
 
     erasure_id = uuid.uuid4().hex
     requested_at = _time.time()
@@ -515,6 +567,7 @@ def delete_fact_authorized(
 
     remove_result = None
     if exists:
+        before_removal = delete_refusal.snapshot(engine, profile_id, fact_id)
         try:
             remove_result = service.remove(engine._db, op_ctx, memory_id=memory_id)
         except Exception as exc:
@@ -547,20 +600,33 @@ def delete_fact_authorized(
     mark_erasing(profile_id, fact_id)
     try:
         if exists:
-            if canonical_runtime is not None:
-                result = dict(canonical_runtime.delete_fact(
-                    profile_id, fact_id, idempotency_key=idempotency_key,
-                ))
-                if not result.get("ok"):
-                    return {"ok": False, "error": f"Memory {fact_id} not found"}
-                if not content_preview:
-                    content_preview = str(result.get("content_preview", ""))
-            else:
-                engine._db.delete_fact(fact_id, profile_id=profile_id)
+            from superlocalmemory.core.remember_runtime import CanonicalMutationConflict
+
+            try:
+                content_preview = _delete_canonical(
+                    engine, fact_id, profile_id, content_preview,
+                    trusted_actor_id=trusted_actor_id,
+                    canonical_runtime=canonical_runtime, idempotency_key=idempotency_key,
+                )
+            except CanonicalMutationConflict as refused:
+                # Refused at the last check (a protecting case appeared after
+                # the first): the fact stays, so its search entries come back.
+                if delete_refusal.restore(engine, before_removal, erasure_id):
+                    raise
+                raise CanonicalMutationConflict(
+                    delete_refusal.unrestored_message(str(refused))) from refused
+            if content_preview is None:
+                return {"ok": False, "error": f"Memory {fact_id} not found"}
 
         # Purge projections for a fresh delete and re-run (idempotently) for a
         # resumed cleanup so an orphaned source memory is reclaimed on retry.
         _purge_delete_projections(engine, fact_id, profile_id, memory_id=memory_id)
+        try:  # the erased words outside the projections (core/erasure_scrub.py)
+            erasure_scrub.scrub(engine._db, profile_id, fact_id, entity_ids)
+        except Exception as exc:
+            logger.error("Erasure scrub failed for %s: %s", fact_id[:16], exc)
+            return {"ok": False, "retryable": True, "deleted": fact_id,
+                    "error": "erasure incomplete: derived copies remain"}
 
         if exists:
             tombstoned = bool(remove_result and remove_result.tombstoned)
@@ -574,9 +640,10 @@ def delete_fact_authorized(
         )
 
         engine._hooks.run_post("delete", context)
+        # Never the erased words themselves: a log line outlives the erasure.
         logger.info(
-            "DELETE fact_id=%s actor=%s source_agent=%s content=%s",
-            fact_id[:16], trusted_actor_id, source_agent_id, content_preview,
+            "DELETE fact_id=%s actor=%s source_agent=%s content_chars=%d",
+            fact_id[:16], trusted_actor_id, source_agent_id, len(content_preview),
         )
         erasure_verified = bool(erasure.get("erasure_verified", False))
         if not erasure_verified:
@@ -663,11 +730,19 @@ def update_fact_authorized(
     source_agent_id: str,
     canonical_runtime: Any | None = None,
     idempotency_key: str | None = None,
+    profile_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create a review-required correction successor without rewriting history."""
+    """Create a review-required correction successor without rewriting history.
+
+    ``profile_id`` is the profile the fact belongs to; ``None`` = the active one.
+    """
     if not content or not content.strip():
         return {"ok": False, "error": "content cannot be empty"}
-    content = content.strip()
+    from superlocalmemory.memory_core import prepare_user_text
+
+    # The new text is prepared like any save, so the stored successor and every
+    # event preview built from it hold no personal data when redaction is on.
+    content = prepare_user_text(getattr(engine, "_config", None), content.strip()).text
     profile_id, context = _context(
         engine,
         "update",
@@ -675,6 +750,7 @@ def update_fact_authorized(
         trusted_actor_id=trusted_actor_id,
         source_agent_id=source_agent_id,
         content_preview=content,
+        profile_id=profile_id,
     )
     rows = engine._db.execute(
         "SELECT content FROM atomic_facts "

@@ -12,11 +12,18 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Callable
 
 logger = logging.getLogger(__name__)
+
+
+#: What ``slm://context`` says when no memory matched the session's context.
+#: It used to say none were stored yet, which was false on a full store.
+EMPTY_CONTEXT_NOTE = ("No stored memory matched this session's context. Use 'recall' to "
+                      "search, or 'remember' to store something.")
 
 
 def register_resources(server, get_engine: Callable) -> None:
@@ -48,12 +55,19 @@ def register_resources(server, get_engine: Callable) -> None:
                 engine=_eng,
                 config={"enabled": True, "max_memories_injected": 10, "relevance_threshold": 0.3},
             )
-            context = auto.get_session_context(query="recent decisions and important context")
+            # pool_recall blocks on HTTP to the daemon: run it off the MCP
+            # event loop (as session_init does) so other tools keep working.
+            # AutoRecall marks the recall as a context load — not judged.
+            context = await asyncio.to_thread(
+                auto.get_session_context, query="recent decisions and important context",
+            )
             if not context:
-                return "No session context available yet. Use 'remember' to store memories."
+                return EMPTY_CONTEXT_NOTE
             return context
         except Exception as exc:
-            return f"Context unavailable: {exc}"
+            # The type only: a message can quote a path or a memory.
+            logger.warning("slm://context failed: %s", type(exc).__name__)
+            return "Context unavailable right now. Use 'recall' to search memories."
 
     # ------------------------------------------------------------------
     # 1. slm://recent
@@ -262,7 +276,7 @@ def register_resources(server, get_engine: Callable) -> None:
             # Top-accessed facts
             top_rows = engine._db.execute(
                 "SELECT fact_id, content, access_count FROM atomic_facts "
-                "WHERE profile_id = ? AND access_count > 0 "
+                f"WHERE profile_id = ? AND access_count > 0{engine._db.visible_fact_clause()} "
                 "ORDER BY access_count DESC LIMIT 5",
                 (pid,),
             )

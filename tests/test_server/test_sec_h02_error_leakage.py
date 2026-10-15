@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 
 def _daemon_headers(app) -> dict[str, str]:

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Qualixar Jev Decision Layer mark</title>
+  <desc id="desc">Three bounded decision paths converge on one checked recommendation.</desc>
+  <defs>
+  </defs>
+  <rect x="3" y="3" width="122" height="122" rx="27" fill="#f4f1ff" stroke="#d7d0f1" stroke-width="2"/>
+  <path d="M25 36h29l17 28M25 64h46M25 92h29l17-28" fill="none" stroke="#6655d1" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="25" cy="36" r="7" fill="#efb847"/><circle cx="25" cy="64" r="7" fill="#efb847"/><circle cx="25" cy="92" r="7" fill="#efb847"/>
+  <path d="M71 49l15 15-15 15-15-15z" fill="#6655d1" stroke="#fff" stroke-width="2"/>
+  <path d="M86 64h17" stroke="#6655d1" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="106" cy="64" r="6" fill="#e8786e"/>
+</svg>

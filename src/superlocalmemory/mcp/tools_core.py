@@ -24,6 +24,7 @@ from superlocalmemory.core.config import CANONICAL_LIST_LIMIT, CANONICAL_RECALL_
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.infra.data_root import state_path
 from superlocalmemory.mcp._daemon_proxy import daemon_unavailable_error
+from superlocalmemory.mcp.remote_visibility import visible_facts
 from superlocalmemory.mcp.shared import authorize_mcp_mutation, parse_id_list
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,11 @@ async def _runtime_profile(get_engine: Callable, explicit: str = "") -> str:
     """Resolve an MCP default profile from daemon runtime truth."""
     if explicit:
         return explicit
+    from superlocalmemory.server.profile_runtime import current_request_profile
+
+    pinned = current_request_profile()
+    if pinned:
+        return str(pinned)
     import asyncio
 
     try:
@@ -62,6 +68,52 @@ async def _runtime_profile(get_engine: Callable, explicit: str = "") -> str:
         logger.debug("daemon profile resolution failed: %s", exc)
     return str(get_engine().profile_id)
 
+
+async def _call_profile(get_engine: Callable, profile_id: object) -> tuple[str, dict | None]:
+    """``(profile, refusal)``: the named profile (it must exist), else the active one.
+
+    The active profile is resolved exactly as before ``profile_id`` existed
+    (:func:`_runtime_profile`), so an unnamed call is unchanged.
+    """
+    from superlocalmemory.mcp.request_profile import tool_profile
+
+    if profile_id is None or (isinstance(profile_id, str) and not profile_id.strip()):
+        return await _runtime_profile(get_engine), None
+    return tool_profile(get_engine(), profile_id)
+
+
+def _routed_daemon_call(method: str, path: str, body: dict | None = None) -> dict | None:
+    """A daemon mutation for a named profile.
+
+    The daemon's 404 for a profile that does not exist (or a memory that is
+    not in it) is an answer, returned with its code so the caller does not
+    retry it; ``None`` still means the daemon did not answer.
+    """
+    from superlocalmemory.cli.daemon import DaemonConflict, DaemonNotFound, daemon_request
+
+    try:
+        return daemon_request(method, path, body, preserve_not_found=True,
+                              preserve_conflict=True)
+    except DaemonNotFound as exc:
+        # The route's own code (unknown_profile) when it gave one.
+        return {"success": False, "code": exc.error_code or exc.code, "retryable": False,
+                "error": exc.error_message or exc.message}
+    except DaemonConflict as exc:  # e.g. a correction already open: retrying cannot help
+        return {"success": False, "code": "CONFLICT", "retryable": False, "error": exc.detail}
+
+def _remember_path(replaces_id: str | None) -> str:
+    """``/remember``, marked with who is asking when a remote app replaces a memory.
+
+    The daemon then lets it replace only a memory it may see. A plain save, and any save from
+    this computer, keeps the bare path.
+    """
+    if replaces_id is None:
+        return "/remember"
+    from superlocalmemory.mcp.remote_visibility import with_view
+
+    return with_view("/remember")
+
+
 def _emit_event(event_type: str, payload: dict | None = None,
                 source_agent: str = "mcp_client") -> None:
     """Emit an event to the EventBus (best-effort, never raises)."""
@@ -74,10 +126,55 @@ def _emit_event(event_type: str, payload: dict | None = None,
         pass
 
 
+# `remember` only adds a memory. The hints are declared explicitly because the
+# MCP default for an unannotated tool is destructiveHint=true. They live in a
+# constant so the decorator stays on one line, which is the form the packaging
+# test's source-level tool-name discovery reads.
+_ADDS_ONLY_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+)
+
+
+#: Keyword search needs no model: never warming up. Present so every recall
+#: door carries the same envelope (warming_up, status_note).
+_SEARCH_READY = {"warming_up": False, "status_note": ""}
+
+
+def _search_tiers(query: str, items: list[dict], *, filtered: bool) -> tuple[list[dict], dict]:
+    """``search``'s tiers: rows the question's words support first, then at most
+    three related ones; an explicit kind or tag filter keeps every row."""
+    rows, info = _tiered_rows(query, items, filtered=filtered)
+    return rows, {**info, **_SEARCH_READY}
+
+
+def _tiered_rows(query: str, items: list[dict], *, filtered: bool) -> tuple[list[dict], dict]:
+    from superlocalmemory.retrieval import support_tiers as st
+    from superlocalmemory.retrieval.support_gate import lexical_support
+
+    supported = [{**i, "tier": st.SUPPORTED} for i in items
+                 if lexical_support(query, str(i.get("content", "")))]
+    others = [{**i, "tier": st.RELATED} for i in items
+              if not lexical_support(query, str(i.get("content", "")))]
+    if filtered:
+        return supported + others, {"tier": st.SUPPORTED if supported else st.RELATED}
+    if supported:
+        return supported + others[:st.RELATED_MAX], {"tier": st.SUPPORTED}
+    if others:
+        return others[:st.RELATED_MAX], {"tier": st.RELATED,
+                                         "abstention_note": st.RELATED_NOTE}
+    return [], {"tier": st.NONE, "abstention_note": SEARCH_NO_MATCH}
+
+
+#: ``search`` matches words only; with no match it says that, not that the
+#: memory does not exist (only recall, warm, measures that).
+SEARCH_NO_MATCH = "No stored memory matches those words."
+
+
 def register_core_tools(server, get_engine: Callable) -> None:
     """Register the 13 core MCP tools on *server*."""
 
-    @server.tool()
+    # Adds a memory; never deletes or overwrites one (see _ADDS_ONLY_ANNOTATIONS).
+    @server.tool(annotations=_ADDS_ONLY_ANNOTATIONS)
     @admits(OperationKind.REMEMBER)
     async def remember(
         content: str, tags: str = "", project: str = "",
@@ -89,6 +186,8 @@ def register_core_tools(server, get_engine: Callable) -> None:
         session_date: str = "",
         profile_id: str = "",
         provenance_kind: str = "",
+        kind: str = "",
+        replaces: str | None = None,
     ) -> dict:
         """Store content to memory with intelligent indexing.
 
@@ -114,6 +213,27 @@ def register_core_tools(server, get_engine: Callable) -> None:
         world/private/curated/legacy. Empty = untagged, byte-identical to
         the legacy call. The daemon validates the value — out-of-vocabulary
         input is filed as untagged, never rejected.
+
+        ``kind`` says what sort of memory this is. Set it whenever you know:
+        ``rule`` (a standing instruction: "always/never ..."), ``decision`` (a
+        choice that settles one question), ``status`` (the current state of
+        something, which a later update will replace), ``procedure`` (steps or
+        commands), ``prospective`` (a plan or to-do), ``opinion`` (a
+        preference or view), ``correction`` (says an earlier memory was wrong),
+        ``episodic`` (something that happened) or ``semantic`` (a lasting
+        fact). A declared kind is confirmed: rules and decisions you save this
+        way are loaded at the start of later sessions. Leave it empty when
+        unsure; SLM may suggest one later, and a suggestion changes nothing.
+
+        ``replaces`` is the id of an earlier memory this one replaces - set it
+        when you are updating something you saved before (a status, a
+        decision, a rule). Use the ``fact_id`` remember returned for it, or a
+        ``fact_id`` / ``memory_id`` from recall. The old memory is then no
+        longer returned by recall or loaded at session start; nothing is
+        deleted. The response's ``replaced`` says what was retired, or why
+        nothing was; the memory itself is saved either way. An unknown id, or
+        another profile's memory, is refused before anything is saved. Undo
+        with ``review_correction(case_id, "rollback", version)``.
         """
         # v3.6.10: resolve "mcp_client" sentinel → URL path (HTTP) or env var (stdio)
         if agent_id == "mcp_client":
@@ -138,12 +258,33 @@ def register_core_tools(server, get_engine: Callable) -> None:
         session_id = resolve_session_id(
             session_id, agent_id=agent_id, allow_agent_fallback=False,
         )
+        from superlocalmemory.core.project_identity import storable_project
+
         meta = {
-            "project": project,
+            "project": storable_project(project),
             "importance": importance,
             "agent_id": agent_id,
             "session_id": session_id,
         }
+        # Sent as the request's own ``kind`` field, never inside metadata (the
+        # daemon strips reserved keys there): see mcp/_remember_kind.py.
+        from superlocalmemory.mcp import _remember_kind as rk
+
+        declared_kind, kind_error = rk.parse_declared_kind(kind)
+        if kind_error is not None:
+            return kind_error
+        replaces_id = None
+        if replaces is not None:
+            from superlocalmemory.core.replaces_input import (
+                ReplacesRejected,
+                normalize_replaces,
+            )
+
+            try:
+                replaces_id = normalize_replaces(replaces)
+            except ReplacesRejected as exc:
+                return {"success": False, "code": exc.code, "retryable": False,
+                        "error": exc.message}
         effective_idempotency_key = idempotency_key
         if not effective_idempotency_key:
             # Derive a stable key before the first attempt so every retry of
@@ -152,15 +293,23 @@ def register_core_tools(server, get_engine: Callable) -> None:
             # stores separate.  Without a session token the key is derived from
             # the remaining call parameters so repeated observations with the
             # same content, agent, and scope are deduplicated across retries.
+            # ``replaces`` is part of what was asked: the same words replacing a
+            # different memory are a different request. Added only when set,
+            # so every key derived for a plain call is unchanged.
+            replaces_part = (f"\0replaces={replaces_id}" if replaces_id is not None else ""
+                             ) + rk.kind_key_part(declared_kind)  # so is the kind
             if session_id:
                 material = (
                     f"{agent_id}\0{session_id}\0{scope or ''}\0{shared_with}\0{content}"
+                    + replaces_part
                 )
                 effective_idempotency_key = "mcp:" + hashlib.sha256(
                     material.encode("utf-8")
                 ).hexdigest()
             else:
-                material = f"{agent_id}\0{scope or ''}\0{shared_with}\0{content}"
+                material = (
+                    f"{agent_id}\0{scope or ''}\0{shared_with}\0{content}" + replaces_part
+                )
                 effective_idempotency_key = "mcp:req:" + hashlib.sha256(
                     material.encode("utf-8")
                 ).hexdigest()
@@ -211,11 +360,18 @@ def register_core_tools(server, get_engine: Callable) -> None:
                         # legacy request byte-identical. The daemon owns
                         # vocabulary validation (out-of-vocab → untagged).
                         body["provenance_kind"] = provenance_kind.strip()
+                    # A 422 refuses THIS request (a reused key, a bad
+                    # ``replaces``): an answer, never an outage to retry.
+                    request_flags = {"preserve_not_found": True, "preserve_unprocessable": True}
+                    if replaces_id is not None:
+                        # Sent only when set, so a plain call is unchanged.
+                        body["replaces"] = replaces_id
+                    body, request_flags = rk.with_declared_kind(body, request_flags, declared_kind)
                     resp = None
                     try:
                         resp = await _asyncio.to_thread(
-                            daemon_request, "POST", "/remember", body,
-                            preserve_not_found=True,
+                            daemon_request, "POST", _remember_path(replaces_id), body,
+                            **request_flags,
                         )
                     except Exception as exc:
                         # 4.1.14 audit: a live daemon's unknown-profile 404
@@ -228,6 +384,22 @@ def register_core_tools(server, get_engine: Callable) -> None:
                                 "retryable": False,
                                 "error": getattr(exc, "message", "daemon returned 404"),
                             }
+                        if type(exc).__name__ == "DaemonUnprocessable" and hasattr(exc, "code"):
+                            return {
+                                "success": False,
+                                "code": getattr(exc, "code"),
+                                "retryable": False,
+                                "error": getattr(exc, "message", str(exc)),
+                            }
+                        if type(exc).__name__ == "DaemonRefused":
+                            # A refusal (401/403) is an answer, not an outage:
+                            # reporting it as retryable invited endless retries.
+                            return {
+                                "success": False,
+                                "code": "NOT_AUTHORIZED",
+                                "retryable": False,
+                                "error": str(exc),
+                            }
                         raise
                     if resp and (resp.get("fact_ids") is not None or resp.get("ok")):
                         fids = resp.get("fact_ids") or []
@@ -237,7 +409,29 @@ def register_core_tools(server, get_engine: Callable) -> None:
                                 "complete" if resp.get("status") == "stored" else "queryable"
                             )
                         pending = materialization_state != "complete"
-                        return {
+                        if resp.get("status") == "accepted":
+                            # Durable but not yet searchable: the writer was
+                            # busy. Never reported as "queryable now".
+                            accepted_reply = {
+                                "success": True,
+                                "fact_ids": [],
+                                "count": 0,
+                                "pending": True,
+                                "pending_id": None,
+                                "operation_id": None,
+                                "materialization_state": "accepted",
+                                "admission_id": resp.get("admission_id"),
+                                "idempotency_key": resp.get("idempotency_key"),
+                                "message": (
+                                    "Saved durably; being indexed now and searchable "
+                                    "within seconds. Resend with the same "
+                                    "idempotency_key for the final receipt."
+                                ),
+                            }
+                            if resp.get("replaced") is not None:
+                                accepted_reply["replaced"] = resp["replaced"]
+                            return accepted_reply
+                        stored_reply = {
                             "success": True,
                             "fact_ids": fids,
                             "count": int(resp.get("count", len(fids))),
@@ -251,6 +445,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
                                 else "Queryable now; canonical enrichment is still running."
                             ),
                         }
+                        return rk.with_receipt_notes(stored_reply, resp)
                     if attempt < 2:
                         await _asyncio.sleep(0.05 * (attempt + 1))
                 return {
@@ -283,6 +478,11 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 "tags": tags,
                 "scope": scope or "personal",
                 "shared_with": _shared_list or [],
+                # L3-24: carried through the same way the daemon-owned branch
+                # above always has (its "session_date": session_date body
+                # field) -- DaemonPoolProxy.store lifts this back out of
+                # metadata into the request's own field.
+                "session_date": session_date,
                 "idempotency_key": (
                     effective_idempotency_key
                     or "mcp:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -299,10 +499,14 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 # as the governance tag on POST /remember. Same unset-is-
                 # byte-identical convention as the routing anchor above.
                 worker_meta["provenance_kind"] = provenance_kind.strip()
+            if replaces_id is not None:
+                # DaemonPoolProxy.store lifts this out of the metadata into
+                # the request's own ``replaces`` field.
+                worker_meta["replaces"] = replaces_id
 
             def _store_via_daemon_pool():
                 pool = choose_pool()
-                return pool.store(content, worker_meta)
+                return pool.store(content, worker_meta, **rk.store_kwargs(declared_kind))
 
             stored = await _asyncio.to_thread(_store_via_daemon_pool)
             if not isinstance(stored, dict) or not stored.get("ok"):
@@ -348,7 +552,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             pending_id = stored.get("pending_id")
             if pending and pending_id is None:
                 pending_id = operation_id
-            return {
+            pool_reply = {
                 "success": True,
                 "fact_ids": fact_ids,
                 "count": int(stored.get("count", len(fact_ids))),
@@ -362,6 +566,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     else "Queryable now; canonical enrichment is still running."
                 ),
             }
+            return rk.with_receipt_notes(pool_reply, stored)
         except Exception:
             logger.exception("remember failed")
             return {
@@ -384,8 +589,44 @@ def register_core_tools(server, get_engine: Callable) -> None:
         valid_at: str | None = None,
         include_unknown: bool = False,
         profile_id: str = "",
+        project: str = "",
+        saved_by: str = "",
+        about: str = "",
+        kind: str = "",
+        prefer_project: str = "",
+        tags: "str | list[str]" = "",
+        tags_match: str = "all",
+        project_strict: bool = False,
+        show_weak: bool = False,
+        include_related: bool = False,
+        depth: int = 1,
+        max_tokens: int = 0,
+        budget_s: float = 0,
     ) -> dict:
         """Search memories through hybrid retrieval, RRF fusion, and reranking.
+
+        When nothing in memory supports the question, recall returns NO results
+        and ``abstention_note`` says so in plain words ("That isn't in
+        SuperLocalMemory."). Do not invent an answer then. Pass
+        ``depth``: 0 glance (ids, tier, one-line previews -- cheapest), 1 recall
+        (full facts, the default), 2 context (+ source memory, same-session
+        neighbours, facts about the same entities, the correction that replaced
+        it). Start at 0 or 1; drill into one result with ``expand``.
+        ``max_tokens`` caps the returned results; it is never exceeded.
+        ``budget_s`` (seconds, optional) is for a recall that blocks a turn,
+        such as a per-message prefetch: it answers inside that time, with
+        unchecked keyword matches when full recall cannot finish. Leave it
+        unset for a question; recall then waits for the full answer.
+        If ``warming_up`` is true, tell the user SuperLocalMemory is still
+        warming up and to retry shortly; do not conclude the memory is absent.
+        ``code: RECALL_BUSY`` means every recall slot is serving other agents:
+        wait a few seconds and ask again; it says nothing about the memory.
+        ``include_related=true`` to see up to three close memories when the
+        question is real but not answered exactly ("I don't have this exactly
+        -- here are the closest memories."), each labelled ``tier: related``.
+        "That isn't in SuperLocalMemory." means stop: do not invent. Pass
+        ``show_weak=true`` to see the closest weak matches anyway; each is
+        labelled ``weak: true``.
 
         Fast local retrieval (six channels + reranker) returns in ~1-2s. This
         tool does NOT run an internal LLM reformulation round — YOU (the calling
@@ -426,14 +667,73 @@ def register_core_tools(server, get_engine: Callable) -> None:
         serves this one recall against that profile (which must already
         exist); empty = the active profile, byte-identical to the legacy
         call. The active-profile pointer is never read or moved by it.
+        
+        Narrowing (4.1.19): ``project`` keeps only memories saved under that
+        project, ``saved_by`` only those saved by that agent (e.g.
+        ``claude-desktop``), ``about`` only those that mention that name (a
+        person, project or tool). Each is a hard filter. Questions phrased as
+        "what did we decide", "how do I", "what is the current status of" get
+        decisions, how-tos and the newest current-state memory first.
+
+        Projects (4.1.21): ``prefer_project`` (a name or a path) ranks memories
+        saved under that project above others of similar relevance and removes
+        nothing - pass your working directory on every recall in a project.
+        ``project`` keeps only that project's memories; when none of the
+        memories found were saved under it, the unfiltered results come back
+        and ``project_scope.filter.applied`` is false with a ``note`` saying
+        so - never a silent empty answer. A name matches the same project saved
+        as a full path, ignoring case.
+        ``project_strict=True`` (4.1.22) turns that fall-back off: only that
+        project's memories, even if none - for automations that must never
+        act on another project's memories. ``project_scope.filter.identity``
+        says which name was matched and warns when one name stands for more
+        than one saved project path.
+
+        ``kind`` (4.1.19 WP8) keeps only results whose kind — the same nine
+        values ``remember``'s ``kind`` parameter takes — equals this value,
+        including memories SLM only mapped from their legacy type. Refused
+        (``INVALID_KIND``) before anything is retrieved if it does not parse.
+        Composes with ``project``/``saved_by``/``about`` as AND.
+
+        ``tags`` (4.1.22): only memories saved with these exact labels (a
+        comma-separated string, or a list — a label containing a comma needs
+        the list form). Matched by canonical identity: case, surrounding
+        whitespace and how the tag happened to be stored (a CSV string, a
+        JSON-array string, or a real list) never matter. ``tags_match`` is
+        ``"all"`` (every label must be present — the default) or ``"any"``.
+        A hard filter that composes with every other facet as AND; unlike
+        ``project`` it never falls back to unfiltered results — an empty
+        answer says why in ``tag_scope`` (nobody ever saved that tag, versus
+        something has it but not among this question's matches).
         """
         # v3.6.10: resolve "mcp_client" sentinel → URL path (HTTP) or env var (stdio)
         if agent_id == "mcp_client":
             from superlocalmemory.mcp.agent_context import get_current_agent_id
             agent_id = get_current_agent_id()
+        from superlocalmemory.core.kind_query import InvalidKind, resolve_kind
+        try:
+            _kind = resolve_kind(kind)
+        except InvalidKind as exc:
+            return {"success": False, "code": "INVALID_KIND", "retryable": False,
+                    "error": str(exc)}
+        from superlocalmemory.core.recall_layers import parse_depth, parse_max_tokens
+        try:
+            depth, max_tokens = parse_depth(depth), parse_max_tokens(max_tokens) or 0
+        except (TypeError, ValueError) as exc:
+            return {"success": False, "code": "INVALID_LAYERS", "retryable": False,
+                    "error": str(exc)}
+        # 4.1.20 (R5): an unreadable window is refused, not passed on to run
+        # unfiltered — the same check and code as the CLI and HTTP.
+        from superlocalmemory.retrieval.time_filter import InvalidTimeFilter, check_window
+        try:
+            window = check_window(window) or ""
+        except InvalidTimeFilter as exc:
+            return {"success": False, "code": exc.code, "retryable": False,
+                    "field": exc.field, "error": str(exc)}
         import asyncio
         try:
             from superlocalmemory.mcp._daemon_proxy import choose_pool
+            from superlocalmemory.mcp._recall_metadata import forward_recall_metadata
             from superlocalmemory.mcp.session_binding import resolve_session_id
 
             # S9-DASH-10's four-step ladder, now shared with remember() so the
@@ -485,6 +785,21 @@ def register_core_tools(server, get_engine: Callable) -> None:
             from superlocalmemory.core.admission import enforce_read_scope
             _incl_global, _incl_shared = enforce_read_scope(include_global, include_shared)
 
+            # A relayed call must answer before its relay gives up: what is left
+            # of the deadline the laptop stamped on this request becomes the
+            # recall's budget. Read here, on the request's own context (the
+            # worker thread below is not it). No deadline -> nothing is sent.
+            from superlocalmemory.mcp.request_deadline import remaining_budget_s
+            _budget_s = remaining_budget_s()
+            # 4.2.3: a turn-blocking caller (Hermes prefetch) names its own
+            # budget; it can only shorten the relay's, never lengthen it.
+            try:
+                _own = float(budget_s or 0)
+            except (TypeError, ValueError):
+                _own = 0.0
+            if _own > 0 and _own == _own:
+                _budget_s = min(_own, _budget_s) if _budget_s is not None else _own
+
             def _recall_via_daemon_pool():
                 pool = choose_pool()
                 return pool.recall(
@@ -501,13 +816,36 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     # parameter are never asked for it. 4.1.14 audit:
                     # stripped (whitespace-only is legacy).
                     **({"profile_id": profile_id.strip()} if (profile_id or "").strip() else {}),
+                    # 4.1.19 facets, only when set.
+                    **{k: v.strip() for k, v in (("project", project), ("saved_by", saved_by),
+                                                 ("about", about),
+                                                 ("prefer_project", prefer_project))
+                       if (v or "").strip()},
+                    **({"project_strict": True}
+                       if project_strict and (project or "").strip() else {}),
+                    # 4.1.19 WP8: the already-validated, normalized kind.
+                    **({"kind": _kind} if _kind else {}),
+                    # 4.1.22: forwarded only when set, same as every
+                    # other facet above.
+                    **({"tags": tags if isinstance(tags, list) else tags.strip()}
+                       if (tags if isinstance(tags, list) else (tags or "").strip())
+                       else {}),
+                    **({"tags_match": tags_match.strip()}
+                       if (tags_match or "").strip().lower() == "any" else {}),
+                    **({"budget_s": _budget_s} if _budget_s is not None else {}),
+                    # 4.1.25: only when asked, so every other call is unchanged.
+                    **({"show_weak": True} if show_weak else {}),
+                    **({"include_related": True} if include_related else {}),
+                    **({"depth": int(depth)} if int(depth) != 1 else {}),
+                    **({"max_tokens": int(max_tokens)} if max_tokens else {}),
                 )
 
             result = await asyncio.to_thread(
                 _recall_via_daemon_pool,
             )
             if result.get("ok"):
-                return {
+                from superlocalmemory.mcp.tools_media import with_recall_images
+                return await with_recall_images({
                     "success": True,
                     "results": result.get("results", []),
                     "count": result.get("result_count", 0),
@@ -522,16 +860,12 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     "retrieval_mode": result.get("retrieval_mode", ""),
                     # v3.6.6: surface evidence-floor signal to MCP clients.
                     "no_confident_match": result.get("no_confident_match", False),
-                    "score_contract_version": result.get("score_contract_version", "2"),
-                    "calibration_status": result.get("calibration_status", "uncalibrated"),
-                    "calibration_id": result.get("calibration_id"),
-                    # Quote this back to report_outcome and the report ties to
-                    # this exact answer instead of being matched by guesswork.
-                    "query_id": result.get("query_id", ""),
-                    "answer_confidence": result.get("answer_confidence"),
-                    "abstained": result.get("abstained", False),
-                    "abstention_reason": result.get("abstention_reason"),
-                }
+                    # M-10: every field of the HTTP envelope's metadata —
+                    # score contract, verdict, query_id (quote it back to
+                    # report_outcome), who chose the order, abandoned channels,
+                    # temporal frame — and any field added there later.
+                    **forward_recall_metadata(result),
+                }, profile_id)
             # 4.1.14 audit: structured daemon answers (unknown_profile)
             # pass through with code and retryability intact — collapsing
             # them to a bare error string repeats the DAEMON_UNAVAILABLE
@@ -550,12 +884,60 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     @admits(OperationKind.RECALL)
-    async def search(query: str, limit: int = CANONICAL_RECALL_LIMIT) -> dict:
-        """Full-text search across memories using FTS5 with BM25 ranking."""
+    async def search(query: str, limit: int = CANONICAL_RECALL_LIMIT, kind: str = "",
+                     profile_id: str = "", tags: "str | list[str]" = "",
+                     tags_match: str = "all", depth: int = 1,
+                     max_tokens: int = 0) -> dict:
+        """Full-text search across memories using FTS5 with BM25 ranking.
+
+        4.1.25: each result carries a ``tier`` -- ``supported`` when the
+        question's words support it, ``related`` (at most three) otherwise --
+        and ``abstention_note`` says so when none is supported. ``depth`` and
+        ``max_tokens`` work as in ``recall`` (0 glance, 1 full, 2 context).
+
+        ``kind`` (4.1.19 WP8) keeps only results whose kind — the same nine
+        values ``remember``'s ``kind`` parameter takes — equals this value,
+        including memories SLM only mapped from their legacy type. Refused
+        (``INVALID_KIND``) before anything is retrieved if it does not parse.
+
+        ``profile_id`` reads another profile (empty = the active one); remote
+        access sets it to the key's profile, whatever this computer is using.
+        A name that is not an existing profile is refused, never silently
+        treated as empty (4.1.22).
+
+        ``tags`` / ``tags_match`` (4.1.22): only memories carrying the tags,
+        exactly as ``recall`` takes them; ``tag_scope`` says what was found.
+        """
+        from superlocalmemory.core import tag_query
+        from superlocalmemory.core.kind_query import (
+            InvalidKind,
+            engine_display_min_confidence,
+            resolve_kind,
+            search_facts,
+        )
+        from superlocalmemory.storage.memory_kinds import kind_fields
+        try:
+            parsed_kind = resolve_kind(kind)
+        except InvalidKind as exc:
+            return {"success": False, "code": "INVALID_KIND", "retryable": False,
+                    "error": str(exc)}
         try:
             engine = get_engine()
-            pid = await _runtime_profile(get_engine)
-            facts = engine._db.search_facts_fts(query, pid, limit=limit)
+            pid, refused = await _call_profile(get_engine, profile_id)
+            if refused:
+                return refused
+            # Read once: used for BOTH the --kind filter above and labelling
+            # each item below, so a fact cannot pass the filter at one
+            # threshold and be labelled (confirmed/suggested/legacy) at another.
+            _display_min_confidence = engine_display_min_confidence(engine)
+            _truncated: list[bool] = []
+            _tags = tag_query.TagFilter.of(tags, tags_match)
+            facts = search_facts(
+                engine._db, query, pid, limit, parsed_kind,
+                display_min_confidence=_display_min_confidence,
+                truncated=_truncated, tag_filter=_tags,
+            )
+            facts = visible_facts(engine._db, pid, facts)
             items = []
             for f in facts:
                 items.append({
@@ -569,21 +951,43 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     # fetch, and list_recent items.
                     "scope": getattr(f, "scope", "personal"),
                     "provenance_kind": getattr(f, "provenance_kind", None),
+                    "stub": bool(getattr(f, "non_answer", False)),
+                    **kind_fields(f, display_min_confidence=_display_min_confidence),
                 })
-            return {"success": True, "results": items, "count": len(items)}
+            items, tier_info = _search_tiers(query, items, filtered=bool(parsed_kind or _tags))
+            from superlocalmemory.core import recall_layers
+            _depth = recall_layers.parse_depth(depth)
+            items, layers = recall_layers.shape(
+                items, _depth, recall_layers.parse_max_tokens(max_tokens),
+                context_of=lambda item: recall_layers.context_for(
+                    engine._db, pid, str(item.get("fact_id", "")),
+                    visible=lambda facts: visible_facts(engine._db, pid, facts)))
+            result = {"success": True, "results": items, "count": len(items), **tier_info,
+                      **({"layers": layers} if _depth != 1 or max_tokens else {})}
+            # 4.1.19 L2-13/M2: told, never a silent short answer, when the
+            # kind filter's windowed fetch hit its hard cap before `limit`
+            # was filled and the store was not exhausted.
+            if _truncated and _truncated[0]:
+                result["kind_filter_truncated"] = True
+            return tag_query.with_report(result, engine._db, pid, _tags)
         except Exception as exc:
             logger.exception("search failed")
             return {"success": False, "error": str(exc)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     @admits(OperationKind.RECALL)
-    async def fetch(fact_ids: "str | list[str]") -> dict:
+    async def fetch(fact_ids: "str | list[str]", profile_id: str = "") -> dict:
         """Fetch full details for specific fact IDs (comma-separated or a list).
 
         Reports every id it could not resolve. Before 4.1.15 an unmatched token
         returned ``success: true, count: 0`` -- indistinguishable from a
         correct answer for a fact that does not exist, on the one tool an agent
         uses to verify that a write landed. GitHub #135.
+
+        ``profile_id`` reads another profile (empty = the active one); remote
+        access sets it to the key's profile, whatever this computer is using.
+        A name that is not an existing profile is refused, never silently
+        treated as empty (4.1.22).
         """
         try:
             engine = get_engine()
@@ -597,9 +1001,15 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     ),
                     "results": [], "count": 0, "not_found": [],
                 }
-            pid = await _runtime_profile(get_engine)
-            facts = engine._db.get_facts_by_ids(ids, pid)
+            pid, refused = await _call_profile(get_engine, profile_id)
+            if refused:
+                return refused
+            facts = visible_facts(engine._db, pid, engine._db.get_facts_by_ids(ids, pid))
             found = {f.fact_id for f in facts}
+            # #150: the project each memory was saved under ("" when none).
+            from superlocalmemory.retrieval.project_scope import stored_projects
+
+            projects = stored_projects(engine._db, [f.fact_id for f in facts])
             not_found = [fid for fid in ids if fid not in found]
             items = []
             for f in facts:
@@ -619,6 +1029,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     # search, and list_recent items.
                     "scope": getattr(f, "scope", "personal"),
                     "provenance_kind": getattr(f, "provenance_kind", None),
+                    "project": projects.get(f.fact_id, ""),
                 })
             if not items:
                 return {
@@ -638,18 +1049,34 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("fetch failed")
             return {"success": False, "error": str(exc)}
 
+    from superlocalmemory.mcp.tools_expand import register_expand_tool
+
+    register_expand_tool(server, get_engine)
+
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     @admits(OperationKind.RECALL)
     async def list_recent(
-        limit: int = CANONICAL_LIST_LIMIT, profile_id: str = "",
-        scope: str = "", provenance_kind: str = "",
+        limit: int = CANONICAL_LIST_LIMIT, kind: str = "",
+        profile_id: str = "", tags: "str | list[str]" = "",
+        tags_match: str = "all", scope: str = "", provenance_kind: str = "",
     ) -> dict:
         """List most recently stored memories, newest first.
+
+        ``kind`` (4.1.19 WP8) keeps only memories whose kind — the same nine
+        values ``remember``'s ``kind`` parameter takes — equals this value,
+        including memories SLM only mapped from their legacy type. Refused
+        (``INVALID_KIND``) before anything is retrieved if it does not parse.
 
         ``profile_id`` is an explicit namespace anchor: a non-empty value
         serves this one list against that profile (which must already
         exist); empty = the active profile, byte-identical to the legacy
         call. The active-profile pointer is never read or moved by it.
+        A name that is not an existing profile is refused, never silently
+        treated as empty (4.1.22).
+
+        ``tags`` / ``tags_match`` (4.1.22): only memories carrying the tags,
+        newest first, exactly as ``recall`` takes them.
+
         Result items carry the complete (untruncated) content plus
         ``importance`` — the same shape the daemon's ``GET /list`` returns.
 
@@ -662,6 +1089,19 @@ def register_core_tools(server, get_engine: Callable) -> None:
         the wire only when set, so an unset filter keeps the legacy
         request byte-identical.
         """
+        from superlocalmemory.core import tag_query
+        from superlocalmemory.core.kind_query import (
+            InvalidKind,
+            engine_display_min_confidence,
+            list_recent_facts,
+            resolve_kind,
+        )
+        from superlocalmemory.storage.memory_kinds import kind_fields
+        try:
+            parsed_kind = resolve_kind(kind)
+        except InvalidKind as exc:
+            return {"success": False, "code": "INVALID_KIND", "retryable": False,
+                    "error": str(exc)}
         try:
             import asyncio
             import urllib.parse
@@ -687,6 +1127,16 @@ def register_core_tools(server, get_engine: Callable) -> None:
             # resident daemon owns the canonical read.
             if await asyncio.to_thread(is_daemon_running):
                 params: dict[str, object] = {"limit": limit}
+                if kind:
+                    # Same door the engine path uses; the daemon's /list
+                    # re-parses and refuses an invalid one with 422.
+                    params["kind"] = kind
+                if tags:
+                    params["tags"] = (
+                        list(tags) if isinstance(tags, (list, tuple)) else [tags]
+                    )
+                    if tags_match != "all":
+                        params["tags_match"] = tags_match
                 if profile_id:
                     # Per-request profile routing (spec section 5): the anchor
                     # is only put on the wire when the caller set it, so an
@@ -725,17 +1175,43 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 }
 
             engine = get_engine()
-            # Offline fallback (spec section 5): None/"" lists the engine's
-            # active profile — byte-identical to the pre-feature behaviour;
-            # an explicit id routes this one read without mutating engine
-            # state. engine.list_facts pushes the limit AND the scan filters
-            # into SQL, so limit still bounds the matched set.
-            facts = engine.list_facts(
-                limit=limit, profile_id=profile_id or None,
-                scope=scan_scope,
-                provenance_kind=scan_kind,
-                provenance_kind_null=scan_kind_null,
+            pid, refused = await _call_profile(get_engine, profile_id)
+            if refused:
+                return refused
+            # v3.6.12 (search-2): push the limit into the query — was loading the
+            # ENTIRE facts table (deserializing every 768-float embedding) just
+            # to return the top N. get_all_facts preserves created_at DESC order.
+            # Read once: used for BOTH the --kind filter above and labelling
+            # each item below, so a fact cannot pass the filter at one
+            # threshold and be labelled (confirmed/suggested/legacy) at another.
+            _display_min_confidence = engine_display_min_confidence(engine)
+            _truncated: list[bool] = []
+            _tags = tag_query.TagFilter.of(tags, tags_match)
+            facts = list_recent_facts(
+                engine._db, pid, limit, parsed_kind,
+                display_min_confidence=_display_min_confidence,
+                truncated=_truncated, tag_filter=_tags,
             )
+            facts = visible_facts(engine._db, pid, facts)
+            # Offline fallback (spec section 5): the curation-scan filters
+            # narrow the fetched page in memory — exact-value matches, so
+            # limit still bounds the fetched set the same way the daemon
+            # path's SQL does.
+            if scan_scope:
+                facts = [
+                    f for f in facts
+                    if (getattr(f, "scope", "") or "personal") == scan_scope
+                ]
+            if scan_kind:
+                facts = [
+                    f for f in facts
+                    if getattr(f, "provenance_kind", None) == scan_kind
+                ]
+            elif scan_kind_null:
+                facts = [
+                    f for f in facts
+                    if getattr(f, "provenance_kind", None) is None
+                ]
             items = []
             for f in facts:
                 items.append({
@@ -749,23 +1225,34 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     # daemon's /list items already carry.
                     "scope": getattr(f, "scope", "personal"),
                     "provenance_kind": getattr(f, "provenance_kind", None),
+                    # A stored stub: listed, never a recall answer (WP-19).
+                    "stub": bool(getattr(f, "non_answer", False)),
+                    **kind_fields(f, display_min_confidence=_display_min_confidence),
                 })
-            return {
+            result = {
                 "success": True,
                 "results": items,
                 "count": len(items),
                 # Envelope parity with the daemon path above and the
                 # daemon's /list route: echo the profile the read was
                 # actually served from.
-                "profile": profile_id or engine.profile_id,
+                "profile": pid,
             }
+            # 4.1.19 L2-13/M2: see the matching note in search() above.
+            if _truncated and _truncated[0]:
+                result["kind_filter_truncated"] = True
+            return tag_query.with_report(result, engine._db, pid, _tags)
         except Exception as exc:
             logger.exception("list_recent failed")
             return {"success": False, "error": str(exc)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def get_status() -> dict:
-        """Get memory system status: fact count, entity count, mode, profile, db size."""
+    async def get_status(profile_id: str = "") -> dict:
+        """Get memory system status: fact count, entity count, mode, profile, db size.
+
+        ``profile_id`` reports another profile (empty = the active one); the
+        counts are then that profile's, read from the store.
+        """
         try:
             # Same source the HTTP surface reads, imported here rather than at
             # module scope: that module costs ~260ms and MCP starts over stdio.
@@ -778,8 +1265,12 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 daemon_request,
                 is_daemon_running,
             )
+            from superlocalmemory.mcp.request_profile import tool_profile
 
-            if await asyncio.to_thread(is_daemon_running):
+            # The daemon's /status describes its active profile, so a named
+            # profile is counted from the store below instead.
+            named = not isinstance(profile_id, str) or bool(profile_id.strip())
+            if not named and await asyncio.to_thread(is_daemon_running):
                 daemon_status = await asyncio.to_thread(
                     daemon_request,
                     "GET",
@@ -807,7 +1298,9 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     }
 
             engine = get_engine()
-            pid = engine.profile_id
+            pid, refused = tool_profile(engine, profile_id)
+            if refused:
+                return refused
             fact_count = engine._db.get_fact_count(pid)
             entities = engine._db.execute(
                 "SELECT COUNT(*) AS c FROM canonical_entities WHERE profile_id = ?",
@@ -877,7 +1370,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool()
-    @admits(OperationKind.PROFILE_SWITCH)
+    @admits(OperationKind.PROFILE_SWITCH, http_kind=OperationKind.RECALL)
     async def switch_profile(profile_id: str) -> dict:
         """Switch the active memory profile. All operations scope to this profile."""
         try:
@@ -885,6 +1378,12 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
             engine = get_engine()
             old = engine.profile_id
+            from superlocalmemory.server.caller_workspace import switch_http_workspace
+
+            if switch_http_workspace(profile_id):
+                return {"success": True, "previous_profile": old,
+                        "current_profile": profile_id, "active_profile": profile_id,
+                        "scope": "session"}
             authorization = authorize_mcp_mutation(
                 engine,
                 "update",
@@ -938,6 +1437,12 @@ def register_core_tools(server, get_engine: Callable) -> None:
                             f"this process's local profile store"
                         ),
                     }
+                from superlocalmemory.core.caller_session import http_session_bound
+
+                if result.get("scope") == "session" and http_session_bound():
+                    authorization.complete()
+                    return {**result, "previous_profile": old,
+                            "current_profile": acknowledged}
                 generation = int(result.get("generation", 0))
                 # Sync target is the DAEMON-CONFIRMED value, never the raw
                 # caller-supplied profile_id, even though they are equal
@@ -998,6 +1503,12 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 "current_profile": profile_id,
                 "generation": generation,
             }
+        except PermissionError:
+            from superlocalmemory.core.admission import refusal_result
+            from superlocalmemory.core.caller_session import presented_session
+
+            reason = "insufficient_roles" if presented_session() else "authentication_required"
+            return refusal_result(reason, OperationKind.RECALL)
         except Exception as exc:
             logger.exception("switch_profile failed")
             return {"success": False, "error": str(exc)}
@@ -1018,11 +1529,16 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def memory_used() -> dict:
-        """Get memory usage breakdown by fact type and lifecycle state."""
+    async def memory_used(profile_id: str = "") -> dict:
+        """Get memory usage breakdown by fact type and lifecycle state.
+
+        ``profile_id`` reports another profile (empty = the active one).
+        """
         try:
             engine = get_engine()
-            pid = await _runtime_profile(get_engine)
+            pid, refused = await _call_profile(get_engine, profile_id)
+            if refused:
+                return refused
             facts = engine._db.get_all_facts(pid)
             by_type: dict[str, int] = {}
             by_lifecycle: dict[str, int] = {}
@@ -1043,11 +1559,17 @@ def register_core_tools(server, get_engine: Callable) -> None:
             return {"success": False, "error": str(exc)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def get_learned_patterns(pattern_type: str = "", limit: int = 20) -> dict:
-        """Get learned behavioral patterns (interests, refinements, archival habits)."""
+    async def get_learned_patterns(pattern_type: str = "", limit: int = 20,
+                                   profile_id: str = "") -> dict:
+        """Get learned behavioral patterns (interests, refinements, archival habits).
+
+        ``profile_id`` reads another profile (empty = the active one).
+        """
         try:
             engine = get_engine()
-            pid = await _runtime_profile(get_engine)
+            pid, refused = await _call_profile(get_engine, profile_id)
+            if refused:
+                return refused
             from superlocalmemory.learning.behavioral import BehavioralPatternStore
             store = BehavioralPatternStore(engine._db.db_path)
             ptype = pattern_type if pattern_type else None
@@ -1061,11 +1583,16 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
     @server.tool()
     @admits(OperationKind.CORRECT)
-    async def correct_pattern(pattern_id: str, correction: str) -> dict:
-        """Correct or annotate a learned behavioral pattern to improve retrieval."""
+    async def correct_pattern(pattern_id: str, correction: str, profile_id: str = "") -> dict:
+        """Correct or annotate a learned behavioral pattern to improve retrieval.
+
+        ``profile_id`` corrects another profile's pattern (empty = the active one).
+        """
         try:
             engine = get_engine()
-            pid = await _runtime_profile(get_engine)
+            pid, refused = await _call_profile(get_engine, profile_id)
+            if refused:
+                return refused
             authorization = authorize_mcp_mutation(
                 engine,
                 "update",
@@ -1076,11 +1603,25 @@ def register_core_tools(server, get_engine: Callable) -> None:
             )
             from superlocalmemory.learning.behavioral import BehavioralPatternStore
             store = BehavioralPatternStore(engine._db.db_path)
-            store.record(
+            # 4.2.3: a correction must name a pattern that exists (its id or
+            # its key, as get_behavioral_patterns lists them); an unknown one
+            # used to return success and record an annotation for nothing.
+            wanted = str(pattern_id or "").strip()
+            known = store.get_patterns(pid, limit=100000)
+            if not wanted or not any(
+                    wanted in (str(p.get("id", "")), str(p.get("pattern_key", "")))
+                    for p in known):
+                authorization.complete()
+                return {"success": False, "retryable": False,
+                        "error": f"no behavioral pattern {wanted!r} in this profile; "
+                                 "use get_behavioral_patterns for ids"}
+            # The store's write is record_pattern; the pattern key travels in
+            # its data. (Before 4.1.21 this called a method the store does not
+            # have, so every correction failed.)
+            store.record_pattern(
                 pid,
                 pattern_type="correction",
-                pattern_key=pattern_id,
-                metadata={"correction": correction},
+                data={"pattern_key": pattern_id, "correction": correction},
             )
             authorization.complete()
             return {"success": True, "pattern_id": pattern_id}
@@ -1090,9 +1631,8 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
     @server.tool(annotations=ToolAnnotations(destructiveHint=True))
     @admits(OperationKind.FORGET)
-    async def delete_memory(
-        fact_id: str, agent_id: str = "mcp_client", profile_id: str = "",
-    ) -> dict:
+    async def delete_memory(fact_id: str, agent_id: str = "mcp_client",
+                            profile_id: str = "") -> dict:
         """Delete a specific memory by exact fact ID.
 
         ``profile_id`` (optional): a non-empty value routes this one delete
@@ -1107,7 +1647,8 @@ def register_core_tools(server, get_engine: Callable) -> None:
         Args:
             fact_id: Exact fact ID to delete (from recall or list_recent results).
             agent_id: Identifier of the calling agent (logged for audit).
-            profile_id: Explicit namespace anchor for this one delete.
+            profile_id: The profile the memory belongs to (empty = the active
+                one). The active profile is not moved.
         """
         # v3.6.10: resolve "mcp_client" sentinel → URL path (HTTP) or env var (stdio)
         if agent_id == "mcp_client":
@@ -1121,38 +1662,26 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 daemon_request,
                 is_daemon_running,
             )
+            from superlocalmemory.mcp.request_profile import (
+                requested_profile,
+                routing_needs_daemon_error,
+            )
 
+            named = requested_profile(profile_id)
             if await asyncio.to_thread(is_daemon_running):
+                from superlocalmemory.mcp.remote_visibility import with_view
+
                 path = "/api/memories/" + urllib.parse.quote(fact_id, safe="")
-                if (profile_id or "").strip():
-                    # Same wire convention as update_memory/list_recent: the
-                    # anchor only goes on the URL when the caller set it.
-                    path += "?profile_id=" + urllib.parse.quote(
-                        profile_id.strip(), safe="",
-                    )
-                try:
-                    result = await asyncio.to_thread(
-                        daemon_request, "DELETE", path,
-                        preserve_not_found=True,
-                    )
-                except Exception as exc:
-                    # An unknown routed profile is a terminal 404, same
-                    # surfacing as remember/update_memory.
-                    if type(exc).__name__ == "DaemonNotFound" and hasattr(exc, "code"):
-                        return {
-                            "success": False,
-                            "code": getattr(exc, "code"),
-                            "retryable": False,
-                            "error": getattr(
-                                exc, "message", "daemon returned 404",
-                            ),
-                        }
-                    raise
+                if named:
+                    path += "?profile_id=" + urllib.parse.quote(named, safe="")
+                # A remote app is marked, so the daemon deletes only what that app may see.
+                path = with_view(path)
+                result = await asyncio.to_thread(_routed_daemon_call, "DELETE", path)
+                if isinstance(result, dict) and result.get("code"):
+                    return result
                 if isinstance(result, dict) and result.get("success"):
-                    _emit_event("memory.deleted", {
-                        "fact_id": fact_id,
-                        "agent_id": agent_id,
-                    }, source_agent=agent_id)
+                    # The daemon's DELETE route announces it (once, for every
+                    # surface); announcing here too showed every MCP delete twice.
                     return {
                         "success": True, "deleted": fact_id,
                         "agent_id": agent_id,
@@ -1162,6 +1691,9 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     "retryable": True,
                     "error": "resident daemon rejected the delete operation",
                 }
+            if named:
+                # The local worker serves only the active profile.
+                return routing_needs_daemon_error()
 
             from superlocalmemory.core.worker_pool import WorkerPool
             pool = WorkerPool.shared()
@@ -1212,7 +1744,8 @@ def register_core_tools(server, get_engine: Callable) -> None:
         profile. The active-profile pointer is never moved.
 
         Security note: All updates are logged with the calling agent_id.
-        The fact_id must belong to the target profile.
+        The fact_id must belong to the profile updated: ``profile_id``, or the
+        active profile when it is empty. The active profile is not moved.
 
         Args:
             fact_id: Exact fact ID to update.
@@ -1235,21 +1768,27 @@ def register_core_tools(server, get_engine: Callable) -> None:
             import asyncio
             import urllib.parse
 
-            from superlocalmemory.cli.daemon import (
-                daemon_request,
-                is_daemon_running,
+            from superlocalmemory.cli.daemon import is_daemon_running
+            from superlocalmemory.mcp.request_profile import (
+                requested_profile,
+                routing_needs_daemon_error,
             )
 
+            named = requested_profile(profile_id)
             if await asyncio.to_thread(is_daemon_running):
+                from superlocalmemory.cli.daemon import daemon_request
+                from superlocalmemory.mcp.remote_visibility import with_view
+
                 path = "/api/memories/" + urllib.parse.quote(fact_id, safe="")
-                if (profile_id or "").strip():
-                    # Per-request profile routing, list_recent wire
-                    # convention: the anchor only goes on the URL when the
-                    # caller set it, so the legacy request stays
-                    # byte-identical.
-                    path += "?profile_id=" + urllib.parse.quote(
-                        profile_id.strip(), safe="",
-                    )
+                if named:
+                    # Fork wire convention (pinned by the provenance tests):
+                    # the routing anchor rides the query string — the same
+                    # convention delete_memory and list_recent use.
+                    path += "?profile_id=" + urllib.parse.quote(named, safe="")
+                # A remote app is marked, so the daemon changes only what that app may see.
+                path = with_view(path)
+                # Curation-only updates (fork, spec section 4/5) send only the
+                # governance fields; a content revision proposes the correction.
                 body: dict[str, object] = {}
                 if (content or "").strip():
                     body["content"] = content.strip()
@@ -1289,6 +1828,8 @@ def register_core_tools(server, get_engine: Callable) -> None:
                             ),
                         }
                     raise
+                if isinstance(result, dict) and result.get("code"):
+                    return result
                 if isinstance(result, dict) and result.get("success"):
                     return {
                         "success": True,
@@ -1304,6 +1845,9 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     "retryable": True,
                     "error": "resident daemon rejected the update operation",
                 }
+            if named:
+                # The local worker serves only the active profile.
+                return routing_needs_daemon_error()
 
             from superlocalmemory.core.worker_pool import WorkerPool
             pool = WorkerPool.shared()
@@ -1337,12 +1881,16 @@ def register_core_tools(server, get_engine: Callable) -> None:
         action: str,
         expected_version: int,
         event_valid_until: str | None = None,
+        profile_id: str = "",
     ) -> dict:
         """Apply, reject, or roll back a review-gated correction case.
 
-        The active daemon derives reviewer identity and profile from its local
-        authenticated MCP boundary.  Clients provide only a case address, a
-        CAS version, and an optional reviewer-approved event-time boundary.
+        The active daemon derives reviewer identity from its local
+        authenticated MCP boundary.  Clients provide a case address, a CAS
+        version, and an optional reviewer-approved event-time boundary.
+        ``profile_id`` names the profile the case belongs to -- the one a
+        ``remember(..., profile_id=..., replaces=...)`` was saved to; empty =
+        the active profile. Routing never moves the active-profile pointer.
         """
         if action not in {"apply", "reject", "rollback"}:
             return {"success": False, "error": "action must be apply, reject, or rollback"}
@@ -1365,22 +1913,60 @@ def register_core_tools(server, get_engine: Callable) -> None:
             payload: dict[str, object] = {"expected_version": expected_version}
             if event_valid_until is not None:
                 payload["event_valid_until"] = event_valid_until
-            path = "/api/corrections/" + urllib.parse.quote(case_id, safe="") + "/" + action
-            result = await asyncio.to_thread(daemon_request, "POST", path, payload)
+            if (profile_id or "").strip():
+                # Only when set, so a legacy call stays byte-identical.
+                payload["profile_id"] = profile_id.strip()
+            from superlocalmemory.mcp.remote_visibility import with_view
+
+            path = with_view(
+                "/api/corrections/" + urllib.parse.quote(case_id, safe="") + "/" + action)
+            from superlocalmemory.cli.daemon import (
+                DaemonConflict,
+                DaemonNotFound,
+                DaemonRefused,
+                DaemonUnprocessable,
+            )
+
+            try:
+                result = await asyncio.to_thread(
+                    daemon_request, "POST", path, payload, preserve_conflict=True,
+                    preserve_not_found=True, preserve_unprocessable=True)
+            except (DaemonConflict, DaemonNotFound, DaemonRefused,
+                    DaemonUnprocessable) as refused:
+                # 4.2.3: an unknown, settled or forbidden case is an answer;
+                # retrying cannot help, so the agent is told not to.
+                return {"success": False, "retryable": False,
+                        "error": f"the correction review was refused: {refused}"}
             if isinstance(result, dict) and result.get("success"):
                 return result
+            if isinstance(result, dict):
+                # 4.2.3: the daemon answered and refused (an unknown or settled
+                # case). Retrying cannot help, so say so and pass its reason on.
+                detail = result.get("detail") or result.get("error") or ""
+                if isinstance(detail, dict):
+                    detail = detail.get("message") or detail.get("code") or ""
+                return {
+                    "success": False,
+                    "retryable": False,
+                    "error": "the correction review was refused"
+                             + (f": {detail}" if detail else ""),
+                }
             return {
                 "success": False,
                 "retryable": True,
-                "error": "resident daemon rejected the correction review",
+                "error": "resident daemon did not answer the correction review",
             }
         except Exception:
             logger.exception("review_correction failed")
             return {"success": False, "retryable": True, "error": "correction review unavailable"}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def list_corrections(limit: int = 100) -> dict:
-        """List active-profile correction cases for a human or host reviewer."""
+    async def list_corrections(limit: int = 100, profile_id: str = "") -> dict:
+        """List correction cases for a human or host reviewer.
+
+        ``profile_id`` lists another profile's cases (empty = the active
+        profile), for a client routed to its own profile with ``remember``.
+        """
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
             return {"success": False, "error": "limit must be an integer from 1 to 500"}
         try:
@@ -1394,7 +1980,14 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     "retryable": True,
                     "error": "correction review requires the resident canonical daemon",
                 }
-            result = await asyncio.to_thread(daemon_request, "GET", f"/api/corrections?limit={limit}")
+            import urllib.parse
+
+            path = f"/api/corrections?limit={limit}"
+            if (profile_id or "").strip():
+                path += "&profile_id=" + urllib.parse.quote(profile_id.strip(), safe="")
+            from superlocalmemory.mcp.remote_visibility import with_view
+
+            result = await asyncio.to_thread(daemon_request, "GET", with_view(path))
             if isinstance(result, dict) and result.get("success"):
                 return result
             return {

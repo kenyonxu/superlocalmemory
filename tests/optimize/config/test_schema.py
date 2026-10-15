@@ -6,7 +6,7 @@ import dataclasses
 
 import pytest
 
-from superlocalmemory.optimize.config.schema import OptimizeConfig, TTLConfig
+from superlocalmemory.optimize.config.schema import OptimizeConfig
 
 
 def test_from_dict_empty_dict_uses_defaults() -> None:

@@ -24,7 +24,12 @@ import tempfile
 from datetime import datetime, UTC, timezone
 from pathlib import Path
 from typing import Any
+from contextlib import closing
 
+from superlocalmemory.infra.cloud_backup_github import (  # noqa: F401 - re-exported
+    MAX_GITHUB_RELEASES,
+    _cleanup_old_releases,
+)
 from superlocalmemory.infra.data_root import canonical_data_root
 from superlocalmemory.storage.memory_write import memory_write
 
@@ -93,6 +98,11 @@ def _atomic_write_creds(store_path: Path, data: dict) -> None:
         # Re-open with 0o600; mkstemp already creates with 0o600 on POSIX.
         # Use os.open with O_NOFOLLOW on the temp name to refuse symlink tricks.
         os.close(tmp_fd)
+        # 0o600 means nothing on Windows: there the owner-only access list
+        # is applied, before a single byte of the secret is written.
+        from superlocalmemory.infra.owner_only_acl import restrict_to_owner
+
+        restrict_to_owner(Path(tmp_name))
         flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(tmp_name, flags, 0o600)
         try:
@@ -132,7 +142,7 @@ def _store_credential(key: str, value: str) -> bool:
         existing: dict = {}
         if store_path.exists():
             try:
-                existing = json.loads(store_path.read_text())
+                existing = json.loads(store_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
                 logger.warning(
                     "Credential store corrupt (JSON decode error), starting fresh: %s", exc
@@ -163,7 +173,7 @@ def _get_credential(key: str) -> str | None:
         store_path = _get_credential_store()
         if store_path.exists():
             try:
-                data = json.loads(store_path.read_text())
+                data = json.loads(store_path.read_text(encoding="utf-8"))
                 return data.get(key)
             except json.JSONDecodeError as exc:
                 logger.warning(
@@ -196,7 +206,7 @@ def _delete_credential(key: str) -> bool:
         store_path = _get_credential_store()
         if store_path.exists():
             try:
-                data = json.loads(store_path.read_text())
+                data = json.loads(store_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
                 logger.warning(
                     "Credential store corrupt (JSON decode error) during delete of '%s': %s",
@@ -269,7 +279,7 @@ def remove_destination(dest_id: str, db_path: Path | None = None) -> bool:
         import sqlite3 as _sqlite3
         creds_ref = None
         try:
-            with _sqlite3.connect(str(path)) as rconn:
+            with closing(_sqlite3.connect(str(path))) as rconn, rconn:
                 row = rconn.execute(
                     "SELECT credentials_ref FROM backup_destinations WHERE id = ?",
                     (dest_id,),
@@ -322,7 +332,7 @@ def connect_google_drive(auth_code: str, redirect_uri: str) -> dict[str, Any]:
         Dict with destination_id, user_email, and status.
     """
     try:
-        from google.oauth2.credentials import Credentials
+        from google.oauth2.credentials import Credentials  # noqa: F401
         from google_auth_oauthlib.flow import Flow
     except ImportError:
         return {"error": "google-auth-oauthlib not installed. Run: pip install google-auth-oauthlib google-api-python-client"}
@@ -373,7 +383,9 @@ def connect_google_drive(auth_code: str, redirect_uri: str) -> dict[str, Any]:
             credentials_ref=cred_key,
         )
 
-        return {"destination_id": dest_id, "email": email, "status": "connected"}
+        from superlocalmemory.infra.cloud_backup_crypto import attach_encryption
+
+        return attach_encryption({"destination_id": dest_id, "email": email, "status": "connected"})
 
     except Exception as exc:
         logger.error("Google Drive connection failed: %s", exc)
@@ -407,10 +419,20 @@ def _get_drive_service() -> Any | None:
 
 
 def sync_to_google_drive(backup_path: Path, dest_config: dict) -> bool:
-    """Upload a backup file to Google Drive."""
+    """Upload a backup file to Google Drive, encrypted on this machine first."""
+    from superlocalmemory.infra.cloud_backup_crypto import (
+        UPLOAD_MIMETYPE, encrypted_upload_copy, prepare_upload_key,
+    )
+
     service = _get_drive_service()
     if service is None:
         logger.warning("Google Drive not connected")
+        return False
+
+    try:
+        key, _created = prepare_upload_key()
+    except Exception as exc:
+        logger.error("Google Drive upload skipped, backup key unavailable: %s", exc)
         return False
 
     try:
@@ -433,35 +455,32 @@ def sync_to_google_drive(backup_path: Path, dest_config: dict) -> bool:
             folder = service.files().create(body=folder_meta, fields="id").execute()
             folder_id = folder["id"]
 
-        # Upload the backup file
-        file_meta = {"name": backup_path.name, "parents": [folder_id]}
+        with encrypted_upload_copy(backup_path, key) as enc_path:
+            # Upload the encrypted copy only; Drive never sees plaintext.
+            file_meta = {"name": enc_path.name, "parents": [folder_id]}
 
-        # Check if file already exists (update instead of create duplicate)
-        existing = service.files().list(
-            q=f"name='{backup_path.name}' and '{folder_id}' in parents and trashed=false",
-            spaces="drive",
-            fields="files(id)",
-        ).execute().get("files", [])
+            # Check if file already exists (update instead of create duplicate)
+            existing = service.files().list(
+                q=f"name='{enc_path.name}' and '{folder_id}' in parents and trashed=false",
+                spaces="drive",
+                fields="files(id)",
+            ).execute().get("files", [])
 
-        media = MediaFileUpload(
-            str(backup_path),
-            mimetype="application/x-sqlite3",
-            resumable=True,
-        )
+            media = MediaFileUpload(str(enc_path), mimetype=UPLOAD_MIMETYPE, resumable=True)
 
-        if existing:
-            service.files().update(
-                fileId=existing[0]["id"],
-                media_body=media,
-            ).execute()
-        else:
-            service.files().create(
-                body=file_meta,
-                media_body=media,
-                fields="id",
-            ).execute()
+            if existing:
+                service.files().update(
+                    fileId=existing[0]["id"],
+                    media_body=media,
+                ).execute()
+            else:
+                service.files().create(
+                    body=file_meta,
+                    media_body=media,
+                    fields="id",
+                ).execute()
 
-        logger.info("Uploaded %s to Google Drive/%s", backup_path.name, folder_name)
+        logger.info("Uploaded encrypted %s to Google Drive/%s", backup_path.name, folder_name)
         return True
 
     except Exception as exc:
@@ -552,7 +571,11 @@ def connect_github(pat: str, repo_name: str = "slm-backup") -> dict[str, Any]:
             credentials_ref=cred_key,
         )
 
-        return {"destination_id": dest_id, "username": username, "repo": full_repo, "status": "connected"}
+        from superlocalmemory.infra.cloud_backup_crypto import attach_encryption
+
+        return attach_encryption(
+            {"destination_id": dest_id, "username": username, "repo": full_repo, "status": "connected"}
+        )
 
     except Exception as exc:
         logger.error("GitHub connection failed: %s", exc)
@@ -569,8 +592,14 @@ def sync_to_github(backup_files: list[Path] | Path, dest_config: dict) -> bool:
     Args:
         backup_files: Single path or list of paths to upload.
         dest_config: Destination config with full_repo key.
+
+    Every asset is encrypted on this machine first; GitHub only stores ciphertext.
     """
     import httpx
+
+    from superlocalmemory.infra.cloud_backup_crypto import (
+        UPLOAD_MIMETYPE, encrypted_upload_copy, prepare_upload_key,
+    )
 
     # Accept both single path and list
     if isinstance(backup_files, Path):
@@ -591,6 +620,12 @@ def sync_to_github(backup_files: list[Path] | Path, dest_config: dict) -> bool:
         return False
 
     try:
+        key, _created = prepare_upload_key()
+    except Exception as exc:
+        logger.error("GitHub sync skipped, backup key unavailable: %s", exc)
+        return False
+
+    try:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         tag_name = f"backup-{timestamp}"
         total_mb = sum(f.stat().st_size for f in backup_files) / (1024 * 1024)
@@ -603,7 +638,7 @@ def sync_to_github(backup_files: list[Path] | Path, dest_config: dict) -> bool:
             json={
                 "tag_name": tag_name,
                 "name": f"SLM Backup {timestamp}",
-                "body": f"Automated backup — {len(backup_files)} databases ({total_mb:.1f} MB total)\n\n{file_list}",
+                "body": f"Automated encrypted backup — {len(backup_files)} databases ({total_mb:.1f} MB total)\n\n{file_list}",
                 "draft": False,
                 "prerelease": False,
             },
@@ -620,15 +655,16 @@ def sync_to_github(backup_files: list[Path] | Path, dest_config: dict) -> bool:
         # Upload each database as a separate asset on the same release
         for backup_path in backup_files:
             try:
-                with open(backup_path, "rb") as f:
+                with encrypted_upload_copy(backup_path, key) as enc_path, \
+                        open(enc_path, "rb") as f:
                     upload_resp = httpx.post(
                         upload_url,
-                        params={"name": backup_path.name},
+                        params={"name": enc_path.name},
                         headers={
                             "Authorization": f"token {pat}",
-                            "Content-Type": "application/octet-stream",
+                            "Content-Type": UPLOAD_MIMETYPE,
                         },
-                        content=f.read(),
+                        content=f,  # streamed from disk with a Content-Length
                         timeout=600,
                     )
                 if upload_resp.status_code in (200, 201):
@@ -651,61 +687,13 @@ def sync_to_github(backup_files: list[Path] | Path, dest_config: dict) -> bool:
         return False
 
 
-MAX_GITHUB_RELEASES = 5  # Keep last 5 backups, delete older ones
-
-
-def _cleanup_old_releases(full_repo: str, headers: dict) -> None:
-    """Delete old GitHub releases to prevent repo storage from exploding.
-
-    Keeps the most recent MAX_GITHUB_RELEASES releases and deletes the rest.
-    """
-    import httpx
-
-    try:
-        resp = httpx.get(
-            f"https://api.github.com/repos/{full_repo}/releases",
-            headers=headers,
-            params={"per_page": 100},
-            timeout=15,
-        )
-        if resp.status_code != 200:
-            return
-
-        releases = resp.json()
-        if len(releases) <= MAX_GITHUB_RELEASES:
-            return
-
-        # Sort by creation date (newest first), delete everything after MAX
-        releases.sort(key=lambda r: r.get("created_at", ""), reverse=True)
-        to_delete = releases[MAX_GITHUB_RELEASES:]
-
-        for release in to_delete:
-            release_id = release["id"]
-            tag = release.get("tag_name", "")
-
-            # Delete release
-            httpx.delete(
-                f"https://api.github.com/repos/{full_repo}/releases/{release_id}",
-                headers=headers,
-                timeout=15,
-            )
-            # Delete the tag too (releases leave orphan tags)
-            httpx.delete(
-                f"https://api.github.com/repos/{full_repo}/git/refs/tags/{tag}",
-                headers=headers,
-                timeout=15,
-            )
-            logger.info("Cleaned up old release: %s", tag)
-
-        logger.info("GitHub cleanup: removed %d old releases, kept %d", len(to_delete), MAX_GITHUB_RELEASES)
-
-    except Exception as exc:
-        logger.warning("GitHub release cleanup failed (non-critical): %s", exc)
-
-
 # ---------------------------------------------------------------------------
 # Sync orchestrator
 # ---------------------------------------------------------------------------
+
+
+#: Backup files that are kept locally and never uploaded to a cloud destination.
+LOCAL_ONLY_BACKUP_PREFIXES = ("media-",)
 
 
 def _find_latest_backup_set(backup_dir: Path) -> list[Path]:
@@ -732,6 +720,8 @@ def _find_latest_backup_set(backup_dir: Path) -> list[Path]:
     for f in backup_dir.iterdir():
         if f == latest or not f.name.endswith(".db"):
             continue
+        if f.name.startswith(LOCAL_ONLY_BACKUP_PREFIXES):
+            continue  # images and documents stay on this machine
         if ts_suffix in f.name:
             backup_set.append(f)
 
@@ -754,6 +744,15 @@ def sync_all_destinations(db_path: Path | None = None) -> dict[str, Any]:
     backup_set = _find_latest_backup_set(backup_dir)
     if not backup_set:
         return {"synced": 0, "message": "No backup files found"}
+
+    from superlocalmemory.infra.cloud_backup_crypto import begin_encrypted_sync
+
+    encryption = begin_encrypted_sync(path)
+    if encryption.get("error"):  # no persisted key: upload nothing, say why
+        for dest in destinations:
+            update_sync_status(dest["id"], "failed", encryption["error"], db_path=path)
+        return {"synced": 0, "total": len(destinations), "message": encryption["error"],
+                "encryption": encryption}
 
     synced = 0
     db_names = [f.name for f in backup_set]
@@ -785,4 +784,5 @@ def sync_all_destinations(db_path: Path | None = None) -> dict[str, Any]:
             update_sync_status(dest_id, "failed", str(exc), db_path=path)
             results[dest_id] = {"type": dest_type, "status": "failed", "error": str(exc)}
 
-    return {"synced": synced, "total": len(destinations), "results": results}
+    return {"synced": synced, "total": len(destinations), "results": results,
+            "encryption": encryption}

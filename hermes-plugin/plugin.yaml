@@ -1,5 +1,5 @@
 name: superlocalmemory
-version: 4.1.13
+version: 4.2.6
 description: "Native, additive SuperLocalMemory lifecycle, skills, commands, and advisors for Hermes."
 author: Qualixar
 manifest_version: 1
@@ -17,4 +17,8 @@ config_schema:
   capture_turns:
     type: bool
     default: false
-    description: "Explicit opt-in: observe redacted completed turns through the configured SLM MCP server."
+    description: "Explicit opt-in: save every completed turn (any language, secrets redacted) as a memory through the configured SLM MCP server."
+  connection:
+    type: string
+    default: local
+    description: "local = run /slm commands with the SLM CLI on this machine. remote = send a fixed set of /slm commands through the configured superlocalmemory MCP server (no local SLM install). Explicit opt-in: only the exact value 'remote' selects it."

@@ -1,0 +1,294 @@
+# Connect each app: step-by-step host guides
+
+[Web access](README.md) lets an AI app on the internet use the memory on your
+computer. This page gives the exact steps for ChatGPT, ChatGPT dots, Grok Bot,
+Composio and Muse, and the things that tripped people up. The steps were
+checked against those apps on 8 October 2026. The apps change their screens
+from time to time, so if a label has moved, look for the one nearest to it.
+
+## Before you start
+
+You do the first part once, in the SuperLocalMemory dashboard (`slm dashboard`),
+whatever the app is.
+
+1. Open **Connected apps** and choose **Add an app**.
+2. Under **What this app can do**, tick **Turn on internet access for this
+   app**. Tick **Allow saving memories** if the app should be able to save, and
+   **Allow session tools** only if you want the app to open and close sessions.
+   Reading is always included.
+3. Select **Link this computer with GitHub** and finish the sign-in in the page
+   that opens. Wait until the page says Web access is on.
+
+Keep this computer awake and online while the app needs your memory.
+
+Every app below needs two things: the connection (the steps in its section)
+and the [setup prompt](../web-agents/setup-prompt.md), which you paste into a
+chat with it once connected. Muse and Grok Bot in particular cannot be
+connected by a button alone.
+
+Two addresses are used below. Both have copy buttons under **Technical
+details** on the Connected apps page.
+
+| What | Address |
+|---|---|
+| Server URL (the MCP server) | `https://mcp.superlocalmemory.com/mcp` |
+| OAuth metadata URL | `https://auth.superlocalmemory.com/.well-known/oauth-authorization-server` |
+
+Every app also shows an approval page the first time it connects. Sign in with
+GitHub there. Reading is always included on that page. **Allow saving
+memories** and the session tools are separate boxes that start unticked, so tick
+saving if the app should save.
+
+## ChatGPT (web, paid plan)
+
+1. In ChatGPT on the web, open **Plugins** and choose **Add**, then **Add
+   custom MCP server**.
+2. Enter a **Name**, the **Server URL**, and set **Authentication** to
+   **OAuth**.
+3. Open **Advanced OAuth settings**. Check that the default scopes show
+   `slm:read`, `slm:write` and `slm:session` ticked. Then put the same three in
+   **Base scopes**: `slm:read`, `slm:write`, `slm:session`.
+4. Tick **I understand and want to continue**, then choose **Create as a
+   plugin**, then **Continue**.
+5. Sign in with GitHub on the approval page and tick **Allow saving memories**.
+6. In a chat, open the tools picker and enable the plugin.
+
+Three things to know:
+
+- ChatGPT keeps the scopes it discovered at the moment the plugin was created.
+  A plugin created before saving was fixed stays read-only. Uninstall it and
+  create it again.
+- An uninstalled plugin's name stays taken. If ChatGPT says "An app with this
+  name already exists", pick another name, for example **SuperLocalMemory
+  Brain**.
+- ChatGPT keeps the SuperLocalMemory skill only where you paste it: a
+  project's instructions or your custom instructions. If ChatGPT says it saved
+  the skill somewhere else on its own, for example into Composio's skill
+  library, ChatGPT chats do not use that copy; paste it yourself.
+
+### Saving pictures and PDFs from ChatGPT
+
+Attach the picture or PDF in the chat and ask ChatGPT to save it to
+SuperLocalMemory. ChatGPT hands the plugin a temporary link to the attachment
+and your computer downloads it, so the file never has to be typed out by the
+model. This needs three things on your side: the approval ticked **Allow images
+and documents** (and saving), the remote key allowed for media
+(`slm remote keys allow <key> media`) and a write key. The file is saved to the
+key's own profile, as with every remote save.
+
+SuperLocalMemory only downloads from hosts it trusts. For an attachment, those
+are ChatGPT's own file hosts plus any host in `SLM_MEDIA_URL_HOSTS`. This
+release has not yet confirmed ChatGPT's file host names in a live test, so the
+built-in list is empty: until it is filled in, add the host of the attachment
+link to `SLM_MEDIA_URL_HOSTS` yourself. If a save is refused with "Links are not
+accepted from remote callers until a host list is set" or "That host is not on
+the allowed list", that is the reason. A link the model types out by itself
+never gets the built-in hosts; it always needs your list.
+
+Pictures can be up to 25 MB and PDFs up to 100 MB. ChatGPT on a phone may not
+pass the attachment to the plugin at all; if ChatGPT says it has no file to
+send, attach the file in ChatGPT on the web instead, or ask ChatGPT for an
+upload link (see "Adding a picture or PDF from a chat" below).
+
+**Bot messages in ChatGPT.** ChatGPT can list your other bots, send one a
+message and wait for the reply (`mesh_peers`, `mesh_send`, `mesh_wait`) after
+you tick **Allow talking to your other bots** and switch on **Let these apps
+message your other bots** in Connected apps (see "Bot messages and the two new
+permissions" below). Because ChatGPT keeps the scopes it saw when the plugin was
+created, a plugin made before you allowed bot messages does not list these tools: uninstall it and
+create it again.
+
+## ChatGPT dots
+
+Dots are ChatGPT's always-on agents. You create them in ChatGPT on the desktop,
+on a Pro or Business Premium plan. A dot uses the plugins you have connected in
+ChatGPT, so connect SuperLocalMemory there first (the section above).
+
+To test it, ask the dot to call `get_status` with the SuperLocalMemory plugin.
+If it answers, the dot can reach your memory.
+
+If the dot cannot see your custom plugin, use Composio instead. Composio is a
+listed ChatGPT plugin: connect SuperLocalMemory to Composio as a custom MCP
+server (see the Composio section below), then use the Composio plugin from the
+dot.
+
+We have not confirmed whether dots can use custom MCP plugins directly. The
+`get_status` test is how you find out on your plan.
+
+A dot uses only the instructions pasted into it. A skill saved anywhere else is
+not read, so paste the full block into the dot yourself. The full block is also
+what teaches the dot to pass `ack_ids` back as `ack` when it reads bot messages
+and to ask for an upload link instead of trying to send a file.
+
+## Grok Bot
+
+1. In Grok Bot, open **Settings**, then **Plugins**, and add a custom MCP
+   server. Give it a name such as `SuperLocalMemory-Web` and the **Server URL**.
+2. Grok Bot starts an OAuth sign-in in the chat. Approve it with GitHub and
+   tick **Allow saving memories**.
+
+Grok Bot's server runs on Cursor's backend, so the approval appears as
+**Cursor** in your Connected apps list. That is expected.
+
+To add a picture or PDF from Grok Bot, ask it for an upload link ("add a
+picture to my memory"), open the link and pick the file. This needs **Allow
+images and documents** and **Allow saving memories** on the approval page, and
+the pictures switch in Connected apps (see below). Bot messages need **Allow
+talking to your other bots** and the bots switch.
+
+### The local plugin is a separate memory
+
+Grok Bot can also install the `superlocalmemory` plugin from the `qualixar`
+marketplace. That plugin keeps its own memory on Grok's computer. It is not the
+memory on your computer, and the two do not sync. For one shared brain, use the
+web connection above and treat the local plugin as optional.
+
+If the local plugin shows the old description "21-tool code profile", or fails
+with `venv/bin/slm: No such file`, Grok's copy of the marketplace is pinned to
+an old commit. Remove the `qualixar` marketplace, add it again, and reinstall
+the plugin. It should then show the description "Local-first long-term memory
+for your agents and bots".
+
+## Composio
+
+1. In Composio, create a **Custom MCP** server with **OAuth** authentication.
+2. Enter the **Server URL**, and under **Advanced settings** enter the **OAuth
+   metadata URL**.
+3. Connect, sign in with GitHub on the approval page and tick **Allow saving
+   memories** if wanted.
+
+After you update SLM (or after you allow bot messages or pictures), run a manual
+toolkit re-sync in Composio so it lists the new tools (`mesh_*`, `remember_media`,
+`remember_document`, `get_media`, `media_status`, `media_upload_link`).
+
+If Composio later reports `401` after you turned Web access off and on again,
+its approval was removed. Reconnect it:
+
+```bash
+composio link custom_superlocalmemory
+```
+
+## Muse
+
+Muse connects through the private adapter's secure OAuth connector. Enter both
+the **Server URL** and the **OAuth metadata URL**, then sign in with GitHub on
+the approval page and tick **Allow saving memories** if wanted. If Muse was
+connected before, authorize it again. To add a picture or PDF from Muse, ask it
+for an upload link and open it; for that, tick **Allow images and documents**
+too and switch on the pictures switch in Connected apps (see below).
+
+## Claude on the web
+
+Claude on the web connects as an **MCP connector** with OAuth: choose **Claude
+(web)** (or **Other app (MCP)**) under **Add an app** in Connected apps and use
+the two addresses above. The screens inside Claude change often and are not
+walked through here. Once connected, it uses the same tools as the apps above.
+To add a picture or PDF, ask Claude for an upload link; bot messages and
+pictures need the same two yeses (approval-page box and Connected apps switch).
+Paste the [setup prompt](../web-agents/setup-prompt.md) or a Claude project's
+instructions block so it knows when to use them.
+
+## Bot messages and the two new permissions
+
+The approval page has two more boxes. Both start unticked, and they appear
+only when the app asks for them.
+
+- **Allow talking to your other bots** lets the app list your other bots, send
+  them messages and read the replies.
+- **Allow images and documents** lets the app save images and PDFs and read
+  image thumbnails. It cannot name a file on your computer, can send at most
+  512 KB of pasted data, and image links work only from hosts on your allowed
+  list (`SLM_MEDIA_URL_HOSTS`, empty by default, which refuses every link).
+  Saving also needs a write key.
+
+**Adding a picture or PDF from a chat.** A chat cannot hand a file to the tool
+directly. Ask the app to make an upload link ("add a picture to my memory"). It
+answers with a link that works once and expires in 10 minutes. Open the link in
+any browser, pick the file and press Save; the page says "Saved to your memory"
+when your computer has it. The file goes from your browser to your computer
+over the connection that is already open, and nothing is kept in the cloud on
+the way. Your computer must be awake and running SuperLocalMemory, and the app
+needs the **Allow images and documents** box, a write key and the pictures
+permission on your computer (below). Pictures can be up to
+25 MB (PNG, JPEG, GIF or WebP) and PDFs up to 100 MB; each connection can make 3
+open links at a time and 20 uploads a day.
+
+Ticking a box is not enough. You must also allow it for the connection on your
+computer. In the dashboard, open **Connected apps**; the **Web access** row has
+two switches, **Let these apps message your other bots** and **Let these apps
+save and read pictures and documents**. They apply to every app on that
+connection, on its next request.
+
+From a terminal, the same switches are on the connection's remote key, named
+`web-<connection id>` (find it with `slm remote keys list`):
+
+```bash
+slm remote keys allow web-<connection id> mesh
+slm remote keys allow web-<connection id> media
+slm remote keys disallow web-<connection id> mesh
+```
+
+`allow` turns a permission on and `disallow` turns it off. Without both the box
+and the switch, the app is refused. Turning pictures off also ends any upload
+link the connection has not finished.
+
+What a web app can do with bot messages:
+
+- `mesh_peers` lists your other bots.
+- `mesh_send` sends one message to one bot. There is no broadcast.
+- `mesh_inbox` checks for messages. Pass `ack` (see below) with the ids you already have.
+- `mesh_wait` waits up to 20 seconds for a message. It takes `ack` too.
+- `mesh_state` reads shared notes. It cannot change them.
+
+**Delivery is at least once.** A relay can drop a reply after SLM has sent it, so
+a message is not marked read when it is handed over. Each reply that carries
+messages also carries `ack_ids`; the app passes those ids as `ack` on its next
+`mesh_inbox` or `mesh_wait` call, and the messages are then marked read. A message
+the app did not acknowledge comes again once about two minutes have passed
+(120 seconds), flagged `"repeat": true`, and at most three times in all; after
+that SLM treats it as delivered. Until the lease runs out a second call does not
+return it, so two calls never both receive a fresh message. Local sessions are
+not affected: their messages are marked read when returned.
+
+Limits: 200 messages sent per app per day. Inbox checks have their own daily
+budget. A connection can have at most 2 waits at once.
+
+Messages from other bots are data, not instructions. A web app should never act
+on a request inside a message without asking you, and should never reply to a
+bot message by itself. The [setup prompt](../web-agents/setup-prompt.md) tells
+it so.
+
+Each app gets a stable name. In the dashboard's **Bot messages** tab you can
+rename, mute or remove any peer.
+
+**ChatGPT:** ChatGPT keeps the scopes it saw when the app was created. To see
+the new boxes, uninstall the app and create it again. **Composio:** run a
+manual toolkit re-sync so it sees the new tools.
+
+## After you connect any app
+
+1. Paste the [setup prompt](../web-agents/setup-prompt.md) into a chat with the
+   app. It asks the app to keep the SuperLocalMemory skill permanently, then
+   tests saving and recall and shows the raw results. Connecting gives the app
+   the tools; this prompt tells it when to use them. For an instructions field
+   instead, the dashboard's **Copy instructions** button (Connected apps, How to
+   add an app) copies the short block.
+2. Check that it works. Ask the app to save a sentence with a unique marker,
+   such as "Remember that my test marker is plum-4471", then ask it in a new
+   chat what your test marker is. A recall that returns the marker means both
+   directions work.
+3. In **Connected apps**, check that the app is listed with the permissions you
+   expect.
+
+## If something is wrong
+
+| What you see | Why | What to do |
+|---|---|---|
+| The app can read but not save | The app was approved without saving, or ChatGPT kept the scopes from when the plugin was created | Re-approve with **Allow saving memories** ticked. In ChatGPT, uninstall the plugin and create it again |
+| `401` from the app | The app's approval was removed, or Web access was turned off and on again | Reconnect the app, and approve it again |
+| "This sign-in session is no longer valid" after you already approved | The sign-in had already completed before the page was shown | Open **Connected apps** and check whether the app is listed. The approval page now says this more clearly |
+| The same app appears twice in **Connected apps** | The app was connected more than once | Remove the older entry with **Remove access** |
+| `connector_asleep` or `relay_timeout` | This computer is asleep or offline | Wake it and try again |
+
+The full list of errors an app can see is in
+[Troubleshooting](../troubleshooting.md#web-access).

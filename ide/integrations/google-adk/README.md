@@ -2,7 +2,7 @@
 
 Google ADK [`BaseMemoryService`](https://google.github.io/adk-docs/) backed by
 the local data root of
-[SuperLocalMemory V4.0.0](https://github.com/qualixar/superlocalmemory).
+[SuperLocalMemory](https://github.com/qualixar/superlocalmemory).
 
 Give a Google ADK agent durable session memory stored in your local SLM data
 root and visible through every other SLM surface (CLI, MCP, dashboard).
@@ -11,22 +11,20 @@ backup, and downloads have separate network behavior).
 
 ## Prerequisites
 
-- Python >=3.11,<3.15 (3.11, 3.12, 3.13, 3.14)
-- [SuperLocalMemory V4.0.0](https://github.com/qualixar/superlocalmemory) installed in the same environment
+- Python >=3.12,<3.15 (3.12, 3.13, 3.14)
+- [SuperLocalMemory](https://github.com/qualixar/superlocalmemory) installed in a **separate** virtual environment; set `SLM_ENGINE_PYTHON` to its Python executable
 - `google-adk >= 2.5.0`
-- Supported platforms: Apple Silicon macOS, 64-bit Windows, 64-bit Linux — Intel Mac and 32-bit Windows (Win32) are outside the V4.0.0 support contract (`cryptography==50.0.0` has no wheel for those architectures).
+- Supported platforms: Apple Silicon macOS, 64-bit Windows, 64-bit Linux — Intel Mac and 32-bit Windows (Win32) are outside the SuperLocalMemory support contract (`cryptography==50.0.0` has no wheel for those architectures).
+
+The isolated installation recipe is in [framework-adapters.md](../../../docs/framework-adapters.md). These adapters do not install the SLM runtime into the framework environment. Close owned service/backend/collection resources when finished.
 
 ## Installation
 
-```bash
-pip install google-adk-superlocalmemory
-```
-
-Or from source:
+`google-adk-superlocalmemory` is not on PyPI yet, so `pip install google-adk-superlocalmemory` does not work. Install it from a clone of the repository:
 
 ```bash
-cd ide/integrations/google-adk
-pip install -e .
+git clone https://github.com/qualixar/superlocalmemory
+pip install ./superlocalmemory/ide/integrations/google-adk
 ```
 
 ## Quick start
@@ -34,20 +32,27 @@ pip install -e .
 ```python
 from google.adk.agents import Agent
 from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
 from google_adk_superlocalmemory import SuperLocalMemoryService
 
+# https://google.github.io/adk-docs/sessions/memory/
+agent = Agent(name="memory_agent", model="gemini-2.5-flash")
 # Attach SLM as the memory service for your runner
 service = SuperLocalMemoryService()
-runner = Runner(agent=agent, app_name="my-app", memory_service=service)
+runner = Runner(agent=agent, app_name="my_app", memory_service=service,
+                session_service=InMemorySessionService())
 
-# After a session runs, its events are automatically stored and retrievable
-# via SLM's CLI, MCP surface, and dashboard.
+# After a run, call await service.add_session_to_memory(session) explicitly.
+service.close()
 ```
 
 ### Custom database path
 
 ```python
-service = SuperLocalMemoryService(db_path="/path/to/my/memory.db")
+from google_adk_superlocalmemory import SuperLocalMemoryService
+
+service = SuperLocalMemoryService(db_path="./example-memory/memory.db")
+service.close()
 ```
 
 ## How it works
@@ -80,6 +85,6 @@ AGPL-3.0 — see [LICENSE](../../../LICENSE).
 
 ## Links
 
-- [SuperLocalMemory V4.0.0](https://github.com/qualixar/superlocalmemory)
+- [SuperLocalMemory](https://github.com/qualixar/superlocalmemory)
 - [Documentation](https://superlocalmemory.com/)
 - [Google ADK](https://google.github.io/adk-docs/)

@@ -33,8 +33,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from superlocalmemory.storage.database import DatabaseManager
-    from superlocalmemory.core.config import SAGQConfig
+    pass
 
 logger = logging.getLogger(__name__)
 

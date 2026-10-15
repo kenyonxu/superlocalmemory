@@ -25,9 +25,7 @@ updated when the projection succeeded.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from superlocalmemory.core.store_pipeline import _upsert_fact_vectors
 from superlocalmemory.storage.models import AtomicFact, FactType

@@ -18,15 +18,18 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from superlocalmemory.infra.data_root import canonical_data_root, state_path
+from superlocalmemory.ingestion.adapter_config import normalize_config, setup_error, validate_tier
 
 logger = logging.getLogger("superlocalmemory.ingestion.manager")
 
 _SLM_HOME = None  # test-only compatibility override
 _ADAPTERS_CONFIG = None  # test-only compatibility override
 _VALID_ADAPTERS = ("gmail", "calendar", "transcript")
+_CHILDREN = {}
 
 # Module paths for each adapter
 _ADAPTER_MODULES = {
@@ -50,17 +53,31 @@ def _adapter_log_dir() -> Path:
     return _slm_home() / "logs"
 
 
+def _path_error(name: str, adapter_config: dict) -> str:
+    """A saved path outside the import folders refuses the adapter (see import_roots)."""
+    from superlocalmemory.ingestion.import_roots import saved_path_error
+
+    return saved_path_error(name, adapter_config, _slm_home())
+
+
 def _load_config() -> dict:
     config_path = _adapters_config_path()
     if config_path.exists():
-        return json.loads(config_path.read_text())
+        config, migrated = normalize_config(json.loads(config_path.read_text(encoding="utf-8")))
+        if migrated:
+            _save_config(config)
+        return config
     return {name: {"enabled": False} for name in _VALID_ADAPTERS}
 
 
 def _save_config(config: dict) -> None:
+    for name, entry in config.items():
+        if name in _VALID_ADAPTERS:
+            validate_tier(name, entry.get("tier", "auto"))
     config_path = _adapters_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(config, indent=2))
+    from superlocalmemory.storage._durable_json import write_json_atomic
+    write_json_atomic(config_path, config)
 
 
 def _pid_file(name: str) -> Path:
@@ -73,14 +90,23 @@ def _is_running(name: str) -> tuple[bool, int | None]:
     if not pf.exists():
         return False, None
     try:
-        pid = int(pf.read_text().strip())
+        pid = int(pf.read_text(encoding="utf-8").strip())
         try:
             import psutil
-            return psutil.pid_exists(pid), pid
+            alive = psutil.pid_exists(pid)
+            if alive:
+                try:
+                    state = psutil.Process(pid).status()
+                    alive = state not in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    alive = False
+            if not alive:
+                pf.unlink(missing_ok=True)
+            return alive, pid
         except ImportError:
-            os.kill(pid, 0)
-            return True, pid
-    except (ValueError, ProcessLookupError, PermissionError):
+            from superlocalmemory.core.platform_utils import is_pid_alive
+            return is_pid_alive(pid), pid
+    except (ValueError, ProcessLookupError, PermissionError, OSError):
         pf.unlink(missing_ok=True)
         return False, None
 
@@ -96,6 +122,21 @@ def list_adapters() -> list[dict]:
     for name in _VALID_ADAPTERS:
         ac = config.get(name, {})
         running, pid = _is_running(name)
+        path_error = _path_error(name, ac)
+        error = path_error or setup_error(name, ac)
+        child = _CHILDREN.get(name)
+        if child is not None and ((pid is not None and child.pid != pid) or not ac.get("enabled")):
+            _CHILDREN.pop(name, None)
+            child = None
+        completed = False
+        if child is not None and child.poll() is not None:
+            running = False
+            # A refused path is the reason: such a worker reads nothing and
+            # exits, which must never read as "completed" or a bare exit.
+            completed = child.poll() == 0 and not path_error
+            error = path_error or ("" if completed else (
+                "The worker exited. Check its setup in Configure, then retry Start."
+            ))
         result.append({
             "name": name,
             "enabled": ac.get("enabled", False),
@@ -103,6 +144,9 @@ def list_adapters() -> list[dict]:
             "pid": pid,
             "tier": ac.get("tier", ""),
             "watch_dir": ac.get("watch_dir", ""),
+            "setup_error": error,
+            "state": ("completed" if completed else "failed" if error and ac.get("enabled")
+                      else "running" if running else "stopped"),
         })
     return result
 
@@ -136,6 +180,9 @@ def start_adapter(name: str) -> dict:
     config = _load_config()
     if not config.get(name, {}).get("enabled"):
         return {"ok": False, "error": f"{name} not enabled. Run `slm adapters enable {name}` first."}
+    error = _path_error(name, config.get(name, {})) or setup_error(name, config.get(name, {}))
+    if error:
+        return {"ok": False, "error": error}
 
     running, pid = _is_running(name)
     if running:
@@ -156,15 +203,23 @@ def start_adapter(name: str) -> dict:
     else:
         kwargs["start_new_session"] = True
 
-    with open(log_path, "a") as lf:
-        proc = subprocess.Popen(cmd, stdout=lf, stderr=lf, **kwargs)
+    with open(log_path, "a", encoding="utf-8") as lf:
+        proc = subprocess.Popen(cmd, stdout=lf, stderr=lf,
+                                env={**os.environ, "SLM_DATA_DIR": str(_slm_home())}, **kwargs)
+    _CHILDREN[name] = proc
+    time.sleep(0.1)
+    if proc.poll() is not None:
+        return {"ok": False, "error": (
+            "The worker exited during setup. Configure it and retry Start."
+        )}
 
-    _pid_file(name).write_text(str(proc.pid))
+    _pid_file(name).write_text(str(proc.pid), encoding="utf-8")
     return {"ok": True, "message": f"{name} started (PID {proc.pid})", "pid": proc.pid}
 
 
 def stop_adapter(name: str) -> dict:
     """Stop a running adapter."""
+    _CHILDREN.pop(name, None)
     running, pid = _is_running(name)
     if not running:
         return {"ok": True, "message": f"{name} not running"}
@@ -250,6 +305,31 @@ def handle_adapters_cli(args: list[str]) -> None:
                 print(f"  PID={a['pid']}", end="")
             print()
 
+    elif action in ("allow-folder", "folders"):
+        _import_folders_cli(action, name)
+
     else:
         print(f"  Unknown action: {action}")
         print("  Usage: slm adapters <list|enable|disable|start|stop|status> [name]")
+        print("         slm adapters allow-folder <path> | folders")
+
+
+def _import_folders_cli(action: str, path: str) -> None:
+    """The owner's own list of folders the dashboard may point importers at."""
+    from superlocalmemory.ingestion import import_roots
+
+    home = _slm_home()
+    if action == "allow-folder":
+        if not path:
+            print("  Usage: slm adapters allow-folder <path>")
+            return
+        try:
+            real = import_roots.approve(path, home)
+        except (OSError, ValueError) as exc:
+            print(f"  Not approved: {exc}")
+            return
+        print(f"  Approved as an import folder: {real}")
+        return
+    print("  Import folders (the dashboard can choose files only inside these):")
+    for root in (import_roots.default_root(home), *import_roots.approved(home)):
+        print(f"    {root}")

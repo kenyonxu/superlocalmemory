@@ -5,14 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.requests import Request
 from fastapi.responses import Response
 
 from superlocalmemory import __version__
+from superlocalmemory.core.outbound_http import GatedAsyncClient
 from superlocalmemory.optimize.config.schema import OptimizeConfig
 from superlocalmemory.optimize.proxy.lifecycle import HookChain
 
@@ -38,12 +38,12 @@ class ProxyApp:
     def __init__(self, config: OptimizeConfig) -> None:
         self.config = config
         self.hooks: HookChain = HookChain.empty()
-        self.http_client: httpx.AsyncClient | None = None
+        self.http_client: GatedAsyncClient | None = None
         self._request_counter: int = 0
         self._counter_lock = asyncio.Lock()
 
     async def startup(self) -> None:
-        self.http_client = httpx.AsyncClient(
+        self.http_client = GatedAsyncClient(
             timeout=httpx.Timeout(
                 connect=_CONNECT_TIMEOUT_S,
                 read=_REQUEST_TIMEOUT_S,
@@ -54,7 +54,6 @@ class ProxyApp:
                 max_connections=_MAX_CONNECTIONS,
                 max_keepalive_connections=_MAX_KEEPALIVE,
             ),
-            follow_redirects=False,
         )
         self.hooks = _load_hooks(self.config)
         logger.info(
@@ -97,6 +96,7 @@ class ProxyApp:
 
 def build_proxy_router(proxy: ProxyApp) -> APIRouter:
     """Build and return the FastAPI router for all proxy surfaces."""
+    from superlocalmemory.optimize.proxy.access import require_proxy_access
     from superlocalmemory.optimize.proxy.anthropic_surface import (
         handle_count_tokens,
         handle_messages,
@@ -114,7 +114,8 @@ def build_proxy_router(proxy: ProxyApp) -> APIRouter:
         handle_vertex_generative,
     )
 
-    router = APIRouter(tags=["slm-optimize-proxy"])
+    router = APIRouter(tags=["slm-optimize-proxy"],
+                       dependencies=[Depends(require_proxy_access)])
 
     @router.post("/v1/messages")
     async def messages_route(request: Request) -> Response:

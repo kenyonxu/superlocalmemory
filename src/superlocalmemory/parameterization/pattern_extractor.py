@@ -191,11 +191,20 @@ class PatternExtractor:
         self, profile_id: str,
     ) -> list[PatternAssertion]:
         """Extract patterns from core memory blocks."""
+        # A block quoting a fact whose erasure has started is not a source for
+        # a new soft prompt: the prompt would carry the erased words forward.
+        from superlocalmemory.storage.erasure_visibility import (
+            aggregate_erasure_clause_for_db,
+        )
+
+        erasure = aggregate_erasure_clause_for_db(
+            self._db, "core_memory_blocks", column="source_fact_ids")
         rows = self._db.execute(
             "SELECT block_id, block_type, content, source_fact_ids "
             "FROM core_memory_blocks "
             "WHERE profile_id = ? AND block_type IN "
-            "('user_profile', 'behavioral_patterns', 'learned_preferences')",
+            "('user_profile', 'behavioral_patterns', 'learned_preferences')"
+            + erasure,
             (profile_id,),
         )
         patterns: list[PatternAssertion] = []

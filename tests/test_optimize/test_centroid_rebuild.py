@@ -11,11 +11,9 @@
 from __future__ import annotations
 
 import logging
-import struct
 import unittest.mock as mock
 
 import numpy as np
-import pytest
 
 from superlocalmemory.optimize.cache.centroid_store import CentroidStore
 

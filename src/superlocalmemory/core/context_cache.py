@@ -197,16 +197,22 @@ class ContextCache:
         conn = sqlite3.connect(
             str(self._db_path), isolation_level=None, timeout=5.0,
         )
-        apply_journal_mode(conn)
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA temp_store=MEMORY")
-        conn.execute("PRAGMA cache_size=-32768")
-        conn.execute("PRAGMA busy_timeout=500")
-        # 64 MB writer mmap — reader opens with defaults to keep budget tight.
         try:
-            conn.execute("PRAGMA mmap_size=67108864")
-        except sqlite3.Error:  # pragma: no cover — some builds disable mmap
-            pass
+            apply_journal_mode(conn)
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA temp_store=MEMORY")
+            conn.execute("PRAGMA cache_size=-32768")
+            conn.execute("PRAGMA busy_timeout=500")
+            # 64 MB writer mmap — reader opens with defaults to keep budget tight.
+            try:
+                conn.execute("PRAGMA mmap_size=67108864")
+            except sqlite3.Error:  # pragma: no cover — some builds disable mmap
+                pass
+        except BaseException:
+            # Setup failed: close it now, or the file stays open (Windows
+            # then cannot delete or replace it) for as long as the error lives.
+            conn.close()
+            raise
         return conn
 
     def _bootstrap_schema_and_meta(self) -> None:
@@ -508,12 +514,21 @@ def _cache_fact_ids_are_current(home: Path, fact_ids: list[str]) -> bool:
                 return False
             correction_join = ""
             correction_bad = "0"
+            join_params: tuple[str, ...] = ()
             if "correction_cases" in tables:
+                from superlocalmemory.storage.correction_cases import (
+                    CALLER_REPLACEMENT_REASON,
+                )
+
+                # Same rule as recall admission (storage/database.py): a
+                # caller's replacement never withholds the memory it saved.
                 correction_join = (
                     " LEFT JOIN correction_cases cc ON cc.successor_fact_id=f.fact_id "
-                    "AND cc.status IN ('proposed', 'rejected', 'rolled_back')"
+                    "AND cc.status IN ('proposed', 'rejected', 'rolled_back') "
+                    "AND cc.reason_code != ?"
                 )
                 correction_bad = "cc.successor_fact_id IS NOT NULL"
+                join_params = (CALLER_REPLACEMENT_REASON,)
             rows = conn.execute(
                 "SELECT f.fact_id, tv.system_expired_at, " + correction_bad + " AS correction_blocked "
                 "FROM atomic_facts f "
@@ -521,7 +536,7 @@ def _cache_fact_ids_are_current(home: Path, fact_ids: list[str]) -> bool:
                 "AND tv.profile_id=f.profile_id "
                 + correction_join
                 + f" WHERE f.fact_id IN ({placeholders})",
-                tuple(fact_ids),
+                (*join_params, *fact_ids),
             ).fetchall()
         finally:
             conn.close()

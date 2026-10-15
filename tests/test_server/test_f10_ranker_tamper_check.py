@@ -15,10 +15,7 @@ Subsequent calls → use_cache=True.
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 
 def _clear_tamper_state(profile: str) -> None:

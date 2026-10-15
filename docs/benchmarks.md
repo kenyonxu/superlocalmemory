@@ -1,19 +1,17 @@
-# Published V3 LoCoMo Evidence (Architecture Carried into V4)
+# Published LoCoMo Evidence
 
-This page is the canonical public reference for SuperLocalMemory benchmark
-figures. It reports the published V3 architecture experiments (from the
-V3 preprint / V3.7 package) that remain the foundation of V4. These are
-published V3 LoCoMo architecture evidence carried into V4 — never a newly
-rerun V4 package result — and are not a cross-vendor leaderboard. All
-original protocols are retained exactly as published.
+This page is the canonical public reference for SuperLocalMemory benchmark figures. It reports the
+published architecture experiments, from the architecture preprint, whose retrieval core SLM still
+runs. They are published results, never a newly rerun result for the current package, and they are
+not a cross-vendor leaderboard. All original protocols are retained exactly as published.
 
-Source: [SuperLocalMemory V3 preprint (arXiv:2603.14588)](https://arxiv.org/abs/2603.14588).
+Source: [Architecture preprint (arXiv:2603.14588)](https://arxiv.org/abs/2603.14588).
 
 ## Published LoCoMo results
 
 | Published configuration | LoCoMo aggregate | Original protocol scope | What the result establishes |
 |---|---:|---|---|
-| **Mode A Raw** | **60.4%** | 10 conversations; 1,276 scored questions; local embeddings, local retrieval, and zero-LLM answer construction | End-to-end local answer construction under the published V3 protocol. |
+| **Mode A Raw** | **60.4%** | 10 conversations; 1,276 scored questions; local embeddings, local retrieval, and zero-LLM answer construction | End-to-end local answer construction under the published protocol. |
 | **Mode A Retrieval** | **74.8%** | 10 conversations; 1,276 scored questions; local retrieval, then GPT-4.1-mini answer synthesis | Retrieval evidence from the local system, with the disclosed external model constructing the final answer. |
 | **Mode C** | **87.7%** | Conv-30 only; 81 scored questions; text-embedding-3-large plus GPT-4.1-mini answer generation and judge | Cloud-assisted configuration on one disclosed conversation; not a full-dataset result. |
 
@@ -32,7 +30,6 @@ an ablation result with its own protocol; it must not be substituted for the
 
 A LoCoMo percentage is comparable only when the conversation subset, question
 count, retrieval stack, answer-construction model, judge, and release artifact
-are declared and compatible. Do not use these figures to claim that V4 has
+are declared and compatible. Do not use these figures to claim that the current package has
 been freshly rerun, that every mode has the same score, or that SLM outranks a
-competitor tested under another protocol. The architecture was introduced in V3
-and its published protocols are carried into V4 unchanged.
+competitor tested under another protocol. The published protocols are carried over unchanged.

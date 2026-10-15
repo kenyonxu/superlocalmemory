@@ -210,19 +210,26 @@ def _strict_temporal_candidate_ids(
     include_unknown: bool = False,
     include_global: bool = False,
     include_shared: bool = False,
+    snapshot_as_of: str | None = None,
 ) -> set[str] | None:
     """Return strict two-clock failures, or ``None`` when admission is unprovable."""
-    if not fact_ids or (known_as_of is None and valid_at is None):
+    if not fact_ids or (known_as_of is None and valid_at is None and snapshot_as_of is None):
         return set()
     try:
         invalid = db.get_strict_temporal_inadmissible_fact_ids(
             list(fact_ids), profile_id,
-            known_as_of=_normalized_as_of(known_as_of),
-            valid_at=_normalized_as_of(valid_at),
+            known_as_of=_normalized_as_of(known_as_of or snapshot_as_of),
+            valid_at=_normalized_as_of(valid_at or snapshot_as_of),
             include_unknown=include_unknown,
             include_global=include_global,
             include_shared=include_shared,
         )
+        if snapshot_as_of is not None:
+            from superlocalmemory.retrieval.snapshot_admission import snapshot_failures
+            invalid |= snapshot_failures(
+                db, fact_ids, profile_id, snapshot_as_of,
+                include_global=include_global, include_shared=include_shared,
+            )
     except Exception as exc:
         logger.warning("Strict temporal admission lookup failed: %s", exc)
         return None
@@ -314,13 +321,7 @@ def admit_correction_candidates(
     include_shared: bool = False,
     lifecycle_cache: CorrectionAdmissionCache | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
-    """Hard-exclude system-superseded facts before candidate fusion.
-
-    This is the SLM 4.0.2 Brain Core admission invariant.  Ranking is unable to
-    enforce a correction because a high-scoring stale fact can still win.  The
-    historical ``as_of`` boundary preserves facts that had not yet been
-    superseded at that point, so current corrections do not rewrite history.
-    """
+    """Exclude superseded/future facts; ``as_of`` intersects both temporal clocks."""
     fact_ids = {
         fact_id
         for channel_results in all_results.values()
@@ -340,6 +341,7 @@ def admit_correction_candidates(
         known_as_of=known_as_of, valid_at=valid_at,
         include_unknown=include_unknown,
         include_global=include_global, include_shared=include_shared,
+        snapshot_as_of=as_of,
     )
     if strict is None:
         return _abstain_candidates(all_results, stage="pre_fusion.strict_temporal")
@@ -390,6 +392,7 @@ def admit_correction_fusion_results(
         known_as_of=known_as_of, valid_at=valid_at,
         include_unknown=include_unknown,
         include_global=include_global, include_shared=include_shared,
+        snapshot_as_of=as_of,
     )
     if strict is None:
         logger.error(

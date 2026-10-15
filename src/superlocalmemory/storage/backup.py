@@ -18,7 +18,7 @@ backups accumulate.  The separation is structural — not timing-dependent.
 Public API intended for use by the migration runner:
   - _backup_via_sqlite_api(src, dest)
   - _pre_migration_backup(learning_db, memory_db, *, backups_root) -> Path
-  - _gc_old_backups(backups_root, keep=2) -> None
+  - _gc_old_backups(backups_root, keep=2, protect=frozenset()) -> None
   - InsufficientDiskSpaceError
 
 Restoring a pre-migration snapshot
@@ -72,15 +72,22 @@ from superlocalmemory.infra.data_root import canonical_data_root
 
 logger = logging.getLogger(__name__)
 
+#: The databases a safety copy can hold, by the stem their copies are named with.
+SNAPSHOT_DATABASES = frozenset({"memory", "learning"})
+#: Copy speed used for the "about N seconds" estimate, verification included.
+#: Measured on a warm store (2026-10, Apple Silicon SSD): ~8.4 s per GB.
+_COPY_BYTES_PER_S = 110 * 1024 * 1024
+#: An estimate at or above this is announced as a warning, so it is seen.
+_ANNOUNCE_WARN_S = 5.0
+
 # ---------------------------------------------------------------------------
 # Filename parsing helpers for snapshot ordering and generation grouping
 # ---------------------------------------------------------------------------
 
 # Timestamps in snapshot filenames are YYYYMMDD-HHmmss-ffffff (microseconds).
 # _free_name appends a collision suffix -N (integer ≥ 1) when a file already
-# exists.  Both forms are matched by this pattern.
-_SNAPSHOT_TIMESTAMP_RE = re.compile(r"^(\d{8}-\d{6}-\d{6})(?:-(\d+))?$")
-
+# exists. Retention parses every naming itself (_snapshot_retention).
+#
 # Pattern used to extract a timestamp (and optional collision suffix) from the
 # RIGHT side of a stripped filename.  Anchoring at the END means the stem may
 # contain hyphens without confusing the parser: only the rightmost field that
@@ -102,23 +109,6 @@ def _extract_snapshot_stamp(name_without_suffix: str) -> re.Match | None:
     to sort as if it were newer than any validly-named snapshot.
     """
     return _SNAPSHOT_TIMESTAMP_TAIL_RE.search(name_without_suffix)
-
-
-def _parse_generation_stamp(raw_stamp: str) -> str:
-    """Return the base YYYYMMDD-HHmmss-ffffff portion of a raw snapshot stamp.
-
-    Strips any trailing -N collision suffix added by ``_free_name``, so that::
-
-        memory-20260819-120000-123456-pre-migration.db
-        memory-20260819-120000-123456-1-pre-migration.db
-
-    are recognised as the same logical generation.
-
-    If the stamp does not match the expected pattern (e.g. an externally
-    created file), the raw stamp is returned unchanged so GC does not crash.
-    """
-    m = _SNAPSHOT_TIMESTAMP_RE.match(raw_stamp)
-    return m.group(1) if m else raw_stamp
 
 
 def _snapshot_sort_key(path: Path) -> tuple[str, int]:
@@ -172,6 +162,22 @@ class InsufficientDiskSpaceError(Exception):
         )
 
 
+def _create_private_file(path: Path) -> None:
+    """Create (or truncate) ``path`` readable and writable by its owner only."""
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                 | getattr(os, "O_BINARY", 0), 0o600)
+    os.close(fd)
+    if os.name != "nt":
+        os.chmod(path, 0o600)        # an existing file keeps its old mode otherwise
+
+
+def _make_private_dir(path: Path) -> None:
+    """Create ``path`` (and parents) and keep it owner-only on POSIX."""
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != "nt":
+        os.chmod(path, 0o700)
+
+
 def _backup_via_sqlite_api(src: Path, dest: Path) -> None:
     """Copy a live SQLite database to dest using the SQLite backup API.
 
@@ -190,6 +196,11 @@ def _backup_via_sqlite_api(src: Path, dest: Path) -> None:
     # name — a snapshot that looks present and restores nothing. rename() within
     # one directory is atomic, so the final name only ever appears complete.
     staging = dest.with_name(dest.name + ".partial")
+    # A snapshot holds every memory, so it is created owner-only (0600) before
+    # a single byte is copied -- the live store is 0600 and a copy beside it
+    # must not be readable by other accounts on the machine. SQLite opens an
+    # existing file as-is and gives its journal the same mode.
+    _create_private_file(staging)
     src_conn = sqlite3.connect(str(src), check_same_thread=False)
     dst_conn = sqlite3.connect(str(staging))
     try:
@@ -199,6 +210,13 @@ def _backup_via_sqlite_api(src: Path, dest: Path) -> None:
         # writer is active at this point).
         src_conn.backup(dst_conn, pages=-1)
         dst_conn.commit()
+    except Exception:
+        # A damaged source fails here; never leave an empty staging file (#153).
+        dst_conn.close()
+        for leftover in (staging, staging.with_name(staging.name + "-wal"),
+                         staging.with_name(staging.name + "-shm")):
+            leftover.unlink(missing_ok=True)
+        raise
     finally:
         src_conn.close()
         dst_conn.close()
@@ -206,7 +224,9 @@ def _backup_via_sqlite_api(src: Path, dest: Path) -> None:
     # Verify and durably flush BEFORE the rename, so the final name never
     # appears over incomplete or corrupt content.
     try:
-        fd = os.open(str(staging), os.O_RDONLY)
+        # Windows durable flush requires write access. This is our temporary
+        # snapshot, not the source database; do not suppress a failed flush.
+        fd = os.open(str(staging), os.O_RDWR | getattr(os, "O_BINARY", 0))
         try:
             os.fsync(fd)
         finally:
@@ -257,8 +277,138 @@ class SnapshotUnusableError(RuntimeError):
     """Raised when a snapshot cannot be verified, BEFORE the live store is touched."""
 
 
-def restore_pre_migration_snapshot(snapshot: Path, target: Path) -> Path:
+class LiveStoreWriteError(RuntimeError):
+    """Raised when a source cannot be written into a live store; the store is untouched."""
+
+
+# How long a restore waits for another connection to release a live store's
+# write lock before giving up, and how long each SQLite busy wait lasts within
+# that window. Without a bound the backup API retries a held lock forever.
+RESTORE_LOCK_WAIT_SECONDS = 30.0
+_LOCK_POLL_SECONDS = 1.0
+
+#: Pages written per backup step when restoring into a live store. -1 is one
+#: step. However many steps, the destination is one transaction: a restore cut
+#: off part-way (power loss, a killed process) leaves the target as it was.
+_RESTORE_PAGES_PER_STEP = -1
+#: Optional ``(remaining, total)`` observer called after every restore step.
+_restore_progress = None
+
+
+def _write_into_live_db(
+    source: Path,
+    target: Path,
+    *,
+    lock_wait_seconds: float = RESTORE_LOCK_WAIT_SECONDS,
+    pages: int = -1,
+    progress=None,
+) -> None:
+    """Make ``target`` hold exactly ``source``'s content, written by SQLite.
+
+    Use this to overwrite a database that may be live; use
+    ``_backup_via_sqlite_api`` only to create a NEW file. The pages are written
+    into ``target`` on its own connection, as one transaction, so its ``-wal``
+    and ``-shm`` stay paired with the file they describe. Renaming a copy over
+    the live file instead left the old ``-wal`` beside a new database, and
+    SQLite read (and later checkpointed) the old store's committed frames over
+    the restored pages: reproduced as a restore that reported success and
+    changed nothing, and as "database disk image is malformed" when the live
+    store had moved on since the backup. A write that raises is rolled back by
+    SQLite, so the target is either fully written or untouched.
+
+    ``source`` must be a verified, quiescent file. It is opened immutable, which
+    reads it without creating a ``-wal`` or ``-shm`` beside it — and without
+    reading one, so a source whose ``-wal`` still holds frames is refused rather
+    than restored without them.
+
+    Raises:
+        LiveStoreWriteError: if ``source``'s ``-wal`` is not empty, if another
+            connection holds ``target``'s write lock for longer than
+            ``lock_wait_seconds``, or if ``target`` is a WAL database whose
+            page size differs from ``source``'s, which the backup API cannot
+            write.
+    """
+    source_wal = Path(f"{source}-wal")
+    if source_wal.exists() and source_wal.stat().st_size > 0:
+        raise LiveStoreWriteError(
+            f"{source.name} has {source_wal.stat().st_size} bytes in its "
+            f"write-ahead log; restoring it would drop those pages")
+
+    src_conn = sqlite3.connect(
+        f"{source.absolute().as_uri()}?mode=ro&immutable=1", uri=True)
+    try:
+        dst_conn = sqlite3.connect(str(target), timeout=_LOCK_POLL_SECONDS)
+        try:
+            src_page = src_conn.execute("PRAGMA page_size").fetchall()[0][0]
+            dst_page = dst_conn.execute("PRAGMA page_size").fetchall()[0][0]
+            dst_mode = dst_conn.execute("PRAGMA journal_mode").fetchall()[0][0]
+            if dst_mode.lower() == "wal" and src_page != dst_page:
+                raise LiveStoreWriteError(
+                    f"{target.name} is a WAL database with page size "
+                    f"{dst_page}, the source has {src_page}; SQLite cannot "
+                    f"restore across page sizes into a WAL database")
+
+            deadline = time.monotonic() + lock_wait_seconds
+
+            def _bounded_wait(status: int, remaining: int, total: int) -> None:
+                if (status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                        and time.monotonic() > deadline):
+                    raise LiveStoreWriteError(
+                        f"{target.name} stayed locked by another connection "
+                        f"for over {lock_wait_seconds:g}s")
+                if progress is not None:
+                    progress(remaining, total)
+
+            try:
+                src_conn.backup(dst_conn, pages=pages, progress=_bounded_wait)
+            finally:
+                # Success or rollback, the write went through the target's
+                # -wal, which then stays as large as the store until something
+                # truncates it -- nothing else ever does on a live store.
+                _shrink_wal(dst_conn, target)
+        finally:
+            dst_conn.close()
+    finally:
+        src_conn.close()
+
+
+# How long the log truncation may wait for readers still inside an older
+# snapshot. They are never interrupted: past this the log is left at its size
+# and the next checkpoint that finds it unused reuses it.
+_WAL_TRUNCATE_WAIT_MS = 2000
+
+
+def _shrink_wal(conn: sqlite3.Connection, target: Path) -> None:
+    """Checkpoint ``target`` and truncate its -wal to zero bytes. Never raises.
+
+    ``wal_checkpoint(TRUNCATE)`` copies the log into the database and then
+    waits, through the busy handler, until every reader has moved off the log
+    before truncating it. A reader mid-query therefore keeps its snapshot and
+    is never disturbed; if one outlasts the wait, SQLite reports busy, nothing
+    is truncated, and the store is exactly as correct as before.
+    """
+    try:
+        if conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+            return
+        conn.execute(f"PRAGMA busy_timeout={_WAL_TRUNCATE_WAIT_MS}")
+        busy, _log, _done = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    except sqlite3.Error as exc:
+        logger.info("[SLM] Could not shrink %s-wal after the restore write: %s",
+                    target.name, exc)
+        return
+    if busy:
+        logger.info(
+            "[SLM] %s-wal was not shrunk after the restore write: a reader was "
+            "still using it. It is reused at the next checkpoint.", target.name)
+
+
+def restore_pre_migration_snapshot(
+    snapshot: Path, target: Path, expected_sha256: str | None = None,
+) -> Path:
     """Restore ``snapshot`` over ``target``, verifying before it destroys anything.
+
+    ``expected_sha256`` (from the generation's manifest) makes it refuse a copy
+    whose bytes changed since it was taken, before anything is touched.
 
     Do NOT restore these snapshots with ``BackupManager.restore_backup()``. That
     method checks the source exists, then takes its own "pre-restore" backup,
@@ -274,12 +424,21 @@ def restore_pre_migration_snapshot(snapshot: Path, target: Path) -> Path:
          before touching ``target`` if it is not,
       2. copies the CURRENT ``target`` aside first, outside the snapshot
          directory so no retention policy can reclaim it,
-      3. copies the snapshot into place through the SQLite backup API.
+      3. writes the snapshot's pages into ``target`` on ``target``'s own
+         connection, so a live WAL store's ``-wal`` stays paired with it.
 
     Returns the path of the safety copy of the pre-restore state.
+
+    Raises:
+        SnapshotUnusableError: the snapshot failed verification; nothing was
+            touched.
+        LiveStoreWriteError: the snapshot could not be written into ``target``;
+            ``target`` is unchanged and the safety copy exists.
     """
     if not snapshot.is_file() or snapshot.stat().st_size == 0:
         raise SnapshotUnusableError(f"snapshot is missing or empty: {snapshot}")
+    if expected_sha256:
+        verify_snapshot(snapshot, expected_sha256)
     try:
         conn = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
         try:
@@ -299,13 +458,24 @@ def restore_pre_migration_snapshot(snapshot: Path, target: Path) -> Path:
     # Safety copy of what we are about to overwrite, deliberately NOT in the
     # snapshot directory — nothing prunes this location.
     safety_dir = target.parent / "pre-restore"
-    safety_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    _make_private_dir(safety_dir)
+    # Microseconds, and never over an existing copy: a restore re-run within the
+    # same second (a crash after the write, before the intent was retired) would
+    # otherwise replace the first safety copy -- the only one holding the state
+    # from before the first restore -- with a copy of the restored store.
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     safety = safety_dir / f"{target.stem}-{stamp}-before-restore{target.suffix}"
+    n = 1
+    while safety.exists():
+        safety = safety_dir / f"{target.stem}-{stamp}-{n}-before-restore{target.suffix}"
+        n += 1
     if target.exists():
         _backup_via_sqlite_api(target, safety)
 
-    _backup_via_sqlite_api(snapshot, target)
+    # Not _backup_via_sqlite_api: its rename over a live WAL store leaves the
+    # old -wal beside the restored file, and SQLite reads those frames instead.
+    _write_into_live_db(snapshot, target, pages=_RESTORE_PAGES_PER_STEP,
+                        progress=_restore_progress)
     logger.info("[SLM] Restored %s from %s (previous state saved to %s)",
                 target.name, snapshot.name, safety)
     return safety
@@ -327,8 +497,10 @@ def _pre_migration_backup(
     memory_db: Path,
     *,
     backups_root: Path | None = None,
+    reason: str = "migration",
+    databases: frozenset[str] = SNAPSHOT_DATABASES,
 ) -> Path:
-    """Snapshot both databases as flat files before migration.
+    """Snapshot the databases about to change as flat files before migration.
 
     Creates ``{db_stem}-{YYYYMMDD-HHmmss}-pre-migration.db`` files directly
     in ``backups_root`` (no subdirectory). Files are named with a
@@ -336,9 +508,12 @@ def _pre_migration_backup(
     identifies them unambiguously without matching any file produced by
     ``BackupManager``.
 
-    Only databases that exist on disk are copied; a missing database is
-    silently skipped (first-install scenario where learning.db may not
-    exist yet).
+    Only the databases named in ``databases`` (``"memory"``, ``"learning"``)
+    are copied: an update that changes learning.db alone has no reason to copy
+    a memory store of several GB first. Only databases that exist on disk are
+    copied; a missing database is silently skipped (first-install scenario
+    where learning.db may not exist yet). Before anything is copied, one line
+    says what is being copied, how large it is and about how long it takes.
 
     The ``backups_root`` directory defaults to
     ``canonical_data_root() / "pre-migration-snapshots"`` — a directory
@@ -377,8 +552,14 @@ def _pre_migration_backup(
     # and the snapshot materialises all of it. Sizing against the main file
     # alone under-counts the requirement and lets a migration start with too
     # little room, which is the situation the check exists to prevent.
+    unknown = set(databases) - SNAPSHOT_DATABASES
+    if unknown:
+        raise ValueError(f"unknown databases to copy: {sorted(unknown)}")
+    chosen = [(stem, db_path) for stem, db_path in (("memory", memory_db),
+                                                     ("learning", learning_db))
+              if stem in databases]
     total_bytes = 0
-    for db_path in (memory_db, learning_db):
+    for _stem, db_path in chosen:
         for companion in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
             if companion.exists():
                 total_bytes += companion.stat().st_size
@@ -418,7 +599,11 @@ def _pre_migration_backup(
     if free_bytes < needed_bytes:
         raise InsufficientDiskSpaceError(needed_bytes, free_bytes)
 
-    backups_root.mkdir(parents=True, exist_ok=True)
+    _make_private_dir(backups_root)
+    # A copy a crash interrupted keeps its staging name, the size of the store.
+    _cleanup_stale_partials(backups_root)
+    facts_before = _live_fact_count(memory_db) if "memory" in databases else None
+    _announce_copy([db for _stem, db in chosen if db.exists()], total_bytes, reason)
 
     # Perform the backup.  Each db gets a flat file with a -pre-migration suffix
     # so the GC glob *-pre-migration.db identifies our files precisely.
@@ -439,12 +624,13 @@ def _pre_migration_backup(
     # (it sorts first) against memory.db as the target — a command that would
     # restore the wrong database over the user's memories.
     pairs: list[tuple[Path, Path]] = []
-    for stem, db_path in (("memory", memory_db), ("learning", learning_db)):
+    for stem, db_path in chosen:
         if db_path.exists():
             dest = _free_name(stem)
             _backup_via_sqlite_api(db_path, dest)
             pairs.append((dest, db_path))
 
+    _prove_and_describe(backups_root, pairs, memory_db, facts_before, reason=reason)
     elapsed = time.monotonic() - t0
 
     written = [snap for snap, _ in pairs]
@@ -474,7 +660,26 @@ def _pre_migration_backup(
     return backups_root
 
 
-def _gc_old_backups(backups_root: Path, keep: int = 2) -> None:
+def _announce_copy(dbs: list[Path], total_bytes: int, reason: str) -> None:
+    """Say, before it starts, what is copied, how large it is and about how long."""
+    if not dbs:
+        return
+    seconds = total_bytes / _COPY_BYTES_PER_S
+    size = (f"{total_bytes / 1024 ** 3:.1f} GB" if total_bytes >= 1024 ** 3
+            else f"{max(total_bytes, 1) / 1024 ** 2:.0f} MB")
+    about = "under a second" if seconds < 1 else f"about {seconds:.0f} seconds"
+    why = "before going back to an older version" if reason == "pre-downgrade" \
+        else "before updating it"
+    logger.log(
+        logging.WARNING if seconds >= _ANNOUNCE_WARN_S else logging.INFO,
+        "[SLM] Taking a safety copy of %s %s (%s, %s). SuperLocalMemory carries "
+        "on as soon as it is done; please do not stop it meanwhile.",
+        " and ".join(db.name for db in dbs), why, size, about)
+
+
+def _gc_old_backups(
+    backups_root: Path, keep: int = 2, protect: frozenset[str] = frozenset(),
+) -> None:
     """Remove old pre-migration snapshot GENERATIONS, retaining ``keep`` newest.
 
     A generation is one migration's snapshots — ``memory-<ts>-pre-migration.db``
@@ -484,48 +689,99 @@ def _gc_old_backups(backups_root: Path, keep: int = 2) -> None:
     retain a ``memory`` snapshot whose matching ``learning`` snapshot had been
     deleted — a half set that cannot restore a consistent store.
 
-    Only files directly under ``backups_root`` matching ``*-pre-migration.db``
-    are eligible. Every deletion uses an explicit full path; no glob is ever
-    passed to the deletion call.
+    Generations are ordered by the time in their NAME, never by mtime, which
+    was nondeterministic when two copies landed in one filesystem second. A
+    ``-N`` collision suffix stays in its generation. Copies named for the
+    version they precede (``memory-<local time>-pre-4.1.0.db``) and the first
+    release's second-granularity names are generations too, and every copy's
+    ``-wal`` / ``-shm`` goes with it; ``_snapshot_retention`` has the rules.
+
+    Only regular files directly under ``backups_root`` are eligible, never
+    through a symlink. Every deletion uses an explicit full path; no glob is
+    ever passed to the deletion call.
+
+    ``protect`` names the files of the copy just taken: that generation is
+    kept whatever time is in its name (a clock running behind would otherwise
+    have it pruned on the spot). Staging files a crash left behind go too.
     """
-    if not backups_root.exists():
-        return
+    from superlocalmemory.storage import _snapshot_manifest
+    from superlocalmemory.storage._snapshot_retention import prune
 
-    generations: dict[str, list[Path]] = {}
-    for candidate in backups_root.glob("*-pre-migration.db"):
-        if not candidate.is_file() or candidate.parent != backups_root:
-            continue
-        # Extract the raw stamp and normalise away any collision suffix so that
-        # "memory-20260819-120000-123456-pre-migration.db" and
-        # "memory-20260819-120000-123456-1-pre-migration.db" land in the same
-        # generation bucket.  Without normalisation a collision suffix makes GC
-        # count one migration's files as two separate generations and can delete
-        # one file from a paired set, leaving a snapshot that cannot be used for
-        # a consistent restore.
-        #
-        # Search from the RIGHT side of the stripped name so a stem that
-        # contains hyphens does not shift the extracted timestamp — the same
-        # fix applied to _snapshot_sort_key.
-        stripped = candidate.name.rsplit("-pre-migration.db", 1)[0]
-        m = _extract_snapshot_stamp(stripped)
-        raw_stamp = m.group(1) if m else stripped
-        stamp = _parse_generation_stamp(raw_stamp)
-        generations.setdefault(stamp, []).append(candidate)
+    prune(backups_root, keep, protect)
+    # A manifest goes with the generation it describes (explicit paths only).
+    _snapshot_manifest.prune_orphan_manifests(backups_root)
 
-    if len(generations) <= keep:
-        return
 
-    # Sort by the base timestamp string.  YYYYMMDD-HHmmss-ffffff is lexically
-    # monotonic, so alphabetical order is chronological order.  Using st_mtime
-    # here was nondeterministic when two snapshots landed in the same filesystem
-    # timestamp second (FAT, relatime ext4).
-    ordered = sorted(
-        generations.items(),
-        key=lambda kv: kv[0],
-    )
-    for _stamp, files in ordered[: len(generations) - keep]:
-        for target in sorted(files):
-            if target.parent != backups_root or not target.is_file():
-                continue
-            logger.info("[SLM] Removing old pre-migration snapshot: %s", target)
-            target.unlink()
+def _live_fact_count(memory_db: Path) -> int | None:
+    """How many facts the live store holds, read-only; None when unreadable."""
+    if not memory_db.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"{memory_db.absolute().as_uri()}?mode=ro", uri=True)
+        try:
+            return int(conn.execute("SELECT COUNT(*) FROM atomic_facts").fetchone()[0])
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
+def _prove_and_describe(
+    backups_root: Path,
+    pairs: list[tuple[Path, Path]],
+    memory_db: Path,
+    facts_before: int | None,
+    *,
+    reason: str,
+) -> Path | None:
+    """Prove the copies hold the store, then write their manifest.
+
+    Runs after both copies are renamed into place and before the caller lets
+    any migration touch the store. A memory copy whose fact count the store
+    cannot explain -- an empty or truncated database that still passes SQLite's
+    own check -- raises ``SnapshotUnusableError``, so the update does not run.
+    The unproven copies are removed (explicit paths): left under a final name,
+    retention would count them as a generation and prune a good one instead.
+    """
+    from superlocalmemory.storage import _snapshot_manifest
+
+    if not pairs:
+        return None
+    try:
+        counts = None
+        for snap, db in pairs:
+            if Path(db) == Path(memory_db):
+                counts = _snapshot_manifest.check_copy_holds_the_store(
+                    snap, facts_before, _live_fact_count(memory_db))
+        stamp = _snapshot_manifest.stamp_of(pairs[0][0]) or pairs[0][0].stem
+        return _snapshot_manifest.write_generation_manifest(
+            backups_root, stamp, pairs, reason=reason, counts=counts)
+    except BaseException:
+        for snap, _db in pairs:
+            Path(snap).unlink(missing_ok=True)
+        raise
+
+
+def _write_generation_manifest(
+    backups_root: Path, stamp: str, pairs: list[tuple[Path, Path]], *, reason: str,
+) -> Path:
+    """manifest-<stamp>-pre-migration.json for copies already renamed into place."""
+    from superlocalmemory.storage import _snapshot_manifest
+
+    return _snapshot_manifest.write_generation_manifest(
+        backups_root, stamp, pairs, reason=reason,
+        counts=_snapshot_manifest.store_counts(pairs[0][0]) if pairs else None)
+
+
+def _cleanup_stale_partials(backups_root: Path) -> list[Path]:
+    """Unlink '*-pre-migration.db.partial' (+ -wal/-shm) older than 1 h."""
+    from superlocalmemory.storage import _snapshot_manifest
+
+    return _snapshot_manifest.cleanup_stale_partials(backups_root)
+
+
+def verify_snapshot(snapshot: Path, expected_sha256: str | None) -> None:
+    """Raise ``SnapshotUnusableError`` unless ``snapshot`` is intact and readable."""
+    from superlocalmemory.storage import _snapshot_manifest
+
+    _snapshot_manifest.verify_snapshot(snapshot, expected_sha256)

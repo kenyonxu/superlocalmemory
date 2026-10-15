@@ -6,8 +6,6 @@
 import time
 from pathlib import Path
 
-import pytest
-
 from superlocalmemory.code_graph.database import CodeGraphDatabase
 from superlocalmemory.code_graph.models import (
     CodeMemoryLink,

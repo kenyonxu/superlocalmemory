@@ -51,6 +51,7 @@ class CCRStore:
         model: str = "",
         tenant_id: str = "default",
         ttl_seconds: int | None = None,
+        profile_id: str = "",
     ) -> str:
         """Store a pre-compression original. Returns ccr_id (UUID4) or '' on failure.
 
@@ -67,7 +68,8 @@ class CCRStore:
                 if ttl_seconds is not None
                 else None
             )
-            db.ccr_put(ccr_id, original, ttl_expires=ttl_expires, tenant_id=tenant_id)
+            db.ccr_put(ccr_id, original, ttl_expires=ttl_expires, tenant_id=tenant_id,
+                       profile_id=profile_id)
             logger.debug("CCR stored ccr_id=%s orig_bytes=%d tenant=%s", ccr_id, len(original), tenant_id)
             return ccr_id
         except Exception as exc:

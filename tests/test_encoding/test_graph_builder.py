@@ -27,7 +27,6 @@ from superlocalmemory.storage import schema as real_schema
 from superlocalmemory.storage.database import DatabaseManager
 from superlocalmemory.storage.models import (
     AtomicFact,
-    CanonicalEntity,
     EdgeType,
     MemoryRecord,
 )
@@ -223,11 +222,11 @@ class TestSemanticEdges:
 
 class TestCausalEdges:
     def test_causal_marker_creates_edge(self, db: DatabaseManager) -> None:
-        _setup_fact(db, "f1", "Alice left the company",
-                    canonical_entities=["ent_alice"])
+        _setup_fact(db, "f1", "Alice accepted the new job",
+                    canonical_entities=["ent_alice"], obs_date="2026-01-01")
         f2 = _setup_fact(db, "f2",
                          "Alice moved to New York because of the new job",
-                         canonical_entities=["ent_alice"])
+                         canonical_entities=["ent_alice"], obs_date="2026-01-02")
 
         builder = GraphBuilder(db=db)
         edges = builder.build_edges(f2, "default")

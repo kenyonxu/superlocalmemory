@@ -27,7 +27,7 @@ Usage::
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # v3.6.6: clamp only pathological monsters; preserve normal dense memories.
 # 24K chars ≈ 6K tokens — well beyond any legitimate single memory.

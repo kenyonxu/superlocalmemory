@@ -24,9 +24,6 @@ Origin) which is a DIFFERENT code path from the token-route client check.
 
 from __future__ import annotations
 
-import os
-from unittest.mock import patch
-
 import pytest
 
 fastapi = pytest.importorskip("fastapi", reason="fastapi not installed")
@@ -34,7 +31,6 @@ fastapi = pytest.importorskip("fastapi", reason="fastapi not installed")
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
-
 
 # ---------------------------------------------------------------------------
 # Minimal app that mirrors unified_daemon.py auth_middleware origin check

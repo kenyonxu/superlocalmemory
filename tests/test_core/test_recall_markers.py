@@ -15,7 +15,6 @@ Covers IMPLEMENTATION-MANIFEST-v3.4.22-FINAL.md §P0.4.
 
 from __future__ import annotations
 
-import os
 import secrets as _secrets
 from pathlib import Path
 

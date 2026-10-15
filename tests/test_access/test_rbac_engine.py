@@ -154,6 +154,9 @@ def test_role_change_and_removal(engine):
     assert engine.get_role(u["user_id"], "acme") == Role.VIEWER
     engine.set_membership("acme", u["user_id"], "admin")  # upsert
     assert engine.get_role(u["user_id"], "acme") == Role.ADMIN
+    # A workspace keeps an administrator (UX-20): add one before removing y.
+    other = engine.create_user("y2", "password-1234")
+    engine.set_membership("acme", other["user_id"], "admin")
     engine.remove_membership("acme", u["user_id"])
     assert engine.get_role(u["user_id"], "acme") is None
 
@@ -161,6 +164,8 @@ def test_role_change_and_removal(engine):
 def test_delete_user_cascades(engine):
     u = engine.create_user("z", "password-1234")
     engine.set_membership("acme", u["user_id"], "admin")
+    keeper = engine.create_user("z2", "password-1234")
+    engine.set_membership("acme", keeper["user_id"], "admin")  # acme keeps an admin
     token = engine.create_session(u["user_id"])
     engine.delete_user(u["user_id"])
     assert engine.get_user(u["user_id"]) is None

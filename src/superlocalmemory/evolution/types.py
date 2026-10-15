@@ -12,23 +12,25 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
 
 class EvolutionType(str, Enum):
     """How the skill is being evolved."""
-    FIX = "fix"           # Repair broken skill in-place
-    DERIVED = "derived"   # Create specialized variant
-    CAPTURED = "captured" # Extract new skill from patterns
+
+    FIX = "fix"  # Repair broken skill in-place
+    DERIVED = "derived"  # Create specialized variant
+    CAPTURED = "captured"  # Extract new skill from patterns
 
 
 class TriggerType(str, Enum):
     """What triggered the evolution."""
-    POST_SESSION = "post_session"   # Session Stop hook analysis
-    DEGRADATION = "degradation"     # Behavioral assertion confidence drop
-    HEALTH_CHECK = "health_check"   # Periodic consolidation scan
+
+    POST_SESSION = "post_session"  # Session Stop hook analysis
+    DEGRADATION = "degradation"  # Behavioral assertion confidence drop
+    HEALTH_CHECK = "health_check"  # Periodic consolidation scan
 
 
 class EvolutionStatus(str, Enum):
@@ -44,23 +46,25 @@ class EvolutionStatus(str, Enum):
     above.  PROMOTED is an alias for what is now VERIFIED_QUARANTINED in the
     live-in-quarantine sense; new records use VERIFIED_QUARANTINED explicitly.
     """
-    CANDIDATE            = "candidate"             # Detected, not yet processed
-    CONFIRMED            = "confirmed"             # Legacy: LLM gate passed
-    MUTATED              = "mutated"               # Legacy: new SKILL.md generated
-    VERIFIED             = "verified"              # Legacy: blind verify passed
-    PROMOTED             = "promoted"              # Legacy alias for quarantined
-    REJECTED             = "rejected"              # Failed gate or verification
-    FAILED               = "failed"               # Error during evolution
+
+    CANDIDATE = "candidate"  # Detected, not yet processed
+    CONFIRMED = "confirmed"  # Legacy: LLM gate passed
+    MUTATED = "mutated"  # Legacy: new SKILL.md generated
+    VERIFIED = "verified"  # Legacy: blind verify passed
+    PROMOTED = "promoted"  # Legacy alias for quarantined
+    REJECTED = "rejected"  # Failed gate or verification
+    FAILED = "failed"  # Error during evolution
     # --- Phase 2 states ---
     VERIFIED_QUARANTINED = "verified_quarantined"  # Passed blind verify, in quarantine
-    APPROVED             = "approved"              # Human/policy approved; ready to activate
-    ACTIVE               = "active"               # Live in skill directory
-    ROLLED_BACK          = "rolled_back"           # Activation reverted; prior artifact restored
+    APPROVED = "approved"  # Human/policy approved; ready to activate
+    ACTIVE = "active"  # Live in skill directory
+    ROLLED_BACK = "rolled_back"  # Activation reverted; prior artifact restored
 
 
 @dataclass(frozen=True)
 class EvolutionCandidate:
     """A skill flagged for potential evolution."""
+
     skill_name: str
     evolution_type: EvolutionType
     trigger: TriggerType
@@ -74,6 +78,7 @@ class EvolutionCandidate:
 @dataclass(frozen=True)
 class EvolutionRecord:
     """Persisted record of an evolution attempt."""
+
     id: str
     skill_name: str
     parent_skill_id: Optional[str]
@@ -96,11 +101,14 @@ class EvolutionRecord:
     # The activator reads this to locate the artifact; it is also stored in the
     # VERIFIED_QUARANTINED transition metadata for auditability.
     quarantine_dir_name: str = ""
+    verified_content_hash: str = ""
+    source_skill_path: str = ""
 
 
 @dataclass(frozen=True)
 class SkillLineage:
     """Lineage metadata for an evolved skill."""
+
     skill_id: str
     parent_skill_id: Optional[str]
     evolution_type: EvolutionType

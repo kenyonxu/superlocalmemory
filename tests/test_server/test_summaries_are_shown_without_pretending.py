@@ -251,17 +251,27 @@ class TestTheCardIsWiredIntoThePage:
         return pathlib.Path(superlocalmemory.__file__).parent / "ui"
 
     @classmethod
-    def _js(cls) -> str:
-        return (cls._ui_root() / "js" / "od-memories.js").read_text(
-            encoding="utf-8",
-        )
+    def _js(cls, name: str = "od-memories.js") -> str:
+        return (cls._ui_root() / "js" / name).read_text(encoding="utf-8")
+
+    @classmethod
+    def _knowledge_js(cls) -> str:
+        """The summary card's renderer, split out of od-memories.js in 4.1.25."""
+        return cls._js("od-memory-knowledge.js")
 
     def test_the_summaries_tab_loads_it(self) -> None:
-        js = self._js()
-        assert "_loadKnowledgeOverview(id)" in js
-        assert "if (tab === 'summary')" in js
-        assert "/api/v3/abstraction/consolidated" in js
-        assert "/api/v3/abstraction/health" in js
+        pane = self._js()
+        assert "if (tab === 'summary')" in pane
+        assert "_loadKnowledgeOverview(id)" in pane
+        knowledge = self._knowledge_js()
+        assert "function _loadKnowledgeOverview(id)" in knowledge
+        assert "/api/v3/abstraction/consolidated" in knowledge
+        assert "/api/v3/abstraction/health" in knowledge
+
+    def test_the_renderer_is_loaded_before_the_pane(self) -> None:
+        html = (self._ui_root() / "index.html").read_text(encoding="utf-8")
+        renderer = html.index("static/js/od-memory-knowledge.js")
+        assert renderer < html.index("static/js/od-memories.js")
 
     def test_every_rendered_field_is_escaped(self) -> None:
         """Anything in a memory can reach this screen.
@@ -270,7 +280,7 @@ class TestTheCardIsWiredIntoThePage:
         markup would render as markup. 68 facts on the author's store carry raw
         tool-call XML.
         """
-        js = self._js()
+        js = self._knowledge_js()
         for fragment in (
             "_esc(s.entity_name)",
             "_esc(shown)",
@@ -278,6 +288,9 @@ class TestTheCardIsWiredIntoThePage:
             "_esc(l)",
         ):
             assert fragment in js, f"unescaped render path: {fragment}"
+        # The escaper is the pane's own, handed over; never a weaker local copy.
+        assert "function _esc" not in js
+        assert "({ _esc," in js and "} = ctx);" in js
 
     def test_markdown_is_flattened_for_display(self) -> None:
         """Mode B/C summaries come back with "**Audit Round**" in them.
@@ -285,7 +298,7 @@ class TestTheCardIsWiredIntoThePage:
         Rendered as text those asterisks read as broken output to exactly the
         reader this card is for.
         """
-        js = self._js()
+        js = self._knowledge_js()
         assert "_koverPlain(s.content)" in js
         assert "function _koverPlain" in js
 
