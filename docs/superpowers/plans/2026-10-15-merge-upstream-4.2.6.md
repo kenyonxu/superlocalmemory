@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 一次性合并上游 `v4.2.6`(2045 提交)进 fork,按 spec 处置三个撞车点(护栏退役/M052→M064 重编号/版本对齐 4.2.6),fork 补丁全数存活,全量 gate 不新增红。
+**Goal:** 一次性合并上游 `v4.2.6`(2036 提交)进 fork,按 spec 处置三个撞车点(护栏退役/M052→M064 重编号/版本对齐 4.2.6),fork 补丁全数存活,全量 gate 不新增红。
 
 **Architecture:** worktree 一次性 `git merge v4.2.6`,冲突按四类策略解(取上游/上游为基+fork 参数/合流/重编号);插件资产批量取上游;lifecycle/storage/engine 三集群各自带测试循环;merge 与生产部署解耦。
 
@@ -52,7 +52,8 @@ cd /tmp/slm-merge-426
 git diff --name-only --diff-filter=U | grep -E "plugin|skills/|agents/" | xargs git checkout --theirs --
 # 元数据取上游:uv.lock(上游重生成)、.gitignore、CITATION.cff、package-lock.json
 git checkout --theirs -- uv.lock .gitignore CITATION.cff package-lock.json
-git add $(git diff --name-only --diff-filter=U | grep -E "plugin|skills/|agents/" | tr '\n' ' ') uv.lock .gitignore CITATION.cff package-lock.json 2>/dev/null || git add -A ':!*superlocalmemory*' 2>/dev/null
+git add $(git diff --name-only --diff-filter=U | grep -E "plugin|skills/|agents/" | tr '\n' ' ') uv.lock .gitignore CITATION.cff package-lock.json
+# 无 sweep 兜底:add 失败即停下排查——`git add -A` 式兜底会把未解冲突带标记 stage
 git status --porcelain | grep -c "^UU"   # 期望: 剩 43 个左右实质冲突(149-102-4)
 ```
 
@@ -72,7 +73,7 @@ merge 保持未提交状态跨 Task(各 Task 解完自己集群 `git add` 对应
 **Files:**
 - Resolve(取上游整文件): `src/superlocalmemory/core/maintenance.py`
 - Rename+Modify: `src/superlocalmemory/storage/migrations/M052_provenance_kind_column.py` → `M064_provenance_kind_column.py`
-- Modify: `src/superlocalmemory/storage/migration_runner.py`(目录登记)、`src/superlocalmemory/storage/_migration_internals.py`(MODULES)、`src/superlocalmemory/storage/_schema_version.py`(64)
+- Modify: `src/superlocalmemory/storage/_migration_catalogue.py`(**M064 登记点**——上游已把 `MIGRATIONS`/`DEFERRED_MIGRATIONS` 抽到此新文件,干净带入无冲突)、`src/superlocalmemory/storage/_migration_internals.py`(MODULES)、`src/superlocalmemory/storage/_schema_version.py`(64);`migration_runner.py` 解冲突=取上游形态(其注册表仅自 catalogue import,fork 旧 M052 条目不随迁)
 - Rewrite: `tests/test_core/test_lifecycle_guard.py`(退役护栏单测,保留改编的行为回归)
 - Resolve(取上游+名称替换): `tests/test_migrations/test_backward_compat_405.py`
 - 既有上游新文件(merge 自带入,验证即可): `src/superlocalmemory/core/langevin_tier.py`、`tests/test_maintenance_never_archives_a_used_memory.py`(路径以上游为准)
@@ -100,7 +101,7 @@ git mv src/superlocalmemory/storage/migrations/M052_provenance_kind_column.py \
 
 `M064_provenance_kind_column.py` 内 `NAME = "M052_provenance_kind_column"` → `NAME = "M064_provenance_kind_column"`;docstring 若提及编号一并改。
 
-`migration_runner.py`(已解冲突到可编辑状态后)在 M063 登记之后追加:
+`migration_runner.py` 取上游形态解冲突;登记点在 **`_migration_catalogue.py`**(上游 4.2.x 起注册表外移到该文件,runner 仅 import)。catalogue import 区追加:
 
 ```python
 from superlocalmemory.storage.migrations import (
@@ -108,7 +109,7 @@ from superlocalmemory.storage.migrations import (
 )
 ```
 
-DEFERRED_MIGRATIONS 列表末尾(M052 上游条目之后,保持 fork 迁移在最后):
+catalogue 的 DEFERRED_MIGRATIONS 列表末尾(保持 fork 迁移在最后;注意上游 M052 在 MIGRATIONS eager 区,不在此列表,不要去找它定位):
 
 ```python
     # Fork addition: governance gating tag (controlled vocabulary, NULL =
@@ -140,14 +141,19 @@ upstream implementation that replaced it.
 HISTORY. The fork shipped a score guard on 2026-09-25 (运维笔记 §19/§21):
 the maintenance Langevin chain derived zones from position radius alone and
 saturated positions archived healthy memories nightly. Upstream fixed the
-same defect at the root in 4.1.18 (74cb08b8): every pass now REMEASURES the
+same defect at the root in 4.1.21 (74cb08b8): every pass now REMEASURES the
 radius as ``1 - R(t)`` (``core/langevin_tier.py``), so positions cannot
 drift and the guard retired. Three weeks of production held archive at 0.
 
 What this file still pins — the guarantees the repair must keep under the
 upstream implementation:
   - a saturated legacy position cannot keep a used memory archived: the
-    next pass remeasures the radius and the tier follows the score;
+    next pass remeasures the radius and the tier follows the Ebbinghaus
+    retention the usage implies (the upstream pass reads
+    access_count/age/importance only — it never consults
+    ``fact_retention.retention_score``, so the score fixtures below are the
+    fork-era authority, kept to prove the score can no longer hijack the
+    tier);
   - M051 re-runnability (the fork's runbook relies on apply() twice);
   - the full production repair sequence (maintenance -> M051 -> M043 ->
     reseed) converges with zones held.
@@ -231,9 +237,11 @@ def store(tmp_path: Path) -> DatabaseManager:
 
 class TestSaturatedLegacyPositionCannotArchiveAUsedMemory:
     def test_remeasure_frees_the_tier_and_the_radius(self, store, tmp_path):
-        """§19's production shape: saturated position, score 0.9. Under the
-        upstream pass the radius is re-derived from retention, so the tier
-        returns to what the score says and the radius leaves the boundary."""
+        """§19's production shape: saturated position on a USED memory.
+        Under the upstream pass the radius is re-derived as 1 - R(t) from
+        access_count/age, so the tier follows the usage and the radius
+        leaves the boundary. (The score=0.9 retention row is the fork-era
+        authority fixture: the upstream pass never reads it.)"""
         conn = sqlite3.connect(str(tmp_path / "memory.db"))
         _insert_fact(conn, "f1", lifecycle="archived", position=_SATURATED,
                      access_count=8)
@@ -317,7 +325,11 @@ class TestProductionReplay:
         conn.close()
 
         db = DatabaseManager(str(path))
-        assert _zone(db, "p1") == "active"
+        # Upstream semantics: tier follows 1 - R(t) from access_count/age,
+        # not the score row. A 60-day, 0-access fixture measures R(t)≈0.77
+        # (v4.2.6 math) ⇒ warm; the pin is "no longer archived", and under
+        # the guard-era implementation this same assertion read "active".
+        assert _zone(db, "p1") in {"active", "warm"}
         counts = run_maintenance(db, _cfg(), _PROFILE)
         assert counts["langevin_backfilled"] == 3
         for fid in ("g1", "g2", "p1"):
@@ -335,19 +347,20 @@ cd /tmp/slm-merge-426
 git add src/superlocalmemory/core/maintenance.py \
   src/superlocalmemory/storage/migrations/M064_provenance_kind_column.py \
   src/superlocalmemory/storage/migration_runner.py \
+  src/superlocalmemory/storage/_migration_catalogue.py \
   src/superlocalmemory/storage/_migration_internals.py \
   src/superlocalmemory/storage/_schema_version.py \
   tests/test_core/test_lifecycle_guard.py tests/test_migrations/
 env -u ALL_PROXY -u all_proxy PYTHONPATH=/tmp/slm-merge-426/src ~/miniconda3/bin/python -m pytest \
   tests/test_core/test_lifecycle_guard.py tests/test_migrations/ \
-  tests/test_maintenance_never_archives_a_used_memory.py \
+  tests/test_core/test_maintenance_never_archives_a_used_memory.py \
   tests/test_storage/test_migration_dependency_and_version.py \
   tests/test_storage/test_provenance_kind.py \
   tests/test_storage/test_migrations.py tests/test_storage/test_migration_runner.py \
   -q
 ```
 
-预期:全 PASS。上游自带的 `test_maintenance_never_archives_a_used_memory.py` 必须绿(护栏退役后的行为背书);版本一致性测试(上限=64=最大序号)必须绿。
+预期:全 PASS。上游自带的 `test_core/test_maintenance_never_archives_a_used_memory.py` 必须绿(护栏退役后的行为背书);迁移版本不变量(`test_migration_dependency_and_version.py`:SUPPORTED=64=最大序号)必须绿。
 
 ---
 
@@ -357,7 +370,7 @@ env -u ALL_PROXY -u all_proxy PYTHONPATH=/tmp/slm-merge-426/src ~/miniconda3/bin
 - Resolve(上游为基+fork 参数): `src/superlocalmemory/storage/database.py`
 - Resolve(合流): `src/superlocalmemory/storage/models.py`(fork provenance_kind 字段+词表 vs 上游 memory_kinds 列)
 - Resolve(合流): `src/superlocalmemory/storage/correction_cases.py`(fork CorrectionPredecessorBusyError 幂等 vs 上游 review-gate)
-- Resolve: `src/superlocalmemory/storage/write_coordinator.py`、`tests/test_storage/test_no_ckpt_on_close.py`、`tests/test_storage/test_single_writer_lock.py`(fork WAL 修复 vs 上游演化)、`src/superlocalmemory/storage/admission_journal.py`、`src/superlocalmemory/storage/agent_experience.py`
+- Resolve: `src/superlocalmemory/storage/write_coordinator.py`、`tests/test_storage/test_no_ckpt_on_close.py`、`tests/test_storage/test_single_writer_lock.py`(fork WAL 修复 vs 上游演化)、`src/superlocalmemory/infra/backup_obligations.py`(fork `apply_journal_mode` 补丁 vs 上游重写 +266/-107)、`src/superlocalmemory/storage/admission_journal.py`、`src/superlocalmemory/storage/agent_experience.py`
 - Resolve(取上游+名称替换): `tests/test_migrations/test_backward_compat_405.py` 若 Task 2 未尽
 
 **Interfaces:**
@@ -376,9 +389,9 @@ fork 侧保留:`PROVENANCE_KINDS`/`validate_provenance_kind`/`parse_scan_filters
 
 先读上游版本全文,理解 review-gate(d489f2a4/bf1ecfa5/ea373853)结构;fork 的 `CorrectionPredecessorBusyError` 与"同 successor 幂等返回/异 successor 类型化抛出"守卫**必须存活**——若上游已有等价机制,保上游并删除 fork 重复;若没有,把 fork 守卫移植进上游新结构。store_pipeline 侧调用点一并核对。
 
-- [ ] **Step 4: WAL 三件套**
+- [ ] **Step 4: WAL 三件套 + backup_obligations**
 
-`write_coordinator.py`/`test_no_ckpt_on_close.py`/`test_single_writer_lock.py`:对照 fork 修复意图(NO_CKPT_ON_CLOSE on per-call connections、busy-timeout ordering),上游演化若已覆盖则取上游,否则保 fork 补丁在上游新结构中。
+`write_coordinator.py`/`test_no_ckpt_on_close.py`/`test_single_writer_lock.py`:对照 fork 修复意图(NO_CKPT_ON_CLOSE on per-call connections、busy-timeout ordering),上游演化若已覆盖则取上游,否则保 fork 补丁在上游新结构中。`infra/backup_obligations.py`:上游为基;fork 补丁仅两行——`_connect` 里 `PRAGMA journal_mode=WAL` → `apply_journal_mode(conn)`(f4dd873c 集中日志策略)——上游新结构的 `_connect` 若仍直写 WAL 则移植这两行。
 
 - [ ] **Step 5: 集群测试循环**
 
@@ -419,7 +432,8 @@ env -u ALL_PROXY -u all_proxy PYTHONPATH=/tmp/slm-merge-426/src ~/miniconda3/bin
 
 ```bash
 cd /tmp/slm-merge-426
-git add -A src/ tests/ 2>/dev/null; git status --porcelain | grep -c "^UU"   # 期望 0(全部解完)
+git diff --name-only --diff-filter=U   # 必须先为空:带冲突标记的文件不得进 stage(add 之后 UU 检查就看不见它们了)
+git add -A src/ tests/ && git status --porcelain | grep -c "^UU"   # 期望 0(全部解完)
 env -u ALL_PROXY -u all_proxy PYTHONPATH=/tmp/slm-merge-426/src ~/miniconda3/bin/python -m pytest \
   tests/test_server/ tests/test_mcp/ tests/mcp/ tests/test_api/ \
   tests/test_per_request_profile.py tests/test_engine_recall_path.py \
@@ -438,30 +452,33 @@ env -u ALL_PROXY -u all_proxy PYTHONPATH=/tmp/slm-merge-426/src ~/miniconda3/bin
 - Modify: fork 侧版本引用文件(上次 sweep 同批:`CLAUDE.md.fragment` 等,`grep -rn "4\.2\.0" --include="*.md" --include="*.json" --include="*.py" -l` 圈定)
 
 **Interfaces:**
-- Produces: 一个干净可提交的 merge 状态;miniconda 环境新依赖就位。
+- Produces: 一个干净可提交的 merge 状态。**共享 conda 环境全程不动**(editable 保持指主仓;依赖钉版推迟到 Task 8 部署批准后)——merge 与生产部署解耦(spec §6)。
 
 - [ ] **Step 1: 版本/依赖文件解冲突**(pyproject: 上游为基,保 fork `contracts/schemas/*.json` package-data 与 jsonschema 钉版;README/CHANGELOG 按上述)
 
-- [ ] **Step 2: miniconda editable 重装 + import 冒烟**
+- [ ] **Step 2: import 冒烟(PYTHONPATH,不动共享环境)**
 
 ```bash
-env -u ALL_PROXY -u all_proxy ~/miniconda3/bin/python -m pip install -e /tmp/slm-merge-426 --no-deps
-env -u ALL_PROXY -u all_proxy ~/miniconda3/bin/python -m pip install "keyring==25.7.0" "sentence-transformers==5.6.1" "transformers==5.10.4" 2>&1 | tail -2
+# 不 pip install -e:editable 必须保持指向主仓。Task 5 到 Task 8 之间若 hermes
+# 04:30 守护重启 daemon,editable 指 worktree 会让生产在无备份、无批准下加载
+# 合并代码并首跑 M052-M063 迁移。冒烟与全部测试一样走 PYTHONPATH 前置。
+# 依赖钉版(keyring/st 5.6.1/tf 5.10.4/torch 2.13.0)推迟到 Task 8:现环境
+# st 5.3.0 跑 4.2.6 只在 __init__ 告警(_check_critical_deps),不阻断 gate;
+# 若出现 st 版本相关新红,单独评估(临时 venv 复验),不动共享环境。
 env -u ALL_PROXY -u all_proxy PYTHONPATH=/tmp/slm-merge-426/src ~/miniconda3/bin/python -c "
-import superlocalmemory, keyring, sentence_transformers, transformers
-print(superlocalmemory.__version__ if hasattr(superlocalmemory,'__version__') else 'n/a')
-print('keyring', keyring.__version__, '| st', sentence_transformers.__version__, '| tf', transformers.__version__)
+import importlib.metadata as im
+import superlocalmemory
+print('slm', getattr(superlocalmemory, '__version__', 'n/a'))
+print('keyring', im.version('keyring'), '| st', im.version('sentence-transformers'), '| tf', im.version('transformers'))
 "
 ```
-
-(torch==2.13.0 若与现环境 CUDA/轮子冲突,记录并报告——测试用 CPU 语义,钉版差异不阻塞 gate,但需登记。)
 
 - [ ] **Step 3: 提交 merge**
 
 ```bash
 cd /tmp/slm-merge-426
 git add -A && git status --porcelain | head -3   # 期望干净
-git commit -m "merge: upstream v4.2.6 (2045 commits) — guard retired for upstream langevin_tier, M052→M064, version 4.2.6, fork patches surviving (hermes routing / lock tolerance / ELC clock / provenance / profile routing)"
+git commit -m "merge: upstream v4.2.6 (2036 commits) — guard retired for upstream langevin_tier, M052→M064, version 4.2.6, fork patches surviving (hermes routing / lock tolerance / ELC clock / provenance / profile routing)"
 git log --oneline -1 && git diff --stat HEAD~1..HEAD | tail -3
 ```
 
@@ -471,7 +488,7 @@ git log --oneline -1 && git diff --stat HEAD~1..HEAD | tail -3
 
 **Files:** 无代码改动;产出 gate 报告。
 
-- [ ] **Step 1: 全量 gate**
+- [ ] **Step 1: 全量 gate**(约 36min:必须 run_in_background + tail 轮询——单阻塞调用有 600s 超时被杀的前科)
 
 ```bash
 cd /tmp/slm-merge-426
@@ -517,7 +534,7 @@ git worktree remove /tmp/slm-merge-426 && git branch -d merge/upstream-4.2.6
 
 - [ ] **Step 1: 🔒 停 gateway(主人侧)→ 停 daemon,验端口/PID
 - [ ] **Step 2: 🔒 备份 memory.db(pre-4.2.6-deploy)
-- [ ] **Step 3: 🔒 起 daemon(miniconda editable 已在 Task 5 指向 worktree——**部署前先确认 editable 是否需重指 main checkout**,`pip show superlocalmemory | grep Editable`;若指向已删 worktree 则重装 `pip install -e ~/github/superlocalmemory --no-deps`)
+- [ ] **Step 3: 🔒 装依赖钉版 + 起 daemon**:`pip install "keyring==25.7.0" "sentence-transformers==5.6.1" "transformers==5.10.4"`(torch==2.13.0 视 CUDA/轮子情况,冲突则记录报告——钉版差异不阻塞,但需登记);`pip show superlocalmemory | grep Editable` 核验 editable 指 `~/github/superlocalmemory`(Task 5 已不重指,此处仅核验;异常则重装 `pip install -e ~/github/superlocalmemory --no-deps`)
 - [ ] **Step 4: 🔒 验收**:health 全绿;迁移日志 M052_M053…M063 complete + M064 幂等空跑(旧 M052_provenance 记录仍在);首轮维护日志=上游格式(无 guard-refused 字段,backfill/updated 数字正常);zone 分布不倒退(archived 不回升);三发探针(米家日常黄金三条/迷雾小镇/Fuse)
 - [ ] **Step 5: 🔒 起 gateway(zhihui 侧)→ 桥侧复核
 - [ ] **Step 6: 运维笔记 §22 merge 回执**(撞车点处置/gate 数字/部署验收/迁移日志;§21 补"护栏已由上游方案接棒退役"注记),commit+push
@@ -532,3 +549,12 @@ git worktree remove /tmp/slm-merge-426 && git branch -d merge/upstream-4.2.6
 - **占位符扫描:** Task 3 Step 1-4 与 Task 4 为冲突解决指令而非代码模板——resolution 原则、存活点、验证命令均已具体化;无 TBD。
 - **类型一致性:** M064 名称/依赖(46)/上限 64/测试引用四处一致;test_lifecycle_guard.py 改编版仅依赖上游接口(run_maintenance/M051/M043),无护栏符号残留。
 - **实测锚点:** 冲突清单来自 2026-10-15 探针 merge(149=102 资产+47 实质),非推测。
+
+## 二轮审阅修正记录(2026-10-15,独立探针核验后落盘)
+
+- **孤儿冲突指派:** 47 个实质冲突中 `src/superlocalmemory/infra/backup_obligations.py` 原无 Task 认领,且 Task 4 原 `git add -A` 会把未解冲突带标记静默 stage(UU 检查不可见)。已指派 Task 3 Step 4(fork 补丁=f4dd873c 集中日志策略两行 `apply_journal_mode`),Task 4 改为**先验空再 add**;Task 1 删 sweep 兜底。
+- **M064 登记点改正:** 上游已把 `MIGRATIONS`/`DEFERRED_MIGRATIONS` 抽到 `storage/_migration_catalogue.py`(干净带入、无冲突),runner 仅 import——原"在 migration_runner.py M063 后追加"落空,已改指 catalogue;`test_migration_dependency_and_version.py` 的 `SUPPORTED==serials[-1]` 为兜底网。
+- **改编测试按上游实测语义修正:** 上游 `_langevin_pass` 只读 access_count/age/importance,不读 `fact_retention.retention_score`;以 v4.2.6 真实代码实测计划夹具——access=8/60d ⇒ radius 0.038/active(TestSaturated 成立),access=0/60d ⇒ R(t)=0.77/radius 0.23/**warm**,故 TestProductionReplay 的 `p1=="active"` 放宽为 `{active,warm}` 并注因;docstring 的 "4.1.18" 与 "follows the score" 叙事一并改正。
+- **共享环境隔离:** Task 5 原 `pip install -e` worktree + 依赖钉版会在部署批准前改变生产运行环境(editable 重指 + st 5.3.0→5.6.1),若 hermes 04:30 守护重启落在窗口内,生产将无备份首跑合并代码与迁移——与 spec §6 解耦原则冲突。已改为:Task 5 仅 PYTHONPATH 冒烟,钉版挪入 Task 8 Step 3,editable 全程指主仓。
+- **史实修正:** 2045→**2036** 提交(`git rev-list --count 5bfa47c9..v4.2.6`);根因修复 4.1.18→**4.1.21**(74cb08b8 首个包含 tag);版本序列 4.1.18-4.1.25→**4.1.18-4.1.24**(14 tag,10/3-10/14);上游 never_archives 测试在 `tests/test_core/` 下。
+- **核验为真(无需改):** 冲突 149=102+47(独立复跑);上游 M052-M063/SUPPORTED=63;`run_maintenance(db, config, profile_id, embedder)` 签名兼容;`langevin_backfilled` 计数键;上游钉版 keyring==25.7.0/st==5.6.1/tf==5.10.4/torch==2.13.0;上游 ELC coupling 仍为小时钟(P2 存活);fork 补丁 f4788225/f21790dd/0811cb56/9fcb2942 在案;fork M052 PRAGMA 守卫与 (M046,) 依赖;护栏符号清单(4 helper+3 接线+counts 键)与 main 一致;基线 16 红构成与运维记录一致。
