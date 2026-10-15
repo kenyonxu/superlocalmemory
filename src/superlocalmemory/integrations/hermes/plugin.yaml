@@ -1,8 +1,12 @@
 name: superlocalmemory
-version: 1.0.0
+version: 1.0.1
 description: "MSLM — 信息几何学的本地 AI 记忆引擎，7通道检索，三层作用域，完全本地运行"
-pip_dependencies:
-  - mslm-memory>=4.1.0
+# 2026-09-25: 移除 pip_dependencies（mslm-memory>=4.1.0）。
+# mslm-memory 任何已发布版本都硬钉 websockets==16.0 / mcp==1.x，与 hermes 工作区
+# 钉的 websockets==15.0.1 / mcp==2.0.0 根本冲突 → PM 工作区解析永无解，连带堵死
+# hermes 所有平台 extra 的按需安装（feishu 首当其冲）。本插件是 daemon-first 设计：
+# 重活由统一守护进程承担（守护进程环境装本地 mslm 即可），网关进程内 import 失败时
+# is_available() 优雅降级——网关 env 本就不需要 mslm。
 hooks:
   - on_session_end
   - on_memory_write
