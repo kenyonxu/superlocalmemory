@@ -81,16 +81,26 @@ READ_SCOPE_ARGUMENTS: frozenset[str] = frozenset({"include_shared", "include_glo
 #: Arguments that would make a saved memory visible to other profiles.
 WRITE_SCOPE_ARGUMENTS: frozenset[str] = frozenset({"scope", "shared_with"})
 
-#: The remote-callable tools that take ``scope``; each remote save through them
-#: is pinned to ``personal``. The registry test keeps this list complete.
-#: Fork (4.2.x): ``update_memory``'s curation ``scope`` (personal/global) is a
-#: write that could widen a memory's visibility, and ``list_recent``'s scan
-#: filter ``scope`` rides the same word — both follow the same rule: a remote
-#: key stays inside its own profile's personal memories, the ones its own
-#: pinned-personal saves produce.
+#: The remote-callable tools that take ``scope`` and get it pinned to
+#: ``personal`` when the caller sent none. The registry test keeps this list
+#: complete. Fork (4.2.x): ``list_recent``'s scan-filter ``scope`` rides the
+#: same word and the same rule — a remote key stays inside its own profile's
+#: personal memories, the ones its own pinned-personal saves produce.
 SCOPED_WRITE_TOOLS: frozenset[str] = frozenset({
-    "remember", "remember_media", "remember_document", "list_recent", "update_memory",
+    "remember", "remember_media", "remember_document", "list_recent",
 })
+
+#: Tools whose ``scope`` is refused at the VALUE level only, never pinned.
+#: ``bind_arguments`` refuses a non-personal ``scope`` value for EVERY tool
+#: (remote_profile_binding's rule 3), so containment holds without an
+#: injection — and ``update_memory``'s empty ``scope`` is the curation
+#: "leave unchanged" (fix round 2): pinning it made every remote content
+#: correction a MIXED body the daemon's routed pre-flight refuses (undoing
+#: the routed-correction flow), and a bare ``update_memory(fact_id)`` a
+#: silent in-place scope write that slipped past the tool's own
+#: "content cannot be empty" guard. A remote key may still set
+#: ``scope="personal"`` explicitly — the value the refusal allows.
+SCOPE_VALUE_ONLY_TOOLS: frozenset[str] = frozenset({"update_memory"})
 
 #: Served for the key's profile by the per-request profile path (4.1.19), with
 #: the host's active profile untouched.
@@ -359,6 +369,7 @@ __all__ = [
     "RuntimeLookup",
     "SCOPED_WRITE_TOOLS",
     "SCOPE_DENIAL",
+    "SCOPE_VALUE_ONLY_TOOLS",
     "WRITE_SCOPE_ARGUMENTS",
     "bind_arguments",
     "inactive_refusal",

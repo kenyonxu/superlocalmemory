@@ -7,8 +7,11 @@ The real engine, the real daemon routes and the real canonical writer, with
 every MCP tool registered against them. ``daemon_request`` is bound to the
 daemon's routes, so a tool that goes through the daemon reaches the same route
 and writer it would in production. The remote wrapper
-(``server/remote_profile_binding``) writes ``profile_id="work"`` into every
-call; :meth:`Host.call` does exactly that, then checks the host never moved.
+(``server/remote_profile_binding``) is applied in full by :meth:`Host.call`
+(fix round 2): classification, the profile/scope refusals, the
+``profile_id="work"`` injection and the ``SCOPED_WRITE_TOOLS`` scope pin —
+the complete argument shape a remote key's call arrives with — then it checks
+the host never moved.
 """
 
 from __future__ import annotations
@@ -104,9 +107,23 @@ class Host:
     tools: dict[str, Any]
 
     def call(self, tool: str, /, **arguments: Any) -> dict:
-        """Run ``tool`` as the remote wrapper would for a key bound to "work"."""
+        """Run ``tool`` exactly as the remote wrapper would for a key bound to "work".
+
+        Fix round 2: this now models the binding's FULL argument treatment
+        (``server.remote_profile_binding.bind_arguments``) — argument
+        classification, the profile/scope value refusals, the
+        ``profile_id="work"`` injection and the ``SCOPED_WRITE_TOOLS``
+        scope pin — not just the profile anchor the old docstring admitted
+        to. A call the binding refuses raises :class:`BindingRefusal` here
+        exactly as the ASGI face refuses it, so the routed-write tests cover
+        the remote face's real input shape (the round-1 gap: a pin injected
+        into ``update_memory`` was invisible to this harness).
+        """
+        from superlocalmemory.server.remote_profile_binding import bind_arguments
+
+        bound = bind_arguments(tool, arguments, key_name="routed-host", bound=WORK)
         before = self.client.get("/status").json()
-        result = asyncio.run(self.tools[tool](**arguments, profile_id=WORK))
+        result = asyncio.run(self.tools[tool](**bound))
         after = self.client.get("/status").json()
         assert self.engine.profile_id == HOST, tool
         assert (after["profile"], after.get("profile_generation")) == (

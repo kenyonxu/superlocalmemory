@@ -70,6 +70,45 @@ def test_update_memory_proposes_a_correction_in_the_keys_profile(host) -> None:
     assert len(host.rows("SELECT 1 FROM correction_cases")) == 1
 
 
+def test_remote_update_memory_content_is_a_routed_correction_not_a_conflict(host) -> None:
+    """Fix round 2 regression: the S1 registration must not inject a scope.
+
+    ``Host.call`` models the binding's full argument treatment now, so this
+    is the remote face end to end: a pinned ``scope="personal"`` used to
+    make every remote content correction a MIXED PATCH body, which the
+    daemon's routed pre-flight refused with a 409 — unconditionally undoing
+    the routed-correction flow S4 restored. Without the pin the call is a
+    pure content revision and proposes the correction.
+    """
+    work, _personal = _pair(host)
+    out = host.call("update_memory", fact_id=work,
+                    content="The work rota now rotates on Thursdays at 10:00 UTC.")
+    assert out["success"] is True, out
+    assert out.get("code") != "CONFLICT", out
+    cases = host.rows("SELECT profile_id, predecessor_fact_id FROM correction_cases")
+    assert cases == [{"profile_id": WORK, "predecessor_fact_id": work}], cases
+
+
+def test_remote_bare_update_memory_is_refused_not_a_scope_write(host) -> None:
+    """Fix round 2 regression: no silent in-place scope write on a bare call.
+
+    A bare remote ``update_memory(fact_id)`` — neither content nor curation —
+    used to carry the injected ``scope="personal"`` past the tool's own
+    "content cannot be empty" guard and land as a curation-only in-place
+    scope write. It must get that guard's refusal instead, and change
+    nothing: no correction case, and the fact's scope byte-identical.
+    """
+    work, _personal = _pair(host)
+    before = host.rows("SELECT scope, provenance_kind FROM atomic_facts WHERE fact_id=?",
+                       (work,))
+    out = host.call("update_memory", fact_id=work)
+    assert out["success"] is False, out
+    assert "content cannot be empty" in str(out.get("error", "")), out
+    assert host.rows("SELECT scope, provenance_kind FROM atomic_facts WHERE fact_id=?",
+                     (work,)) == before
+    assert host.rows("SELECT 1 FROM correction_cases") == []
+
+
 def test_set_and_confirm_memory_kind_change_the_keys_profile(host) -> None:
     work, personal = _pair(host)
     out = host.call("set_memory_kind", fact_id=work, kind="decision")
@@ -245,7 +284,18 @@ def _turn(profile: str) -> dict:
 def test_brain_receipts_are_recorded_for_the_keys_profile(host) -> None:
     _receipt_tables(host)
     assert host.call("record_agent_experience", payload=_experience(WORK))["success"] is True
-    assert host.call("record_agent_experience", payload=_experience(HOST))["success"] is False
+    # Fix round 2: Host.call models the binding's full argument treatment,
+    # and the real remote face refuses a foreign profile_id nested inside
+    # ``payload`` AT THE BINDING (remote_profile_not_allowed) — the call
+    # never reaches the daemon. Nothing is recorded either way; the refusal
+    # is just the face's own, earlier and stronger than the daemon's check.
+    from superlocalmemory.server.remote_profile_binding import (
+        PROFILE_DENIAL, BindingRefusal,
+    )
+
+    with pytest.raises(BindingRefusal) as refused:
+        host.call("record_agent_experience", payload=_experience(HOST))
+    assert refused.value.code == PROFILE_DENIAL
     assert host.call("record_cognitive_turn", payload=_turn(WORK))["success"] is True
     status = host.call("get_brain_evidence_status")
     assert status["agent_experience"]["experiences_total"] == 1, status

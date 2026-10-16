@@ -91,10 +91,31 @@ def test_outcome_report_key_is_retained_inside_the_bound_profile():
                                key_name="test", bound="work")
 
 
-def test_every_remote_tool_that_takes_scope_is_pinned_to_personal(registry) -> None:
+def test_every_remote_tool_that_takes_scope_is_pinned_or_value_refused(registry) -> None:
     takes_scope = {t for t, args in registry.items()
                    if t in policy.WRITE_TOOLS | policy.MEDIA_TOOLS and "scope" in args}
-    assert takes_scope == binding.SCOPED_WRITE_TOOLS
+    # Fix round 2: update_memory's ``scope`` is refused at the value level
+    # (bind_arguments blocks non-personal values for EVERY tool) and never
+    # pinned — its empty scope is the curation "leave unchanged", and a pin
+    # turned remote content corrections into pre-flight 409s and bare calls
+    # into silent scope writes. The registry-completeness contract stays: a
+    # tool that gains a ``scope`` argument must land in one of the two sets.
+    assert takes_scope == binding.SCOPED_WRITE_TOOLS | binding.SCOPE_VALUE_ONLY_TOOLS
+
+
+def test_update_memory_scope_is_value_refused_never_pinned() -> None:
+    """Fix round 2 regression: no scope injection into a remote update_memory."""
+    out = binding.bind_arguments("update_memory", {"fact_id": "f"}, key_name="k",
+                                 bound="work")
+    assert out == {"fact_id": "f", "profile_id": "work"}  # no scope key at all
+    with pytest.raises(binding.BindingRefusal) as err:
+        binding.bind_arguments("update_memory", {"fact_id": "f", "scope": "global"},
+                               key_name="k", bound="work")
+    assert err.value.code == binding.SCOPE_DENIAL
+    # The one value the refusal allows through, the caller may send itself.
+    assert binding.bind_arguments(
+        "update_memory", {"fact_id": "f", "scope": "personal"},
+        key_name="k", bound="work")["scope"] == "personal"
 
 
 def test_every_remote_tool_that_names_a_profile_is_told_the_keys_profile(registry) -> None:
