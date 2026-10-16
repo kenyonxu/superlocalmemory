@@ -83,7 +83,14 @@ WRITE_SCOPE_ARGUMENTS: frozenset[str] = frozenset({"scope", "shared_with"})
 
 #: The remote-callable tools that take ``scope``; each remote save through them
 #: is pinned to ``personal``. The registry test keeps this list complete.
-SCOPED_WRITE_TOOLS: frozenset[str] = frozenset({"remember", "remember_media", "remember_document"})
+#: Fork (4.2.x): ``update_memory``'s curation ``scope`` (personal/global) is a
+#: write that could widen a memory's visibility, and ``list_recent``'s scan
+#: filter ``scope`` rides the same word — both follow the same rule: a remote
+#: key stays inside its own profile's personal memories, the ones its own
+#: pinned-personal saves produce.
+SCOPED_WRITE_TOOLS: frozenset[str] = frozenset({
+    "remember", "remember_media", "remember_document", "list_recent", "update_memory",
+})
 
 #: Served for the key's profile by the per-request profile path (4.1.19), with
 #: the host's active profile untouched.
@@ -141,7 +148,12 @@ NEUTRAL_ARGUMENTS: frozenset[str] = frozenset({
     "new_name", "note", "offset", "outcome",
     "output_summary", "pattern_id", "pattern_type", "payload", "prefer_project", "project",
     "project_strict",
-    "project_path", "query", "recall_query_id", "receipt_id", "refs", "replaces",
+    "project_path", "provenance_kind", "query",
+    # provenance_kind (fork 4.2.x): a governance tag (world/private/curated/
+    # legacy, or the scan literal "null") that remember sets, update_memory
+    # curates and list_recent filters on. It names how a memory came to be,
+    # never a profile and never a share scope.
+    "recall_query_id", "receipt_id", "refs", "replaces",
     # report_id is an idempotency key, hashed with the routed profile by outcome_events;
     # it cannot select a stored report or another workspace.
     "reply_to", "report_id", "reversible", "run_id",

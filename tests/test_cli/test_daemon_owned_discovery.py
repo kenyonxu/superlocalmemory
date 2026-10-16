@@ -324,7 +324,12 @@ def test_daemon_request_carries_structured_conflict_code() -> None:
         ),
     )
 
-    with patch("urllib.request.urlopen", side_effect=[_HealthResponse(health), conflict]):
+    # Merge 4.2.6: the request travels through the egress gate
+    # (core.outbound_http.urlopen -> _send), so a plain urlopen patch alone
+    # lets it escape to a real socket. patch_urlopen fakes both exits — the
+    # file's own helper for exactly this — and the structured-code branch in
+    # daemon_request is reached again in the merged call sequence.
+    with patch_urlopen(side_effect=[_HealthResponse(health), conflict]):
         with pytest.raises(daemon.DaemonConflict) as caught:
             daemon.daemon_request(
                 "PATCH",

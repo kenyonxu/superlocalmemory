@@ -151,7 +151,10 @@ class MediaStore(JobsMixin, DocumentsMixin, DocumentEraseMixin, EraseMixin, Reve
             self.read_only = True
             self._w.execute("PRAGMA query_only=ON")
             return
-        self._w.execute("PRAGMA journal_mode=WAL")
+        # Fork policy (f4dd873c): journal mode decided centrally, not a
+        # hard-coded WAL (see storage/journal_policy.py).
+        from superlocalmemory.storage.journal_policy import apply_journal_mode
+        apply_journal_mode(self._w)
         from superlocalmemory import __version__
 
         with self._write() as conn:

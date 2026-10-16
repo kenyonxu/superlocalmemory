@@ -1919,14 +1919,17 @@ def edit_memory(request: Request, fact_id: str, profile_id: str = "",
                 "per-request profile routing: PATCH /api/memories/{fact_id} "
                 "profile=%s", profile,
             )
-        if new_content and profile and profile != engine.profile_id:
-            # Pre-flight rejection BEFORE any durable mutation: the curation
-            # fields would commit against the routed profile, but the content
-            # correction that follows can only resolve against the ACTIVE
-            # profile (the canonical correction writer binds it) — a 404
-            # after the curation landed would be a status lying about a
-            # committed write. Curation-only bodies route fine; content
-            # corrections stay active-profile-bound.
+        if new_content and curation and profile and profile != engine.profile_id:
+            # Pre-flight rejection BEFORE any durable mutation, narrowed in the
+            # 4.2.6 merge to its designed case: a MIXED body (curation fields
+            # + content) routed to a non-active profile, where the in-place
+            # curation would commit against the routed profile and a failed
+            # content correction after it would be a status lying about a
+            # half-applied write (the routed partial-write case). A pure routed
+            # content correction is upstream 4.2.6's supported flow — the
+            # canonical correction writer binds to the routed profile — so it
+            # proceeds and proposes the correction; curation-only bodies route
+            # fine as before.
             from starlette.responses import JSONResponse
 
             return JSONResponse(

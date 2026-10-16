@@ -224,10 +224,13 @@ def _plan(version: str):
          lambda: _read_json_at("server.json", ("packages", 0, "version")),
          lambda: _sub_json_at("server.json", ("packages", 0, "version"), version)),
         ("plugin-src/requirements.txt",
-         lambda: _read("plugin-src/requirements.txt", r"superlocalmemory==([^\s]+)"),
+         # Fork identity: the plugin pins the fork's published package,
+         # mslm-memory (package renamed from superlocalmemory; see
+         # tests/test_version_consistency.py, which this list mirrors).
+         lambda: _read("plugin-src/requirements.txt", r"mslm-memory==([^\s]+)"),
          lambda: _sub_regex("plugin-src/requirements.txt",
-                            r"superlocalmemory==([^\s]+)",
-                            "superlocalmemory=={v}", version)),
+                            r"mslm-memory==([^\s]+)",
+                            "mslm-memory=={v}", version)),
         ("package-lock.json",
          lambda: _read_json("package-lock.json"),
          lambda: _sub_json("package-lock.json", version)),
@@ -238,10 +241,11 @@ def _plan(version: str):
          lambda: _read_json("plugin/.claude-plugin/plugin.json"),
          lambda: _sub_json("plugin/.claude-plugin/plugin.json", version)),
         ("plugin/requirements.txt",
-         lambda: _read("plugin/requirements.txt", r"superlocalmemory==([^\s]+)"),
+         # Fork identity (same as plugin-src/requirements.txt above).
+         lambda: _read("plugin/requirements.txt", r"mslm-memory==([^\s]+)"),
          lambda: _sub_regex("plugin/requirements.txt",
-                            r"superlocalmemory==([^\s]+)",
-                            "superlocalmemory=={v}", version)),
+                            r"mslm-memory==([^\s]+)",
+                            "mslm-memory=={v}", version)),
         ("CITATION.cff",
          # Quotes are REQUIRED, not optional: the release contract test matches
          # ^version:\s*"..." exactly. An unquoted value must read as drift, or
@@ -257,10 +261,12 @@ def _plan(version: str):
                             'date-released: "%s"' % _today(), version,
                             reported=_today())),
         ("uv.lock",
+         # Fork identity: the locked root package is mslm-memory (see
+         # tests/test_version_consistency.py — exactly one mslm-memory entry).
          lambda: _read("uv.lock",
-                       r'name = "superlocalmemory"\nversion = "([^"]+)"'),
+                       r'name = "mslm-memory"\nversion = "([^"]+)"'),
          lambda: _sub_regex("uv.lock",
-                            r'(?<=name = "superlocalmemory"\n)version = "([^"]+)"',
+                            r'(?<=name = "mslm-memory"\n)version = "([^"]+)"',
                             'version = "{v}"', version)),
         # Two copies of the agent rules carry a version footer. codex-plugin/ is
         # the generated artifact the test checks; plugin-src/rules/ is its source.

@@ -80,9 +80,11 @@ def test_invalidate_needs_a_filter(path):
 
 
 def test_clear_removes_the_file_and_its_sidecars(path):
+    from superlocalmemory.storage.journal_policy import resolve_journal_mode
     cache = SqliteDeriveCache(path)
     cache.put(make_key(1), b"x", kind="text")
-    assert path.with_name(path.name + "-wal").exists()  # WAL mode keeps sidecars
+    if resolve_journal_mode() == "wal":  # fork central policy defaults to delete
+        assert path.with_name(path.name + "-wal").exists()  # WAL mode keeps sidecars
     cache.clear()
     assert not path.exists()
     assert not list(path.parent.glob("derive_cache.db*"))

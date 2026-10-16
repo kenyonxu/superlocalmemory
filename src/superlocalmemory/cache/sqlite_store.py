@@ -16,6 +16,10 @@ from pathlib import Path
 
 from superlocalmemory.cache.keys import CacheKey
 from superlocalmemory.cache.port import check_payload
+# Fork policy (f4dd873c): the journal mode is decided in one place, never a
+# hard-coded WAL here — WAL's close path can convoy on another process's
+# reader pin while holding the VFS mutex (see storage/journal_policy.py).
+from superlocalmemory.storage.journal_policy import apply_journal_mode
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +93,7 @@ class SqliteDeriveCache:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.path), timeout=10.0, check_same_thread=False)
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
+            apply_journal_mode(conn)
             conn.execute("PRAGMA synchronous=NORMAL")
             for statement in _DDL:
                 conn.execute(statement)

@@ -72,17 +72,37 @@ def _ids_param(ids: frozenset[str]) -> str:
     return json.dumps(sorted(ids))
 
 
-def recent_fetch(db: Any, profile_id: str, ids: frozenset[str]) -> FetchFn:
-    """Newest-first fetch of ``limit`` facts among ``ids``."""
+def recent_fetch(
+    db: Any, profile_id: str, ids: frozenset[str], *,
+    scope: str | None = None,
+    provenance_kind: str | None = None,
+    provenance_kind_null: bool = False,
+) -> FetchFn:
+    """Newest-first fetch of ``limit`` facts among ``ids``.
+
+    Curation-scan filters (merge 4.2.6, ruling S9) ride the same SQL, so
+    ``limit`` bounds the matched set exactly as the untagged fetch does.
+    """
 
     def fetch(limit: int) -> list["AtomicFact"]:
         if not ids or limit <= 0:
             return []
+        clauses = ["profile_id = ?",
+                   "fact_id IN (SELECT value FROM json_each(?))"]
+        params: list = [profile_id, _ids_param(ids)]
+        if scope is not None:
+            clauses.append("scope = ?")
+            params.append(scope)
+        if provenance_kind is not None:
+            clauses.append("provenance_kind = ?")
+            params.append(provenance_kind)
+        elif provenance_kind_null:
+            clauses.append("provenance_kind IS NULL")
         rows = db.execute(
-            "SELECT * FROM atomic_facts WHERE profile_id = ? "
-            "AND fact_id IN (SELECT value FROM json_each(?))"
-            f"{db.visible_fact_clause()} ORDER BY created_at DESC LIMIT ?",
-            (profile_id, _ids_param(ids), int(limit)),
+            "SELECT * FROM atomic_facts WHERE "
+            + " AND ".join(clauses)
+            + f" {db.visible_fact_clause()} ORDER BY created_at DESC LIMIT ?",
+            (*params, int(limit)),
         )
         return [db._row_to_fact(r) for r in rows]
 

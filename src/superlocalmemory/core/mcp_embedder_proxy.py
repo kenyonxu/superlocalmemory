@@ -28,18 +28,31 @@ No owned daemon means no proxy: keyword recall still works, and the facts are
 embedded later by their own daemon.
 
 Fork daemon-fallback (superlocalmemory): constructed WITH an explicit
-``port`` the proxy keeps the direct localhost-HTTP transport to that port —
-the EmbeddingService daemon-fallback path, where the port comes from
+``port`` the proxy keeps its direct transport to that port — the
+EmbeddingService daemon-fallback path, where the port comes from
 ``SLM_DAEMON_PORT`` and the attach is gated by ``proxy.is_available()``.
-There ``strict=True`` re-raises the original exception (httpx errors,
+There ``strict=True`` re-raises the original exception (transport errors,
 ValueError) from embed()/embed_batch() instead of returning None
 placeholders — used by callers that implement their own fallback
 accounting (daemon→local in ``core/embeddings.py``).
+
+Merge 4.2.6 (outbound gate): the direct transport no longer opens its own
+httpx connection. Upstream's rule for this module — no module opens an
+outbound connection outside ``core.outbound_http`` — now holds for the
+fork path too: the ping goes through ``outbound_http.urlopen`` and the
+embed POST through ``outbound_http.post_json`` (the gate: no environment
+proxy for the loopback target, no redirects, screened body). The gate's
+one-shot POST is httpx underneath, so ``strict=True`` still re-raises the
+httpx errors the fallback accounting in ``core/embeddings.py`` counts.
+The fork's availability semantics are unchanged: port/timeout/strict
+params, tri-state availability, negative ping not sticky, fallback
+attachment.
 """
 
 from __future__ import annotations
 
 import logging
+import urllib.request
 
 logger = logging.getLogger(__name__)
 
@@ -87,12 +100,17 @@ class McpEmbedderProxy:
         if self._available is True:
             return True
         if self._direct_port is not None:
-            # Fork direct transport: ping the given port; a negative answer is
-            # not sticky (retried on the next call, cached only on success).
+            # Fork direct transport: ping the given port through the outbound
+            # gate (never an environment proxy for loopback, never a
+            # redirect); a negative answer is not sticky (retried on the next
+            # call, cached only on success).
             try:
-                import httpx
-                resp = httpx.get(f"{self._base_url}/api/v3/embed/ping", timeout=2.0)
-                self._available = resp.status_code == 200
+                from superlocalmemory.core import outbound_http
+
+                ping = urllib.request.Request(
+                    f"{self._base_url}/api/v3/embed/ping", method="GET")
+                with outbound_http.urlopen(ping, timeout=2.0) as resp:
+                    self._available = getattr(resp, "status", None) == 200
             except Exception:
                 self._available = False
             return bool(self._available)
@@ -126,11 +144,16 @@ class McpEmbedderProxy:
         if not texts:
             return []
         if self._direct_port is not None:
+            # Fork direct transport, through the outbound gate (merge 4.2.6):
+            # post_json is httpx under the gate — no proxy for the loopback
+            # target, no redirects, screened body — and re-raises the httpx
+            # errors strict mode exists for.
             try:
-                import httpx
-                resp = httpx.post(
+                from superlocalmemory.core import outbound_http
+
+                resp = outbound_http.post_json(
                     f"{self._base_url}/api/v3/embed",
-                    json={"texts": texts},
+                    {"texts": list(texts)},
                     timeout=self._timeout,
                 )
                 resp.raise_for_status()

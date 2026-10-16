@@ -38,6 +38,9 @@ _NAMED_AS_ABSENT = {
     "cli-reference.md": {"consistency"},
     "company-mode.md": {"user", "role", "company-mode"},
     "compliance.md": {"audit", "retention"},
+    # Historical rename note: `slm daemon` -> `slm serve` (upstream CLI change,
+    # adopted by the fork in 4.2.0). The doc names the old form to explain it.
+    "upgrade-assessment-2026-08-13-v4-merge-hermes.md": {"daemon"},
 }
 
 

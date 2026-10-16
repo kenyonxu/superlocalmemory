@@ -17,7 +17,9 @@ from superlocalmemory.storage.models import Mode
 class Delegate:
     is_available = True
 
-    def __init__(self, config):
+    # The fork's engine wiring forwards the configured proxy to the embedding
+    # service (HF access in network-restricted deployments); stubs tolerate it.
+    def __init__(self, config, *, proxy_http: str = "", proxy_https: str = ""):
         self._config = config
         self.dimension = config.dimension
 

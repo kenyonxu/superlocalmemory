@@ -1156,7 +1156,11 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 result = await asyncio.to_thread(
                     daemon_request,
                     "GET",
-                    "/list?" + urllib.parse.urlencode(params),
+                    # doseq: a tags list must become repeated query params
+                    # (?tags=a&tags=b) — the default stringifies the list's
+                    # repr into ONE bogus tag and the filter matches nothing
+                    # (merge 4.2.6, ruling S9's parity red).
+                    "/list?" + urllib.parse.urlencode(params, doseq=True),
                 )
                 if isinstance(result, dict) and result.get("success"):
                     results = result.get("results", [])
@@ -1191,27 +1195,14 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 engine._db, pid, limit, parsed_kind,
                 display_min_confidence=_display_min_confidence,
                 truncated=_truncated, tag_filter=_tags,
+                # Scan filters ride the same SQL pushdown as the daemon's
+                # /list (merge 4.2.6, ruling S9): limit bounds the matched
+                # set, not the pre-filter page.
+                scope=scan_scope or None,
+                provenance_kind=scan_kind or None,
+                provenance_kind_null=scan_kind_null,
             )
             facts = visible_facts(engine._db, pid, facts)
-            # Offline fallback (spec section 5): the curation-scan filters
-            # narrow the fetched page in memory — exact-value matches, so
-            # limit still bounds the fetched set the same way the daemon
-            # path's SQL does.
-            if scan_scope:
-                facts = [
-                    f for f in facts
-                    if (getattr(f, "scope", "") or "personal") == scan_scope
-                ]
-            if scan_kind:
-                facts = [
-                    f for f in facts
-                    if getattr(f, "provenance_kind", None) == scan_kind
-                ]
-            elif scan_kind_null:
-                facts = [
-                    f for f in facts
-                    if getattr(f, "provenance_kind", None) is None
-                ]
             items = []
             for f in facts:
                 items.append({
@@ -1808,20 +1799,30 @@ def register_core_tools(server, get_engine: Callable) -> None:
                     if type(exc).__name__ == "DaemonNotFound" and hasattr(exc, "code"):
                         return {
                             "success": False,
-                            "code": getattr(exc, "code"),
+                            # The route's structured code (unknown_profile)
+                            # when it gave one, else the plain not_found —
+                            # the same preference _routed_daemon_call has.
+                            "code": (getattr(exc, "error_code", "")
+                                     or getattr(exc, "code")),
                             "retryable": False,
-                            "error": getattr(
-                                exc, "message", "daemon returned 404",
-                            ),
+                            "error": (getattr(exc, "error_message", "")
+                                      or getattr(exc, "message", "daemon returned 404")),
                         }
-                    # A deterministic 409 (e.g. the routed-content pre-flight)
-                    # is terminal too: without preserve_conflict it collapsed
-                    # to None and this tool labelled a request that can never
-                    # succeed as retryable — the retry-forever lie.
+                    # A deterministic 409 (e.g. one correction already open
+                    # on this memory) is terminal too: without
+                    # preserve_conflict it collapsed to None and this tool
+                    # labelled a request that can never succeed as
+                    # retryable — the retry-forever lie.
                     if type(exc).__name__ == "DaemonConflict":
                         return {
+                            # Upstream 4.2.6's machine-readable vocabulary:
+                            # the tool envelope says CONFLICT; the daemon's
+                            # structured reason rides in ``error``. (The
+                            # structured code stays readable on the exception
+                            # itself — DaemonConflict.code — for callers that
+                            # need the fine-grained reason.)
                             "success": False,
-                            "code": getattr(exc, "code", "conflict"),
+                            "code": "CONFLICT",
                             "retryable": False,
                             "error": getattr(
                                 exc, "detail", str(exc),

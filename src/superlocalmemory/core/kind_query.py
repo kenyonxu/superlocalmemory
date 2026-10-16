@@ -145,6 +145,9 @@ def list_recent_facts(
     display_min_confidence: float = _DEFAULT_DISPLAY_MIN_CONFIDENCE,
     truncated: list[bool] | None = None,
     tag_filter: "TagFilter | None" = None,
+    scope: str | None = None,
+    provenance_kind: str | None = None,
+    provenance_kind_null: bool = False,
 ) -> list["AtomicFact"]:
     """``get_all_facts``, newest first, with an optional displayed-kind filter.
 
@@ -164,13 +167,30 @@ def list_recent_facts(
     ``tag_filter`` (4.1.22): only memories carrying the tags, found by
     membership first (``core.tag_query``), so a rare tag is never crowded
     out; ``kind`` then filters inside that set.
+
+    Curation-scan filters (merge 4.2.6, ruling S9): ``scope`` /
+    ``provenance_kind`` / ``provenance_kind_null`` ride the same SQL
+    pushdown ``get_all_facts`` and ``tag_query.recent_fetch`` already
+    speak, so ``limit`` bounds the MATCHED set — an in-memory narrowing of
+    the fetched page returned a short page whenever the newest ``limit``
+    rows did not themselves match (the read-after-write parity deviation
+    Task 4 registered). All optional; unset keeps every call byte-identical.
     """
-    fetch = lambda n: db.get_all_facts(profile_id, limit=n)  # noqa: E731
+    scan = dict(
+        scope=scope,
+        provenance_kind=provenance_kind,
+        provenance_kind_null=provenance_kind_null,
+    )
     if tag_filter:
         from superlocalmemory.core import tag_query
 
         fetch = tag_query.recent_fetch(
-            db, profile_id, tag_query.members(db, profile_id, tag_filter))
+            db, profile_id, tag_query.members(db, profile_id, tag_filter),
+            **scan,
+        )
+    else:
+        def fetch(n: int) -> list["AtomicFact"]:
+            return db.get_all_facts(profile_id, limit=n, **scan)  # type: ignore[arg-type]
     if not kind:
         return fetch(limit)
     facts, was_truncated = _windowed_kind_fetch(

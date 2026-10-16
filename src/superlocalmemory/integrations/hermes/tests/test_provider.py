@@ -919,7 +919,7 @@ class TestPluginYAML:
         )
         assert os.path.exists(yaml_path), f"plugin.yaml not found at {yaml_path}"
 
-        with open(yaml_path) as f:
+        with open(yaml_path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
 
         assert data is not None

@@ -11,7 +11,9 @@ def test_provider_only_migration_config_can_build_recipe(monkeypatch):
     from superlocalmemory.core.config import EmbeddingConfig
     from superlocalmemory.core.embedding_recipe import TASK_SUFFIX, RecipeEmbedder
 
-    monkeypatch.setattr(engine_wiring, "_try_service_embedder", lambda *args: Mock())
+    # **kw: the fork's wiring forwards the configured proxy to the service
+    # embedder; the recipe-build assertion does not care about it.
+    monkeypatch.setattr(engine_wiring, "_try_service_embedder", lambda *args, **kw: Mock())
     config = SimpleNamespace(
         embedding=EmbeddingConfig(
             model_name="nomic-ai/nomic-embed-text-v1.5" + TASK_SUFFIX,

@@ -6482,27 +6482,18 @@ def _register_daemon_routes(application: FastAPI) -> None:
             from superlocalmemory.core import tag_query
 
             _tags = tag_query.TagFilter.of(_recall_tags_param(tags), tags_match)
+            # Fork scan filters ride the SAME SQL pushdown (merge 4.2.6,
+            # ruling S9): scope/provenance_kind/[null] travel into
+            # list_recent_facts, so ``limit`` bounds the matched set instead
+            # of the pre-filter page — a scan no longer returns a short page
+            # when the newest rows all fail the filter.
             facts = await asyncio.to_thread(
                 list_recent_facts, engine._db, profile_id, limit, parsed_kind,
-                tag_filter=_tags)
-            # Fork scan filters: exact-value matches narrowing the fetched
-            # page in memory (the same convention the MCP list_recent
-            # offline path uses).
-            if scan_scope:
-                facts = [
-                    f for f in facts
-                    if (getattr(f, "scope", "") or "personal") == scan_scope
-                ]
-            if scan_kind:
-                facts = [
-                    f for f in facts
-                    if getattr(f, "provenance_kind", None) == scan_kind
-                ]
-            elif scan_kind_null:
-                facts = [
-                    f for f in facts
-                    if getattr(f, "provenance_kind", None) is None
-                ]
+                tag_filter=_tags,
+                scope=scan_scope or None,
+                provenance_kind=scan_kind or None,
+                provenance_kind_null=scan_kind_null,
+            )
             items = [
                 {
                     "fact_id": f.fact_id,

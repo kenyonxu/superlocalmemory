@@ -28,7 +28,7 @@ For tools marked ⚠️, follow the manual setup instructions below.
    - [Gemini CLI](#gemini-cli)
    - [JetBrains IDEs](#jetbrains-ides)
    - [Cody (VS Code/JetBrains)](#cody-vs-codejetbrains)
-   - [ChatGPT Desktop App](#chatgpt-desktop-app)
+   - [ChatGPT Desktop App](#chatgpt-desktop-app--chatgpt-connectors)
    - [Perplexity](#perplexity)
    - [Zed Editor](#zed-editor)
    - [HTTP Transport (Remote Access)](#http-transport-remote-access)

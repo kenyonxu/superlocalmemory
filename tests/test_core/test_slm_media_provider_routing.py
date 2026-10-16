@@ -74,8 +74,11 @@ def test_the_provider_never_falls_back_to_the_other_models(tmp_path, monkeypatch
 
 def test_existing_providers_route_exactly_as_before_in_the_daemon_too(tmp_path, monkeypatch):
     sentinel = object()
-    monkeypatch.setattr(engine_wiring, "_try_service_embedder", lambda cls, cfg: sentinel)
-    monkeypatch.setattr(engine_wiring, "_try_ollama_embedder", lambda cfg: sentinel)
+    # **kw: the fork's wiring forwards the configured proxy to the service
+    # embedder; the routing assertion does not care about it.
+    monkeypatch.setattr(engine_wiring, "_try_service_embedder",
+                        lambda cls, cfg, **kw: sentinel)
+    monkeypatch.setattr(engine_wiring, "_try_ollama_embedder", lambda cfg, **kw: sentinel)
     process_role.mark_daemon_process()
     for provider in ("sentence-transformers", "ollama", ""):
         cfg = _cfg(tmp_path, provider=provider, model="nomic-ai/nomic-embed-text-v1.5")

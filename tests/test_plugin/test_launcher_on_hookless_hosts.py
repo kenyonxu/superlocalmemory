@@ -39,7 +39,9 @@ CMD_ARGS = ["/d", "/s", "/c", "where.exe /q slm || (echo x 1>&2 & exit 1) & slm 
 
 def _pin() -> str:
     line = (BUILT_PLUGIN / "requirements.txt").read_text(encoding="utf-8").strip()
-    assert line.startswith("superlocalmemory=="), line
+    # Fork PyPI identity: the plugin pins mslm-memory (Task 5 identity ruling,
+    # consistent with plugin/requirements.txt), not upstream's superlocalmemory.
+    assert line.startswith("mslm-memory=="), line
     return line
 
 
