@@ -50,7 +50,14 @@ def test_absent_file_is_not_created_by_a_read(root):
     assert not root.exists() or not media_db_path(root).exists()
 
 
-def test_create_makes_schema_wal_and_private_file(root):
+def test_create_makes_schema_wal_and_private_file(root, monkeypatch):
+    # Fork journal policy (merge 4.2.6, fix round 4): the store's connections
+    # route through storage.journal_policy.apply_journal_mode, whose default
+    # is delete (2026-08-13 postmortem). This upstream-new test asserts WAL
+    # machinery, so it opts the store into WAL for itself — the same
+    # conversion the fork's other WAL-machinery tests made (bbef9b22). The
+    # file's other tests stay on the default policy.
+    monkeypatch.setenv("SLM_JOURNAL_MODE", "wal")
     s = open_media_store(create=True, data_root=root)
     try:
         path = media_db_path(root)
