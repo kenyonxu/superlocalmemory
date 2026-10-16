@@ -201,8 +201,10 @@ def test_forgetting_drift_in_langevin(coupling: EbbinghausLangevinCoupling) -> N
 
 class TestStoreScaledClock:
     """The ELC Ebbinghaus step must use the store-scaled clock
-    (#136 的时钟修复只落在 batch 路径;维护层 ELC 仍用原始 retention →
-    凌晨维护窗把 3 个月未访问的记忆(曲线真值 = warm)成批判成 forgotten→archive)。"""
+    (the #136 clock fix landed only in the batch path; the maintenance ELC
+    step still used raw retention, so the overnight maintenance window filed
+    memories unaccessed for 3 months (curve truth = warm) as forgotten ->
+    archive in bulk)."""
 
     def test_three_months_unaccessed_is_warm_not_forgotten(self):
         import numpy as np
@@ -221,12 +223,12 @@ class TestStoreScaledClock:
             importance=0.5,
             confirmation_count=0,
             emotional_salience=0.0,
-            hours_since_last_access=3 * 30 * 24.0,  # 3 个月
+            hours_since_last_access=3 * 30 * 24.0,  # 3 months
         )
         assert state.lifecycle_zone == "warm"
 
     def test_matches_batch_path_zone(self):
-        """ELC 与 batch_compute_retention(修复后的正确时钟)对同一输入给同 zone。"""
+        """ELC and batch_compute_retention (the corrected clock) give the same zone for the same input."""
         import numpy as np
         from superlocalmemory.core.config import ForgettingConfig
         from superlocalmemory.dynamics.ebbinghaus_langevin_coupling import (
