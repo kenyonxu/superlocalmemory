@@ -44,6 +44,7 @@ def cmd_upgrade_hosts(args: Namespace) -> None:
     if not targets:
         print("No existing SLM host integrations were detected.")
         print("Run `slm setup` for first-time setup, or use `--host <name>` to target one host.")
+        _report_reconnect_apps([])
         return
 
     operation = "Applying" if apply else "Previewing"
@@ -57,8 +58,23 @@ def cmd_upgrade_hosts(args: Namespace) -> None:
         detail = result.get("detail", "")
         print(f"  [{status}] {host}: {detail}")
 
-    if apply:
-        print("Restart affected host applications, then run `slm doctor` to verify SLM itself.")
+    _report_reconnect_apps(targets if apply else [])
+
+
+def _report_reconnect_apps(targets: list[str]) -> None:
+    from superlocalmemory.infra.data_root import canonical_data_root
+    from superlocalmemory.infra.mcp_processes import HOST_NAMES, snapshot
+
+    running = snapshot(canonical_data_root())
+    restart = set(targets) | {
+        app["host"] for app in running["apps"]
+        if app["stale_version"] or app.get("version_reported") is False
+    }
+    if restart:
+        names = ", ".join(HOST_NAMES.get(host, host) for host in sorted(restart))
+        print(f"Apps to restart or reconnect: {names}")
+        print("Use Dashboard → Connected apps to reconnect live MCP sessions, "
+              "then run `slm doctor`.")
 
 
 def _detected_hosts(home: Path | None = None) -> list[str]:
@@ -67,6 +83,7 @@ def _detected_hosts(home: Path | None = None) -> list[str]:
         IDE_MATRIX,
         _load_config,
         _ParseError,
+        global_config_path,
     )
 
     effective_home = home or Path.home()
@@ -74,7 +91,7 @@ def _detected_hosts(home: Path | None = None) -> list[str]:
     for host, desc in IDE_MATRIX.items():
         if not desc.fmt:
             continue
-        path = effective_home / desc.mcp_path_global
+        path = global_config_path(desc, effective_home, environ=None if home is None else {})
         try:
             data = _load_config(path, desc.fmt)
         except _ParseError:
@@ -111,11 +128,82 @@ def _contains_slm_block(data: dict[str, Any], desc: Any) -> bool:
         providers = data.get(desc.server_key, [])
         return isinstance(providers, list) and any(
             isinstance(item, dict)
-            and item.get("params", {}).get("serverName") == "superlocalmemory"
+            and item.get("name") == "superlocalmemory"
             for item in providers
         )
     servers = data.get(desc.server_key, {})
     return isinstance(servers, dict) and "superlocalmemory" in servers
+
+
+#: Hermes's documented grant for a plugin's MCP access; it has no prompt for it.
+_HERMES_GRANT_LINE = "plugins.entries.superlocalmemory.mcp_allowlist: [superlocalmemory]"
+
+
+def _hermes_config_path() -> Path:
+    import os
+
+    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / "config.yaml"
+
+
+def hermes_plugin_grant(path: Path, *, apply: bool) -> dict[str, str]:
+    """Grant the SLM MCP server to the SLM Hermes plugin (``mcp_allowlist``).
+
+    Hermes refuses every plugin MCP call without it, so recall, session
+    tracking and turn capture silently did nothing on installs that followed
+    the guide. Writes only that key, keeps a backup, and never rewrites a
+    config holding hand-written comments (a YAML rewrite would drop them).
+    """
+    import re
+    import time
+
+    import yaml
+
+    fix = f"set {_HERMES_GRANT_LINE} in {path}, then restart Hermes"
+    if not path.is_file():
+        return {"status": "not-installed", "detail": "no Hermes config"}
+    try:
+        text = path.read_text(encoding="utf-8")
+        data = yaml.safe_load(text) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return {"status": "blocked", "detail": f"cannot read {path}: {exc}"}
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    enabled = plugins.get("enabled") if isinstance(plugins, dict) else None
+    if not isinstance(enabled, list) or "superlocalmemory" not in enabled:
+        return {"status": "not-installed", "detail": "the SLM Hermes plugin is not enabled"}
+    entries = plugins.get("entries") if isinstance(plugins.get("entries"), dict) else {}
+    entry = entries.get("superlocalmemory") if isinstance(entries.get("superlocalmemory"), dict) else {}
+    allow = entry.get("mcp_allowlist") if isinstance(entry.get("mcp_allowlist"), list) else []
+    if "superlocalmemory" in allow:
+        return {"status": "verified", "detail": "the Hermes plugin may reach SLM"}
+    if not apply:
+        return {"status": "preview", "detail": "would grant SLM to the Hermes plugin: " + fix}
+    if re.search(r"(?m)(^\s*#|\s#)", text):
+        return {"status": "blocked", "detail": "config has hand-written comments; " + fix}
+    entry = {**entry, "mcp_allowlist": [*allow, "superlocalmemory"]}
+    data["plugins"] = {**plugins, "entries": {**entries, "superlocalmemory": entry}}
+    backup = path.with_name(f"{path.name}.bak-slm-{time.strftime('%Y%m%dT%H%M%S')}")
+    backup.write_text(text, encoding="utf-8")
+    tmp = path.with_name(path.name + ".slm-tmp")
+    tmp.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    tmp.replace(path)
+    reread = yaml.safe_load(path.read_text(encoding="utf-8"))
+    granted = reread["plugins"]["entries"]["superlocalmemory"].get("mcp_allowlist", [])
+    if "superlocalmemory" not in granted:
+        backup.replace(path)
+        return {"status": "blocked", "detail": "the grant did not persist; " + fix}
+    return {"status": "updated",
+            "detail": f"granted SLM to the Hermes plugin (backup {backup.name}); restart Hermes"}
+
+
+def hermes_plugin_finding() -> tuple[str, str, str] | None:
+    """``slm doctor``: whether the SLM Hermes plugin may reach SLM (None: no plugin)."""
+    grant = hermes_plugin_grant(_hermes_config_path(), apply=False)
+    if grant["status"] == "not-installed":
+        return None
+    if grant["status"] == "verified":
+        return "PASS", grant["detail"], ""
+    return ("WARN", "Hermes has not granted SLM to the SLM plugin, so its recall, "
+            "session tracking and turn capture are off", "slm upgrade-hosts --host hermes --apply")
 
 
 def _upgrade_host(host: str, *, apply: bool, already_integrated: bool) -> dict[str, str]:
@@ -128,6 +216,10 @@ def _upgrade_host(host: str, *, apply: bool, already_integrated: bool) -> dict[s
 
     if host == "hermes":
         if already_integrated:
+            # Connected is not enough: without the grant the plugin is inert.
+            grant = hermes_plugin_grant(_hermes_config_path(), apply=apply)
+            if grant["status"] in ("updated", "preview", "blocked"):
+                return grant
             return {
                 "status": "verified",
                 "detail": "existing native Hermes SLM mapping preserved",

@@ -30,9 +30,41 @@ from superlocalmemory.retrieval.scope_policy import (
     filter_authorized_results,
 )
 from superlocalmemory.storage.database import _scope_where
+from superlocalmemory.storage.graph_generation import graph_version
 from superlocalmemory.storage.models import _new_id
 
 logger = logging.getLogger(__name__)
+
+
+def _seed_score(cosine: float, vector_path: bool = True) -> float:
+    """A seed's initial activation from its cosine to the query.
+
+    The ONE place the seed scale is defined, so local and cross-scope seeds
+    can never drift apart again (#146), and neither can the two seed paths.
+    The vec0 path scores ``max(0, 1 - distance)`` = ``max(0, cos)``
+    (``VectorStore.search``), and every path now uses that scale.
+
+    Before 4.1.20 the SQL fallback used ``(cos + 1) / 2``: cos 0.45 started the
+    walk at 0.725 instead of 0.45, an unrelated memory (cos 0) at 0.5, so the
+    answer depended on whether the vector index happened to be available.
+    ``vector_path`` is accepted for callers and no longer changes the scale.
+    """
+    del vector_path
+    return max(0.0, cosine)
+
+
+def _evidence_seeds(seeds: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """Only seeds the question actually resembles start the walk.
+
+    A seed scored 0 (cosine <= 0) carries no evidence, yet one sigmoid round
+    lifts it to ``sigmoid(-theta)`` ~ 0.45 and it then spreads like a real
+    match. Which zero-scored facts fill the ``top_m`` seed slots is an
+    arbitrary tie-break, and the vec0 index and the SQL fallback break that
+    tie differently, so a question that resembled nothing came back with a
+    different spreading-activation answer on a machine without sqlite-vec.
+    Dropping them makes that answer "nothing" on every backend.
+    """
+    return [(fact_id, score) for fact_id, score in seeds if score > 0.0]
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +108,24 @@ class SpreadingActivationConfig:
 # SpreadingActivation Channel
 # ---------------------------------------------------------------------------
 
+#: Bumped when cross-scope seed selection changes, so activations cached by the
+#: old selection are not served after an upgrade.
+_CROSS_SCOPE_SEEDING = "|seeds=2"
+
+#: Seed scores are compared to this many decimals in the cache key.
+_SEED_SCORE_DECIMALS = 6
+
+
+def _seed_fingerprint(seeds: list[tuple[str, float]]) -> str:
+    """Order-free digest of a seed set: ids and rounded scores."""
+    material = "\n".join(
+        f"{fact_id}={round(float(score), _SEED_SCORE_DECIMALS)!r}"
+        for fact_id, score in sorted(
+            seeds, key=lambda item: (str(item[0]), float(item[1])))
+    )
+    return "|seedset=" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
 class SpreadingActivation:
     """SYNAPSE 5-step spreading activation as 5th retrieval channel.
 
@@ -104,6 +154,7 @@ class SpreadingActivation:
         self._pr_profile: str = ""
         self._comm_cache: dict[str, int | None] = {}
         self._comm_profile: str = ""
+        self._graph_version_warned = False
 
     def search(
         self,
@@ -137,80 +188,62 @@ class SpreadingActivation:
                 include_global=include_global,
                 include_shared=include_shared,
             )
-            # Owner-partitioned vector indexes cannot discover opted-in peers.
-            # Add visible external embeddings with the same cosine seed signal.
-            # v3.8.2 perf: external (global/shared) facts only matter for a
-            # cross-scope read. For the default personal scope this query always
-            # returns [] — skip it to remove a per-recall DB round-trip.
-            external_facts: list = []
             if include_global or include_shared:
-                try:
-                    external_facts = self._db.get_external_visible_facts(
-                        profile_id,
-                        include_global=include_global,
-                        include_shared=include_shared,
-                    )
-                except Exception:
-                    external_facts = []
-            q_vec = np.array(query, dtype=np.float32)
-            q_norm = float(np.linalg.norm(q_vec))
-            combined = {fact_id: score for fact_id, score in seed_results}
-            for fact in external_facts:
-                embedding = getattr(fact, "embedding", None)
-                if embedding is None:
-                    continue
-                fact_vec = np.array(embedding, dtype=np.float32)
-                if fact_vec.shape != q_vec.shape:
-                    continue
-                denominator = q_norm * float(np.linalg.norm(fact_vec))
-                if denominator <= 1e-8:
-                    continue
-                score = (float(np.dot(q_vec, fact_vec) / denominator) + 1.0) / 2.0
-                combined[fact.fact_id] = max(combined.get(fact.fact_id, 0.0), score)
-            # v3.8.2 perf: seeds come from this profile's own vector index /
-            # get_all_facts(profile_id), so for personal scope they are already
-            # authorized. Only re-authorize when a cross-scope read merged in
-            # global/shared candidates. filter_authorized_results below remains the
-            # security net on the returned set.
-            if include_global or include_shared:
-                allowed_seeds = authorized_fact_ids(
-                    self._db,
-                    combined,
+                seed_results = self._merge_cross_scope_seeds(
+                    query,
+                    seed_results,
                     profile_id,
                     include_global=include_global,
                     include_shared=include_shared,
                 )
-                seed_results = [
-                    (fact_id, score)
-                    for fact_id, score in combined.items()
-                    if fact_id in allowed_seeds
-                ]
             else:
-                seed_results = list(combined.items())
+                # v3.8.2 perf: seeds come from this profile's own vector index /
+                # get_all_facts(profile_id), so for personal scope they are
+                # already authorized, and there are top_m of them at most.
+                # filter_authorized_results below remains the security net.
+                seed_results = list(
+                    {fact_id: score for fact_id, score in seed_results}.items()
+                )
+            seed_results = _evidence_seeds(seed_results)
             if not seed_results:
                 return []
 
             # Check cache first
-            query_hash = self._compute_query_hash(
+            # Keyed by the seeds too: a memory saved since the entry was
+            # written that now seeds this question must be walked, not hidden
+            # behind an hour-old answer. And by the graph's generation, read
+            # BEFORE the walk: a link written during or after the walk moves
+            # the generation, so the entry stored below is never read again.
+            graph = self._graph_version(
+                profile_id, cross_scope=include_global or include_shared,
+            )
+            query_hash = None if graph is None else self._compute_query_hash(
                 query,
                 profile_id,
                 include_global=include_global,
                 include_shared=include_shared,
+                seeds=seed_results,
+                graph=graph,
             )
-            cached = self._get_cached_results(query_hash, profile_id)
+            cached = (
+                None if query_hash is None
+                else self._get_cached_results(query_hash, profile_id)
+            )
             if cached:
-                # v3.8.2 perf: cached activations were produced from this profile's
-                # own propagation; personal-scope hits need no re-authorization.
-                # Cross-scope hits still pass the fail-closed filter.
-                if include_global or include_shared:
-                    return filter_authorized_results(
-                        self._db,
-                        cached,
-                        profile_id,
-                        include_global=include_global,
-                        include_shared=include_shared,
-                    )[:top_k]
-                return cached[:top_k]
+                # A hit is answered exactly as the propagation that stored it
+                # was: same order, same fail-closed filter, for EVERY scope.
+                # The cache holds raw activations, and a personal propagation
+                # can reach facts outside this profile through an edge; 4.1.19
+                # returned personal hits unfiltered, so a repeated question
+                # could surface another profile's fact the first answer had
+                # removed (and the two answers differed).
+                return filter_authorized_results(
+                    self._db,
+                    cached,
+                    profile_id,
+                    include_global=include_global,
+                    include_shared=include_shared,
+                )[:top_k]
 
             # Run 5-step spreading activation
             activations = self._propagate(
@@ -227,10 +260,14 @@ class SpreadingActivation:
             # Cache results — DEFERRED so recall stays READ-ONLY on its hot
             # path.  This is a perf cache for FUTURE recalls, not needed to
             # return the current results.
-            from superlocalmemory.storage.deferred_writes import submit_background
-            submit_background(
-                lambda: self._cache_results(query_hash, profile_id, activations)
-            )
+            if query_hash is not None:
+                from superlocalmemory.storage.deferred_writes import (
+                    submit_background,
+                )
+                submit_background(
+                    lambda: self._cache_results(
+                        query_hash, profile_id, activations)
+                )
 
             # Return top-K sorted by activation
             results = sorted(
@@ -251,6 +288,98 @@ class SpreadingActivation:
             )
             return []
 
+    def _graph_version(self, profile_id: str, *, cross_scope: bool) -> str | None:
+        """The graph generation for the cache key, or None to skip the cache.
+
+        None when the store cannot say it (no ``graph_generation`` table): an
+        entry could then be older than a link, so the cache is neither read nor
+        written and every recall walks the graph. Logged once per channel.
+        """
+        try:
+            return graph_version(self._db, profile_id, cross_scope=cross_scope)
+        except Exception as exc:
+            if not self._graph_version_warned:
+                self._graph_version_warned = True
+                logger.warning(
+                    "Spreading-activation cache off: the graph generation "
+                    "is unreadable (%s); every recall walks the graph.", exc,
+                )
+            return None
+
+    def _uses_vector_seeds(self) -> bool:
+        """Whether ``_seed_search`` takes the vec0 path (else the SQL scan)."""
+        return self._vector_store is not None and bool(
+            getattr(self._vector_store, "available", False)
+        )
+
+    def _merge_cross_scope_seeds(
+        self,
+        query: Any,
+        seed_results: list[tuple[str, float]],
+        profile_id: str,
+        *,
+        include_global: bool,
+        include_shared: bool,
+    ) -> list[tuple[str, float]]:
+        """Seeds for a cross-scope read: the top_m of local + visible external.
+
+        The vector index is partitioned by owner, so it cannot find an opted-in
+        global or shared fact; those are scored here and merged in.  #146:
+
+        * Externals are scored on the SAME scale as the seed path.  vec0 seeds
+          are ``max(0, cos)``; externals used ``(cos + 1) / 2``, so an unrelated
+          external (cos 0 -> 0.5) outranked a relevant local fact (cos 0.45).
+        * Authorization runs on the whole merged set FIRST, so a fact the
+          caller may not see can never take a seed slot from one it may.
+        * Then the set is cut to ``top_m`` by ``(-score, fact_id)``.  That is
+          the algorithm's own seed width -- the set a single KNN over every
+          visible fact would return -- not a new cap.  Without it all visible
+          externals became seeds, one neighbour lookup each, and the channel
+          ran past its 8 s guard and answered nothing.
+        """
+        external_embeddings: list = []
+        try:
+            # #147: id + embedding only; full hydration was most of the cost.
+            external_embeddings = self._db.get_external_visible_embeddings(
+                profile_id,
+                include_global=include_global,
+                include_shared=include_shared,
+            )
+        except Exception as exc:
+            # Not silent: losing this drops every cross-scope seed.
+            logger.warning(
+                "SpreadingActivation: cross-scope seeds unavailable "
+                "for profile %s: %s", profile_id, exc,
+            )
+        vector_path = self._uses_vector_seeds()
+        q_vec = np.array(query, dtype=np.float32)
+        q_norm = float(np.linalg.norm(q_vec))
+        combined = {fact_id: score for fact_id, score in seed_results}
+        for ext_id, fact_vec in external_embeddings:
+            if fact_vec.shape != q_vec.shape:
+                continue
+            denominator = q_norm * float(np.linalg.norm(fact_vec))
+            if denominator <= 1e-8:
+                continue
+            score = _seed_score(
+                float(np.dot(q_vec, fact_vec) / denominator), vector_path,
+            )
+            combined[ext_id] = max(combined.get(ext_id, 0.0), score)
+        allowed_seeds = authorized_fact_ids(
+            self._db,
+            combined,
+            profile_id,
+            include_global=include_global,
+            include_shared=include_shared,
+        )
+        authorized = [
+            (fact_id, score)
+            for fact_id, score in combined.items()
+            if fact_id in allowed_seeds
+        ]
+        authorized.sort(key=lambda item: (-item[1], item[0]))
+        return authorized[: self._config.top_m]
+
     def _seed_search(
         self,
         query: Any,
@@ -267,9 +396,7 @@ class SpreadingActivation:
         cross-profile supplement below.  This keeps spreading activation
         present and truthful rather than silently removing a retrieval layer.
         """
-        if self._vector_store is not None and getattr(
-            self._vector_store, "available", False,
-        ):
+        if self._uses_vector_seeds():
             return self._vector_store.search(
                 query, top_k=self._config.top_m, profile_id=profile_id,
             )
@@ -294,7 +421,9 @@ class SpreadingActivation:
             denominator = q_norm * float(np.linalg.norm(fact_vec))
             if denominator <= 1e-8:
                 continue
-            score = (float(np.dot(q_vec, fact_vec) / denominator) + 1.0) / 2.0
+            score = _seed_score(
+                float(np.dot(q_vec, fact_vec) / denominator), vector_path=False,
+            )
             scored.append((fact.fact_id, score))
         return sorted(scored, key=lambda item: (-item[1], item[0]))[:self._config.top_m]
 
@@ -506,9 +635,34 @@ class SpreadingActivation:
         *,
         include_global: bool = False,
         include_shared: bool = False,
+        seeds: list[tuple[str, float]] | None = None,
+        graph: str | None = None,
     ) -> str:
-        """Deterministic hash for cache key."""
+        """Deterministic hash for cache key.
+
+        ``seeds`` is the seed set this search starts from. It is part of the
+        key because the activations are a function of it: before 4.1.20 a
+        memory saved after a question was asked — even the best match, seeding
+        first — stayed invisible to that question for the cache's full hour.
+        Scores are rounded so float noise cannot defeat the cache.
+
+        ``graph`` is the graph generation (``storage.graph_generation``). The
+        activations are a function of the links too: before 4.1.21 a link that
+        changed the walk without changing the seeds stayed hidden the same way.
+        """
         scope_bytes = f"|g={int(include_global)}|s={int(include_shared)}".encode()
+        if include_global or include_shared:
+            scope_bytes += _CROSS_SCOPE_SEEDING.encode()
+        if seeds is not None:
+            scope_bytes += _seed_fingerprint(seeds).encode()
+            # Which search produced the seeds. One scale on both paths makes
+            # their walks agree, but the two indexes can still disagree (a
+            # vector index lagging the store), so one never answers for the other.
+            scope_bytes += (
+                b"|path=vec" if self._uses_vector_seeds() else b"|path=sql"
+            )
+        if graph is not None:
+            scope_bytes += graph.encode()
         if isinstance(query, np.ndarray):
             data = query.tobytes() + profile_id.encode() + scope_bytes
         elif isinstance(query, list):
@@ -524,21 +678,29 @@ class SpreadingActivation:
     def _get_cached_results(
         self, query_hash: str, profile_id: str,
     ) -> list[tuple[str, float]] | None:
-        """Check activation_cache for recent results."""
+        """Check activation_cache for recent results.
+
+        One row per node, whatever the table holds: two identical recalls in
+        flight at once used to store the entry twice, and a hit then returned
+        every node twice.
+        """
         try:
             rows = self._db.execute(
-                "SELECT node_id, activation_value FROM activation_cache "
+                "SELECT node_id, MAX(activation_value) AS activation_value "
+                "FROM activation_cache "
                 "WHERE profile_id = ? AND query_hash = ? "
                 "AND expires_at > datetime('now') "
-                "ORDER BY activation_value DESC",
+                "GROUP BY node_id",
                 (profile_id, query_hash),
             )
             if not rows:
                 return None
-            return [
-                (dict(r)["node_id"], dict(r)["activation_value"])
-                for r in rows
-            ]
+            # The same total order as a fresh propagation (value desc, then
+            # id), so a tie cannot reorder the answer on a hit.
+            return sorted(
+                ((dict(r)["node_id"], dict(r)["activation_value"]) for r in rows),
+                key=lambda item: (-item[1], item[0]),
+            )
         except Exception:
             return None
 
@@ -548,11 +710,21 @@ class SpreadingActivation:
         profile_id: str,
         activations: dict[str, float],
     ) -> None:
-        """Store results in activation_cache with 1-hour TTL."""
+        """Store results in activation_cache with 1-hour TTL.
+
+        Replaces the entry rather than adding to it: the old rows for this key
+        are deleted in the same transaction, so two concurrent writers of one
+        entry leave exactly one copy (SQLite serialises the two transactions).
+        """
         try:
             # One transaction => ONE write-lock acquisition for the whole
             # activation cache, instead of N separately-locked writes.
             with self._db.transaction():
+                self._db.execute(
+                    "DELETE FROM activation_cache "
+                    "WHERE profile_id = ? AND query_hash = ?",
+                    (profile_id, query_hash),
+                )
                 for node_id, value in activations.items():
                     self._db.execute(
                         "INSERT OR REPLACE INTO activation_cache "
@@ -564,7 +736,9 @@ class SpreadingActivation:
                          self._config.max_iterations),
                     )
         except Exception as exc:
-            logger.debug("Cache write failed: %s", exc)
+            # Not debug: a cache that is never written is invisible otherwise,
+            # and every identical recall then pays the full propagation.
+            logger.warning("Spreading-activation cache write failed: %s", exc)
 
     def cleanup_expired_cache(self) -> int:
         """Delete expired cache entries. Called by maintenance."""

@@ -22,7 +22,7 @@ Covers:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -258,8 +258,9 @@ class TestStoreWriteLossGuard:
             consolidator, "consolidate",
             side_effect=RuntimeError("LLM timeout during consolidation"),
         ):
-            # Must NOT raise — the failure is contained.
-            engine_with_mock_deps.store(content, session_id="s1")
+            # The evidence survives, but incomplete derivation is reported.
+            with pytest.raises(RuntimeError, match="consolidation"):
+                engine_with_mock_deps.store(content, session_id="s1")
         facts = engine_with_mock_deps._db.get_all_facts(
             engine_with_mock_deps._profile_id,
         )
@@ -276,7 +277,8 @@ class TestStoreWriteLossGuard:
             extractor, "extract_facts",
             side_effect=RuntimeError("extractor backbone unavailable"),
         ):
-            engine_with_mock_deps.store(content, session_id="s1")
+            with pytest.raises(RuntimeError, match="extraction"):
+                engine_with_mock_deps.store(content, session_id="s1")
         facts = engine_with_mock_deps._db.get_all_facts(
             engine_with_mock_deps._profile_id,
         )

@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import time
 
-import pytest
 
 from superlocalmemory.optimize.cache.exact import ExactCache
-from superlocalmemory.optimize.cache.key_builder import CacheConfig
 
 
 def _tenant(n: int) -> str:
@@ -131,7 +129,7 @@ def test_c09_no_python_ttl_recheck(tmp_cache_db) -> None:
 
 def test_c07_tags_passed_to_db_set(tmp_cache_db) -> None:
     """C-07: ExactCache.set() must thread actual tags to db.set (not hardcoded [])."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
 
     ec = ExactCache(tmp_cache_db)
     tags = ["model:claude-3", "tenant:abc123"]

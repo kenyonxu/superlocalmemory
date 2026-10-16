@@ -1,14 +1,9 @@
-# Continue.dev MCP Configuration
-# Add this to ~/.continue/config.yaml
-
-contextProviders:
-  - name: mcp
-    params:
-      serverName: "superlocalmemory"
-      command: "slm"
-      args:
-        - "mcp"
-      description: "SuperLocalMemory V3 - Search your memory system"
-
-# You can also use Continue's slash commands with SuperLocalMemory
-# See continue-skills.yaml for slash command configuration
+# Official schema: https://docs.continue.dev/reference (2026-10-11)
+# Merge mcpServers into ~/.continue/config.yaml; preserve existing name/version/models.
+name: SLM Config
+version: 1.0.0
+schema: v1
+mcpServers:
+  - name: superlocalmemory
+    command: slm
+    args: [mcp]

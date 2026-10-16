@@ -11,23 +11,16 @@
 from __future__ import annotations
 
 import json
-import sqlite3
-import tempfile
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pytest
 
 from superlocalmemory.core.config import (
-    AutoInvokeConfig,
     MathConfig,
-    ForgettingConfig,
     ParameterizationConfig,
     SLMConfig,
 )
-from superlocalmemory.hooks.auto_invoker import AutoInvoker
 from superlocalmemory.math.fisher import FisherRaoMetric
 from superlocalmemory.storage.embedding_codec import decode_float_vector
 
@@ -160,7 +153,6 @@ class TestSoftPromptInjectionWiring:
     ) -> None:
         """When parameterization.enabled=False, no prompt injector is attached."""
         from superlocalmemory.core import engine_wiring
-        from dataclasses import replace
 
         db = _make_real_db(tmp_path)
         profile_id = "default"

@@ -16,9 +16,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-from fastapi import HTTPException
-
 
 class _Req:
     """Minimal FastAPI Request stub for unit-testing write_identity functions."""

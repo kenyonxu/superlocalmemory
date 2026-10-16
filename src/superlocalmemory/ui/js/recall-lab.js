@@ -8,6 +8,7 @@ var recallLabState = {
     query: '',
     synthesis: '',
     channelStatus: {},
+    answerCheck: {},
 };
 
 // How each channel status reads to someone looking at a thin result set.
@@ -22,9 +23,11 @@ var CHANNEL_STATUS_STYLE = {
     error:          {cls: 'bg-danger',    label: 'failed'},
     timeout:        {cls: 'bg-warning',   label: 'timed out'},
     no_embedding:   {cls: 'bg-danger',    label: 'no embedding'},
+    warming:        {cls: 'bg-warning',   label: 'warming'},
+    needs_service:  {cls: 'bg-danger',    label: 'needs service'},
 };
 
-var CHANNEL_FAULTS = ['error', 'timeout', 'no_embedding'];
+var CHANNEL_FAULTS = ['error', 'timeout', 'no_embedding', 'warming', 'needs_service'];
 
 // Built with createElement and textContent throughout — the status strings come
 // from the server, and this pane has no reason to be an injection sink.
@@ -88,9 +91,21 @@ document.addEventListener('click', function(e) {
 
     fetch('/api/v3/recall/trace', {
         method: 'POST',
+        slmInvalidatesCache: false,
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({query: query, limit: fetchLimit, synthesize: true})
     }).then(function(r) { return r.json(); }).then(function(data) {
+        if (data.code === 'RECALL_BUSY') {
+            // Every slot is answering other agents: an honest "ask again",
+            // never a keyword guess and never shown as a failure.
+            resultsDiv.textContent = '';
+            var busyDiv = document.createElement('div');
+            busyDiv.className = 'alert alert-info';
+            busyDiv.setAttribute('role', 'status');
+            busyDiv.textContent = data.message || 'SuperLocalMemory is busy. Ask again in a few seconds.';
+            resultsDiv.appendChild(busyDiv);
+            return;
+        }
         if (data.error) {
             resultsDiv.textContent = '';
             var errDiv = document.createElement('div');
@@ -110,11 +125,19 @@ document.addEventListener('click', function(e) {
         recallLabState.allResults = data.results || [];
         recallLabState.synthesis = data.synthesis || '';
         recallLabState.channelStatus = data.channel_status || {};
+        recallLabState.answerCheck = data;
+        metaDiv.appendChild(buildAnswerCheckNotice(data));
 
         // Rendered BEFORE the no-results branch below, and that ordering is the
         // whole point: every channel failing produces exactly zero results, so
         // the case most in need of an explanation is the one that would
         // otherwise show a bare 'No results found'.
+        if (window.SLMAnswerCheckTryIt) {
+            var verdict = document.createElement('div');
+            verdict.setAttribute('role', 'status');
+            metaDiv.appendChild(verdict);
+            window.SLMAnswerCheckTryIt.renderVerdict(verdict, data);
+        }
         var health = buildChannelHealth(recallLabState.channelStatus);
         if (health) metaDiv.appendChild(health);
 
@@ -181,14 +204,16 @@ function renderRecallPage() {
         numLabel.textContent = '#' + (globalIndex + 1);
         scoreRow.appendChild(numLabel);
         var scoreBadges = document.createElement('div');
+        var storedConfidence = r.memory_confidence === undefined ? r.confidence : r.memory_confidence;
         // Built element by element rather than as an HTML string. The values are
         // server-supplied, and this file's sibling panes are held to the same
         // rule: this pane renders DOM, it does not parse markup.
         [
-            ['badge bg-primary me-1', 'Score: ' + r.score, ''],
+            ['badge bg-primary me-1', 'Query relevance: ' + r.score, ''],
+            ['badge bg-secondary me-1', 'Semantic evidence: ' + (r.match_confidence == null ? 'unmeasured' : r.match_confidence), ''],
             ['badge bg-secondary me-1', 'Trust: ' + r.trust_score, ''],
-            ['badge bg-outline-info', 'Conf: ' + r.confidence,
-             'border:1px solid #0dcaf0;color:#0dcaf0;'],
+            ['badge bg-outline-info', 'Stored fact confidence: ' + (storedConfidence == null ? 'not recorded' : storedConfidence),
+             'border:1px solid var(--cyan);color:var(--cyan-text);'],
         ].forEach(function(spec) {
             var badge = document.createElement('span');
             badge.className = spec[0];
@@ -205,6 +230,7 @@ function renderRecallPage() {
         contentDiv.style.cssText = 'white-space:pre-wrap; line-height:1.5;';
         var truncated = displayText.length > 500 ? displayText.substring(0, 500) + '...' : displayText;
         contentDiv.textContent = truncated;
+        item.title = 'Open to read the whole memory';
         item.appendChild(contentDiv);
 
         // Expandable atomic fact section (only if source differs from content)
@@ -254,7 +280,8 @@ function renderRecallPage() {
         // Click for detail modal
         item.style.cursor = 'pointer';
         (function(result) {
-            contentDiv.addEventListener('click', function() {
+            item.addEventListener('click', function(ev) {
+                if (ev.target.closest && ev.target.closest('button,a,input')) return;
                 if (typeof openMemoryDetail === 'function') {
                     openMemoryDetail({
                         id: result.fact_id,
@@ -371,3 +398,24 @@ document.addEventListener('keydown', function(e) {
         if (btn) btn.click();
     }
 });
+
+// A rank or assertion confidence never claims that a question was answered.
+function buildAnswerCheckNotice(body) {
+    var block = body.answer_check || {};
+    var status = body.answer_check_status || block.status || 'off';
+    var notice = document.createElement('div');
+    notice.className = 'alert alert-info mt-2';
+    if (body.abstained || block.abstained) {
+        notice.textContent = "I don't have a supported answer to that question. Inspect the source memories below.";
+    } else if (status === 'judged') {
+        notice.textContent = 'Answer check found support in the retrieved memories. Stored fact confidence describes the saved assertion; semantic evidence is raw cosine, not an answer probability.';
+    } else {
+        notice.textContent = 'Not checked — ' + status + '. These memories may not answer your question. ' +
+            (body.answer_check_note || block.note || 'See Settings → Answer check.');
+    }
+    notice.appendChild(document.createElement('br'));
+    var legend = document.createElement('small');
+    legend.textContent = 'Query relevance is a matching score. Semantic evidence is raw cosine, not an answer probability. Stored fact confidence describes the saved assertion.';
+    notice.appendChild(legend);
+    return notice;
+}

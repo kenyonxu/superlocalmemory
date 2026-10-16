@@ -1,0 +1,25 @@
+flowchart TD
+    Q["Query + filters<br/>profile, scope, window, as-of, kind"] --> S["Classify the query<br/>adaptive channel weights"]
+    S --> P1["Semantic"]
+    S --> P2["BM25 keyword"]
+    S --> P3["Temporal"]
+    S --> P4["Spreading activation"]
+    S --> P5["Hopfield"]
+    S -.->|"pictures on"| P6["Picture channel"]
+    P1 --> F["Weighted RRF fusion"]
+    P2 --> F
+    P3 --> F
+    P4 --> F
+    P5 --> F
+    P6 --> F
+    F --> B["Entity-graph and cross-channel boosts"]
+    B --> E["Evidence floor<br/>keep only results with real evidence"]
+    E --> R["Cross-encoder rerank (optional)"]
+    R --> K["Ranking mode<br/>off unless SLM_RANKING is set"]
+    K --> A{"Answer check<br/>Laya, Jev or off"}
+    A --> G{"Does any memory<br/>support the question?"}
+    G -->|"yes"| OK["Supported: results + scores + answer fields"]
+    G -->|"no, but the question is real"| RL["Related: up to three closest memories,<br/>labelled, with a note"]
+    G -->|"no, or nonsense"| NO["None: nothing returned,<br/>That isn't in SuperLocalMemory."]
+    classDef gate fill:#FFF4E0,stroke:#C27A00,color:#1F2340
+    class E,A,G gate

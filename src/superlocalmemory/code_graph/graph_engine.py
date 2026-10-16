@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from superlocalmemory.code_graph.graph_store import GraphStore
-from superlocalmemory.code_graph.models import EdgeKind, GraphNode
+from superlocalmemory.code_graph.models import EdgeKind
 
 logger = logging.getLogger(__name__)
 

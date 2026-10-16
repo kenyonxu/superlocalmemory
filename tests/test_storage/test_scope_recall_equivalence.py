@@ -3,7 +3,6 @@ data (every row scope='personal'), the new scope-filtered DB queries must return
 exactly the same facts as the old profile_id-only queries. This is the core
 "must not impact our functionality" guarantee — scope is purely additive.
 """
-import sqlite3
 
 import pytest
 

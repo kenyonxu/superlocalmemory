@@ -67,11 +67,13 @@ class ConsolidationWorker:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-        # 1. Confidence decay on unused facts.
+        # 1. Confidence decay on unused facts. A dry run COUNTS the facts it
+        # would touch and writes nothing (the UPDATE used to run
+        # before the dry_run check, so a preview changed stored confidence).
         try:
             from superlocalmemory.learning.signals import LearningSignals
             decayed = LearningSignals.decay_confidence(
-                self._memory_db, profile_id, rate=0.001,
+                self._memory_db, profile_id, rate=0.001, dry_run=dry_run,
             )
             stats["decayed"] = decayed
             if not dry_run:
@@ -139,12 +141,12 @@ class ConsolidationWorker:
 
         # 5. Ranker retrain — online (LLD-10) or legacy cold-start.
         #
-        # Gating (Stage-8 H-07): once a profile has an active model the
-        # online path wins unconditionally. The legacy cold-start path
-        # only fires when there is NO active model (``_should_retrain``
-        # returns False because no active row exists) AND the raw
-        # signal_count crosses 200. Partial unique indexes M009 keep
-        # both paths from racing.
+        # Since 4.1.25 the online shadow cycle owns cold start as well: a first
+        # model is a CANDIDATE tested live against the heuristic. The legacy
+        # path (``_retrain_ranker``) installed a model as ACTIVE with no live
+        # test whenever 200 feedback signals existed — that is how a model
+        # trained on 972 all-zero labels went live. It is no longer run
+        # automatically; ``_retrain_ranker`` stays callable explicitly.
         try:
             from superlocalmemory.learning.feedback import FeedbackCollector
             collector = FeedbackCollector(Path(self._learning_db))
@@ -166,12 +168,8 @@ class ConsolidationWorker:
                         learning_db_path=self._learning_db,
                         profile_id=profile_id,
                     )
-                elif signal_count >= 200:
-                    # Cold-start only: no active model yet.
-                    retrained = self._retrain_ranker(
-                        profile_id, signal_count,
-                    )
-                    stats["retrained"] = retrained
+                    stats["retrained"] = bool(
+                        stats["online_retrain"].get("candidate_persisted"))
         except Exception as exc:
             logger.debug("Retrain check failed: %s", exc)
 
@@ -323,76 +321,21 @@ class ConsolidationWorker:
     # ------------------------------------------------------------------
 
     def _should_retrain(self, profile_id: str) -> bool:
-        """Return True if the outcome-count or 24h trigger has fired.
+        """Whether the online retrain is due — see ``learning.retrain_trigger``.
 
-        Reads ``learning_model_state.metadata_json`` on the active row.
-        Honours ``metadata_json.retrain_disabled_until`` (post-rollback
-        cooldown). No DB writes — pure SELECT + JSON parse.
+        Covers cold start too (no active model -> a candidate tested live
+        against the heuristic), refuses while a candidate is under test, and
+        counts new labelled outcomes from the data instead of a counter
+        nothing incremented.
         """
         from superlocalmemory.learning.ranker_retrain_online import (
-            RETRAIN_NEW_OUTCOMES_THRESHOLD,
             RETRAIN_HOURS_THRESHOLD,
+            RETRAIN_NEW_OUTCOMES_THRESHOLD,
         )
-        try:
-            conn = sqlite3.connect(self._learning_db, timeout=5)
-            try:
-                conn.row_factory = sqlite3.Row
-                row = conn.execute(
-                    "SELECT metadata_json FROM learning_model_state "
-                    "WHERE profile_id = ? AND is_active = 1 LIMIT 1",
-                    (profile_id,),
-                ).fetchone()
-            finally:
-                conn.close()
-        except sqlite3.Error as exc:
-            logger.debug("_should_retrain sqlite error: %s", exc)
-            return False
+        from superlocalmemory.learning.retrain_trigger import should_retrain
 
-        if row is None:
-            # No active model yet — let the legacy cold-start path
-            # (signal_count >= 200) drive first training.
-            return False
-
-        try:
-            meta = json.loads(row["metadata_json"] or "{}")
-        except (TypeError, ValueError):
-            meta = {}
-
-        now = datetime.now(timezone.utc)
-
-        # Cooldown: honour retrain_disabled_until (post-rollback).
-        disabled_until = meta.get("retrain_disabled_until")
-        if disabled_until:
-            try:
-                dt = datetime.fromisoformat(disabled_until)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                if dt > now:
-                    return False
-            except (TypeError, ValueError):
-                pass  # malformed → ignore the cooldown
-
-        # Trigger A — outcome-count delta.
-        try:
-            new_outcomes = int(
-                meta.get("new_outcomes_since_last_retrain", 0) or 0,
-            )
-        except (TypeError, ValueError):
-            new_outcomes = 0
-        if new_outcomes >= RETRAIN_NEW_OUTCOMES_THRESHOLD:
-            return True
-
-        # Trigger B — hours since last retrain.
-        last = meta.get("last_retrain_at")
-        if last:
-            try:
-                last_dt = datetime.fromisoformat(last)
-                if last_dt.tzinfo is None:
-                    last_dt = last_dt.replace(tzinfo=timezone.utc)
-                hours = (now - last_dt).total_seconds() / 3600.0
-                if hours >= RETRAIN_HOURS_THRESHOLD:
-                    return True
-            except (TypeError, ValueError):
-                pass
-
-        return False
+        return should_retrain(
+            self._learning_db, self._memory_db, profile_id,
+            new_outcomes_threshold=RETRAIN_NEW_OUTCOMES_THRESHOLD,
+            hours_threshold=RETRAIN_HOURS_THRESHOLD,
+        )

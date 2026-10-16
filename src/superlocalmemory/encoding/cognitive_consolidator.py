@@ -3,7 +3,6 @@
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
 """Cognitive Consolidation Quantization (CCQ) — Phase E.
-
 Sleep-time consolidation that mirrors hippocampal-neocortical transfer:
   1. IDENTIFY: warm/cold facts below retention threshold
   2. CLUSTER: group by entity overlap + temporal proximity (Union-Find)
@@ -11,11 +10,6 @@ Sleep-time consolidation that mirrors hippocampal-neocortical transfer:
   4. COMPRESS: source embeddings -> PolarQuant 2-bit
   5. STORE: gist block at float32 + archive source facts
   6. AUDIT: complete audit trail
-
-Biological analogy:
-  Hippocampus (atomic_facts) -> replay during sleep (CCQ pipeline)
-  -> Neocortex (ccq_consolidated_blocks with full-precision gist)
-
 Hard rules:
   - Already-consolidated facts NEVER re-consolidated (HR-01)
   - Minimum cluster size 3 (HR-02)
@@ -28,14 +22,6 @@ Hard rules:
   - PolarQuant optional (HR-10)
   - Audit trail mandatory (HR-11)
 
-References:
-  McClelland et al. (1995). Complementary Learning Systems.
-  SimpleMem (arXiv 2601.02553). Semantic lossless compression.
-  TurboQuant (ICLR 2026). Recursive polar quantization.
-
-Part of Qualixar | Author: Varun Pratap Bhardwaj
-License: AGPL-3.0-or-later
-IP Novelty: 92% (no prior art for retention-gated consolidation + polar quantization)
 """
 
 from __future__ import annotations
@@ -44,17 +30,16 @@ import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Protocol
+from datetime import datetime
+from typing import TYPE_CHECKING, Protocol
 
+from superlocalmemory.encoding.ccq_dates import _parse_date, _temporal_midpoint
 from superlocalmemory.storage.models import _new_id
 
 if TYPE_CHECKING:
     from superlocalmemory.core.config import CCQConfig
     from superlocalmemory.storage.database import DatabaseManager
-
 logger = logging.getLogger(__name__)
-
 
 # ---------------------------------------------------------------------------
 # Protocols
@@ -156,30 +141,8 @@ class _UnionFind:
 # ---------------------------------------------------------------------------
 
 
-def _parse_date(raw: str | None) -> datetime | None:
-    """Parse ISO-8601 dates with multiple format fallbacks."""
-    if not raw:
-        return None
-    for fmt in (
-        "%Y-%m-%dT%H:%M:%S.%f",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d",
-    ):
-        try:
-            return datetime.strptime(raw, fmt)
-        except ValueError:
-            continue
-    return None
-
-
-def _temporal_midpoint(dates: list[datetime]) -> str:
-    """Compute ISO-8601 midpoint of a list of datetimes."""
-    if not dates:
-        return datetime.now(timezone.utc).isoformat()
-    ts = [d.timestamp() for d in dates]
-    mid = sum(ts) / len(ts)
-    return datetime.fromtimestamp(mid).isoformat()
+# _parse_date / _temporal_midpoint live in encoding/ccq_dates.py and are
+# imported at the top of this module (tests import them from here).
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +302,10 @@ class CognitiveConsolidator:
           - Facts above retention threshold
           - Facts already in ccq_consolidated_blocks (HR-01, HR-08)
         """
+        # Only facts the store still believes are consolidated: a fact a
+        # correction retired must never be copied into a fresh, current gist
+        # (the retired rule came back under a new id).
+        current = self._db.current_fact_clause("f")
         rows = self._db.execute(
             """
             SELECT f.fact_id, f.content, f.canonical_entities_json,
@@ -363,6 +330,7 @@ class CognitiveConsolidator:
               -- Exactly the damage this release exists to stop, on a path the
               -- release did not otherwise touch.
               AND COALESCE(f.quarantined, 0) = 0
+              {current}
               AND f.fact_id NOT IN (
                   SELECT je.value
                   FROM ccq_consolidated_blocks ccb,
@@ -371,7 +339,7 @@ class CognitiveConsolidator:
               )
             ORDER BY r.retention_score ASC
             LIMIT ?
-            """,
+            """.replace("{current}", current),
             (
                 profile_id,
                 profile_id,
@@ -491,16 +459,17 @@ class CognitiveConsolidator:
             )
             dated.append((fid, _parse_date(raw)))
 
-        dated.sort(key=lambda t: t[1] or datetime.min)
+        # A fact whose date is unknown cannot be shown to fall inside the
+        # window, so it joins nothing (it used to join whatever
+        # cluster was open, which merged facts months apart).
+        dated = [(fid, dt) for fid, dt in dated if dt is not None]
+        dated.sort(key=lambda t: t[1])
 
         sub_clusters: list[list[str]] = [[]]
         prev_dt: datetime | None = None
         window_seconds = self._config.temporal_window_days * 86400
 
         for fid, dt in dated:
-            if dt is None:
-                sub_clusters[-1].append(fid)
-                continue
             if (
                 prev_dt is not None
                 and (dt - prev_dt).total_seconds() > window_seconds
@@ -695,11 +664,20 @@ class CognitiveConsolidator:
         fact_id: str,
         profile_id: str,
     ) -> tuple[int, int]:
-        """Compress one fact's embedding. Returns (bytes_before, bytes_after).
+        """Measure one source embedding. Returns (bytes_before, bytes_after).
 
-        PolarQuant is optional (HR-10). When unavailable, records the
-        uncompressed byte count so the pipeline can still report metrics.
-        Does NOT write invalid values to embedding_quantization_metadata.
+        This step does NOT quantize, and since 4.1.25 it no longer says it
+        does. It used to import PolarQuantEncoder, never call
+        it, write ``quantization_level='polar2', bit_width=2`` and report an
+        estimated 2-bit size: the stored embedding kept every byte (identical
+        SHA-256), and the fake ``bit_width=2`` made the EAP scheduler — which
+        does real quantization through ``QuantizedStore`` — treat the fact as
+        already compressed and skip it.
+
+        Physical quantization of a consolidated (archived) source belongs to
+        the EAP lifecycle scheduler, which reads the retention zone this
+        pipeline sets. So this measures the float32 payload and reports it
+        unchanged: bytes_after == bytes_before, a compression ratio of 1.0.
         """
         meta = self._db.execute(
             "SELECT vec_rowid, dimension FROM embedding_metadata "
@@ -708,11 +686,7 @@ class CognitiveConsolidator:
         )
         if not meta:
             return (0, 0)
-
-        d = dict(meta[0])
-        dim = d.get("dimension", 768)
-
-        # Check existing quantization status
+        dim = dict(meta[0]).get("dimension", 768)
         eq_meta = self._db.execute(
             "SELECT quantization_level FROM embedding_quantization_metadata "
             "WHERE fact_id = ? AND profile_id = ?",
@@ -721,30 +695,9 @@ class CognitiveConsolidator:
         if eq_meta:
             level = dict(eq_meta[0]).get("quantization_level", "float32")
             if level in ("polar2", "polar4", "deleted"):
-                return (0, 0)  # Already compressed
-
-        bytes_before = dim * 4  # float32
-
-        # Try PolarQuant (Phase B) — optional dependency (HR-10)
-        try:
-            from superlocalmemory.math.polar_quant import PolarQuantEncoder
-            # Phase B exists. Mark as polar2 for the scheduler to actually
-            # perform the quantization with the raw embedding data.
-            self._db.execute(
-                "INSERT OR REPLACE INTO embedding_quantization_metadata "
-                "(fact_id, profile_id, quantization_level, bit_width) "
-                "VALUES (?, ?, 'polar2', 2)",
-                (fact_id, profile_id),
-            )
-            # Estimated compressed size: radius(4 bytes) + packed angles
-            bytes_after = 4 + (dim * self._config.target_bit_width + 7) // 8
-            return (bytes_before, bytes_after)
-        except ImportError:
-            pass
-
-        # PolarQuant not available: no compression, no metadata change.
-        # The bytes are uncompressed but we track them for metrics.
-        return (bytes_before, bytes_before)
+                return (0, 0)  # quantized by EAP already; nothing to measure
+        bytes_now = int(dim) * 4  # float32, as stored
+        return (bytes_now, bytes_now)
 
     # ------------------------------------------------------------------
     # Step 5: Store block + archive source facts
@@ -756,93 +709,25 @@ class CognitiveConsolidator:
         gist: GistResult,
         profile_id: str,
     ) -> str:
-        """Create CCQ consolidated block and archive source facts.
+        """Atomically persist the replacement before soft-archiving its sources."""
+        from superlocalmemory.encoding.gist_store import store_block
+        return store_block(self._db, self._embedder, cluster, gist, profile_id, _new_id,
+                           lambda ids: self._still_current_confidence(ids, profile_id))
 
-        Source facts are SOFT-ARCHIVED (HR-04), never deleted.
-        Gist embedding stored at float32 (HR-05).
-
-        Ordering guarantee: the gist replacement is committed as a live
-        atomic fact BEFORE source facts are archived.  This ensures there
-        is never a window where neither the sources nor the replacement
-        are recallable.
-        """
-        block_id = _new_id()
-
-        # Generate gist embedding BEFORE the transaction.  Embedding generation
-        # is a pure CPU/ML computation with no DB side effects; running it outside
-        # the transaction avoids holding a write lock during a potentially slow
-        # model forward pass.  If generation fails, we abort before any write.
-        # Note: gist_embedding_rowid is currently always None because vec0
-        # insertion requires VectorStore integration (future work).  When that
-        # integration lands, the rowid write must move INSIDE the transaction
-        # below so a rollback removes the embedding row together with the block.
-        gist_embedding_rowid: int | None = None
-        if self._embedder is not None:
-            try:
-                self._embedder.encode(gist.gist_text)
-            except Exception as exc:
-                logger.warning("Gist embedding generation failed: %s", exc)
-
-        from superlocalmemory.storage.models import AtomicFact, MemoryRecord
-        from superlocalmemory.core.lifecycle_state import set_fact_lifecycle_zone
-
-        # All four writes are wrapped in a single transaction so a mid-write
-        # failure (e.g. store_ccq_block raising) cannot leave an orphan gist
-        # AtomicFact with no corresponding ccq_consolidated_blocks row.
-        # set_fact_lifecycle_zone is transaction-aware and reuses the active
-        # connection rather than opening a nested one.
-        with self._db.transaction():
-            # --- Store replacement fact FIRST (ordering guarantee) ---
-            # The gist is persisted as a live atomic fact so it is immediately
-            # recallable.  Source archival happens only after this write lands.
-            self._db.store_memory(
-                MemoryRecord(
-                    memory_id=block_id,
-                    profile_id=profile_id,
-                    content=gist.gist_text,
-                    session_id="ccq",
-                )
-            )
-            self._db.store_fact(
-                AtomicFact(
-                    memory_id=block_id,
-                    profile_id=profile_id,
-                    content=gist.gist_text,
-                    canonical_entities=list(gist.key_entities),
-                    importance=0.8,
-                    confidence=1.0,
-                    session_id="ccq",
-                )
-            )
-
-            # Store the consolidated block — must follow the gist fact INSERT so
-            # the step-1 identify filter (NOT IN ccq_consolidated_blocks) sees the
-            # correct state on any immediate re-run.
-            self._db.store_ccq_block(
-                block_id=block_id,
-                profile_id=profile_id,
-                content=gist.gist_text,
-                source_fact_ids=json.dumps(list(cluster.fact_ids)),
-                gist_embedding_rowid=gist_embedding_rowid,
-                char_count=len(gist.gist_text),
-                cluster_id=cluster.cluster_id,
-            )
-
-            # Archive source facts AFTER replacement is committed (HR-04: soft-archive, never delete)
-            set_fact_lifecycle_zone(
-                self._db, cluster.fact_ids, "archive", profile_id=profile_id,
-            )
-            for fact_id in cluster.fact_ids:
-                # Log access event
-                self._db.execute(
-                    "INSERT INTO fact_access_log "
-                    "(log_id, fact_id, profile_id, accessed_at, "
-                    " access_type, session_id) "
-                    "VALUES (?, ?, ?, datetime('now'), 'consolidation', 'ccq')",
-                    (_new_id(), fact_id, profile_id),
-                )
-
-        return block_id
+    def _still_current_confidence(self, fact_ids: tuple[str, ...],
+                                  profile_id: str) -> float:
+        """Min confidence of the sources; raises if any is no longer current."""
+        marks = ",".join("?" for _ in fact_ids)
+        rows = self._db.execute(
+            f"SELECT confidence FROM atomic_facts f WHERE f.profile_id = ? "
+            f"AND f.fact_id IN ({marks}){self._db.current_fact_clause('f')}",
+            (profile_id, *fact_ids),
+        )
+        if len(rows or []) != len(fact_ids):
+            raise RuntimeError(
+                "a source was retired or removed after selection; "
+                "cluster abandoned")
+        return min(float(dict(r).get("confidence") or 0.0) for r in rows)
 
     # ------------------------------------------------------------------
     # Step 6: Audit trail

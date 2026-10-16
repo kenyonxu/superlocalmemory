@@ -341,7 +341,7 @@ def _demote_tier(
 # Thread-safe. Flushed to SQLite every _ACCESS_FLUSH_THRESHOLD records
 # or _ACCESS_FLUSH_SECONDS, whichever comes first.
 import threading as _threading
-from datetime import datetime as _datetime, timedelta as _timedelta
+from datetime import datetime as _datetime
 
 _pending_accesses: dict[str, int] = {}
 _access_lock = _threading.Lock()

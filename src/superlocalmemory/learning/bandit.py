@@ -9,7 +9,9 @@ Schema: ``bandit_arms`` + ``bandit_plays`` live in ``learning.db``, created by
 LLD-07 M005. This module NEVER defines DDL — it only READs / WRITEs.
 
 Hard rules:
-  - B1: ``secrets.SystemRandom`` used for Beta sampling (NOT ``random``).
+  - B1: the Beta draw is keyed by an install secret (``bandit_draw``):
+    unpredictable without it, and one question over one posterior is one arm
+    (4.1.20 — a fresh system-random draw reordered identical recalls).
   - B2: α, β clamped at ``SLM_BANDIT_ALPHA_CAP`` (default 1000).
   - B4: stratum cardinality == 48 (4 query_types × 3 entity bins × 4 buckets).
   - B5: cache invalidated on every successful ``update``.
@@ -26,7 +28,6 @@ from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_
 import json
 import logging
 import os
-import secrets
 import sqlite3
 import threading
 from dataclasses import dataclass, field
@@ -36,6 +37,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from superlocalmemory.learning.arm_catalog import ARM_CATALOG
+from superlocalmemory.learning.bandit_draw import draw_rng
 from superlocalmemory.learning.bandit_cache import (
     _BanditCache,
     get_shared_cache,
@@ -49,6 +51,12 @@ logger = logging.getLogger(__name__)
 _SHOWN_FACT_LIMIT = 5
 
 _FALLBACK_ARM_ID = "fallback_default"
+
+#: Marks a play whose shown order was replaced after the arm chose it (the
+#: opt-in hosted reorder). Written to ``settlement_type`` while the play is
+#: open; ``update`` then settles the play but leaves the arm's posterior alone,
+#: because the outcome describes an order the arm did not produce.
+ORDER_REPLACED = "order_replaced"
 
 _DEFAULT_ALPHA_CAP = float(os.environ.get("SLM_BANDIT_ALPHA_CAP", "1000.0"))
 
@@ -170,14 +178,20 @@ def _conn_for(db_path: Path) -> sqlite3.Connection:
             pass
     conn = sqlite3.connect(path_str, timeout=10.0, isolation_level=None)
     try:
-        apply_journal_mode(conn)
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-    except sqlite3.Error:  # pragma: no cover — best-effort
-        pass
-    conn.row_factory = sqlite3.Row
-    _holder.conn = conn
-    _holder.path = path_str
+        try:
+            apply_journal_mode(conn)
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+        except sqlite3.Error:  # pragma: no cover — best-effort
+            pass
+        conn.row_factory = sqlite3.Row
+        _holder.conn = conn
+        _holder.path = path_str
+    except BaseException:
+        # Setup failed: close it now, or the file stays open (Windows
+        # then cannot delete or replace it) for as long as the error lives.
+        conn.close()
+        raise
     return conn
 
 
@@ -200,6 +214,24 @@ def close_threadlocal_conn() -> None:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _clamp_reward(reward: Any) -> float | None:
+    """Reward clamped to [0, 1]; None when it is not a number."""
+    try:
+        value = float(reward)
+    except (TypeError, ValueError):
+        return None
+    return min(1.0, max(0.0, value))
+
+
+def _positive_weight(weight: Any) -> float:
+    """A usable IPS weight: non-positive or non-numeric becomes 1.0."""
+    try:
+        value = float(weight)
+    except (TypeError, ValueError):
+        return 1.0
+    return value if value > 0.0 else 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -229,8 +261,6 @@ class ContextualBandit:
         self._catalog = catalog or ARM_CATALOG
         self._cache = cache or get_shared_cache()
         self._alpha_cap = float(alpha_cap)
-        # Fresh SystemRandom per instance; cheap, seeded from os.urandom.
-        self._rng = secrets.SystemRandom()
 
     # ------------------------------------------------------------------
     # choose
@@ -240,8 +270,15 @@ class ContextualBandit:
         self,
         context: dict[str, Any],
         query_id: str,
+        *,
+        draw_key: str | None = None,
     ) -> BanditChoice:
         """Sample one arm under the context stratum; record play row.
+
+        ``draw_key`` is the question. The draw is keyed by it and the stratum's
+        posterior, so asking the same thing twice picks the same arm until a
+        settled reward changes what the bandit knows. Without one, the opaque
+        ``query_id`` keys the draw. The question is never stored (B6).
 
         Never raises. On DB error, returns a fallback_default choice with
         ``play_id=None`` and logs at WARN level (no PII).
@@ -258,7 +295,8 @@ class ContextualBandit:
             )
             posteriors = {}
 
-        arm_id = self._sample_best(posteriors)
+        key = draw_key if draw_key is not None else query_id
+        arm_id = self._sample_best(posteriors, stratum, key)
         play_id = self._insert_play(query_id, stratum, arm_id)
         return BanditChoice(
             stratum=stratum,
@@ -267,8 +305,15 @@ class ContextualBandit:
             play_id=play_id,
         )
 
-    def choose_readonly(self, context: dict[str, Any]) -> BanditChoice:
+    def choose_readonly(
+        self,
+        context: dict[str, Any],
+        *,
+        draw_key: str | None = None,
+    ) -> BanditChoice:
         """Sample an arm from a read-only snapshot without recording a play.
+
+        ``draw_key`` keys the draw exactly as in :meth:`choose`.
 
         Recall uses this method so the established bandit weighting and
         ensemble quality path remain available without turning a query into a
@@ -286,7 +331,7 @@ class ContextualBandit:
                 exc,
             )
             posteriors = {}
-        arm_id = self._sample_best(posteriors)
+        arm_id = self._sample_best(posteriors, stratum, draw_key or "")
         return BanditChoice(
             stratum=stratum,
             arm_id=arm_id,
@@ -297,9 +342,15 @@ class ContextualBandit:
     def _sample_best(
         self,
         posteriors: dict[str, tuple[float, float]],
+        stratum: str,
+        draw_key: str,
     ) -> str:
-        """Draw one Beta sample per arm, return argmax."""
-        rng = self._rng  # B1: secrets.SystemRandom
+        """Draw one Beta sample per arm, return argmax.
+
+        B1: the generator is keyed (``bandit_draw.draw_rng``), so the same
+        question over the same posterior always yields the same arm.
+        """
+        rng = draw_rng(self._profile, stratum, draw_key, posteriors)
         best_arm = _FALLBACK_ARM_ID
         best_sample = float("-inf")
         for arm_id in self._catalog:
@@ -328,107 +379,145 @@ class ContextualBandit:
         reward: float,
         kind: str = "proxy_position",
         weight: float = 1.0,
+        *,
+        outcome_id: str | None = None,
     ) -> bool:
         """Apply the reward to the (profile, stratum, arm) posterior.
 
-        ``weight`` scales how much this one observation counts, and exists for
-        inverse-propensity correction: the policy chose what was shown, so an
-        arm it almost always shows produces weak evidence whatever happens to
-        it, while one it rarely shows produces strong evidence. Weighting by
-        the inverse of that probability is what keeps the posterior from
-        recording popularity the policy manufactured. See ``propensity.py``.
-
-        A weight of 1.0 is the uncorrected update and the default, so a caller
-        with no competitor posteriors to estimate against changes nothing.
-
-        Returns True on success. Never raises — DB failures logged at WARN.
-        Cache invalidated on success (B5).
+        ``weight``: inverse-propensity scale (``propensity.py``); 1.0 = plain.
+        ``outcome_id``: the reported outcome spent on this play, written in the
+        SAME transaction as the posterior change under a unique index (M055),
+        so one outcome settles one play across passes, restarts and concurrent
+        settlers; a second claim is refused and nothing moves.
+        Returns True on success. Never raises. Cache invalidated (B5).
         """
-        try:
-            reward_f = float(reward)
-        except (TypeError, ValueError):
+        reward_f = _clamp_reward(reward)
+        if reward_f is None:
             logger.warning("bandit.update: non-numeric reward, ignoring")
             return False
-        # Clamp reward ∈ [0, 1].
-        if reward_f < 0.0:
-            reward_f = 0.0
-        elif reward_f > 1.0:
-            reward_f = 1.0
-
-        try:
-            weight_f = float(weight)
-        except (TypeError, ValueError):
-            weight_f = 1.0
-        # A non-positive weight would either freeze the arm or subtract
-        # evidence; neither is a meaningful observation.
-        if weight_f <= 0.0:
-            weight_f = 1.0
-
+        weight_f = _positive_weight(weight)
         try:
             conn = _conn_for(self._db_path)
         except sqlite3.Error as exc:  # pragma: no cover — defensive
             logger.warning("bandit.update: cannot open db: %s", exc)
             return False
-
         try:
-            row = conn.execute(
-                "SELECT profile_id, stratum, arm_id, settled_at "
-                "FROM bandit_plays WHERE play_id = ?",
-                (int(play_id),),
-            ).fetchone()
-        except sqlite3.Error as exc:
-            logger.warning("bandit.update: lookup failed: %s", exc)
+            touched = self._transact(conn, int(play_id), reward_f, kind,
+                                     weight_f, outcome_id)
+        except sqlite3.IntegrityError:
+            logger.info("bandit.update: outcome %s already spent", outcome_id)
             return False
-
-        if row is None:
-            logger.warning("bandit.update: play_id %s not found", play_id)
+        except sqlite3.OperationalError as exc:
+            if outcome_id and "outcome_id" in str(exc):
+                # A store M055 has not reached: settle without the durable
+                # spend record rather than not at all, and say so.
+                logger.warning("bandit.update: no outcome ledger (M055 "
+                               "pending); spend is not durable")
+                return self.update(play_id, reward_f, kind, weight_f)
+            logger.warning("bandit.update: write failed: %s", exc)
             return False
-        if row["settled_at"] is not None:
-            # Idempotent no-op: already settled.
-            return False
-
-        profile_id = row["profile_id"]
-        stratum = row["stratum"]
-        arm_id = row["arm_id"]
-        now = _now_iso()
-        cap = self._alpha_cap
-
-        try:
-            # Ensure an arm row exists with prior (1,1). INSERT OR IGNORE is
-            # cheap — PK composite guarantees uniqueness.
-            conn.execute(
-                "INSERT OR IGNORE INTO bandit_arms "
-                "(profile_id, stratum, arm_id, alpha, beta, plays, "
-                " last_played_at) VALUES (?, ?, ?, 1.0, 1.0, 0, ?)",
-                (profile_id, stratum, arm_id, now),
-            )
-            # B2: MIN(cap, value) clamp.
-            conn.execute(
-                "UPDATE bandit_arms "
-                "SET alpha = MIN(?, alpha + ?), "
-                "    beta  = MIN(?, beta  + ?), "
-                "    plays = plays + 1, "
-                "    last_played_at = ? "
-                "WHERE profile_id = ? AND stratum = ? AND arm_id = ?",
-                (cap, weight_f * reward_f, cap, weight_f * (1.0 - reward_f),
-                 now, profile_id, stratum, arm_id),
-            )
-            conn.execute(
-                "UPDATE bandit_plays "
-                "SET reward = ?, settled_at = ?, settlement_type = ? "
-                "WHERE play_id = ?",
-                (reward_f, now, str(kind), int(play_id)),
-            )
         except sqlite3.Error as exc:
             logger.warning("bandit.update: write failed: %s", exc)
             return False
-
-        # B5: invalidate the (profile, stratum) cache entry.
-        try:
-            self._cache.invalidate(profile_id, stratum)
-        except Exception:  # pragma: no cover — defensive
-            pass
+        if touched is None:
+            return False
+        if touched:
+            try:
+                self._cache.invalidate(*touched)
+            except Exception:  # pragma: no cover — defensive
+                pass
         return True
+
+    def _transact(self, conn: sqlite3.Connection, play_id: int,
+                  reward_f: float, kind: str, weight_f: float,
+                  outcome_id: str | None):
+        """``_apply_update`` inside BEGIN IMMEDIATE; rolls back on any error."""
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            touched = self._apply_update(conn, play_id, reward_f, kind,
+                                         weight_f, outcome_id)
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+        return touched
+
+    def _apply_update(
+        self, conn: sqlite3.Connection, play_id: int, reward_f: float,
+        kind: str, weight_f: float, outcome_id: str | None,
+    ) -> tuple[str, str] | tuple[()] | None:
+        """The writes of one settlement, inside the caller's transaction.
+
+        Returns ``None`` when nothing was settled, ``()`` when the play closed
+        without touching an arm, else the (profile, stratum) to invalidate.
+        """
+        row = conn.execute(
+            "SELECT profile_id, stratum, arm_id, settled_at, settlement_type "
+            "FROM bandit_plays WHERE play_id = ?", (play_id,),
+        ).fetchone()
+        if row is None:
+            logger.warning("bandit.update: play_id %s not found", play_id)
+            return None
+        if row["settled_at"] is not None:
+            return None  # idempotent no-op: already settled
+        now = _now_iso()
+        if row["settlement_type"] == ORDER_REPLACED:
+            kind = f"{kind}:{ORDER_REPLACED}"
+        else:
+            self._bump_arm(conn, row, reward_f, weight_f, now)
+        if outcome_id:
+            conn.execute(
+                "UPDATE bandit_plays SET reward = ?, settled_at = ?, "
+                "settlement_type = ?, outcome_id = ? WHERE play_id = ?",
+                (reward_f, now, str(kind), str(outcome_id), play_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE bandit_plays SET reward = ?, settled_at = ?, "
+                "settlement_type = ? WHERE play_id = ?",
+                (reward_f, now, str(kind), play_id),
+            )
+        if row["settlement_type"] == ORDER_REPLACED:
+            return ()
+        return (row["profile_id"], row["stratum"])
+
+    def _bump_arm(self, conn: sqlite3.Connection, row: sqlite3.Row,
+                  reward_f: float, weight_f: float, now: str) -> None:
+        """Fold one weighted reward into the play's arm (B2: capped)."""
+        cap = self._alpha_cap
+        conn.execute(
+            "INSERT OR IGNORE INTO bandit_arms "
+            "(profile_id, stratum, arm_id, alpha, beta, plays, "
+            " last_played_at) VALUES (?, ?, ?, 1.0, 1.0, 0, ?)",
+            (row["profile_id"], row["stratum"], row["arm_id"], now),
+        )
+        conn.execute(
+            "UPDATE bandit_arms SET alpha = MIN(?, alpha + ?), "
+            "beta = MIN(?, beta + ?), plays = plays + 1, last_played_at = ? "
+            "WHERE profile_id = ? AND stratum = ? AND arm_id = ?",
+            (cap, weight_f * reward_f, cap, weight_f * (1.0 - reward_f),
+             now, row["profile_id"], row["stratum"], row["arm_id"]),
+        )
+
+    def mark_order_replaced(self, play_id: int) -> bool:
+        """Say that what this play showed first was not the arm's order.
+
+        Only an open play can be marked; a settled one is history. Best-effort,
+        like ``record_shown``: a failure means the arm is credited as before.
+        """
+        if not play_id:
+            return False
+        try:
+            conn = _conn_for(self._db_path)
+            cur = conn.execute(
+                "UPDATE bandit_plays SET settlement_type = ? "
+                "WHERE play_id = ? AND settled_at IS NULL",
+                (ORDER_REPLACED, int(play_id)),
+            )
+            return bool(cur.rowcount)
+        except sqlite3.Error as exc:
+            logger.debug("bandit.mark_order_replaced: %s", exc)
+            return False
 
     def record_shown(self, play_id: int, fact_ids: Sequence[str]) -> bool:
         """Record which memories this play surfaced, for later settlement.
@@ -646,6 +735,7 @@ def retention_sweep(
 
 
 __all__ = (
+    "ORDER_REPLACED",
     "BanditChoice",
     "ContextualBandit",
     "close_threadlocal_conn",

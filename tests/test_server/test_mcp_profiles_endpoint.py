@@ -19,11 +19,11 @@ from superlocalmemory.server.unified_daemon import create_app
 _ENDPOINT = "/api/v3/mcp/profiles"
 
 _EXPECTED_COUNTS = {
-    "core": 18,   # v4.1.0: + switch_profile (memory is profile-scoped)
-    "code": 34,   # v4.1.0: + the two usefulness reports the ranker reads
-    "full": 50,   # v4.0.5: everyday memory, Brain, optimize, and mesh
-    "power": 62,  # v4.0.5: full plus governance/lifecycle diagnostics
-    "mesh": 8,
+    "core": 19,   # v4.1.0: + switch_profile; 4.1.25: + expand (layered recall)
+    "code": 39,   # 4.1.19 WP8: + memory-kind management; 4.1.25: + expand
+    "full": 58,   # 4.1.21: + saved views; 4.1.25: + expand
+    "power": 70,  # + saved views and expand, via full
+    "mesh": 9,
 }
 
 
@@ -141,12 +141,17 @@ def test_mcp_profiles_descriptions_present(trusted_client, monkeypatch):
 # Current profile resolution
 # ---------------------------------------------------------------------------
 
-def test_mcp_profiles_current_defaults_to_core(trusted_client, monkeypatch):
-    """When SLM_MCP_PROFILE is unset, current must be 'core'."""
+def test_mcp_profiles_current_defaults_to_full(trusted_client, monkeypatch):
+    """When SLM_MCP_PROFILE is unset, the MCP server falls back to
+    `_ESSENTIAL_TOOLS`, which `tests/test_mcp/test_mcp_exposure_contract.py`
+    asserts is exactly the `full` profile (58 tools) — not `core` (19). The
+    dashboard used to claim 'core' here, understating the real no-profile
+    surface by 36 tools (L3-05).
+    """
     monkeypatch.delenv("SLM_MCP_PROFILE", raising=False)
     data = trusted_client.get(_ENDPOINT).json()
-    assert data["current"] == "core", (
-        f"expected 'core' for unset SLM_MCP_PROFILE, got {data['current']!r}"
+    assert data["current"] == "full", (
+        f"expected 'full' for unset SLM_MCP_PROFILE (the real default), got {data['current']!r}"
     )
 
 

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Generator
 
 import pytest
 
@@ -41,6 +40,7 @@ from fastapi.testclient import TestClient
 
 def _make_app(monkeypatch, tmp_path: Path) -> TestClient:
     """Create a TestClient wired to config_api.router with MEMORY_DIR mocked."""
+    monkeypatch.delenv("SLM_DAEMON_PORT", raising=False)
     # Import lazily so monkeypatch fires first
     monkeypatch.setattr(
         "superlocalmemory.server.routes.config_api.MEMORY_DIR", tmp_path
@@ -68,12 +68,12 @@ def _read_config(tmp_path: Path) -> dict:
     p = tmp_path / "config.json"
     if not p.exists():
         return {}
-    return json.loads(p.read_text())
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
 def _write_config(tmp_path: Path, data: dict) -> None:
     p = tmp_path / "config.json"
-    p.write_text(json.dumps(data, indent=2))
+    p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

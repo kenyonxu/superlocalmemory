@@ -11,7 +11,6 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 from superlocalmemory.optimize.adapters._agent_registry import AGENT_REGISTRY
 from superlocalmemory.optimize.proxy.lifecycle import ensure_proxy_running, proxy_port

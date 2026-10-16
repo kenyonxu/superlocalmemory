@@ -15,7 +15,6 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -26,7 +25,6 @@ from superlocalmemory.storage import schema as real_schema
 from superlocalmemory.storage.database import DatabaseManager
 from superlocalmemory.storage.models import (
     AtomicFact,
-    CanonicalEntity,
     MemoryRecord,
     TemporalEvent,
 )

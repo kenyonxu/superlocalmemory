@@ -57,6 +57,10 @@ def test_every_exp_reachable_from_run_all():
     # scrutiny: the paper may only cite one of these alongside the stated
     # precondition under which it was produced.
     _MANUAL_RUN = {
+        "recall_channels.py": (
+            "a developer profiler (cProfile + SQL plans) over a synthetic store; "
+            "its output is diagnostic, never a paper result"
+        ),
         "bench_perf.py": (
             "requires a retained ~1 GB real memory-store database (--db); "
             "cannot run in a fresh-temp-store bundle"

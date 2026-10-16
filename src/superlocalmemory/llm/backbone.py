@@ -4,7 +4,8 @@
 
 """LLM backbone — unified interface for LLM providers.
 
-Supports OpenAI, Anthropic, Azure OpenAI, and Ollama via raw HTTP (httpx).
+Supports OpenAI, Anthropic, Azure OpenAI, and Ollama via raw HTTP (httpx),
+sent through the outbound gate (``core.outbound_http``).
 Falls back gracefully when no API key is configured — Mode A still works.
 
 Providers:
@@ -29,6 +30,8 @@ from typing import Any
 import httpx
 
 from superlocalmemory.core.config import LLMConfig
+from superlocalmemory.core import outbound_http
+from superlocalmemory.core.outbound_redaction import for_endpoint, is_local_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +86,28 @@ class LLMResponse:
 # Main class
 # ---------------------------------------------------------------------------
 
+#: Longest a background generation waits for recalls to finish before it goes
+#: ahead anyway, so steady recall load can never park extraction for good.
+LLM_YIELD_MAX_S = 20.0
+
+
+def _yield_to_recall() -> None:
+    """Background generation (Mode B extraction, summaries) waits while a recall runs.
+
+    A local model serves one request at a time; a background prompt that takes
+    the model first makes every recall behind it wait for a whole generation.
+    Foreground calls (a recall's own answer check) never wait here.
+    """
+    from superlocalmemory.core import recall_gate
+
+    if not recall_gate.is_background_work() or recall_gate.in_flight() == 0:
+        return
+    import time as _time
+
+    with recall_gate.idle_wait_deadline(_time.monotonic() + LLM_YIELD_MAX_S):
+        recall_gate.wait_for_foreground_idle()
+
+
 class LLMBackbone:
     """Unified LLM interface driven by LLMConfig.
 
@@ -111,7 +136,8 @@ class LLMBackbone:
             host = config.api_base or os.environ.get(
                 "OLLAMA_HOST", _OLLAMA_DEFAULT_BASE,
             )
-            self._base_url = f"{host.rstrip('/')}/api/chat"
+            self._ollama_host = host.rstrip("/")
+            self._base_url = f"{self._ollama_host}/api/chat"
         elif self._provider == "openrouter":
             self._api_key = self._resolve_api_key(config)
             self._base_url = config.api_base or _OPENROUTER_URL
@@ -134,15 +160,24 @@ class LLMBackbone:
     def is_available(self) -> bool:
         """True when the provider is ready for requests.
 
-        For Ollama: always True (no API key needed). The num_ctx and
-        keep_alive guards in _build_ollama() protect against memory spikes.
-        The recall-path warm-only guard lives in Summarizer, not here —
-        store/fact-extraction should always use the LLM in Mode B.
+        For Ollama: no API key is ever needed, but that is not the same
+        question as whether anything is actually listening at the
+        configured host. 4.1.22: a saved Mode B with no Ollama running (or
+        one that has since stopped) reported available forever, so Mode B
+        never degraded to Mode A the way every caller of this method
+        already expects to for every other unavailable provider. The
+        reachability check itself is bounded and cached (see
+        ``ollama_reachability``), so this stays cheap on the hot,
+        once-per-fact paths that call it. The num_ctx and keep_alive guards
+        in _build_ollama() protect against memory spikes once a request is
+        actually sent.
         """
         if not self._provider:
             return False
         if self._provider == "ollama":
-            return True
+            from superlocalmemory.llm.ollama_reachability import ollama_reachable
+
+            return ollama_reachable(self._ollama_host)
         # v3.6.12 (modeb-1): a custom local OpenAI-compatible endpoint
         # (llama.cpp, LM Studio, vLLM) needs NO API key — _build_openai already
         # omits the Authorization header when the key is empty. Treat a
@@ -168,6 +203,8 @@ class LLMBackbone:
         temperature: float | None = None,
         max_tokens: int | None = None,
         think: bool | None = None,
+        *,
+        attempts: int | None = None,
     ) -> str:
         """Send prompt to the LLM and return generated text.
 
@@ -179,6 +216,10 @@ class LLMBackbone:
         sends ``think: false`` (content-only answers from thinking
         models); ``None``/``True`` omit the key and keep model defaults.
         ``True`` is never sent: non-thinking models reject it.
+
+        ``attempts`` caps the tries (default three, with backoff). A caller on
+        a write path that has its own fallback passes 1, so a provider that is
+        down costs one failed request, not seconds of retries.
         """
         if not self.is_available():
             raise LLMUnavailableError(
@@ -186,13 +227,21 @@ class LLMBackbone:
                 f"Set {_ENV_KEYS.get(self._provider, 'API_KEY')} or pass api_key=."
             )
 
+        _yield_to_recall()
         temp = temperature if temperature is not None else self._default_temperature
         tokens = max_tokens if max_tokens is not None else self._default_max_tokens
         url, headers, payload = self._build_request(prompt, system, tokens, temp, think)
+        if not is_local_endpoint(url):
+            # Memories keep their credentials; a model on another machine
+            # never receives them. Decided on the final URL, for every provider.
+            url, headers, payload = self._build_request(
+                for_endpoint(prompt, url), for_endpoint(system, url), tokens, temp, think,
+            )
 
         last_error: Exception | None = None
         think_downgraded = False
-        for attempt in range(_MAX_RETRIES):
+        tries = _MAX_RETRIES if attempts is None else max(1, int(attempts))
+        for attempt in range(tries):
             try:
                 response = self._send(url, headers, payload)
                 return self._extract_text(response)
@@ -222,18 +271,23 @@ class LLMBackbone:
             except (httpx.TimeoutException, httpx.ConnectError, ValueError) as exc:
                 last_error = exc
 
-            if attempt < _MAX_RETRIES - 1:
+            if attempt < tries - 1:
                 delay = _RETRY_BASE_DELAY * (2 ** attempt)
-                logger.info("Retry %d/%d after %.1fs", attempt + 1, _MAX_RETRIES, delay)
+                logger.info("Retry %d/%d after %.1fs", attempt + 1, tries, delay)
                 time.sleep(delay)
 
-        logger.error("All %d retries exhausted: %s", _MAX_RETRIES, last_error)
+        logger.error("All %d retries exhausted: %s", tries, last_error)
         return ""
 
     # -- HTTP transport -----------------------------------------------------
 
     def _send(self, url: str, headers: dict, payload: dict) -> dict:
-        """Execute HTTP POST with socket-level SSL backstop."""
+        """Execute HTTP POST with socket-level SSL backstop.
+
+        Through ``core.outbound_http``: the body is screened again on the
+        final URL, a local model is never reached through a proxy, and a
+        redirect is never followed.
+        """
         old_default = socket.getdefaulttimeout()
         socket.setdefaulttimeout(self._timeout + 30)
         try:
@@ -243,17 +297,17 @@ class LLMBackbone:
                 write=10.0,
                 pool=10.0,
             )
-            with httpx.Client(timeout=timeout) as client:
-                resp = client.post(url, headers=headers, json=payload)
-                resp.raise_for_status()
-                try:
-                    return resp.json()
-                except Exception as exc:
-                    raise ValueError(
-                        f"LLM endpoint returned HTTP {resp.status_code} with "
-                        f"non-JSON body (Content-Length="
-                        f"{resp.headers.get('content-length', '?')}): {exc}"
-                    ) from exc
+            resp = outbound_http.post_json(url, payload, headers=headers,
+                                           timeout=timeout)
+            resp.raise_for_status()
+            try:
+                return resp.json()
+            except Exception as exc:
+                raise ValueError(
+                    f"LLM endpoint returned HTTP {resp.status_code} with "
+                    f"non-JSON body (Content-Length="
+                    f"{resp.headers.get('content-length', '?')}): {exc}"
+                ) from exc
         finally:
             socket.setdefaulttimeout(old_default)
 

@@ -13,10 +13,8 @@ TDD RED suite. Tests for:
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from superlocalmemory.core.block_hygiene import (
     dedupe_block_content,

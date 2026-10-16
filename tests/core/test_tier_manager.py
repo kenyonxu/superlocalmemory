@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import pytest
 import sqlite3
-from datetime import datetime, timedelta, UTC
 from unittest.mock import MagicMock, patch
 
 from superlocalmemory.core.tier_manager import (
@@ -19,8 +18,6 @@ from superlocalmemory.core.tier_manager import (
     unpin_fact,
     get_tier_stats,
     record_access_batch,
-    reset_access_count_30d,
-    set_backends,
     WARM_AFTER_DAYS,
     COLD_AFTER_DAYS,
     ARCHIVE_AFTER_DAYS,

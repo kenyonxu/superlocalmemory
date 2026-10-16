@@ -2,7 +2,10 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
-"""Sheaf cohomology for contradiction detection at ENCODING time.
+"""Experimental pairwise sheaf residuals with factual-conflict admission.
+
+This computes local residuals, not first cohomology. A residual is reported
+as a contradiction only after explicit subject/attribute incompatibility.
 
 V1 applied sheaf at RECALL (HARMFUL — penalized diverse multi-hop results).
 V2 runs at ENCODING ONLY, checking new facts against graph-connected facts.
@@ -107,7 +110,7 @@ def coboundary_norm(
 
 
 class SheafConsistencyChecker:
-    """Detect contradictions at ENCODING time (not retrieval).
+    """Detect supported conflicts at ENCODING time with a residual score.
 
     V1 differences: uses real graph edges (not all-pairs), non-trivial
     restriction maps, and returns results for the pipeline to act on.
@@ -123,126 +126,71 @@ class SheafConsistencyChecker:
 
     # -- Public API ---------------------------------------------------------
 
-    def check_consistency(
-        self,
-        new_fact: AtomicFact,
-        profile_id: str,
-    ) -> list[ContradictionResult]:
-        """Check new fact against graph-connected existing facts."""
-        if new_fact.embedding is None:
+    def check_consistency(self, new_fact: AtomicFact, profile_id: str) -> list[ContradictionResult]:
+        """Check supported logical conflicts along graph edges; topics abstain."""
+        if not new_fact.embedding or not new_fact.canonical_entities:
             return []
-        if not new_fact.canonical_entities:
-            return []
-
-        emb_a = np.asarray(new_fact.embedding, dtype=np.float64)
-        dim = emb_a.shape[0]
-        if dim == 0:
-            return []
-
-        contradictions: list[ContradictionResult] = []
-        checked_pairs: set[str] = set()
-
-        # Get all graph edges touching this fact
-        edges = self._db.get_edges_for_node(new_fact.fact_id, profile_id)
-
-        for edge in edges:
-            # Determine the OTHER fact in this edge
-            other_id = (
-                edge.target_id
-                if edge.source_id == new_fact.fact_id
-                else edge.source_id
-            )
-
-            # Skip already-checked pairs and skip contradiction/supersedes edges
-            if other_id in checked_pairs:
+        contradictions = []
+        checked = set()
+        for edge in self._db.get_edges_for_node(new_fact.fact_id, profile_id):
+            other_id = edge.target_id if edge.source_id == new_fact.fact_id else edge.source_id
+            if other_id in checked or edge.edge_type.value in ("contradiction", "supersedes"):
                 continue
-            if edge.edge_type.value in ("contradiction", "supersedes"):
+            checked.add(other_id)
+            other = self._db.get_fact(other_id, profile_id)
+            if other is None:
                 continue
-            checked_pairs.add(other_id)
-
-            # Look up the other fact's embedding
-            other_emb = self._get_fact_embedding(other_id)
-            if other_emb is None or other_emb.shape[0] != dim:
-                continue
-
-            # Compute coboundary with edge-type-specific restriction map
-            edge_type_str = edge.edge_type.value
-            R = _restriction_for_edge_type(edge_type_str, dim, emb_a, other_emb)
-            severity = coboundary_norm(emb_a, other_emb, R, R)
-
-            if severity > self._threshold:
-                contradictions.append(ContradictionResult(
-                    fact_id_a=new_fact.fact_id,
-                    fact_id_b=other_id,
-                    severity=min(severity, 1.0),
-                    edge_type=edge_type_str,
-                    description=(
-                        f"Sheaf coboundary {severity:.3f} > {self._threshold:.2f} "
-                        f"along {edge_type_str} edge"
-                    ),
-                ))
-
-        if contradictions:
-            logger.info(
-                "Sheaf: %d contradiction(s) for fact %s",
-                len(contradictions), new_fact.fact_id,
-            )
+            result = self._pair_conflict(new_fact, other, edge.edge_type.value)
+            if result is not None:
+                contradictions.append(result)
         return contradictions
 
-    def detect_contradictions_batch(
-        self,
-        facts: list[AtomicFact],
-        profile_id: str,
-    ) -> list[ContradictionResult]:
-        """Pairwise check within entity groups (for batch imports)."""
-        # Group facts by canonical entity
+    def _pair_conflict(self, left: AtomicFact, right: AtomicFact,
+                       edge_type: str) -> ContradictionResult | None:
+        from superlocalmemory.math.contradiction_evidence import incompatible
+
+        if not isinstance(right.content, str) or not incompatible(left, right):
+            return None
+        if left.embedding is None or right.embedding is None:
+            return None
+        a, b = np.asarray(left.embedding), np.asarray(right.embedding)
+        if a.ndim != 1 or a.shape != b.shape or not a.size:
+            return None
+        restriction = _restriction_for_edge_type(edge_type, a.size, a, b)
+        severity = coboundary_norm(a, b, restriction, restriction)
+        if severity <= self._threshold:
+            return None
+        return ContradictionResult(
+            left.fact_id, right.fact_id, min(severity, 1.0), edge_type,
+            f"Incompatible subject/attribute values; embedding residual {severity:.3f}",
+        )
+
+    def detect_contradictions_batch(self, facts: list[AtomicFact],
+                                    profile_id: str) -> list[ContradictionResult]:
+        """Check explicit incompatible slots within canonical entity groups."""
         entity_groups: dict[str, list[AtomicFact]] = {}
         for fact in facts:
-            if fact.embedding is None:
-                continue
-            for eid in fact.canonical_entities:
-                entity_groups.setdefault(eid, []).append(fact)
-
-        contradictions: list[ContradictionResult] = []
-        checked_pairs: set[tuple[str, str]] = set()
-
-        for _entity_id, group in entity_groups.items():
-            for i in range(len(group)):
-                for j in range(i + 1, len(group)):
-                    fa, fb = group[i], group[j]
-                    pair = (min(fa.fact_id, fb.fact_id), max(fa.fact_id, fb.fact_id))
-                    if pair in checked_pairs:
+            if fact.embedding is not None:
+                for eid in fact.canonical_entities:
+                    entity_groups.setdefault(eid, []).append(fact)
+        contradictions = []
+        checked = set()
+        for group in entity_groups.values():
+            for index, left in enumerate(group):
+                for right in group[index + 1:]:
+                    pair = tuple(sorted((left.fact_id, right.fact_id)))
+                    if pair in checked:
                         continue
-                    checked_pairs.add(pair)
-
-                    emb_a = np.asarray(fa.embedding, dtype=np.float64)
-                    emb_b = np.asarray(fb.embedding, dtype=np.float64)
-                    if emb_a.shape[0] != emb_b.shape[0] or emb_a.shape[0] == 0:
-                        continue
-
-                    dim = emb_a.shape[0]
-                    R = np.eye(dim)
-                    severity = coboundary_norm(emb_a, emb_b, R, R)
-
-                    if severity > self._threshold:
-                        contradictions.append(ContradictionResult(
-                            fact_id_a=fa.fact_id,
-                            fact_id_b=fb.fact_id,
-                            severity=min(severity, 1.0),
-                            edge_type="entity",
-                            description=(
-                                f"Batch sheaf coboundary {severity:.3f} > "
-                                f"{self._threshold:.2f} (shared entity group)"
-                            ),
-                        ))
-
+                    checked.add(pair)
+                    result = self._pair_conflict(left, right, "entity")
+                    if result is not None:
+                        contradictions.append(result)
         return contradictions
 
     # -- Internal -----------------------------------------------------------
 
     def _get_fact_embedding(self, fact_id: str) -> np.ndarray | None:
         """Load a fact's embedding from the database."""
-        import json
         rows = self._db.execute(
             "SELECT embedding FROM atomic_facts WHERE fact_id = ?",
             (fact_id,),

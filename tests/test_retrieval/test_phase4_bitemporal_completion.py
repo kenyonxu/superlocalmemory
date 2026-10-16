@@ -24,7 +24,7 @@ import asyncio
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -490,6 +490,9 @@ class TestRecallTraceHttpWithAsOf:
 
         class _MockRequest:
             app = _MockApp()
+            # 4.1.20: the route checks READ first (personal mode: no RBAC engine).
+            headers: dict = {}
+            cookies: dict = {}
 
             async def json(self_inner):
                 return body

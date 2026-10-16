@@ -47,11 +47,11 @@ def _current() -> VersionIntegrity:
 
 class TestDoctorSurface:
     def _run_doctor_json(self) -> dict:
-        from superlocalmemory.cli import commands
+        from tests.helpers.doctor import run_doctor_report
 
         buf = io.StringIO()
         with patch("sys.stdout", buf):
-            commands.cmd_doctor(Namespace(json=True, fix=False))
+            run_doctor_report(Namespace(json=True, fix=False))
         return json.loads(buf.getvalue())
 
     def _find(self, report: dict, name: str) -> dict | None:

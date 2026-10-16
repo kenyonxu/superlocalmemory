@@ -23,12 +23,8 @@ to schema.py table names in S17.
 
 from __future__ import annotations
 
-import json
-import sqlite3
 import threading
 from pathlib import Path
-from types import ModuleType
-from typing import Any
 
 import pytest
 
@@ -668,6 +664,30 @@ class TestStoreFactIdempotent:
         rows = db.execute(
             "SELECT COUNT(*) AS c FROM atomic_facts WHERE content = ? AND lifecycle != 'archived'",
             (c,),
+        )
+        assert dict(rows[0])["c"] == 1
+
+    def test_dedup_excludes_retired_facts(self, db: DatabaseManager) -> None:
+        # A fact retired by a replacement (system_expired_at set) is dead
+        # history, not the live fact. A later write of the same content —
+        # typically a successor's own enrichment repeating something the
+        # replaced memory already said — must get its own current fact, not
+        # be folded back onto the retired one (L1-10).
+        self._parent(db)
+        c = "retired fact must not dedup-match"
+        id1 = db.store_fact(AtomicFact(fact_id="ret1", memory_id="m0", content=c,
+                                       fact_type=FactType.SEMANTIC))
+        # A plain system invalidation, not a caller replacement — the dedup
+        # exclusion must hold for "any other invalidation" too, not only the
+        # replaces hook's own reason code.
+        db.invalidate_fact_temporal(id1, invalidated_by="succ",
+                                    invalidation_reason="direct_content_correction")
+        id2 = db.store_fact(AtomicFact(fact_id="ret2", memory_id="m0", content=c,
+                                       fact_type=FactType.SEMANTIC))
+        assert id2 == "ret2", "retired fact was wrongly resurrected by dedup"
+        rows = db.execute(
+            "SELECT COUNT(*) AS c FROM atomic_facts WHERE content = ? AND fact_id != ?",
+            (c, id1),
         )
         assert dict(rows[0])["c"] == 1
 

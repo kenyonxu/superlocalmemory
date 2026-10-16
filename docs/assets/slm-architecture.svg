@@ -1,0 +1,207 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1088" width="1600" height="1088" font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
+<title id="t">SuperLocalMemory architecture</title>
+<desc id="d">Agents and web bots reach one SuperLocalMemory service on your computer through MCP, the CLI, the REST API and the dashboard, or optional Web access. Inside, recall runs hybrid channels, fusion and reranking, the answer-support gate with three tiers, the Laya or Jev answer check and layered output; saves pass admission, redaction and enrichment; a living brain runs Memory health, consolidation, learning and bounded loops. SQLite is canonical, with verified LanceDB and CozoDB copies, a picture and document store, the knowledge graph and the audit chain. SLM-Mesh connects local agents and web bots. Governance applies to every call.</desc>
+<defs>
+<marker id="h" viewBox="0 0 10 10" refX="10" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker>
+<marker id="hs" viewBox="0 0 10 10" refX="0" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto"><path d="M10,0 L0,5 L10,10 z" fill="context-stroke"/></marker>
+<linearGradient id="core" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f7f4ff"/><stop offset="1" stop-color="#eee8ff"/></linearGradient>
+<linearGradient id="gate" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fff4dc"/><stop offset="1" stop-color="#ffe9b8"/></linearGradient>
+<filter id="sh" x="-5%" y="-5%" width="110%" height="115%"><feDropShadow dx="0" dy="1.5" stdDeviation="2.5" flood-color="#2a2160" flood-opacity="0.09"/></filter>
+</defs>
+<rect x="0" y="0" width="1600" height="1088" rx="28" fill="#ffffff"/>
+<rect x="1" y="1" width="1598" height="1086" rx="28" fill="none" stroke="#e4e0f5" stroke-width="2"/>
+<text x="48" y="56" font-size="28" font-weight="800" fill="#1f1a4d" text-anchor="start">SuperLocalMemory</text>
+<text x="340" y="56" font-size="20" font-weight="500" fill="#5b5491" text-anchor="start">the governed memory brain for AI agents</text>
+<text x="1552" y="56" font-size="15" font-weight="600" fill="#7a74a8" text-anchor="end">Runs on your computer · Mode A makes no model-provider call</text>
+<rect x="48" y="88" width="1504" height="56" rx="16" fill="#f3ecff" stroke="#c9b5fb" stroke-width="1.5" />
+<text x="72" y="122" font-size="18" font-weight="800" fill="#5b21b6" text-anchor="start">SLM-Mesh</text>
+<text x="172" y="122" font-size="15" font-weight="400" fill="#4c1d95" text-anchor="start">Local agents and web bots talk to each other — messages, waits, locks and shared state, across machines and across the internet. Messages arrive as data, never instructions.</text>
+<text x="180" y="212" font-size="12" font-weight="800" fill="#7a74a8" text-anchor="middle" letter-spacing="1.5">YOUR AGENTS AND BOTS</text>
+<text x="464" y="212" font-size="12" font-weight="800" fill="#7a74a8" text-anchor="middle" letter-spacing="1.5">FOUR DOORS</text>
+<text x="1416" y="212" font-size="12" font-weight="800" fill="#7a74a8" text-anchor="middle" letter-spacing="1.5">ON YOUR DISK</text>
+<path d="M180,144 L180,184" fill="none" stroke="#7c3aed" stroke-width="2" marker-end="url(#h)" marker-start="url(#hs)"/>
+<path d="M928,144 L928,224" fill="none" stroke="#7c3aed" stroke-width="2" marker-end="url(#h)" marker-start="url(#hs)"/>
+<rect x="48" y="224" width="264" height="208" rx="14" fill="#ffffff" stroke="#d9d3f3" stroke-width="1.5" filter="url(#sh)"/>
+<text x="64" y="258" font-size="15" font-weight="700" fill="#1f1a4d" text-anchor="start">Harnesses on your computer</text>
+<text x="64" y="286" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">Claude Code · Codex · Cursor</text>
+<text x="64" y="310" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">GitHub Copilot · Antigravity</text>
+<text x="64" y="334" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">Hermes · Windsurf · Zed · JetBrains</text>
+<text x="64" y="358" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">Gemini CLI · Claude Desktop · more</text>
+<text x="64" y="388" font-size="13" font-weight="700" fill="#6d28d9" text-anchor="start">Any harness that speaks MCP</text>
+<text x="64" y="412" font-size="13" font-weight="700" fill="#6d28d9" text-anchor="start">or can run a command</text>
+<rect x="48" y="448" width="264" height="208" rx="14" fill="#ffffff" stroke="#d9d3f3" stroke-width="1.5" filter="url(#sh)"/>
+<text x="64" y="482" font-size="15" font-weight="700" fill="#1f1a4d" text-anchor="start">Bots on the web</text>
+<text x="64" y="510" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">ChatGPT · Claude on the web</text>
+<text x="64" y="534" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">Grok Bot · Muse · Composio</text>
+<text x="64" y="564" font-size="13" font-weight="700" fill="#6d28d9" text-anchor="start">Only the apps you allow</text>
+<rect x="48" y="672" width="264" height="208" rx="14" fill="#ffffff" stroke="#d9d3f3" stroke-width="1.5" filter="url(#sh)"/>
+<text x="64" y="706" font-size="15" font-weight="700" fill="#1f1a4d" text-anchor="start">Your code</text>
+<text x="64" y="734" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">LangGraph · LangChain · LlamaIndex</text>
+<text x="64" y="758" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">CrewAI · AutoGen · Semantic Kernel</text>
+<text x="64" y="782" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">Google ADK · OpenAI Agents · SDK</text>
+<rect x="352" y="224" width="224" height="152" rx="14" fill="#eeeaff" stroke="#cfc6f6" stroke-width="1.5" filter="url(#sh)"/>
+<text x="368" y="258" font-size="15" font-weight="700" fill="#1f1a4d" text-anchor="start">MCP server</text>
+<text x="368" y="284" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">stdio or HTTP · 110 tools</text>
+<text x="368" y="304" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">profiles from 9 to 110</text>
+<rect x="352" y="392" width="224" height="152" rx="14" fill="#eeeaff" stroke="#cfc6f6" stroke-width="1.5" filter="url(#sh)"/>
+<text x="368" y="426" font-size="15" font-weight="700" fill="#1f1a4d" text-anchor="start">CLI · slm</text>
+<text x="368" y="452" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">remember · recall · enrich</text>
+<text x="368" y="472" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">doctor · gdpr · loop</text>
+<rect x="352" y="560" width="224" height="152" rx="14" fill="#eeeaff" stroke="#cfc6f6" stroke-width="1.5" filter="url(#sh)"/>
+<text x="368" y="594" font-size="15" font-weight="700" fill="#1f1a4d" text-anchor="start">REST + dashboard</text>
+<text x="368" y="620" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">graph · health · answer</text>
+<text x="368" y="640" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">check · governance</text>
+<rect x="352" y="728" width="224" height="152" rx="14" fill="#eeeaff" stroke="#cfc6f6" stroke-width="1.5" filter="url(#sh)"/>
+<text x="368" y="762" font-size="15" font-weight="700" fill="#1f1a4d" text-anchor="start">Web access</text>
+<text x="368" y="788" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">sign-in per app · read or</text>
+<text x="368" y="808" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">save · outbound link, no</text>
+<text x="368" y="828" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">open port · optional</text>
+<path d="M332,300 L332,804" fill="none" stroke="#4c3fb0" stroke-width="2" stroke-linecap="butt"/>
+<path d="M312,328 L332,328" fill="none" stroke="#4c3fb0" stroke-width="2" stroke-linecap="butt"/>
+<circle cx="332" cy="328" r="3.5" fill="#4c3fb0"/>
+<path d="M312,552 L332,552" fill="none" stroke="#4c3fb0" stroke-width="2" stroke-linecap="butt"/>
+<circle cx="332" cy="552" r="3.5" fill="#4c3fb0"/>
+<path d="M312,776 L332,776" fill="none" stroke="#4c3fb0" stroke-width="2" stroke-linecap="butt"/>
+<circle cx="332" cy="776" r="3.5" fill="#4c3fb0"/>
+<path d="M332,300 L352,300" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<path d="M332,468 L352,468" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<path d="M332,636 L352,636" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<path d="M332,804 L352,804" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<path d="M596,300 L596,804" fill="none" stroke="#4c3fb0" stroke-width="2" stroke-linecap="butt"/>
+<path d="M576,300 L596,300" fill="none" stroke="#4c3fb0" stroke-width="2" stroke-linecap="butt"/>
+<circle cx="596" cy="300" r="3.5" fill="#4c3fb0"/>
+<path d="M576,468 L596,468" fill="none" stroke="#4c3fb0" stroke-width="2" stroke-linecap="butt"/>
+<circle cx="596" cy="468" r="3.5" fill="#4c3fb0"/>
+<path d="M576,636 L596,636" fill="none" stroke="#4c3fb0" stroke-width="2" stroke-linecap="butt"/>
+<circle cx="596" cy="636" r="3.5" fill="#4c3fb0"/>
+<path d="M576,804 L596,804" fill="none" stroke="#4c3fb0" stroke-width="2" stroke-linecap="butt"/>
+<circle cx="596" cy="804" r="3.5" fill="#4c3fb0"/>
+<path d="M596,552 L616,552" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<rect x="616" y="224" width="624" height="656" rx="20" fill="url(#core)" stroke="#bfb0f2" stroke-width="2" />
+<text x="640" y="262" font-size="19" font-weight="800" fill="#1f1a4d" text-anchor="start">The SLM service on your computer</text>
+<text x="640" y="284" font-size="13" font-weight="400" fill="#5b5491" text-anchor="start">one process, every agent · governance checked on every call</text>
+<text x="632" y="322" font-size="12" font-weight="800" fill="#4c3fb0" text-anchor="start" letter-spacing="1.5">RECALL</text>
+<rect x="632" y="334" width="130" height="108" rx="14" fill="#ffffff" stroke="#d9d3f3" stroke-width="1.5" filter="url(#sh)"/>
+<text x="644" y="368" font-size="14" font-weight="700" fill="#1f1a4d" text-anchor="start">Hybrid search</text>
+<text x="644" y="388" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">semantic · BM25</text>
+<text x="644" y="403" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">graph · temporal</text>
+<text x="644" y="418" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">Hopfield · spread</text>
+<text x="644" y="433" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">pictures</text>
+<rect x="786" y="334" width="130" height="108" rx="14" fill="#ffffff" stroke="#d9d3f3" stroke-width="1.5" filter="url(#sh)"/>
+<text x="798" y="368" font-size="14" font-weight="700" fill="#1f1a4d" text-anchor="start">Fusion</text>
+<text x="798" y="388" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">rank fusion</text>
+<text x="798" y="403" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">cross-encoder</text>
+<text x="798" y="418" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">reranking</text>
+<rect x="940" y="334" width="130" height="108" rx="14" fill="url(#gate)" stroke="#f0b429" stroke-width="1.5" filter="url(#sh)"/>
+<text x="952" y="368" font-size="14" font-weight="700" fill="#7a4a00" text-anchor="start">Answer gate</text>
+<text x="952" y="388" font-size="12" font-weight="400" fill="#8a5a10" text-anchor="start">does any memory</text>
+<text x="952" y="403" font-size="12" font-weight="400" fill="#8a5a10" text-anchor="start">support the</text>
+<text x="952" y="418" font-size="12" font-weight="400" fill="#8a5a10" text-anchor="start">question?</text>
+<rect x="1094" y="334" width="130" height="108" rx="14" fill="url(#gate)" stroke="#f0b429" stroke-width="1.5" filter="url(#sh)"/>
+<text x="1106" y="368" font-size="14" font-weight="700" fill="#7a4a00" text-anchor="start">Answer check</text>
+<text x="1106" y="388" font-size="12" font-weight="400" fill="#8a5a10" text-anchor="start">Laya on your Mac</text>
+<text x="1106" y="403" font-size="12" font-weight="400" fill="#8a5a10" text-anchor="start">or Jev online</text>
+<text x="1106" y="418" font-size="12" font-weight="400" fill="#8a5a10" text-anchor="start">(your consent)</text>
+<path d="M762,388 L786,388" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<path d="M916,388 L940,388" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<path d="M1070,388 L1094,388" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<rect x="632" y="462" width="186" height="32" rx="16" fill="#dff4e4" stroke="#79c78f" stroke-width="1.5" />
+<text x="725.0" y="483" font-size="13" font-weight="700" fill="#14532d" text-anchor="middle">Supported answer</text>
+<rect x="834" y="462" width="186" height="32" rx="16" fill="#e7edfc" stroke="#9db0ea" stroke-width="1.5" />
+<text x="927.0" y="483" font-size="13" font-weight="700" fill="#1e3a8a" text-anchor="middle">Closest memories</text>
+<rect x="1036" y="462" width="186" height="32" rx="16" fill="#fdebef" stroke="#f0a5b6" stroke-width="1.5" />
+<text x="1129.0" y="483" font-size="13" font-weight="700" fill="#9f1239" text-anchor="middle">&quot;Not in memory&quot;</text>
+<rect x="632" y="510" width="592" height="40" rx="12" fill="#ffffff" stroke="#d9d3f3" stroke-width="1.5" />
+<text x="928.0" y="535" font-size="12" text-anchor="middle" fill="#4a4577"><tspan font-weight="700" fill="#1f1a4d">Layered output</tspan> · depth 0 glance · 1 facts · 2 context · max_tokens cap · expand one result</text>
+<text x="632" y="592" font-size="12" font-weight="800" fill="#4c3fb0" text-anchor="start" letter-spacing="1.5">SAVE</text>
+<rect x="632" y="606" width="130" height="80" rx="14" fill="#ffffff" stroke="#d9d3f3" stroke-width="1.5" filter="url(#sh)"/>
+<text x="644" y="640" font-size="14" font-weight="700" fill="#1f1a4d" text-anchor="start">Admission</text>
+<text x="644" y="660" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">check + receipt</text>
+<rect x="786" y="606" width="130" height="80" rx="14" fill="#ffffff" stroke="#d9d3f3" stroke-width="1.5" filter="url(#sh)"/>
+<text x="798" y="640" font-size="14" font-weight="700" fill="#1f1a4d" text-anchor="start">Redaction</text>
+<text x="798" y="660" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">secrets out</text>
+<rect x="940" y="606" width="130" height="80" rx="14" fill="#ffffff" stroke="#d9d3f3" stroke-width="1.5" filter="url(#sh)"/>
+<text x="952" y="640" font-size="14" font-weight="700" fill="#1f1a4d" text-anchor="start">Understand</text>
+<text x="952" y="660" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">who · when · kind</text>
+<rect x="1094" y="606" width="130" height="80" rx="14" fill="#ffffff" stroke="#d9d3f3" stroke-width="1.5" filter="url(#sh)"/>
+<text x="1106" y="640" font-size="14" font-weight="700" fill="#1f1a4d" text-anchor="start">Durable write</text>
+<text x="1106" y="660" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">queued, retried</text>
+<path d="M762,646 L786,646" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<path d="M916,646 L940,646" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<path d="M1070,646 L1094,646" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<text x="632" y="730" font-size="12" font-weight="800" fill="#4c3fb0" text-anchor="start" letter-spacing="1.5">THE LIVING BRAIN · IN THE BACKGROUND</text>
+<rect x="632" y="744" width="130" height="112" rx="14" fill="#ffffff" stroke="#d9d3f3" stroke-width="1.5" filter="url(#sh)"/>
+<text x="644" y="778" font-size="14" font-weight="700" fill="#1f1a4d" text-anchor="start">Memory health</text>
+<text x="644" y="798" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">describes older</text>
+<text x="644" y="813" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">memories, adds</text>
+<text x="644" y="828" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">only · Fix and</text>
+<text x="644" y="843" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">Undo</text>
+<rect x="786" y="744" width="130" height="112" rx="14" fill="#ffffff" stroke="#d9d3f3" stroke-width="1.5" filter="url(#sh)"/>
+<text x="798" y="778" font-size="14" font-weight="700" fill="#1f1a4d" text-anchor="start">Consolidate</text>
+<text x="798" y="798" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">summaries</text>
+<text x="798" y="813" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">forgetting</text>
+<text x="798" y="828" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">curves</text>
+<rect x="940" y="744" width="130" height="112" rx="14" fill="#ffffff" stroke="#d9d3f3" stroke-width="1.5" filter="url(#sh)"/>
+<text x="952" y="778" font-size="14" font-weight="700" fill="#1f1a4d" text-anchor="start">Learns daily</text>
+<text x="952" y="798" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">from outcomes</text>
+<text x="952" y="813" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">soft prompts</text>
+<text x="952" y="828" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">skill evolution</text>
+<text x="952" y="843" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">guarded ranker</text>
+<rect x="1094" y="744" width="130" height="112" rx="14" fill="#ffffff" stroke="#d9d3f3" stroke-width="1.5" filter="url(#sh)"/>
+<text x="1106" y="778" font-size="14" font-weight="700" fill="#1f1a4d" text-anchor="start">Bounded loops</text>
+<text x="1106" y="798" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">done only when</text>
+<text x="1106" y="813" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">a gate passes</text>
+<text x="1106" y="828" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">graphs via</text>
+<text x="1106" y="843" font-size="12" font-weight="400" fill="#4a4577" text-anchor="start">Bounded Loops</text>
+<rect x="1280" y="224" width="272" height="96" rx="14" fill="#eef2fd" stroke="#c3cff0" stroke-width="1.5" filter="url(#sh)"/>
+<text x="1296" y="258" font-size="15" font-weight="700" fill="#1f1a4d" text-anchor="start">SQLite + sqlite-vec</text>
+<text x="1296" y="280" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">the one source of truth</text>
+<text x="1296" y="296" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">bi-temporal facts · 9 memory kinds</text>
+<text x="1296" y="312" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">receipts for every write</text>
+<rect x="1280" y="336" width="272" height="96" rx="14" fill="#eef2fd" stroke="#c3cff0" stroke-width="1.5" filter="url(#sh)"/>
+<text x="1296" y="370" font-size="15" font-weight="700" fill="#1f1a4d" text-anchor="start">LanceDB · CozoDB</text>
+<text x="1296" y="392" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">fast copies that serve only once</text>
+<text x="1296" y="408" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">they match SQLite</text>
+<rect x="1280" y="448" width="272" height="96" rx="14" fill="#eef2fd" stroke="#c3cff0" stroke-width="1.5" filter="url(#sh)"/>
+<text x="1296" y="482" font-size="15" font-weight="700" fill="#1f1a4d" text-anchor="start">Pictures and documents</text>
+<text x="1296" y="504" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">picture model + OCR on device</text>
+<text x="1296" y="520" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">document index · health check</text>
+<text x="1296" y="536" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">every answer cites its page</text>
+<rect x="1280" y="560" width="272" height="96" rx="14" fill="#eef2fd" stroke="#c3cff0" stroke-width="1.5" filter="url(#sh)"/>
+<text x="1296" y="594" font-size="15" font-weight="700" fill="#1f1a4d" text-anchor="start">Knowledge graph</text>
+<text x="1296" y="616" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">people · projects · tools · code</text>
+<text x="1296" y="632" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">timelines and contradictions</text>
+<rect x="1280" y="672" width="272" height="96" rx="14" fill="#eef2fd" stroke="#c3cff0" stroke-width="1.5" filter="url(#sh)"/>
+<text x="1296" y="706" font-size="15" font-weight="700" fill="#1f1a4d" text-anchor="start">Audit chain</text>
+<text x="1296" y="728" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">hash-chained · tamper-evident</text>
+<text x="1296" y="744" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">erasure receipts</text>
+<rect x="1280" y="784" width="272" height="96" rx="14" fill="#eef2fd" stroke="#c3cff0" stroke-width="1.5" filter="url(#sh)"/>
+<text x="1296" y="818" font-size="15" font-weight="700" fill="#1f1a4d" text-anchor="start">Encrypted backup</text>
+<text x="1296" y="840" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">GitHub or Google Drive · restore</text>
+<text x="1296" y="856" font-size="13" font-weight="400" fill="#4a4577" text-anchor="start">points · safety copy on restore</text>
+<path d="M1240,552 L1260,552" fill="none" stroke="#4c3fb0" stroke-width="2" stroke-linecap="butt"/>
+<path d="M1260,272 L1260,832" fill="none" stroke="#4c3fb0" stroke-width="2" stroke-linecap="butt"/>
+<circle cx="1260" cy="552" r="3.5" fill="#4c3fb0"/>
+<path d="M1260,272 L1280,272" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<path d="M1260,384 L1280,384" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<path d="M1260,496 L1280,496" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<path d="M1260,608 L1280,608" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<path d="M1260,720 L1280,720" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<path d="M1260,832 L1280,832" fill="none" stroke="#4c3fb0" stroke-width="2" marker-end="url(#h)"/>
+<rect x="48" y="912" width="1504" height="104" rx="18" fill="#fdf0f3" stroke="#f2b3c2" stroke-width="1.5" />
+<text x="72" y="948" font-size="19" font-weight="800" fill="#9f1239" text-anchor="start">Governance on every call</text>
+<text x="72.0" y="978" font-size="14" font-weight="600" fill="#881337" text-anchor="start">Roles per workspace</text>
+<text x="72.0" y="1000" font-size="14" font-weight="400" fill="#9f1239" text-anchor="start">admin · member · viewer</text>
+<text x="314.66666666666663" y="978" font-size="14" font-weight="600" fill="#881337" text-anchor="start">Company mode</text>
+<text x="314.66666666666663" y="1000" font-size="14" font-weight="400" fill="#9f1239" text-anchor="start">every action has a person</text>
+<text x="557.3333333333333" y="978" font-size="14" font-weight="600" fill="#881337" text-anchor="start">Scopes</text>
+<text x="557.3333333333333" y="1000" font-size="14" font-weight="400" fill="#9f1239" text-anchor="start">personal · shared · global</text>
+<text x="800.0" y="978" font-size="14" font-weight="600" fill="#881337" text-anchor="start">GDPR export and erasure</text>
+<text x="800.0" y="1000" font-size="14" font-weight="400" fill="#9f1239" text-anchor="start">reaches every derived copy</text>
+<text x="1042.6666666666665" y="978" font-size="14" font-weight="600" fill="#881337" text-anchor="start">Hash-chained audit</text>
+<text x="1042.6666666666665" y="1000" font-size="14" font-weight="400" fill="#9f1239" text-anchor="start">retention · EU AI Act report</text>
+<text x="1285.3333333333333" y="978" font-size="14" font-weight="600" fill="#881337" text-anchor="start">Privacy by default</text>
+<text x="1285.3333333333333" y="1000" font-size="14" font-weight="400" fill="#9f1239" text-anchor="start">nothing leaves unless you choose</text>
+<text x="48" y="1056" font-size="14" font-weight="400" fill="#7a74a8" text-anchor="start">Built on four arXiv papers: information-geometric retrieval · biologically inspired forgetting · Bayesian trust against memory poisoning · governed memory</text>
+<text x="1552" y="1056" font-size="14" font-weight="700" fill="#5b5491" text-anchor="end">qualixar.com · AI Reliability Engineering</text>
+</svg>

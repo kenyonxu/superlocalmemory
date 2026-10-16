@@ -29,6 +29,8 @@ Usage::
     await collection.upsert(MyRecord(id="d1", text="hello"))
 """
 
+# Current native API (opened 2026-10-11):
+# https://raw.githubusercontent.com/microsoft/semantic-kernel/main/python/semantic_kernel/data/vector.py
 from __future__ import annotations
 
 from pathlib import Path

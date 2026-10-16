@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import pathlib
 import re
+import sys
 
 import pytest
 
@@ -76,31 +77,38 @@ def _codex_env():
     return out
 
 
+def _cursor_env():
+    """The Cursor-format manifest (cursor-plugin/mcp.cursor.json), read by Grok Bot and
+    the Cursor editor."""
+    d = json.loads((REPO / "cursor-plugin/mcp.cursor.json").read_text(encoding="utf-8"))
+    return d["mcpServers"]["superlocalmemory"].get("env", {})
+
+
 SURFACES = (
     ("Claude Code", _claude_env),
     ("Codex", _codex_env),
     ("VS Code", _vscode_env),
     ("Antigravity", _antigravity_env),
     ("Codex plugin tree", _codex_plugin_mcp_env),
+    ("Cursor / Grok Bot", _cursor_env),
 )
 
+class TestNoSurfaceForcesAToolSet:
+    """No package we ship sets SLM_MCP_PROFILE (14 Oct 2026).
 
-class TestNoSurfaceNarrowsYourToolSet:
+    Every host gets the default tool set (full: memory, mesh, optimize), and
+    one saved choice (`slm tools set <name>`) widens or narrows it for every
+    host at once. A profile forced in a package would override that choice
+    silently: earlier surfaces forced `code` (mesh tools dropped), the Cursor
+    plugin forced `core` and Antigravity forced `power`.
+    """
+
     @pytest.mark.parametrize("name, reader", SURFACES, ids=[s[0] for s in SURFACES])
     def test_it_does_not_force_a_profile(self, name, reader) -> None:
-        env = reader()
-
-        # The harm this guards is NARROWING: three surfaces once forced
-        # SLM_MCP_PROFILE=code (31 tools, mesh tools dropped), silently
-        # taking away tools the user configured. Forcing the widest
-        # profile ('power', the full set) cannot narrow anyone and is the
-        # standing product decision — so absent or 'power' passes, while
-        # any narrower forced profile still fails.
-        forced = env.get("SLM_MCP_PROFILE")
-        assert forced is None or forced == "power", (
-            f"{name} forces SLM_MCP_PROFILE={forced!r}. "
-            f"Installing a plugin must not remove tools the user configured."
-        )
+        forced = reader().get("SLM_MCP_PROFILE")
+        assert forced is None, (
+            f"{name} forces SLM_MCP_PROFILE={forced!r}; it would override the "
+            f"tool set the user chose with `slm tools set`.")
 
 
 class TestNoSurfaceRepointsYourStore:
@@ -127,12 +135,18 @@ class TestAttributionIsStillSet:
             ("Codex", _codex_env, "codex"),
             ("Antigravity", _antigravity_env, "antigravity"),
             ("Codex plugin tree", _codex_plugin_mcp_env, "codex"),
+            ("Cursor / Grok Bot", _cursor_env, "cursor_plugin"),
         ],
     )
     def test_the_agent_id_identifies_the_host(self, name, reader, expected) -> None:
         assert reader().get("SLM_AGENT_ID") == expected
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX launcher: on Windows the plugin entry runs cmd.exe and the installed "
+    "slm instead (tests/test_plugin/test_windows_mcp_starts_installed_slm.py)",
+)
 class TestLaunchersPreferWhatIsAlreadyInstalled:
     """Both install orders converge on one environment.
 
@@ -251,14 +265,24 @@ class TestLaunchersPreferWhatIsAlreadyInstalled:
 
     @pytest.mark.parametrize("name, rel", LAUNCHERS, ids=[l[0] for l in LAUNCHERS])
     def test_it_says_something_useful_when_nothing_is_installed(
-        self, name, rel,
+        self, name, rel, tmp_path,
     ) -> None:
         """A path that silently does not exist is the worst outcome — that is how
-        the Codex server failed to start with no explanation at all."""
-        text = (REPO / rel).read_text(encoding="utf-8")
+        the Codex server failed to start with no explanation at all.
 
-        assert "pipx install superlocalmemory" in text, (
-            f"{name}: no install advice for a machine that has no SLM"
+        Run, not grepped: the Claude launcher's wording lives in the shared
+        resolver it sources, so only executing it shows what a user sees."""
+        empty = tmp_path / "bin"
+        empty.mkdir(parents=True, exist_ok=True)
+
+        result = self._run(
+            rel, path_dir=empty, plugin_data=tmp_path / "plugin-data", tmp_path=tmp_path,
+        )
+
+        assert result.returncode != 0, f"{name}: started with nothing installed"
+        assert "pipx install superlocalmemory" in result.stderr, (
+            f"{name}: no install advice for a machine that has no SLM.\n"
+            f"stderr={result.stderr[:300]!r}"
         )
 
     @pytest.mark.parametrize("name, rel", LAUNCHERS, ids=[l[0] for l in LAUNCHERS])

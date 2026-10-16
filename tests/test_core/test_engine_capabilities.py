@@ -11,6 +11,8 @@ Guarantees tested here:
 """
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from superlocalmemory.core.config import SLMConfig
@@ -27,8 +29,27 @@ def mode_a_config(tmp_path):
     return cfg
 
 
+@pytest.fixture
+def make_engine():
+    """Build engines that are closed after the test, whatever its outcome.
+
+    Every engine here used to be left open: its pools and the embedding
+    service outlived the test (audit C-3).
+    """
+    made: list[MemoryEngine] = []
+
+    def _make(*args, **kwargs) -> MemoryEngine:
+        engine = MemoryEngine(*args, **kwargs)
+        made.append(engine)
+        return engine
+
+    yield _make
+    for engine in made:
+        engine.close()
+
+
 class TestLightEngine:
-    def test_light_engine_does_not_load_embedder(self, mode_a_config, monkeypatch):
+    def test_light_engine_does_not_load_embedder(self, make_engine, mode_a_config, monkeypatch):
         """LIGHT mode must not load a heavy embedder.
 
         V3.5.9 added a McpEmbedderProxy that attaches when the daemon is
@@ -40,14 +61,14 @@ class TestLightEngine:
             "superlocalmemory.core.mcp_embedder_proxy.McpEmbedderProxy.is_available",
             return_value=False,
         ):
-            engine = MemoryEngine(mode_a_config, capabilities=Capabilities.LIGHT)
+            engine = make_engine(mode_a_config, capabilities=Capabilities.LIGHT)
             engine.initialize()
         assert engine._embedder is None
         assert engine._retrieval_engine is None
         assert engine._llm is None
 
-    def test_light_engine_raises_on_recall(self, mode_a_config):
-        engine = MemoryEngine(mode_a_config, capabilities=Capabilities.LIGHT)
+    def test_light_engine_raises_on_recall(self, make_engine, mode_a_config):
+        engine = make_engine(mode_a_config, capabilities=Capabilities.LIGHT)
         engine.initialize()
         with pytest.raises(CapabilityError) as exc:
             engine.recall("anything")
@@ -55,8 +76,8 @@ class TestLightEngine:
         assert "LIGHT" in msg
         assert "WorkerPool" in msg
 
-    def test_light_engine_raises_on_store(self, mode_a_config):
-        engine = MemoryEngine(mode_a_config, capabilities=Capabilities.LIGHT)
+    def test_light_engine_raises_on_store(self, make_engine, mode_a_config):
+        engine = make_engine(mode_a_config, capabilities=Capabilities.LIGHT)
         engine.initialize()
         with pytest.raises(CapabilityError) as exc:
             engine.store("anything")
@@ -64,8 +85,8 @@ class TestLightEngine:
         assert "LIGHT" in msg
         assert "WorkerPool" in msg
 
-    def test_light_engine_allows_db_access(self, mode_a_config):
-        engine = MemoryEngine(mode_a_config, capabilities=Capabilities.LIGHT)
+    def test_light_engine_allows_db_access(self, make_engine, mode_a_config):
+        engine = make_engine(mode_a_config, capabilities=Capabilities.LIGHT)
         engine.initialize()
         # DB is present and usable
         assert engine.db is not None
@@ -74,38 +95,47 @@ class TestLightEngine:
         # fact_count works (DB-only)
         assert engine.fact_count == 0
 
-    def test_light_engine_initialized_flag_true(self, mode_a_config):
-        engine = MemoryEngine(mode_a_config, capabilities=Capabilities.LIGHT)
+    def test_light_engine_initialized_flag_true(self, make_engine, mode_a_config):
+        engine = make_engine(mode_a_config, capabilities=Capabilities.LIGHT)
         engine.initialize()
         assert engine._initialized is True
 
-    def test_light_engine_capabilities_attribute_exposed(self, mode_a_config):
-        engine = MemoryEngine(mode_a_config, capabilities=Capabilities.LIGHT)
+    def test_light_engine_capabilities_attribute_exposed(self, make_engine, mode_a_config):
+        engine = make_engine(mode_a_config, capabilities=Capabilities.LIGHT)
         assert engine.capabilities is Capabilities.LIGHT
 
 
 class TestFullEngineDefault:
-    def test_full_is_default_capability(self, mode_a_config):
+    def test_full_is_default_capability(self, make_engine, mode_a_config):
         # Backward-compat: no capabilities arg → FULL
-        engine = MemoryEngine(mode_a_config)
+        engine = make_engine(mode_a_config)
         assert engine.capabilities is Capabilities.FULL
 
-    def test_explicit_full_equals_default(self, mode_a_config):
-        engine_default = MemoryEngine(mode_a_config)
-        engine_explicit = MemoryEngine(mode_a_config, capabilities=Capabilities.FULL)
+    def test_explicit_full_equals_default(self, make_engine, mode_a_config):
+        engine_default = make_engine(mode_a_config)
+        engine_explicit = make_engine(mode_a_config, capabilities=Capabilities.FULL)
         assert engine_default.capabilities is engine_explicit.capabilities
 
-    def test_full_engine_loads_embedder(self, mode_a_config):
-        engine = MemoryEngine(mode_a_config, capabilities=Capabilities.FULL)
+    def test_full_engine_loads_embedder(self, make_engine, mode_a_config, monkeypatch):
+        # The real service object is built, but nothing may start its model.
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+        engine = make_engine(mode_a_config, capabilities=Capabilities.FULL)
         engine.initialize()
         # Heavy layer present
         assert engine._embedder is not None
         assert engine._retrieval_engine is not None
 
-    def test_full_engine_no_capability_error(self, mode_a_config):
-        # recall on empty DB returns empty response, NOT CapabilityError
-        engine = MemoryEngine(mode_a_config, capabilities=Capabilities.FULL)
-        engine.initialize()
+    def test_full_engine_no_capability_error(
+        self, make_engine, mode_a_config, mock_embedder, monkeypatch,
+    ):
+        # recall on empty DB returns empty response, NOT CapabilityError.
+        # A mock embedder: this used to start the real embedding model (and
+        # its worker threads) in the normal lane, then never close the engine.
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+        engine = make_engine(mode_a_config, capabilities=Capabilities.FULL)
+        with patch("superlocalmemory.core.engine_wiring.init_embedder",
+                   return_value=mock_embedder):
+            engine.initialize()
         response = engine.recall("query on empty db")
         # response may be empty; must not raise
         assert response is not None
@@ -126,14 +156,14 @@ class TestLightEngineDBOnlyFeatures:
     """LIGHT must still serve DB-only features so user-facing feedback,
     learning-status, and session_init phase counters keep working in MCP."""
 
-    def test_light_engine_has_adaptive_learner(self, mode_a_config):
+    def test_light_engine_has_adaptive_learner(self, make_engine, mode_a_config):
         """AdaptiveLearner needs only the DB; it must be available in LIGHT
         so report_feedback and get_feedback_count work through MCP."""
-        engine = MemoryEngine(mode_a_config, capabilities=Capabilities.LIGHT)
+        engine = make_engine(mode_a_config, capabilities=Capabilities.LIGHT)
         engine.initialize()
         assert engine._adaptive_learner is not None
 
-    def test_light_engine_adaptive_learner_interface_intact(self, mode_a_config):
+    def test_light_engine_adaptive_learner_interface_intact(self, make_engine, mode_a_config):
         """AdaptiveLearner under LIGHT exposes record_feedback +
         get_feedback_count callables bound to the engine's DB.
 
@@ -141,7 +171,7 @@ class TestLightEngineDBOnlyFeatures:
         memories) is covered by the existing FULL-engine feedback tests.
         Here we only need to verify LIGHT wiring.
         """
-        engine = MemoryEngine(mode_a_config, capabilities=Capabilities.LIGHT)
+        engine = make_engine(mode_a_config, capabilities=Capabilities.LIGHT)
         engine.initialize()
         learner = engine._adaptive_learner
         assert learner is not None
@@ -151,3 +181,65 @@ class TestLightEngineDBOnlyFeatures:
         # happy path that Varun cares about (no "learning disabled" copy
         # showing up in the MCP response).
         assert learner.get_feedback_count(engine.profile_id) == 0
+
+
+class TestKindReconcileAtStart:
+    """L1-15: ``reconcile_confirmed`` had no production caller at all — it
+    existed, was unit-tested, and fixed nothing on any reachable path. Engine
+    start is the right place: it is bounded (rows and time) and a failure
+    there must never block boot (``_init_db_layer`` logs a warning for every
+    other best-effort migration the same way)."""
+
+    def test_engine_start_repairs_a_confirmed_kind_fact_type(self, make_engine, mode_a_config) -> None:
+        from superlocalmemory.storage.models import AtomicFact, FactType, MemoryRecord
+
+        # First boot: only to create the M052 schema the same way production
+        # does (through real migrations, not a hand-applied DDL fixture).
+        first = make_engine(mode_a_config, capabilities=Capabilities.LIGHT)
+        first.initialize()
+        assert first.db.has_memory_kind_columns() is True
+        assert first._kind_reconcile.wait(timeout=30)  # its own pass, on a clean store
+
+        mid = first.db.store_memory(
+            MemoryRecord(profile_id=first.profile_id, content="s"))
+        fid = first.db.store_fact(AtomicFact(
+            profile_id=first.profile_id, memory_id=mid,
+            content="We decided to ship Friday", fact_type=FactType.SEMANTIC))
+        # A confirmed kind whose fact_type fell out of step with it — the
+        # LLD §6.5 downgrade-window corruption reconcile_confirmed repairs.
+        first.db.execute(
+            "UPDATE atomic_facts SET memory_kind = 'decision', "
+            "memory_kind_source = 'user' WHERE fact_id = ?", (fid,),
+        )
+        first_dir = first.db.db_path.parent
+        first.close()
+        # The window: an older version ran on this store, and its daemon wrote
+        # its version marker, as every version's daemon does at start.
+        (first_dir / ".last_version").write_text("4.1.18", encoding="utf-8")
+
+        restarted = make_engine(mode_a_config, capabilities=Capabilities.LIGHT)
+        restarted.initialize()  # the repair starts here, with no manual call...
+        # ...on its own thread (4.1.22): start-up never waits for the scan.
+        assert restarted._kind_reconcile.wait(timeout=30)
+        assert restarted._kind_reconcile.snapshot()["state"] == "complete"
+        assert restarted._kind_reconcile.snapshot()["fixed"] == 1
+        row = dict(restarted.db.execute(
+            "SELECT fact_type FROM atomic_facts WHERE fact_id = ?", (fid,))[0])
+        assert row["fact_type"] == "episodic"  # COARSE[DECISION]
+        restarted.close()
+
+    def test_engine_start_never_fails_if_the_reconcile_itself_fails(
+        self, make_engine, mode_a_config, monkeypatch,
+    ) -> None:
+        import superlocalmemory.storage.memory_kind_writes as writes_module
+
+        def _boom(db, profile_id, **kwargs):
+            raise RuntimeError("simulated reconcile failure")
+
+        monkeypatch.setattr(writes_module, "reconcile_confirmed_pass", _boom)
+        engine = make_engine(mode_a_config, capabilities=Capabilities.LIGHT)
+        engine.initialize()  # must not raise
+        assert engine._initialized is True
+        assert engine._kind_reconcile.wait(timeout=30)
+        assert engine._kind_reconcile.snapshot()["state"] == "failed"  # said, not hidden
+        engine.close()

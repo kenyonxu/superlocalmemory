@@ -8,11 +8,15 @@ Maps variant mentions ("Alice", "Ms. Smith", "she") to canonical entities.
 Persists ALL resolution results to DB — the #1 fix from the V1 audit where
 entity resolution ran but results were silently discarded.
 
-4-tier strategy:
+Tiers, strongest evidence first (rules and their sources: entity_match.py):
   a) Exact match in canonical_entities (case-insensitive)
-  b) Alias match in entity_aliases (case-insensitive)
-  c) Fuzzy match via Jaro-Winkler similarity (threshold 0.85)
-  d) LLM disambiguation (Mode B/C only)
+  b) Exact alias match in entity_aliases (case-insensitive; entity_match.alias_in_use)
+  c) The same name once normalized, or one typo in one word, compared with
+     canonical names only -- never with aliases, so merges cannot chain
+  d) Mode B/C only: a borderline pair the local model confirms
+Before 4.1.25 tier (c) was whole-string Jaro-Winkler >= 0.85 against names and
+aliases alike; such an alias (source 'jaro_winkler') answers an exact lookup
+only while the new rules would still accept it.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
 License: AGPL-3.0-or-later
@@ -25,6 +29,10 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
+from superlocalmemory.encoding import entity_match as em
+from superlocalmemory.encoding.entity_mentions import STOP_WORDS
+from superlocalmemory.encoding.entity_name_cache import CanonicalNames
+from superlocalmemory.encoding.entity_validity import valid_name
 from superlocalmemory.storage.models import CanonicalEntity, EntityAlias, _new_id, _now
 
 if TYPE_CHECKING:
@@ -37,8 +45,10 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-JARO_WINKLER_AUTO_MERGE: float = 0.85   # Auto-merge threshold
-JARO_WINKLER_LLM_FLOOR: float = 0.70    # Below this, never merge
+# Kept for callers that still read them; no merge decision uses them since
+# 4.1.25 (a whole-string score cannot see a differing version or word).
+JARO_WINKLER_AUTO_MERGE: float = 0.85
+JARO_WINKLER_LLM_FLOOR: float = 0.70
 PRONOUNS: frozenset[str] = frozenset({
     "he", "she", "they", "him", "her", "them", "his", "hers", "their",
     "himself", "herself", "themselves", "it", "its", "i", "me", "my",
@@ -48,7 +58,8 @@ PRONOUNS: frozenset[str] = frozenset({
 # Heuristic entity type patterns
 _ORG_MARKERS = ("Inc", "Corp", "LLC", "Ltd", "University", "Hospital", "Bank",
                 "Foundation", "Institute", "Company", "Group", "Agency")
-_PLACE_MARKERS = ("City", "State", "County", "Island", "River", "Mountain",
+_PLACE_MARKERS = ("City", "State", "County", "Island", "River", "Mountain", "Harbour",
+                  "Harbor", "Bay", "Valley", "Beach", "Square", "Bridge",
                   "Lake", "Park", "Street", "Avenue", "Road", "District")
 _EVENT_MARKERS = ("Festival", "Conference", "Summit", "Workshop", "Meeting",
                   "Election", "War", "Match", "Game", "Concert", "Wedding")
@@ -162,6 +173,35 @@ _COMMON_WORDS = frozenset({
 })
 
 
+#: Last words that make a two-word capitalised name a product, model or part
+#: of something, never a person ("Claude Code", "Claude Opus", "Gemini Flash").
+_PRODUCT_WORDS = frozenset("""
+code opus sonnet haiku flash pro ultra nano mini max turbo lite plus desktop cloud
+studio chat assistant agent agents mode edition hub lab labs engine kit suite cli
+os app apps api sdk server service section report board team panel page tab view
+analytics robotics logistics systems technologies solutions networks software
+industries partners capital ventures health media digital data security
+search docs drive maps sheets console store play ads workspace
+""".split())
+
+
+def _looks_like_person(name: str, words: list[str]) -> bool:
+    """Two or three capitalised words that read as a person's name.
+
+    4.1.25: "Claude Code" was typed person. A product word as the last word,
+    or an everyday English word before it ("Final Report", "Check Accenture"),
+    makes it something else; only a surname may be an everyday word ("Alice
+    Smith", "Linda Park"). Uncertain names are concepts, which costs little.
+    """
+    if not re.match(r"^[A-Z][a-z]+ [A-Z][a-z]+( [A-Z][a-z]+)?$", name):
+        return False
+    from superlocalmemory.encoding.common_words import is_common_word
+
+    if words[-1] in _PRODUCT_WORDS or any(w in _COMMON_WORDS for w in words):
+        return False
+    return not any(is_common_word(w) for w in words[:-1])
+
+
 def _guess_entity_type(name: str) -> str:
     """Heuristic entity type classification from name string.
 
@@ -177,11 +217,13 @@ def _guess_entity_type(name: str) -> str:
     if re.match(r"^[\d.v\-/]+$", name):
         return "concept"
 
-    if any(m in name for m in _ORG_MARKERS):
+    # Whole words only: "Stateless" is not a State, "Banking" not a Bank.
+    tokens = set(name.split())
+    if tokens & set(_ORG_MARKERS):
         return "organization"
-    if any(m in name for m in _PLACE_MARKERS):
+    if tokens & set(_PLACE_MARKERS):
         return "place"
-    if any(m in name for m in _EVENT_MARKERS):
+    if tokens & set(_EVENT_MARKERS):
         return "event"
 
     # v3.4.10: Skill entities — namespaced skills always skill type
@@ -197,10 +239,8 @@ def _guess_entity_type(name: str) -> str:
     if _SKILL_MARKERS_RE.search(name):
         return "skill"
 
-    # Multi-word entity: "person" only if 2-3 capitalized words, no stop words
-    if re.match(r"^[A-Z][a-z]+ [A-Z][a-z]+( [A-Z][a-z]+)?$", name):
-        if not any(p in _COMMON_WORDS for p in words):
-            return "person"
+    if _looks_like_person(name, words):
+        return "person"
 
     # Single capitalized word — almost never a person in our context
     # Only known first names should get "person" but we can't maintain
@@ -256,6 +296,29 @@ def _unproject_entity(entity_id: str) -> bool:
         return False
 
 
+def _usable_mention(raw: str) -> str | None:
+    """The mention as a name worth resolving, or None for pronouns, stop
+    words, numbers and fragments too short or long to be a name."""
+    name = raw.strip()
+    if not name or name.lower() in PRONOUNS:
+        return None
+    if len(name) <= 2 or len(name) > 100:
+        return None
+    words = name.lower().split()
+    if len(words) == 1 and (name.lower() in _COMMON_WORDS or name.lower() in STOP_WORDS):
+        return None
+    if len(words) > 1 and all(w in _COMMON_WORDS or len(w) <= 2 for w in words):
+        return None
+    if re.match(r"^[\d.v\-/]+$", name):
+        return None
+    # Ids, dates, paths, status words, fragments (encoding/entity_validity).
+    # No text here, so a capitalised everyday word is given the benefit of
+    # the doubt; the save path judges it against the fact's text first.
+    if not valid_name(name, capital_evidence=True):
+        return None
+    return name
+
+
 class EntityResolver:
     """Resolves raw entity mentions to persisted canonical entities.
 
@@ -271,6 +334,7 @@ class EntityResolver:
     ) -> None:
         self._db = db
         self._llm = llm
+        self._names = CanonicalNames(db)
 
     # -- Public API ---------------------------------------------------------
 
@@ -279,90 +343,152 @@ class EntityResolver:
         raw_entities: list[str],
         profile_id: str,
     ) -> dict[str, str]:
-        """Resolve raw mentions to canonical entity IDs.
+        """Resolve raw mentions to canonical entity IDs, for a save.
 
-        Returns mapping: raw_name -> canonical entity_id.
-        All new entities and aliases are persisted before returning.
+        Returns mapping: raw_name -> canonical entity_id. Tiers, strongest
+        evidence first (``entity_match`` has the rules and their sources):
+        exact name, an alias in use, the same name once normalized, a typo of
+        one word of a canonical name; in Mode B/C a borderline pair confirmed
+        by the model. Anything else is a new entity. All new entities and
+        aliases are persisted before returning.
         """
         if not raw_entities:
             return {}
-
         resolution: dict[str, str] = {}
-        candidates_for_llm: list[str] = []
-
+        pending: list[tuple[str, str, str, str]] = []
         for raw in raw_entities:
-            name = raw.strip()
-            if not name or name.lower() in PRONOUNS:
+            name = _usable_mention(raw)
+            if name is None:
                 continue
-
-            # Skip very short/long entities
-            if len(name) <= 2 or len(name) > 100:
-                continue
-
-            # Skip single-word stop words
-            words = name.lower().split()
-            if len(words) == 1 and name.lower() in _COMMON_WORDS:
-                continue
-
-            # Skip multi-word entities where ALL words are stop words or <=2 chars
-            if len(words) > 1 and all(w in _COMMON_WORDS or len(w) <= 2 for w in words):
-                continue
-
-            # Skip pure numbers/versions
-            if re.match(r"^[\d.v\-/]+$", name):
-                continue
-
-            # Tier a: exact match on canonical_name
-            entity = self._db.get_entity_by_name(name, profile_id)
-            if entity is not None:
-                resolution[raw] = entity.entity_id
-                self._touch_last_seen(entity.entity_id, profile_id)
-                continue
-
-            # Tier b: alias match (case-insensitive, indexed)
-            entity_id = self._alias_lookup(name, profile_id)
+            entity_id = self._exact(name, profile_id)
+            if entity_id is None:
+                verdict, match_id, canonical, why = self._names.best(name, profile_id)
+                if verdict == em.SAME and match_id:
+                    entity_id = match_id
+                    self._persist_alias(entity_id, name, 1.0 if why == "normalized" else 0.9,
+                                        why, profile_id)
+                elif verdict == em.BORDERLINE and self._llm is not None and match_id:
+                    pending.append((raw, name, match_id, canonical))
+                    continue
             if entity_id is not None:
-                resolution[raw] = entity_id
                 self._touch_last_seen(entity_id, profile_id)
+                resolution[raw] = entity_id
                 continue
-
-            # Tier c: fuzzy match via Jaro-Winkler
-            match_id, score = self._fuzzy_match(name, profile_id)
-            if match_id is not None and score >= JARO_WINKLER_AUTO_MERGE:
-                resolution[raw] = match_id
-                self._persist_alias(match_id, name, score, "jaro_winkler", profile_id)
-                self._touch_last_seen(match_id, profile_id)
-                continue
-
-            # Candidate zone (0.70–0.85): queue for LLM in Mode B/C
-            if match_id is not None and score >= JARO_WINKLER_LLM_FLOOR:
-                candidates_for_llm.append(raw)
-                continue
-
-            # No match at all — create new entity
-            new_id = self._create_entity(name, profile_id)
-            resolution[raw] = new_id
-
-        # Tier d: LLM disambiguation for fuzzy candidates (Mode B/C)
-        if candidates_for_llm and self._llm is not None:
-            llm_resolved = self._llm_disambiguate(
-                candidates_for_llm, profile_id,
-            )
-            for raw_name, entity_id in llm_resolved.items():
-                resolution[raw_name] = entity_id
-
-            # Create new entities for candidates LLM couldn't resolve
-            for raw_name in candidates_for_llm:
-                if raw_name not in resolution:
-                    new_id = self._create_entity(raw_name.strip(), profile_id)
-                    resolution[raw_name] = new_id
-        elif candidates_for_llm:
-            # No LLM available — create new entities for all candidates
-            for raw_name in candidates_for_llm:
-                new_id = self._create_entity(raw_name.strip(), profile_id)
-                resolution[raw_name] = new_id
-
+            resolution[raw] = self._create_entity(name, profile_id)
+        if pending:
+            resolution.update(self._confirm(pending, profile_id))
         return resolution
+
+    def _exact(self, name: str, profile_id: str) -> str | None:
+        """The entity with this exact name, or an alias in use of it."""
+        entity = self._db.get_entity_by_name(name, profile_id)
+        if entity is not None:
+            return entity.entity_id
+        return self._alias_lookup(name, profile_id)
+
+    def _confirm(self, pending: list[tuple[str, str, str, str]],
+                 profile_id: str) -> dict[str, str]:
+        """Mode B/C: the model's yes merges a borderline pair; no creates."""
+        from superlocalmemory.encoding.entity_confirm import confirm_pairs
+
+        answers = confirm_pairs(self._llm, [(name, canonical)
+                                            for _r, name, _e, canonical in pending])
+        out: dict[str, str] = {}
+        for (raw, name, entity_id, _canonical), same in zip(pending, answers):
+            if same:
+                self._persist_alias(entity_id, name, 0.9, "llm_confirmed", profile_id)
+                self._touch_last_seen(entity_id, profile_id)
+                out[raw] = entity_id
+            else:
+                existing = self._db.get_entity_by_name(name, profile_id)
+                out[raw] = (existing.entity_id if existing is not None
+                            else self._create_entity(name, profile_id))
+        return out
+
+    def lookup(
+        self,
+        raw_entities: list[str],
+        profile_id: str,
+    ) -> dict[str, str]:
+        """Known entities named in a question, read-only.
+
+        For recall. Finds a name by exact match, an alias in use, or the same
+        rules a save merges by (never a borderline pair, never a fuzzy match
+        on an alias). Never creates an entity, saves an
+        alias, updates last-seen, or asks the language model: a question must
+        not change the store, and a model call here would spend the recall
+        budget. A name that is unknown, or only uncertainly close, is left out.
+        """
+        found: dict[str, str] = {}
+        index = self._lookup_rows(profile_id)
+        for raw in raw_entities or ():
+            name = _usable_mention(raw)
+            if name is None:
+                continue
+            entity_id = self._lookup_one(name, profile_id, index)
+            if entity_id is not None:
+                found[raw] = entity_id
+        return found
+
+    def lookup_plain_words(self, words: list[str], profile_id: str) -> dict[str, str]:
+        """Entities a lower-case question word names exactly (no spelling
+        rules; see ``entity_match.plain_word_may_name``). Read-only."""
+        from superlocalmemory.encoding import entity_lookup_index as eli
+
+        index = self._lookup_rows(profile_id)
+        found: dict[str, str] = {}
+        for word in words or ():
+            name = word.strip()
+            # The plain-word rule (not entity_validity) judges an everyday word.
+            if len(name) <= 2 or name.lower() in PRONOUNS or name.lower() in STOP_WORDS:
+                continue
+            if index is not None:
+                hit = eli.plain_word_hit(index, name)
+            else:
+                entity = self._db.get_entity_by_name(name, profile_id)
+                ok = entity is not None and em.plain_word_may_name(
+                    name, entity.canonical_name, entity.entity_type)
+                hit = entity.entity_id if ok else None
+            if hit is not None:
+                found[word] = str(hit)
+        return found
+
+    def _lookup_rows(self, profile_id: str):
+        """The kept name rows (encoding/entity_lookup_index), or None."""
+        from superlocalmemory.encoding import entity_lookup_index as eli
+
+        holder = self.__dict__.get("_lookup_index")
+        if holder is None:
+            holder = self.__dict__.setdefault("_lookup_index", eli.EntityLookupIndex(self._db))
+        try:
+            return holder.get(profile_id)
+        except Exception as exc:  # noqa: BLE001 -- the original queries still answer
+            logger.debug("entity lookup index unavailable: %s", exc)
+            return None
+
+    def _lookup_one(self, name: str, profile_id: str, index) -> str | None:
+        """Exact name, then an alias in use, then a save's merge rules."""
+        from superlocalmemory.encoding import entity_lookup_index as eli
+
+        key = eli.sql_lower(name)
+        hit = index.by_name.get(key) if index is not None else eli.AMBIGUOUS
+        if hit is eli.AMBIGUOUS:
+            entity = self._db.get_entity_by_name(name, profile_id)
+            hit = entity.entity_id if entity is not None else None
+        if hit is not None:
+            return str(hit)
+        hit = index.by_alias.get(key) if index is not None else eli.AMBIGUOUS
+        if hit is eli.AMBIGUOUS:
+            hit = self._alias_lookup(name, profile_id)
+        if hit is not None:
+            return str(hit)
+        if index is not None and name in index.same:
+            return index.same[name]
+        verdict, entity_id, _c, _w = self._names.best(name, profile_id)
+        hit = entity_id if verdict == em.SAME else None
+        if index is not None:
+            index.same[name] = hit
+        return hit
 
     def create_speaker_entities(
         self,
@@ -416,7 +542,26 @@ class EntityResolver:
         Reassigns aliases, updates canonical_entities_json in atomic_facts,
         and removes the merged entity record.
         """
-        # Move aliases from merge -> keep
+        self._merge_aliases(entity_id_keep, entity_id_merge, profile_id)
+        self._merge_fact_memberships(entity_id_keep, entity_id_merge, profile_id)
+
+        # Delete the merged entity (tenant-scoped). Its index rows cascade.
+        self._db.execute(
+            "DELETE FROM entity_aliases WHERE entity_id = ? AND profile_id = ?",
+            (entity_id_merge, profile_id),
+        )
+        self._db.execute(
+            "DELETE FROM canonical_entities WHERE entity_id = ? AND profile_id = ?",
+            (entity_id_merge, profile_id),
+        )
+        _unproject_entity(entity_id_merge)
+        logger.info(
+            "Merged entity %s into %s (profile=%s)",
+            entity_id_merge, entity_id_keep, profile_id,
+        )
+
+    def _merge_aliases(self, entity_id_keep, entity_id_merge, profile_id):
+        """Move aliases and the old canonical name to the kept entity."""
         aliases = self._db.get_aliases_for_entity(entity_id_merge, profile_id)
         for alias in aliases:
             new_alias = EntityAlias(
@@ -429,7 +574,6 @@ class EntityResolver:
             self._db.store_alias(new_alias, profile_id)
 
         # Also add the merged entity's canonical name as an alias of keep
-        merged = self._db.get_entity_by_name("", "")  # placeholder
         rows = self._db.execute(
             "SELECT canonical_name FROM canonical_entities WHERE entity_id = ?",
             (entity_id_merge,),
@@ -438,108 +582,35 @@ class EntityResolver:
             merged_name = str(dict(rows[0])["canonical_name"])
             self._persist_alias(entity_id_keep, merged_name, 1.0, "merge", profile_id)
 
-        # Update atomic_facts: replace entity_id_merge with entity_id_keep
-        # in canonical_entities_json column
-        fact_rows = self._db.execute(
-            "SELECT fact_id, canonical_entities_json FROM atomic_facts "
-            "WHERE profile_id = ? AND canonical_entities_json LIKE ?",
-            (profile_id, f'%"{entity_id_merge}"%'),
-        )
-        for row in fact_rows:
-            d = dict(row)
-            try:
-                entities = json.loads(d["canonical_entities_json"])
-                updated = [
-                    entity_id_keep if eid == entity_id_merge else eid
-                    for eid in entities
-                ]
-                # Deduplicate while preserving order
-                seen: set[str] = set()
-                deduped = []
-                for eid in updated:
-                    if eid not in seen:
-                        seen.add(eid)
-                        deduped.append(eid)
-                self._db.execute(
-                    "UPDATE atomic_facts SET canonical_entities_json = ? "
-                    "WHERE fact_id = ?",
-                    (json.dumps(deduped), d["fact_id"]),
-                )
-            except (json.JSONDecodeError, TypeError):
-                continue
+    def _merge_fact_memberships(self, entity_id_keep, entity_id_merge, profile_id):
+        """Rewrite every indexed member, deduplicating in stable order."""
+        from superlocalmemory.encoding.entity_fact_lookup import entity_facts
+        from superlocalmemory.storage.entity_index import record_fact_entities
 
-        # Delete the merged entity (tenant-scoped)
-        self._db.execute(
-            "DELETE FROM entity_aliases WHERE entity_id = ? AND profile_id = ?",
-            (entity_id_merge, profile_id),
-        )
-        self._db.execute(
-            "DELETE FROM canonical_entities WHERE entity_id = ? AND profile_id = ?",
-            (entity_id_merge, profile_id),
-        )
-        # The merged-away node has its own copy in the graph projection, and
-        # deleting the row above does not reach it. Left there it keeps its own
-        # name and its own edges, so the two halves of a merged entity stay
-        # visible to a graph query as two entities.
-        _unproject_entity(entity_id_merge)
-        logger.info(
-            "Merged entity %s into %s (profile=%s)",
-            entity_id_merge, entity_id_keep, profile_id,
-        )
+        for fact_id, entities in entity_facts(self._db, entity_id_merge, profile_id):
+            updated = [entity_id_keep if eid == entity_id_merge else eid for eid in entities]
+            deduped = list(dict.fromkeys(updated))
+            self._db.execute(
+                "UPDATE atomic_facts SET canonical_entities_json = ? WHERE fact_id = ?",
+                (json.dumps(deduped), fact_id),
+            )
+            record_fact_entities(self._db, fact_id, profile_id, deduped)
 
     # -- Internal: lookups --------------------------------------------------
 
     def _alias_lookup(self, name: str, profile_id: str) -> str | None:
-        """Look up entity_id via alias table (case-insensitive)."""
+        """Look up entity_id via an alias in use (case-insensitive, exact)."""
         rows = self._db.execute(
-            "SELECT ea.entity_id FROM entity_aliases ea "
+            "SELECT ea.entity_id, ea.alias, ea.source, ce.canonical_name "
+            "FROM entity_aliases ea "
             "JOIN canonical_entities ce ON ce.entity_id = ea.entity_id "
             "WHERE LOWER(ea.alias) = LOWER(?) AND ce.profile_id = ?",
             (name, profile_id),
         )
-        if rows:
-            return str(dict(rows[0])["entity_id"])
+        for row in map(dict, rows):
+            if em.alias_in_use(row["source"], row["alias"], row["canonical_name"]):
+                return str(row["entity_id"])
         return None
-
-    def _fuzzy_match(
-        self, name: str, profile_id: str,
-    ) -> tuple[str | None, float]:
-        """Scan all canonical names + aliases for best Jaro-Winkler match.
-
-        Returns (entity_id, score) or (None, 0.0).
-        """
-        best_id: str | None = None
-        best_score: float = 0.0
-        name_lower = name.lower()
-
-        # Check canonical names
-        rows = self._db.execute(
-            "SELECT entity_id, canonical_name FROM canonical_entities "
-            "WHERE profile_id = ?",
-            (profile_id,),
-        )
-        for row in rows:
-            d = dict(row)
-            score = jaro_winkler(name_lower, d["canonical_name"].lower())
-            if score > best_score:
-                best_score = score
-                best_id = d["entity_id"]
-
-        # Check aliases
-        alias_rows = self._db.execute(
-            "SELECT ea.entity_id, ea.alias FROM entity_aliases ea "
-            "JOIN canonical_entities ce ON ce.entity_id = ea.entity_id "
-            "WHERE ce.profile_id = ?",
-            (profile_id,),
-        )
-        for row in alias_rows:
-            d = dict(row)
-            score = jaro_winkler(name_lower, d["alias"].lower())
-            if score > best_score:
-                best_score = score
-                best_id = d["entity_id"]
-
-        return (best_id, best_score)
 
     # -- Internal: persistence ----------------------------------------------
 
@@ -565,6 +636,7 @@ class EntityResolver:
 
         # Store name as its own alias for uniform lookup
         self._persist_alias(entity.entity_id, name, 1.0, "canonical", profile_id)
+        self._names.added(profile_id, entity.entity_id, name)
 
         logger.debug(
             "Created entity '%s' [%s] (type=%s, profile=%s)",
@@ -609,7 +681,7 @@ class EntityResolver:
         "recall is 8 s" regression.  We now record it in memory and flush from a
         single background thread in coalesced batches, so recall stays
         READ-ONLY on its hot path.  The dashboard stays correct within the flush
-        interval (~2 s).  The profile_id guard (L-01) is preserved in the
+        interval (~2 s).  The profile_id guard is preserved in the
         deferred UPDATE (see storage/deferred_writes.py).
         """
         try:
@@ -620,68 +692,3 @@ class EntityResolver:
         except Exception:
             # Bookkeeping must never break entity resolution.
             pass
-
-    # -- Internal: LLM disambiguation (Mode B/C) ---------------------------
-
-    def _llm_disambiguate(
-        self,
-        raw_names: list[str],
-        profile_id: str,
-    ) -> dict[str, str]:
-        """Ask LLM whether fuzzy candidates match existing entities."""
-        if not self._llm or not raw_names:
-            return {}
-
-        # Gather known entity names for context
-        rows = self._db.execute(
-            "SELECT entity_id, canonical_name FROM canonical_entities "
-            "WHERE profile_id = ? LIMIT 50",
-            (profile_id,),
-        )
-        known = {
-            str(dict(r)["canonical_name"]): str(dict(r)["entity_id"])
-            for r in rows
-        }
-
-        prompt = (
-            "Entity resolution task. For each mention, decide if it refers to "
-            "one of the known entities or is a new entity.\n\n"
-            f"Mentions to resolve: {raw_names}\n"
-            f"Known entities: {list(known.keys())}\n\n"
-            "Respond with ONLY a JSON object mapping each mention to a "
-            "known entity name if they match, or to itself if it is new.\n"
-            'Example: {"Ms. Smith": "Alice Smith", "Bob": "Bob"}'
-        )
-
-        try:
-            response = self._llm.generate(
-                prompt=prompt,
-                system="You are a precise entity resolution system.",
-                max_tokens=256,
-                temperature=0.0,
-            )
-            match = re.search(r"\{[^}]*\}", response)
-            if not match:
-                return {}
-
-            result = json.loads(match.group())
-            if not isinstance(result, dict):
-                return {}
-
-            resolved: dict[str, str] = {}
-            for mention, canonical_name in result.items():
-                mention_str = str(mention)
-                name_str = str(canonical_name)
-                if name_str in known:
-                    entity_id = known[name_str]
-                    resolved[mention_str] = entity_id
-                    self._persist_alias(
-                        entity_id, mention_str, 0.9, "llm", profile_id,
-                    )
-                    self._touch_last_seen(entity_id, profile_id)
-                # If LLM says it's itself, leave for caller to create
-            return resolved
-
-        except (json.JSONDecodeError, TypeError, Exception) as exc:
-            logger.warning("LLM entity disambiguation failed: %s", exc)
-            return {}

@@ -98,8 +98,8 @@ def _seed_pending_row(
 def test_finalize_outcome_feeds_shadow_router(
     tmp_path: Path, reset_router: None,
 ) -> None:
-    """C1: finalize_outcome must call feed_recall_settled with reward
-    as the NDCG@10 proxy. Verified by mocking feed_recall_settled and
+    """C1: finalize_outcome must call feed_recall_settled with the settled
+    engagement reward. Verified by mocking feed_recall_settled and
     checking it was invoked with the right kwargs."""
     memory_db = tmp_path / "memory.db"
     outcome_id = _seed_pending_row(memory_db, recall_query_id="q-123")
@@ -117,7 +117,8 @@ def test_finalize_outcome_feeds_shadow_router(
     call_kwargs = mock_feed.call_args.kwargs
     assert call_kwargs["profile_id"] == "default"
     assert call_kwargs["query_id"] == "q-123"
-    assert call_kwargs["ndcg_at_10"] == pytest.approx(reward)
+    # An engagement reward, not an NDCG@10 (audit BRN-19).
+    assert call_kwargs["reward"] == pytest.approx(reward)
     # memory_db / learning_db paths should be side-by-side.
     assert call_kwargs["memory_db"].endswith("memory.db")
     assert call_kwargs["learning_db"].endswith("learning.db")

@@ -16,10 +16,8 @@ from __future__ import annotations
 import io
 import json
 import subprocess
-import sys
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from superlocalmemory.hooks import before_web_hook as bwh
 

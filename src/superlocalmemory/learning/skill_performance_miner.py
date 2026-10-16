@@ -27,11 +27,11 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Thresholds — conservative to avoid hallucinating patterns
-MIN_INVOCATIONS = 5        # Don't create assertions for skills with fewer uses
-MIN_CONFIDENCE = 0.5       # Don't inject into soft prompts below this
-TRACE_WINDOW = 10          # Number of tool events to look at after a Skill call
-RETRY_WINDOW_SECONDS = 300 # 5 minutes — same Skill re-invoked = potential retry
-REINFORCEMENT_NUDGE = 0.10 # Bayesian confidence increase per consolidation cycle
+MIN_INVOCATIONS = 5  # Don't create assertions for skills with fewer uses
+MIN_CONFIDENCE = 0.5  # Don't inject into soft prompts below this
+TRACE_WINDOW = 10  # Number of tool events to look at after a Skill call
+RETRY_WINDOW_SECONDS = 300  # 5 minutes — same Skill re-invoked = potential retry
+REINFORCEMENT_NUDGE = 0.10  # Bayesian confidence increase per consolidation cycle
 
 
 class SkillPerformanceMiner:
@@ -73,7 +73,9 @@ class SkillPerformanceMiner:
 
             # Step 3: Build execution traces and compute outcomes
             skill_metrics = self._compute_skill_metrics(
-                conn, profile_id, skill_invocations,
+                conn,
+                profile_id,
+                skill_invocations,
             )
 
             # Step 4: Create/update behavioral assertions for each skill
@@ -89,7 +91,10 @@ class SkillPerformanceMiner:
             for pair, corr_data in correlations.items():
                 if corr_data["count"] >= 3:
                     self._upsert_correlation_assertion(
-                        conn, profile_id, pair, corr_data,
+                        conn,
+                        profile_id,
+                        pair,
+                        corr_data,
                     )
 
             conn.commit()
@@ -107,7 +112,9 @@ class SkillPerformanceMiner:
         return result
 
     def _get_skill_events(
-        self, conn: sqlite3.Connection, profile_id: str,
+        self,
+        conn: sqlite3.Connection,
+        profile_id: str,
     ) -> list[dict]:
         """Get all Skill tool events with enriched data."""
         rows = conn.execute(
@@ -148,170 +155,86 @@ class SkillPerformanceMiner:
             if not skill_name:
                 continue
 
-            invocations.append({
-                "skill_name": skill_name,
-                "session_id": event.get("session_id", ""),
-                "event_id": event.get("id", 0),
-                "created_at": event.get("created_at", ""),
-                "project_path": event.get("project_path", ""),
-            })
+            invocations.append(
+                {
+                    "skill_name": skill_name,
+                    "session_id": event.get("session_id", ""),
+                    "event_id": event.get("id", 0),
+                    "created_at": event.get("created_at", ""),
+                    "project_path": event.get("project_path", ""),
+                }
+            )
 
         return invocations
 
-    def _compute_skill_metrics(
-        self,
-        conn: sqlite3.Connection,
-        profile_id: str,
-        invocations: list[dict],
-    ) -> dict[str, dict]:
-        """Compute per-skill metrics using execution trace heuristic.
+    def _compute_skill_metrics(self, conn, profile_id, invocations) -> dict[str, dict]:
+        """One execution window per invocation, bounded to its session/project."""
+        from superlocalmemory.learning.skill_metrics import execution_windows
 
-        Outcome heuristic (conservative, labeled as APPROXIMATE):
-        - Signal 1 (POSITIVE): Productive tools follow (Edit, Write, Bash success)
-        - Signal 2 (NEGATIVE): Same Skill re-invoked within 5 min
-        - Signal 3 (NEGATIVE): Bash errors in next 3 events
-        - Signal 4 (WEAK POSITIVE): Session continues 10+ events
-
-        H-N1QUERY: Batch-loads all trace events in one query instead of N+1.
-        """
-        metrics: dict[str, dict] = defaultdict(lambda: {
-            "total_invocations": 0,
-            "positive_signals": 0,
-            "negative_signals": 0,
-            "sessions": set(),
-            "projects": set(),
-        })
-
-        if not invocations:
-            return {}
-
-        # H-N1QUERY: Batch-load all potential trace events in one query.
-        # Find the min event_id across all invocations so we can fetch
-        # all subsequent events in a single SELECT.
-        min_event_id = min(inv["event_id"] for inv in invocations)
-        all_trace_rows = conn.execute(
-            "SELECT id, tool_name, event_type, output_summary, created_at "
-            "FROM tool_events "
-            "WHERE profile_id = ? AND id > ? "
-            "ORDER BY id ASC",
-            (profile_id, min_event_id),
-        ).fetchall()
-        all_trace = [dict(r) for r in all_trace_rows]
-
-        # Build an index: for each event_id, find its position in all_trace
-        # so we can slice TRACE_WINDOW events after it in O(1).
-        trace_id_to_idx: dict[int, int] = {}
-        for idx, t in enumerate(all_trace):
-            if t["id"] not in trace_id_to_idx:
-                trace_id_to_idx[t["id"]] = idx
-
-        for inv in invocations:
-            skill = inv["skill_name"]
-            m = metrics[skill]
-            m["total_invocations"] += 1
-            m["sessions"].add(inv["session_id"])
-            if inv["project_path"]:
-                m["projects"].add(inv["project_path"])
-
-            # Find trace window for this invocation from pre-loaded data
-            # Events with id > inv["event_id"], take first TRACE_WINDOW
-            start_idx = 0
-            eid = inv["event_id"]
-            # The first entry in all_trace with id > eid
-            # Since all_trace starts at min_event_id+1 and is sorted, we
-            # can bisect or scan. Use the index if the next id is present.
-            # Simple approach: events after eid start at the position of eid+1
-            # or the first id > eid in the sorted list.
-            for candidate_id in range(eid + 1, eid + TRACE_WINDOW + 2):
-                if candidate_id in trace_id_to_idx:
-                    start_idx = trace_id_to_idx[candidate_id]
-                    break
-            else:
-                # No trace events found after this invocation
-                start_idx = len(all_trace)
-
-            trace_list = all_trace[start_idx:start_idx + TRACE_WINDOW]
-            outcome = self._evaluate_trace(skill, inv, trace_list, invocations)
-
-            if outcome > 0:
-                m["positive_signals"] += 1
-            elif outcome < 0:
-                m["negative_signals"] += 1
-
-        # Compute final metrics per skill
-        result = {}
-        for skill, m in metrics.items():
-            total = m["total_invocations"]
-            positive = m["positive_signals"]
-            negative = m["negative_signals"]
-
-            effective_score = (positive - negative) / total if total > 0 else 0.0
-            result[skill] = {
-                "total_invocations": total,
-                "positive_signals": positive,
-                "negative_signals": negative,
-                "effective_score": round(max(-1.0, min(1.0, effective_score)), 3),
-                "session_count": len(m["sessions"]),
-                "project_count": len(m["projects"]),
+        traces = execution_windows(conn, profile_id, invocations, TRACE_WINDOW)
+        metrics = defaultdict(
+            lambda: {
+                "total_invocations": 0,
+                "positive_signals": 0,
+                "negative_signals": 0,
+                "sessions": set(),
+                "projects": set(),
             }
+        )
+        for invocation in invocations:
+            skill = invocation["skill_name"]
+            current = metrics[skill]
+            current["total_invocations"] += 1
+            current["sessions"].add(invocation["session_id"])
+            if invocation["project_path"]:
+                current["projects"].add(invocation["project_path"])
+            outcome = self._evaluate_trace(
+                skill, invocation, traces[invocation["event_id"]], invocations
+            )
+            if outcome:
+                current["positive_signals" if outcome > 0 else "negative_signals"] += 1
+        return {
+            skill: {
+                "total_invocations": current["total_invocations"],
+                "positive_signals": current["positive_signals"],
+                "negative_signals": current["negative_signals"],
+                "effective_score": round(
+                    (current["positive_signals"] - current["negative_signals"])
+                    / current["total_invocations"],
+                    3,
+                ),
+                "session_count": len(current["sessions"]),
+                "project_count": len(current["projects"]),
+            }
+            for skill, current in metrics.items()
+        }
 
-        return result
-
-    def _evaluate_trace(
-        self,
-        skill_name: str,
-        invocation: dict,
-        trace: list[dict],
-        all_invocations: list[dict],
-    ) -> int:
-        """Evaluate execution trace after a Skill call. Returns +1, 0, or -1."""
+    def _evaluate_trace(self, skill_name, invocation, trace, all_invocations) -> int:
+        """Failures dominate heuristic productivity; no execution is unknown."""
         if not trace:
             return 0
-
-        score = 0
-
-        # Signal 1: Productive tools in trace → +1
-        productive_tools = {"Edit", "Write"}
-        if any(t["tool_name"] in productive_tools for t in trace[:TRACE_WINDOW]):
-            score += 1
-
-        # Signal 2: Same Skill re-invoked within RETRY_WINDOW → -1
-        inv_time = invocation.get("created_at", "")
-        for other in all_invocations:
-            if other["event_id"] == invocation["event_id"]:
-                continue
-            if other["skill_name"] != skill_name:
-                continue
-            if other["session_id"] != invocation["session_id"]:
-                continue
-            try:
-                t1 = datetime.fromisoformat(inv_time.replace("Z", "+00:00"))
-                t2 = datetime.fromisoformat(
-                    other["created_at"].replace("Z", "+00:00"),
+        if any(
+            event.get("event_type") == "error"
+            or (
+                event["tool_name"] == "Bash"
+                and any(
+                    word in event.get("output_summary", "").lower()
+                    for word in ("error", "failed", "command not found", "permission denied")
                 )
-                delta = abs((t2 - t1).total_seconds())
-                if 0 < delta <= RETRY_WINDOW_SECONDS:
-                    score -= 1
-                    break
-            except (ValueError, TypeError):
-                pass
-
-        # Signal 3: Bash errors in first 3 events → -1
-        for t in trace[:3]:
-            if t["tool_name"] == "Bash":
-                output = t.get("output_summary", "")
-                if output and any(
-                    kw in output.lower()
-                    for kw in ("error", "failed", "command not found", "permission denied")
-                ):
-                    score -= 1
-                    break
-
-        # Clamp to [-1, +1]
-        return max(-1, min(1, score))
+            )
+            for event in trace
+        ):
+            return -1
+        positive = any(
+            event["tool_name"] in {"Edit", "Write"}
+            or (event["tool_name"] == "Bash" and event.get("event_type") == "success")
+            for event in trace[:TRACE_WINDOW]
+        )
+        return int(positive) - int(_same_skill_retry(skill_name, invocation, all_invocations))
 
     def _detect_skill_correlations(
-        self, invocations: list[dict],
+        self,
+        invocations: list[dict],
     ) -> dict[tuple[str, str], dict]:
         """Find skills frequently used together in the same session."""
         session_skills: dict[str, set[str]] = defaultdict(set)
@@ -354,21 +277,26 @@ class SkillPerformanceMiner:
         ).hexdigest()[:32]
 
         existing = conn.execute(
-            "SELECT id, confidence FROM behavioral_assertions WHERE id = ?",
+            "SELECT id, confidence, evidence_count, source FROM behavioral_assertions WHERE id = ?",
             (assertion_id,),
         ).fetchone()
 
         confidence = min(0.85, max(0.3, abs(eff) * 0.8 + total / 100))
 
         if existing:
-            old_conf = dict(existing)["confidence"]
-            new_conf = old_conf + (1.0 - old_conf) * REINFORCEMENT_NUDGE
+            row = dict(existing)
+            # Idempotent: a rejected rule stays rejected, and a
+            # re-run over the same evidence changes nothing. Confidence is a
+            # function of the evidence, not of how often mining ran.
+            if row.get("source") == "rejected":
+                return "suppressed"
+            if int(total) <= int(row.get("evidence_count") or 0):
+                return "unchanged"
             conn.execute(
                 "UPDATE behavioral_assertions SET "
                 "action = ?, confidence = ?, evidence_count = ?, "
-                "reinforcement_count = reinforcement_count + 1, "
-                "last_reinforced_at = ?, updated_at = ? WHERE id = ?",
-                (action, round(min(0.95, new_conf), 4), total, now, now, assertion_id),
+                "updated_at = ? WHERE id = ?",
+                (action, round(confidence, 4), total, now, assertion_id),
             )
             return "reinforced"
         else:
@@ -377,8 +305,7 @@ class SkillPerformanceMiner:
                 "(id, profile_id, project_path, trigger_condition, action, "
                 " category, confidence, evidence_count, source, created_at, updated_at) "
                 "VALUES (?, ?, '', ?, ?, 'skill_performance', ?, ?, 'skill_miner', ?, ?)",
-                (assertion_id, profile_id, trigger, action,
-                 round(confidence, 4), total, now, now),
+                (assertion_id, profile_id, trigger, action, round(confidence, 4), total, now, now),
             )
             return "created"
 
@@ -399,24 +326,50 @@ class SkillPerformanceMiner:
         ).hexdigest()[:32]
 
         existing = conn.execute(
-            "SELECT id FROM behavioral_assertions WHERE id = ?",
+            "SELECT id, evidence_count, source FROM behavioral_assertions WHERE id = ?",
             (assertion_id,),
         ).fetchone()
 
         if existing:
-            conn.execute(
-                "UPDATE behavioral_assertions SET "
-                "action = ?, reinforcement_count = reinforcement_count + 1, "
-                "last_reinforced_at = ?, updated_at = ? WHERE id = ?",
-                (action, now, now, assertion_id),
-            )
+            row = dict(existing)
+            if row.get("source") != "rejected" and int(corr_data["count"]) > int(
+                row.get("evidence_count") or 0
+            ):
+                conn.execute(
+                    "UPDATE behavioral_assertions SET action = ?, "
+                    "evidence_count = ?, updated_at = ? WHERE id = ?",
+                    (action, int(corr_data["count"]), now, assertion_id),
+                )
         else:
             conn.execute(
                 "INSERT INTO behavioral_assertions "
                 "(id, profile_id, project_path, trigger_condition, action, "
                 " category, confidence, evidence_count, source, created_at, updated_at) "
                 "VALUES (?, ?, '', ?, ?, 'skill_correlation', ?, ?, 'skill_miner', ?, ?)",
-                (assertion_id, profile_id, trigger, action,
-                 round(min(0.7, corr_data["count"] / 10), 4),
-                 corr_data["count"], now, now),
+                (
+                    assertion_id,
+                    profile_id,
+                    trigger,
+                    action,
+                    round(min(0.7, corr_data["count"] / 10), 4),
+                    corr_data["count"],
+                    now,
+                    now,
+                ),
             )
+
+
+def _same_skill_retry(skill_name, invocation, invocations):
+    for other in invocations:
+        if other["event_id"] == invocation["event_id"] or other["skill_name"] != skill_name:
+            continue
+        if other["session_id"] != invocation["session_id"]:
+            continue
+        try:
+            first = datetime.fromisoformat(invocation.get("created_at", "").replace("Z", "+00:00"))
+            second = datetime.fromisoformat(other["created_at"].replace("Z", "+00:00"))
+            if 0 < abs((second - first).total_seconds()) <= RETRY_WINDOW_SECONDS:
+                return True
+        except (ValueError, TypeError):
+            continue
+    return False

@@ -113,17 +113,29 @@ class LearningDatabase:
         produces a configured connection they can use instead.
         """
         conn = sqlite3.connect(self._db_path, timeout=timeout)
-        apply_journal_mode(conn)
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.row_factory = sqlite3.Row
+        try:
+            apply_journal_mode(conn)
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.row_factory = sqlite3.Row
+        except BaseException:
+            # Setup failed: close it now, or the file stays open (Windows
+            # then cannot delete or replace it) for as long as the error lives.
+            conn.close()
+            raise
         return conn
 
     def _connect(self) -> sqlite3.Connection:
         """Create a configured connection to the learning database."""
         conn = sqlite3.connect(self._db_path, timeout=10)
-        apply_journal_mode(conn)
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.row_factory = sqlite3.Row
+        try:
+            apply_journal_mode(conn)
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.row_factory = sqlite3.Row
+        except BaseException:
+            # Setup failed: close it now, or the file stays open (Windows
+            # then cannot delete or replace it) for as long as the error lives.
+            conn.close()
+            raise
         return conn
 
     def _init_schema(self) -> None:
@@ -506,23 +518,6 @@ class LearningDatabase:
         "LIMIT ?"
     )
 
-    _SQL_WITH_OUTCOMES = (
-        "SELECT s.id AS signal_id, s.query_id, s.fact_id, s.position, "
-        "       s.created_at, f.features_json, o.reward AS outcome_reward "
-        "FROM learning_signals s "
-        "JOIN learning_features f "
-        "  ON f.signal_id = s.id AND f.profile_id = s.profile_id "
-        "LEFT JOIN action_outcomes o "
-        "  ON o.recall_query_id = s.query_id AND o.settled = 1 "
-        "WHERE s.profile_id = ? "
-        "  AND s.signal_type IN ('candidate', 'shown', 'legacy_feedback') "
-        "  AND f.is_synthetic = 0 "
-        "  AND (o.settled IS NULL OR "
-        "       (julianday('now') - julianday(o.settled_at)) * 86400.0 >= ?) "
-        "ORDER BY s.created_at DESC "
-        "LIMIT ?"
-    )
-
     def _migration_applied(self, name: str) -> bool:
         """Return True if ``name`` is recorded complete in migration_log.
 
@@ -550,45 +545,55 @@ class LearningDatabase:
         limit: int = 2000,
         min_outcome_age_sec: int = 60,
         include_synthetic: bool = False,
+        memory_db: Optional[Union[str, Path]] = None,
     ) -> list[dict]:
-        """Fetch training rows for LightGBM lambdarank training.
+        """Fetch labelled rows for LightGBM lambdarank training.
 
-        Version-gated on M006: without the ``reward`` column we return rows
-        with ``outcome_reward = None`` and the labeler falls through to the
-        position proxy (§4.7).
-
-        When ``include_synthetic`` is True, migrated legacy rows (with
-        ``learning_features.is_synthetic=1``) are included. The default
-        (False) preserves Stage 8 D9 — synthetic rows excluded unless the
-        caller opts in explicitly. The UI exposes this via the
-        "Migrate legacy data" flow so users consciously choose to let their
-        pre-v3.4.22 feedback bootstrap the model.
-
-        Returns rows sorted newest-first; the caller is expected to regroup
-        by ``query_id`` before training.
+        Rows come from :func:`training_rows.fetch_labelled_rows`: exposure
+        features joined to the outcomes that name the recall and the memory,
+        across learning.db and memory.db (``memory_db``, default the one beside
+        this file). Judged queries only; position is never a label.
+        The old join looked for ``action_outcomes`` in learning.db (it lives in
+        memory.db) and gated on M006 in learning.db's migration log (M006 is
+        logged in memory.db), so production training never saw a real label.
+        With no reachable outcome table the legacy position rows remain.
+        Newest-first; the caller regroups by ``query_id``.
         """
-        m006_applied = self._migration_applied("M006_action_outcomes_reward")
-        sql = self._SQL_WITH_OUTCOMES if m006_applied else self._SQL_POSITION_ONLY
+        from superlocalmemory.learning.training_rows import (
+            fetch_labelled_rows,
+            outcome_source,
+        )
+
+        mem = Path(memory_db) if memory_db else Path(self._db_path).parent / "memory.db"
+        conn = self._connect()
+        try:
+            table = outcome_source(conn, mem)
+            if table is None:
+                return self._fetch_position_only(profile_id, limit,
+                                                 include_synthetic)
+            return fetch_labelled_rows(
+                conn, table, profile_id=profile_id, limit=limit,
+                min_outcome_age_sec=min_outcome_age_sec,
+                include_synthetic=include_synthetic,
+            )
+        except sqlite3.Error as exc:
+            logger.warning("fetch_training_examples failed: %s", exc)
+            return []
+        finally:
+            conn.close()
+
+    def _fetch_position_only(
+        self, profile_id: str, limit: int, include_synthetic: bool,
+    ) -> list[dict]:
+        sql = self._SQL_POSITION_ONLY
         if include_synthetic:
-            # Drop the synthetic-filter clause verbatim. Safe because the
-            # surrounding clauses already reference ``f.`` so removing this
-            # one keeps the SQL grammatically valid.
             sql = sql.replace(" AND f.is_synthetic = 0 ", " ")
-        params: tuple
-        if m006_applied:
-            params = (profile_id, int(min_outcome_age_sec), int(limit))
-        else:
-            params = (profile_id, int(limit))
         conn = self._connect()
         try:
             try:
-                rows = conn.execute(sql, params).fetchall()
+                rows = conn.execute(sql, (profile_id, int(limit))).fetchall()
             except sqlite3.Error as exc:
-                logger.warning(
-                    "fetch_training_examples failed (m006=%s): %s",
-                    m006_applied,
-                    exc,
-                )
+                logger.warning("fetch_training_examples (no M006): %s", exc)
                 return []
             out: list[dict] = []
             for row in rows:
@@ -601,6 +606,30 @@ class LearningDatabase:
             return out
         finally:
             conn.close()
+
+    @staticmethod
+    def _other_profile_tables(conn: sqlite3.Connection, already: list[str]) -> list[str]:
+        """Every other table of learning.db that carries a profile (a producer added later).
+
+        ``channel_credits`` and ``co_retrieval_edges`` (written by ordinary recall)
+        were not in the list above, so an erasure left the ids of the memories a
+        person's queries co-retrieved. Receipts and the markers that refuse a late
+        write are decided by ``profile_fold_sidecars`` and are not touched here.
+        """
+        from superlocalmemory.storage.profile_fold_sidecars import DELETE, LEARNING_DECISIONS
+
+        extra: list[str] = []
+        for (name,) in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+            if name in already or name.startswith("sqlite_"):
+                continue
+            try:
+                cols = {r[1] for r in conn.execute(f'PRAGMA table_info("{name}")')}
+            except sqlite3.OperationalError:
+                continue
+            if "profile_id" in cols and LEARNING_DECISIONS.get(name, DELETE) == DELETE:
+                extra.append(name)
+        return extra
 
     def reset(self, profile_id: Optional[str] = None) -> None:
         """Delete learning data. GDPR Article 17 handler.
@@ -634,6 +663,10 @@ class LearningDatabase:
                     # would have survived indefinitely.
                     "bandit_plays",
                     "bandit_arms",
+                    # Which arm/model served each of the profile's recalls,
+                    # and the reward each earned, in a ranker's live test.
+                    "shadow_assignments",
+                    "shadow_observations",
                 ]
                 receipt_tables = {
                     row[0]
@@ -651,6 +684,8 @@ class LearningDatabase:
                         "SELECT name FROM sqlite_master WHERE type='table'"
                     )
                 }
+                if profile_id:
+                    tables = [*tables, *self._other_profile_tables(conn, tables)]
                 for table in tables:
                     # A store predating any of these tables must not abort the
                     # erasure of the rest — an Article 17 request that fails

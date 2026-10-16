@@ -8,17 +8,8 @@ from __future__ import annotations
 import pytest
 
 from superlocalmemory.code_graph.bridge.entity_resolver import (
-    BUG_FIX_KEYWORDS,
     CONF_EXACT_NAME,
-    CONF_FILE_PATH,
-    CONF_QUALIFIED_CONTAINS,
-    CONF_SUBSTRING,
-    DECISION_KEYWORDS,
-    RATIONALE_KEYWORDS,
-    REFACTOR_KEYWORDS,
-    CandidateMention,
     EntityResolver,
-    MatchedNode,
 )
 from superlocalmemory.code_graph.database import CodeGraphDatabase
 from superlocalmemory.code_graph.models import (

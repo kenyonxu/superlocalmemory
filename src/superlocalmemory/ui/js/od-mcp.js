@@ -6,13 +6,13 @@
 //
 // Endpoint: GET /api/v3/mcp/profiles
 //   {
-//     current: "core",
+//     current: "full",
 //     profiles: {
-//       core:  { count: 14, tools: [...], description: "..." },
-//       code:  { count: 28, tools: [...], description: "..." },
-//       full:  { count: 46, tools: [...], description: "..." },
-//       power: { count: 58, tools: [...], description: "..." },
-//       mesh:  { count:  8, tools: [...], description: "..." },
+//       core:  { count: 19, tools: [...], description: "..." },
+//       code:  { count: 39, tools: [...], description: "..." },
+//       full:  { count: 58, tools: [...], description: "..." },
+//       power: { count: 70, tools: [...], description: "..." },
+//       mesh:  { count:  9, tools: [...], description: "..." },
 //     },
 //     aliases: { "code21": "code", ... },
 //     total_tools: <int>
@@ -165,6 +165,26 @@
       'MCP connection. Fewer tools keeps context lean; more tools gives agents ' +
       'deeper capabilities.';
     return p;
+  }
+
+  // =========================================================================
+  // Build: pointer to the Connected apps pane (internet apps live there)
+  // =========================================================================
+
+  function buildAppsPointer() {
+    var wrap = EL('div', { className: 'apps-pointer', 'data-apps-pointer': '' });
+    var text = EL('div', { className: 'apps-pointer-text' });
+    text.appendChild(EL('strong', { text: 'Want ChatGPT, Claude on the web, Muse or bots to use your memory?' }));
+    text.appendChild(EL('span', { text: 'That is optional and set up separately, under Connected apps.' }));
+    var link = EL('a', { href: '#apps-pane', className: 'btn secondary sm', text: 'Open Connected apps' });
+    link.addEventListener('click', function (event) {
+      event.preventDefault();
+      if (typeof window.slmNavigate === 'function') window.slmNavigate('apps-pane');
+      else window.location.hash = '#apps-pane';
+    });
+    wrap.appendChild(text);
+    wrap.appendChild(link);
+    return wrap;
   }
 
   // =========================================================================
@@ -369,11 +389,11 @@
     // Use textContent — no API data, just static example strings
     codeBlock.textContent =
       '"env": {\n' +
-      '  "SLM_MCP_PROFILE": "core"    // 14 tools — minimal\n' +
-      '  // "SLM_MCP_PROFILE": "code"  // 28 tools — + Brain, code graph, loops\n' +
-      '  // "SLM_MCP_PROFILE": "full"  // 46 tools — + mesh\n' +
-      '  // "SLM_MCP_PROFILE": "power" // 58 tools — + governance\n' +
-      '  // "SLM_MCP_PROFILE": "mesh"  //  8 tools — mesh only\n' +
+      '  "SLM_MCP_PROFILE": "core"    // 19 tools — minimal\n' +
+      '  // "SLM_MCP_PROFILE": "code"  // 39 tools — + Brain, code graph, loops, kinds\n' +
+      '  // "SLM_MCP_PROFILE": "full"  // 58 tools — + mesh\n' +
+      '  // "SLM_MCP_PROFILE": "power" // 70 tools — + governance\n' +
+      '  // "SLM_MCP_PROFILE": "mesh"  //  9 tools — mesh only\n' +
       '}';
     body2.appendChild(codeBlock);
     step2.appendChild(num2);
@@ -461,38 +481,40 @@
   // Main render
   // =========================================================================
 
-  window.odRenderMcp = function (pane) {
-    if (!pane) return;
+  window.odRenderMcp = function (pane, options) {
+    if (!pane) return Promise.resolve();
+    options = options || {};
     injectStyles();
-
-    // Show loading state immediately
-    pane.textContent = '';
-    pane.appendChild(buildLoading());
-
-    apiFetch('/api/v3/mcp/profiles')
+    // The pane keeps its mounted root across refreshes (and the shell does not
+    // clear it), so only the profile-data area below is ever re-rendered.
+    // The internet-connection flow ("Connect your AI") moved to its own pane,
+    // Connected apps (od-apps.js); this pane is for local agents only.
+    var root = pane.querySelector('#od-mcp-root');
+    if (!root) {
+      root = EL('div', { id: 'od-mcp-root' });
+      root.style.cssText = 'padding:26px;max-width:860px';
+      var pageHead = EL('div'); pageHead.className = 'page-head';
+      pageHead.appendChild(EL('h2', { text: 'MCP & Integrations' }));
+      root.appendChild(pageHead); root.appendChild(buildIntro());
+      root.appendChild(buildAppsPointer());
+      pane.textContent = ''; pane.appendChild(root);
+      var details = EL('div', { 'data-mcp-profile-details': '' });
+      details.appendChild(buildLoading()); root.appendChild(details);
+    }
+    var profileDetails = root.querySelector('[data-mcp-profile-details]');
+    var generation = (pane.odMcpGeneration || 0) + 1; pane.odMcpGeneration = generation;
+    return apiFetch('/api/v3/mcp/profiles')
       .then(function (data) {
-        pane.textContent = '';
-
-        // Root wrapper
-        var root = EL('div', { id: 'od-mcp-root' });
-        root.style.cssText = 'padding:26px;max-width:860px';
-
-        // Page heading
-        var pageHead = EL('div');
-        pageHead.className = 'page-head';
-        pageHead.appendChild(EL('h2', { text: 'MCP & Integrations' }));
-        root.appendChild(pageHead);
-
-        root.appendChild(buildIntro());
-        root.appendChild(buildCurrentCard(data));
-        root.appendChild(buildProfilesCard(data));
-        root.appendChild(buildHowToCard());
-
-        pane.appendChild(root);
+        if (pane.odMcpGeneration !== generation || !root.isConnected) return;
+        profileDetails.textContent = '';
+        profileDetails.appendChild(buildCurrentCard(data));
+        profileDetails.appendChild(buildProfilesCard(data));
+        profileDetails.appendChild(buildHowToCard());
       })
-      .catch(function (err) {
-        pane.textContent = '';
-        pane.appendChild(buildError(
+      .catch(function () {
+        if (pane.odMcpGeneration !== generation || !root.isConnected) return;
+        profileDetails.textContent = '';
+        profileDetails.appendChild(buildError(
           'Could not load MCP profile data. Is the daemon running?',
           function () { window.odRenderMcp(pane); }
         ));

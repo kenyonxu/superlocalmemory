@@ -27,6 +27,8 @@ Usage::
     runner = Runner(agent=agent, app_name="my-app", memory_service=service)
 """
 
+# Current native API (opened 2026-10-11):
+# https://google.github.io/adk-docs/sessions/memory/
 from __future__ import annotations
 
 import asyncio
@@ -52,11 +54,7 @@ def _data_root() -> Path:
 
 
 def _extract_events(session: Any) -> tuple[str, str, str, list[dict[str, Any]]]:
-    """Extract (app_name, user_id, session_id, event_dicts) from an ADK Session.
-
-    Uses only ``getattr`` — never direct attribute access — so this function
-    remains safe when called with any pydantic model version.
-    """
+    """Extract a namespace and JSON event records from a native ADK session."""
     app_name = str(getattr(session, "app_name", "") or "")
     user_id = str(getattr(session, "user_id", "") or "")
     session_id = str(
@@ -105,37 +103,18 @@ def _extract_events(session: Any) -> tuple[str, str, str, list[dict[str, Any]]]:
 
 
 def _build_memory_entry(envelope: dict[str, Any]) -> MemoryEntry:
-    """Convert a stored envelope dict into a google.adk ``MemoryEntry``.
+    """Build the supported native MemoryEntry with an ISO 8601 timestamp."""
+    # https://raw.githubusercontent.com/google/adk-python/main/src/google/adk/memory/memory_entry.py
+    from google.genai import types as genai_types
 
-    Tries to construct a ``Content`` object with typed ``Part``s when the
-    google-genai types are importable; falls back to a plain string otherwise
-    so the wrapper degrades gracefully across ADK minor versions.
-    """
     evt = envelope.get("event", {})
-    text = evt.get("text", "")
     author = evt.get("author", "unknown")
     ts_float = float(evt.get("timestamp_float", 0.0))
-    # ADK's MemoryEntry types timestamp as `datetime | None` — pass a datetime,
-    # not the raw epoch float (pydantic will not coerce a bare float).
-    from datetime import datetime as _dt, timezone as _tz
-    ts = _dt.fromtimestamp(ts_float, tz=_tz.utc) if ts_float and ts_float > 0 else None
-
-    try:
-        from google.genai import types as genai_types
-
-        content = genai_types.Content(
-            role=author,
-            parts=[genai_types.Part(text=text)],
-        )
-    except Exception:  # ADK version difference or import failure
-        content = text  # type: ignore[assignment]  # graceful fallback
-
-    try:
-        return MemoryEntry(content=content, author=author, timestamp=ts)
-    except TypeError:
-        # Defensive: an ADK minor version that doesn't accept `timestamp` as a
-        # constructor kwarg still yields a usable entry.
-        return MemoryEntry(content=content, author=author)
+    timestamp = evt.get("timestamp_iso") or (
+        datetime.fromtimestamp(ts_float, tz=timezone.utc).isoformat() if ts_float > 0 else None
+    )
+    content = genai_types.Content(role=author, parts=[genai_types.Part(text=evt.get("text", ""))])
+    return MemoryEntry(content=content, author=author, timestamp=timestamp)
 
 
 class SuperLocalMemoryService(BaseMemoryService):

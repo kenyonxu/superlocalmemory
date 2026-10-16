@@ -5,14 +5,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from superlocalmemory.code_graph.bridge.hebbian_linker import (
     WEIGHT_BASE,
     WEIGHT_CAP,
-    WEIGHT_PER_SHARED,
     HebbianLinker,
 )
 from superlocalmemory.code_graph.database import CodeGraphDatabase

@@ -26,14 +26,13 @@ from __future__ import annotations
 
 import functools
 import logging
-import os
 import sqlite3
 from typing import TYPE_CHECKING, FrozenSet
 
 from superlocalmemory.core.actor_context import ActorContext, ActorRole, Transport
 from superlocalmemory.core.operation_policy_registry import (
-    PolicyDecision,
     _DEFAULT_REGISTRY,
+    PolicyDecision,
 )
 from superlocalmemory.core.operation_request import OperationKind
 
@@ -124,9 +123,13 @@ _REQUIRED_MCP_GATES: frozenset[str] = frozenset({
     "link_memory_to_code",
     # Tranche G — mesh_inbox marks messages as read (POST to mesh broker)
     "mesh_inbox",
+    "mesh_wait",
     "fetch",
     "list_recent",
     "session_init",
+    # Memory kinds (tools_kinds.py) — writes a kind onto an existing memory
+    "set_memory_kind",
+    "confirm_memory_kinds",
 })
 
 
@@ -470,14 +473,22 @@ def _target_profile(explicit: str = "") -> str:
     return "default"
 
 
-def _session_principal(profile: str) -> tuple[str, str, FrozenSet[ActorRole] | None]:
-    """Resolve the caller from a session token in the environment.
+def _session_principal(
+    profile: str, token: str | None = None,
+) -> tuple[str, str, FrozenSet[ActorRole] | None]:
+    """Resolve the caller from the session it presented.
 
     Returns ``(principal_id, raw_token, roles)``. An empty principal means the
     caller could not be identified, which ``resolve_actor`` turns into ANONYMOUS
     and ``admit`` then denies -- so an unset or expired token fails closed.
+
+    ``token`` defaults to the session the current caller presented: the one an
+    HTTP request carried (bound by the MCP mount), else this process's own
+    ``SLM_USER_SESSION`` (stdio MCP, command line). See core/caller_session.
     """
-    token = os.environ.get(_SESSION_ENV, "").strip()
+    from superlocalmemory.core.caller_session import presented_session
+
+    token = (presented_session() if token is None else token).strip()
     if not token:
         return "", "", None
     rbac = _rbac_engine()
@@ -506,7 +517,78 @@ def _session_principal(profile: str) -> tuple[str, str, FrozenSet[ActorRole] | N
     return user["user_id"], token, frozenset({actor_role})
 
 
-def admits(kind: OperationKind):
+def _accounts_exist() -> bool:
+    """Whether the workspace has any team account. Unreadable counts as yes."""
+    rbac = _rbac_engine()
+    if rbac is None:
+        return False
+    try:
+        return rbac.user_count() > 0
+    except sqlite3.OperationalError as exc:
+        return "no such table" not in str(exc).lower()
+    except Exception:  # noqa: BLE001 - an unreadable store is not "no accounts"
+        return True
+
+
+def caller_actor(transport: Transport, profile_hint: str = "") -> tuple[ActorContext, str]:
+    """``(actor, mode)`` for one call on MCP or the command line.
+
+    Company mode (either switch) always identifies the caller by its session.
+    With login optional, a caller that presents NO session is the machine
+    owner, as before; one that presents a session is that user, held to that
+    user's role, and an ended or unknown session is refused -- never promoted to
+    the owner (4.1.25 audit OPS-24, the same rule HTTP applies). With no team
+    accounts at all a stray token changes nothing.
+    """
+    from superlocalmemory.core.caller_session import presented_session
+
+    company = _company_mode_active(_resolve_deployment())
+    presented = presented_session()
+    enforce = company or (bool(presented) and _accounts_exist())
+    if not enforce:
+        return resolve_actor(transport, tier="personal", mode="local"), "local"
+    principal, token, roles = _session_principal(_target_profile(profile_hint))
+    actor = resolve_actor(
+        transport, tier="enterprise", mode="company",
+        principal=principal, session=token, roles=roles,
+    )
+    return actor, "company"
+
+
+#: What a refused caller is told, by reason. Every refusal says what to do.
+_REFUSAL_HELP = {
+    "authentication_required": (
+        "This workspace needs a signed-in user for this. Sign in on the "
+        "dashboard and pass the session (X-SLM-User-Session over HTTP, or the "
+        "SLM_USER_SESSION environment variable for a local agent); an ended "
+        "session must be replaced, not reused."
+    ),
+    "insufficient_roles": (
+        "Your role on this workspace does not allow this. Ask a workspace "
+        "administrator for a role that does."
+    ),
+}
+
+
+def refusal_result(reason: str, kind: OperationKind | None = None) -> dict:
+    """The tool result for a refused call (reported to MCP clients as isError)."""
+    policy = _DEFAULT_REGISTRY.get_policy(kind) if kind is not None else None
+    roles = sorted(role.value for role in policy.required_roles) if policy is not None else []
+    message = _REFUSAL_HELP.get(reason, "This call is not allowed by the workspace policy.")
+    if roles:
+        message += " Required role on this workspace: " + " or ".join(roles) + "."
+    return {
+        "success": False,
+        "error": "not_authorized",
+        "code": "NOT_AUTHORIZED",
+        "retryable": False,
+        "reason": reason,
+        "message": message,
+        "required_roles": roles,
+    }
+
+
+def admits(kind: OperationKind, *, http_kind: OperationKind | None = None):
     """Decorator that gates an async MCP tool function via the policy registry.
 
     Usage (inside register_*_tools):
@@ -527,31 +609,28 @@ def admits(kind: OperationKind):
 
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
-            deployment = _resolve_deployment()
-            # Either switch means company mode. Reading only the config file is
+            # Either switch means company mode, and a presented session is
+            # always that user (caller_actor). Reading only the config file is
             # what let a dashboard toggle change HTTP and leave this transport
             # writing as the machine owner.
-            company = _company_mode_active(deployment)
-            tier = "enterprise" if company else "personal"
-            mode = "company" if company else "local"
-            principal, token, roles = ("", "", None)
-            if company:
-                principal, token, roles = _session_principal(
-                    _target_profile(kwargs.get("profile_id", "") or ""),
-                )
-            actor = resolve_actor(
-                Transport.MCP, tier=tier, mode=mode,
-                principal=principal, session=token, roles=roles,
+            actor, mode = caller_actor(
+                Transport.MCP, str(kwargs.get("profile_id", "") or ""),
             )
+            effective_kind = kind
+            if http_kind is not None:
+                from superlocalmemory.server.profile_runtime import current_request_pin
+
+                if current_request_pin() is not None:
+                    effective_kind = http_kind
             try:
-                admit(kind, actor, mode=mode)
+                admit(effective_kind, actor, mode=mode)
             except AdmissionDenied as exc:
-                return {
-                    "success": False,
-                    "error": "not_authorized",
-                    "reason": exc.decision.reason,
-                }
-            return await fn(*args, **kwargs)
+                return refusal_result(exc.decision.reason, effective_kind)
+            try:
+                return await fn(*args, **kwargs)
+            except AdmissionDenied as exc:
+                return refusal_result(exc.decision.reason, effective_kind)
+        wrapper._slm_admission_gated = True
         return wrapper
     return decorator
 
@@ -581,33 +660,20 @@ def gate_cli_mutation(
     profile   : Workspace the command will touch. Empty means the active one.
     """
     import sys
-    deployment = _resolve_deployment()
-    # Either switch means company mode -- the same rule the MCP gate uses. This
-    # gate used to read config.toml alone, so turning per-user access on from
-    # the dashboard changed HTTP and MCP and left every CLI write running as the
-    # machine owner.
-    company = _company_mode_active(deployment)
-    tier = "enterprise" if company else "personal"
-    mode = "company" if company else "local"
-    session = ""
-    if company and not principal:
-        # A CLI caller identifies itself the same way an MCP caller does. With
-        # no token the principal stays empty, resolve_actor returns ANONYMOUS,
-        # and admit denies -- which is the intended answer for an unauthenticated
-        # write on a workspace that requires a login.
-        principal, session, resolved_roles = _session_principal(
-            _target_profile(profile),
+    if principal:
+        # An identity the command already resolved (and its roles).
+        company = _company_mode_active(_resolve_deployment())
+        mode = "company" if company else "local"
+        actor = resolve_actor(
+            Transport.CLI, tier="enterprise" if company else "personal",
+            mode=mode, principal=principal, roles=roles,
         )
-        if roles is None:
-            roles = resolved_roles
-    actor = resolve_actor(
-        Transport.CLI,
-        tier=tier,
-        mode=mode,
-        principal=principal,
-        session=session,
-        roles=roles,
-    )
+    else:
+        # Either switch means company mode, and a presented session is always
+        # that user -- the same rule the MCP gate uses (caller_actor). This
+        # gate used to read config.toml alone, so turning per-user access on
+        # from the dashboard left every CLI write running as the machine owner.
+        actor, mode = caller_actor(Transport.CLI, profile)
     try:
         admit(kind, actor, mode=mode)
     except AdmissionDenied as exc:
@@ -623,97 +689,6 @@ def gate_cli_mutation(
             flush=True,
         )
         sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# Startup coverage self-check (non-vacuous)
-# ---------------------------------------------------------------------------
-
-def coverage_self_check(
-    deployment: "DeploymentConfig",
-    registry: "OperationPolicyRegistry | None" = None,
-    server: "object | None" = None,
-) -> None:
-    """Assert comprehensive policy coverage at daemon startup.
-
-    Checks:
-      1. Every OperationKind has a registered policy (existing check).
-      2. No policy has an empty allowed_transports set (unreachable = bug).
-      3. Every tool in _REQUIRED_MCP_GATES appears in _GATED_MCP_TOOLS.
-      4. (F1) Dynamic: every mutating tool in server._tool_manager._tools
-         that is NOT flagged readOnlyHint=True must be in _GATED_MCP_TOOLS.
-
-    In personal/local mode: logs warnings for any gap (non-fatal).
-    In enterprise mode: raises RuntimeError on the first gap (fatal startup).
-
-    Parameters
-    ----------
-    deployment : Loaded DeploymentConfig (from unified_daemon startup).
-    registry   : Override the default registry (for testing).
-    server     : Optional FastMCP server; when supplied, its tool registry
-                 is enumerated for check 4 (dynamic mutator coverage).
-    """
-    reg = registry if registry is not None else _DEFAULT_REGISTRY
-    is_enterprise = deployment.is_enterprise
-    messages: list[str] = []
-
-    # Check 1: every OperationKind has a policy entry.
-    cov = reg.coverage()
-    missing_kinds = [
-        kind.value
-        for kind in OperationKind
-        if not cov.get(kind.value, {}).get("has_policy", False)
-    ]
-    if missing_kinds:
-        messages.append(f"policy coverage gap — no policy for: {missing_kinds}")
-
-    # Check 2: no policy has empty allowed_transports (unreachable).
-    empty_transport_kinds = [
-        info["kind"]
-        for info in cov.values()
-        if info.get("has_policy") and not info.get("has_transports", True)
-    ]
-    if empty_transport_kinds:
-        messages.append(
-            f"empty_transports in policies for: {empty_transport_kinds} "
-            "(no reachable transport — these operations can never be invoked)"
-        )
-
-    # Check 3: tool inventory — every required MCP gate is wired.
-    ungated = sorted(_REQUIRED_MCP_GATES - _GATED_MCP_TOOLS)
-    if ungated:
-        messages.append(f"ungated MCP tools (missing @admits): {ungated}")
-
-    # Check 4 (F1): dynamic discovery — enumerate server tool registry and flag
-    # any mutating tool (readOnlyHint / read_only_hint != True) not in
-    # _GATED_MCP_TOOLS. See _tool_read_only_hint for mcp 2.0 naming.
-    if server is not None:
-        try:
-            tool_dict = server._tool_manager._tools  # type: ignore[attr-defined]
-            dynamic_ungated = sorted(
-                name
-                for name, tool in tool_dict.items()
-                if name not in _GATED_MCP_TOOLS
-                and _tool_read_only_hint(tool) is not True
-            )
-            if dynamic_ungated:
-                messages.append(
-                    f"dynamic ungated MCP mutators (not in _GATED_MCP_TOOLS): {dynamic_ungated}"
-                )
-        except AttributeError:
-            logger.debug(
-                "admission: server does not expose _tool_manager._tools — skipping dynamic check"
-            )
-
-    if not messages:
-        logger.debug("admission: coverage self-check passed (%d kinds)", len(list(OperationKind)))
-        return
-
-    for msg in messages:
-        full = f"admission: {msg}"
-        if is_enterprise:
-            raise RuntimeError(full)
-        logger.warning(full)
 
 
 def enforce_read_scope(
@@ -757,6 +732,8 @@ def enforce_read_scope(
 
 __all__ = [
     "AdmissionDenied",
+    "caller_actor",
+    "refusal_result",
     "admit",
     "admits",
     "coverage_self_check",
@@ -767,3 +744,7 @@ __all__ = [
     "_GATED_MCP_TOOLS",
     "_REQUIRED_MCP_GATES",
 ]
+
+
+# Re-exported: the startup coverage check lives in its own module (size budget).
+from superlocalmemory.core.admission_coverage import coverage_self_check  # noqa: E402

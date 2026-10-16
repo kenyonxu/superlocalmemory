@@ -68,6 +68,11 @@ REAL_SKILLS: frozenset[str] = frozenset(
         "slm-list-recent",
         "slm-show-patterns",
         "slm-switch-profile",
+        # Skills the rules and fragment now point at (shipped in plugin-src/skills/).
+        "slm-bot-memory",
+        "slm-getting-started-bot",
+        "slm-web-access",
+        "slm-media",  # 4.1.25: pictures, PDFs and folders
     }
 )
 
@@ -77,6 +82,7 @@ ADVISOR_NAMES: frozenset[str] = frozenset(
         "slm-memory-advisor",
         "slm-optimize-advisor",
         "slm-governance-advisor",
+        "slm-loop-runner",
     }
 )
 
@@ -95,6 +101,14 @@ CLI_FIRST_VERBS: frozenset[str] = frozenset(
         "cache",
         "compress",
         "loop",   # slm loop demo|history|show — bounded loops (v3.8.0)
+        "update",  # slm update <fact_id> <content> — proposes a reviewed correction
+        "gdpr",    # slm gdpr status|export|erase|verify — subject-rights CLI
+        "media",   # slm media enable|disable|status|gc|repair (4.1.25)
+        "sources", # slm sources add|list|report|rescan|remove|forget-empty (4.1.25)
+        "team",    # slm team status|policy (4.1.25)
+        "token",   # slm token show (4.1.25)
+        "remote",  # slm remote keys allow|disallow web-<id> mesh|media
+        "mesh",    # slm mesh status|peers (the only mesh commands)
     }
 )
 

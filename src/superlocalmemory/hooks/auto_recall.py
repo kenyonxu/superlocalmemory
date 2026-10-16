@@ -9,10 +9,19 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from superlocalmemory.core.injection import InjectableMemory, render_context
+from superlocalmemory.core.injection import (
+    InjectableMemory, render_context, response_injectable, supported_only,
+)
 from superlocalmemory.retrieval.temporal_frame import relative_age, temporal_frame
 
 logger = logging.getLogger(__name__)
+
+
+def _injectable_tier(result: Any) -> bool:
+    """A result the support stage labelled supported, or never labelled."""
+    return supported_only([InjectableMemory(
+        content="", score=0.0, support_tier=str(getattr(result, "tier", "") or ""),
+    )]) != []
 
 
 class AutoRecall:
@@ -66,11 +75,22 @@ class AutoRecall:
             logger.warning("Soft-prompt bridge (AutoRecall→AutoInvoker) failed: %s", exc)
             return ""
 
-    def _recall(self, query: str, limit: int):
-        if self._recall_fn is not None:
-            return self._recall_fn(query, limit=limit)
-        if self._engine is not None:
-            return self._engine.recall(query, limit=limit)
+    def _recall(self, query: str, limit: int, *, context: bool = False):
+        # S-M2: everything AutoRecall does is loading context — session start,
+        # ``slm://context``, ``slm session-context --full``. Nobody asked a
+        # question, so the answer check is skipped: nothing is judged, and
+        # with the online check on nothing is sent off the machine or billed.
+        # In-process recalls read the marker; across HTTP the daemon proxy
+        # sends it as ``answer_check=skip``.
+        from superlocalmemory.core.answer_check_scope import context_load, skip_answer_check
+
+        # 4.1.25: a session's context is a load, not a question -- no
+        # answer-support gate either; a query from a tool is still gated.
+        with context_load() if context else skip_answer_check():
+            if self._recall_fn is not None:
+                return self._recall_fn(query, limit=limit)
+            if self._engine is not None:
+                return self._engine.recall(query, limit=limit)
         return None
 
     def get_session_context(self, project_path: str = "", query: str = "") -> str:
@@ -94,17 +114,27 @@ class AutoRecall:
         # --- 2. Memory recall ---
         try:
             search_query = query or f"project context {project_path}"
-            response = self._recall(search_query, self._max_memories)
+            response = self._recall(search_query, self._max_memories, context=True)
         except Exception as exc:
             logger.warning("Auto-recall failed: %s", exc)
             # Still return soft prompt if present
             return soft_prompt
 
+        # --- 2b. The answer check's verdict, if one ran ---
+        # H-3: added ABOVE the memories, never in their place — exactly as
+        # session_init and the CLI do. A false "not answered" must not hide
+        # what the user stored. "" when no judge ran (the usual case, and
+        # always for this context-loading recall once the skip is honoured).
+        from superlocalmemory.core.answer_check_notice import answer_check_line
+
+        verdict_line = answer_check_line(response) if response is not None else ""
+
         # --- 3. Build memory context block (empty string when no results) ---
         memory_ctx = ""
         try:
-            if response is not None and response.results:
-                relevant = [r for r in response.results if r.score >= self._threshold]
+            if response is not None and response.results and response_injectable(response):
+                relevant = [r for r in response.results
+                            if r.score >= self._threshold and _injectable_tier(r)]
                 if relevant:
                     memories = [
                         InjectableMemory(
@@ -114,6 +144,7 @@ class AutoRecall:
                             importance=float(getattr(r.fact, "importance", 0.0) or 0.0),
                             access_count=int(getattr(r.fact, "access_count", 0) or 0),
                             source_type="recall",
+                            support_tier=str(getattr(r, "tier", "") or ""),
                         )
                         for r in relevant[:self._max_memories]
                     ]
@@ -127,8 +158,8 @@ class AutoRecall:
         except Exception as exc:
             logger.warning("Auto-recall memory formatting failed: %s", exc)
 
-        # --- 4. Combine: soft-prompt + memories (either may be empty) ---
-        parts = [p for p in (soft_prompt, memory_ctx) if p]
+        # --- 4. Combine: verdict + soft-prompt + memories (any may be empty) ---
+        parts = [p for p in (verdict_line, soft_prompt, memory_ctx) if p]
         return "\n\n".join(parts)
 
     def get_query_context(self, query: str) -> list[dict]:
@@ -143,13 +174,13 @@ class AutoRecall:
 
         try:
             response = self._recall(query, self._max_memories)
-            if response is None:
+            if response is None or not response_injectable(response):
                 return []
             from datetime import datetime as _dt, timezone as _tz
             _now = _dt.now(_tz.utc)
             results = []
             for r in response.results:
-                if r.score >= self._threshold:
+                if r.score >= self._threshold and _injectable_tier(r):
                     _created = getattr(r.fact, "created_at", "") or ""
                     results.append({
                         "fact_id": r.fact.fact_id,

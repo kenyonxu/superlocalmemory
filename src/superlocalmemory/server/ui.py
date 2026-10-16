@@ -29,8 +29,8 @@ entry point only; the production write-auth boundary lives in
 
 import logging
 import sys
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -41,26 +41,26 @@ _script_dir = str(Path(__file__).parent.resolve())
 sys.path = [p for p in sys.path if p not in ("", _script_dir)]
 
 try:
+    import uvicorn
     from fastapi import FastAPI
-    from fastapi.staticfiles import StaticFiles
-    from fastapi.responses import HTMLResponse, RedirectResponse
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.middleware.gzip import GZipMiddleware
-    import uvicorn
+    from fastapi.responses import HTMLResponse, RedirectResponse
+    from fastapi.staticfiles import StaticFiles
 except ImportError:
     raise ImportError(
         "FastAPI dependencies not installed. "
         "Install with: pip install 'fastapi[all]' uvicorn websockets"
     )
 
-from superlocalmemory.server.security_middleware import SecurityHeadersMiddleware
-
 # V3 Paths — reuse the lazy resolvers from routes.helpers so the dashboard
 # honours SLM_DATA_DIR / SL_MEMORY_PATH / SLM_HOME / config.json:base_dir
 # exactly like the CLI. Previously this hardcoded ~/.superlocalmemory, which
 # caused dashboard-created profiles to land in a different memory.db than
 # `slm profile list` reads when a custom data dir was configured.
-from superlocalmemory.server.routes.helpers import MEMORY_DIR, DB_PATH
+from superlocalmemory.server.routes.helpers import DB_PATH  # noqa: E402
+from superlocalmemory.server.security_middleware import SecurityHeadersMiddleware  # noqa: E402
+
 # V3.3.21+: the dashboard ships inside the package (superlocalmemory/ui) for
 # every install path — pip, npm, and editable checkouts. The legacy repo-root
 # ui/ dev fallback was retired in v3.8.0 when that copy was deleted; the
@@ -95,11 +95,11 @@ def create_app() -> FastAPI:
 
     # Rate limiting (graceful)
     try:
-        from superlocalmemory.infra.rate_limiter import RateLimiter
         from superlocalmemory.core.remote_mode import (
-            rate_limit_config,
             is_rate_limit_exempt,
+            rate_limit_config,
         )
+        from superlocalmemory.infra.rate_limiter import RateLimiter
         # v3.6.12 (issue #40): env-tunable thresholds (defaults unchanged).
         _rl_write, _rl_read, _rl_window = rate_limit_config()
         _write_limiter = RateLimiter(max_requests=_rl_write, window_seconds=_rl_window)
@@ -162,26 +162,32 @@ def create_app() -> FastAPI:
     # ========================================================================
     # Register Route Modules
     # ========================================================================
-    from superlocalmemory.server.routes.memories import router as memories_router
-    from superlocalmemory.server.routes.stats import router as stats_router
-    from superlocalmemory.server.routes.profiles import router as profiles_router
+    from superlocalmemory.server.routes.agents import router as agents_router
     from superlocalmemory.server.routes.backup import router as backup_router
     from superlocalmemory.server.routes.data_io import router as data_io_router
-    from superlocalmemory.server.routes.events import router as events_router, register_event_listener
-    from superlocalmemory.server.routes.agents import router as agents_router
-    from superlocalmemory.server.routes.ws import router as ws_router, manager as ws_manager
+    from superlocalmemory.server.routes.events import register_event_listener
+    from superlocalmemory.server.routes.events import router as events_router
+    from superlocalmemory.server.routes.memories import router as memories_router
+    from superlocalmemory.server.routes.profiles import router as profiles_router
+    from superlocalmemory.server.routes.stats import router as stats_router
+    from superlocalmemory.server.routes.ws import manager as ws_manager
+    from superlocalmemory.server.routes.ws import router as ws_router
 
     application.include_router(memories_router)
     application.include_router(stats_router)
     application.include_router(profiles_router)
     application.include_router(backup_router)
+    from superlocalmemory.server.routes.backup_encryption import router as backup_encryption_router
+    application.include_router(backup_encryption_router)
     application.include_router(data_io_router)
     application.include_router(events_router)
     application.include_router(agents_router)
     application.include_router(ws_router)
 
     # V3 API endpoints (dashboard, mode, trust, math, etc.)
+    from superlocalmemory.server.routes.recall_trace import install as install_recall_trace
     from superlocalmemory.server.routes.v3_api import router as v3_router
+    install_recall_trace(v3_router)
     application.include_router(v3_router)
 
     # Config endpoints (storage, daemon, mesh, trust, forgetting)
@@ -191,7 +197,8 @@ def create_app() -> FastAPI:
     # v3.4.1: Chat SSE + Insights + Timeline endpoints
     for _module_name_v341 in ("chat",):
         try:
-            _mod_v341 = __import__(f"superlocalmemory.server.routes.{_module_name_v341}", fromlist=["router"])
+            _mod_v341 = __import__(
+                f"superlocalmemory.server.routes.{_module_name_v341}", fromlist=["router"])
             application.include_router(_mod_v341.router)
         except (ImportError, Exception) as _exc:
             logger.warning("Optional router %s failed: %s", _module_name_v341, _exc)
@@ -208,8 +215,8 @@ def create_app() -> FastAPI:
             logger.warning("Optional router %s failed: %s", _module_name, _exc)
 
     # Wire WebSocket manager into routes that need broadcast capability
-    import superlocalmemory.server.routes.profiles as _profiles_mod
     import superlocalmemory.server.routes.data_io as _data_io_mod
+    import superlocalmemory.server.routes.profiles as _profiles_mod
     _profiles_mod.ws_manager = ws_manager
     _data_io_mod.ws_manager = ws_manager
 
@@ -254,7 +261,7 @@ def create_app() -> FastAPI:
                 "asset version rewrite unavailable, serving index.html as "
                 "written: %s: %s", type(exc).__name__, exc,
             )
-            return index_path.read_text().replace("__SLM_VERSION__", _v)
+            return index_path.read_text(encoding="utf-8").replace("__SLM_VERSION__", _v)
 
     @application.get("/favicon.ico", include_in_schema=False)
     async def favicon():
@@ -305,6 +312,15 @@ def create_app() -> FastAPI:
         except Exception:
             pass
 
+    # A proxied request never counts as local (forwarded_guard); outermost,
+    # refuse a request not addressed to this machine (DNS rebinding).
+    from superlocalmemory.server.access_gate import NonLocalAccessGate
+    from superlocalmemory.server.forwarded_guard import ForwardedLoopbackDemotion
+    from superlocalmemory.server.host_guard import HostGuardMiddleware
+    application.add_middleware(NonLocalAccessGate)
+    application.add_middleware(ForwardedLoopbackDemotion)
+    application.add_middleware(HostGuardMiddleware)
+
     return application
 
 
@@ -351,4 +367,6 @@ if __name__ == "__main__":
     print(f"  WebSocket:   ws://localhost:{ui_port}/ws/updates")
     print("\n  Press Ctrl+C to stop\n")
 
-    uvicorn.run(app, host="127.0.0.1", port=ui_port, log_level="info", access_log=True)
+    from superlocalmemory.server.forwarded_guard import uvicorn_proxy_options
+    uvicorn.run(app, host="127.0.0.1", port=ui_port, log_level="info", access_log=True,
+                **uvicorn_proxy_options())

@@ -5,8 +5,24 @@
 """Post-promotion watch + auto-rollback (LLD-10 §5).
 
 After promotion flips ``is_active`` to the new row, the next 200
-recalls are measured against the pre-promotion baseline. If mean
-NDCG@10 drops by ≥ REGRESSION_THRESHOLD (2%), auto-rollback fires:
+settled recalls are measured against the pre-promotion baseline. If the
+mean settled **reward** drops by ≥ REGRESSION_THRESHOLD (2%), auto-rollback
+fires.
+
+WHAT IS MEASURED
+-------------------------------
+The watched quantity is the reward a settled recall earned: an explicit
+outcome (success 1.0 / partial 0.5 / failure 0.0) or the engagement label
+``reward._compute_label`` derives from cite/edit/dwell/requery signals. It used
+to be passed in, and documented, as "NDCG@10". It is not one: NDCG needs a
+graded relevance list, an ordering and an ideal ordering, and a cited fact at
+rank 1 or at rank 10 earns the same 0.9 here. The guarantee is therefore
+stated in the unit actually measured — mean settled reward — and the old
+keyword names are accepted only so existing callers keep working. The
+baseline the router supplies is the active arm's mean reward in the same
+shadow experiment, so the comparison is like for like.
+
+On regression:
 
 * Current active → ``is_rollback=1``, ``is_active=0``,
   ``rollback_reason=<reason>``.
@@ -33,6 +49,7 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Final
+from contextlib import closing
 
 from superlocalmemory.learning.model_cache import invalidate as invalidate_model_cache
 
@@ -64,7 +81,7 @@ def _iso_in_hours(hours: int) -> str:
 
 
 class ModelRollback:
-    """Watch post-promotion NDCG@10 and flip lineage on regression."""
+    """Watch post-promotion mean reward and flip lineage on regression."""
 
     WATCH_WINDOW: Final[int] = _WATCH_WINDOW
     REGRESSION_THRESHOLD: Final[float] = _REGRESSION_THRESHOLD
@@ -75,11 +92,13 @@ class ModelRollback:
         *,
         learning_db_path: str,
         profile_id: str,
-        baseline_ndcg: float,
+        baseline_reward: float | None = None,
+        baseline_ndcg: float | None = None,
     ) -> None:
         self._db = str(learning_db_path)
         self._profile_id = profile_id
-        self._baseline = float(baseline_ndcg)
+        base = baseline_reward if baseline_reward is not None else baseline_ndcg
+        self._baseline = float(base or 0.0)
         self._observations: list[float] = []
 
     # ------------------------------------------------------------------
@@ -87,12 +106,17 @@ class ModelRollback:
     # ------------------------------------------------------------------
 
     def record_post_promotion(
-        self, *, query_id: str, ndcg_at_10: float,
+        self, *, query_id: str, reward: float | None = None,
+        ndcg_at_10: float | None = None,
     ) -> None:
-        """Record one post-promotion NDCG@10 sample (at most WATCH_WINDOW)."""
-        if len(self._observations) >= self.WATCH_WINDOW:
+        """Record one post-promotion reward (at most WATCH_WINDOW).
+
+        ``ndcg_at_10`` is the legacy name of ``reward``.
+        """
+        value = reward if reward is not None else ndcg_at_10
+        if value is None or len(self._observations) >= self.WATCH_WINDOW:
             return
-        self._observations.append(float(ndcg_at_10))
+        self._observations.append(float(value))
 
     def should_rollback(self) -> bool:
         """Return True iff ≥ WATCH_WINDOW samples and regression detected.
@@ -169,7 +193,7 @@ class ModelRollback:
              ``retrain_disabled_until`` (+24h) and
              ``last_rollback_at``, counter reset.
         """
-        with sqlite3.connect(self._db, timeout=10) as conn:
+        with closing(sqlite3.connect(self._db, timeout=10)) as conn, conn:
             conn.row_factory = sqlite3.Row
             try:
                 conn.execute("BEGIN IMMEDIATE")
@@ -240,7 +264,7 @@ class ModelRollback:
         invalidate_model_cache(self._profile_id)
         logger.warning(
             "AUTO-ROLLBACK profile=%s reason=%s observations=%d "
-            "baseline_ndcg=%.4f current_ndcg=%.4f",
+            "baseline_reward=%.4f current_reward=%.4f",
             self._profile_id, reason, len(self._observations),
             self._baseline,
             (sum(self._observations) / len(self._observations))

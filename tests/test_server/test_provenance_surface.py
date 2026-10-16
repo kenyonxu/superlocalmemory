@@ -702,8 +702,8 @@ class TestMcpUpdateDeleteProfileRouting:
     ) -> None:
         """Fix round 2: a deterministic 409 is terminal, never retryable.
 
-        update_memory(content=..., profile_id="b") with b != active is
-        refused by the daemon's pre-flight with a structured 409. Without
+        A mixed routed body (content + curation fields, profile_id != active)
+        is refused by the daemon's pre-flight with a structured 409. Without
         ``preserve_conflict=True`` daemon_request collapses that answer to
         None and the tool returns the retryable outage envelope — telling
         the caller to retry forever a request that can never succeed.
@@ -734,9 +734,11 @@ class TestMcpUpdateDeleteProfileRouting:
 
         assert result["success"] is False
         # Deterministic conflict: retrying the identical request can never
-        # succeed, so the envelope must say so and name the reason.
+        # succeed, so the envelope must say so and name the reason. Merge
+        # 4.2.6: the tool envelope carries upstream's machine code CONFLICT;
+        # the structured reason (the pre-flight's own code) rides in error.
         assert result["retryable"] is False
-        assert result["code"] == "routed_content_correction_unsupported"
+        assert result["code"] == "CONFLICT"
         assert "active profile" in result["error"]
         # The conflict must be preserved on the wire, not collapsed to None.
         assert seen["kwargs"].get("preserve_conflict") is True

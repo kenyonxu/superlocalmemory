@@ -21,7 +21,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def _write_config(base: Path, text: str) -> None:
-    (base / "config.toml").write_text(text)
+    (base / "config.toml").write_text(text, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +109,7 @@ class TestHttpRecallScopeClamped:
         src = (
             pathlib.Path(superlocalmemory.__file__).parent
             / "server" / "unified_daemon.py"
-        ).read_text()
+        ).read_text(encoding="utf-8")
         assert "enforce_read_scope" in src, (
             "enforce_read_scope not found in unified_daemon.py — HTTP recall scope NOT clamped"
         )
@@ -146,6 +146,13 @@ class TestCliRecallScopeClamped:
             args.fast = False
             args.window = ""
             args.as_of = ""
+            # Every time filter is checked before the scope clamp; a MagicMock
+            # attribute is not a readable time, so each must be set.
+            args.known_as_of = ""
+            args.valid_at = ""
+            # A MagicMock attribute is not a valid kind; recall refuses it
+            # before the scope clamp is reached.
+            args.kind = ""
             try:
                 cmd_mod.cmd_recall(args)
             except (Exception, SystemExit):

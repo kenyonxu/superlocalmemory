@@ -1,0 +1,24 @@
+sequenceDiagram
+    participant C as Client (agent, CLI, dashboard)
+    participant H as POST /remember (daemon)
+    participant G as Checks (identity, RBAC, trust)
+    participant P as Prepare (redaction)
+    participant J as Admission journal
+    participant W as Single writer
+    participant M as Materializer
+    C->>H: remember(content, idempotency key)
+    H->>G: write actor, WRITE permission (SHARE if shared)
+    G-->>H: allowed or refused
+    H->>P: strip secrets, redact PII when on
+    P->>J: prepare entry (state: prepared)
+    J->>W: dispatch (state: dispatched)
+    alt writer busy past the accept window
+        W-->>C: status: accepted (durable, no fact ids yet)
+        Note over C,W: retry with the same key returns the canonical receipt
+    else committed in time
+        W->>W: operation, fact and FTS row in one transaction
+        W->>J: state: committed
+        W-->>C: status: queryable (fact ids)
+    end
+    W->>M: enrichment work queued
+    M->>M: enriching, then complete (or failed, retried with backoff)

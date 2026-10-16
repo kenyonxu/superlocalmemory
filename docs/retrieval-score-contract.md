@@ -1,10 +1,10 @@
 # Retrieval Score Contract v2
 
 This contract describes runtime result fields, not benchmark accuracy. For the
-published V3 LoCoMo figures carried into V4 (from the V3 paper / V3.7 package) and their protocol disclosures,
+published LoCoMo figures and their protocol disclosures,
 see [Benchmark Evidence](benchmarks.md).
 
-SuperLocalMemory V4 keeps retrieval ordering separate from confidence. A
+SuperLocalMemory keeps retrieval ordering separate from confidence. A
 retrieval score answers “how relevant is this stored fact to this query?” It
 does not answer “how likely is a generated answer to be correct?”
 
@@ -33,18 +33,88 @@ Every canonical recall response declares:
   "calibration_id": null,
   "answer_confidence": null,
   "abstained": false,
-  "abstention_reason": null
+  "abstention_reason": null,
+  "answer_check_status": "off",
+  "reranker_status": "not_configured",
+  "local_reranker_status": ""
 }
 ```
 
-V3.7 does not publish calibrated answer confidence. Therefore
+By default, no backend judges whether the results answer the question, so
 `calibration_status` is `uncalibrated`, `calibration_id` is `null`, and
 `answer_confidence` is `null`. Consumers must not derive answer probability by
 doubling, thresholding, averaging, or otherwise transforming retrieval scores.
 
-When no result survives the evidence floor, `abstained` is `true` and
-`abstention_reason` is `evidence_floor`. When candidate generation returns
-nothing, the reason is `no_candidates`.
+`answer_check_status` reports what became of the answer check on this one
+recall: `judged` (a verdict was applied), `off` (no check runs), `skipped`
+(the check is on but wasn't asked — context loading, a system recall, no
+results, too little of the recall's time budget left, or the online option
+would have had to read another profile's memory), `busy` (the on-device
+check was already answering another recall), `warming` (still loading its
+model), or `unavailable` (timed out, errored, no key, or can't run here).
+Skipping costs the verdict only — the memories, their order, and their
+scores are unaffected either way.
+
+`reranker_status` names whichever step produced the final order;
+`jev_listwise` means the online answer check's optional reorder replaced
+whatever the local reranker had produced. `local_reranker_status` keeps that
+local status for the recall, empty when nothing replaced it.
+
+Every recall also reports the answer-support decision and a tier (illustrative values):
+
+```json
+{
+  "tier": "supported",
+  "support": {"status": "supported", "best": 0.91, "threshold": 0.3003,
+              "version": "answer-support-v2", "weak_shown": false, "tier": "supported"},
+  "abstention_note": "",
+  "warming_up": false,
+  "status_note": ""
+}
+```
+
+`support.status` is `supported` when at least one memory's support probability
+reaches `threshold`, and `unsupported` otherwise; `version` names the fitted
+recipe. Each result carries its own `support` probability, a `weak` flag (below
+the threshold) and a `tier` label. The probability is the output of a fitted
+logistic over the recipe's inputs, so it ranks memories by how well they answer
+the question; it is not a calibrated chance of being right. See
+[Recall](recall.md#when-memory-cannot-answer) for the three tiers (`supported`,
+`related`, `none`) and the sentence each carries in `abstention_note`.
+
+When the question is unsupported, `abstained` is `true` and `abstention_reason`
+is `unsupported`. When no result survives the evidence floor the reason is
+`evidence_floor`, and when candidate generation returns nothing it is
+`no_candidates`. While SLM is still loading models or inputs, `warming_up` is
+`true`, `status_note` carries the sentence to show, and the results retrieval
+found are returned labelled `related` rather than withheld: a decision made
+without its inputs is never reported as "not in memory".
+
+### Answer check
+
+When [Answer check](answer-check.md) is turned on (Settings → Answer check —
+off until an on-device install has passed its check), a separate decision
+runs on the top results: not "is this
+relevant" but "does this answer the question." That decision populates
+`calibration_status`, `calibration_id`, and `answer_confidence` with real
+values instead of the uncalibrated defaults above, and can set
+`abstention_reason` to a third value, `judged_insufficient`: results were
+found, but none of them were judged to answer the question. `calibration_status` additionally distinguishes a measured
+calibration from one that is not yet calibrated for its current backend and
+settings — treat an unmeasured verdict as a confidence signal, not a
+guarantee. The verdict is one input to the answer-support decision above: it
+lowers the support of the memories it judges insufficient, and the decision,
+not the verdict alone, determines whether results are returned. See
+[Answer Check](answer-check.md) for the full contract and setup.
+
+### The `answer_check` request parameter
+
+The daemon's `GET /recall` accepts an `answer_check` query parameter:
+`full` (the default — the complete check, with the optional reorder when
+that's on), `no_reorder` (the check's verdict only, never the reorder —
+what the bounded-loop gate asks for), or `skip` (no check at all, for a
+recall that isn't a question — context loading, health probes). Any other
+value is refused with HTTP 400.
 
 ## Retrieval composition
 

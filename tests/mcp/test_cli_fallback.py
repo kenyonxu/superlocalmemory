@@ -15,7 +15,6 @@ import importlib
 import json
 import subprocess
 import sys
-import types
 import unittest.mock as mock
 from pathlib import Path
 from typing import Any
@@ -83,7 +82,7 @@ _ALL_MCP_TOOLS: frozenset[str] = frozenset({
     "apply_refactor", "code_memory_search", "code_entity_history",
     "enrich_blast_radius",
     # tools_mesh.py (8)
-    "mesh_summary", "mesh_peers", "mesh_send", "mesh_inbox",
+    "mesh_summary", "mesh_peers", "mesh_send", "mesh_inbox", "mesh_wait",
     "mesh_state", "mesh_lock", "mesh_events", "mesh_status",
     # tools_learning.py (4)
     "log_tool_event", "get_assertions", "reinforce_assertion", "contradict_assertion",
@@ -142,7 +141,7 @@ class TestArgvIsListNeverShell:
             / "src" / "superlocalmemory" / "mcp" / "cli_fallback.py"
         )
         assert cli_fallback_path.exists(), "cli_fallback.py not found"
-        source = cli_fallback_path.read_text()
+        source = cli_fallback_path.read_text(encoding="utf-8")
         assert "shell=True" not in source, (
             "cli_fallback.py contains 'shell=True' — this is forbidden. "
             "Use argv list with shell=False."

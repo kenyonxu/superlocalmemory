@@ -1,0 +1,11 @@
+# SuperLocalMemory - Grok CLI MCP configuration
+# Copyright (c) 2026 Varun Pratap Bhardwaj
+# Licensed under AGPL-3.0-or-later
+#
+# Use: slm connect grok-cli
+# Manual: add this table to ~/.grok/config.toml
+
+[mcp_servers.superlocalmemory]
+command = "slm"
+args = ["mcp"]
+env = { SLM_AGENT_ID = "grok_cli" }

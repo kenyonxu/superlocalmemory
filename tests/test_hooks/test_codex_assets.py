@@ -10,6 +10,7 @@ EXPECTED_SKILLS = {
     "slm-governance",
     "slm-graph",
     "slm-loop",
+    "slm-media",
     "slm-mesh",
     "slm-profile",
     "slm-recall",
@@ -17,6 +18,7 @@ EXPECTED_SKILLS = {
     "slm-scope",
     "slm-session",
     "slm-status",
+    "slm-web-access",
 }
 
 
@@ -34,7 +36,7 @@ def test_install_and_remove_assets_are_scoped_to_slm_paths(tmp_path):
     assert codex_assets.status_assets(home=tmp_path)["installed"] is True
 
     other = tmp_path / ".codex" / "agents" / "user-agent.toml"
-    other.write_text("name = 'user-agent'\n")
+    other.write_text("name = 'user-agent'\n", encoding="utf-8")
     removed = codex_assets.remove_assets(home=tmp_path)
 
     assert removed["success"] is True

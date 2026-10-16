@@ -4,19 +4,14 @@
 
 """Fisher-Rao Quantization-Aware Distance (FRQAD).
 
-Novel contribution (98% IP confidence): Fisher-Rao geodesic distance on
-mixed-precision embeddings.  Quantized memories naturally rank lower because
-their variance is inflated to model quantization uncertainty.
+Ranking distance = Fisher-Rao distance of the observed Gaussians plus an
+explicit bounded precision penalty, kappa * (1 - bit_width / 32) per operand.
+For fixed means/variances, reducing either operand's precision cannot improve
+similarity. Float32 pairs retain the base distance. This ranking distance is
+not a metric: low-precision self-comparisons include a reliability penalty.
 
-    sigma_quant = sigma_base * (32 / bit_width) ^ kappa
-
-When both embeddings are float32, FRQAD degrades exactly to standard
-Fisher-Rao --- no regression, pure extension.
-
-Mathematical basis:
-  - Fisher-Rao geodesic (Atkinson & Mitchell 1981, Pinele et al. 2020)
-  - Variance inflation models quantization noise as additional uncertainty
-    on the statistical manifold of diagonal Gaussians
+Variance inflation remains available as an uncertainty-model helper; it is
+not used for ranking because changing uncertainty can reduce Gaussian distance.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
 License: AGPL-3.0-or-later
@@ -49,8 +44,8 @@ class FRQADConfig:
     """Configuration for FRQAD metric.
 
     Attributes:
-        kappa:            Scaling exponent for variance inflation.
-                          sigma_quant = sigma_base * (32/bw)^kappa.
+        kappa:            Precision penalty strength (0 disables the penalty).
+                          Also the legacy uncertainty helper's exponent.
         temperature:      Softmax temperature for similarity conversion.
         enabled:          When False, fall back to base Fisher-Rao.
         variance_floor:   Minimum per-dimension variance after inflation.
@@ -72,8 +67,8 @@ class FRQADConfig:
 class FRQADMetric:
     """Fisher-Rao Quantization-Aware Distance metric.
 
-    Wraps an existing FisherRaoMetric and inflates variance vectors based
-    on each embedding's bit-width before computing geodesic distance.
+    Adds a monotone reliability penalty to the observed Fisher-Rao distance.
+    This is a ranking distance, rather than a metric on quantized embeddings.
 
     Self-consistency property:
         FRQAD(32bit, 32bit) == FisherRao(same pair) within float epsilon.
@@ -169,8 +164,8 @@ class FRQADMetric:
     ) -> float:
         """FRQAD distance between mixed-precision embeddings.
 
-        Inflates variance based on bit-width, then delegates to the
-        standard Fisher-Rao geodesic.
+        Keeps observed variance fixed and adds a bounded precision penalty.
+        At fixed Gaussian parameters this is monotone in each bit-width.
 
         Args:
             mu_a:  Mean of embedding A.
@@ -181,25 +176,25 @@ class FRQADMetric:
             bw_b:  Bit-width of B.
 
         Returns:
-            Non-negative geodesic distance.
+            Non-negative ranking distance (base geodesic plus reliability penalty).
         """
-        if not self._config.enabled:
-            return self._base.distance(
-                np.asarray(mu_a, dtype=np.float64).tolist(),
-                np.asarray(var_a, dtype=np.float64).tolist(),
-                np.asarray(mu_b, dtype=np.float64).tolist(),
-                np.asarray(var_b, dtype=np.float64).tolist(),
-            )
-
-        var_a_q = self.quantization_variance(var_a, bw_a)
-        var_b_q = self.quantization_variance(var_b, bw_b)
-
-        return self._base.distance(
+        base = self._base.distance(
             np.asarray(mu_a, dtype=np.float64).tolist(),
-            var_a_q.tolist(),
+            np.asarray(var_a, dtype=np.float64).tolist(),
             np.asarray(mu_b, dtype=np.float64).tolist(),
-            var_b_q.tolist(),
+            np.asarray(var_b, dtype=np.float64).tolist(),
         )
+        if not self._config.enabled:
+            return base
+        # Gaussian uncertainty is not a precision penalty: moving variances
+        # closer reduces the geodesic (Pinele et al., doi:10.3390/e22040404;
+        # arXiv:2604.04514, Definition 4.2 does not imply Proposition 4.3).
+        # https://github.com/geomstats/geomstats/blob/main/geomstats/information_geometry/normal.py,
+        # checked 2026-10-11). This bounded ranking feature is an SLM policy,
+        # not a paper-derived quantization-noise model or a metric axiom.
+        widths = (bw if bw in _VALID_BIT_WIDTHS else 32 for bw in (bw_a, bw_b))
+        penalty = sum(1.0 - bw / 32.0 for bw in widths) * self._config.kappa
+        return base + penalty
 
     # ------------------------------------------------------------------
     # Similarity (exponential kernel)

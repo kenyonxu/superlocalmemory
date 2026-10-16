@@ -1,16 +1,28 @@
 # Architecture
-> SuperLocalMemory V4 Documentation
-> https://superlocalmemory.com | Part of Qualixar
 
-A high-level overview of how SuperLocalMemory V4 stores, organizes, and retrieves your memories.
+A high-level overview of how SuperLocalMemory stores, organizes, and retrieves your memories.
 
-Published V3 LoCoMo evidence carried into V4 (from the V3 paper / V3.7 package) is maintained in
-[Benchmark Evidence](benchmarks.md), including the original model, judge, and
-sample disclosures required to interpret each result.
+## The whole picture
 
-## What changed in V4
+![SuperLocalMemory architecture: agents and apps reach one daemon through MCP, the CLI, the REST API and the optional Web access connector; recall runs channels, fusion and reranking, the answer-support gate, the answer check and layered output; saves are admission-checked; SQLite is canonical with LanceDB and CozoDB projections and a store for pictures and documents; Memory health, backfill and consolidation run in the background; roles, audit and erasure govern every call; SLM-Mesh connects agents and allowed web apps](assets/slm-architecture.png)
 
-V4 keeps the V3 multi-channel retrieval and local-first store as the foundation, and adds a governed write path (admission, per-store obligations, completion manifests), stronger cross-store erasure, SLM-Mesh peer coordination, multi-scope memory with profiles, cache/compress context optimization, Entity Explorer and skill evolution surfaces, and enterprise controls (roles, retention, hash-chained audit). Modes A/B/C still describe locality and enrichment choices; they do **not** determine EU AI Act legal compliance — that depends on deployment context.
+The diagram source is `docs/assets/slm-architecture.svg`. The sections below are the reference for each row.
+
+## Local core and optional Web access
+
+![Integrated SLM architecture: local memory capabilities, Laya/Jev answer checks and optional web connection](remote-access/assets/slm-integrated-architecture.svg)
+
+The local core is the foundation and works fully without an account. **Web access** is an optional extra, managed from the dashboard's **Connected apps** page, that lets an AI app on the internet (ChatGPT, Claude on the web, Composio, Muse) use the same engine and database after you sign in with GitHub and approve what it may do. It leaves local tools and configuration untouched, and a gateway problem never stops local use. Web results do pass through the gateway and the AI service you connected, so keeping the database local does not mean nothing leaves the computer.
+
+See [Web access](remote-access/README.md), [its architecture and trust boundaries](remote-access/architecture.md) and [how to connect an app](remote-access/onboarding.md). The ingestion and retrieval design below is the local engine reference.
+
+Published LoCoMo evidence is maintained in [Benchmark Evidence](benchmarks.md),
+including the original model, judge, and sample disclosures required to interpret
+each result.
+
+## What SLM is built from
+
+Multi-channel retrieval over a local-first store, a governed write path (admission, per-store obligations, completion manifests), cross-store erasure, SLM-Mesh peer coordination, multi-scope memory with profiles, cache and compress context optimization, memory kinds, saved views and summaries, Entity Explorer and skill evolution surfaces, an optional Web access connection, and enterprise controls (roles, retention, hash-chained audit). Modes A/B/C describe locality and enrichment choices; they do **not** determine EU AI Act legal compliance — that depends on deployment context.
 
 ## Memory boundaries: profiles and scopes
 
@@ -33,23 +45,25 @@ separate from trusted-peer SLM Mesh coordination.
 ## System Overview
 
 ```
-Your IDE (Claude, Cursor, VS Code, ...)
-       |
-       | MCP Protocol
-       v
-+------------------+
-| MCP Server       |  Profile-selected tools and resources
-+------------------+
-       |
-       v
-+------------------+
-| Memory Engine    |  Ingestion + Retrieval + Lifecycle
-+------------------+
-       |
-       v
-+------------------+
-| SQLite Database  |  ~/.superlocalmemory/memory.db
-+------------------+
+Your IDE (Claude, Cursor, VS Code, ...)        Web app (optional)
+       |                                              |
+       | MCP Protocol                                 | HTTPS + OAuth, via the gateway
+       v                                              v
++------------------+                          +------------------+
+| MCP Server       |  Tool-set-selected       | Companion        |  Outbound link,
+|                  |  tools and resources     | (in the daemon)  |  same MCP server
++------------------+                          +------------------+
+       |                                              |
+       +----------------------+-----------------------+
+                              v
+                    +------------------+
+                    | Memory Engine    |  Ingestion + Retrieval + Lifecycle
+                    +------------------+
+                              |
+                              v
+                    +------------------+
+                    | SQLite Database  |  ~/.superlocalmemory/memory.db
+                    +------------------+
 ```
 
 ## How Memories Are Stored (Ingestion)
@@ -86,6 +100,7 @@ then fusion, optional reranking, and graph-based score enhancement.
 | **Temporal** | Matches based on time references and event ordering | "What did we decide last Friday?" or "Changes since the sprint started" |
 | **Hopfield** | Associative retrieval over stored representations | Related decisions and linked technical context |
 | **Spreading activation** | Traverses linked graph neighborhoods | Multi-hop related evidence |
+| **Pictures** | Matches your words to saved pictures and PDF pages by what they show and the text read from them (only when pictures and documents are on) | "The slide with the quarterly numbers" |
 
 ### Fusion and Ranking
 
@@ -93,10 +108,37 @@ then fusion, optional reranking, and graph-based score enhancement.
 2. Reciprocal Rank Fusion combines the ranked lists.
 3. Optional rerankers refine the leading candidates when enabled.
 4. Graph-derived evidence can modify later scoring without becoming a sixth producer.
-5. The response returns the final ranked evidence and measured runtime fields.
+5. The **answer-support gate** scores each memory on several signals together and places the
+   recall in one of three tiers: supported, closest memories, or "That isn't in
+   SuperLocalMemory." It reads the original question, never a rewrite. See
+   [Recall](recall.md#when-memory-cannot-answer).
+6. The **answer check** (Laya on-device, or Jev online if you chose it) judges whether the top
+   results answer the question; its verdict is one input to the gate. It has its own time budget
+   inside the recall ceiling.
+7. **Layered output** returns each memory at depth 0 (ids and previews), 1 (full facts) or 2 (with
+   source, neighbours and the replacing correction), within a hard `max_tokens` cap; `expand`
+   drills into one result. While models are still loading, recall says it is warming up and shows
+   what it found instead of claiming the memory is empty.
+8. The response returns the final ranked evidence and measured runtime fields.
 
 No single producer is guaranteed to run in every mode. The runtime degrades to
 the indexes that are healthy and reports its result provenance.
+
+## Background work
+
+The daemon does the work that must not slow a save or a recall in the background, and it stands aside
+for the foreground. **Memory health** describes older memories while the computer is idle (it only
+adds, and anything that deletes or moves something waits for your Fix; see
+[Memory health](memory-health.md)). A backfill measures each memory's baseline for the
+answer-support gate. Consolidation and lifecycle maintenance run after the daemon has been idle for a
+while, and answer-check calibration runs only when you start it. The memory graph is built when the
+daemon starts, never on a recall's time.
+
+## Pictures and documents
+
+When turned on, pictures and PDF pages are stored in their own database (`media.db`) with the
+original files beside it, embedded by an on-device picture model and read by OCR. Text memory is
+unchanged. See [Pictures and documents](pictures-and-documents.md).
 
 ## Safe context injection
 
@@ -110,22 +152,22 @@ authority to call tools, change roles, or request secrets.
 Cursor, Copilot, and Antigravity instruction files contain only
 product-authored static protocol. Dynamic memories are fetched through MCP at
 runtime and are not persisted into these high-trust files. See
-`docs/adr/0001-untrusted-memory-boundary.md` (archived decision; see git history
-at `c1669e94`) for the decision and its limits.
+[Auto-memory](auto-memory.md#memory-is-evidence-not-instruction) for how the
+boundary works.
 
 ## Three Operating Modes
 
 | Mode | Retrieval | LLM Usage | Data Location |
 |------|-----------|-----------|---------------|
-| **A: Local** | Candidate retrieval + math-informed scoring | None for core memory operations | Local data root; optional integrations may use the network |
-| **B: Local LLM** | Candidate retrieval + local LLM enrichment | Ollama (local) | Local data root; optional integrations may use the network |
-| **C: Cloud LLM** | Candidate retrieval plus configured provider-backed enrichment | Cloud provider | Configured content is sent to the provider |
+| **A: Local Guardian** | Candidate retrieval + math-informed scoring | None for core memory operations | Local data root; optional integrations may use the network |
+| **B: Smart Local** | Candidate retrieval + local LLM enrichment | A model on this machine (Ollama by default, any local OpenAI-compatible server works) | Local data root; optional integrations may use the network |
+| **C: Full Power** | Candidate retrieval plus configured provider-backed enrichment | Your own endpoint, or a cloud provider | Configured content is sent to the provider |
 
 Mode A is the default. Core memory operations can run without a cloud model provider, but model and dependency downloads, connectors, cloud backup, and explicitly enabled integrations may use the network.
 
 ## Mathematical Foundations
 
-V3 uses three mathematical layers. These are not academic additions — they solve specific practical problems.
+SLM uses three mathematical layers. They solve specific practical problems.
 
 ### Fisher-Rao Similarity
 
@@ -139,9 +181,9 @@ V3 uses three mathematical layers. These are not academic additions — they sol
 
 **Problem:** Over time, you store contradictory memories. "We use PostgreSQL" and later "We migrated to MySQL." Simple retrieval returns both without flagging the conflict.
 
-**Solution:** Sheaf cohomology detects when memories attached to the same entity or topic contradict each other. When a contradiction is found, the system records a *supersedes* link from the newer memory to the older one. That link is evidence, not a deletion: the older memory stays in the store and can still be recalled, and the link is what lets the graph and the lifecycle weigh the two against each other. Nothing is hidden from you on the strength of an automatic contradiction check.
+**Solution:** Sheaf cohomology can detect when memories attached to the same entity or topic contradict each other, and the system then records a *supersedes* link from the newer memory to the older one. That link is evidence, not a deletion: the older memory stays in the store and can still be recalled. The check that runs when a memory is stored is off by default (see [Configuration](configuration.md#consistency-checking-at-store-time)); you can still ask for contradictions on demand with the `consistency_check` MCP tool (in the `power` tool set). Nothing is hidden from you on the strength of an automatic contradiction check.
 
-**Effect:** Recall returns consistent information. Contradictions are flagged for your review.
+**Effect:** Contradictions can be surfaced for your review instead of being silently averaged.
 
 ### Langevin Lifecycle
 
@@ -151,7 +193,7 @@ V3 uses three mathematical layers. These are not academic additions — they sol
 
 **Effect:** Active memories stay prominent. Stale memories fade gracefully. Storage stays efficient.
 
-## Bounded Loop Engine (v3.8.0)
+## Bounded Loop Engine
 
 A gate-verified iteration primitive. The engine runs laps until an independent gate passes or a hard bound trips. The agent's own claim that it is done is recorded per lap for audit, but does not terminate the run — only the independent gate can.
 
@@ -165,34 +207,20 @@ Three surfaces drive the same engine and the same durable ledger:
 
 Every lap is stored in the active SLM data root under tag `loop:<name>`, making the full run history queryable via `slm recall` and visible on the dashboard.
 
-## Framework Adapters (v3.8.0)
+## Framework Adapters
 
-Nine Python packages implement each framework's native memory interface, backed by the local SLM data root:
-
-| Package | Framework | Interface |
-|---------|-----------|-----------|
-| `langgraph-superlocalmemory` | LangGraph | `BaseStore` |
-| `semantic-kernel-superlocalmemory` | Semantic Kernel | `VectorStore` |
-| `agent-framework-superlocalmemory` | Microsoft Agent Framework | `ContextProvider` / `HistoryProvider` |
-| `langchain-superlocalmemory` | LangChain | `BaseChatMessageHistory` |
-| `llama-index-storage-chat-store-superlocalmemory` | LlamaIndex | `BaseChatStore` |
-| `crewai-superlocalmemory` | CrewAI | `StorageBackend` |
-| `autogen-superlocalmemory` | AutoGen | `Memory` |
-| `google-adk-superlocalmemory` | Google ADK | `BaseMemoryService` |
-| `openai-agents-superlocalmemory` | OpenAI Agents | `SessionABC` |
-
-Each adapter delegates persistence to the same SLM engine that powers the CLI and MCP surfaces. Optional SLM providers, connectors, and backup retain their documented network behavior. See [Framework Adapters →](framework-adapters.md).
+Nine Python packages implement each framework's native memory interface (LangGraph, Semantic Kernel, Microsoft Agent Framework, LangChain, LlamaIndex, CrewAI, AutoGen, Google ADK and OpenAI Agents), backed by the local SLM data root. Each adapter delegates persistence to the same SLM engine that powers the CLI and MCP surfaces. Optional SLM providers, connectors, and backup retain their documented network behavior. See [Framework Adapters](framework-adapters.md).
 
 ## Privacy and compliance controls
 
 SuperLocalMemory provides controls that may support a deployment's privacy and compliance program. It is not a legal certification. Operators must assess the configured system, use case, data flows, and surrounding services.
 
 - **Local core path.** Mode A can keep memory content in the configured local data root during core operations.
-- **Erasure command.** `slm forget` removes selected local records; backups, exports, caches, derived indexes, and provider logs require separate verification.
+- **Erasure commands.** `slm forget` and `slm delete` remove selected local records, and `slm gdpr erase` removes a whole profile, including the derived copies SLM controls (queued saves, caches, the vector index, picture mirrors) and reports what remains. Backups carry an erasure obligation that is replayed on restore; exports and provider logs require separate verification. See [Compliance](compliance.md#what-an-erasure-removes-and-what-it-says-it-did).
 - **Auditability.** Retrieval and lifecycle surfaces expose local records and diagnostics, subject to release-specific verification.
 - **Policy controls.** Provenance, retention, and access-policy features are available for operator configuration.
 
-Mode C sends queries to a cloud LLM provider. In that mode, the cloud provider's compliance posture applies to those queries.
+Mode C sends queries to your configured endpoint or cloud provider. In that mode, that provider's compliance posture applies to those queries.
 
 ## Database
 
@@ -210,7 +238,7 @@ Key table groups:
 - **Knowledge:** atomic_facts, graph_edges, canonical_entities, temporal_events
 - **Durable ingestion:** ingestion_operations (M018 operation state and raw evidence)
 - **Retrieval indexes:** SQLite FTS plus configured derived indexes
-- **Math layers:** fisher_state, sheaf_sections, langevin_state
+- **Math layers:** per-fact similarity and lifecycle columns on `atomic_facts`
 - **Compliance and provenance:** trust scores, provenance records, audit and retention controls
 
 M017 additively adds scope to CCQ consolidation blocks. M018 is the canonical
@@ -220,4 +248,4 @@ is marked done.
 
 ---
 
-*SuperLocalMemory V4 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*
+*SuperLocalMemory — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*

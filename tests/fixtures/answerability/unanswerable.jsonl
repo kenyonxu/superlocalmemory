@@ -1,0 +1,32 @@
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-1", "question": "What is Kestrel payroll database password?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-2", "question": "What is Priya Sen home address?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-3", "question": "Which university did Alexa Morgan attend?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-4", "question": "What is the CEO of Orchid called?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-5", "question": "What is Atlas customer churn percentage?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-6", "question": "Which credit card does Juniper use?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-7", "question": "What is Joan Smith birthday?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-8", "question": "Which operating system does Morgan Patel use?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-9", "question": "What is the Tundra legal registration number?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-10", "question": "Who won the company hackathon?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-11", "question": "When is Meridian IPO scheduled?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-12", "question": "How many children does Alex Morgan have?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-13", "question": "What is Kestrel SOC2 report link?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-14", "question": "Which hotel did Alexa Morgan stay in Kyoto?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-15", "question": "How much was the Atlas vendor penalty?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-16", "question": "Who is the on-call engineer this weekend?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-17", "question": "What is the Orchid production API password?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-18", "question": "What is the Kestrel disaster recovery RPO?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-19", "question": "How many paid customers does Tundra have?"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-20", "question": "What is the color of Priya Sen car?"}
+{"category": "audit_absent", "expected": "abstain", "note": "a memory says the value was never recorded", "qid": "u-audit-unknown", "question": "What is the Kestrel CFO salary?"}
+{"category": "audit_ops_absent", "expected": "abstain", "qid": "u-ops-1", "question": "What is the approved budget in dollars for fictional Project NeverStoredSatellite?"}
+{"category": "audit_ops_absent", "expected": "abstain", "qid": "u-ops-2", "question": "What date is fictional Atlantis submarine procurement scheduled to close?"}
+{"category": "audit_ops_absent", "expected": "abstain", "qid": "u-ops-3", "question": "Who is the CEO of fictional UmbraNeverStored Corporation?"}
+{"category": "audit_ops_absent", "expected": "abstain", "qid": "u-ops-4", "question": "What is the admin password for the real production database?"}
+{"category": "audit_ops_absent", "expected": "abstain", "qid": "u-ops-5", "question": "Which city did Alice Chen visit in 2024?"}
+{"category": "near_miss", "expected": "abstain", "qid": "u-near-1", "question": "What port does the Grafana instance use?"}
+{"category": "near_miss", "expected": "abstain", "qid": "u-near-2", "question": "Who maintains the Linux installer?"}
+{"category": "near_miss", "expected": "abstain", "qid": "u-near-3", "question": "What did release 3.2.0 add?"}
+{"category": "near_miss", "expected": "abstain", "qid": "u-near-4", "question": "What is the SLA for P3 incidents?"}
+{"category": "near_miss", "expected": "abstain", "qid": "u-near-5", "question": "What was ticket OPS-9999 about?"}
+{"category": "near_miss", "expected": "abstain", "qid": "u-near-6", "question": "Why did we adopt MongoDB?"}

@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from superlocalmemory.optimize.proxy.lifecycle import ProxyRequest, CompressHook
 from superlocalmemory.optimize.config.store import ConfigStore
+from superlocalmemory.optimize.proxy.lifecycle import ProxyRequest
 
 if TYPE_CHECKING:
     from superlocalmemory.optimize.compress.align import CacheAligner
@@ -133,8 +134,11 @@ class CompressRouter:
             )
 
         except Exception as exc:
-            logger.warning("[%s] CompressRouter.compress failed (fail-open): %s",
-                           req.request_id if hasattr(req, 'request_id') else '?', exc)
+            logger.warning(
+                "[%s] CompressRouter.compress failed (fail-open): %s",
+                req.request_id if hasattr(req, "request_id") else "?",
+                exc,
+            )
             return req
 
     def on_compress(self, before_tokens: int, after_tokens: int, lossy: bool) -> None:
@@ -171,7 +175,9 @@ class CompressRouter:
 
         # K-05: protect last N *user* turns, not last N messages of any role
         user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-        protect_indices: set[int] = set(user_indices[-protect_recent:]) if protect_recent > 0 else set()
+        protect_indices: set[int] = (
+            set(user_indices[-protect_recent:]) if protect_recent > 0 else set()
+        )
         # Always protect the very last message (current turn, any role)
         if messages:
             protect_indices.add(len(messages) - 1)
@@ -238,7 +244,11 @@ class CompressRouter:
                         new_blocks.append(block)
                         continue
                     new_text, before, after, strat = self._compress_text(
-                        text, aggressive, request_id, model, tenant_id,
+                        text,
+                        aggressive,
+                        request_id,
+                        model,
+                        tenant_id,
                         is_proxy=is_proxy,
                     )
                     total_before += before
@@ -265,33 +275,22 @@ class CompressRouter:
         model: str,
         tenant_id: str,
         is_proxy: bool = False,
+        persist_original: bool = True,
     ) -> tuple[str, int, int, str]:
         tokens_before = _token_estimate(text)
-
         if len(text) < _MIN_CHARS_FOR_COMPRESSION:
             return text, tokens_before, tokens_before, "none"
-
-        # K-01 refined (P4a): structured JSON is never *lossily* compressed, but it
-        # IS losslessly minified — parse → reserialize with no insignificant
-        # whitespace, which preserves the exact parsed value (see _json_minify for
-        # the duplicate-key + round-trip guards that keep it provably lossless).
-        # Code is still passed through untouched below.
         stripped = text.strip()
         if stripped.startswith(("{", "[")):
             _last = stripped[-1]
-            bracket_matched = (
-                (stripped[0] == "{" and _last == "}")
-                or (stripped[0] == "[" and _last == "]")
+            bracket_matched = (stripped[0] == "{" and _last == "}") or (
+                stripped[0] == "[" and _last == "]"
             )
-            # PERF-02: over the size cap, a bracket-matched payload is assumed
-            # structured and skipped — avoids a pathological parse on the hot path.
             if len(stripped) > _MAX_JSON_MINIFY_CHARS and bracket_matched:
                 return text, tokens_before, tokens_before, "none"
             minified = _json_minify(stripped)
             if minified is not None:
                 return minified, tokens_before, _token_estimate(minified), "json_minify"
-            # Not shrinkable: already-compact valid JSON passes through (K-01);
-            # anything that is not valid JSON falls through to prose/code handling.
             try:
                 json.loads(stripped)
                 return text, tokens_before, tokens_before, "none"  # already-compact JSON
@@ -299,68 +298,72 @@ class CompressRouter:
                 pass  # not valid JSON — treat as prose
             except RecursionError:
                 return text, tokens_before, tokens_before, "none"  # pathological nesting
-
         if _detect_language(text) is not None:
             return text, tokens_before, tokens_before, "none"  # code → passthrough
-
-        # Layer 1 — lossless whitespace normalization (always-on, safe)
         normalized = self._normalize_whitespace(text)
         tokens_after_l1 = _token_estimate(normalized)
-
-        # Layer 2 — LLMLingua-2 prose compression (aggressive + opt-in only)
-        # D5-B: proxy path SKIPS Layer 2 entirely — only Layer 1 lossless normalize
-        # runs on proxy (ProxyRequest has no response/rehydration hook for CCR markers).
         cfg = self._get_config()
         prose_enabled = bool(getattr(cfg, "compress_prose", False))
-        if aggressive and prose_enabled and not is_proxy:  # pragma: no cover — LLMLingua optional dep
-            compressor = self._get_llmlingua_compressor()
-            if compressor is not None:
-                # D6: compress FIRST, store ONLY inside the reduction branch.
-                # Old code stored before compress → orphan row when no reduction occurred.
-                compressed = compressor.compress(normalized)
-                tokens_after_l2 = _token_estimate(compressed)
-                if tokens_after_l2 < tokens_before:
-                    # Reduction confirmed — now safe to store (no orphan possible)
-                    ccr_id = self._ccr_store_original(text.encode(), model, tenant_id)
-                    if ccr_id:
-                        self._ccr_update_compressed(ccr_id, compressed.encode())
-                        logger.info(
-                            "[%s] LLMLingua-2 prose compressed rate=%.2f ccr_id=%s (LOSSY)",
-                            request_id,
-                            tokens_after_l2 / tokens_before if tokens_before else 1.0,
-                            ccr_id,
-                        )
-                        return compressed, tokens_before, tokens_after_l2, "llmlingua2_prose"
-                    # CCR store FAILED → no recoverable id. Returning the lossy form
-                    # now would destroy the original irreversibly. Refuse it and fall
-                    # through to lossless Layer 1 (data-safety over compression ratio).
-                    logger.warning(
-                        "[%s] CCR store failed — refusing irreversible lossy "
-                        "compression, falling back to lossless Layer 1", request_id,
-                    )
-                # No reduction (or store-failed) — fall through to lossless Layer 1.
-
-        # S-01 fix: compare character length, not word count.
-        # _token_estimate() is word-count — whitespace normalization saves characters/bytes
-        # but never removes words, so token counts are identical before and after Layer 1.
-        # Character comparison correctly detects when normalization reduced the body size.
+        if aggressive and prose_enabled and not is_proxy:
+            compressed = self._compress_prose(
+                text, normalized, tokens_before, request_id, model, tenant_id, persist_original
+            )
+            if compressed is not None:
+                return compressed
         if len(normalized) < len(text):
             return normalized, tokens_before, tokens_after_l1, "normalize"
-
         return text, tokens_before, tokens_before, "none"
+
+    def _compress_prose(
+        self, text, normalized, tokens_before, request_id, model, tenant_id, persist_original
+    ):
+        compressor = self._get_llmlingua_compressor()
+        if compressor is not None:
+            compressed = compressor.compress(normalized)
+            tokens_after_l2 = _token_estimate(compressed)
+            if tokens_after_l2 < tokens_before:
+                if not persist_original:
+                    return compressed, tokens_before, tokens_after_l2, "llmlingua2_prose"
+                ccr_id = self._ccr_store_original(text.encode(), model, tenant_id)
+                if ccr_id:
+                    self._ccr_update_compressed(ccr_id, compressed.encode())
+                    logger.info(
+                        "[%s] LLMLingua-2 prose compressed rate=%.2f ccr_id=%s (LOSSY)",
+                        request_id,
+                        tokens_after_l2 / tokens_before if tokens_before else 1.0,
+                        ccr_id,
+                    )
+                    return compressed, tokens_before, tokens_after_l2, "llmlingua2_prose"
+                logger.warning(
+                    "[%s] CCR store failed — refusing irreversible lossy "
+                    "compression, falling back to Layer 1",
+                    request_id,
+                )
+
+        return None
 
     @staticmethod
     def _normalize_whitespace(text: str) -> str:
-        """Layer 1 safe: collapse runs of 3+ blank lines to a single blank line.
+        """Layer 1: collapse runs of 3+ newlines to one blank line — in prose only.
 
-        v3.6.12 (normalize-1): no longer rstrips trailing spaces per line — that
-        is LOSSY for Markdown hard breaks (two trailing spaces) and padded string
-        literals, which broke the 'lossless/safe' guarantee that callers (incl.
-        slm_compress mode=normalize) rely on. Only collapsing excess blank lines
-        remains, which is semantically safe.
+        Not lossless, and no longer called that: it changes
+        bytes. It is safe only where a blank-line run carries no meaning, which
+        is NOT true inside source code (a triple-quoted string literal holding
+        three newlines changed value, and the code's own assert failed), inside
+        a fenced or indented Markdown code block (blank lines there are
+        rendered), or in any text that looks like code. So:
+
+        * text ``_looks_like_code`` flags is returned byte-for-byte;
+        * fenced code blocks (``` or ~~~) inside prose pass through untouched;
+        * only the prose between them is collapsed.
+
+        Callers that must be able to restore the input keep the original
+        bytes themselves (``slm_compress`` stores it in CCR whenever the output
+        differs).
         """
-        import re
-        return re.sub(r"\n{3,}", "\n\n", text)
+        if _looks_like_code(text):
+            return text
+        return _collapse_outside_fences(text)
 
     # ── Lazy loaders ─────────────────────────────────────────────────────
 
@@ -368,6 +371,7 @@ class CompressRouter:
         if self._llmlingua_compressor is None:
             try:
                 from superlocalmemory.optimize.compress.prose_llmlingua import LLMLinguaCompressor
+
                 self._llmlingua_compressor = LLMLinguaCompressor()
             except ImportError:
                 logger.warning("LLMLinguaCompressor not available — prose compression disabled")
@@ -377,12 +381,14 @@ class CompressRouter:
     def _get_ccr_store(self) -> "CCRStore":
         if self._ccr_store is None:
             from superlocalmemory.optimize.compress.ccr import CCRStore
+
             self._ccr_store = CCRStore()
         return self._ccr_store
 
     def _get_aligner(self) -> "CacheAligner":
         if self._aligner is None:
             from superlocalmemory.optimize.compress.align import CacheAligner
+
             self._aligner = CacheAligner()
         return self._aligner
 
@@ -437,24 +443,36 @@ class CompressRouter:
             if not getattr(cfg, "compress_enabled", False):
                 t = _token_estimate(text)
                 return CompressTextResult(
-                    compressed_text=text, strategy="none",
-                    tokens_before=t, tokens_after=t, lossy=False,
+                    compressed_text=text,
+                    strategy="none",
+                    tokens_before=t,
+                    tokens_after=t,
+                    lossy=False,
                 )
             aggressive = cfg.compress_mode == "aggressive"
             compressed, tb, ta, strat = self._compress_text(
-                text, aggressive, request_id="eval", model="", tenant_id="default"
+                text,
+                aggressive,
+                request_id="eval",
+                model="",
+                tenant_id="default",
+                persist_original=False,
             )
             return CompressTextResult(
-                compressed_text=compressed, strategy=strat,
-                tokens_before=tb, tokens_after=ta,
+                compressed_text=compressed,
+                strategy=strat,
+                tokens_before=tb,
+                tokens_after=ta,
                 lossy=strat == "llmlingua2_prose",
             )
         except Exception as exc:
             logger.debug("compress_text failed (non-fatal): %s", exc)
             t = _token_estimate(text)
             return CompressTextResult(
-                compressed_text=text, strategy="none",
-                tokens_before=t, tokens_after=t,
+                compressed_text=text,
+                strategy="none",
+                tokens_before=t,
+                tokens_after=t,
                 lossy=False,
             )
 
@@ -475,6 +493,7 @@ class CompressTextResult:
     will never report strategy="llmlingua2_prose"/lossy=True regardless of
     compress_prose/compress_mode.
     """
+
     compressed_text: str
     strategy: str  # "normalize" | "llmlingua2_prose" | "none"
     tokens_before: int
@@ -483,6 +502,7 @@ class CompressTextResult:
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────────
+
 
 def _token_estimate(text: str) -> int:
     return len(text.split()) if text else 0
@@ -558,6 +578,43 @@ def _msg_has_tool_result(msg: dict) -> bool:
     return False
 
 
+#: Lines that mark text as code even when ``_detect_language`` finds too few
+#: signal lines: string-literal delimiters whose contents are whitespace-exact.
+_CODE_MARKERS = ('"""', "'''", "```")
+
+
+def _looks_like_code(text: str) -> bool:
+    """Whether blank-line normalization could change this text's meaning.
+
+    True for anything ``_detect_language`` recognises, for text containing
+    triple-quoted string delimiters or an unclosed fence outside Markdown
+    fences, and
+    for text with indented-code lines (4 spaces or a tab) — a Markdown
+    indented code block renders its blank lines.
+    """
+    if _detect_language(text) is not None:
+        return True
+    prose = _FENCE_RE.sub("", text)
+    if any(marker in prose for marker in _CODE_MARKERS):
+        return True
+    return any(line.startswith(("    ", "\t")) and line.strip() for line in prose.split("\n"))
+
+
+_FENCE_RE = re.compile(r"^(```|~~~)[^\n]*\n.*?^\1[ \t]*$", re.S | re.M)
+
+
+def _collapse_outside_fences(text: str) -> str:
+    """Collapse 3+ newlines between fenced blocks; fences stay byte-exact."""
+    out: list[str] = []
+    pos = 0
+    for match in _FENCE_RE.finditer(text):
+        out.append(re.sub(r"\n{3,}", "\n\n", text[pos : match.start()]))
+        out.append(match.group(0))
+        pos = match.end()
+    out.append(re.sub(r"\n{3,}", "\n\n", text[pos:]))
+    return "".join(out)
+
+
 def _detect_language(text: str) -> str | None:
     """Detect programming language. Returns None if ambiguous.
 
@@ -579,7 +636,19 @@ def _detect_language(text: str) -> str | None:
 
     if lines and lines[0].startswith("```"):
         lang_hint = lines[0][3:].strip().lower()
-        _KNOWN = {"python", "javascript", "js", "typescript", "ts", "go", "rust", "java", "cpp", "c++", "c"}
+        _KNOWN = {
+            "python",
+            "javascript",
+            "js",
+            "typescript",
+            "ts",
+            "go",
+            "rust",
+            "java",
+            "cpp",
+            "c++",
+            "c",
+        }
         if lang_hint in _KNOWN:
             if lang_hint in ("cpp", "c++"):
                 return "cpp"
@@ -630,8 +699,7 @@ def _detect_language(text: str) -> str | None:
         return count
 
     scores: dict[str, int] = {
-        lang: _count_signals(patterns)
-        for lang, patterns in _LANG_PATTERNS.items()
+        lang: _count_signals(patterns) for lang, patterns in _LANG_PATTERNS.items()
     }
     best_lang, best_score = max(scores.items(), key=lambda kv: kv[1])
     if best_score >= 3:
@@ -645,7 +713,9 @@ def _tool_result_text(block: dict) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+        parts = [
+            b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
+        ]
         return "\n".join(parts)
     return ""
 

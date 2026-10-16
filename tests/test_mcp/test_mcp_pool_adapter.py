@@ -19,9 +19,10 @@ class _FakePool:
 
     def recall(
         self, query: str, limit: int = 10, session_id: str = "",
-        fast: bool = False,
+        fast: bool = False, prefer_project: str = "",
     ):
         self.recall_calls.append((query, limit, session_id, fast))
+        self.prefer_project = prefer_project
         return {
             "ok": True,
             "query": query,
@@ -74,6 +75,31 @@ class TestPoolAdapter:
         _pool_adapter.pool_recall("hello", limit=5, session_id="s-1", fast=True)
 
         assert fake.recall_calls == [("hello", 5, "s-1", True)]
+
+    def test_pool_recall_forwards_tags_only_when_set(self, monkeypatch):
+        """4.1.22: tags/tags_match forwarded like project/prefer_project —
+        present only when the caller actually asked for them."""
+        from superlocalmemory.mcp import _pool_adapter
+
+        class _TagFakePool:
+            def recall(self, query: str, limit: int = 10, session_id: str = "",
+                      fast=None, **kwargs):
+                self.seen = kwargs
+                return {"ok": True, "results": []}
+
+        fake = _TagFakePool()
+        monkeypatch.setattr(_pool_adapter, "_pool", lambda: fake)
+
+        _pool_adapter.pool_recall("hello", limit=5)
+        assert "tags" not in fake.seen
+
+        _pool_adapter.pool_recall("hello", limit=5, tags="decision,status")
+        assert fake.seen["tags"] == "decision,status"
+        assert "tags_match" not in fake.seen
+
+        _pool_adapter.pool_recall("hello", limit=5, tags=["a", "b"], tags_match="any")
+        assert fake.seen["tags"] == ["a", "b"]
+        assert fake.seen["tags_match"] == "any"
 
     def test_pool_store_returns_fact_ids(self, monkeypatch):
         from superlocalmemory.mcp import _pool_adapter
@@ -192,9 +218,12 @@ class TestToolsActiveUsesPool:
         # internal agentic round). Session start is a hot path — it must return
         # fast local results, not spend an Ollama reformulation round every time.
         # FTS5 fallback only triggers when the daemon is completely down.
+        # 4.1.21 (#150): the query names the project, and the project itself
+        # travels as a preference rather than as search words.
         assert fake_pool.recall_calls == [
-            ("project context /tmp/p", 10, "", None),
+            ("project context p", 10, "", None),
         ], "session_init should recall with fast=None (client-driven default)"
+        assert fake_pool.prefer_project == "/tmp/p"
 
     def test_observe_uses_pool_adapter_not_engine_store(self, monkeypatch):
         import asyncio

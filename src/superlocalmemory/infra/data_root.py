@@ -94,6 +94,21 @@ def canonical_data_root(
     return _legacy_configured_root(default_root) or default_root
 
 
+def is_implicit_default_root(*, home: str | Path | None = None) -> bool:
+    """Whether this process serves the root an UNCONFIGURED process would use.
+
+    That is precedence steps 5-6 of :func:`canonical_data_root`: the legacy
+    ``~/.superlocalmemory/config.json:base_dir`` relocation if present, else
+    ``~/.superlocalmemory``. An environment selection that names that same
+    folder still counts; any other selected root does not. Old clients that
+    predate data roots can only ever mean this one.
+    """
+    home_path = _canonical_path(home if home is not None else Path.home())
+    default_root = _canonical_path(home_path / ".superlocalmemory")
+    implicit = _legacy_configured_root(default_root) or default_root
+    return canonical_data_root(home=home_path) == implicit
+
+
 def _durable_markers(root: Path) -> tuple[Path, ...]:
     """Return bounded evidence that ``root`` contains durable SLM state.
 
@@ -236,3 +251,41 @@ class DynamicStatePath(os.PathLike[str]):
 
     def __getattr__(self, name: str):
         return getattr(self._resolve(), name)
+
+
+DATA_ROOT_REFUSAL = "That folder holds SuperLocalMemory's own data."
+
+
+def overlaps_data_root(path: str | Path, *extra_roots: str | Path | None) -> bool:
+    """True when ``path`` is, is inside, or contains SuperLocalMemory's data folder.
+
+    Folders are compared by identity on disk (device and inode), not by spelling, so
+    a link into the data folder, a different letter case on a case-insensitive disk
+    or a ``..`` detour all count as the data folder. A parent of it counts too:
+    connecting the parent would take the data folder along with it.
+    """
+    target = Path(os.path.realpath(os.path.expanduser(str(path))))
+    roots = [canonical_data_root(), *(r for r in extra_roots if r)]
+    for root in roots:
+        base = Path(os.path.realpath(os.path.expanduser(str(root))))
+        if _within(base, target) or _within(target, base):
+            return True
+    return False
+
+
+def _within(outer: Path, inner: Path) -> bool:
+    """``inner`` is ``outer`` or below it, by spelling or by identity on disk."""
+    if str(inner) == str(outer) or str(inner).startswith(str(outer).rstrip(os.sep) + os.sep):
+        return True
+    try:
+        outer_id = os.stat(outer)
+    except OSError:
+        return False
+    for candidate in (inner, *inner.parents):
+        try:
+            found = os.stat(candidate)
+        except OSError:
+            continue
+        if (found.st_dev, found.st_ino) == (outer_id.st_dev, outer_id.st_ino):
+            return True
+    return False

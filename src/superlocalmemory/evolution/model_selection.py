@@ -29,6 +29,7 @@ Author: Varun Pratap Bhardwaj / Qualixar
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,8 @@ def _resolve_model_alias(alias: str) -> str:
     Unknown aliases fall back to the cheapest Claude model — the same
     fail-safe the evolver has always used.
     """
+    if is_local_model(alias):
+        return alias
     return _MODEL_ALIASES.get(alias, CHEAPEST_CLAUDE)
 
 
@@ -98,20 +101,25 @@ def _cheapest_for_backend(backend: str) -> str:
 
 def _resolve_field(value: str, default: str) -> str:
     """Resolve a config field: empty → default; else alias→id, validated."""
-    if not value:
+    if not value or (value == "ollama" and default.startswith("ollama:")):
+        return default
+    if value not in _MODEL_ALIASES and not is_local_model(value):
         return default
     resolved = _resolve_model_alias(value)
-    if resolved not in _ALLOWED:  # pragma: no cover — defensive
+    if resolved not in _ALLOWED and not is_local_model(resolved):  # pragma: no cover — defensive
         logger.warning(
-            "evolution: configured model %r is not allow-listed; "
-            "falling back to %s", value, default,
+            "evolution: configured model %r is not allow-listed; falling back to %s",
+            value,
+            default,
         )
         return default
     return resolved
 
 
 def _independent_verifier(
-    mutation: str, *, ollama_available: bool,
+    mutation: str,
+    *,
+    ollama_available: bool,
 ) -> str:
     """Pick a cheap verifier that differs from the generator when possible.
 
@@ -137,7 +145,11 @@ def _independent_verifier(
 
 
 def resolve_evolution_models(
-    config: object, backend: str, *, ollama_available: bool,
+    config: object,
+    backend: str,
+    *,
+    ollama_available: bool,
+    installed_models: tuple[str, ...] | None = None,
 ) -> ResolvedModels:
     """Resolve mutation/verify/confirm models for a backend.
 
@@ -145,7 +157,10 @@ def resolve_evolution_models(
     ``mutation_model`` / ``verify_model`` / ``confirm_model`` attributes,
     each an alias, allow-listed id, or "" for auto).
     """
-    cheapest = _cheapest_for_backend(backend)
+    available = tuple(
+        "ollama:" + model for model in (installed_models or ()) if is_local_model("ollama:" + model)
+    )
+    cheapest = available[0] if backend == "ollama" and available else _cheapest_for_backend(backend)
 
     mutation = _resolve_field(getattr(config, "mutation_model", ""), cheapest)
     confirm = _resolve_field(getattr(config, "confirm_model", ""), cheapest)
@@ -154,9 +169,10 @@ def resolve_evolution_models(
     if verify_cfg:
         verify = _resolve_field(verify_cfg, cheapest)
     else:
-        verify = _independent_verifier(
-            mutation, ollama_available=ollama_available,
-        )
+        if available and (mutation.startswith("ollama:") or ollama_available):
+            verify = next((model for model in available if model != mutation), cheapest)
+        else:
+            verify = _independent_verifier(mutation, ollama_available=ollama_available)
 
     independent = verify != mutation
     if not independent:
@@ -172,4 +188,17 @@ def resolve_evolution_models(
         verify=verify,
         confirm=confirm,
         independent=independent,
+    )
+
+
+def is_local_model(model: str) -> bool:
+    """Ollama model identifiers are local, free, and dispatched as JSON data."""
+    return (
+        isinstance(model, str)
+        and bool(
+            re.fullmatch(
+                r"ollama:[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?", model
+            )
+        )
+        and not any(word in model.lower() for word in ("opus", "gpt-4-turbo", "-cpu"))
     )

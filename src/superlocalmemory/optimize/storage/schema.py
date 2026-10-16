@@ -151,6 +151,7 @@ def create_all_tables(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE llmcache_semantic_vectors ADD COLUMN context_fp TEXT NOT NULL DEFAULT ''"
         )
+    _add_profile_provenance(conn)
     row = conn.execute(
         "SELECT 1 FROM llmcache_schema_version WHERE version = ?",
         (CACHE_SCHEMA_VERSION,),
@@ -160,6 +161,23 @@ def create_all_tables(conn: sqlite3.Connection) -> None:
             "INSERT INTO llmcache_schema_version (version, description) VALUES (?, ?)",
             (CACHE_SCHEMA_VERSION, ""),
         )
+
+
+#: Tables whose rows can hold a person's text. Each records the profile that was
+#: active when the row was written, so an erasure can find them. A row written
+#: before this column existed has ``''``: its owner is unknown, and an erasure of
+#: any profile treats it as possibly theirs.
+PROVENANCE_TABLES: tuple[str, ...] = ("llmcache_entries", "llmcache_ccr_originals")
+
+
+def _add_profile_provenance(conn: sqlite3.Connection) -> None:
+    """Add ``profile_id`` where missing. A constant default: O(1), no row is rewritten."""
+    for table in PROVENANCE_TABLES:
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if "profile_id" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN profile_id TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{table}_profile ON {table} (profile_id)")
 
 
 def drop_all_tables(conn: sqlite3.Connection) -> None:

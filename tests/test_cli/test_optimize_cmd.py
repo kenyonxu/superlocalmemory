@@ -4,7 +4,6 @@
 
 import json
 from argparse import Namespace
-from pathlib import Path
 
 import pytest
 
@@ -13,7 +12,6 @@ import pytest
 def _isolate_config(tmp_path, monkeypatch):
     """Redirect ConfigStore and CacheDB to tmp paths."""
     from superlocalmemory.optimize.config.store import ConfigStore
-    from superlocalmemory.optimize.config.defaults import DEFAULT_OPTIMIZE_CONFIG
 
     _store = ConfigStore(config_path=tmp_path / "optimize.json")
     monkeypatch.setattr(
@@ -55,7 +53,6 @@ def test_optimize_status_json(capsys):
 
 def test_optimize_on_writes_config(_isolate_config):
     from superlocalmemory.cli.optimize_cmd import cmd_optimize_on
-    import dataclasses
 
     cmd_optimize_on(Namespace(json=False))
     cfg = _isolate_config.get()

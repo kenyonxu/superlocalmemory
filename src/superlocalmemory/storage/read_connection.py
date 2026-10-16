@@ -49,10 +49,15 @@ class ReadConnectionFactory:
 
         uri = f"{self._memory_db.as_uri()}?mode=ro"
         try:
+            # Closable from any thread: a legacy caller that skips its close
+            # leaves the connection to garbage collection, which may run on
+            # another thread, where a same-thread connection refuses to close
+            # and is never closed. One caller still uses it at a time.
             conn = sqlite3.connect(
                 uri,
                 uri=True,
                 timeout=self._timeout_ms / 1000.0,
+                check_same_thread=False,
             )
         except sqlite3.Error as exc:
             raise ReadConnectionError(
@@ -112,4 +117,25 @@ class ReadConnectionLease:
             self._snapshot.__exit__(exc_type, exc, traceback)
 
 
-__all__ = ["ReadConnectionError", "ReadConnectionFactory", "ReadConnectionLease"]
+def read_only_snapshot(db: object, *, timeout_ms: int = 5_000) -> AbstractContextManager:
+    """A query-only connection to ``db``'s file that takes NO write lock.
+
+    ``DatabaseManager.raw_connection`` takes the process-wide write lock even
+    for a pure read, so a long read through it (a whole-graph scan, a
+    full-table check) blocked every save and edit for its whole duration -
+    measured at 60 s on a 22k-fact store. In WAL mode a reader never blocks
+    a writer, so reads go here instead. ``db`` is a ``DatabaseManager`` (its
+    ``db_path``) or a path.
+    """
+    path = getattr(db, "db_path", db)
+    factory = ReadConnectionFactory(Path(str(path)), timeout_ms=timeout_ms)
+    if not factory.memory_db.exists():
+        return factory.snapshot()  # raises the same ReadConnectionError as before
+    # A reused per-thread connection (storage/snapshot_pool.py).
+    from superlocalmemory.storage import snapshot_pool
+
+    return snapshot_pool.snapshot(factory.memory_db, timeout_ms, factory.snapshot)
+
+
+__all__ = ["ReadConnectionError", "ReadConnectionFactory", "ReadConnectionLease",
+           "read_only_snapshot"]

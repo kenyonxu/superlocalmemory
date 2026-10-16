@@ -15,13 +15,12 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import socket
 import sqlite3
+import sys
 import time
 from pathlib import Path
-from threading import Thread
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -45,15 +44,13 @@ def _write_plain_pid(path: Path, pid: int) -> None:
 
 
 def _dead_pid() -> int:
+    from superlocalmemory.core.platform_utils import is_pid_alive
+
     pid = 2_000_000
     while pid > 1:
-        try:
-            os.kill(pid, 0)
-            pid -= 1
-        except ProcessLookupError:
+        if not is_pid_alive(pid):  # not os.kill(pid, 0): Ctrl+C on Windows
             return pid
-        except PermissionError:
-            pid -= 1
+        pid -= 1
     raise RuntimeError("Could not find a dead PID")
 
 
@@ -64,13 +61,15 @@ def _dead_pid() -> int:
 class TestBoundedRetryLoop:
     """G-01+G-05: bounded 5-attempt retry loop replaces single self-heal+retry."""
 
+    @pytest.fixture(autouse=True)
+    def _runtime_dir(self, tmp_path):
+        self._tmp_path = tmp_path
+
     def _make_runtime(self, mock_coordinator):
-        """Build a minimal CanonicalRememberRuntime shell for unit testing."""
-        from superlocalmemory.core.remember_runtime import CanonicalRememberRuntime
-        rt = CanonicalRememberRuntime.__new__(CanonicalRememberRuntime)
-        rt._started = False
-        rt.coordinator = mock_coordinator
-        return rt
+        """A real runtime whose writer coordinator is the given test double."""
+        from tests.test_resilience.runtime_factory import runtime_with_coordinator
+
+        return runtime_with_coordinator(self._tmp_path, mock_coordinator)
 
     def test_alive_but_not_healthy_then_becomes_healthy_raises_daemon_already_serving(self):
         """Holder alive but health-check not yet responsive → eventually responds → DaemonAlreadyServing.
@@ -115,7 +114,6 @@ class TestBoundedRetryLoop:
         Scenario: holder crashes between our retry intervals.
         Expected: start() completes normally (no exception) after the claim succeeds.
         """
-        from superlocalmemory.core.remember_runtime import CanonicalRememberRuntime
 
         mock_coordinator = MagicMock()
         # claim: False, False, True (first outer check + 2 loop retries)
@@ -142,7 +140,6 @@ class TestBoundedRetryLoop:
         NOT CanonicalRememberUnavailable (traceback crash for non-technical users).
         """
         from superlocalmemory.core.remember_runtime import (
-            CanonicalRememberUnavailable,
             DaemonAlreadyServing,
         )
 
@@ -476,6 +473,8 @@ class TestLiveSLMLockProtection:
 class TestPermissionErrorIsAlive:
     """G-09: os.kill PermissionError means process exists; treat as alive."""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="the no-psutil fallback is signal 0, "
+                        "which Windows lacks; psutil is a required dependency there")
     def test_permission_error_on_kill_means_alive(self):
         """_is_pid_alive returns True when os.kill raises PermissionError."""
         from superlocalmemory.infra.self_heal import _is_pid_alive
@@ -488,7 +487,7 @@ class TestPermissionErrorIsAlive:
 
         # Import psutil conditionally to test the os.kill fallback path
         try:
-            import psutil as _psutil
+            import psutil as _psutil  # noqa: F401
             # If psutil is available, _is_pid_alive uses psutil.pid_exists.
             # Test the PermissionError path by disabling psutil.
             with patch.dict("sys.modules", {"psutil": None}):
@@ -508,7 +507,7 @@ class TestPermissionErrorIsAlive:
         from superlocalmemory.infra.self_heal import _is_pid_alive
 
         try:
-            import psutil as _psutil
+            import psutil as _psutil  # noqa: F401
             with patch.dict("sys.modules", {"psutil": None}):
                 with patch("os.kill", side_effect=ProcessLookupError("no such process")):
                     result = _is_pid_alive(99999)

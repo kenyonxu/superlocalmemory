@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import time
 from typing import Any
 
 import httpx
@@ -14,8 +12,6 @@ from superlocalmemory.optimize.config.schema import OptimizeConfig
 from superlocalmemory.optimize.proxy.lifecycle import (
     CachedResponse,
     HookChain,
-    ProviderResponse,
-    ProxyRequest,
 )
 from superlocalmemory.optimize.proxy.server import ProxyApp, build_proxy_router
 

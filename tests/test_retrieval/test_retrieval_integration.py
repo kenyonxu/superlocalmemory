@@ -32,6 +32,9 @@ from superlocalmemory.storage import schema as real_schema
 from superlocalmemory.storage.database import DatabaseManager
 from superlocalmemory.storage.models import AtomicFact, MemoryRecord
 
+# Every RetrievalEngine a test builds is closed when the test ends.
+pytestmark = pytest.mark.usefixtures("closes_retrieval_engines")
+
 
 # ---------------------------------------------------------------------------
 # Helpers — match existing test_engine.py conventions
@@ -274,7 +277,7 @@ class TestFourChannelPipeline:
         """Facts appearing in more channels should rank higher via RRF.
 
         Both facts carry above-floor semantic evidence (v3.6.6 evidence floor
-        requires semantic >= 0.60 or other channel signal); this test isolates
+        requires raw cosine >= 0.60, stored >= 0.80, or other channel signal); this test isolates
         RRF *ranking*, not the floor (which is covered in test_evidence_floor).
         """
         facts = [
@@ -284,7 +287,7 @@ class TestFourChannelPipeline:
         db = _mock_db(facts)
         engine = _build_engine(
             db=db,
-            semantic_results=[("f_multi", 0.9), ("f_single", 0.65)],
+            semantic_results=[("f_multi", 0.9), ("f_single", 0.82)],
             bm25_results=[("f_multi", 0.8)],
         )
         response = engine.recall("q", "default")
@@ -651,11 +654,14 @@ class TestTimeWindowRecall:
         assert {"f_recent", "f_old"} <= ids
         db.get_fact_event_times.assert_not_called()  # no window -> no lookup
 
-    def test_unparseable_window_applies_no_filter(self) -> None:
+    def test_unparseable_window_is_refused(self) -> None:
+        # 4.1.20 (R5): an explicit window that cannot be read used to apply no
+        # filter at all, silently returning every date. It is now refused.
+        from superlocalmemory.retrieval.time_filter import InvalidTimeFilter
+
         engine, _ = self._engine()
-        response = engine.recall("q", "default", window="someday")
-        ids = {r.fact.fact_id for r in response.results}
-        assert {"f_recent", "f_old"} <= ids  # bad spec => additive no-op
+        with pytest.raises(InvalidTimeFilter):
+            engine.recall("q", "default", window="someday")
 
     def test_query_infers_window(self) -> None:
         # T3: no explicit window, but "last week" in the query auto-windows to 7d.

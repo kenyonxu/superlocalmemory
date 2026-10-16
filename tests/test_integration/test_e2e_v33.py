@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import uuid
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
@@ -25,8 +24,6 @@ import pytest
 from superlocalmemory.core.config import (
     ChannelWeights,
     ForgettingConfig,
-    HopfieldConfig,
-    QuantizationConfig,
     RetrievalConfig,
     SLMConfig,
 )
@@ -736,7 +733,10 @@ class TestFullPipelineSmoke:
             embedder=embedder,
         )
 
-        response = engine.recall("Tell me about Python", "default")
+        try:
+            response = engine.recall("Tell me about Python", "default")
+        finally:
+            engine.close()  # its channel pool must not outlive the test
         assert response.query is not None
         assert len(response.results) >= 1
         # All 5 channels + hopfield were called

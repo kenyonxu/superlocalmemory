@@ -50,6 +50,22 @@ def _header(request: Request, name: str) -> str:
     return ""
 
 
+def _caller_is_local(request: Request) -> bool:
+    """Whether the peer is on this computer (the only callers the install token serves)."""
+    host = request.client.host if request.client else ""
+    return _is_loopback_host(host)
+
+
+def _local_credential_hint() -> str:
+    return (
+        "this request came from this computer, so present the local install token "
+        "in the X-Install-Token header. The dashboard and the slm commands send it "
+        "for you; `slm token show` prints it for your own scripts. "
+        "X-SLM-API-Key is for callers on other hosts (configure SLM_API_KEY and "
+        "present it as X-SLM-API-Key)."
+    )
+
+
 def require_daemon_actor(request: Request, descriptor: Any | None) -> str:
     """Require the private capability for one exact daemon instance."""
     capability = _header(request, "X-SLM-Daemon-Capability")
@@ -105,15 +121,19 @@ def require_write_actor(
         ).hexdigest()
         return f"api-key:{actor_kind}:{fingerprint}"
 
-    raise HTTPException(
-        403,
-        detail=(
+    # Name the credential this caller can actually use. A local caller needs the
+    # install token; telling it to send an API key first sent
+    # it looking for a key it does not have.
+    if _caller_is_local(request):
+        detail = "Write rejected: " + _local_credential_hint()
+    else:
+        detail = (
             "Write rejected: this origin requires an API key (X-SLM-API-Key). "
             "The install token (X-Install-Token) is accepted only from loopback "
             "(127.x.x.x / ::1 / localhost). If calling from a container or "
             "remote host, configure SLM_API_KEY and present it as X-SLM-API-Key."
-        ),
-    )
+        )
+    raise HTTPException(403, detail=detail)
 
 
 def require_http_mutation_actor(
@@ -163,15 +183,18 @@ def require_http_mutation_actor(
             ).hexdigest()
             return f"mesh-secret:{fingerprint}"
 
-    raise HTTPException(
-        403,
-        detail=(
+    if _caller_is_local(request):
+        # Only reachable when SLM_REQUIRE_CREDENTIALS is on: a local caller must
+        # present the install token, which is what the dashboard and slm send.
+        detail = "Mutation rejected: " + _local_credential_hint()
+    else:
+        detail = (
             "Mutation rejected: present one of X-SLM-Daemon-Capability, "
             "X-Install-Token (loopback only), or X-SLM-API-Key. "
             "Uncredentialed writes are accepted only from loopback. "
             "See SLM_API_KEY in the deployment guide for network access."
-        ),
-    )
+        )
+    raise HTTPException(403, detail=detail)
 
 
 def authenticated_request_actor(

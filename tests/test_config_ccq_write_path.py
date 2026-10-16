@@ -103,13 +103,13 @@ class TestForgettingRoundTrip:
             "base_dir": str(tmp_path),
             "future_vendor_extension": {"enabled": True, "count": 42},
         }
-        config_path.write_text(json.dumps(raw))
+        config_path.write_text(json.dumps(raw), encoding="utf-8")
 
         cfg = SLMConfig.load(config_path)
         cfg.forgetting = ForgettingConfig(alpha=5.0)
         cfg.save(config_path)
 
-        saved = json.loads(config_path.read_text())
+        saved = json.loads(config_path.read_text(encoding="utf-8"))
         assert saved.get("future_vendor_extension") == {"enabled": True, "count": 42}
 
         reloaded = SLMConfig.load(config_path)
@@ -229,7 +229,7 @@ def _make_cluster_and_gist(db=None):
         ConsolidationCluster,
         GistResult,
     )
-    from superlocalmemory.storage.models import AtomicFact, MemoryRecord
+    from superlocalmemory.storage.models import MemoryRecord
 
     src_ids = ("src-fact-a", "src-fact-b", "src-fact-c")
 
@@ -272,9 +272,10 @@ class TestStep5StoreBlockAtomicity:
         """When store_ccq_block raises after store_fact succeeds, the transaction
         must roll back so no orphan gist fact or memory row remains."""
         db = _make_real_db(tmp_path)
-        # No source facts pre-created: the injected failure aborts before the
-        # FK-constrained fact_access_log writes are reached, so this is safe.
-        cluster, gist = _make_cluster_and_gist(db=None)
+        # The source facts must exist: since 4.1.25 the step re-checks inside
+        # its transaction that every source is still current (BRN-31) and
+        # abandons the cluster otherwise, before any write.
+        cluster, gist = _make_cluster_and_gist(db=db)
 
         from superlocalmemory.encoding.cognitive_consolidator import CognitiveConsolidator
 

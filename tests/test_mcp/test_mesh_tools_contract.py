@@ -19,15 +19,7 @@ class _ToolCollector:
         return decorate
 
 
-def test_mesh_mcp_tools_use_one_broker_identity_and_unread_delivery(monkeypatch) -> None:
-    """Every exposed Mesh tool uses the broker identity minted at registration."""
-    import superlocalmemory.mcp.tools_mesh as mesh_tools
-
-    collector = _ToolCollector()
-    mesh_tools.register_mesh_tools(collector, lambda: None)
-
-    calls: list[tuple[str, str, dict | None]] = []
-
+def _broker_request(calls):
     def request(method: str, path: str, body: dict | None = None) -> dict:
         calls.append((method, path, body))
         if path == "/register":
@@ -51,16 +43,37 @@ def test_mesh_mcp_tools_use_one_broker_identity_and_unread_delivery(monkeypatch)
             return {"key": "release", "value": "v3.7"}
         return {"ok": True}
 
+    return request
+
+
+def test_mesh_mcp_tools_use_one_broker_identity_and_unread_delivery(monkeypatch) -> None:
+    """Every exposed Mesh tool uses the broker identity minted at registration."""
+    import superlocalmemory.mcp.tools_mesh as mesh_tools
+
+    collector = _ToolCollector()
+    mesh_tools.register_mesh_tools(collector, lambda: None)
+
+    calls: list[tuple[str, str, dict | None]] = []
+
+    request = _broker_request(calls)
+
     monkeypatch.setattr(mesh_tools, "_mesh_request", request)
     monkeypatch.setattr(mesh_tools, "_start_heartbeat", lambda: None)
     monkeypatch.setattr(mesh_tools, "_REGISTERED", False)
     monkeypatch.setattr(mesh_tools, "_PEER_ID", "local-provisional")
+    monkeypatch.setattr(mesh_tools, "_MESH_SESSION_ID", "")
+    for key in ("SLM_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(mesh_tools, "_HEARTBEAT_THREAD", None)
     monkeypatch.setattr(mesh_tools, "_PROJECT_PATH", "/sandbox/project")
     # `_detect_project_path()` deliberately prefers CLAUDE_PROJECT_DIR. Clear
     # it so this fixture owns the selected lower-priority PROJECT_PATH too.
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.setenv("PROJECT_PATH", "/sandbox/project")
+    # Name the host explicitly so the registration does not depend on which
+    # app runs the test (inside Claude Code, CLAUDECODE=1 would name it).
+    monkeypatch.setenv("SLM_MCP_HOST", "codex")
+    monkeypatch.delenv("CLAUDECODE", raising=False)
 
     async def exercise() -> None:
         assert (await collector.tools["mesh_summary"]("audit mesh"))["peer_id"] == "broker-peer"
@@ -78,29 +91,44 @@ def test_mesh_mcp_tools_use_one_broker_identity_and_unread_delivery(monkeypatch)
 
     asyncio.run(exercise())
 
+    _assert_broker_calls(calls)
+
+
+def _assert_broker_calls(calls):
     assert calls[0] == (
         "POST",
         "/register",
         {
-            "peer_id": "local-provisional",
             "session_id": "local-provisional",
             "summary": "audit mesh",
             "project_path": "/sandbox/project",
-            "agent_type": "claude_code",
+            "agent_type": "mcp_client",
+            "app": "codex",
+            "display_name": "Codex · project",
         },
     )
-    assert ("POST", "/send", {"from_peer": "broker-peer", "to_peer": "other-peer", "content": "ready"}) in calls
+    assert (
+        "POST",
+        "/send",
+        {"from_peer": "broker-peer", "to_peer": "other-peer", "content": "ready"},
+    ) in calls
     assert ("POST", "/inbox/broker-peer/read", {"message_ids": [7]}) in calls
     assert ("POST", "/state", {"key": "release", "value": "v3.7", "set_by": "broker-peer"}) in calls
-    assert ("POST", "/lock", {"file_path": "/sandbox/file.py", "action": "acquire", "locked_by": "broker-peer"}) in calls
+    assert (
+        "POST",
+        "/lock",
+        {"file_path": "/sandbox/file.py", "action": "acquire", "locked_by": "broker-peer"},
+    ) in calls
 
 
 # ---------------------------------------------------------------------------
 # M03: Circuit-breaker tests for mesh_send
 # ---------------------------------------------------------------------------
 
+
 class _CollectorWithAnnotations:
     """Collector that also accepts ToolAnnotations keyword from @server.tool."""
+
     def __init__(self) -> None:
         self.tools: dict[str, object] = {}
 
@@ -108,13 +136,14 @@ class _CollectorWithAnnotations:
         def decorate(func):
             self.tools[func.__name__] = func
             return func
+
         return decorate
 
 
 def _make_mesh_send_tool(monkeypatch):
     """Return the mesh_send coroutine with a fresh module-level circuit state."""
-    import importlib
     import superlocalmemory.mcp.tools_mesh as mesh_tools
+
     # Force fresh module state
     monkeypatch.setattr(mesh_tools, "_REGISTERED", True)
     monkeypatch.setattr(mesh_tools, "_PEER_ID", "cb-peer")
@@ -237,9 +266,9 @@ def test_circuit_breaker_success_resets_failure_count(monkeypatch) -> None:
     monkeypatch.setattr(mesh_tools, "_mesh_request", varying_request)
 
     async def run():
-        await send_fn("p", "fail-1")   # failure 1
-        await send_fn("p", "fail-2")   # failure 2
-        r = await send_fn("p", "ok")   # success → resets counter
+        await send_fn("p", "fail-1")  # failure 1
+        await send_fn("p", "fail-2")  # failure 2
+        r = await send_fn("p", "ok")  # success → resets counter
         assert r.get("ok") is True
         # One more failure — counter should be 1, not tripping the breaker at 3
         r2 = await send_fn("p", "fail-again")
@@ -248,3 +277,30 @@ def test_circuit_breaker_success_resets_failure_count(monkeypatch) -> None:
         assert not mesh_tools._SEND_CIRCUIT.is_open()
 
     asyncio.run(run())
+
+
+def test_a_state_key_named_delta_is_still_readable(monkeypatch) -> None:
+    """GET /mesh/state/delta is the fleet sync endpoint, so the single-key route
+    cannot serve a key called "delta"; the tool reads it from the full state."""
+    import superlocalmemory.mcp.tools_mesh as mesh_tools
+
+    collector = _ToolCollector()
+    mesh_tools.register_mesh_tools(collector, lambda: None)
+    paths: list[str] = []
+
+    def request(method: str, path: str, body: dict | None = None) -> dict:
+        paths.append(path)
+        if path == "/state/delta":
+            return {"entries": [], "node_id": "n1"}
+        if path == "/state":
+            return {"state": {"delta": {"value": "v2", "set_by": "a", "updated_at": "t"}}}
+        return {"ok": True}
+
+    monkeypatch.setattr(mesh_tools, "_mesh_request", request)
+    monkeypatch.setattr(mesh_tools, "_ensure_registered", lambda: None)
+
+    got = asyncio.run(collector.tools["mesh_state"]("delta"))
+    assert got == {"key": "delta", "value": "v2", "set_by": "a", "updated_at": "t"}
+    assert "/state/delta" not in paths
+    missing = asyncio.run(collector.tools["mesh_state"]("nope-delta"))
+    assert missing == {"ok": True}

@@ -1,0 +1,35 @@
+flowchart TB
+    subgraph LOCALC["Clients on this computer"]
+        direction LR
+        AG["AI agents and IDEs<br/>MCP over stdio or HTTP"]
+        CL["slm CLI and dashboard"]
+    end
+    subgraph WEBC["Optional: apps on the internet"]
+        direction LR
+        WEB["ChatGPT, Claude on the web,<br/>Composio, Muse"]
+        GW["Connection gateway<br/>hosted"]
+    end
+    subgraph DAEMON["SLM daemon: the one process that owns your data"]
+        API["HTTP API and MCP endpoint"]
+        COMP["Companion<br/>outbound link only"]
+        REM["Remember path<br/>journal and single writer"]
+        REC["Recall engine<br/>five producers and fusion"]
+        MAT["Materializer<br/>background enrichment"]
+        MESH["SLM-Mesh broker"]
+    end
+    PW["Picture worker<br/>separate process"]
+    DB[("memory.db<br/>SQLite + sqlite-vec, canonical")]
+    PROJ[("Cozo graph and Lance vectors<br/>serve only after parity")]
+    MDB[("media.db and picture files")]
+    AG --> API
+    CL --> API
+    WEB --> GW --> COMP --> API
+    API --> REM --> DB
+    API --> REC --> DB
+    REM --> MAT --> DB
+    DB -.->|"projected, then verified"| PROJ
+    REC -.-> PROJ
+    API --> MESH
+    API --> PW --> MDB
+    classDef store fill:#FFF4E0,stroke:#C27A00,color:#1F2340
+    class DB,PROJ,MDB store

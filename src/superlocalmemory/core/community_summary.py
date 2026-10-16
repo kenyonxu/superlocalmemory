@@ -30,6 +30,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from superlocalmemory.core.entity_community import EntityCommunityBuilder
+from superlocalmemory.storage.erasure_visibility import aggregate_erasure_clause_for_db
 
 logger = logging.getLogger(__name__)
 
@@ -135,8 +136,9 @@ class CommunitySummaryBuilder:
 
     def get_summaries(self, profile_id: str) -> list[dict]:
         try:
+            erasure = aggregate_erasure_clause_for_db(self._db, "community_summaries")
             rows = self._db.execute(
-                "SELECT * FROM community_summaries WHERE profile_id = ? "
+                f"SELECT * FROM community_summaries WHERE profile_id = ?{erasure} "
                 "ORDER BY fact_count DESC",
                 (profile_id,),
             )
@@ -147,9 +149,10 @@ class CommunitySummaryBuilder:
 
     def get_summary(self, profile_id: str, community_id: int) -> dict | None:
         try:
+            erasure = aggregate_erasure_clause_for_db(self._db, "community_summaries")
             rows = self._db.execute(
                 "SELECT * FROM community_summaries "
-                "WHERE profile_id = ? AND community_id = ?",
+                f"WHERE profile_id = ? AND community_id = ?{erasure}",
                 (profile_id, int(community_id)),
             )
         except Exception as exc:

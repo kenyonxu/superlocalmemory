@@ -1,6 +1,6 @@
 # Compliance Controls and Limits
 
-> SuperLocalMemory V4 documentation · not legal advice or certification
+> Not legal advice or certification
 
 SuperLocalMemory exposes local storage, scoped recall, erasure mutations,
 provenance, policy hooks, and audit records that can support a compliance
@@ -13,8 +13,8 @@ surrounding systems, and verified operating procedures.
 | Mode | Core memory path | Network considerations |
 |---|---|---|
 | A | Can store and retrieve through the configured local data root without a cloud model provider | Model/dependency downloads, connectors, backup, proxy providers, remote embedding endpoints, and other enabled integrations remain separate network paths |
-| B | Adds an operator-configured Ollama endpoint | Verify where Ollama runs and which data it receives |
-| C | Adds configured provider calls | Provider terms, retention, region, logging, access, and data-processing agreements become part of the deployment |
+| B | Adds an operator-configured local model endpoint (Ollama by default; any local OpenAI-compatible server works) | Verify where that local model runs and which data it receives |
+| C | Adds calls to your own endpoint, or a configured cloud provider | Provider terms, retention, region, logging, access, and data-processing agreements become part of the deployment |
 
 “Local-first” describes the default core state location. It does not mean that
 every optional feature is offline or that operating-system processes cannot
@@ -28,9 +28,85 @@ Use the supported mutation commands for the installed release:
 slm forget "query" --dry-run
 slm forget "query" --yes
 slm delete <fact_id> --yes
+slm gdpr export --profile <name> --output export.json   # subject access / portability
+slm gdpr erase --profile <name> --dry-run              # preview; --yes erases the profile irreversibly
 ```
 
-A complete erasure claim requires proof that deletion propagates through:
+### What an erasure removes, and what it says it did
+
+Erasing a profile (`slm gdpr erase`, or the dashboard's erase button) does not stop at
+`memory.db`. SLM checks the bytes of the data folder after an erasure and removes the
+profile from every place that kept a copy of what the person wrote:
+
+- the relational rows, the full-text index (including free pages, so deleted words are not
+  readable from the file) and the vector index itself, with the Lance history and the
+  graph store's entity nodes;
+- saves still waiting in the queue (`pending.db`) and the encrypted request journal that
+  records each accepted save, including the instruction to write one again;
+- the per-prompt recall queue and the memories it recalled, event previews, and the running
+  service's in-memory copies;
+- the MCP cache and the reversible originals kept by compression, and the derived
+  caches that were built from redacted text;
+- the write receipts, the workspace's entry in `profiles.json`, and the free pages of the
+  learning and brain-cache databases;
+- the prompt text two logs kept, and an erased picture's stored original and backup mirror
+  (erasing a memory erases its picture).
+
+The result says exactly what happened. `slm gdpr erase --json` reports `success: false` for an
+incomplete erasure and lists what was removed and what remains with the step
+that retries it; the dashboard shows the same list, and the stored receipt is written after every
+step, so it cannot read COMPLETE over a failed sweep. Erasing one memory or one person's mentions
+(a targeted erasure) follows the same rules.
+
+Backups are the one place an erasure cannot rewrite, because the copy would stop matching its
+checksums and would no longer restore. Each backup that holds the profile is recorded as an
+**erasure obligation**. The obligation is replayed on every restore (a restore re-applies
+targeted erasures as well as profile ones), reported as outstanding, and ends only when the
+backup is deleted or re-read and found clean, never by age. A backup SLM cannot read is an
+obligation too, because not being able to look is not the same as there being nothing to find.
+Stores a scale-engine promotion keeps for rollback are treated the same way. Copies SLM does not
+control, such as files you exported, cloud backups already uploaded, or another computer's data
+folder, are yours to remove.
+
+What the two exports carry for pictures and documents:
+
+- `slm gdpr export` (and the dashboard's compliance export) adds a `media`
+  section for the profile: a record for each picture (type, size, dimensions,
+  capture time, the camera details as stored, and the scope of its memory), each
+  document (title, pages, state), each connected folder (its root path and state)
+  and each background job. It holds records only: no picture or document bytes,
+  no thumbnails (a record says whether one exists), and nothing of another
+  profile. The section is absent when pictures and documents were never turned on.
+- The memory data export (`/api/export`, the dashboard Export button) carries the
+  text of pictures, document pages and folder files as ordinary memories, with a
+  `source` field naming where each came from (`media`, `document_page` or
+  `folder`, by id and never by file path). The pictures and documents themselves
+  are not exported. Importing that file saves the text as plain memories again.
+
+What the full export (`slm gdpr export`, `GET /api/compliance/gdpr/export`) holds
+and leaves out:
+
+- It carries every table of `memory.db` that has a profile column, found from the
+  live schema, plus the profile record, the code graph, the `media` section above,
+  what the system learned about how you work (`learning_signals`), the
+  hash-chained audit records about you (`audit_chain`) and any save still waiting
+  to be written (`pending_saves`). Another profile's rows are never included.
+- It is plain JSON. Embeddings, Fisher vectors and other binary columns are
+  derived numbers, not text you wrote, and they make the file many times larger,
+  so they are omitted unless you ask (`--include-embeddings`, or
+  `include_embeddings=true` on the HTTP routes), in which case they are base64.
+- Search indexes (full-text and vector indexes) are not exported, because they are
+  rebuilt from the exported text; installation bookkeeping (schema versions,
+  settings, other users' credentials and sessions) is not data about you; and the
+  operator's erasure receipts stay with the operator as proof an erasure happened.
+- The file says all of this about itself under `export_manifest`
+  (`omitted_columns`, `not_exported`, and any table that could not be read).
+- On failure the HTTP routes answer with an error status and send no file, and the
+  dashboard shows that error; the CLI writes the file only when it is whole.
+- The memory data export (`GET /api/export`, formats `json`, `jsonl`, `csv`) follows
+  the same rule for embeddings and sends the file only once it is complete.
+
+For your own assessment, a complete erasure claim requires proof that deletion propagates through:
 
 - relational facts and raw evidence;
 - FTS, graph, temporal, vector, cache, and optional backend projections;
@@ -38,7 +114,7 @@ A complete erasure claim requires proof that deletion propagates through:
 - exports, backups, snapshots, logs, queues, and recovery artifacts; and
 - any configured provider, connector, mesh peer, or external system.
 
-The release gate (from V3.7 onward, including V4) includes this lifecycle propagation matrix. Do not delete
+The release gate includes this lifecycle propagation matrix. Do not delete
 only `memory.db` and call the deployment erased: the data root can also contain
 configuration, logs, queues, credentials, models, derived indexes, and optional
 backend state.

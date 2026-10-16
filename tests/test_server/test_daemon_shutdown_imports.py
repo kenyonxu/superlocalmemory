@@ -16,11 +16,8 @@ D-04: UI assets are served from the data dir (no xattr restrictions) rather
 
 from __future__ import annotations
 
-import importlib
-import shutil
-import types
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -124,7 +121,6 @@ def test_d03_outcome_common_no_server_imports() -> None:
 def test_d04_ui_copy_to_data_dir_succeeds(tmp_path: Path) -> None:
     """When source UI dir exists, _register_dashboard_routes copies it to
     the data dir and UI_DIR inside the function resolves to the data dir."""
-    from superlocalmemory.infra.data_root import canonical_data_root
 
     # Point data root at tmp_path so the copy lands there
     data_root = tmp_path / "slm_data"
@@ -139,7 +135,6 @@ def test_d04_ui_copy_to_data_dir_succeeds(tmp_path: Path) -> None:
 
     captured_ui_dir: list[Path] = []
 
-    import superlocalmemory.server.unified_daemon as daemon_mod
 
     # Patch the internal imports used by _register_dashboard_routes
     with (
@@ -185,7 +180,6 @@ def test_d04_fallback_to_source_when_copy_fails(tmp_path: Path) -> None:
     """If the data-dir copy raises (e.g. permissions), UI_DIR falls back to
     the source path and a WARNING is logged — the daemon must not crash."""
     import logging
-    import shutil
 
     fake_source_ui = tmp_path / "source_ui"
     fake_source_ui.mkdir()

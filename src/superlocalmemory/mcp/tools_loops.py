@@ -33,8 +33,8 @@ Fail-open: every tool body returns a dict; internal errors surface as
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
-import time
 from typing import Any, Callable
 
 from mcp.types import ToolAnnotations
@@ -42,14 +42,10 @@ from mcp.types import ToolAnnotations
 from superlocalmemory.core.admission import admits
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.loops import (
-    Bounds,
-    LapResult,
-    LedgerEntry,
-    Verdict,
     engine_backed_ledger,
-    pool_backed_ledger,
-    run_bounded_loop,
 )
+from superlocalmemory.loops.stop_reasons import last_gate_reason
+from superlocalmemory.retrieval.answer_check_status import REQUEST_NO_REORDER
 
 logger = logging.getLogger("slm.mcp.tools_loops")
 
@@ -68,6 +64,34 @@ _MAX_WALLCLOCK_S = 120.0
 _MIN_POLL_S = 0.25
 _MAX_NAME_CHARS = 128
 _MAX_QUERY_CHARS = 2000
+#: Results each gate lap asks for — and so the most memories its answer check
+#: ever judges.
+_GATE_LIMIT = 3
+
+
+def _gate_recall_kwargs(recall: Callable) -> dict:
+    """The gate's per-recall request, for a recall that can carry it.
+
+    The gate needs the answer check's verdict, never the opt-in reorder. A pool
+    whose transport does not forward the request yet is called as before.
+    """
+    try:
+        params = inspect.signature(recall).parameters
+    except (TypeError, ValueError):
+        return {}
+    takes_it = "answer_check" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    return {"answer_check": REQUEST_NO_REORDER} if takes_it else {}
+
+
+def _loop_profile(engine: Any, profile_id: str) -> tuple[str | None, dict | None]:
+    """``(profile, refusal)`` for a loop read; ``None`` = the engine's own."""
+    from superlocalmemory.mcp.request_profile import requested_profile, tool_profile
+
+    if not requested_profile(profile_id):
+        return None, None
+    return tool_profile(engine, profile_id)
 
 
 def register_loop_tools(
@@ -92,180 +116,44 @@ def register_loop_tools(
         poll_interval_s: float = 1.0,
         max_tokens: int = 0,
         no_progress_window: int = 0,
+        require_support: bool = False,
+        gate_contract: dict | None = None,
     ) -> dict:
-        """Run one bounded loop that finishes only when an INDEPENDENT gate passes.
+        """Wait under hard bounds for independently executed verification.
 
-        The gate is an SLM recall of ``gate_query``: the loop converges on the
-        first lap that recall returns a confident match scoring at least
-        ``gate_min_score``. The agent cannot end the loop by asserting it is
-        done — only the gate can. The call BLOCKS (polling every
-        ``poll_interval_s``) until the gate passes or a bound trips, then
-        returns the outcome. Every lap is written to SLM memory (tag
-        ``loop:<name>``) and is visible on the dashboard.
-
-        Use it to wait, under strict bounds, for a verification or coordination
-        condition to hold — e.g. for another agent to record a "build passed"
-        memory in shared SLM.
-
-        Args:
-            name: Loop name, also the memory tag. 1–128 chars.
-            gate_query: Recall query the independent gate checks each lap.
-            gate_min_score: Minimum top-result score to pass (0.0 = any
-                confident hit above the evidence floor).
-            max_iterations: Hard cap on laps (1–200).
-            max_wallclock_s: Hard cap on wall-clock seconds (0 disables; capped at 120).
-            poll_interval_s: Seconds to wait between laps (minimum 0.25).
-            max_tokens: Optional token budget (0 disables).
-            no_progress_window: Halt after this many consecutive no-change laps
-                (0 disables). A pure watcher never "changes", so leave at 0
-                unless the runner reports progress.
+        DONE requires gate_contract={"job_id": <operator registration nonce>}.
+        The operator pins check files, declares mutable artifact paths/globs,
+        watcher name and freshness via loops.receipt_jobs.register_job, then
+        executes run_registered_check in a private copy. DONE copies and hashes
+        current inputs again. Older caller-selected contracts fail closed.
+        Hosts without secure no-follow directory handles refuse registration;
+        the watcher exposes the platform or receipt reason in its result.
+        Pre-start evidence requires explicit permission in that registration.
+        Recall locates context; related text or support alone cannot pass.
+        require_support additionally requires a supported answer check.
+        Each lap recalls at most three memories and asks the answer check once;
+        no reorder is requested. An online check may be billed for each lap.
+        Missing, failed, stale or mismatched receipts halt at the configured bound.
         """
-        try:
-            name = (name or "").strip()
-            if not name or len(name) > _MAX_NAME_CHARS:
-                return {"ok": False, "error": f"name must be 1–{_MAX_NAME_CHARS} chars"}
-            gate_query = (gate_query or "").strip()
-            if not gate_query or len(gate_query) > _MAX_QUERY_CHARS:
-                return {
-                    "ok": False,
-                    "error": f"gate_query must be 1–{_MAX_QUERY_CHARS} chars",
-                }
+        from superlocalmemory.mcp.loop_runner import run_loop
 
-            iters = max(1, min(int(max_iterations), _MAX_ITERATIONS))
-            wall = (
-                min(float(max_wallclock_s), _MAX_WALLCLOCK_S)
-                if max_wallclock_s and float(max_wallclock_s) > 0
-                else None
-            )
-            poll = max(float(poll_interval_s), _MIN_POLL_S)
-            tok = int(max_tokens) if max_tokens and int(max_tokens) > 0 else None
-            # 0 = disabled (a pure watcher never "changes", so no-progress must
-            # be off by default or it would halt before the gate can pass).
-            npw = (
-                int(no_progress_window)
-                if no_progress_window and int(no_progress_window) > 0
-                else 0
-            )
-            min_score = float(gate_min_score)
-
-            engine = get_engine()
-            pool = get_pool() if get_pool is not None else None
-
-            def gate(lap: int) -> Verdict:
-                if pool is not None:
-                    resp = pool.recall(gate_query, limit=3, fast=True)
-                    if not isinstance(resp, dict) or resp.get("ok") is False:
-                        raise RuntimeError(
-                            (resp or {}).get("error", "owned SLM reader rejected recall")
-                            if isinstance(resp, dict)
-                            else "owned SLM reader returned an invalid response"
-                        )
-                    all_results = resp.get("results", []) or []
-                    floored = bool(resp.get("no_confident_match", False))
-                else:
-                    resp = engine.recall(gate_query, limit=3, fast=True)
-                    all_results = getattr(resp, "results", None) or []
-                    floored = bool(getattr(resp, "no_confident_match", False))
-
-                def _content(result: Any) -> str:
-                    if isinstance(result, dict):
-                        fact = result.get("fact")
-                        if isinstance(fact, dict):
-                            return str(fact.get("content", "") or "")
-                        return str(result.get("content", "") or "")
-                    return str(
-                        getattr(getattr(result, "fact", None), "content", "") or ""
-                    )
-
-                def _score(result: Any) -> float:
-                    if isinstance(result, dict):
-                        value = result.get("score", result.get("relevance_score", 0.0))
-                    else:
-                        value = getattr(result, "score", None)
-                        if value is None:
-                            value = getattr(result, "relevance_score", 0.0) or 0.0
-                    try:
-                        return float(value)
-                    except (TypeError, ValueError):
-                        return 0.0
-
-                # Exclude the loop's own audit records from the gate evaluation.
-                # Each lap writes a LedgerEntry (JSON with "run_id" + "lap") into
-                # SLM via store_fast; the FTS5 trigger indexes every such insert.
-                # Without this filter BM25 finds those self-authored records on the
-                # next lap and the gate falsely passes. Only memories written by an
-                # external agent — whose content does not parse as a LedgerEntry —
-                # can satisfy an independent gate.
-                results = [
-                    r for r in all_results
-                    if LedgerEntry.from_json(_content(r)) is None
-                ]
-                best = max((_score(result) for result in results), default=0.0)
-                passed = bool(results) and not floored and best >= min_score
-                return Verdict(
-                    passed,
-                    f"recall '{gate_query[:48]}': hits={len(results)} "
-                    f"top={best:.3f} floor={floored}",
-                )
-
-            def runner(lap: int) -> LapResult:
-                # Watcher lap: no work of our own. Give the gate condition time
-                # to become true (e.g. another agent writing a memory) between
-                # polls. Bounded by poll interval so the wall-clock / iteration
-                # caps stay meaningful. The first lap checks immediately.
-                if lap > 1:
-                    time.sleep(poll)
-                return LapResult(changed=False, tokens=0)
-
-            ledger = (
-                pool_backed_ledger(pool, engine)
-                if pool is not None
-                else engine_backed_ledger(engine)
-            )
-
-            # The loop blocks (sleeps between laps); run it off the event loop.
-            # The engine's per-call WAL connection model makes this thread-safe.
-            outcome = await asyncio.to_thread(
-                run_bounded_loop,
-                name,
-                bounds=Bounds(
-                    max_iterations=iters,
-                    max_tokens=tok,
-                    max_wallclock_s=wall,
-                    no_progress_window=npw,
-                ),
-                runner=runner,
-                gate=gate,
-                ledger=ledger,
-            )
-            laps = await asyncio.to_thread(ledger.laps, outcome.run_id)
-            return {
-                "ok": True,
-                "status": outcome.status.value,
-                "reason": outcome.reason,
-                "passed": bool(outcome.ok),
-                "laps": outcome.laps,
-                "run_id": outcome.run_id,
-                "ledger": [
-                    {
-                        "lap": e.lap,
-                        "decision": e.decision,
-                        "passed": e.passed,
-                        "detail": e.detail,
-                    }
-                    for e in laps
-                ],
-                "note": (
-                    "The gate — an independent SLM recall — decided this "
-                    "outcome; the agent's own done-claim never terminates a loop."
-                ),
-            }
-        except Exception as exc:
-            logger.exception("slm_loop_run failed (fail-open)")
-            return {"ok": False, "error": str(exc)}
+        return await run_loop(
+            get_engine,
+            get_pool,
+            name,
+            gate_query,
+            gate_min_score,
+            max_iterations,
+            max_wallclock_s,
+            poll_interval_s,
+            max_tokens,
+            no_progress_window,
+            require_support,
+            gate_contract,
+        )
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def slm_loop_history(name: str, limit: int = 20) -> dict:
+    async def slm_loop_history(name: str, limit: int = 20, profile_id: str = "") -> dict:
         """List recorded bounded-loop runs for a loop name, newest laps summarised.
 
         Reads the durable SLM-backed ledger (the same rows ``slm loop history``
@@ -274,6 +162,7 @@ def register_loop_tools(
         Args:
             name: Loop name to list runs for.
             limit: Maximum runs to return (1–200).
+            profile_id: The profile whose runs to list (empty = the active one).
         """
         try:
             name = (name or "").strip()
@@ -281,7 +170,10 @@ def register_loop_tools(
                 return {"ok": False, "error": "name is required"}
             lim = max(1, min(int(limit), 200))
             engine = get_engine()
-            ledger = engine_backed_ledger(engine)
+            pid, refused = _loop_profile(engine, profile_id)
+            if refused:
+                return {"ok": False, **refused}
+            ledger = engine_backed_ledger(engine, pid)
 
             def _collect() -> list[dict]:
                 run_ids = ledger.runs(name)[:lim]
@@ -294,6 +186,7 @@ def register_loop_tools(
                             "run_id": rid,
                             "laps": len(laps),
                             "final": last.decision if last else "unknown",
+                            "reason": last_gate_reason(laps),
                             "ts": last.ts if last else "",
                         }
                     )
@@ -306,7 +199,7 @@ def register_loop_tools(
             return {"ok": False, "error": str(exc)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def slm_loop_show(run_id: str, limit: int = 200) -> dict:
+    async def slm_loop_show(run_id: str, limit: int = 200, profile_id: str = "") -> dict:
         """Show every lap of one bounded-loop run, in order, from SLM memory.
 
         Read-only. Each lap carries the gate verdict plus the agent's recorded
@@ -315,6 +208,7 @@ def register_loop_tools(
         Args:
             run_id: Run identifier returned by ``slm_loop_run``.
             limit: Maximum laps to return (1–1000).
+            profile_id: The profile the run was recorded in (empty = the active one).
         """
         try:
             run_id = (run_id or "").strip()
@@ -322,7 +216,10 @@ def register_loop_tools(
                 return {"ok": False, "error": "run_id is required"}
             lim = max(1, min(int(limit), 1000))
             engine = get_engine()
-            ledger = engine_backed_ledger(engine)
+            pid, refused = _loop_profile(engine, profile_id)
+            if refused:
+                return {"ok": False, **refused}
+            ledger = engine_backed_ledger(engine, pid)
 
             def _collect() -> list[dict]:
                 return [

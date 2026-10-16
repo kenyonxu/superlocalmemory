@@ -21,7 +21,8 @@ import logging
 from datetime import timedelta
 import os
 import threading
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from superlocalmemory.core.config import SLMConfig
@@ -35,9 +36,31 @@ logger = logging.getLogger(__name__)
 # store creates a version and nothing used to remove them: a 5,561-memory
 # store reached 50,580 versions in 17 GB, and each vector operation then had
 # to walk that history -- the daemon in GitHub #137 held a core at 90%+ with
-# an empty queue. A week is enough to debug a bad projection and short enough
-# that the history cannot run away.
-_VECTOR_HISTORY_DAYS = float(os.environ.get("SLM_VECTOR_HISTORY_DAYS", "7"))
+# an empty queue. 4.2.4: an hour, not a week. A week still held one version
+# per memory saved that week: 7,194 versions in 5,401 files (4.1 GB for 27k
+# vectors) on a busy store after a model switch, and semantic search took
+# 2.2 s instead of 50 ms. An hour is past any in-flight read; the GDPR erase
+# path already cleans with no retention at all.
+_VECTOR_HISTORY_DAYS = float(os.environ.get("SLM_VECTOR_HISTORY_DAYS", str(1 / 24)))
+
+
+_NOT_APPLICABLE_REPORTED: set[str] = set()
+_NOT_APPLICABLE_LOCK = threading.Lock()
+
+
+def _not_applicable(why: str) -> dict:
+    """Nothing to compact here. Not a failure: said once, at INFO, per reason.
+
+    It used to be a WARNING on every run, counted as a failed maintenance step
+    and escalated to an ERROR after three cycles -- on every store that keeps
+    its vectors in SQLite, i.e. every store whose vector index is not in use.
+    """
+    reason = f"not applicable: {why}"
+    with _NOT_APPLICABLE_LOCK:
+        first = reason not in _NOT_APPLICABLE_REPORTED
+        _NOT_APPLICABLE_REPORTED.add(reason)
+    (logger.info if first else logger.debug)("vector store compaction %s", reason)
+    return {"ok": True, "applicable": False, "reason": reason}
 
 
 def compact_vector_store() -> dict:
@@ -58,10 +81,11 @@ def compact_vector_store() -> dict:
             logger.warning("vector store compaction skipped: no orchestrator")
             return {"ok": False, "reason": "no orchestrator"}
         backend = orchestrator.get_vector_backend()
+        if backend is None:
+            return _not_applicable("this store's vectors are kept in its database")
         compact = getattr(backend, "compact", None)
         if not callable(compact):
-            logger.warning("vector store compaction skipped: backend cannot compact")
-            return {"ok": False, "reason": "backend cannot compact"}
+            return _not_applicable("this vector store keeps no version history")
         return compact(retention=timedelta(days=_VECTOR_HISTORY_DAYS))
     except Exception as exc:  # noqa: BLE001 -- maintenance is best-effort
         logger.warning("vector store compaction skipped: %s", exc)
@@ -81,8 +105,12 @@ class MaintenanceScheduler:
         config: SLMConfig,
         profile_id: str = "default",
         embedder: object | None = None,
+        fact_writer: Callable[[Any], object] | None = None,
     ) -> None:
         self._db = db
+        # 4.2.5: stores one prebuilt fact with full enrichment; the coverage
+        # backfill needs it (core/coverage_backfill.py).
+        self._fact_writer = fact_writer
         self._config = config
         self._profile_id = profile_id
         # v3.8.2 self-heal: when provided, periodic maintenance backfills
@@ -143,6 +171,26 @@ class MaintenanceScheduler:
         )
         self._initial_compact_timer.daemon = True
         self._initial_compact_timer.start()
+        # #150: session-end summaries get the project their text names. Same
+        # one-shot pattern, staggered after the others for the write lock.
+        self._initial_project_timer = threading.Timer(
+            330.0, self._project_backfill,
+        )
+        self._initial_project_timer.daemon = True
+        self._initial_project_timer.start()
+        # 4.1.25: every stored memory's hub baseline (retrieval/hub_baseline.py),
+        # so recall can tell a memory that is close to everything from one
+        # that answers. Same one-shot pattern, after the others; the periodic
+        # cycle then keeps it complete in bounded steps.
+        self._initial_hub_timer = threading.Timer(390.0, self._hub_baseline_pass)
+        self._initial_hub_timer.daemon = True
+        self._initial_hub_timer.start()
+        # 4.2.5: memories saved before coverage-at-save get a fact for every
+        # sentence. Same one-shot pattern, after the others; the periodic
+        # cycle then continues it in bounded steps.
+        self._initial_coverage_timer = threading.Timer(450.0, self._coverage_pass)
+        self._initial_coverage_timer.daemon = True
+        self._initial_coverage_timer.start()
         logger.info(
             "Maintenance scheduler started (interval=%dm)",
             self._config.forgetting.scheduler_interval_minutes,
@@ -165,6 +213,64 @@ class MaintenanceScheduler:
             _reclassify.apply(open_connection=self._db.raw_connection)
         except Exception as exc:
             logger.debug("Startup plan re-read skipped: %s", exc)
+
+    def _hub_baseline_pass(self, max_batches: int | None = None) -> None:
+        """Fill in missing hub baselines in bounded batches (resumable: each
+        batch re-reads what is missing, so a stop loses nothing)."""
+        if not self._running or self._embedder is None:
+            return
+        try:
+            from superlocalmemory.retrieval.hub_baseline import Backfill
+
+            self._hub_pass = Backfill(self._db, self._embedder)
+            written = self._hub_pass.run_until_done(max_batches=max_batches)
+            if written:
+                logger.info("Hub baselines: %d facts measured", written)
+            self._record_step("hub baseline", True)
+        except Exception as exc:
+            self._record_step("hub baseline", False, str(exc))
+
+    def _coverage_pass(self, max_batches: int | None = 40) -> None:
+        """Add the missing sentence facts of older memories, bounded and
+        resumable (core/coverage_backfill.py)."""
+        limit = self._config.encoding.coverage_backfill_per_memory
+        if not self._running or self._fact_writer is None or limit <= 0:
+            return  # 0 turns the pass off
+        try:
+            from superlocalmemory.core.coverage_backfill import CoverageBackfill
+            from superlocalmemory.infra.data_root import state_path
+
+            self._coverage_job = CoverageBackfill(
+                self._db, self._fact_writer, state_dir=state_path("backfill"),
+                max_batches=max_batches,
+                limit=limit,
+            )
+            written = self._coverage_job.run_until_done()
+            if written:
+                logger.info("Coverage backfill: %d sentence facts added (%s)", written,
+                            "done" if self._coverage_job.finished else "more next cycle")
+            self._record_step("coverage backfill", True)
+        except Exception as exc:  # noqa: BLE001
+            self._record_step("coverage backfill", False, str(exc))
+
+    def _project_backfill(self) -> None:
+        """Tag a bounded batch of session-end summaries with their project
+        (storage/project_backfill.py). Idempotent; a no-op once converged."""
+        if not self._running:
+            return
+        try:
+            from superlocalmemory.storage.project_backfill import (
+                backfill_session_end_projects,
+            )
+            report = backfill_session_end_projects(self._db.raw_connection)
+            if report.tagged:
+                logger.info(
+                    "Project backfill: %d session summaries tagged (%s)",
+                    report.tagged, "done" if report.finished else "more next cycle",
+                )
+            self._record_step("project backfill", True)
+        except Exception as exc:  # noqa: BLE001
+            self._record_step("project backfill", False, str(exc))
 
     def _initial_vector_compaction(self) -> None:
         """Drop stale vector-store versions without waiting a full interval."""
@@ -204,7 +310,9 @@ class MaintenanceScheduler:
                 stale, why = metrics_are_stale(self._db, profile_id)
                 if not stale:
                     continue
-                report = compute_graph_metrics(self._db, profile_id)
+                # In a separate process: on the daemon's interpreter this pass
+                # stalled recalls for 5-9 s (core/graph_metrics_process.py).
+                report = compute_graph_metrics(self._db, profile_id, isolate=True)
                 if report.ok:
                     logger.info(
                         "Graph metrics at startup (%s): %s", why, report.summary(),
@@ -236,6 +344,24 @@ class MaintenanceScheduler:
         if _compact_timer is not None:
             _compact_timer.cancel()
             self._initial_compact_timer = None
+        _project_timer = getattr(self, "_initial_project_timer", None)
+        if _project_timer is not None:
+            _project_timer.cancel()
+            self._initial_project_timer = None
+        _hub_timer = getattr(self, "_initial_hub_timer", None)
+        if _hub_timer is not None:
+            _hub_timer.cancel()
+            self._initial_hub_timer = None
+        _coverage_timer = getattr(self, "_initial_coverage_timer", None)
+        if _coverage_timer is not None:
+            _coverage_timer.cancel()
+            self._initial_coverage_timer = None
+        _coverage_job = getattr(self, "_coverage_job", None)
+        if _coverage_job is not None:  # stops after the memory in progress
+            _coverage_job.stop()
+        _hub_pass = getattr(self, "_hub_pass", None)
+        if _hub_pass is not None:  # stops between batches
+            _hub_pass.stop(timeout=0)
         logger.info("Maintenance scheduler stopped")
 
     def _schedule_next(self) -> None:
@@ -312,6 +438,9 @@ class MaintenanceScheduler:
                     )
             except Exception as exc:
                 logger.debug("Self-heal backfill skipped: %s", exc)
+            # Bounded per cycle: a new embedding space or probe version
+            # converges over a few cycles instead of holding the write lock.
+            self._hub_baseline_pass(max_batches=20)
 
         # Once per cycle, not per profile: there is one embeddings table.
         # Also before the per-profile Langevin/Ollama work — on a real store
@@ -423,6 +552,7 @@ class MaintenanceScheduler:
                         backend = None
                     report = compute_graph_metrics(
                         self._db, profile_id, backend=backend,
+                        isolate=True,  # in a separate process unless a projection computes it
                     )
                     if report.ok:
                         logger.info("Graph metrics (%s): %s", why, report.summary())
@@ -478,6 +608,11 @@ class MaintenanceScheduler:
             self._record_step("re-reading plans", True)
         except Exception as exc:  # noqa: BLE001
             self._record_step("re-reading plans", False, str(exc))
+
+        # #150: once per cycle, all profiles in one sweep (each row stays in
+        # its own profile); batched, so the write lock is held per batch.
+        self._project_backfill()
+        self._coverage_pass()
 
         # Anything that has failed on several cycles running is not a blip.
         # Every step here logs and continues, which is right -- one broken step

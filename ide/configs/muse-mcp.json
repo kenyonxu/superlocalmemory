@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "mcpServers": {
+    "superlocalmemory": {
+      "type": "stdio",
+      "command": "slm",
+      "args": [
+        "mcp"
+      ],
+      "env": {
+        "SLM_AGENT_ID": "muse"
+      },
+      "mode": "optional"
+    }
+  }
+}

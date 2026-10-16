@@ -380,7 +380,7 @@ function _updateNavbarWidget(destinations) {
                 icon +
                 '<span style="flex:1;color:#e0e0e0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + name + '</span>' +
                 '<span class="account-dest-badge ' + statusCls + '">' + statusText + '</span>' +
-                '<button class="btn btn-sm" data-act-click="disconnect-destination" data-dest-id="' + dest.id + '" style="padding:0;border:0;color:#555;font-size:12px;" title="Disconnect"><i class="bi bi-x"></i></button>' +
+                '<button class="btn btn-sm" data-act-click="disconnect-destination" data-dest-id="' + escapeHtml(String(dest.id)) + '" style="padding:0;border:0;color:#555;font-size:12px;" title="Disconnect"><i class="bi bi-x"></i></button>' +
                 '</div>';
         });
         accountList.innerHTML = html;
@@ -422,7 +422,7 @@ function renderCloudDestinations(destinations, container) {
             card.innerHTML = '<div class="card-body p-2">' +
                 '<div class="d-flex justify-content-between align-items-center">' +
                 '<div><i class="bi bi-' + icon + '"></i> <strong>' + dest.display_name + '</strong> ' + statusBadge + '</div>' +
-                '<button class="btn btn-outline-danger btn-sm" data-act-click="disconnect-destination" data-dest-id="' + dest.id + '"><i class="bi bi-x-circle"></i></button>' +
+                '<button class="btn btn-outline-danger btn-sm" data-act-click="disconnect-destination" data-dest-id="' + escapeHtml(String(dest.id)) + '"><i class="bi bi-x-circle"></i></button>' +
                 '</div>' +
                 '<div class="small text-muted mt-1">Last sync: ' + lastSync + '</div>' +
                 '</div>';
@@ -543,7 +543,7 @@ async function exportBackup() {
         var objectUrl = URL.createObjectURL(blob);
         var link = document.createElement('a');
         link.href = objectUrl;
-        link.download = match ? match[1] : 'superlocalmemory-backup.db.gz';
+        link.download = match ? match[1] : 'superlocalmemory-backup.tar.gz';
         link.style.display = 'none';
         document.body.appendChild(link);
         link.click();

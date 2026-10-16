@@ -15,8 +15,6 @@ from __future__ import annotations
 import ast
 import pathlib
 
-import pytest
-
 _MIGRATIONS_DIR = (
     pathlib.Path(__file__).resolve().parents[2]
     / "src" / "superlocalmemory" / "storage" / "migrations"
@@ -98,6 +96,10 @@ def test_repair_modules_keep_verify() -> None:
 #: the destructive patterns below must name its proof here, or the guard
 #: fails the suite. (4.1.14 #133 audit.)
 ROUND_TRIP_COVERED = {
+    "M057_temporal_retrieval_version": (
+        "tests/test_migrations/test_m057_roundtrip.py::"
+        "test_downgrade_legacy_write_reupgrade_and_repair"
+    ),
     "M021_ingestion_log_profile": (
         "tests/test_migrations/test_repair_rebuild_roundtrip.py::"
         "test_m021_interrupted_rebuild_resumes_from_old"

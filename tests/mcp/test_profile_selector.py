@@ -13,8 +13,6 @@ from __future__ import annotations
 import importlib
 import logging
 import sys
-import types
-from typing import Callable
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +50,7 @@ def test_profile_definitions_keys_exact():
 # ---------------------------------------------------------------------------
 
 _EXPECTED_CORE = frozenset({
-    "remember", "recall", "search", "fetch", "list_recent", "update_memory", "forget",
+    "remember", "recall", "search", "fetch", "expand", "list_recent", "update_memory", "forget",
     "session_init", "close_session",
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
     "review_correction", "list_corrections",
@@ -73,7 +71,7 @@ def test_profile_core_exact():
     assert core == _EXPECTED_CORE, (
         f"core diff — extra: {core - _EXPECTED_CORE}, missing: {_EXPECTED_CORE - core}"
     )
-    assert len(core) == 18, f"core must be 18 names, got {len(core)}"
+    assert len(core) == 19, f"core must be 19 names, got {len(core)}"
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +92,10 @@ _CODE_EXTRA = frozenset({
     # 4.1.0: ranking reads whether a memory helped, and only the assistant
     # that used it can say so. The plugin runs this profile.
     "report_outcome", "report_feedback",
+    # 4.1.19 WP8: memory-kind management. Varun's call (2026-10-03): default
+    # visibility, not power-only.
+    "set_memory_kind", "memory_kinds_status", "review_memory_kinds",
+    "confirm_memory_kinds",
 })
 
 
@@ -104,7 +106,7 @@ def test_profile_code_exact():
     assert code == expected, (
         f"code diff — extra: {code - expected}, missing: {expected - code}"
     )
-    assert len(code) == 34, f"code must be 34 names, got {len(code)}"
+    assert len(code) == 39, f"code must be 39 names, got {len(code)}"
 
 
 # ---------------------------------------------------------------------------
@@ -112,12 +114,12 @@ def test_profile_code_exact():
 # ---------------------------------------------------------------------------
 
 _EXPECTED_FULL_MESH = frozenset({
-    "mesh_summary", "mesh_peers", "mesh_send", "mesh_inbox",
+    "mesh_summary", "mesh_peers", "mesh_send", "mesh_inbox", "mesh_wait",
     "mesh_state", "mesh_lock", "mesh_events", "mesh_status",
 })
 
 _EXPECTED_FULL_BASE = frozenset({
-    "remember", "recall", "search", "fetch", "list_recent", "delete_memory",
+    "remember", "recall", "search", "fetch", "expand", "list_recent", "delete_memory",
     "update_memory", "get_status", "session_init", "observe", "close_session",
     "report_feedback", "forget", "run_maintenance", "consolidate_cognitive",
     "get_soft_prompts", "set_mode", "report_outcome", "log_tool_event",
@@ -132,10 +134,17 @@ _EXPECTED_FULL_BASE = frozenset({
     "slm_loop_run", "slm_loop_history", "slm_loop_show",
     # 4.0.8 (#113): in core, therefore necessarily in full.
     "get_memory_summary",
+    # 4.1.21 (#113): saved views, run (read) and manage (write).
+    "run_view", "manage_view",
     # prestage_context is registered but intentionally not in named profiles.
 })
 
-_EXPECTED_FULL = _EXPECTED_FULL_BASE | _EXPECTED_FULL_MESH
+_EXPECTED_KINDS = frozenset({
+    "set_memory_kind", "memory_kinds_status", "review_memory_kinds",
+    "confirm_memory_kinds",
+})
+
+_EXPECTED_FULL = _EXPECTED_FULL_BASE | _EXPECTED_FULL_MESH | _EXPECTED_KINDS
 
 
 def test_profile_full_exact():
@@ -144,20 +153,22 @@ def test_profile_full_exact():
     assert full == _EXPECTED_FULL, (
         f"full diff — extra: {full - _EXPECTED_FULL}, missing: {_EXPECTED_FULL - full}"
     )
-    assert len(full) == 50, f"full must be 50 names, got {len(full)}"
+    assert len(full) == 58, f"full must be 58 names, got {len(full)}"
     # Must ⊇ core memory names
     core = mod._PROFILE_DEFINITIONS["core"]
     assert core <= full, f"full must be a superset of core; missing from full: {core - full}"
 
 
 # ---------------------------------------------------------------------------
-# RED-5: power == 62 and ⊇ full
+# RED-5: power == 69 and ⊇ full
 # ---------------------------------------------------------------------------
 
 _POWER_EXTRA = frozenset({
     "get_version", "get_mode", "health", "consistency_check", "recall_trace",
     "get_lifecycle_status", "set_retention_policy", "compact_memories",
     "get_behavioral_patterns", "audit_trail", "quantize", "get_retention_stats",
+    # memory-kind management arrives here via _EXPECTED_FULL now that it is a
+    # default-visibility surface (code/full/essential), not a power-only one.
 })
 
 _EXPECTED_POWER = _EXPECTED_FULL | _POWER_EXTRA
@@ -169,7 +180,7 @@ def test_profile_power_exact():
     assert power == _EXPECTED_POWER, (
         f"power diff — extra: {power - _EXPECTED_POWER}, missing: {_EXPECTED_POWER - power}"
     )
-    assert len(power) == 62, f"power must be 62 names, got {len(power)}"
+    assert len(power) == 70, f"power must be 70 names, got {len(power)}"
     full = mod._PROFILE_DEFINITIONS["full"]
     assert full <= power, f"power must be a superset of full; missing: {full - power}"
 
@@ -184,7 +195,7 @@ def test_profile_mesh_exact():
     assert mesh == _EXPECTED_FULL_MESH, (
         f"mesh diff — extra: {mesh - _EXPECTED_FULL_MESH}, missing: {_EXPECTED_FULL_MESH - mesh}"
     )
-    assert len(mesh) == 8, f"mesh must be 8 names, got {len(mesh)}"
+    assert len(mesh) == 9, f"mesh must be 9 names, got {len(mesh)}"
     non_mesh = {n for n in mesh if not n.startswith("mesh_")}
     assert not non_mesh, f"All mesh names must start with 'mesh_'; offenders: {non_mesh}"
 
@@ -236,7 +247,9 @@ def test_every_profile_name_is_a_real_registered_tool():
     from superlocalmemory.mcp.tools_loops import register_loop_tools
     from superlocalmemory.mcp.tools_brain import register_brain_tools
     from superlocalmemory.mcp.tools_context import register_prestage_tool
+    from superlocalmemory.mcp.tools_kinds import register_kind_tools
     from superlocalmemory.mcp.tools_summaries import register_summary_tools
+    from superlocalmemory.mcp.tools_views import register_view_tools
 
     collector = _NameCollector()
     get_engine_stub = lambda: None  # noqa: E731
@@ -255,6 +268,8 @@ def test_every_profile_name_is_a_real_registered_tool():
     register_brain_tools(collector, get_engine_stub)
     register_prestage_tool(collector, lambda *a, **k: [])
     register_summary_tools(collector, get_engine_stub)
+    register_view_tools(collector, get_engine_stub)
+    register_kind_tools(collector, get_engine_stub)
 
     mod = _get_module()
     all_profile_names: set[str] = set()
@@ -362,8 +377,31 @@ def test_default_target_uses_essential_filtered_server():
     assert isinstance(target, mod._FilteredServer), (
         f"_target should be _FilteredServer, got {type(target).__name__}"
     )
-    # Must be filtered on _ESSENTIAL_TOOLS
-    assert target._allowed == mod._ESSENTIAL_TOOLS, (
-        f"Default _FilteredServer._allowed must equal _ESSENTIAL_TOOLS; "
-        f"diff: {target._allowed.symmetric_difference(mod._ESSENTIAL_TOOLS)}"
+    # Registered: the essential tools plus the media tools. Media tools are
+    # registered up front so turning images on needs no restart; whether they
+    # are listed or callable is decided per request (see the test below).
+    from superlocalmemory.mcp.profiles import _MEDIA_TOOLS
+
+    expected = mod._ESSENTIAL_TOOLS | _MEDIA_TOOLS
+    assert target._allowed == expected, (
+        f"Default _FilteredServer._allowed must equal essential + media; "
+        f"diff: {target._allowed.symmetric_difference(expected)}"
     )
+
+
+def test_media_tools_are_offered_only_while_images_are_on(monkeypatch):
+    """Registered by default, but listed and callable only while images are on."""
+    from superlocalmemory.mcp.profiles import _MEDIA_TOOLS
+    from superlocalmemory.runtimes import features
+
+    mod = importlib.import_module("superlocalmemory.mcp.server")
+    server = mod.server
+    media = sorted(_MEDIA_TOOLS)[0]
+    plain = sorted(mod._ESSENTIAL_TOOLS - _MEDIA_TOOLS)[0]
+
+    monkeypatch.setattr(features, "media_enabled", lambda: False)
+    assert not server._tool_enabled(media)
+    assert server._tool_enabled(plain)
+
+    monkeypatch.setattr(features, "media_enabled", lambda: True)
+    assert server._tool_enabled(media)

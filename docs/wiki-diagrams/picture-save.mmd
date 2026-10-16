@@ -1,0 +1,15 @@
+flowchart TD
+    IN["Picture arrives<br/>file, link, pasted data or upload"] --> K["Check type from file bytes<br/>PNG, JPEG, GIF or WebP"]
+    K --> D{"Already saved?<br/>Library under 2 GB?"}
+    D -->|"same picture"| R1["Receipt: duplicate"]
+    D -->|"library full"| R2["Refused: library is full"]
+    D -->|"new"| WK["Wait for the picture worker<br/>90 s local, 20 s web app"]
+    WK -->|"still starting"| R3["Receipt: warming, try again"]
+    WK --> PR["Re-encode and strip metadata<br/>thumbnail, near-duplicate hash"]
+    PR --> OC["Read text in the picture (OCR)<br/>secrets always redacted"]
+    OC --> EM["Embed the picture<br/>local image model"]
+    EM --> SV["Save the memory<br/>your words + text in image"]
+    SV --> IX["Store picture record and vector<br/>media.db"]
+    IX --> R4["Receipt: stored"]
+    classDef out fill:#FFF4E0,stroke:#C27A00,color:#1F2340
+    class R1,R2,R3,R4 out

@@ -51,6 +51,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_integration._process_tree import descendants_of, reap_survivors
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
 
@@ -91,10 +93,12 @@ def _child_env(data_root: Path, port: int, home: Path, cache_root: Path) -> dict
     (offline so a cold cache can never trigger a network fetch). Proxy
     variables are stripped so loopback HTTP cannot be middle-boxed.
     """
+    from tests._portable import child_env_base
+
     env = {name: os.environ[name] for name in _PASSTHROUGH_VARS if name in os.environ}
+    env.update(child_env_base(home))  # HOME, plus what Windows cannot run without
     env.update(
         {
-            "HOME": str(home),
             "PYTHONPATH": str(SRC_ROOT),
             "SLM_DATA_DIR": str(data_root),
             "SLM_DAEMON_PORT": str(port),
@@ -118,8 +122,61 @@ def _child_env(data_root: Path, port: int, home: Path, cache_root: Path) -> dict
     return env
 
 
+_DEFAULT_DAEMON_PORT = 8765  # unified_daemon --start with no --port
+
+
+def _daemon_port(cmdline: list[str]) -> int | None:
+    """The port a ``unified_daemon --start`` command line serves on."""
+    for index, arg in enumerate(cmdline):
+        if arg.startswith("--port="):
+            try:
+                return int(arg.split("=", 1)[1])
+            except ValueError:
+                return None
+        if arg == "--port":
+            try:
+                return int(cmdline[index + 1])
+            except (ValueError, IndexError):
+                return None
+    return _DEFAULT_DAEMON_PORT
+
+
+def _daemon_arguments(cmdline: list[str]) -> list[str] | None:
+    """Read the Python entry point before inspecting its application arguments."""
+    if not cmdline or not Path(cmdline[0]).name.lower().startswith(("python", "pypy")):
+        return None
+    module = "superlocalmemory.server.unified_daemon"
+    index = 1
+    while index < len(cmdline):
+        arg = cmdline[index]
+        if arg.startswith("-c") or arg == "-":
+            return None
+        if arg == "-m":
+            return cmdline[index + 2:] if cmdline[index + 1:index + 2] == [module] else None
+        if arg.startswith("-m"):
+            return cmdline[index + 1:] if arg[2:] == module else None
+        if arg == "--":
+            index += 1
+            break
+        if arg in {"-W", "-X"}:
+            index += 2
+        elif arg.startswith("-"):
+            index += 1
+        else:
+            break
+    if index < len(cmdline) and Path(cmdline[index]).name == "unified_daemon.py":
+        return cmdline[index + 1:]
+    return None
+
+
 def _foreign_daemon_pids() -> set[int]:
-    """PIDs of unified daemons that do not belong to this test (production)."""
+    """PIDs of production unified daemons (on a production port) not ours.
+
+    Only production daemons are counted. Other test runs on the same machine
+    start their own daemons on private ports and stop them whenever they
+    finish; counting those made this guard fail whenever a parallel suite
+    ended (4.1.20 full-suite run: two such daemons exited mid-module).
+    """
     try:
         import psutil
     except Exception:  # pragma: no cover — psutil is a test dependency
@@ -128,23 +185,30 @@ def _foreign_daemon_pids() -> set[int]:
     pids: set[int] = set()
     for proc in psutil.process_iter(["pid", "cmdline"]):
         try:
-            cmdline = " ".join(proc.info["cmdline"] or [])
+            cmdline = list(proc.info["cmdline"] or [])
         except Exception:
             continue
+        daemon_args = _daemon_arguments(cmdline)
         if (
             proc.info["pid"] != mine
-            and "superlocalmemory.server.unified_daemon" in cmdline
+            and daemon_args is not None and "--start" in daemon_args
+            and _daemon_port(daemon_args) in PRODUCTION_PORTS
         ):
             pids.add(proc.info["pid"])
     return pids
 
 
+def test_only_production_port_daemons_count_as_foreign() -> None:
+    mod = "superlocalmemory.server.unified_daemon"
+    assert _daemon_port(["python", "-m", mod, "--start"]) == 8765
+    assert _daemon_port(["python", "-m", mod, "--start", "--port=8767"]) in PRODUCTION_PORTS
+    assert _daemon_port(["python", "-m", mod, "--start", "--port=18921"]) not in PRODUCTION_PORTS
+
+
 def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    from superlocalmemory.core.platform_utils import is_pid_alive
+
+    return is_pid_alive(pid)  # not os.kill(pid, 0): that is Ctrl+C on Windows
 
 
 class _RpcClient:
@@ -284,14 +348,50 @@ class RealDaemon:
         assert code == 200, payload
         return payload
 
+    #: Each remember is sent exactly ONCE. Under machine load the writer may
+    #: be busy past the admission deadline; the contract is then 202
+    #: "accepted": durable, not yet searchable, committed moments later by
+    #: the daemon itself. A 503 (what 4.1.19/4.1.20 answered here at load
+    #: average 25) fails at once — no resend hides it.
+    accepted = 0
+    COMMIT_WAIT_SECONDS = 30.0
+
     def remember(self, content: str, profile_id: str, idempotency_key: str) -> dict:
         body = {"content": content, "idempotency_key": idempotency_key}
         if profile_id:
             body["profile_id"] = profile_id
         code, payload = self.request("POST", "/remember", body)
-        assert code == 200, payload
+        assert code in (200, 202), payload
         assert payload.get("ok") is True, payload
+        if code == 202:
+            assert payload["status"] == "accepted", payload
+            assert payload["durable"] is True and payload["queryable"] is False
+            assert payload["fact_ids"] == [], payload
+            self.accepted += 1
+            self._wait_committed(profile_id or payload["profile"], idempotency_key)
         return payload
+
+    def _wait_committed(self, profile_id: str, idempotency_key: str) -> None:
+        """Observe (read-only) the daemon commit an accepted remember."""
+        deadline = time.monotonic() + self.COMMIT_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            conn = sqlite3.connect(
+                f"file:{self.data_root / 'memory.db'}?mode=ro", uri=True, timeout=30,
+            )
+            try:
+                found = conn.execute(
+                    "SELECT COUNT(*) FROM ingestion_operations "
+                    "WHERE profile_id=? AND idempotency_key=?",
+                    (profile_id, idempotency_key),
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            if found:
+                return
+            time.sleep(0.05)
+        raise AssertionError(
+            f"accepted remember {idempotency_key!r} was never committed"
+        )
 
     def recall(self, query: str, profile_id: str) -> dict:
         code, payload = self.request(
@@ -419,6 +519,9 @@ class RealDaemon:
 
     def stop(self, foreign_before: set[int]) -> None:
         """Stop the daemon and PROVE machine state was restored."""
+        # Windows has no process group to sweep afterwards, so note the
+        # daemon's descendants now (workers, a self-heal model download).
+        descendants = [] if os.name == "posix" else descendants_of(self.proc.pid)
         # 1. Graceful stop via the daemon's own capability-bound route.
         try:
             self.request("POST", "/stop", body={}, timeout=10)
@@ -460,6 +563,11 @@ class RealDaemon:
                 leaked = self._group_members()
             assert leaked == [], (
                 f"daemon process group {self.proc.pid} leaked members: {leaked}"
+            )
+        else:
+            leaked = reap_survivors(descendants, grace=30)
+            assert leaked == [], (
+                f"daemon {self.proc.pid} left descendants running: {leaked}"
             )
 
         # 3. Graceful stop removes exactly the ephemeral lifecycle identity.

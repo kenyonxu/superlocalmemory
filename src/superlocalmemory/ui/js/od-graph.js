@@ -19,20 +19,26 @@
   /* Keep force-layout work bounded even when a user asks to render "All". */
   var PHYSICS_MAX_NODES = 160;
   var PRE_SETTLE_TICKS = 24;
+  /* Pixel-width budget for a node's label (not a word/char count — "webhook
+     signing secret" and "mutable account balances" are 3-4 words each and
+     still ran into their neighbours at the default font). Chosen as roughly
+     the gap the force layout settles neighbouring tier-2 nodes to at
+     scale=1; wide enough that short labels never get touched. */
+  var LABEL_MAX_WIDTH = 92;
 
   /* ---- 16-colour categorical palette (Tableau-inspired, accessible) ---- */
   var CAT_PALETTE = [
-    '#4E79A7', '#F28E2B', '#E15759', '#76B7B2', '#59A14F',
+    '#4E79A7', '#F28E2B', '#E15759', '#B8A6FF', '#8F76FF',
     '#EDC948', '#B07AA1', '#FF9DA7', '#9C755F', '#BAB0AC',
-    '#52B2BF', '#D4A5A5', '#7EB0D5', '#FD7F6F', '#B2E061', '#FFBE7D'
+    '#FF6FAA', '#D4A5A5', '#7EB0D5', '#FD7F6F', '#D9C7FF', '#FFBE7D'
   ];
   /* fixed colours per entity type -- consistent across renders */
   var ETYPE_COLORS = {
     person:   '#4E79A7',
     org:      '#F28E2B',
-    concept:  '#59A14F',
+    concept:  '#8F76FF',
     event:    '#E15759',
-    location: '#76B7B2',
+    location: '#B8A6FF',
     tool:     '#EDC948',
     project:  '#B07AA1',
     skill:    '#FF9DA7'
@@ -132,7 +138,7 @@
         // Delegation wired in wireControls() so buttons survive re-renders.
         '<div id="odg-insights-panel" style="border-top:1px solid var(--border);' +
           'padding:10px 12px 8px">' +
-          '<div style="font-size:10.5px;font-weight:600;color:var(--fg-3);' +
+          '<div style="font-size:10.5px;font-weight:600;color:var(--fg-2);' +
             'text-transform:uppercase;letter-spacing:0.06em;margin-bottom:7px">' +
             'Quick Insights</div>' +
           '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:7px">' +
@@ -180,6 +186,21 @@
   /* ---------------- data -> tiered graph (real fields only) ---------------- */
   function shortWords(s, n) {
     return String(s || '').trim().split(/\s+/).slice(0, n || 4).join(' ');
+  }
+
+  /* Clip `text` to fit `maxWidth` CSS px under ctx's CURRENT font, appending
+     an ellipsis, via binary search over measureText — exact for whatever
+     font is active rather than guessing a character count. Caller sets
+     ctx.font first; this does not touch it. */
+  function clipLabel(ctx, text, maxWidth) {
+    if (ctx.measureText(text).width <= maxWidth) return text;
+    var lo = 0, hi = text.length;
+    while (lo < hi) {
+      var mid = (lo + hi + 1) >> 1;
+      if (ctx.measureText(text.slice(0, mid) + '…').width <= maxWidth) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo > 0 ? text.slice(0, lo) + '…' : '…';
   }
   function catColor(cat) {
     if (cat === 'episodic' || cat === 'temporal') return 'episode';
@@ -352,7 +373,22 @@
       if (n.tier < 3 || n === hover || n === selected || scale > 1.6) {
         ctx.fillStyle = PAL.fg;
         ctx.font = (n.tier === 1 ? '650 ' : '500 ') + (n.tier === 1 ? 13 : 11.5) + 'px -apple-system,system-ui,sans-serif';
-        ctx.textAlign = 'center'; ctx.fillText(n.label, p[0], p[1] + r + 13);
+        ctx.textAlign = 'center';
+        // Basic collision avoidance: a dense cluster of tier-2 entity nodes
+        // ("webhook signing secret", "mutable account balances", ...) drew
+        // every label at full width with no gap check, so neighbouring
+        // labels routinely overlapped or ran past the canvas edge
+        // (docs/screenshots/4.1.21/03-knowledge-graph.png). True pairwise
+        // overlap detection would mean measuring every visible label
+        // against every other one, every animated frame, for a live force
+        // layout — a real feature, not a small fix. This instead keeps the
+        // common case cheap: the node under the cursor or the one selected
+        // (the one the user is actually reading) always gets its full
+        // label; every other label is clipped to LABEL_MAX_WIDTH px with an
+        // ellipsis, which removes most overlap without new per-frame cost,
+        // and the full name is one hover away.
+        var label = (n === hover || n === selected) ? n.label : clipLabel(ctx, n.label, LABEL_MAX_WIDTH);
+        ctx.fillText(label, p[0], p[1] + r + 13);
       }
     });
   }
@@ -471,8 +507,7 @@
     return '<span style="display:inline-block;vertical-align:middle;width:70px;height:6px;border-radius:99px;background:var(--card-2);overflow:hidden;margin-right:7px"><span style="display:block;height:100%;width:' + (v / max * 100) + '%;background:linear-gradient(90deg,var(--cyan),var(--violet))"></span></span>';
   }
   function field(k, v) { return '<div class="field"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>'; }
-  function esc(s) { return String(s == null ? '' : s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
-  function escAttr(s) { return esc(s).replace(/"/g, '&quot;'); }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 
   function selectById(id) {
     var n = idx[id];
@@ -514,7 +549,7 @@
     }
     var nb = LINKS.filter(function (l) { return l.s === n.id || l.t === n.id; }).slice(0, 6).map(function (l) {
       var o = idx[l.s === n.id ? l.t : l.s]; if (!o) return '';
-      return '<div class="list-row" style="padding:8px 0;cursor:pointer" data-act-click="odg-select" data-odg-id="' + escAttr(o.id) + '">' +
+      return '<div class="list-row" style="padding:8px 0;cursor:pointer" data-act-click="odg-select" data-odg-id="' + esc(o.id) + '">' +
         '<span style="width:9px;height:9px;border-radius:50%;background:' + nodeColor(o) + '"></span>' +
         '<span style="flex:1;font-size:12.5px">' + esc(o.label.replace('…', '')) + '</span>' +
         '<span class="badge neutral" style="font-size:10px">' + esc(l.rt) + '</span></div>';
@@ -544,7 +579,7 @@
         var cites = items.slice(0, 4).map(function (it) {
           var id = String(it.id || it.fact_id || '');
           var lbl = esc(shortWords(it.content || it.text || it.summary || 'fact', 4));
-          return '<span class="cite"' + (idx[id] ? ' data-act-click="odg-select" data-odg-id="' + escAttr(id) + '"' : '') + '>◈ ' + lbl + '</span>';
+          return '<span class="cite"' + (idx[id] ? ' data-act-click="odg-select" data-odg-id="' + esc(id) + '"' : '') + '>◈ ' + lbl + '</span>';
         }).join('');
         t.innerHTML = ans + (cites ? '<div style="margin-top:8px">' + cites + '</div>' : '');
       })

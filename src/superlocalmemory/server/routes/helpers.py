@@ -26,6 +26,7 @@ from superlocalmemory.infra.data_root import DynamicStatePath, canonical_data_ro
 from superlocalmemory.storage.memory_write import memory_read, memory_write
 
 _engine_logger = logging.getLogger("superlocalmemory.engine")
+_log = logging.getLogger("superlocalmemory.routes.helpers")
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +51,7 @@ def _get_version() -> str:
                 root = root.parent
             pkg_json = root / "package.json"
             if pkg_json.exists():
-                with open(pkg_json) as f:
+                with open(pkg_json, encoding="utf-8") as f:
                     v = _json.load(f).get("version", "")
                     if v:
                         return v
@@ -286,7 +287,7 @@ def get_active_profile() -> str:
     config_file = MEMORY_DIR / "profiles.json"
     if config_file.exists():
         try:
-            with open(config_file, "r") as f:
+            with open(config_file, "r", encoding="utf-8") as f:
                 pconfig = json.load(f)
             return pconfig.get("active_profile", "default")
         except (json.JSONDecodeError, IOError):
@@ -326,6 +327,9 @@ def ensure_profile_in_json(name: str, description: str = "") -> None:
     """Ensure a profile entry exists in profiles.json (idempotent)."""
     from datetime import datetime
 
+    from superlocalmemory.core import profile_tombstones
+
+    profile_tombstones.clear(MEMORY_DIR, name)  # an explicit creation lifts an erasure
     config = _load_profiles_json()
     profiles = config.get("profiles", {})
     if name not in profiles:
@@ -356,8 +360,16 @@ def sync_profiles() -> list[dict]:
 
     changed = False
 
-    # JSON-only → add to SQLite (fixes Dashboard-created profiles)
+    # JSON-only → add to SQLite (fixes Dashboard-created profiles). An erased
+    # workspace's leftover entry is dropped instead: it must not come back.
+    from superlocalmemory.core import profile_tombstones
+
+    erased = profile_tombstones.erased_digests(MEMORY_DIR)
     for key in json_keys - db_ids:
+        if profile_tombstones.digest(key) in erased:
+            json_profiles.pop(key, None)
+            changed = True
+            continue
         ensure_profile_in_db(key, json_profiles[key].get("description", ""))
 
     # SQLite-only → add to profiles.json (fixes CLI-created profiles)
@@ -386,32 +398,111 @@ def set_active_profile_everywhere(name: str) -> None:
     persist_active_profile(name)
 
 
-def delete_profile_from_db(name: str) -> None:
-    """Delete a profile row from SQLite.
+PICTURES_PENDING = "pictures_pending"
 
-    rbac_memberships has no FK to profiles, so CASCADE does not remove role
-    grants — they would otherwise survive deletion and silently re-activate if
-    a profile of the same name is later recreated. Remove them explicitly.
-    Uses ``memory_write()`` so the multi-statement DELETE is atomic and
-    serialised against other in-process writers.
+
+def delete_profile_from_db(name: str, *, move_to: str = "default") -> dict:
+    """Move a profile's memories to ``move_to``, then delete the profile.
+
+    Every profile-scoped row is moved, merged or deleted by the decision table
+    in storage/profile_fold.py -- in ONE memory.db transaction with the profile
+    row's own DELETE, so a failure leaves the profile and all of its data as
+    they were. Foreign keys stay off for that DELETE: with them on, every
+    ON DELETE CASCADE table dropped the moved memories' indexes (the 4.1.21
+    defect), and anything a future table left behind must stay visible, never
+    be deleted silently.
+
+    Pictures and documents (media.db) move last, after that transaction has
+    committed: if the memory move fails, nothing in media.db has moved. If the
+    picture move itself fails the delete still stands: the move is recorded
+    (storage/pending_media_moves.py), the counts carry ``pictures_pending``,
+    and it is finished at daemon start or before the next profile is created.
+
+    Sidecar stores first, as before: if one fails the profile row must survive
+    for a retry rather than leave profile-scoped evidence orphaned. Raises
+    ``ProfileFoldError`` / ``SidecarFoldError`` (nothing changed) when the
+    delete cannot run safely. Returns the fold's per-table counts.
     """
     if not DB_PATH.exists():
-        return
-    # Receipt evidence lives in learning.db, not recall's memory.db.  Purge it
-    # first: if this fails the profile row must survive for a retry rather than
-    # leaving profile-scoped learning evidence orphaned.
+        return {}
+    from superlocalmemory.storage import profile_fold_sidecars as sidecars
+
+    root = Path(DB_PATH).parent
+    sidecars.check_learning(root / "learning.db")
+    sidecars.check_media(root)
+    _refuse_unfoldable(name, move_to)
+    # Receipt evidence lives in learning.db, not recall's memory.db.
     from superlocalmemory.storage.agent_experience import purge_profile_receipts
 
-    purge_profile_receipts(Path(DB_PATH).parent / "learning.db", name)
+    purge_profile_receipts(root / "learning.db", name)
+    from superlocalmemory.core.answer_check_history_store import erase_profile_everywhere
+
+    erase_profile_everywhere(root / "learning.db", name)
+    # A workspace made later under the same name must not inherit these views.
+    from superlocalmemory.views import ViewStore
+
+    ViewStore(root / "learning.db").erase_profile(name)
+    sidecars.purge_learned_state(root / "learning.db", name)
+    sidecars.purge_context_cache(root, name)
+    sidecars.move_pending(root / "pending.db", name, move_to)
+    from superlocalmemory.storage.profile_fold import fold_profile
+
     with memory_write(DB_PATH) as conn:
-        conn.execute("PRAGMA foreign_keys=ON")
-        # Purge role grants for this workspace (no FK CASCADE covers these).
-        for tbl in ("rbac_memberships",):
-            try:
-                conn.execute(f"DELETE FROM {tbl} WHERE profile_id = ?", (name,))
-            except sqlite3.OperationalError:
-                pass  # table may not exist on older installs
+        _load_vectors(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        counts = fold_profile(conn, name, move_to)
         conn.execute("DELETE FROM profiles WHERE profile_id = ?", (name,))
+    # Pictures and documents follow only once the memories have moved for good.
+    # The delete is done by now, so a failure here is recorded and finished
+    # later instead of being reported as a failed delete.
+    try:
+        sidecars.move_media(root, name, move_to)
+    except Exception as exc:  # noqa: BLE001 -- the memories already moved; finish this later
+        from superlocalmemory.storage import pending_media_moves
+
+        _log.warning("pictures of '%s' did not move yet: %s", name, exc)
+        pending_media_moves.record(root, name, move_to)
+        counts = {**counts, PICTURES_PENDING: True}
+    _unproject_entities(counts.get("merged_entities") or [])
+    return counts
+
+
+def _refuse_unfoldable(name: str, move_to: str) -> None:
+    """Read-only pre-check, so a refusal never leaves the sidecars purged."""
+    from superlocalmemory.storage.profile_fold import ProfileFoldError, _check, profile_scoped_tables
+
+    if not name or name == move_to:
+        raise ProfileFoldError("a profile cannot be folded into itself")
+    with memory_read(DB_PATH) as conn:
+        _load_vectors(conn)
+        _check(conn, profile_scoped_tables(conn))
+
+
+def _load_vectors(conn) -> None:
+    """sqlite-vec, so vectors partitioned by profile can move (fold refuses without it)."""
+    try:
+        import sqlite_vec
+
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+    except Exception as exc:  # noqa: BLE001 -- the fold's own check reports what it needs
+        _log.debug("sqlite-vec not loaded for the profile fold: %s", exc)
+
+
+def _unproject_entities(entity_ids: list) -> None:
+    """Merged-away entity nodes leave the external graph projection, best effort."""
+    if not entity_ids:
+        return
+    try:
+        from superlocalmemory.encoding.entity_resolver import _unproject_entity
+    except Exception:  # noqa: BLE001
+        return
+    for entity_id in entity_ids:
+        try:
+            _unproject_entity(entity_id)
+        except Exception as exc:  # noqa: BLE001 -- the store itself is already right
+            _log.warning("graph projection kept merged entity %s: %s", entity_id, exc)
 
 
 def _get_db_profiles() -> list[dict]:
@@ -434,7 +525,7 @@ def _load_profiles_json() -> dict:
     config_file = MEMORY_DIR / "profiles.json"
     if config_file.exists():
         try:
-            with open(config_file, "r") as f:
+            with open(config_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             # Handle ProfileManager array format → convert to dict format
             if isinstance(data.get("profiles"), list):
@@ -459,7 +550,7 @@ def _save_profiles_json(config: dict) -> None:
     """Save profiles.json config."""
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     config_file = MEMORY_DIR / "profiles.json"
-    with open(config_file, "w") as f:
+    with open(config_file, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
 
 
@@ -483,6 +574,15 @@ class SearchRequest(BaseModel):
     # ("2026-07-01..2026-07-31"). When empty, date_from/date_to (if both set)
     # are used as the range. Empty + no dates = no time filter.
     window: Optional[str] = None
+    # L3-20 (4.1.19 WP8): the same nine-value kind filter list/search already
+    # take on MCP and the CLI. Validated with core.kind_query.resolve_kind —
+    # empty means "no filter"; an unknown value is refused (422) before any
+    # retrieval, never silently ignored.
+    kind: str = ""
+    # 4.1.25: the "show closest matches" toggle -- every weak match of a recall
+    # that abstains, labelled. Off by default; close memories of a real
+    # question (tier related) are shown either way, since a person is looking.
+    show_weak: bool = False
 
 
 class ProfileSwitch(BaseModel):

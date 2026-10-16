@@ -428,11 +428,9 @@ def test_learning_database_fetches_all_platform_outcomes(
             cited=True,
         )
 
-    # Attach memory.db to the learning connection so the JOIN resolves.
-    # In production the trainer copies/joins across files too; the
-    # fetch_training_examples method is DB-local, so we mirror that by
-    # copying action_outcomes rows into the learning.db for the JOIN.
-    _mirror_action_outcomes_into_learning_db(memory_db_path, learning_db)
+    # No copying: the outcomes live in memory.db, beside learning.db, and the
+    # trainer must join across the two files itself (audit BRN-12 — this test
+    # used to mirror the rows into learning.db, which hid the broken join).
 
     rows = learning_db.fetch_training_examples(
         profile_id=_SHARED_PROFILE, limit=100, min_outcome_age_sec=0
@@ -490,7 +488,6 @@ def test_platform_tag_preserved_in_training_features(
         )
         recorded.append(r)
 
-    _mirror_action_outcomes_into_learning_db(memory_db_path, learning_db)
 
     rows = learning_db.fetch_training_examples(
         profile_id=_SHARED_PROFILE, limit=100, min_outcome_age_sec=0
@@ -545,7 +542,6 @@ def test_retrain_sees_combined_training_set(
             query_text=f"{p} retrain probe",
             cited=True,
         )
-    _mirror_action_outcomes_into_learning_db(memory_db_path, learning_db)
 
     rows = learning_db.fetch_training_examples(
         profile_id=_SHARED_PROFILE, limit=100, min_outcome_age_sec=0
@@ -662,7 +658,6 @@ def test_cross_platform_shared_profile_no_leakage(
         cited=True,
     )
 
-    _mirror_action_outcomes_into_learning_db(memory_db_path, learning_db)
 
     shared_rows = learning_db.fetch_training_examples(
         profile_id=_SHARED_PROFILE, limit=100, min_outcome_age_sec=0
@@ -708,38 +703,3 @@ def test_cross_platform_shared_profile_no_leakage(
 # ---------------------------------------------------------------------------
 
 
-def _mirror_action_outcomes_into_learning_db(
-    memory_db_path: Path, learning_db: LearningDatabase
-) -> None:
-    with sqlite3.connect(memory_db_path) as mconn:
-        rows = mconn.execute(
-            "SELECT outcome_id, profile_id, reward, settled, settled_at, "
-            "       recall_query_id "
-            "FROM action_outcomes WHERE settled = 1"
-        ).fetchall()
-
-    lconn = sqlite3.connect(learning_db.path, timeout=5)
-    try:
-        lconn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS action_outcomes (
-                outcome_id       TEXT PRIMARY KEY,
-                profile_id       TEXT NOT NULL DEFAULT 'default',
-                reward           REAL,
-                settled          INTEGER NOT NULL DEFAULT 0,
-                settled_at       TEXT,
-                recall_query_id  TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_ao_recall_q
-                ON action_outcomes(recall_query_id);
-            """
-        )
-        lconn.executemany(
-            "INSERT OR REPLACE INTO action_outcomes "
-            "(outcome_id, profile_id, reward, settled, settled_at, recall_query_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            rows,
-        )
-        lconn.commit()
-    finally:
-        lconn.close()

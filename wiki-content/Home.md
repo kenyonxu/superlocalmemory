@@ -1,178 +1,70 @@
-# SuperLocalMemory V4.0.5
+<p align="center"><img src="images/slm-mascot-hero.png" width="180" alt="SuperLocalMemory mascot, a fluffy caped helper with the SLM logo, arms open"></p>
 
-> **V4.0.5 — governed local-first agent memory control plane built on the V3.8 foundation:
-> local-first agent memory, 5-channel retrieval, cache, compression, trusted-peer
-> coordination, team workspaces, roles, and governance controls.**
+# SuperLocalMemory
 
-SuperLocalMemory turns conversations, observations, and connected-source
-evidence into durable memory that can be recalled through a CLI, MCP, hooks,
-dashboard, or documented IDE integrations. SQLite + sqlite-vec are the
-canonical local store. The product also includes an explicit Scale Engine for
-CozoDB graph and LanceDB vector projections, a cache/compression module, and
-**SLM-Mesh** coordination controls.
+**Governed, local-first memory for AI agents.** SuperLocalMemory (SLM) gives your AI agents a memory that lives on your computer, follows rules you set, and can say "I don't have that" instead of guessing. It is the working core of **AI Reliability Engineering**: the practice of making AI systems behave predictably, show their evidence and fail safely.
 
-> **V4.0.5 is the current release** (see [CHANGELOG](https://github.com/qualixar/superlocalmemory/blob/main/CHANGELOG.md) and `src/superlocalmemory/__init__.py`). Every Current page in this Wiki describes V4. Historical V3 research pages are labeled as historical and carried forward where still accurate.
+![SuperLocalMemory architecture: agents on your computer and optional web apps and bots use one governed memory engine on your machine](images/slm-architecture.svg)
 
-## What changed in V4.0.5
+This wiki is written to be read like a book, front to back or by chapter. It covers the whole product, not just the latest release.
 
-V4.0.5 adds reviewed corrections. An update creates an immutable successor and
-profile-scoped proposal; current recall keeps it out until an authenticated
-review applies it. The predecessor remains available to time-aware history.
-The same hard admission covers ordinary retrieval, cached context, pins, and
-bridge or scene expansion. If correction state cannot be read, current recall
-abstains. Living Brain, CLI, HTTP, and MCP show the same observation-only
-BrainTruth snapshot; it does not silently alter recall, ranking, or routing.
+## What SLM is
 
-V4.0.4 changes remain available:
+AI assistants forget everything between sessions, and the memory tools that fix this usually send your data to a service you do not control. SLM keeps the memory in SQLite on your own computer and puts a governed engine in front of it. Agents in Claude Code, Codex, Cursor and other tools talk to that engine through MCP, the CLI or HTTP, and a dashboard shows what it knows and why.
 
-V4.0.4 keeps consented host-integration upgrades. `slm upgrade-hosts` is always a
-read-only preview until an operator selects named hosts (or explicitly approves
-all detected hosts) with `--apply`. It preserves existing MCP blocks and only
-refreshes SLM-owned Codex assets. Normal CLI and MCP startup never silently
-installs or updates Claude Code hooks. See [Host Upgrades](Host-Upgrades).
+Four ideas set it apart. **Memory is governed**: roles per workspace, default-deny access across profiles, an audit chain you can verify, erasure with a signed receipt, and trust that agents earn and lose. **Recall is honest**: five retrieval producers fuse into one ranking, results with no real evidence are dropped, and every recall says whether memory supports the question, holds only close matches, or does not have it ("That isn't in SuperLocalMemory."). An answer check that runs on your own Mac by default feeds that decision. **Memory behaves like memory**: facts fade, consolidate and connect over time instead of piling up. **It runs where you decide**: nothing leaves your computer unless you turn on a feature that sends it, and [Privacy and Data Flow](Privacy-and-Data-Flow) lists every one.
 
-It also adds an optional Bounded Loops MCP 2 evidence bridge. When the separate
-`bounded-loops-mcp` product is installed, an agent can explicitly observe a
-workspace's terminal graph receipts. SLM stores compatible v1 receipts in its
-profile-scoped `learning.db` and shows them in Living Brain. This is not an
-automatic learning path: the evidence never changes recall, ranking, routing,
-or reward. See [MCP Tools](MCP-Tools).
+## Who it is for
 
-V4 keeps the multi-channel retrieval and local-first store from the V3 research line, and productizes governed writes, **SLM-Mesh** peer coordination, multi-scope profiles, cache/compress, Entity Explorer and skill evolution, Modes A/B/C, and GDPR-oriented retention/audit controls. Operating mode is not legal certification under the EU AI Act — deployment context decides legal duties.
+Developers who use AI coding agents and want decisions, conventions and fixes to carry across sessions and tools. Teams that need a shared memory with roles, attribution and an audit trail. Anyone who has to show where an AI's answer came from, or erase what it knows. Researchers who want an inspectable memory: the design is published in four arXiv papers, listed at the end of this page.
 
-V4 hardens the full lifecycle of a memory operation — admission, canonical commit, projection to every store, migration, backup, and erasure — so each step is authorized and verifiable against its manifest and logs. Existing V4 memories and configuration are preserved; M038 (eager) and M039 (deferred) migrations are automatically applied at startup so no manual `slm db migrate` is normally required (see [CLI Reference](CLI-Reference) — forward only, no rollback). Schema downgrade is unsupported; to revert a V4 upgrade, restore a verified pre-upgrade backup of the complete data root (stop the daemon first and include WAL/SHM). V2→V3 migration is a separate `slm migrate` command (see [Migration from V2](Migration-from-V2)).
+## Start here
 
-## The product in one view
+| If you want to | Read |
+|---|---|
+| Install it and save your first memory | [Installation](Installation), then [Getting Started](Getting-Started) |
+| Connect your IDE or agent | [IDE Setup](IDE-Setup), [MCP Tools](MCP-Tools) |
+| See the whole system in one picture | [Architecture](Architecture) |
+| Understand how a save and a search really work | [How Remember Works](How-Remember-Works), [How Recall Works](How-Recall-Works) |
+| Judge whether it is safe for your data | [Privacy and Data Flow](Privacy-and-Data-Flow), [Security, Company Mode and Teams](Security-Company-Mode-and-Teams), [Governance](Governance) |
 
-```text
-Sources and clients
-CLI · MCP HTTP/stdio · hooks · dashboard · IDEs · adapters
-                              │
-                              ▼
-  admission → queryable core → enrichment → brain/lifecycle
-                              │
-                              ▼
- semantic · BM25 · temporal · Hopfield · spreading activation
-   (5 candidate producers + entity-graph score enhancement)
-                              │
-                              ▼
- safe bounded context with policy, provenance and trace evidence
-                              │
-                              ▼
- SQLite + sqlite-vec canonical ─► parity-gated graph/vector projections
-```
+## What is in the book
 
-The architecture has seven logical stages: admission, queryable durability,
-enrichment, learning/lifecycle, retrieval, safe context delivery, and
-operations. A specific write or recall only reports stages that actually ran;
-optional enrichers and retrieval channels are dependency- and mode-aware.
+**How memory works.** [Architecture](Architecture), [How Remember Works](How-Remember-Works), [How Recall Works](How-Recall-Works), [Retrieval Score Contract](Retrieval-Score-Contract), [Answer Check](Answer-Check), [Memory Kinds](Memory-Kinds), [Modes Explained](Modes-Explained), [Profiles](Profiles), [Auto-Memory](Auto-Memory), [Active Memory](Active-Memory).
 
-## Capability map
+**The living system.** [Living Brain](Living-Brain) (decay, consolidation, quantization, learning), [Knowledge Graph, Clusters, Summaries and Entities](Knowledge-Graph-and-Entities), [Skill Evolution](Skill-Evolution), [Health and Repair](Health-and-Repair), [Multi-Agent Memory](Multi-Agent-Memory).
 
-| Area | Available capability | Important boundary |
-|---|---|---|
-| Memory | Facts, scenes, temporal events, entities, profiles/scopes, memory lifecycle | Recalled content is untrusted evidence, never a new instruction. |
-| Ingestion | Replay-safe operation receipts; extraction, entity, graph, temporal, provenance and embedding derivations | Use `--sync` when a caller needs all declared stages, not only the immediate queryable receipt. |
-| Recall | 5 candidate producers (semantic, BM25, temporal, Hopfield, spreading activation); RRF fusion, optional rerank and graph score enhancement | Runtime health determines the channels that participate; entity graph is a post-fusion enhancement, not a 6th candidate. |
-| Brain | Behavioral patterns, feedback/outcomes, reward signals, consolidation, soft prompts and guarded skill evolution | Learning is not a guarantee that an outcome was correct or beneficial. |
-| Graph | Canonical entities, aliases, profiles, edges, scenes, timelines and an Entity Explorer | Graph evidence is inspectable and provenance-bearing. |
-| Scale Engine | CozoDB graph + LanceDB vectors with `prepare → verify → promote → rollback` and `adopt` | SQLite remains canonical; promotion is explicit and parity-gated. |
-| Optimize | Exact cache, tag invalidation, safe compression, opt-in lossy prose compression and CCR originals | Only the proxy can intercept a primary provider turn. |
-| **SLM-Mesh** | Authenticated peer messages, locks, inbox/outbox, queues and optional discovery | Mesh coordinates peers; it is not a replicated distributed-memory database. |
-| Governance | Provenance, audit, retention, policy, export/erasure, health and diagnostics | Deployment configuration determines compliance posture. |
-| Integrations | CLI, Python SDK, MCP, Claude plugin, Codex add-on, documented IDE configs, Gmail/Calendar/transcript adapters, nine framework adapters (LangGraph, Semantic Kernel, Microsoft Agent Framework, LangChain, LlamaIndex, CrewAI, AutoGen, Google ADK, OpenAI Agents) | Connectors and hooks are opt-in and have their own data paths. |
+**Governance and trust.** [Governance](Governance) (lifecycle, trust, retention, GDPR, audit), [Security, Company Mode and Teams](Security-Company-Mode-and-Teams), [Privacy and Data Flow](Privacy-and-Data-Flow), [Compliance](Compliance), [Cloud Backup](Cloud-Backup).
 
-## V4 Reliability Contract — Verified 2,200/2,200 (Scoped)
+**Beyond text.** [Pictures and Documents](Pictures-and-Documents) (screenshots, photos, PDFs, folders and Obsidian vaults), [Ingestion Adapters](Ingestion-Adapters) (Gmail, Calendar, meeting transcripts).
 
-V4 states every reliability guarantee as a falsifiable invariant with an adversarial test, negative controls, and a shipped harness that regenerates the evidence. The only verified stress figure in V4 is the following; no other durability, latency, or throughput guarantee is claimed as a measured release envelope.
+**Connected systems.** [Bots That Talk](Bots-That-Talk) (SLM-Mesh and bot messages), [Web Access and Connected Apps](Web-Access-and-Connected-Apps), [Plugins, Skills and Hooks](Plugins-Skills-and-Hooks) (Claude Code, Cursor, Codex, Copilot, Hermes, Antigravity), [Bounded Loops](Bounded-Loops), [Framework Adapters](Framework-Adapters), [Optimize](Optimize) (caching and compression).
 
-> **Verified source:** `benchmark/results/SUMMARY.md` (package **4.0.0**, Python **3.13.13**, `macOS-26.5.2-arm64-arm-64bit-Mach-O`, generated `2026-08-08T08:38:21Z`) and `benchmark/README.md`. Reproduce with `python benchmark/run_all.py --trials 200 --output-dir results/` — 11 experiments × 200 trials = **2,200/2,200 (100.0%)** trials upheld their guarantee. Individual trial JSON under `benchmark/results/`.
+**Operate and reference.** [Dashboard Tour](Dashboard-Tour), [Configuration](Configuration), [Embedding Models](Embedding-Models), [CLI Reference](CLI-Reference), [MCP Tools](MCP-Tools), [Capabilities and Operations](Capabilities-and-Operations), [Troubleshooting](Troubleshooting), [FAQ](FAQ), [Research Foundations](Research-Foundations).
 
-| Experiment | Guarantee | Metric |
-|---|---|---|
-| exp1_erasure_completeness | Real Bm25Owner + TemporalOwner + VectorOwner (embedding_metadata path; no sqlite-vec ANN in this env) erase all projection rows; tombstones + receipt persisted; keep-tenant hash unchanged | complete-erasure rate |
-| exp2_transaction_atomicity | Committed → COMPLETE; faulted → DEGRADED with `compensate()` removing successful projection (ledger states verified) | manifest-correct rate |
-| exp2b_real_owner_manifest | Happy path → COMPLETE with all three tables present; Bm25 fault → DEGRADED with zero residue and `compensate('temporal')` verified | manifest-correct rate |
-| exp3_migration_downgrade | Newer-stamped DB refused on deferred pass with zero mutation | refuse-and-preserve rate |
-| exp4_backup_restore_atomicity | Partial-restore failure rolls live data back to pre-restore bytes | rollback+clean rate |
-| exp5_multitenant_isolation | Personal rows never leak across tenants (positive control: requester still sees own data) | zero-leak rate |
-| exp6a/b/c | Superseded demotion, Ebbinghaus decay monotonicity, time-window inference | correct-demotion / monotonic-decay / correct-window |
-| exp7_generation_fence | Stale-epoch ADMISSION rejected; fresh-epoch admitted | fence-correct rate |
-| exp8_policy_registry | RBAC allow/deny with exact reason strings and unauthenticated→authentication_required | policy-correct rate |
-| exp_governed_latency | Governed write envelope p50 reported alongside bypass (distinct shape) | latency_ms |
+## The product in one list
 
-Explicit non-coverage (see `benchmark/README.md` honesty notes): fault-injection reliability and SLM's own temporal machinery — not an external agent-task benchmark; exp1 VectorOwner scope is `embedding_metadata` SQL only (ANN/`vector_row_map` excluded without sqlite-vec); exp2 uses a lightweight but complete `_TrackingOwner` (service/ledger/reconciler paths only); exp7 sets `runtime._generation` directly rather than exercising the full `rebind_engine` path; exp6b measures the shipped `EbbinghausCurve` function mathematically, not an end-to-end forgetting outcome.
+| Capability | One line |
+|---|---|
+| Governed storage | SQLite and sqlite-vec as the canonical store, one writer, a journal that replays accepted saves |
+| Multi-channel recall | Semantic, keyword, temporal, spreading activation and Hopfield, plus a picture channel, fused and floor-checked |
+| Support tiers and answer check | Every recall is supported, related or none; an on-device model (Laya, installed by default on Apple Silicon) or a hosted one (Jev) judges whether results answer the question |
+| Layered recall | `depth` 0 to 2, `max_tokens` and `expand` let an agent look cheaply first and drill into one memory |
+| Memory health | Older memories are described automatically, repairs that move or delete wait for your Fix, and every run can be undone |
+| Living Brain | Decay, consolidation and quantization keep memory fast and relevant |
+| Knowledge graph | Entities, edges, clusters, summaries and an Entity Explorer |
+| Pictures and documents | Search screenshots, photos and PDFs by what they show |
+| SLM-Mesh | Agents and web apps exchange short, safe messages |
+| Web access | Optional outbound-only link so ChatGPT, Claude on the web and others use your memory |
+| Governance | Roles, trust, retention, GDPR export and erasure, hash-chained audit |
+| Optimize | Reversible compression and caching, with no proxy needed |
+| Bounded loops | Iteration that ends only when an independent gate passes |
+| 110 MCP tools in profiles | `core` 19, `code` 39, `full` 58, `power` 70, `mesh` 9, `whole` 110 |
 
-> **What this is not:** Published LoCoMo scores below are historical V3 architecture evidence (`arXiv:2603.14588`) carried into V4 for continuity. They are **not** a newly rerun V4 package benchmark and are not comparable across vendors without matching protocol (conversation scope, question count, retrieval stack, answer model, judge, and release artifact).
+## The research
 
-## Operating modes
+SLM's design is described in four arXiv preprints by Varun Pratap Bhardwaj, newest first: [the governed memory operating system paper](https://arxiv.org/abs/2608.08253) (multi-scope isolation, role-based access, verified erasure, hash-chained audit and bi-temporal recall), [the Living Brain paper](https://arxiv.org/abs/2604.04514) (forgetting and cognitive quantization), [the information-geometric foundations paper](https://arxiv.org/abs/2603.14588) and [the privacy-preserving multi-agent memory paper](https://arxiv.org/abs/2603.02240). See [Research Foundations](Research-Foundations).
 
-| Mode | Core behavior | Model path |
-|---|---|---|
-| **A — Local Guardian** | Local core memory and math-informed retrieval | No cloud model provider is required for core operations. |
-| **B — Smart Local** | Mode A plus an operator-managed Ollama endpoint | Local LLM endpoint. |
-| **C — Provider-assisted** | Local storage with configured provider-backed enrichment/retrieval behavior | Content sent to the configured provider follows that provider path. |
+SLM is open source. The source, issues and releases are on [GitHub](https://github.com/qualixar/superlocalmemory), and the version history is in the [CHANGELOG](https://github.com/qualixar/superlocalmemory/blob/main/CHANGELOG.md).
 
-Mode A does not disable model downloads, adapters, backup, proxy providers, or
-other integrations that an operator explicitly enables. Review the complete
-deployment before making a privacy or compliance determination.
-
-## What's fixed in V3.8.1
-
-V3.8.1 hardens upgrades with bounded startup and background repair, replay-safe
-ingestion, O(1) entity associations, responsive dashboard navigation, truthful
-Brain telemetry, company-mode authorization across learning controls, and
-repair of incomplete additive schemas such as Skill Evolution's cost ledger.
-
-## What V3.8.0 added (carried into V4)
-
-**Teams and enterprise memory**
-
-- **Users and roles** — admin / member / viewer, scoped per workspace
-- **Login gate** — `require_login = true` for team and enterprise deployments
-- **GDPR export and erasure** — full profile data export; erasure removes data from 30+ scoped tables and is logged to the tamper-proof audit chain
-- **Retention rules** — `indefinite`, `gdpr-30d`, `hipaa-7y`, `custom` policies per workspace
-- **PII redaction** — configurable automatic redaction before memory content crosses trust boundaries
-
-Personal installs are unchanged — no login required by default. See [[RBAC and Teams]] and [[GDPR Compliance]] — and [[Compliance]] for the wider deployment view.
-
-**Bounded loops** — gate-verified iteration with a durable SLM-backed ledger. Three surfaces:
-`slm loop` CLI (`demo` / `history` / `show`), the `/slm-loop` plugin command, and MCP tools `slm_loop_run` /
-`slm_loop_history` / `slm_loop_show`. The gate is an independent recall query;
-the agent's claim of completion is never used. See [[Bounded Loops]].
-
-**Nine framework adapters** — LangGraph, Semantic Kernel, Microsoft Agent
-Framework, LangChain, LlamaIndex, CrewAI, AutoGen, Google ADK, and OpenAI
-Agents. Each implements its framework's native memory interface and writes
-through the SLM V4 ingestion contract. See [[Framework Adapters]].
-
-**Multi-Agent Memory** — per-agent attribution via `SLM_AGENT_ID`, per-agent pane in the dashboard, and Mesh/lock coordination. See [[Multi-Agent Memory]].
-
-**MCP profile update** — profiles include bounded-loop evidence and reviewed
-correction lifecycle tools. V4.0.5 counts: `core` 16 / `code` 31 / `full` 49 /
-`power` 61 / `mesh` 8 / **`whole` 94** (all registered). See [[MCP Tools]].
-
-## Dashboard workspaces
-
-The local dashboard (`slm dashboard`, default `http://localhost:8765`) exposes Dashboard, Brain, Knowledge Graph, Memories, Health, Governance (Access & Users / Data Privacy / Audit / Lifecycle & Trust), Entity Explorer, Skill Evolution, Mesh Peers, MCP & Tools, Cloud Backup, Settings, and Optimize workspaces. Workspace and tab counts are illustrative — verify the installed dashboard. Use `slm health`, `slm doctor`, and `slm trace` for operational verification rather than treating a visual status or tab count as a contract.
-
-## Quick Start
-
-```bash
-npm install -g superlocalmemory    # Primary global CLI path
-slm setup                          # Choose mode A/B/C
-slm warmup                         # Pre-download embedding model (optional)
-```
-
-The second primary path is Python in an activated virtual environment:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install superlocalmemory
-slm setup
-```
-
-Then configure the client you intend to use and verify it with `slm doctor`. See [[Installation]], [[Getting Started]], and [[Quick Start Tutorial]].
-
-> **Platform boundary (V4):** **Apple Silicon macOS, 64-bit Windows, 64-bit Linux.** Intel Mac and 32-bit Windows are not supported — packaging metadata (`package.json` `os: [darwin, linux, win32]`) does not hard-block architectures; install will fail where `cryptography==50.0.0` wheels are absent (see `pyproject.toml`).
+Pages for older releases, which are no longer supported, are kept in the [Archive](archive/Archive-Index).

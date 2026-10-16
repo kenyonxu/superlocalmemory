@@ -33,7 +33,6 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 
 from __future__ import annotations
 
-import json as _json
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -45,10 +44,12 @@ from superlocalmemory.cli.gdpr_io import (
     KNOWN_GAPS as _KNOWN_GAPS,
     _audit_chain_path,
     _data_root,
-    _db_path,
     _die,
     _json_envelope,
+    _print_erase_text,
     _print_json,
+    stream_export_to_file,
+    stream_export_to_stdout,
 )
 
 
@@ -107,7 +108,7 @@ def _cmd_gdpr_status(args: Namespace) -> None:
             chain = AuditChain(str(_audit_chain_path()))
             scope_filter = {"profile_id": profile} if profile else {}
             audit_recent = chain.query(limit=10, **scope_filter)
-            audit_count = len(chain.query(limit=100_000, **scope_filter))
+            audit_count = chain.count(**scope_filter)
         except Exception:
             pass
 
@@ -203,7 +204,7 @@ def _print_human_status(data: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _cmd_gdpr_export(args: Namespace) -> None:
-    """``slm gdpr export --profile P [--output FILE] [--json]``."""
+    """``slm gdpr export --profile P [--output FILE] [--include-embeddings] [--json]``."""
     use_json = getattr(args, "json", False)
     profile = getattr(args, "profile", None)
     output_file = getattr(args, "output", None)
@@ -242,6 +243,7 @@ def _cmd_gdpr_export(args: Namespace) -> None:
             _die(f"{err['message']}\n  {err['hint']}")
         sys.exit(2)
 
+    include_embeddings = bool(getattr(args, "include_embeddings", False))
     try:
         from superlocalmemory.storage.database import DatabaseManager
         from superlocalmemory.compliance.gdpr import GDPRCompliance
@@ -251,7 +253,22 @@ def _cmd_gdpr_export(args: Namespace) -> None:
         # schema. Pattern mirrors commands.py:3233.
         db = DatabaseManager(db_path)
         gdpr = GDPRCompliance(db, data_root=root)
-        export_data = gdpr.export_profile_data(profile)
+        if output_file:
+            out_path = Path(output_file)
+            summary = stream_export_to_file(
+                gdpr, profile, out_path, include_embeddings=include_embeddings)
+        else:
+            summary = stream_export_to_stdout(
+                gdpr, profile, include_embeddings=include_embeddings, envelope=use_json)
+    except OSError as exc:
+        if use_json:
+            _print_json(_json_envelope(
+                "gdpr-export",
+                error={"code": "WRITE_ERROR", "message": str(exc)},
+            ))
+        else:
+            _die(f"Failed to write export to {output_file or 'stdout'}: {exc}")
+        sys.exit(1)
     except Exception as exc:
         if use_json:
             _print_json(_json_envelope(
@@ -262,43 +279,26 @@ def _cmd_gdpr_export(args: Namespace) -> None:
             _die(f"Export failed: {exc}\n  Run `slm gdpr status` to check DB state.")
         sys.exit(1)
 
-    total = export_data.get("total_items", 0)
+    if not output_file:
+        return  # the export itself was the output
 
-    if output_file:
-        try:
-            out_path = Path(output_file)
-            out_path.write_text(
-                _json.dumps(export_data, indent=2, default=str), encoding="utf-8"
-            )
-        except OSError as exc:
-            if use_json:
-                _print_json(_json_envelope(
-                    "gdpr-export",
-                    error={"code": "WRITE_ERROR", "message": str(exc)},
-                ))
-            else:
-                _die(f"Failed to write export to {output_file}: {exc}")
-            sys.exit(1)
-
-        confirmation = {
-            "profile": profile,
-            "total_items": total,
-            "output_file": str(out_path.resolve()),
-            "exported_at": export_data.get("exported_at"),
-            "note": "Output file contains personal data. Handle as confidential.",
-        }
-        if use_json:
-            _print_json(_json_envelope("gdpr-export", data=confirmation))
-        else:
-            print(f"Art.15 export complete — {total} items written to {out_path.resolve()}")
-            print("  Handle as confidential personal data.")
+    total = summary["total_items"]
+    confirmation = {
+        "profile": profile,
+        "total_items": total,
+        "output_file": str(out_path.resolve()),
+        "bytes": summary["bytes"],
+        "embeddings": "included_base64" if include_embeddings else "omitted",
+        "note": "Output file contains personal data. Handle as confidential.",
+    }
+    if use_json:
+        _print_json(_json_envelope("gdpr-export", data=confirmation))
     else:
-        # No output file: emit the full export to stdout
-        if use_json:
-            # Wrap in envelope but the data payload IS the export
-            _print_json(_json_envelope("gdpr-export", data=export_data))
-        else:
-            print(_json.dumps(export_data, indent=2, default=str))
+        print(f"Art.15 export complete — {total} items written to {out_path.resolve()}")
+        print(f"  {summary['bytes']:,} bytes. Handle as confidential personal data.")
+        if not include_embeddings:
+            print("  Embeddings and other binary columns are omitted (see export_manifest);"
+                  " add --include-embeddings to include them as base64.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -426,43 +426,37 @@ def _cmd_gdpr_erase(args: Namespace) -> None:
             print("  The erasure may be incomplete.  Check the audit_chain.db receipt.", file=sys.stderr)
         sys.exit(1)
 
-    complete = counts.get("erasure_complete", 0)
-    # Whether it can be SHOWN to have happened is a separate answer, and
-    # printing COMPLETE while the tamper-evident receipt failed to persist is
-    # how the command line came to disagree with the API about the same erasure.
-    provable = counts.get("erasure_provable", complete)
+    from superlocalmemory.compliance import erasure_outcome
+
+    # One verdict for every surface (compliance/erasure_outcome.py): the JSON
+    # envelope, the printed text and the exit code below all read it, so they
+    # cannot disagree about the same erasure.
+    statement = erasure_outcome.describe(counts)
+    ok = erasure_outcome.erasure_succeeded(counts)
     result_data = {
         "profile": profile,
-        "erasure_complete": bool(complete),
-        "erasure_provable": bool(provable),
-        "counts": counts,
+        "erasure_complete": bool(statement["complete"]),
+        "erasure_provable": bool(statement["provable"]),
+        "removed": statement["removed"],
+        "remains": statement["remains"],
+        "counts": {k: v for k, v in counts.items() if k != "erasure_report"},
         "note": (
-            "Erasure recorded in audit_chain.db. "
-            "Backups/ remain as an outstanding obligation (C1). "
-            "Run `slm gdpr verify --profile PROFILE` to confirm receipts."
+            "Erasure recorded in audit_chain.db. Run "
+            "`slm gdpr verify --profile PROFILE` to confirm receipts."
         ),
     }
 
     if use_json:
-        _print_json(_json_envelope("gdpr-erase", data=result_data))
+        error = None if ok else {
+            "code": "ERASURE_INCOMPLETE",
+            "message": erasure_outcome.failure_message(counts),
+            "hint": "; ".join(item["retry"] for item in statement["remains"]),
+        }
+        _print_json(_json_envelope("gdpr-erase", data=result_data, error=error, success=ok))
     else:
-        if not complete:
-            status_str = "INCOMPLETE (check counts)"
-        elif not provable:
-            status_str = (
-                "COMPLETE, BUT NOT PROVABLE — the data is gone and the "
-                "tamper-evident receipt did not persist"
-            )
-        else:
-            status_str = "COMPLETE"
-        print(f"Art.17 erasure for profile '{profile}': {status_str}")
-        for k, v in counts.items():
-            print(f"  {k}: {v}")
-        print()
-        print("  Backups/ contain outstanding obligation — see C1 gap.")
-        print("  Verify receipts: slm gdpr verify --profile", profile)
+        _print_erase_text(profile, statement, ok)
 
-    if not complete or not provable:
+    if not ok:
         sys.exit(1)
 
 
@@ -511,14 +505,16 @@ def _show_erase_preview(
         "tables_affected": len(tables),
         "total_rows": sum(row_counts.values()),
         "also_purged": [
-            "learning.db (sidecar)",
-            "active_brain_cache.db",
-            "vector store entries",
+            "learning.db, pending.db and admission_journal.db rows of the profile",
+            "write receipts (write_commits) of the profile",
+            "active_brain_cache.db, derive_cache.db and the MCP cache / compression originals",
+            "vector index entries and the profile's entry in profiles.json",
+            "pictures, documents and the code-graph links of its memories",
         ],
         "survives": [
-            "erasure_receipts (tamper-evident audit chain)",
-            "profiles record (for GDPR accountability)",
-            "backups/ (outstanding obligation — C1)",
+            "erasure_receipts and the audit chain (proof that the erasure happened; hashes only)",
+            "backups (backups/, pre-migration-snapshots/, pre-restore/): each is recorded "
+            "as an erasure obligation and the result stays INCOMPLETE until it is deleted",
         ],
         "warning": (
             "This operation is IRREVERSIBLE. "
@@ -782,7 +778,7 @@ def cmd_gdpr(args: Namespace) -> None:
             "Usage: slm gdpr <status|export|erase|verify> [options]\n"
             "\n"
             "  slm gdpr status [--profile P] [--json]\n"
-            "  slm gdpr export --profile P [--output FILE] [--json]\n"
+            "  slm gdpr export --profile P [--output FILE] [--include-embeddings] [--json]\n"
             "  slm gdpr erase --profile P --yes [--dry-run] [--json]\n"
             "  slm gdpr verify --receipt-id ID [--profile P] [--json]\n"
             "\n"

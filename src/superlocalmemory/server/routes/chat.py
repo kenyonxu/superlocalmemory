@@ -24,6 +24,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
+from superlocalmemory.core import outbound_http
 from superlocalmemory.core.injection import (
     InjectableMemory,
     render_context,
@@ -74,9 +75,13 @@ async def chat_stream(request: Request):
 
     mode = (body.get("mode") or "a").lower()
     limit = min(body.get("limit", 10), 20)
+    # READ on the caller's own workspace, and the chat recalls only there:
+    # this POST is not gated by the GET-only RBAC middleware.
+    from superlocalmemory.server.routes.v3_api import _resolve_profile
+    profile = _resolve_profile(request)
 
     return StreamingResponse(
-        _stream_chat(request.app.state, query, mode, limit),
+        _stream_chat(request.app.state, query, mode, limit, profile),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -89,7 +94,7 @@ async def chat_stream(request: Request):
 # ── Core Chat Logic ──────────────────────────────────────────────
 
 async def _stream_chat(
-    app_state, query: str, mode: str, limit: int,
+    app_state, query: str, mode: str, limit: int, profile: str = "",
 ) -> AsyncGenerator[str, None]:
     """Retrieve memories, then stream LLM response with citations."""
 
@@ -99,7 +104,7 @@ async def _stream_chat(
     try:
         loop = asyncio.get_event_loop()
         memories = await loop.run_in_executor(
-            None, _recall_memories, app_state, query, limit,
+            None, _recall_memories, app_state, query, limit, profile,
         )
     except Exception:
         logger.exception("chat: memory retrieval failed")
@@ -249,21 +254,24 @@ async def _stream_ollama(
         "options": {"num_predict": 1024, "temperature": 0.3, "num_ctx": 4096},
     }
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
-        async with client.stream("POST", url, json=payload) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line:
-                    continue
-                try:
-                    chunk = json.loads(line)
-                    if chunk.get("done"):
-                        break
-                    token = chunk.get("message", {}).get("content", "")
-                    if token:
-                        yield token
-                except json.JSONDecodeError:
-                    continue
+    # Through the outbound gate: a LAN or remote Ollama never receives a
+    # credential, and a local one is never reached through a proxy.
+    async with outbound_http.astream_json(
+        "POST", url, payload, timeout=httpx.Timeout(120.0),
+    ) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line)
+                if chunk.get("done"):
+                    break
+                token = chunk.get("message", {}).get("content", "")
+                if token:
+                    yield token
+            except json.JSONDecodeError:
+                continue
 
 
 # ── OpenAI-Compatible Streaming ──────────────────────────────────
@@ -299,27 +307,30 @@ async def _stream_openai_compat(
         "temperature": 0.3,
     }
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
-        async with client.stream("POST", url, json=payload, headers=headers) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data = line[6:]
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                    token = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                    if token:
-                        yield token
-                except json.JSONDecodeError:
-                    continue
+    # Through the outbound gate: the provider receives the question and the
+    # recalled memories with every credential replaced.
+    async with outbound_http.astream_json(
+        "POST", url, payload, headers=headers, timeout=httpx.Timeout(120.0),
+    ) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if not line.startswith("data: "):
+                continue
+            data = line[6:]
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+                token = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                if token:
+                    yield token
+            except json.JSONDecodeError:
+                continue
 
 
 # ── Retrieval Helper ─────────────────────────────────────────────
 
-def _recall_memories(app_state, query: str, limit: int) -> list:
+def _recall_memories(app_state, query: str, limit: int, profile: str = "") -> list:
     """Run full recall via the daemon's resident, lease-protected engine.
 
     v3.7.8 CRITICAL fix: this used to go through ``WorkerPool.shared()``, a
@@ -333,7 +344,9 @@ def _recall_memories(app_state, query: str, limit: int) -> list:
     reflects the current profile.
     """
     adapter = getattr(app_state, "engine_recall_adapter", None)
-    if adapter is not None:
+    # The adapter recalls the engine's own workspace; a caller's workspace is
+    # served by the resident engine, which takes it explicitly.
+    if adapter is not None and not profile:
         result = adapter.recall(query, limit=limit)
         if result.get("ok"):
             return result.get("results", [])
@@ -342,10 +355,10 @@ def _recall_memories(app_state, query: str, limit: int) -> list:
     # recall directly against the resident engine under the same profile
     # lease the HTTP /recall route uses. Never fall back to WorkerPool —
     # that reintroduces the stale-profile leak this fix closes.
-    return _recall_via_resident_engine(app_state, query, limit)
+    return _recall_via_resident_engine(app_state, query, limit, profile)
 
 
-def _recall_via_resident_engine(app_state, query: str, limit: int) -> list:
+def _recall_via_resident_engine(app_state, query: str, limit: int, profile: str = "") -> list:
     """Lease-protected direct-engine recall, mirroring the /recall route."""
     from superlocalmemory.server.profile_runtime import get_profile_runtime
     from superlocalmemory.server.routes.helpers import get_engine_lazy
@@ -355,17 +368,21 @@ def _recall_via_resident_engine(app_state, query: str, limit: int) -> list:
         engine = get_engine_lazy(app_state)
         if engine is None:
             return []
-        response = engine.recall(query, limit=limit)
+        from superlocalmemory.core.answer_check_history import call_as_dashboard
+        response = call_as_dashboard(  # not agent traffic
+            engine.recall, query, limit=limit, profile_id=profile or None)
         memory_ids = list({
             r.fact.memory_id for r in response.results[:limit]
             if r.fact.memory_id
         })
         memory_map = (
             engine._db.get_memory_content_batch(
-                memory_ids, engine.profile_id,
+                memory_ids, profile or engine.profile_id,
                 include_global=True, include_shared=True,
             ) if memory_ids else {}
         )
+        from superlocalmemory.retrieval.media_channel import memory_sources
+        from superlocalmemory.core.kind_query import engine_display_min_confidence
         from superlocalmemory.server.recall_serializer import (
             serialize_recall_response,
         )
@@ -374,8 +391,10 @@ def _recall_via_resident_engine(app_state, query: str, limit: int) -> list:
             response,
             limit=limit,
             memory_map=memory_map,
+            source_map=memory_sources(engine._db, memory_ids),
             per_fact_max=getattr(_rc, "recall_per_fact_max_chars", 2400),
             total_max=getattr(_rc, "recall_total_max_chars", 12000),
+            display_min_confidence=engine_display_min_confidence(engine),
         )
         return results
 

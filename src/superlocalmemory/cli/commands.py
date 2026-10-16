@@ -58,7 +58,8 @@ def _daemon_unavailable(command: str, use_json: bool) -> None:
         "reason": diagnosis["reason"],
         "message": f"Owned daemon is unavailable: {diagnosis['message']}",
         "hint": diagnosis["hint"],
-        "retryable": True,
+        # Retrying never clears a store that needs recovery; it does end a restore.
+        "retryable": diagnosis["reason"] != "recovery_needed",
     }
     if use_json:
         from superlocalmemory.cli.json_output import json_print
@@ -70,6 +71,28 @@ def _daemon_unavailable(command: str, use_json: bool) -> None:
             f"{diagnosis['message']} {diagnosis['hint']}",
             file=sys.stderr,
         )
+    raise SystemExit(1)
+
+
+def _memory_not_found(command: str, fact_id: str, use_json: bool) -> None:
+    """Exit for an id the running daemon does not know.
+
+    A live daemon answering 404 is an answer, not an outage. Reporting it as
+    DAEMON_UNAVAILABLE sent people to restart a daemon that was working.
+    """
+    message = f"No memory with id {fact_id}"
+    hint = "Run `slm list` to see memory ids."
+    if use_json:
+        from superlocalmemory.cli.json_output import json_print
+
+        json_print(command, error={
+            "code": "NOT_FOUND",
+            "message": message,
+            "hint": hint,
+            "retryable": False,
+        })
+    else:
+        print(f"{message}. {hint}", file=sys.stderr)
     raise SystemExit(1)
 
 
@@ -99,12 +122,26 @@ def _cmd_db_dispatch(args: Namespace) -> None:
         if rc:
             sys.exit(rc)
         return
+    if sub in ("restore-points", "restore", "prepare-downgrade", "fidelity", "integrity", "repair",
+               "repair-entities"):
+        from superlocalmemory.cli import fidelity_cmd, integrity_cmd, upgrade_cmd
+        handler = {"restore-points": upgrade_cmd.cmd_db_restore_points,
+                   "restore": upgrade_cmd.cmd_db_restore, "fidelity": fidelity_cmd.cmd_db_fidelity,
+                   "integrity": integrity_cmd.cmd_db_integrity, "repair": integrity_cmd.cmd_db_repair,
+                   "repair-entities": integrity_cmd.cmd_db_repair_entities,
+                   "prepare-downgrade": upgrade_cmd.cmd_db_prepare_downgrade}[sub]
+        rc = handler(args)
+        if rc:
+            sys.exit(rc)
+        return
     print(
         "Usage: slm db migrate [--status] [--dry-run] "
         "| slm db scale <action> "
         "| slm db regraph [--check] [--profile NAME] "
         "| slm db reembed [--missing-only] [--all-profiles] [--limit N] "
-        "| slm db compact [--offline]"
+        "| slm db compact [--offline] | slm db fidelity [--withhold|--release ID] "
+        "| slm db integrity | slm db repair [--apply|--undo ID] --root PATH "
+        "| slm db repair-entities [--apply|--undo ID] --root PATH"
     )
     sys.exit(2)
 
@@ -119,14 +156,24 @@ def _cmd_db_compact(args: Namespace) -> int:
     from datetime import timedelta
 
     from superlocalmemory.cli.daemon import owned_daemon_process_alive
-    from superlocalmemory.core.maintenance_scheduler import compact_vector_store
     from superlocalmemory.infra.data_root import canonical_data_root
 
     offline = bool(getattr(args, "offline", False))
     if not offline:
-        out = compact_vector_store()
+        # The vector backends live in the daemon; compacting here, in the CLI
+        # process, found none and always failed. Ask the daemon instead.
+        from superlocalmemory.cli import daemon as _daemon
+
+        if not _daemon.is_daemon_running():
+            print(
+                "slm db compact: the daemon is not running. Start it (`slm serve`), "
+                "or, with SLM stopped, use `slm db compact --offline`.",
+                file=sys.stderr,
+            )
+            return 1
+        out = _daemon.daemon_request("POST", "/maintenance/compact", {})
         print(out)
-        return 0 if out.get("ok") else 1
+        return 0 if isinstance(out, dict) and out.get("ok") else 1
 
     if owned_daemon_process_alive():
         print(
@@ -288,17 +335,17 @@ def _cmd_db_reembed(args: Namespace) -> None:
                 error={
                     "code": "NOT_IMPLEMENTED",
                     "message": "Only --missing-only is supported. "
-                    "For full re-embed use 'slm db migrate'.",
+                    "To re-embed with another model use 'slm embedder switch MODEL'.",
                 },
             )
         else:
             print("Only --missing-only mode is supported. "
-                  "For full re-embed use 'slm db migrate'.")
+                  "To re-embed with another model use 'slm embedder switch MODEL'.")
         sys.exit(2)
 
     try:
         config = SLMConfig.load()
-        engine = MemoryEngine(config)
+        engine = MemoryEngine(_without_answer_check(config))
         engine.initialize()
     except Exception as exc:
         if use_json:
@@ -411,10 +458,21 @@ def _cmd_escape_benchmark(args: Namespace) -> None:
     cmd_benchmark(args)
 
 
+def _cmd_remote(args: Namespace) -> None:
+    from superlocalmemory.cli.remote_commands import cmd_remote
+    cmd_remote(args)
+
+
 def _cmd_escape_rotate_token(args: Namespace) -> None:
     """S-M07: rotate the install token."""
     from superlocalmemory.cli.escape_hatch import cmd_rotate_token
     cmd_rotate_token(args)
+
+
+def _cmd_token(args: Namespace) -> None:
+    """`slm token show`: print the key the dashboard asks for in strict mode."""
+    from superlocalmemory.cli.escape_hatch import cmd_token
+    cmd_token(args)
 
 
 # ---- SLM v3.6 Optimize dispatch functions (additive) ----
@@ -455,6 +513,12 @@ def _cmd_ops(args: Namespace) -> None:
     cmd_ops(args)
 
 
+def _cmd_backup_dispatch(args: Namespace) -> None:
+    """4.1.19: cloud backup encryption (status, recovery key, decrypt)."""
+    from superlocalmemory.cli.backup_cmd import cmd_backup
+    cmd_backup(args)
+
+
 def _cmd_gdpr_dispatch(args: Namespace) -> None:
     """V4.0.6: GDPR subject-rights CLI (Art.15/17/20)."""
     from superlocalmemory.cli.gdpr_cmd import cmd_gdpr
@@ -467,6 +531,67 @@ def _cmd_summary_dispatch(args: Namespace) -> None:
     cmd_summary(args)
 
 
+def _cmd_team_dispatch(args: Namespace) -> None:
+    """4.1.25: workspace login policy through the daemon (cli/team_cmd.py)."""
+    from superlocalmemory.cli.team_cmd import cmd_team
+    cmd_team(args)
+
+
+def _cmd_kinds_dispatch(args: Namespace) -> None:
+    """4.1.19: memory kinds through the daemon (cli/kinds_cmd.py)."""
+    from superlocalmemory.cli.kinds_cmd import cmd_kinds
+    cmd_kinds(args)
+
+
+def _cmd_sources_dispatch(args: Namespace) -> None:
+    """4.1.25: folder sources through the daemon (cli/sources_cmd.py)."""
+    from superlocalmemory.cli.sources_cmd import cmd_sources
+    rc = cmd_sources(args)
+    if rc:
+        sys.exit(rc)
+
+
+def _cmd_media_dispatch(args: Namespace) -> None:
+    """4.1.25: images and documents through the daemon (cli/media_cmd.py)."""
+    from superlocalmemory.cli.media_cmd import cmd_media
+    cmd_media(args)
+
+
+def _cmd_features_dispatch(args: Namespace) -> None:
+    from superlocalmemory.cli.features_cmd import cmd_features
+    cmd_features(args)
+
+
+def _cmd_outcome_dispatch(args: Namespace) -> None:
+    """4.1.25: report an outcome through the shared writer (cli/outcome_cmd.py)."""
+    from superlocalmemory.cli.outcome_cmd import run
+    run(args)
+
+
+def _cmd_corrections_dispatch(args: Namespace) -> None:
+    """4.1.22: corrections a user action overtook (cli/corrections_cmd.py)."""
+    from superlocalmemory.cli.corrections_cmd import run
+    run(args)
+
+
+def _cmd_view_dispatch(args: Namespace) -> None:
+    """4.1.21: saved views through the daemon (cli/view_cmd.py)."""
+    from superlocalmemory.cli.view_cmd import cmd_view
+    cmd_view(args)
+
+
+def _cmd_models_dispatch(args: Namespace) -> None:
+    """4.1.22: installed + recommended models, no daemon (cli/models_cmd.py)."""
+    from superlocalmemory.cli.models_cmd import cmd_models
+    cmd_models(args)
+
+
+def _cmd_embedder_dispatch(args: Namespace) -> None:
+    """4.1.22: switch the embedding model in the background (cli/embedder_cmd.py)."""
+    from superlocalmemory.cli.embedder_cmd import cmd_embedder
+    cmd_embedder(args)
+
+
 # ---- end SLM v3.6 Optimize dispatch functions ----
 
 
@@ -475,7 +600,9 @@ def cmd_session(args: Namespace) -> None:
     so a shell hook (e.g. Claude session-start / /quit) can call it directly.
     """
     from superlocalmemory.cli.daemon import (
-        daemon_request, ensure_daemon, is_daemon_running,
+        daemon_request,
+        ensure_daemon,
+        is_daemon_running,
     )
 
     action = getattr(args, "session_command", None)
@@ -498,7 +625,8 @@ def cmd_session(args: Namespace) -> None:
             print(f"Session opened — warmed {resp.get('warmed', 0)} memories "
                   f"(query: {resp.get('query', '')})")
         else:
-            print("Session open failed (daemon unreachable?)")
+            print("Session open failed (daemon unreachable?)", file=sys.stderr)
+            raise SystemExit(1)
         return
 
     # close
@@ -509,7 +637,8 @@ def cmd_session(args: Namespace) -> None:
         print(f"Session closed: {sid} — "
               f"{resp.get('summary_events_created', 0)} summary event(s) created")
     else:
-        print("Session close failed (daemon unreachable?)")
+        print("Session close failed (daemon unreachable?)", file=sys.stderr)
+        raise SystemExit(1)
 
 
 def _cmd_upgrade_hosts(args: Namespace) -> None:
@@ -543,6 +672,7 @@ def dispatch(args: Namespace) -> None:
         "doctor": cmd_doctor,
         "trace": cmd_trace,
         "mcp": cmd_mcp,
+        "tools": _cmd_tools,
         "warmup": cmd_warmup,
         "dashboard": cmd_dashboard,
         "profile": cmd_profile,
@@ -554,6 +684,7 @@ def dispatch(args: Namespace) -> None:
         # V3.3 commands
         "decay": cmd_decay,
         "quantize": cmd_quantize,
+        "enrich": cmd_enrich,
         "consolidate": cmd_consolidate,
         "soft-prompts": cmd_soft_prompts,
         "reap": cmd_reap,
@@ -581,6 +712,8 @@ def dispatch(args: Namespace) -> None:
         "reconfigure": _cmd_escape_reconfigure,
         "benchmark": _cmd_escape_benchmark,
         "rotate-token": _cmd_escape_rotate_token,
+        "token": _cmd_token,
+        "remote": _cmd_remote,
         "evidence": _cmd_evidence,
         "diagnostics": _cmd_diagnostics,
         # LLD-06 — `slm wrap <agent> [args...]` activates the Optimize proxy.
@@ -599,7 +732,18 @@ def dispatch(args: Namespace) -> None:
         "ops": _cmd_ops,
         # V4.0.6: GDPR subject-rights CLI (Art.15/17/20)
         "gdpr": _cmd_gdpr_dispatch,
+        "backup": _cmd_backup_dispatch,
         "summary": _cmd_summary_dispatch,
+        "kinds": _cmd_kinds_dispatch,
+        "team": _cmd_team_dispatch,
+        "sources": _cmd_sources_dispatch,
+        "media": _cmd_media_dispatch,
+        "features": _cmd_features_dispatch,
+        "view": _cmd_view_dispatch,
+        "corrections": _cmd_corrections_dispatch,
+        "outcome": _cmd_outcome_dispatch,
+        "models": _cmd_models_dispatch,
+        "embedder": _cmd_embedder_dispatch,
     }
     handler = handlers.get(args.command)
     if handler:
@@ -612,11 +756,19 @@ def dispatch(args: Namespace) -> None:
             # do this. A refusal is an answer: say so and stop, rather than
             # printing a traceback or -- worse -- letting a command fall back to
             # writing locally what the workspace has just declined.
-            print(
+            message = (
                 f"[slm] {refusal}. This workspace requires authentication; "
-                "set SLM_USER_SESSION or log in, then try again.",
-                flush=True,
+                "set SLM_USER_SESSION or log in, then try again."
             )
+            # L3-14: this handler answers for every command, so a command run
+            # with --json must still get a JSON error body here, not the
+            # plain-text message every non-JSON caller gets.
+            if getattr(args, "json", False):
+                from superlocalmemory.cli.json_output import json_print
+                json_print(str(args.command), error={"code": "NOT_AUTHORIZED",
+                                                      "message": message})
+            else:
+                print(message, flush=True)
             sys.exit(1)
     else:
         print(f"Unknown command: {args.command}")
@@ -674,13 +826,56 @@ def _cmd_wrap(args: Namespace) -> None:
 
 def cmd_serve(args: Namespace) -> None:
     """Start/stop the SLM daemon for instant CLI response."""
-    from superlocalmemory.cli.daemon import is_daemon_running, ensure_daemon, stop_daemon
+    from superlocalmemory.cli.daemon import (
+        is_daemon_running, ensure_daemon, stop_daemon,
+        read_descriptor, _descriptor_process_is_alive,
+        owned_daemon_process_alive,
+    )
 
     action = getattr(args, 'action', 'start')
 
     if action == 'stop':
+        from superlocalmemory.cli.daemon_startup import stop_wait_budget
+
+        def _starting_and_alive(descriptor):
+            return (
+                descriptor is not None
+                and getattr(descriptor, "state", "") == "starting"
+                and _descriptor_process_is_alive(descriptor)
+            )
+
+        before = read_descriptor()
+        if _starting_and_alive(before):
+            # 4.1.22 polish: this used to wait silently -- say what for, and
+            # the wait is bounded (SLM_DAEMON_STOP_WAIT_S), never forever.
+            print(
+                f"Daemon (pid {before.pid}) is still starting; waiting up to "
+                f"{int(stop_wait_budget())}s for it to finish before stopping..."
+            )
         if stop_daemon():
             print("Daemon stopped.")
+        elif _starting_and_alive(read_descriptor()):
+            # Truthful, not "was not running": the process is alive and
+            # never left "starting" in time to take /stop.
+            print(
+                "Daemon is still starting and did not respond to stop in "
+                "time; it may still be running. Run `slm serve stop` again, "
+                "or `slm doctor`."
+            )
+        elif owned_daemon_process_alive():
+            # Q10 (2026-10-06): stop_daemon() returning False here does NOT
+            # mean there was no daemon -- owned_daemon_process_alive() just
+            # proved the opposite (PID/start-token liveness, no HTTP
+            # involved). Reproduced live: a write burst exhausted the
+            # loopback rate-limit budget, and the very next POST /stop got
+            # HTTP 429 too (daemon_request() has no 429 handling, so it
+            # looks exactly like "no response"); the daemon itself never
+            # stopped. A dropped stop request must never be reported as
+            # "was not running" (see g02-final-measurements.md §1b).
+            print(
+                "Daemon is running but did not stop; the request may have "
+                "been dropped. Run `slm serve stop` again, or `slm doctor`."
+            )
         else:
             print("Daemon was not running.")
         return
@@ -689,7 +884,10 @@ def cmd_serve(args: Namespace) -> None:
         if is_daemon_running():
             from superlocalmemory.cli.daemon import daemon_request
             status = daemon_request("GET", "/status")
-            if status:
+            if status and status.get("details_hidden"):
+                print(f"Daemon: RUNNING (PID {status.get('pid', '?')}). "
+                      "Sign in to see more (set SLM_USER_SESSION).")
+            elif status:
                 print(f"Daemon: RUNNING (PID {status['pid']}, "
                       f"mode={status['mode']}, facts={status['fact_count']}, "
                       f"uptime={status['uptime_s']}s, idle={status['idle_s']}s)")
@@ -734,6 +932,12 @@ def cmd_serve(args: Namespace) -> None:
         return
 
     print("Starting SLM daemon (engine warming up)...")
+    from superlocalmemory.cli.daemon import _recovery_block
+
+    blocked = _recovery_block()
+    if blocked:
+        print(blocked)
+        sys.exit(1)
     if ensure_daemon():
         print("Daemon started \u2713 — CLI commands are now instant.")
         print("  slm serve status  — check daemon status")
@@ -751,6 +955,67 @@ def cmd_serve(args: Namespace) -> None:
 # -- Ingestion Adapters (V3.4.3) ------------------------------------------
 
 
+def _write_restart_record(started_at: float, steps: list[dict]) -> None:
+    """Leave ``logs/restart-last.json`` behind, atomically, on every exit path.
+
+    A restart can be started by something with no terminal (the dashboard
+    button); this file is how anyone finds out afterwards what happened.
+    """
+    import json
+    import os
+    import time
+
+    from superlocalmemory.infra.daemon_identity import canonical_data_root
+
+    try:
+        logs = canonical_data_root() / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "started_at": started_at,
+            "finished_at": time.time(),
+            "success": bool(steps) and all(s["status"] == "ok" for s in steps),
+            "steps": steps,
+        }
+        tmp = logs / f".restart-last.{os.getpid()}.tmp"
+        tmp.unlink(missing_ok=True)
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps(payload))
+            os.replace(tmp, logs / "restart-last.json")
+        finally:
+            tmp.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 - a record must never fail the restart
+        pass
+
+
+_RESTART_STEPS: list[dict] = []
+
+
+def _begin_restart_steps() -> list[dict]:
+    """The step log of the restart now running (read by the record writer)."""
+    _RESTART_STEPS.clear()
+    return _RESTART_STEPS
+
+
+def _records_restart_outcome(func):
+    """Write ``restart-last.json`` however the restart ends, even by exception."""
+    import functools
+    import time
+
+    @functools.wraps(func)
+    def wrapper(args: Namespace) -> None:
+        started_at = time.time()
+        _RESTART_STEPS.clear()
+        try:
+            func(args)
+        finally:
+            _write_restart_record(started_at, list(_RESTART_STEPS))
+
+    return wrapper
+
+
+@_records_restart_outcome
 def cmd_restart(args: Namespace) -> None:
     """Restart the one daemon owned by the current SLM data namespace.
 
@@ -767,7 +1032,7 @@ def cmd_restart(args: Namespace) -> None:
     use_json = getattr(args, "json", False)
     open_dashboard = getattr(args, "dashboard", False)
     slm_dir = canonical_data_root()
-    steps: list[dict] = []
+    steps = _begin_restart_steps()
 
     def _log(step: int, name: str, status: str, detail: str = ""):
         entry = {"step": step, "name": name, "status": status, "detail": detail}
@@ -789,7 +1054,7 @@ def cmd_restart(args: Namespace) -> None:
     _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     restart_lock_fd = None
     try:
-        restart_lock_fd = open(_LOCK_FILE, "w")
+        restart_lock_fd = open(_LOCK_FILE, "w", encoding="utf-8")
         if sys.platform != "win32":
             import fcntl
             fcntl.flock(restart_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -840,6 +1105,32 @@ def cmd_restart(args: Namespace) -> None:
             )
         else:
             print("\n  Restart FAILED at step 1. The owned daemon was not stopped.")
+        return
+
+    # Step 1b: the old daemon is gone from view, but the data folder is free
+    # only once the operating system has dropped its instance lock.
+    from superlocalmemory.infra import instance_lock as _instance_lock
+
+    if _instance_lock.wait_until_instance_lock_free(timeout_s=30):
+        _log("1b", "Wait for the data-folder lock", "ok")
+    else:
+        _log("1b", "Wait for the data-folder lock", "fail",
+             "the previous daemon still holds the data folder")
+        if restart_lock_fd:
+            restart_lock_fd.close()
+        if use_json:
+            from superlocalmemory.cli.json_output import json_print
+            json_print(
+                "restart",
+                data={"steps": steps, "success": False},
+                next_actions=[{
+                    "command": "slm doctor",
+                    "description": "Diagnose the owned daemon",
+                }],
+            )
+        else:
+            print("\n  Restart FAILED at step 1b. The previous daemon still holds "
+                  "the data folder.")
         return
 
     # Step 2: the namespace lock was acquired before shutdown so hooks cannot
@@ -909,16 +1200,12 @@ def cmd_restart(args: Namespace) -> None:
 
     # Step 5: Database integrity check
     try:
-        from superlocalmemory.storage.memory_write import memory_read
+        from superlocalmemory.storage.integrity_diagnosis import restart_report
 
         db_path = slm_dir / "memory.db"
         if db_path.exists():
-            with memory_read(db_path) as conn:
-                integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
-                fact_count = conn.execute("SELECT COUNT(*) FROM atomic_facts").fetchone()[0]
-                entity_count = conn.execute("SELECT COUNT(*) FROM canonical_entities").fetchone()[0]
-            _log(5, "Database integrity", "ok" if integrity == "ok" else "fail",
-                 f"integrity={integrity}, {fact_count} facts, {entity_count} entities")
+            status, detail = restart_report(db_path, slm_dir)
+            _log(5, "Database integrity", status, detail)
         else:
             _log(5, "Database check", "warn", "no database yet — will create on first use")
     except Exception as exc:
@@ -993,7 +1280,7 @@ def cmd_config(args: Namespace) -> None:
     cfg: dict = {}
     if config_path.exists():
         try:
-            cfg = json.loads(config_path.read_text())
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -1161,7 +1448,7 @@ def cmd_config(args: Namespace) -> None:
 
         # Write back
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(json.dumps(cfg, indent=2) + "\n")
+        config_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
 
         if use_json:
             from superlocalmemory.cli.json_output import json_print
@@ -1219,7 +1506,7 @@ def cmd_evolve(args: Namespace) -> None:
     # Check if evolution is enabled via config.json
     config_path = state_path("config.json")
     try:
-        cfg = json.loads(config_path.read_text()) if config_path.exists() else {}
+        cfg = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
     except (json.JSONDecodeError, OSError):
         return  # Config unreadable — silent exit
 
@@ -1265,7 +1552,7 @@ def cmd_setup(args: Namespace) -> None:
     """Run the interactive setup wizard."""
     from superlocalmemory.cli.setup_wizard import run_wizard
 
-    run_wizard(auto=getattr(args, "auto", False))
+    run_wizard(auto=getattr(args, "auto", False), no_laya=getattr(args, "no_laya", False))
     sys.exit(0)  # Force clean exit (background threads from imports may linger)
 
 
@@ -1324,9 +1611,15 @@ def cmd_mode(args: Namespace) -> None:
             print(f"  LLM: {updated.llm.provider}/{updated.llm.model}")
         print(f"  Reranker: ONNX cross-encoder (enabled)")
 
-        # V3.3.4: Warn if Mode C lacks cloud API key
-        if args.value == "c" and not updated.llm.api_key:
-            print("  ⚠ Mode C requires a cloud API key. Run: slm provider set")
+        # V3.3.4: Warn if Mode C has neither a cloud key nor a configured
+        # custom endpoint (#112). A keyless custom endpoint — llama.cpp,
+        # vLLM, LM Studio, any other OpenAI-compatible server — is a
+        # working Mode C setup; only a genuinely bare config needs this.
+        if args.value == "c" and not updated.llm.api_key and not updated.llm.has_custom_endpoint:
+            print(
+                "  ⚠ Mode C needs a cloud API key, or a configured custom endpoint. "
+                "Run: slm provider set"
+            )
         print("  ℹ Run `slm restart` to apply the new mode.")
     else:
         print(f"Current mode: {config.mode.value.upper()}")
@@ -1341,7 +1634,14 @@ def cmd_provider(args: Namespace) -> None:
     if args.action == "set":
         from superlocalmemory.cli.setup_wizard import configure_provider
 
-        configure_provider(config, provider_name=getattr(args, "provider", None))
+        configure_provider(
+            config,
+            provider_name=getattr(args, "provider", None),
+            endpoint=getattr(args, "endpoint", None),
+            api_key=getattr(args, "api_key", None),
+            model=getattr(args, "model", None),
+            target_mode=getattr(args, "mode", None),
+        )
     else:
         print(f"Provider: {config.llm.provider or 'none (Mode A)'}")
         if config.llm.model:
@@ -1384,155 +1684,26 @@ def _agents_md_source_factory():
 
 
 def cmd_connect(args: Namespace) -> None:
-    """Configure IDE integrations.
+    """Configure/discover hosts through the canonical portable registry."""
+    from superlocalmemory.cli.connect_cmd import cmd_connect as connect
 
-    Dispatch priority:
-    1. ``slm connect <ide>`` where ide ∈ IDE_MATRIX → portable_kit.connect_ide
-       (MCP-wiring + AGENTS.md; claude-code short-circuits to the plugin pointer).
-    2. ``--cross-platform`` / ``--disable`` → LLD-05 CrossPlatformConnector.
-    3. Bare ``slm connect`` / ``--list`` → legacy IDEConnector (markdown-rules).
+    connect(args)
+
+
+def _without_answer_check(config):
+    """The config for a command that never recalls: it builds no answer check.
+
+    Nothing will be judged, so detecting the on-device install, probing its
+    interpreter or preparing the hosted client would be work for nothing.
     """
-    ide_arg = getattr(args, "ide", None)
+    from dataclasses import is_dataclass, replace
 
-    # Intercept known IDE_MATRIX ids before legacy branches (critical: must run first)
-    if ide_arg is not None:
-        from superlocalmemory.hooks.portable_kit import (
-            IDE_MATRIX,
-            connect_ide,
-            supported_ides,
-        )
-
-        if ide_arg in IDE_MATRIX:
-            here = getattr(args, "here", False)
-            profile = getattr(args, "profile", None)
-            transport = getattr(args, "transport", "stdio")
-            daemon_port = getattr(args, "daemon_port", 8765)
-            verify = getattr(args, "verify", False)
-            project = None
-            if here:
-                import pathlib
-                project = pathlib.Path.cwd()
-
-            result = connect_ide(
-                ide_arg,
-                home=None,
-                project=project,
-                here=here,
-                profile=profile,
-                agents_md_source=_agents_md_source_factory(),
-                dry_run=getattr(args, "dry_run", False),
-                transport=transport,
-                daemon_port=daemon_port,
-            )
-
-            # --verify: probe daemon health after writing
-            if verify and transport in ("http", "http-mcp-remote") and not result.get("error"):
-                from superlocalmemory.hooks.portable_kit import _check_daemon_health
-                reachable = _check_daemon_health(daemon_port)
-                if reachable:
-                    print(f"[verify] Daemon reachable at http://127.0.0.1:{daemon_port}/api/v3/health")
-                else:
-                    print(
-                        f"[verify] Warning: daemon NOT reachable at "
-                        f"http://127.0.0.1:{daemon_port}/api/v3/health. "
-                        f"Run `slm serve start` to start it.",
-                        file=sys.stderr,
-                    )
-
-            if not result.get("error") and not getattr(args, "dry_run", False):
-                from superlocalmemory.infra.local_diagnostics import record_operation
-
-                record_operation("activation", client=ide_arg)
-
-            if getattr(args, "json", False):
-                from superlocalmemory.cli.json_output import json_print
-                json_print("connect", data=result)
-                return
-
-            if result["error"]:
-                print(f"Error: {result['error']}", file=sys.stderr)
-                print(
-                    f"Supported IDEs: {', '.join(supported_ides())}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-
-            status_sym = {"wrote": "[+]", "merged": "[~]", "unchanged": "[=]",
-                          "would_write": "[~]",
-                          "skipped": "[s]", "error": "[!]"}.get(
-                result["mcp_config"], "[?]"
-            )
-            print(
-                f"{status_sym} {ide_arg}: mcp_config={result['mcp_config']} "
-                f"path={result['mcp_path']}"
-            )
-            print(f"    agents_md={result['agents_md']}")
-            return
-
-        # Unknown ide — list supported and exit non-zero
-        from superlocalmemory.hooks.portable_kit import supported_ides
-        print(
-            f"Unknown IDE '{ide_arg}'.\nSupported: {', '.join(supported_ides())}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # Route --disable <name> and --cross-platform to the LLD-05 orchestrator.
-    if getattr(args, "disable", None) or getattr(args, "cross_platform", False):
-        from superlocalmemory.cli.context_commands import (
-            cmd_connect_cross_platform,
-        )
-        cmd_connect_cross_platform(args)
-        return
-    from superlocalmemory.hooks.ide_connector import IDEConnector
-
-    connector = IDEConnector()
-    dry_run = bool(getattr(args, "dry_run", False))
-
-    if getattr(args, 'json', False):
-        from superlocalmemory.cli.json_output import json_print
-        if getattr(args, "list", False):
-            json_print("connect", data={"ides": connector.get_status()},
-                       next_actions=[
-                           {"command": "slm connect --json", "description": "Auto-configure all IDEs"},
-                       ])
-        elif getattr(args, "ide", None):
-            success = connector.connect(args.ide)
-            json_print("connect", data={"ide": args.ide, "connected": success})
-        elif dry_run:
-            json_print(
-                "connect",
-                data={
-                    "dry_run": True,
-                    "would_configure": connector.get_status(),
-                },
-            )
-        else:
-            json_print("connect", data={"results": connector.connect_all()},
-                       next_actions=[
-                           {"command": "slm status --json", "description": "Check system status"},
-                       ])
-        return
-
-    if getattr(args, "list", False):
-        status = connector.get_status()
-        for s in status:
-            mark = "[+]" if s["installed"] else "[-]"
-            print(f"  {mark} {s['name']:20s} {s['config_path']}")
-        return
-    if dry_run:
-        status = connector.get_status()
-        print("Dry run — no IDE, hook, config, or SLM data files were written.")
-        for item in status:
-            print(f"  would inspect/configure: {item['name']} ({item['config_path']})")
-        return
-    if getattr(args, "ide", None):
-        success = connector.connect(args.ide)
-        print(f"{'Connected' if success else 'Failed'}: {args.ide}")
-    else:
-        results = connector.connect_all()
-        for ide_id, ide_status in results.items():
-            print(f"  {ide_id}: {ide_status}")
+    retrieval = getattr(config, "retrieval", None)
+    if is_dataclass(retrieval) and not isinstance(retrieval, type):
+        config.retrieval = replace(retrieval, sufficiency_judge="off")
+    elif retrieval is not None:  # a stand-in config (tests, plugins)
+        retrieval.sufficiency_judge = "off"
+    return config
 
 
 def cmd_migrate(args: Namespace) -> None:
@@ -1545,21 +1716,80 @@ def cmd_migrate(args: Namespace) -> None:
 # -- Memory Operations (all support --json) --------------------------------
 
 
+def _kind_display(fields: dict) -> str:
+    """The memory kind as a person reads it: "Decision", "Rule (suggested)".
+
+    The same label the dashboard and ``--json`` report; the old text view
+    printed the internal fact type ("semantic") instead.
+    """
+    label = fields.get("memory_kind_label") or "Untyped"
+    if fields.get("memory_kind_state") == "suggested":
+        return f"{label} (suggested)"
+    return str(label)
+
+
+def _tags_qs(args: Namespace) -> str:
+    """``--tag`` / ``--tags-match`` as recall query parameters (4.1.22).
+
+    Each ``--tag`` is its own ``tags=`` so the daemon keeps them as separate
+    labels; a single one may also be comma-separated ("a,b" is two tags).
+    """
+    from urllib.parse import quote
+
+    tags = [t.strip() for t in (getattr(args, "tags", None) or []) if (t or "").strip()]
+    if not tags:
+        return ""
+    match = getattr(args, "tags_match", "all") or "all"
+    return "".join(f"&tags={quote(t)}" for t in tags) + (
+        "&tags_match=any" if match == "any" else "")
+
+
 def cmd_list(args: Namespace) -> None:
     """List recent memories chronologically."""
     from superlocalmemory.core.config import CANONICAL_LIST_LIMIT, SLMConfig
     from superlocalmemory.core.engine import MemoryEngine
+    from superlocalmemory.core import tag_query
+    from superlocalmemory.core.kind_query import (
+        InvalidKind,
+        engine_display_min_confidence,
+        list_recent_facts,
+        resolve_kind,
+    )
 
     use_json = getattr(args, 'json', False)
+    # 4.1.19 WP8: refused before any engine is even built.
+    try:
+        parsed_kind = resolve_kind(getattr(args, "kind", ""))
+    except InvalidKind as exc:
+        if use_json:
+            from superlocalmemory.cli.json_output import json_print
+            json_print("list", error={"code": "INVALID_KIND", "message": str(exc)})
+        else:
+            print(str(exc), file=sys.stderr)
+        sys.exit(2)
     try:
         config = SLMConfig.load()
-        engine = MemoryEngine(config)
+        engine = MemoryEngine(_without_answer_check(config))
         engine.initialize()
 
         limit = getattr(args, "limit", CANONICAL_LIST_LIMIT)
+        # Read once, used for BOTH the --kind filter above and labelling each
+        # item below — a fact must not pass the filter at one threshold and
+        # be labelled (confirmed/suggested/legacy) at another.
+        _display_min_confidence = engine_display_min_confidence(engine)
         # The query already returns newest-first; pushing the bound into SQL
         # keeps this from deserializing the whole table to show twenty rows.
-        facts = engine._db.get_all_facts(engine.profile_id, limit=limit)
+        _truncated: list[bool] = []
+        _tags = tag_query.TagFilter.of(getattr(args, "tags", None) or None,
+                                       getattr(args, "tags_match", "all"))
+        facts = list_recent_facts(
+            engine._db, engine.profile_id, limit, parsed_kind,
+            display_min_confidence=_display_min_confidence,
+            truncated=_truncated, tag_filter=_tags,
+        )
+        kind_filter_truncated = bool(_truncated and _truncated[0])
+        _tag_note = tag_query.with_report({"count": len(facts)}, engine._db,
+                                          engine.profile_id, _tags).get("tag_scope")
     except Exception as exc:
         if use_json:
             from superlocalmemory.cli.json_output import json_print
@@ -1569,6 +1799,7 @@ def cmd_list(args: Namespace) -> None:
 
     if use_json:
         from superlocalmemory.cli.json_output import json_print
+        from superlocalmemory.storage.memory_kinds import kind_fields
         items = []
         for f in facts:
             ftype_raw = getattr(f, "fact_type", "")
@@ -1576,8 +1807,16 @@ def cmd_list(args: Namespace) -> None:
             items.append({
                 "fact_id": f.fact_id, "content": f.content,
                 "fact_type": ftype, "created_at": (f.created_at or "")[:19],
+                "stub": bool(getattr(f, "non_answer", False)),
+                **kind_fields(f, display_min_confidence=_display_min_confidence),
             })
-        json_print("list", data={"results": items, "count": len(items)},
+        _data = {"results": items, "count": len(items),
+                 **({"tag_scope": _tag_note} if _tag_note else {})}
+        # 4.1.19 L2-13/M2: say so rather than returning a silent short answer
+        # when the kind filter's windowed fetch hit its hard cap.
+        if kind_filter_truncated:
+            _data["kind_filter_truncated"] = True
+        json_print("list", data=_data,
                    next_actions=[
                        {"command": "slm recall '<query>' --json", "description": "Search memories"},
                        {"command": "slm delete <fact_id> --json --yes", "description": "Delete a memory"},
@@ -1585,15 +1824,26 @@ def cmd_list(args: Namespace) -> None:
         return
 
     if not facts:
-        print("No memories stored yet.")
+        print((_tag_note or {}).get("note") or "No memories stored yet.")
     else:
+        from superlocalmemory.storage.memory_kinds import kind_fields
+
         print(f"Recent memories ({len(facts)}):\n")
         for i, f in enumerate(facts, 1):
             date = (f.created_at or "")[:19]
-            ftype_raw = getattr(f, "fact_type", "")
-            ftype = ftype_raw.value if hasattr(ftype_raw, "value") else str(ftype_raw)
             content = f.content[:100] + ("..." if len(f.content) > 100 else "")
-            print(f"  {i:3d}. [{date}] ({ftype}) {content}")
+            fields = kind_fields(f, display_min_confidence=_display_min_confidence)
+            # A stored stub is kept and listed, never used as an answer.
+            stub = " (stub)" if getattr(f, "non_answer", False) else ""
+            print(f"  {i:3d}. [{date}] {_kind_display(fields)}{stub}: {content}")
+            print(f"       id: {f.fact_id}")
+        print("\nChange one with: slm update <id> \"new text\"   "
+              "Remove one with: slm delete <id>")
+    if kind_filter_truncated:
+        print(
+            "\nNote: the kind filter stopped at its search cap before "
+            "--limit was filled; more matches may exist.",
+        )
 
     # V3.3.21: Show pending memories (store-first pattern)
     try:
@@ -1606,6 +1856,22 @@ def cmd_list(args: Namespace) -> None:
                 print(f"  \u23f3 [{p['created_at'][:19]}] {content}")
     except Exception:
         pass
+
+
+def _cli_remember_idempotency_key(body: dict) -> str:
+    """The same ``slm remember`` command always carries the same key.
+
+    Re-running a command is the only resend a CLI user has, so it must be
+    recognised as the same request: the daemon then answers with the first
+    receipt instead of storing the memory again. Anything that makes it a
+    different request (wording, tags, scope, kind, replaces) gives a
+    different key. Keys are scoped per profile by the daemon.
+    """
+    import hashlib
+    import json as _json
+
+    material = _json.dumps(body, sort_keys=True, ensure_ascii=False, default=str)
+    return "cli:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def cmd_remember(args: Namespace) -> None:
@@ -1629,31 +1895,88 @@ def cmd_remember(args: Namespace) -> None:
 
     try:
         from superlocalmemory.cli.daemon import (
-            daemon_request, ensure_daemon, is_daemon_running,
+            DaemonServerError,
+            DaemonUnprocessable,
+            daemon_request,
+            ensure_daemon,
+            is_daemon_running,
         )
+        kind = (getattr(args, "kind", "") or "").strip()
+        if kind:
+            from superlocalmemory.storage.memory_kinds import MemoryKind, parse_kind
+
+            if parse_kind(kind) is None:
+                message = ("Unknown memory kind. Use one of: "
+                          + ", ".join(k.value for k in MemoryKind))
+                # L3-14: every --json path prints valid JSON, on success AND
+                # on error -- this one printed nothing to stdout before.
+                if use_json:
+                    from superlocalmemory.cli.json_output import json_print
+                    json_print("remember", error={"code": "INVALID_KIND", "message": message})
+                else:
+                    print(message, file=sys.stderr)
+                sys.exit(2)
+        replaces = getattr(args, "replaces", None)
+        if replaces is not None:
+            from superlocalmemory.core.replaces_input import (
+                ReplacesRejected, normalize_replaces,
+            )
+
+            try:
+                replaces = normalize_replaces(replaces)
+            except ReplacesRejected as exc:
+                if use_json:
+                    from superlocalmemory.cli.json_output import json_print
+                    json_print("remember", error={"code": exc.code, "message": exc.message})
+                else:
+                    print(exc.message, file=sys.stderr)
+                sys.exit(2)
         if not (is_daemon_running() or ensure_daemon()):
             _daemon_unavailable("remember", use_json)
         path = "/remember?wait=true" if sync_mode else "/remember"
-        result = daemon_request(
-            "POST", path, {
-                "content": args.content,
-                "tags": args.tags or "",
-                "scope": scope,
-                "shared_with": shared_with,
-            },
-            timeout_seconds=30,
-        )
+        body = {
+            "content": args.content,
+            "tags": args.tags or "",
+            "scope": scope,
+            "shared_with": shared_with,
+            "kind": kind,
+        }
+        # A 422 is a refusal of this request, printed as such, not "daemon
+        # unavailable" (an idempotency conflict never heals by retrying).
+        extra = {"preserve_unprocessable": True, "preserve_server_error": sync_mode}
+        if replaces is not None:
+            body["replaces"] = replaces
+        body["idempotency_key"] = _cli_remember_idempotency_key(body)
+        try:
+            result = daemon_request("POST", path, body,
+                                    timeout_seconds=300 if sync_mode else 30, **extra)
+        except (DaemonUnprocessable, DaemonServerError) as exc:
+            if use_json:
+                from superlocalmemory.cli.json_output import json_print
+                json_print("remember", error={"code": exc.code, "message": exc.message})
+            else:
+                print(exc.message, file=sys.stderr)
+            sys.exit(1 if isinstance(exc, DaemonServerError) else 2)
         if result and "fact_ids" in result:
+            if sync_mode:
+                from superlocalmemory.cli.save_completion import require_completed_receipt
+                require_completed_receipt(result, use_json)
             if use_json:
                 from superlocalmemory.cli.json_output import json_print
                 json_print("remember", data=result)
             else:
-                state = result.get("materialization_state", "queryable")
-                operation_id = result.get("operation_id", "unknown")
-                print(
-                    f"{state.capitalize()} \u2713 {result['count']} facts "
-                    f"(operation={operation_id})."
-                )
+                from superlocalmemory.cli.recall_text import remember_receipt_text
+                print(remember_receipt_text(result))
+                replaced = result.get("replaced")
+                if isinstance(replaced, dict) and replaced.get("ok"):
+                    from superlocalmemory.cli.recall_text import replaced_text
+                    print(replaced_text(replaced))
+                elif isinstance(replaced, dict) and replaced.get("pending"):
+                    print(f"{replaced.get('replaces')} will be replaced as soon as the "
+                          "new memory is indexed (within seconds).")
+                elif isinstance(replaced, dict):
+                    print(f"Saved, but {replaced.get('replaces')} was NOT replaced: "
+                          f"{replaced.get('reason')}", file=sys.stderr)
             return
     except SystemExit:
         raise
@@ -1662,9 +1985,115 @@ def cmd_remember(args: Namespace) -> None:
     _daemon_unavailable("remember", use_json)
 
 
+def _answer_check_line(result: dict) -> str:
+    """One plain text line summarizing the answer-check judge verdict.
+
+    Returns "" when no judge is configured (``calibration_status ==
+    "uncalibrated"``) so plain-text output is byte-identical to before this
+    existed — that is the overwhelming majority of installs today.
+
+    Results are never removed from the printed list; this is an extra line, not
+    a filter: abstention is a signal for the reader, never a reason to hide results.
+    """
+    if result.get("calibration_status", "uncalibrated") == "uncalibrated":
+        return _not_checked_line(result)
+    confidence = result.get("answer_confidence")
+    confidence = float(confidence) if confidence is not None else 0.0
+    if result.get("abstention_reason") == "judged_insufficient":
+        return (
+            "Answer check: none of these memories answers the question "
+            f"(confidence {confidence:.2f}). Say you don't have it, or ask "
+            "— don't present these as the answer."
+        )
+    from superlocalmemory.core.answer_check_notice import answered_line, is_supported
+    if not result.get("abstained", False) and is_supported(result):  # a checked answer only
+        return answered_line(result.get, confidence)  # by the model, or by a stated rule
+    return ""
+
+
+def _not_checked_line(result: dict) -> str:
+    """4.1.20: say so when a configured check gave no verdict on this recall.
+
+    Silent when no check is configured ("off") and when the reason is unknown
+    (an older daemon, the keyword fallback), so output without a check is
+    byte-identical to before.
+    """
+    status = result.get("answer_check_status")
+    reason = result.get("answer_check_reason", "")
+    if status in ("busy", "warming", "unavailable") or (status == "skipped" and reason):
+        from superlocalmemory.retrieval.answer_check_status import answer_check_note
+        return answer_check_note(status, reason)
+    return ""
+
+
+#: Recall's time filters: (Namespace attribute, flag as typed).
+_RECALL_TIME_FLAGS = (
+    ("window", "--window"),
+    ("as_of", "--as-of"),
+    ("known_as_of", "--known-as-of"),
+    ("valid_at", "--valid-at"),
+)
+
+
+def _invalid_recall_time_filter(args: Namespace) -> tuple[str, str] | None:
+    """Return ``(flag, value)`` for the first time filter that cannot be read.
+
+    The same check MCP, HTTP and the engine use (``retrieval.time_filter``).
+    """
+    from superlocalmemory.retrieval.time_filter import first_invalid
+
+    bad = first_invalid({attr: getattr(args, attr, "") or ""
+                         for attr, _flag in _RECALL_TIME_FLAGS})
+    if bad is None:
+        return None
+    return dict(_RECALL_TIME_FLAGS)[bad.field], bad.raw
+
+
+def _refuse_bad_recall_time_filter(args: Namespace, use_json: bool) -> None:
+    """Exit 1 on an unreadable time filter, in the output format asked for."""
+    bad = _invalid_recall_time_filter(args)
+    if bad is None:
+        return
+    flag, raw = bad
+    expected = (
+        "Expected a relative span (24h, 7d, 30d, 1y) or a range "
+        "(2026-07-01..2026-07-31)."
+        if flag == "--window"
+        else "Expected ISO 8601 UTC datetime, e.g. '2024-01-01T00:00:00Z'."
+    )
+    if use_json:
+        from superlocalmemory.cli.json_output import json_print
+        json_print("recall", error={
+            "code": "INVALID_TIME_FILTER",
+            "flag": flag,
+            "message": f"invalid {flag} value: {raw!r}. {expected}",
+        })
+    else:
+        sys.stderr.write(f"Error: invalid {flag} value: {raw!r}\n{expected}\n")
+    sys.exit(1)
+
+
 def cmd_recall(args: Namespace) -> None:
     """Search memories through the owned daemon without a local engine."""
     use_json = getattr(args, 'json', False)
+    # 4.1.19 WP8: refused before the daemon is even probed — a request that
+    # will be rejected every time is not a reason to retry anything.
+    from superlocalmemory.core.kind_query import InvalidKind, resolve_kind
+    try:
+        _kind = resolve_kind(getattr(args, "kind", ""))
+    except InvalidKind as exc:
+        # L3-14: --json must still print valid JSON on this (refused-before-
+        # any-request) error path.
+        if use_json:
+            from superlocalmemory.cli.json_output import json_print
+            json_print("recall", error={"code": "INVALID_KIND", "message": str(exc)})
+        else:
+            print(str(exc), file=sys.stderr)
+        sys.exit(2)
+    # 4.1.20: every time filter is checked here, before the daemon is probed,
+    # so a bad value is answered in the format asked for (JSON under --json)
+    # and a bad --window is refused instead of silently running unfiltered.
+    _refuse_bad_recall_time_filter(args, use_json)
     # v3.6.15: None = "not specified" → daemon/engine resolves the configured
     # default (shared-off). Only an explicit --include-global / --no-global
     # produces True/False here.
@@ -1724,12 +2153,45 @@ def cmd_recall(args: Namespace) -> None:
             known_as_of_qs = _strict_time_qs("known_as_of", "known_as_of")
             valid_at_qs = _strict_time_qs("valid_at", "valid_at")
             unknown_qs = "&include_unknown=true" if getattr(args, "include_unknown", False) else ""
-            result = daemon_request(
-                "GET",
-                f"/recall?q={quote(args.query)}&limit={args.limit}"
-                f"&session_id={quote(session_id)}{fast_qs}{scope_qs}{window_qs}{as_of_qs}"
-                f"{known_as_of_qs}{valid_at_qs}{unknown_qs}",
+            if getattr(args, "show_weak", False):
+                unknown_qs += "&show_weak=true"
+            # A person searching: close memories of a real question are shown,
+            # labelled related (agents opt in instead).
+            unknown_qs += "&include_related=true"
+            _depth = getattr(args, "depth", 1)
+            if isinstance(_depth, int) and _depth != 1:
+                unknown_qs += f"&depth={_depth}"
+            _max_tokens = getattr(args, "max_tokens", 0)
+            if isinstance(_max_tokens, int) and _max_tokens > 0:
+                unknown_qs += f"&max_tokens={_max_tokens}"
+            facet_qs = "".join(
+                f"&{name}={quote(str(value).strip())}"
+                for name, value in (("project", getattr(args, "project", "")),
+                                    ("saved_by", getattr(args, "saved_by", "")),
+                                    ("about", getattr(args, "about", "")),
+                                    ("prefer_project", getattr(args, "prefer_project", "")))
+                if (value or "").strip()
             )
+            if getattr(args, "project_strict", False) and (getattr(args, "project", "") or "").strip():
+                facet_qs += "&project_strict=true"
+            facet_qs += _tags_qs(args)
+            kind_qs = f"&kind={quote(_kind)}" if _kind else ""
+            from superlocalmemory.cli.daemon_errors import DaemonServerError
+            try:
+                result = daemon_request(
+                    "GET",
+                    f"/recall?q={quote(args.query)}&limit={args.limit}"
+                    f"&session_id={quote(session_id)}{fast_qs}{scope_qs}{window_qs}{as_of_qs}"
+                    f"{known_as_of_qs}{valid_at_qs}{unknown_qs}{facet_qs}{kind_qs}",
+                    preserve_server_error=True,
+                )
+            except DaemonServerError as busy_exc:
+                if busy_exc.code != "RECALL_BUSY":
+                    raise
+                # The daemon is running and every slot is taken: say so, and do
+                # not start a second engine on this machine to compete with it.
+                print(busy_exc.message, file=sys.stderr)
+                sys.exit(75)
             if result and "results" in result:
                 # Format daemon response same as engine response
                 if use_json:
@@ -1738,11 +2200,21 @@ def cmd_recall(args: Namespace) -> None:
                         {"command": "slm list --json", "description": "List recent memories"},
                     ])
                     return
+                from superlocalmemory.cli.recall_text import (
+                    context_lines,
+                    empty_result_line,
+                    fidelity_line,
+                    incomplete_line,
+                    project_line,
+                    result_line,
+                    status_line,
+                    tag_line,
+                )
+                incomplete = incomplete_line(result)
                 if not result["results"]:
-                    print("No confident match."
-                          if result.get("no_confident_match")
-                          else "No matching memories found.")
-                    return
+                    return print("\n".join(filter(None, [
+                        empty_result_line(result), incomplete, project_line(result),
+                        tag_line(result), fidelity_line(result)])))
                 # Text output.
                 # PR #101: ``dict.get(k, 0)`` returns the DEFAULT only when the
                 # key is ABSENT — a present-but-null value still reaches the
@@ -1750,13 +2222,19 @@ def cmd_recall(args: Namespace) -> None:
                 # NoneType.__format__". ``or 0`` covers both. Same for score,
                 # which the keyword-fallback path returns as None.
                 elapsed_ms = result.get('retrieval_time_ms') or 0
-                print(
-                    "SpreadingActivation.search completed via daemon "
-                    f"({elapsed_ms:.0f}ms)"
-                )
+                # Timing is diagnostics; stdout carries only the results.
+                logger.debug("recall completed via daemon (%.0fms)", elapsed_ms)
+                if result.get("abstention_note"):  # weak matches shown on request
+                    print(result["abstention_note"])
+                if status_line(result):
+                    print(status_line(result))
                 for i, r in enumerate(result["results"], 1):
-                    score = r.get('score') or 0
-                    print(f"  {i}. [{score:.2f}] {r['content']}")
+                    print(result_line(i, r))
+                    for line in context_lines(r):
+                        print(line)
+                for note in filter(None, (incomplete, project_line(result), fidelity_line(result),
+                                          _answer_check_line(result))):
+                    print(f"\n{note}")
                 return
     except Exception as _exc:  # noqa: BLE001
         logger.warning(
@@ -1927,10 +2405,13 @@ def cmd_delete(args: Namespace) -> None:
     import urllib.parse
 
     from superlocalmemory.cli.daemon import (
+        DaemonConflict,
+        DaemonNotFound,
         daemon_request,
         ensure_daemon,
         is_daemon_running,
     )
+    from superlocalmemory.cli.mutation_conflict import exit_conflict
 
     use_json = getattr(args, 'json', False)
     fact_id = args.fact_id.strip()
@@ -1939,10 +2420,14 @@ def cmd_delete(args: Namespace) -> None:
         confirmed = getattr(args, "yes", False)
         content = ""
         if not confirmed:
-            detail = daemon_request(
-                "GET",
-                "/api/facts/" + urllib.parse.quote(fact_id, safe=""),
-            )
+            try:
+                detail = daemon_request(
+                    "GET",
+                    "/api/facts/" + urllib.parse.quote(fact_id, safe=""),
+                    preserve_not_found=True,
+                )
+            except DaemonNotFound:
+                _memory_not_found("delete", fact_id, use_json)
             if not isinstance(detail, dict):
                 _daemon_unavailable("delete", use_json)
             content = str(detail.get("content") or "")
@@ -1968,7 +2453,13 @@ def cmd_delete(args: Namespace) -> None:
                 print("Cancelled.")
                 return
 
-        result = daemon_request("DELETE", path)
+        try:
+            result = daemon_request("DELETE", path, preserve_not_found=True,
+                                    preserve_conflict=True)
+        except DaemonNotFound:
+            _memory_not_found("delete", fact_id, use_json)
+        except DaemonConflict as exc:
+            exit_conflict("delete", exc.detail, use_json)
         if not isinstance(result, dict) or not result.get("success"):
             _daemon_unavailable("delete", use_json)
         if use_json:
@@ -1998,6 +2489,8 @@ def cmd_update(args: Namespace) -> None:
     import urllib.parse
 
     from superlocalmemory.cli.daemon import (
+        DaemonConflict,
+        DaemonNotFound,
         daemon_request,
         ensure_daemon,
         is_daemon_running,
@@ -2017,7 +2510,15 @@ def cmd_update(args: Namespace) -> None:
 
     if is_daemon_running() or ensure_daemon():
         path = "/api/memories/" + urllib.parse.quote(fact_id, safe="")
-        result = daemon_request("PATCH", path, {"content": new_content})
+        try:
+            body = {"content": new_content}
+            result = daemon_request("PATCH", path, body, preserve_not_found=True,
+                                    preserve_conflict=True)
+        except DaemonNotFound:
+            _memory_not_found("update", fact_id, use_json)
+        except DaemonConflict as exc:
+            from superlocalmemory.cli.mutation_conflict import exit_conflict
+            exit_conflict("update", exc.detail, use_json)
         if not isinstance(result, dict) or not result.get("success"):
             _daemon_unavailable("update", use_json)
         if use_json:
@@ -2084,6 +2585,24 @@ def cmd_review_correction(args: Namespace) -> None:
 # -- Diagnostics (all support --json) -------------------------------------
 
 
+def _admission_status_text(daemon_status: dict) -> str:
+    """Lines for saves still being indexed and saves set aside; "" when none."""
+    lines = ""
+    waiting = int(daemon_status.get("saves_waiting", 0) or 0)
+    unreadable = int(daemon_status.get("unreadable_saves", 0) or 0)
+    if waiting > 0:
+        lines += f"  Saves being indexed: {waiting} (searchable within seconds)\n"
+    if unreadable > 0:
+        lines += (
+            f"  Saves set aside: {unreadable} could not be read back by this "
+            "machine's key and were kept unchanged in the admission journal. "
+            "See the daemon log for their ids.\n"
+        )
+    elif unreadable < 0:
+        lines += "  Saves set aside: unknown (the admission journal did not answer)\n"
+    return lines
+
+
 def cmd_status(args: Namespace) -> None:
     """Show system status."""
     from superlocalmemory.core.config import SLMConfig
@@ -2133,6 +2652,8 @@ def cmd_status(args: Namespace) -> None:
                 "projection_queue_depth": int(
                     daemon_status.get("projection_queue_depth", 0)
                 ),
+                "saves_waiting": int(daemon_status.get("saves_waiting", 0)),
+                "unreadable_saves": int(daemon_status.get("unreadable_saves", 0)),
             }
             json_print("status", data=data, next_actions=[
                 {"command": "slm health --json", "description": "Check math layer health"},
@@ -2214,6 +2735,11 @@ def cmd_status(args: Namespace) -> None:
     if config.db_path.exists():
         size_mb = round(config.db_path.stat().st_size / 1024 / 1024, 2)
         print(f"  DB size: {size_mb} MB")
+    if daemon_status:
+        print(_admission_status_text(daemon_status), end="")
+        print(__import__("superlocalmemory.cli.embedder_cmd", fromlist=["x"]).status_line(), end="")
+    else:
+        print(__import__("superlocalmemory.cli.embedder_cmd", fromlist=["x"]).text_provider_note(config), end="")
 
     # S9-UX-07 / S9-UX-13: --verbose surfaces the disabled marker,
     # last-version marker, and daemon port so users who are debugging
@@ -2270,7 +2796,7 @@ def cmd_health(args: Namespace) -> None:
             langevin_count = int(langevin_count or 0)
         else:
             from superlocalmemory.core.engine import MemoryEngine
-            engine = MemoryEngine(config)
+            engine = MemoryEngine(_without_answer_check(config))
             engine.initialize()
             facts = engine._db.get_all_facts(engine.profile_id)
             fisher_count = sum(1 for f in facts if f.fisher_mean is not None)
@@ -2424,8 +2950,8 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("setup", "Guided first-time setup (models, mode, IDEs) — start here"),
         ("init", "Set up + wire Claude Code hooks + connect IDEs"),
         ("reconfigure", "Re-run setup / pick a performance profile"),
-        ("mode", "Switch memory mode: a (local) / b (Ollama) / c (cloud)"),
-        ("provider", "Configure the cloud LLM provider + API key (Mode C)"),
+        ("mode", "Switch memory mode: a (local) / b (a local model) / c (your endpoint or cloud)"),
+        ("provider", "Configure the LLM provider + API key (Mode C)"),
         ("connect", "Auto-configure detected IDEs (Cursor, VS Code, …)"),
         ("upgrade-hosts", "Preview or explicitly refresh existing SLM host integrations"),
         ("hooks", "Install/inspect Claude Code hooks"),
@@ -2443,28 +2969,41 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("trace", "Recall with a per-channel score breakdown"),
         ("ingest", "Ingest external observations / documents"),
         ("summary", "Readable summaries: session, day, or project"),
+        ("view", "Saved views: named recall queries you can re-run"),
+        ("kinds", "Memory kinds: status, settings, classify (undoable)"),
+        ("team", "Workspace login policy: status, require-login on/off (owner's way back in)"),
+        ("sources", "Connect folders and notes vaults: add, list, report, rescan, remove, forget-empty"),
+        ("embedder", "Switch the embedding model in the background"),
+        ("models", "Installed Ollama models, recommendations, hosted catalogue"),
+        ("corrections", "Corrections your own delete, replace or edit closed"),
+        ("outcome", "Report whether recalled memories helped (trains ranking)"),
     ]),
     ("Privacy & compliance", [
         # gdpr shipped in 4.0.6 but was never listed here, so `slm help` did not
         # mention it at all. The drift test caught it; the omission is the thing
         # that test exists to prevent.
         ("gdpr", "Subject rights: status, export, erase, verify"),
+        ("backup", "Cloud backup encryption: recovery key, decrypt a download"),
     ]),
     ("Run SLM (daemon & dashboard)", [
         ("serve", "Start/stop the background daemon"),
         ("restart", "Restart the daemon (applies restart-only settings)"),
-        ("dashboard", "Open the web dashboard (localhost:8765)"),
+        ("dashboard", "Open the web dashboard on the configured daemon port"),
         ("mcp", "Start the MCP server (used by IDEs)"),
+        ("tools", "Show or choose how many MCP tools your apps see"),
+        ("remote", "Let other computers use this SLM over HTTPS with revocable keys"),
         ("warmup", "Pre-load models so the first recall is fast"),
         ("status", "Show daemon status + memory counts"),
     ]),
     ("Health & self-healing", [
         ("doctor", "Full pre-flight check (add --fix to auto-repair)"),
+        ("enrich", "Memory health: describe older memories, suggest and fix repairs, undo"),
         ("health", "Quick math/retrieval layer status"),
         ("ops", "List/resolve stuck, dead-lettered, or degraded operations (admin)"),
         ("diagnostics", "Export a local diagnostics bundle"),
         ("evidence", "Build/inspect evidence bundles"),
         ("rotate-token", "Rotate the local dashboard install token"),
+        ("token", "Show the key the dashboard asks for when a key is required (slm token show)"),
     ]),
     ("Configuration", [
         ("config", "View/set configuration (see: slm help config)"),
@@ -2507,6 +3046,10 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ("Automation", [
         ("loop", "Run gate-verified bounded agent loops"),
     ]),
+    ("Images, documents & bots", [
+        ("features", "See what is on: images & documents, bot mesh"),
+        ("media", "Images & documents: enable | disable | status"),
+    ]),
     ("Help", [
         ("help", "This overview. Try: slm help config | modes | self-heal"),
     ]),
@@ -2514,13 +3057,16 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
 
 _HELP_TOPICS: dict[str, str] = {
     "modes": """\
-Operating modes
-  a  On-device only  — no AI language model runs; all data stays on this
-                       device. Fastest and most private. (EU AI Act: full)
-  b  On-device + AI  — uses a local Ollama model to improve recall quality;
-                       all data stays on this device. Requires Ollama running.
-  c  Cloud AI        — uses a cloud provider (OpenAI, Anthropic, …) for best
-                       recall quality; queries leave this device. Needs a key.
+Operating modes — named by what you get, not by a vendor
+  a  Local Guardian — no AI language model runs; all data stays on this
+                       device. Fastest and most private.
+  b  Smart Local     — a model on this machine improves recall quality;
+                       all data stays on this device. Ollama by default,
+                       but any local OpenAI-compatible server works.
+  c  Full Power      — your own endpoint, or a cloud provider (OpenAI,
+                       Anthropic, …), for the best recall quality; queries
+                       leave this device. A key is needed for a cloud
+                       provider, but not for a keyless custom endpoint.
 
   Switch any time:  slm mode a   (or b / c)
 """,
@@ -2616,9 +3162,10 @@ def _migration_error_logs() -> list:
             cfg = SLMConfig.for_mode(Mode.A)
             db = getattr(cfg, "memory_db_path", None) or getattr(cfg, "db_path", None)
             if db:
-                roots.add(pathlib.Path(db).parent)
-        except Exception:
-            pass
+                roots.add(Path(db).parent)
+        except Exception as exc:  # noqa: BLE001 — the canonical root is still searched
+            logger.debug("doctor: configured database folder not searched: %s",
+                         type(exc).__name__)
 
         found: list = []
         for root in roots:
@@ -2652,33 +3199,9 @@ def _installed_plugin_versions() -> dict:
     Best effort by design: an editor this does not know about should produce
     "not detected", never an error.
     """
-    import json
-    from pathlib import Path
+    from superlocalmemory.cli.doctor_hosts import installed_plugin_versions
 
-    found: dict[str, str] = {}
-    roots = (
-        # Claude Code: marketplace installs and directly-added plugins.
-        Path.home() / ".claude" / "plugins",
-        # Codex and VS Code copies, when placed by hand.
-        Path.home() / ".codex" / "plugins",
-        Path.home() / ".vscode" / "extensions",
-    )
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for manifest in list(root.glob("*/.claude-plugin/plugin.json")) + \
-                list(root.glob("*/plugin.json")) + \
-                list(root.glob("*/*/.claude-plugin/plugin.json")):
-            try:
-                data = json.loads(manifest.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001 — a sibling plugin's bad json is not ours
-                continue
-            if str(data.get("name", "")) != "superlocalmemory":
-                continue
-            found[str(manifest.parent.parent.name)] = str(
-                data.get("version", "unknown")
-            )
-    return found
+    return installed_plugin_versions()
 
 
 def _detect_all_installs() -> list:
@@ -2692,7 +3215,82 @@ def _detect_all_installs() -> list:
         return []
 
 
+# One wall-clock budget for the whole doctor run. --deep reads every database
+# page and --fix may download models, so they get a larger budget.
+DOCTOR_TIMEOUT = 180.0
+DOCTOR_DEEP_TIMEOUT = 900.0
+
+
 def cmd_doctor(args: Namespace) -> None:
+    """Run doctor under one overall deadline; exit 1 on any failed check.
+
+    The checks run on a worker thread so a hung probe cannot hang the command.
+    When the budget runs out, the report so far is printed together with a
+    failing "Doctor deadline" row that names the check that did not finish.
+    Doctor still never starts a daemon.
+    """
+    import threading
+
+    use_json = getattr(args, "json", False)
+    deep = bool(getattr(args, "deep", False) or getattr(args, "fix", False))
+    budget = DOCTOR_DEEP_TIMEOUT if deep else DOCTOR_TIMEOUT
+    state = {"checks": [], "stage": "startup", "closed": False,
+             "lock": threading.Lock(), "exit": None, "error": None}
+
+    def _run() -> None:
+        try:
+            _cmd_doctor_checks(args, state)
+        except SystemExit as exc:
+            state["exit"] = exc.code
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            state["error"] = exc
+
+    worker = threading.Thread(target=_run, name="slm-doctor", daemon=True)
+    worker.start()
+    worker.join(budget)
+    if not worker.is_alive():
+        if state["error"] is not None:
+            raise state["error"]
+        if state["exit"] not in (None, 0):
+            sys.exit(state["exit"])
+        return
+    with state["lock"]:
+        state["closed"] = True
+        checks = list(state["checks"])
+        stage = state["stage"]
+    detail = (f"Check '{stage}' did not finish within the {budget:g}s overall doctor "
+              "deadline; the checks after it were not run")
+    checks.append({"name": "Doctor deadline", "status": "FAIL", "detail": detail,
+                   "fix": "Re-run `slm doctor --quick`, or investigate the named check"})
+    if not use_json:
+        print(f"  [FAIL] Doctor deadline: {detail}")
+    _doctor_summary(checks, use_json, None, None)
+    sys.exit(1)
+
+
+def _doctor_summary(checks: list[dict], use_json: bool, memory_health_data, refile_data) -> int:
+    """Print the closing report for ``checks``; return how many failed."""
+    passed = sum(c["status"] == "PASS" for c in checks)
+    warned = sum(c["status"] == "WARN" for c in checks)
+    failed = len(checks) - passed - warned
+    if use_json:
+        from superlocalmemory.cli.json_output import json_print
+        next_actions = [{"command": c["fix"], "description": f"Fix {c['name']}"}
+                        for c in checks if c["fix"]]
+        json_print("doctor", data={
+            "checks": checks,
+            "summary": {"passed": passed, "warned": warned, "failed": failed},
+            "memory_health": memory_health_data,
+            "refile_hidden": refile_data,
+        }, next_actions=next_actions)
+    else:
+        print(f"\nSummary: {passed} passed, {warned} warnings, {failed} failed")
+        if failed > 0:
+            print("Run the suggested fix commands above, then re-run: slm doctor")
+    return failed
+
+
+def _cmd_doctor_checks(args: Namespace, state: dict) -> None:
     """Comprehensive pre-flight check — verify everything works.
 
     S9-UX-10: ``--quick`` skips the slow probes (embedding worker
@@ -2705,30 +3303,45 @@ def cmd_doctor(args: Namespace) -> None:
 
     use_json = getattr(args, "json", False)
     quick = getattr(args, "quick", False)
-    checks: list[dict] = []
-    passed = warned = failed = 0
+    checks: list[dict] = state["checks"]
+
+    def _stage(name: str) -> None:
+        state["stage"] = name
 
     def _check(name: str, status: str, detail: str, fix: str = ""):
-        nonlocal passed, warned, failed
-        checks.append({"name": name, "status": status, "detail": detail, "fix": fix})
-        if status == "PASS":
-            passed += 1
-        elif status == "WARN":
-            warned += 1
-        else:
-            failed += 1
-        if not use_json:
-            tag = {"PASS": "[PASS]", "WARN": "[WARN]", "FAIL": "[FAIL]"}[status]
-            line = f"  {tag} {name}: {detail}"
-            if fix:
-                line += f"\n         Fix: {fix}"
-            print(line)
+        with state["lock"]:
+            if state["closed"]:  # the overall deadline already printed the report
+                return
+            checks.append({"name": name, "status": status, "detail": detail, "fix": fix})
+            if not use_json:
+                tag = {"PASS": "[PASS]", "WARN": "[WARN]", "FAIL": "[FAIL]"}[status]
+                line = f"  {tag} {name}: {detail}"
+                if fix:
+                    line += f"\n         Fix: {fix}"
+                print(line)
 
     if not use_json:
         print("SuperLocalMemory V4 — Doctor (Pre-flight Check)")
         print("=" * 50)
         print()
 
+    _stage("Daemon")
+    # Always check the daemon, including --quick. This never starts it and
+    # never waits for boot; other diagnostics reuse the proven identity.
+    from superlocalmemory.cli.doctor_daemon import check_daemon
+
+    daemon_check = check_daemon()
+    _check("Daemon", daemon_check.status, daemon_check.detail, daemon_check.fix)
+    if daemon_check.feature_warning:
+        # Optional probe trouble is its own line; it never rewrites the daemon verdict.
+        # Slowness alone is never a reason to restart the daemon.
+        _check("Daemon features", "WARN", daemon_check.feature_warning,
+               "run slm doctor again; if it keeps timing out, check 'slm status'")
+    elif daemon_check.feature_note:
+        # A daemon that only just started: nothing is wrong, so no restart advice.
+        _check("Daemon features", "PASS", daemon_check.feature_note)
+
+    _stage("Auto-repair (--fix)")
     # v3.8.2 `--fix`: run the component healer (the SAME repair the daemon
     # self-heal performs) BEFORE the checks, so the report below reflects the
     # healed state. Re-downloads missing models / installs sqlite-vec; big or
@@ -2783,14 +3396,16 @@ def cmd_doctor(args: Namespace) -> None:
             if not use_json:
                 print(f"  stale-artifact cleanup skipped: {_sh_exc}\n")
 
+    _stage("Python")
     # 1. Python version
     v = sys.version_info
-    if v >= (3, 11):
-        _check("Python", "PASS", f"{v.major}.{v.minor}.{v.micro} (>= 3.11)")
+    if v >= (3, 12):
+        _check("Python", "PASS", f"{v.major}.{v.minor}.{v.micro} (>= 3.12)")
     else:
-        _check("Python", "FAIL", f"{v.major}.{v.minor}.{v.micro} (need >= 3.11)",
-               "Install Python 3.11+ from https://python.org/downloads/")
+        _check("Python", "FAIL", f"{v.major}.{v.minor}.{v.micro} (need >= 3.12)",
+               "Install Python 3.12+ from https://python.org/downloads/")
 
+    _stage("Version integrity")
     # 1b. Version integrity (issue #107). Doctor is what a user runs when
     # something seems wrong, so it is exactly where "the code you are running
     # is not the code you installed" has to appear. Reported as WARN rather
@@ -2813,6 +3428,7 @@ def cmd_doctor(args: Namespace) -> None:
     except Exception as _vi_exc:  # noqa: BLE001 - never break doctor
         _check("Version integrity", "WARN", f"could not verify: {_vi_exc}")
 
+    _stage("Core deps")
     # 2. Core deps
     core_modules = {
         "numpy": "numpy", "scipy": "scipy", "networkx": "networkx",
@@ -2836,6 +3452,7 @@ def cmd_doctor(args: Namespace) -> None:
         _check("Core deps", "FAIL", f"Missing: {', '.join(missing)}",
                "pip install " + " ".join(core_modules[m] for m in missing))
 
+    _stage("Search deps")
     # 3. Search deps
     #
     # Presence only. Importing these executes torch, which cost ~4 s of every
@@ -2861,6 +3478,7 @@ def cmd_doctor(args: Namespace) -> None:
         _check("Search deps", "WARN", f"Missing: {', '.join(missing)}",
                "pip install 'superlocalmemory[search]'")
 
+    _stage("Dashboard deps")
     # 4. Dashboard deps
     dash_ok = True
     for mod in ["fastapi", "uvicorn", "websockets"]:
@@ -2875,6 +3493,7 @@ def cmd_doctor(args: Namespace) -> None:
         _check("Dashboard deps", "WARN", "Missing dashboard deps",
                "pip install 'fastapi[all]' uvicorn websockets")
 
+    _stage("Learning deps")
     # 5. Learning deps
     try:
         import lightgbm
@@ -2886,6 +3505,7 @@ def cmd_doctor(args: Namespace) -> None:
         _check("Learning deps", "WARN", f"lightgbm installed but broken: {exc}",
                "brew install libomp && pip install --force-reinstall lightgbm")
 
+    _stage("Performance deps")
     # 6. Performance deps
     # v3.4.43: diskcache removed from this check — it was a phantom dependency
     # (declared in pyproject.toml but never imported anywhere in src/ or tests/).
@@ -2904,6 +3524,7 @@ def cmd_doctor(args: Namespace) -> None:
         _check("Performance deps", "WARN", "Missing: orjson",
                "pip install orjson")
 
+    _stage("Embedding worker")
     # 7. Embedding worker functional test — skipped under --quick.
     if quick:
         _check("Embedding worker", "PASS", "skipped (--quick)")
@@ -2960,6 +3581,7 @@ def cmd_doctor(args: Namespace) -> None:
         except Exception as exc:
             _check("Embedding worker", "FAIL", str(exc), "slm warmup")
 
+    _stage("Ollama / API key")
     # 8. Ollama connectivity (Mode B only) — skipped under --quick.
     if quick:
         _check("Ollama / API key", "PASS", "skipped (--quick)")
@@ -2974,24 +3596,9 @@ def cmd_doctor(args: Namespace) -> None:
                         f"{config.llm.api_base}/api/tags", timeout=5.0,
                     )
                     if resp.status_code == 200:
-                        models = [
-                            m["name"].split(":")[0]
-                            for m in resp.json().get("models", [])
-                        ]
-                        has_llm = config.llm.model.split(":")[0] in models
-                        if has_llm:
-                            _check(
-                                "Ollama", "PASS",
-                                f"running, {len(models)} models, "
-                                f"'{config.llm.model}' available",
-                            )
-                        else:
-                            _check(
-                                "Ollama", "WARN",
-                                f"running but '{config.llm.model}' "
-                                f"not pulled",
-                                f"ollama pull {config.llm.model}",
-                            )
+                        from superlocalmemory.cli.doctor_models import local_model_finding
+                        models = [m["name"] for m in resp.json().get("models", [])]
+                        _check("Ollama extraction model", *local_model_finding(config, models))
                     else:
                         _check(
                             "Ollama", "WARN",
@@ -3019,6 +3626,7 @@ def cmd_doctor(args: Namespace) -> None:
         except Exception:
             pass  # Config load failed — already caught above
 
+    _stage("Disk space")
     # 9. Disk space
     from superlocalmemory.infra.data_root import canonical_data_root
     slm_home = canonical_data_root()
@@ -3033,6 +3641,7 @@ def cmd_doctor(args: Namespace) -> None:
     except Exception:
         pass
 
+    _stage("Database")
     # 10. Database integrity
     db_path = slm_home / "memory.db"
     if db_path.exists():
@@ -3051,22 +3660,26 @@ def cmd_doctor(args: Namespace) -> None:
             # check ran, and --deep runs the exhaustive one.
             deep = bool(getattr(args, "deep", False))
             pragma = "integrity_check" if deep else "quick_check"
+            from superlocalmemory.storage.integrity_diagnosis import check_database
+
+            # The finding's own text, never the sqlite3.Row it arrives in
+            # (GitHub #204); a damaged keyword index points at its own rebuild.
             with memory_read(db_path) as conn:
-                result = conn.execute(f"PRAGMA {pragma}").fetchone()
-            if result and result[0] == "ok":
+                result = check_database(conn, deep=deep, root=slm_home)
+            if result.ok:
                 size_mb = db_path.stat().st_size / (1024 * 1024)
                 detail = f"OK ({size_mb:.2f} MB, {pragma})"
                 if not deep:
                     detail += " — run `slm doctor --deep` for a full page scan"
                 _check("Database", "PASS", detail)
             else:
-                _check("Database", "FAIL", f"{pragma}: {result}",
-                       "Backup and recreate database")
+                _check("Database", "FAIL", f"{pragma}: {result.summary()}", result.fix)
         except Exception as exc:
             _check("Database", "FAIL", str(exc))
     else:
         _check("Database", "PASS", "not yet created (will initialize on first use)")
 
+    _stage("Projection queue")
     # 10b. Projection queue. The graph and the vectors live in other storage
     # engines, and a queue that stops draining is the one failure that produces
     # no error at all: the memory is safely in SQLite, nothing raises, and
@@ -3091,14 +3704,15 @@ def cmd_doctor(args: Namespace) -> None:
                     "Projection queue", "FAIL",
                     f"{len(stalled)}+ memories refused by the graph or vector "
                     f"store (e.g. {', '.join(f[:12] for f in stalled)})",
-                    "Check `slm logs` for the projection error, then restart "
-                    "the daemon to retry",
+                    "Check logs/daemon.log in the SLM data folder for the "
+                    "projection error, then run `slm restart` to retry",
                 )
             elif depth:
                 _check(
                     "Projection queue", "PASS",
-                    f"{depth} memory/memories queued — the worker drains these "
-                    "in the background",
+                    f"{depth} memory/memories queued for the graph/vector "
+                    "projections — drained in the background once one is open "
+                    "(until then they are the catch-up record for a promotion)",
                 )
             else:
                 _check("Projection queue", "PASS", "empty (graph is up to date)")
@@ -3107,32 +3721,62 @@ def cmd_doctor(args: Namespace) -> None:
             # pending on it by definition, so this is not a finding.
             _check("Projection queue", "PASS", "not applicable to this store")
 
-    # 11. PEP 668 advisory: detect EXTERNALLY-MANAGED marker and
-    #     recommend pipx when the system Python is managed by the OS package
-    #     manager (e.g. Homebrew, Debian/Ubuntu, Fedora 38+).
+    _stage("Failed saves")
+    # 10c. Failed saves. `slm ops status` reports dead-lettered saves, degraded
+    # operations and exhausted retries; doctor said nothing about them and read
+    # 0 failures on a store where 60 saves had been given up on.
+    # Same counts, same source, so the two commands cannot disagree.
+    if db_path.exists():
+        try:
+            from superlocalmemory.cli.doctor_ops import failed_saves_finding
+
+            _check("Failed saves", *failed_saves_finding(db_path))
+        except Exception as _fs_exc:  # noqa: BLE001 - never break doctor
+            _check("Failed saves", "WARN", f"could not read the failed-save counts: {_fs_exc}",
+                   "Run `slm ops status`")
+
+    if db_path.exists():
+        try:
+            from superlocalmemory.cli.doctor_quantization import qjl_finding
+
+            _check("QJL sketches", *qjl_finding(db_path))
+        except Exception as exc:  # noqa: BLE001 - report unavailable diagnostics
+            _check("QJL sketches", "WARN", f"could not inspect QJL sketches: {exc}",
+                   "Run `slm quantize --dry-run --json`")
+
+    _stage("PEP 668 / Install method")
+    # 11. PEP 668 advisory (only for the system Python; a venv is exempt)
+    #     and whether this Python can load SQLite extensions at all.
     try:
-        import sysconfig as _sc
-        _stdlib = _sc.get_path("stdlib")
-        if _stdlib:
-            _em_marker = Path(_stdlib) / "EXTERNALLY-MANAGED"
-            if _em_marker.exists():
-                _check(
-                    "PEP 668 / Install method",
-                    "WARN",
-                    "System Python is externally managed (EXTERNALLY-MANAGED marker found). "
-                    "pip install may fail with PEP 668 error.",
-                    "Use an isolated install: pipx install superlocalmemory  "
-                    "or uv tool install superlocalmemory",
-                )
-            else:
-                _check(
-                    "PEP 668 / Install method",
-                    "PASS",
-                    "No EXTERNALLY-MANAGED marker — standard pip install supported",
-                )
+        from superlocalmemory.cli import doctor_hosts as _dh
+
+        _check("PEP 668 / Install method", *_dh.install_method_finding())
+        _check("SQLite extensions (vector search)", *_dh.sqlite_extension_finding())
     except Exception:
         pass  # advisory only — never fail doctor on this check
 
+    _stage("Images & documents")
+    # 11b. Images & documents: a read-only line, "off" until someone turns it on.
+    try:
+        from superlocalmemory.runtimes import media_feature_status
+        from superlocalmemory.runtimes.features import media_requested
+
+        _mf = media_feature_status()
+        # Captured under the same deadline as daemon health; no second IO wait.
+        _live = daemon_check.media_status
+        if not _mf["enabled"]:
+            _check("Images & documents", "PASS",
+                   "requested by the installer, starts with the daemon" if media_requested() else "off")
+        elif _live.get("restart_required"):
+            _check("Images & documents", "WARN", "on and ready - run `slm restart` to start using it")
+        elif _mf["env"]["state"] == "ready":
+            _check("Images & documents", "PASS", "on")
+        else:
+            _check("Images & documents", "WARN", f"on, but not ready ({_mf['env']['state']})")
+    except Exception:
+        pass  # advisory only — never fail doctor on this check
+
+    _stage("Component registry")
     # 12a. Component registry (v3.8.2) — models + optional vector/graph/
     #      compression backends the older checks above did NOT cover
     #      (embedder/reranker/compressor cache presence, sqlite-vec, lancedb,
@@ -3161,6 +3805,7 @@ def cmd_doctor(args: Namespace) -> None:
     except Exception as _cr_exc:
         _check("Component registry", "WARN", f"probe failed: {_cr_exc}")
 
+    _stage("install_versions")
     # 13. Install version convergence — detect all copies of SLM on this machine
     #     and warn when they are at different versions. Silent divergence is the
     #     most common source of unexpected behaviour after an upgrade.
@@ -3228,6 +3873,7 @@ def cmd_doctor(args: Namespace) -> None:
     except Exception as _inst_exc:  # noqa: BLE001 — never break doctor
         _check("install_versions", "WARN", f"could not probe installs: {_inst_exc}")
 
+    _stage("plugin_skills")
     # 14. The skills, agents and commands are NOT in the Python package.
     #     They ship through the editor's own plugin channel -- `plugin/` in the
     #     repository -- so `pip install --upgrade` cannot move them, and until now
@@ -3235,6 +3881,8 @@ def cmd_doctor(args: Namespace) -> None:
     #     upgraded the package and read a clean `slm doctor` had every reason to
     #     believe they had all of it, and no way to find out otherwise.
     try:
+        from superlocalmemory.cli import doctor_hosts as _dh_plugins
+
         _pkg_version = _slm_version()
         _pl = _installed_plugin_versions()
         if not _pl:
@@ -3247,8 +3895,10 @@ def cmd_doctor(args: Namespace) -> None:
                 fix="Claude Code:  claude plugin marketplace add "
                     "qualixar/superlocalmemory  &&  claude plugin install "
                     "superlocalmemory@qualixar     "
-                    "Codex / VS Code: copy codex-plugin/ or copilot-plugin/ "
-                    "from the tag you are on",
+                    "Codex:  slm connect codex  &&  slm codex install     "
+                    "VS Code / Copilot:  slm connect copilot     "
+                    "Hermes, Antigravity and the others: docs/ide-setup.md; the npm "
+                    "package also carries every adapter folder",
             )
         else:
             _stale = {n: v for n, v in _pl.items() if v != _pkg_version}
@@ -3260,18 +3910,22 @@ def cmd_doctor(args: Namespace) -> None:
                         _pkg_version,
                         ", ".join(f"{n}={v}" for n, v in sorted(_stale.items())),
                     ),
-                    fix="claude plugin marketplace update qualixar && "
-                        "claude plugin update superlocalmemory@qualixar",
+                    fix=_dh_plugins.update_command_for(_stale),
                 )
             else:
+                _note = _dh_plugins.codex_cache_note(_pl)
                 _check(
                     "plugin_skills",
                     "PASS",
-                    f"plugin content matches the package ({_pkg_version})",
+                    f"plugin content matches the package ({_pkg_version}): "
+                    + ", ".join(sorted(_pl)) + " (found on disk; not proof "
+                    "that the host runs its hooks)"
+                    + (f". Note: {_note}" if _note else ""),
                 )
     except Exception as _pl_exc:  # noqa: BLE001 — never break doctor
         _check("plugin_skills", "WARN", f"could not probe plugins: {_pl_exc}")
 
+    _stage("migration_errors")
     # 14. Migration error logs — surface any unresolved failure from a previous
     #     upgrade attempt. The daemon writes these and they persist until the
     #     user takes action; doctor is the right place to surface them.
@@ -3300,6 +3954,7 @@ def cmd_doctor(args: Namespace) -> None:
     except Exception as _mel_exc:  # noqa: BLE001 — never break doctor
         _check("migration_errors", "WARN", f"could not check error logs: {_mel_exc}")
 
+    _stage("Optimize (Surface B)")
     # 12. Optimize (Surface B) — reads daemon-persisted metrics (≤60s stale).
     info = _gather_optimize_surface_b()
     _enabled = info["enabled"]
@@ -3357,6 +4012,17 @@ def cmd_doctor(args: Namespace) -> None:
                 f"enabled [{_surface_str}] {_stats}",
             )
 
+    _stage("Answer check fit")
+    # The text model this store runs on must be one recall's answer check was
+    # fitted for (core/support_fit_guard.py). "Upgrade memory engine" (4.1.25 to
+    # 4.2.1) moved text to the managed model; such a store refuses answers it has.
+    try:
+        from superlocalmemory.cli.doctor_models import answer_check_fit_finding
+        _check("Answer check fit", *answer_check_fit_finding(slm_home / "memory.db"))
+    except Exception as exc:  # noqa: BLE001 - one check never stops the doctor
+        _check("Answer check fit", "WARN", f"could not read: {type(exc).__name__}")
+
+    _stage("Memory answer-ability")
     # Memory answer-ability.
     #
     # Every other check here asks whether a component is installed. None of
@@ -3367,7 +4033,7 @@ def cmd_doctor(args: Namespace) -> None:
     memory_health_data: dict | None = None
     try:
         from superlocalmemory.core.config import SLMConfig as _HealthCfg
-        from superlocalmemory.core.memory_health import describe, measure
+        from superlocalmemory.core.memory_health import classify, describe, measure
         _h = measure(_HealthCfg.load().db_path)
         memory_health_data = {
             "live_facts": _h.live_facts,
@@ -3377,44 +4043,57 @@ def cmd_doctor(args: Namespace) -> None:
             "display_summaries": _h.display_summaries,
             "hidden_by_forgetting": _h.hidden_by_forgetting,
             "inconsistently_hidden": _h.inconsistently_hidden,
+            "missing_projection": _h.missing_projection,
+            "indexing": _h.indexing,
+            "index_verified": _h.index_verified,
             "reachability": round(_h.reachability, 4),
             "healthy": _h.healthy,
             "unavailable": list(_h.unavailable),
             "summary": describe(_h),
         }
+        from superlocalmemory.core.metadata_health import from_path as _metadata_report
+        _metadata = _metadata_report(_HealthCfg.load().db_path)
+        memory_health_data["metadata"] = _metadata
+        from superlocalmemory.core.metadata_health import doctor_checks as _doctor_checks
+        for _row in _doctor_checks(_metadata):
+            _check(*_row)
         _detail = " ".join(describe(_h))
         if _h.healthy:
             _check("Memory answer-ability", "PASS", _detail)
-        elif _h.inconsistently_hidden or _h.reachability < 0.9:
-            _check(
-                "Memory answer-ability", "FAIL", _detail,
-                fix="slm restart",
-            )
         else:
-            _check("Memory answer-ability", "WARN", _detail,
-                   fix="slm db reembed --missing-only")
+            _st, _fix = classify(_h)
+            _check("Memory answer-ability", _st, _detail, fix=_fix)
     except Exception as _mh_exc:  # noqa: BLE001 — a report must not break doctor
         _check(
             "Memory answer-ability", "WARN",
             f"could not be measured: {_mh_exc}",
         )
 
+    from superlocalmemory.cli.doctor_mcp import connected_apps_finding
+    _check("Connected MCP apps", *connected_apps_finding())
+
+    try:  # 4.2.6: a Hermes without the grant runs the SLM plugin inert
+        from superlocalmemory.cli.host_upgrades import hermes_plugin_finding
+        _hermes = hermes_plugin_finding()
+        if _hermes is not None:
+            _check("Hermes plugin access", _hermes[0], _hermes[1], fix=_hermes[2])
+    except Exception as _hp_exc:  # noqa: BLE001 — a report must not break doctor
+        _check("Hermes plugin access", "WARN", f"could not be checked: {_hp_exc}")
+
+    refile_data = None
+    if getattr(args, "refile_hidden", False):
+        from superlocalmemory.cli.doctor_refile import run_refile
+        refile_data = run_refile(args, use_json)
+
     # Summary
-    if use_json:
-        from superlocalmemory.cli.json_output import json_print
-        next_actions = []
-        for c in checks:
-            if c["fix"]:
-                next_actions.append({"command": c["fix"], "description": f"Fix {c['name']}"})
-        json_print("doctor", data={
-            "checks": checks,
-            "summary": {"passed": passed, "warned": warned, "failed": failed},
-            "memory_health": memory_health_data,
-        }, next_actions=next_actions)
-    else:
-        print(f"\nSummary: {passed} passed, {warned} warnings, {failed} failed")
-        if failed > 0:
-            print("Run the suggested fix commands above, then re-run: slm doctor")
+    with state["lock"]:
+        if state["closed"]:
+            return
+        state["closed"] = True
+        failed = _doctor_summary(checks, use_json, memory_health_data, refile_data)
+
+    if failed > 0:
+        sys.exit(1)
 
 
 def cmd_trace(args: Namespace) -> None:
@@ -3460,6 +4139,11 @@ def cmd_trace(args: Namespace) -> None:
                         "answer_confidence": result.get("answer_confidence"),
                         "abstained": bool(result.get("abstained", False)),
                         "abstention_reason": result.get("abstention_reason"),
+                        **{k: result[k] for k in (
+                            "answer_check_status", "answer_check_ran",
+                            "answer_check_reason", "answer_check_note", "answerability",
+                            "source_fidelity_status", "source_fidelity_note",
+                            "answerability_reason") if k in result},
                     }, next_actions=[
                         {
                             "command": "slm recall '<query>' --json",
@@ -3473,6 +4157,11 @@ def cmd_trace(args: Namespace) -> None:
                     f"{float(result.get('retrieval_time_ms', 0)):.0f}ms"
                 )
                 print(f"Results: {len(result['results'])}")
+                from superlocalmemory.cli.recall_text import empty_result_line, fidelity_line
+                if not result["results"]:
+                    print(empty_result_line(result))
+                if fidelity_line(result):
+                    print(fidelity_line(result))
                 for i, item in enumerate(result["results"], 1):
                     print(
                         f"\n  {i}. [relevance "
@@ -3486,6 +4175,9 @@ def cmd_trace(args: Namespace) -> None:
                         )
                     for channel, score in (item.get("channel_scores") or {}).items():
                         print(f"       {channel}: {float(score):.3f}")
+                answer_check = _answer_check_line(result)
+                if answer_check:
+                    print(f"\n{answer_check}")
                 return
     except Exception:
         # The direct path remains the offline escape hatch when a daemon is
@@ -3508,6 +4200,7 @@ def cmd_trace(args: Namespace) -> None:
 
     if use_json:
         from superlocalmemory.cli.json_output import json_print
+        from superlocalmemory.core.kind_query import engine_display_min_confidence
         from superlocalmemory.server.recall_serializer import (
             recall_response_metadata,
             serialize_recall_response,
@@ -3517,6 +4210,7 @@ def cmd_trace(args: Namespace) -> None:
             limit=limit,
             per_fact_max=200,
             total_max=max(200, limit * 200),
+            display_min_confidence=engine_display_min_confidence(engine),
         )
         json_print("trace", data={
             "query": args.query,
@@ -3540,13 +4234,30 @@ def cmd_trace(args: Namespace) -> None:
         if hasattr(r, "channel_scores") and r.channel_scores:
             for ch, sc in r.channel_scores.items():
                 print(f"       {ch}: {sc:.3f}")
+    from superlocalmemory.cli.recall_text import empty_result_line, fidelity_line
+    from superlocalmemory.server.recall_serializer import recall_response_metadata
+    metadata = recall_response_metadata(response)
+    if not response.results:
+        print(empty_result_line(metadata))
+    if fidelity_line(metadata):
+        print(fidelity_line(metadata))
+    answer_check = _answer_check_line(metadata)
+    if answer_check:
+        print(f"\n{answer_check}")
 
 
 # -- Services (no --json — these start long-running processes) -------------
 
 
+def _cmd_tools(args: Namespace) -> None:
+    from superlocalmemory.cli.tools_cmd import cmd_tools
+    cmd_tools(args)
+
+
 def cmd_mcp(_args: Namespace) -> None:
     """Start the V3 MCP server (stdio transport for IDE integration)."""
+    from superlocalmemory.mcp.profile_names import exit_on_unknown_profile
+    exit_on_unknown_profile()  # before anything else runs; stderr only
     # SINGLETON GUARD (v3.5.8): Reap fresh orphans before binding stdio.
     # Root cause: every IDE session spawns a new `slm mcp`; dead sessions'
     # processes survive indefinitely (~400 MB each) because the reaper's
@@ -3563,7 +4274,11 @@ def cmd_mcp(_args: Namespace) -> None:
             kill_orphan,
         )
         _reaper_cfg = ReaperConfig(orphan_age_threshold_hours=0.0)
-        for _orphan in find_orphans(_reaper_cfg):
+        _orphans = (
+            [] if os.environ.get("SLM_DISABLE_WARMUP_SIDE_EFFECTS") == "1"
+            else find_orphans(_reaper_cfg)
+        )
+        for _orphan in _orphans:
             # A unified daemon is expected to be detached from the launching
             # shell and can therefore have PPID 1.  The MCP reaper must never
             # treat that healthy shared daemon as an orphaned stdio server.
@@ -3624,40 +4339,27 @@ def cmd_warmup(_args: Namespace) -> None:
     print(f"  Model:  nomic-ai/nomic-embed-text-v1.5 (~500MB)")
     print()
 
-    # v3.4.42 — daemon-aware fast path. If the daemon is up and reports
-    # engine=initialized, the embedding model is already loaded inside
-    # the daemon's worker subprocess. No need to spawn a redundant one;
-    # in fact, the machine-wide singleton would refuse to do so anyway.
+    # v3.4.42 — daemon-aware path. When the daemon is up it owns the
+    # machine-wide embedding worker; a local one would be refused anyway.
     try:
         from superlocalmemory.cli.daemon import (
             is_daemon_running, daemon_request,
         )
-        if is_daemon_running():
-            health = daemon_request("GET", "/health")
-            if health and health.get("engine") == "initialized":
-                from superlocalmemory.core.config import EmbeddingConfig
-                cfg = EmbeddingConfig()
-                print("[PASS] Daemon is running with embedding model loaded.")
-                print(f"       Model: {cfg.model_name} ({cfg.dimension}-dim)")
-                print("Semantic search is fully operational.")
-                return
-            # Daemon up but engine not yet initialized — warn and return
-            # rather than racing the daemon for the singleton lock.
-            engine_state = (health or {}).get("engine", "unknown")
-            print(f"[INFO] Daemon is up but engine state is '{engine_state}'.")
-            print("       Wait ~30s and retry, or run: slm doctor")
-            return
+        daemon_up = is_daemon_running()
     except Exception:
-        # Any failure in the daemon path falls through to local warmup —
+        # Any failure in the daemon probe falls through to local warmup --
         # better to spawn a local worker than block warmup entirely.
-        pass
+        daemon_up = False
+    if daemon_up:
+        _warmup_via_daemon(daemon_request, _args)
+        return
 
     # Local-warmup fallback path: daemon is unreachable, so it's safe
     # to spawn our own embedding worker (no singleton conflict).
     # Increase timeout for first-time download.
     original_timeout = _emb_mod._SUBPROCESS_RESPONSE_TIMEOUT
     _emb_mod._SUBPROCESS_RESPONSE_TIMEOUT = 180  # 3 min for cold start
-
+    failed = False
     try:
         from superlocalmemory.core.config import EmbeddingConfig
         from superlocalmemory.core.embeddings import EmbeddingService
@@ -3670,27 +4372,76 @@ def cmd_warmup(_args: Namespace) -> None:
         if not svc.is_available:
             print("\n[FAIL] Embedding service not available.")
             _warmup_diagnose()
-            return
-
-        print("Step 2/3: Loading model (may download ~500MB on first run)...")
-        emb = svc.embed("warmup test")
-
-        if emb and len(emb) == config.dimension:
-            print("Step 3/3: Verifying embedding output...")
-            print(f"\n[PASS] Model ready: {config.model_name} ({config.dimension}-dim)")
-            print("Semantic search is fully operational.")
+            failed = True
         else:
-            print("\n[FAIL] Model loaded but embedding verification failed.")
-            _warmup_diagnose()
+            print("Step 2/3: Loading model (may download ~500MB on first run)...")
+            emb = svc.embed("warmup test")
+            if emb and len(emb) == config.dimension:
+                print("Step 3/3: Verifying embedding output...")
+                print(f"\n[PASS] Model ready: {config.model_name} ({config.dimension}-dim)")
+                print("Semantic search is fully operational.")
+            else:
+                print("\n[FAIL] Model loaded but embedding verification failed.")
+                _warmup_diagnose()
+                failed = True
 
     except ImportError as exc:
         print(f"\n[FAIL] Missing dependency: {exc}")
         print("Fix: pip install sentence-transformers einops torch")
+        failed = True
     except Exception as exc:
         print(f"\n[FAIL] Warmup failed: {exc}")
         _warmup_diagnose()
+        failed = True
     finally:
         _emb_mod._SUBPROCESS_RESPONSE_TIMEOUT = original_timeout
+    if failed:
+        sys.exit(1)
+
+
+def _warmup_via_daemon(daemon_request, args: Namespace) -> None:
+    """Report warmup against a running daemon; exit non-zero unless ready.
+
+    PASS requires the daemon to report ``ready`` AND ``embedding_warm``. An
+    engine object alone is not enough -- the first recall after such a PASS
+    still paid the whole model load. A starting daemon is waited on up to
+    ``--timeout`` seconds; if it is still not ready, that is said plainly and
+    the command exits 1 so a script does not mistake it for success.
+    """
+    from superlocalmemory.cli.warmup_readiness import (
+        DEFAULT_WAIT_SECONDS, wait_until_warm,
+    )
+
+    timeout = getattr(args, "timeout", None)
+    timeout = DEFAULT_WAIT_SECONDS if timeout is None else max(0.0, float(timeout))
+
+    def _fetch():
+        try:
+            return daemon_request("GET", "/health")
+        except Exception:
+            return None
+
+    def _announce_wait() -> None:
+        print(f"Daemon is running; waiting up to {int(timeout)} s for it to be ready...")
+
+    verdict = wait_until_warm(_fetch, timeout, on_first_wait=_announce_wait)
+
+    if verdict.ready:
+        from superlocalmemory.core.config import EmbeddingConfig
+        cfg = EmbeddingConfig()
+        print("[PASS] Daemon is ready and the embedding model is loaded.")
+        print(f"       Model: {cfg.model_name} ({cfg.dimension}-dim)")
+        print("Semantic search is fully operational.")
+        return
+    if not verdict.reachable:
+        print("[FAIL] The daemon stopped answering while warmup waited.")
+        print("       Run: slm status   (or: slm doctor)")
+        sys.exit(1)
+    print(f"[INFO] The daemon is running but not ready yet: {verdict.detail}.")
+    print(f"       Waited {int(round(verdict.waited_seconds))} s. "
+          "Run `slm warmup` again in a minute, or `slm warmup --timeout 300` "
+          "to wait longer. If it stays like this, run: slm doctor")
+    sys.exit(1)
 
 
 def _warmup_diagnose() -> None:
@@ -3724,9 +4475,10 @@ def cmd_dashboard(args: Namespace) -> None:
     ensures the daemon is running and opens the browser. It does NOT
     start a separate server (saves ~500MB RAM from duplicate engine).
     """
-    from superlocalmemory.cli.daemon import ensure_daemon, _get_port
+    from superlocalmemory.cli.daemon import ensure_daemon
+    from superlocalmemory.cli.deployment import runtime_port
 
-    port = getattr(args, "port", None) or _get_port()
+    port = getattr(args, "port", None) or runtime_port()
 
     print("  SuperLocalMemory V4 — Web Dashboard")
     print(f"  Starting daemon if needed...")
@@ -3751,6 +4503,16 @@ def cmd_dashboard(args: Namespace) -> None:
 
 def _switch_profile_runtime(config, profile_name: str) -> dict:
     """Switch through the resident daemon, or persist an offline fallback."""
+    from superlocalmemory.cli.daemon_paths import validate_daemon_id
+
+    # Issue #148, same bug class: profile_name is interpolated straight into
+    # a daemon URL path below. The daemon's own validate_profile_name
+    # (server/routes/helpers.py) already restricts every profile it will
+    # accept to ^[a-zA-Z0-9_-]+$; reject anything else here too, before it
+    # is interpolated into a path, rather than letting http.client discover
+    # the problem.
+    validate_daemon_id(profile_name, label="profile name")
+
     from superlocalmemory.cli.daemon import daemon_request, is_daemon_running
 
     if is_daemon_running():
@@ -3929,7 +4691,8 @@ def _cmd_init_auto(
             f"setup_completed={_time.strftime('%Y-%m-%dT%H:%M:%S')}\n"
             f"python={sys.executable}\n"
             f"platform={platform.system()}\n"
-            f"version={platform.python_version()}\n"
+            f"version={platform.python_version()}\n",
+            encoding="utf-8",
         )
     except Exception:
         pass  # best-effort — sentinel is advisory only
@@ -4131,14 +4894,16 @@ def cmd_hooks(args: Namespace) -> None:
 
 def cmd_codex(args: Namespace) -> None:
     """Manage explicit, SLM-owned Codex skills, agents, and lifecycle hooks."""
-    from superlocalmemory.hooks.codex_assets import install_assets, remove_assets, status_assets
+    from superlocalmemory.hooks.codex_assets import (
+        AGENTS, SKILLS, install_assets, remove_assets, status_assets,
+    )
     from superlocalmemory.hooks.codex_hooks import install_hooks, remove_hooks, check_status
 
     action, dry_run = getattr(args, "action", "status"), getattr(args, "dry_run", False)
     if action == "install":
         assets, hooks = install_assets(dry_run=dry_run), install_hooks(dry_run=dry_run)
         if assets.get("success") and hooks.get("success"):
-            print(f"SLM Codex add-ons {'would be installed' if dry_run else 'installed'}: 7 skills, 2 subagents, 4 lifecycle hooks.")
+            print(f"SLM Codex add-ons {'would be installed' if dry_run else 'installed'}: {len(SKILLS)} skills, {len(AGENTS)} subagents, 4 lifecycle hooks.")
             print("MCP wiring remains explicit: run `slm connect codex` if it is not already configured.")
             print("Review and trust newly installed hooks in Codex with /hooks.")
         else:
@@ -4153,7 +4918,7 @@ def cmd_codex(args: Namespace) -> None:
         return
     assets, hooks = status_assets(), check_status()
     print(f"SLM Codex add-ons: {'INSTALLED' if assets['installed'] and hooks['installed'] else 'NOT INSTALLED'}")
-    print(f"  Skills: {len(assets['skills'])}/7; subagents: {len(assets['agents'])}/2")
+    print(f"  Skills: {len(assets['skills'])}/{len(SKILLS)}; subagents: {len(assets['agents'])}/{len(AGENTS)}")
     print(f"  Hooks: {', '.join(hooks.get('hook_types', [])) or 'none'}")
 
 
@@ -4189,9 +4954,12 @@ def cmd_session_context(args: Namespace) -> None:
                 engine=engine,
                 config={"enabled": True, "max_memories_injected": 10, "relevance_threshold": 0.3},
             )
-            context = auto.get_session_context(
-                query=getattr(args, "query", "") or "recent decisions and important context",
-            )
+            # Loading context, not answering a question: never judged.
+            from superlocalmemory.core.answer_check_scope import skip_answer_check
+            with skip_answer_check():
+                context = auto.get_session_context(
+                    query=getattr(args, "query", "") or "recent decisions and important context",
+                )
             if context:
                 if use_json:
                     from superlocalmemory.cli.json_output import json_print
@@ -4226,11 +4994,7 @@ def cmd_session_context(args: Namespace) -> None:
 
         # Core Memory blocks (compiled high-value context)
         try:
-            cm_rows = _read_rows(
-                "SELECT block_type, content FROM core_memory_blocks "
-                "WHERE profile_id = ? ORDER BY block_type",
-                (pid,),
-            )
+            cm_rows = _core_block_rows(db_path, pid)
             for r in cm_rows:
                 content = f"[{r['block_type']}] {r['content']}"
                 inj_mems.append(InjectableMemory(
@@ -4444,7 +5208,7 @@ def cmd_observe(args: Namespace) -> None:
 
         try:
             config = SLMConfig.load()
-            engine = MemoryEngine(config)
+            engine = MemoryEngine(_without_answer_check(config))
             engine.initialize()
 
             from superlocalmemory.core.engine_ingestion import (
@@ -4490,7 +5254,7 @@ def cmd_decay(args: Namespace) -> None:
 
     try:
         config = SLMConfig.load()
-        engine = MemoryEngine(config)
+        engine = MemoryEngine(_without_answer_check(config))
         engine.initialize()
         pid = profile or engine.profile_id
 
@@ -4535,8 +5299,22 @@ def cmd_decay(args: Namespace) -> None:
     print(f"  Transitions:  {result.get('transitions', 0)}")
 
 
+def cmd_enrich(args: Namespace) -> None:
+    """slm enrich: the automatic background improvements (cli/enrich_cmd.py)."""
+    from superlocalmemory.cli.enrich_cmd import cmd_enrich as _run
+
+    _run(args)
+
+
 def cmd_quantize(args: Namespace) -> None:
     """Run EAP embedding quantization cycle."""
+    if getattr(args, "repair_sketches", False):
+        from superlocalmemory.cli.quantize_repair import cmd_repair_sketches
+
+        cmd_repair_sketches(args)
+        return
+    from dataclasses import replace
+
     from superlocalmemory.core.admission import gate_cli_mutation
     from superlocalmemory.core.operation_request import OperationKind
     gate_cli_mutation(OperationKind.CONSOLIDATE)
@@ -4549,7 +5327,7 @@ def cmd_quantize(args: Namespace) -> None:
 
     try:
         config = SLMConfig.load()
-        engine = MemoryEngine(config)
+        engine = MemoryEngine(_without_answer_check(config))
         engine.initialize()
         pid = profile or engine.profile_id
 
@@ -4563,7 +5341,8 @@ def cmd_quantize(args: Namespace) -> None:
         from superlocalmemory.math.qjl import QJLEncoder
 
         ebbinghaus = EbbinghausCurve(config.forgetting)
-        polar = PolarQuantEncoder(config.quantization.polar)
+        polar = PolarQuantEncoder(replace(config.quantization.polar,
+                                          dimension=config.embedding.dimension))
         qjl = QJLEncoder(config.quantization.qjl)
         qstore = QuantizedEmbeddingStore(
             engine._db, polar, qjl, config.quantization,
@@ -4571,6 +5350,14 @@ def cmd_quantize(args: Namespace) -> None:
         scheduler = EAPScheduler(
             engine._db, ebbinghaus, qstore, config.quantization,
         )
+        plan = scheduler.run_eap_cycle(pid, dry_run=True) if not dry_run else None
+        if plan is not None:
+            from superlocalmemory.cli.quantize_repair import print_plan
+
+            print_plan(plan, file=sys.stderr if use_json else None)
+            if plan.get("errors") or plan.get("repair_errors"):
+                raise RuntimeError(
+                    "Quantization preview failed; nothing was applied. Run slm doctor.")
         result = scheduler.run_eap_cycle(pid, dry_run=dry_run)
     except Exception as exc:
         if use_json:
@@ -4581,7 +5368,7 @@ def cmd_quantize(args: Namespace) -> None:
 
     if use_json:
         from superlocalmemory.cli.json_output import json_print
-        json_print("quantize", data={"dry_run": dry_run, **result},
+        json_print("quantize", data={"dry_run": dry_run, "plan": plan, **result},
                    next_actions=[
                        {"command": "slm quantize --execute --json", "description": "Apply changes"},
                        {"command": "slm status --json", "description": "Check status"},
@@ -4594,6 +5381,11 @@ def cmd_quantize(args: Namespace) -> None:
     print(f"  Upgrades:    {result.get('upgrades', 0)}")
     print(f"  Skipped:     {result.get('skipped', 0)}")
     print(f"  Errors:      {result.get('errors', 0)}")
+
+    print(f"  QJL repair needed: {result.get('repair_needed', 0)}")
+    print(f"  QJL repaired:      {result.get('repaired', 0)}")
+    print(f"  QJL repair errors: {result.get('repair_errors', 0)}")
+    print(f"  Need re-embedding: {result.get('unrecoverable', 0)}")
 
 
 def cmd_consolidate(args: Namespace) -> None:
@@ -4624,7 +5416,7 @@ def cmd_consolidate(args: Namespace) -> None:
 
     try:
         config = SLMConfig.load()
-        engine = MemoryEngine(config)
+        engine = MemoryEngine(_without_answer_check(config))
         engine.initialize()
         pid = profile or engine.profile_id
 
@@ -4673,7 +5465,7 @@ def cmd_soft_prompts(args: Namespace) -> None:
 
     try:
         config = SLMConfig.load()
-        engine = MemoryEngine(config)
+        engine = MemoryEngine(_without_answer_check(config))
         engine.initialize()
         pid = profile or engine.profile_id
 
@@ -4787,3 +5579,18 @@ def cmd_reap(args: Namespace) -> None:
     if dry_run and orphans > 0:
         print("\n  Use --force to kill orphaned processes.")
         print("  Use --all to kill ALL slm mcp sessions (after IDE switch).")
+
+
+def _core_block_rows(db_path: object, profile_id: str) -> list:
+    """Core-memory blocks for context injection, minus any that quote a fact
+    whose erasure has started (projection_tombstones)."""
+    from superlocalmemory.storage.erasure_visibility import aggregate_erasure_clause
+    from superlocalmemory.storage.memory_write import memory_read
+
+    with memory_read(db_path) as conn:
+        return conn.execute(
+            "SELECT block_type, content FROM core_memory_blocks WHERE profile_id = ?"
+            + aggregate_erasure_clause(conn, "core_memory_blocks", column="source_fact_ids")
+            + " ORDER BY block_type",
+            (profile_id,),
+        ).fetchall()

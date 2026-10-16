@@ -16,13 +16,10 @@ ONNX models, or heavy dependencies. All recall is mocked.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 
 def _make_queue(tmp_path: Path):

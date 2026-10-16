@@ -32,8 +32,6 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
-
 from superlocalmemory.storage.migrations import (
     M043_quarantine_display_summaries as m043,
 )

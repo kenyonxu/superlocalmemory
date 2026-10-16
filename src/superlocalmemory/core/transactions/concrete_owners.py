@@ -426,7 +426,12 @@ class VectorOwner(_FactScopedOwner):
     def _fingerprints(self, context: OperationContext) -> dict[str, str]:
         if not context.fact_ids or not self._store_available():
             return {}
-        indexed = self._vector_store.indexed_fact_ids(context.profile_id)
+        # Only this operation's facts: the whole-profile read cost 2.4 s on a
+        # 22k-vector store, three times per save. Same answer for these ids.
+        if getattr(type(self._vector_store), "indexed_among", None) is not None:
+            indexed = self._vector_store.indexed_among(context.profile_id, context.fact_ids)
+        else:
+            indexed = self._vector_store.indexed_fact_ids(context.profile_id)
         candidates = [fid for fid in context.fact_ids if fid in indexed]
         if not candidates:
             return {}
@@ -521,13 +526,33 @@ class VectorOwner(_FactScopedOwner):
 
     def _remove(self, context: OperationContext, fact_id: str) -> None:
         if self._vector_store is not None and hasattr(self._vector_store, "delete"):
-            self._vector_store.delete(fact_id)
+            from superlocalmemory.retrieval.vector_store import classify_delete
+
+            # A failed delete is an error of this owner, not "nothing to remove":
+            # the erasure receipt must not read as clean on the strength of it.
+            if classify_delete(self._vector_store.delete(fact_id)).failed:
+                raise RuntimeError(f"vector delete failed for {fact_id}")
         else:
-            self._db.execute(
-                "DELETE FROM embedding_metadata WHERE fact_id = ?", (fact_id,)
-            )
+            self._remove_without_store(fact_id)
         if self._ann_index is not None and hasattr(self._ann_index, "remove"):
             self._ann_index.remove(fact_id)
+
+    def _remove_without_store(self, fact_id: str) -> None:
+        """No ``VectorStore`` here (a command-line erasure): remove the vector itself.
+
+        Deleting the bookkeeping rows alone left the vector in the index with
+        nothing pointing at it, which is exactly the copy an erasure is asked to
+        remove.
+        """
+        db_path = getattr(self._db, "db_path", None)
+        if db_path is not None:
+            from superlocalmemory.retrieval import vector_physical
+
+            outcome = vector_physical.purge_facts(db_path, [fact_id])
+            if outcome.remaining:
+                raise RuntimeError(f"vector of {fact_id} is still in the index")
+            return
+        self._db.execute("DELETE FROM embedding_metadata WHERE fact_id = ?", (fact_id,))
 
 
 def _admission_owners(engine: Any) -> dict[str, Any]:
@@ -548,12 +573,20 @@ def build_transaction_service(engine: Any) -> MemoryTransactionService:
     return MemoryTransactionService(_admission_owners(engine))
 
 
+def _media_owner(db: Any, data_root: Any = None) -> Any:
+    # Imported here: the image store is optional and nothing above it is needed to save text.
+    from superlocalmemory.media.erasure import MediaErasureOwner
+
+    return MediaErasureOwner(db, data_root=data_root)
+
+
 def build_erasure_service(engine: Any) -> ErasureService:
     audit_logger = _audit_chain_logger()
-    return ErasureService(_admission_owners(engine), audit_logger=audit_logger)
+    owners = {**_admission_owners(engine), "media": _media_owner(engine._db)}
+    return ErasureService(owners, audit_logger=audit_logger)
 
 
-def build_erasure_service_for_db(db: Any, engine: Any = None) -> ErasureService:
+def build_erasure_service_for_db(db: Any, engine: Any = None, data_root: Any = None) -> ErasureService:
     """Build an ErasureService given a db wrapper and an optional engine.
 
     Used by GDPR erasure paths that have a db handle but may not have an
@@ -561,13 +594,16 @@ def build_erasure_service_for_db(db: Any, engine: Any = None) -> ErasureService:
     """
     audit_logger = _audit_chain_logger()
     owners: dict[str, Any] = {
-        "bm25": Bm25Owner(db),
+        # The live keyword index too: without it an erased person's words
+        # stayed searchable in the running daemon until its next restart.
+        "bm25": Bm25Owner(db, retrieval=getattr(engine, "_retrieval_engine", None)),
         "temporal": TemporalOwner(db),
         "vector": VectorOwner(
             db,
             vector_store=getattr(engine, "_vector_store", None),
             ann_index=getattr(engine, "_ann_index", None),
         ),
+        "media": _media_owner(db, data_root),
     }
     return ErasureService(owners, audit_logger=audit_logger)
 

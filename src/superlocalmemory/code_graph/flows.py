@@ -14,12 +14,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections import deque
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from superlocalmemory.code_graph.database import CodeGraphDatabase
-from superlocalmemory.code_graph.models import EdgeKind, NodeKind
+from superlocalmemory.code_graph.models import EdgeKind
 
 logger = logging.getLogger(__name__)
 

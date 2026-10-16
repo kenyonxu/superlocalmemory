@@ -19,24 +19,48 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import math
-import random
+import secrets
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
-
-import numpy as np
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from superlocalmemory.optimize.storage.db import CacheDB
 
 logger = logging.getLogger(__name__)
 
-# Module-level RNG instance — tests can seed via _RNG.seed(42) for determinism.
-_RNG = random.Random()
+#: W3 (4.1.22): the explore draw is keyed by this install's secret, the same way
+#: learning/bandit_draw.py keys its draw, so which queries get re-asked is not
+#: predictable to anyone who can see or guess a record's state but lacks the key.
+_EXPLORE_KEY_LABEL = b"slm:vcache-explore:v1"
+_PROCESS_FALLBACK_KEY = secrets.token_bytes(32)
+_explore_keys: dict[str, bytes] = {}
+
+
+def _explore_key() -> bytes:
+    """The install-derived key for the explore draw, cached per token file."""
+    try:
+        from superlocalmemory.core.security_primitives import (
+            _install_token_path,
+            ensure_install_token,
+        )
+
+        path = str(_install_token_path())
+        key = _explore_keys.get(path)
+        if key is None:
+            token = ensure_install_token()
+            key = hmac.new(token.encode("utf-8"), _EXPLORE_KEY_LABEL, hashlib.sha256).digest()
+            _explore_keys[path] = key
+        return key
+    except Exception as exc:  # noqa: BLE001 — token I/O failure; still a secret draw
+        logger.debug("vcache explore: install key unavailable (%s)", type(exc).__name__)
+        return _PROCESS_FALLBACK_KEY
 
 # Optional scipy MLE (N-D L-BFGS-B). Fall back to gradient descent if absent.
 try:
@@ -47,6 +71,17 @@ except ImportError:  # pragma: no cover
     _sp_minimize = None  # type: ignore[assignment]
 
 _BOUNCE_EPS: float = 1e-9
+
+# The fit's search box: t in [_T_MIN, _T_MAX], gamma in [_GAMMA_MIN, _GAMMA_MAX].
+_T_MIN, _T_MAX = 0.5, 1.0
+_GAMMA_MIN, _GAMMA_MAX = 0.1, 100.0
+
+# L-BFGS-B factorizes a matrix whose order is the number of stored
+# corrections, through native LAPACK (Accelerate's dpotrf on macOS, which has
+# a reported out-of-bounds fault at large orders). Bounding the corrections
+# keeps that matrix at most 10 x 10 however many samples arrive. 10 is SciPy's
+# own default, so the fit itself is unchanged.
+_LBFGSB_MAX_CORRECTIONS: int = 10
 
 # LRU cap for the in-memory write-through cache.  Records are durable in
 # SQLite (boundary_upsert), so eviction from _cache is lossless — a miss
@@ -165,13 +200,36 @@ class PerItemBoundaryRecord:
         query_sim: float,
         delta: float = 0.05,
         return_threshold: float = 1.0,
+        draw: float | None = None,
     ) -> bool:
         """Return True (explore = LLM call) or False (exploit = serve cache).
 
         Source: vCache Algorithm 2: draw u ~ Uniform(0, 1); explore iff u ≤ τ̂.
+
+        ``u`` is :meth:`explore_draw` unless the caller passes ``draw``: a
+        pure function of this record and the query similarity, so the same
+        cache state answers the same query the same way every time, while a
+        new outcome (which changes the record) gives a fresh draw.
         """
         tau = self.compute_tau(query_sim, delta=delta, return_threshold=return_threshold)
-        return _RNG.random() <= tau
+        u = self.explore_draw(query_sim) if draw is None else float(draw)
+        return u <= tau
+
+    def explore_draw(self, query_sim: float) -> float:
+        """u in [0, 1), keyed on this record's state and the query similarity,
+        under this install's secret (W3): repeatable here, unpredictable elsewhere.
+
+        The similarity is rounded to 6 places, so float noise from different
+        platforms' arithmetic does not turn one query into two draws.
+        """
+        material = json.dumps(
+            [self.entry_id, repr(float(self.t_hat)), repr(float(self.gamma_hat)),
+             [[repr(float(s)), int(c)] for s, c in self.samples],
+             f"{float(query_sim):.6f}"],
+            ensure_ascii=True,
+        )
+        digest = hmac.new(_explore_key(), material.encode("utf-8"), hashlib.sha256).digest()
+        return int.from_bytes(digest[:8], "big") / 2.0**64
 
     def add_sample(
         self,
@@ -213,14 +271,6 @@ def _sigmoid(s: float, t: float, gamma: float) -> float:
     return 1.0 / (1.0 + math.exp(exponent))
 
 
-def _rng() -> float:
-    """u ~ Uniform(0, 1) for the vCache exploit/explore draw.
-
-    Tests can seed via `boundary_store._RNG.seed(N)` for determinism.
-    """
-    return _RNG.random()
-
-
 def _binary_cross_entropy(
     params: tuple[float, float],
     samples: list[tuple[float, int]],
@@ -241,15 +291,18 @@ def _fit_logistic_mle(
     samples: list[tuple[float, int]],
     t_init: float,
     gamma_init: float,
-    t_prior: float = 0.95,
 ) -> tuple[float, float]:
     """Fit (t̂, γ̂) via MLE on `samples`. L-BFGS-B if scipy, else gradient descent.
 
     Fail-open: returns (t_init, gamma_init) on any error.
 
-    The prior pulls the solution toward (t_prior, 10.0) so a single sample
-    does not collapse the boundary to the saturating corner. This is
-    required for stable online learning.
+    When every outcome agrees, the likelihood has no interior optimum: it keeps
+    improving toward a corner of the search box, and an iterative optimiser
+    stops wherever its tolerances happen to trip. That stopping point moved
+    gamma from 45.9 to 37.9 for a 1e-9 change in the input (and so with each
+    platform's floating point), which moved the explore probability at
+    similarity 1.0 from 0 to 8%. So that case returns the corner itself
+    (:func:`_agreeing_outcomes_corner`), not an optimiser's stopping point.
 
     Warm-start trick: t_init is nudged toward the empirical midpoint of
     the sample similarities. This avoids L-BFGS-B's "already-at-optimum"
@@ -258,6 +311,10 @@ def _fit_logistic_mle(
     """
     if not samples:
         return t_init, gamma_init
+
+    corner = _agreeing_outcomes_corner(samples)
+    if corner is not None:
+        return corner
 
     # Warm-start: empirical midpoint of positive vs negative clusters.
     pos = [s for s, c in samples if c == 1]
@@ -277,8 +334,9 @@ def _fit_logistic_mle(
                 ),
                 x0=[t_warm, gamma_warm],
                 method="L-BFGS-B",
-                bounds=[(0.5, 1.0), (0.1, 100.0)],
-                options={"maxiter": 200, "ftol": 1e-10, "gtol": 1e-8},
+                bounds=[(_T_MIN, _T_MAX), (_GAMMA_MIN, _GAMMA_MAX)],
+                options={"maxiter": 200, "ftol": 1e-10, "gtol": 1e-8,
+                         "maxcor": _LBFGSB_MAX_CORRECTIONS},
             )
             t_out, g_out = float(result.x[0]), float(result.x[1])
             # Guard: refuse to return a value outside the observed sample range
@@ -289,6 +347,28 @@ def _fit_logistic_mle(
         except Exception:
             pass
     return _fit_logistic_gd(samples, t_warm, gamma_warm)
+
+
+def _agreeing_outcomes_corner(
+    samples: list[tuple[float, int]],
+) -> tuple[float, float] | None:
+    """The bounded MLE when every outcome agrees; ``None`` otherwise.
+
+    All hits: the loss falls as the boundary moves down and the curve gets
+    steeper, so the optimum is t at its lower bound and gamma at its upper
+    bound. All misses: it falls as the boundary moves up, so t at its upper
+    bound, gamma at its upper bound — every similarity seen so far was wrong,
+    so the boundary sits above them, steeply. t is then held inside the
+    observed similarities, the same rule as every other fit here: the lowest
+    seen for all hits, the highest seen for all misses.
+    """
+    outcomes = {c for _, c in samples}
+    if len(outcomes) != 1:
+        return None
+    sims = [s for s, _ in samples]
+    lo, hi = min(sims), max(sims)
+    t_bound = _T_MIN if outcomes == {1} else _T_MAX
+    return max(lo, min(hi, t_bound)), _GAMMA_MAX
 
 
 def _fit_logistic_gd(

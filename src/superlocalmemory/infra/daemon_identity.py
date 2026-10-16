@@ -10,7 +10,6 @@ random process instance through a private, atomically written descriptor.
 
 from __future__ import annotations
 
-import getpass
 import hashlib
 import hmac
 import json
@@ -23,10 +22,13 @@ import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from superlocalmemory.infra.data_root import canonical_data_root
 from superlocalmemory.infra.process_identity import process_start_token_for
+
+if TYPE_CHECKING:  # typing only: infra must not depend on the lock module at runtime
+    from superlocalmemory.infra.instance_lock import InstanceLock
 
 DAEMON_DESCRIPTOR_SCHEMA = 1
 DAEMON_PROTOCOL = 1
@@ -59,7 +61,9 @@ def owner_id() -> str:
     getuid = getattr(os, "getuid", None)
     if getuid is not None:
         return f"uid:{getuid()}"
-    return f"user:{getpass.getuser()}"
+    from superlocalmemory.core.platform_utils import current_user_name
+
+    return f"user:{current_user_name()}"
 
 
 def process_create_time_for(pid: int) -> float:
@@ -173,7 +177,9 @@ def _restrict_to_owner(path: Path) -> None:
     """
     if sys.platform == "win32":
         try:
-            user = getpass.getuser()
+            from superlocalmemory.core.platform_utils import current_account
+
+            user = current_account()
             subprocess.run(
                 ["icacls", str(path), "/inheritance:r"],
                 check=False, capture_output=True,
@@ -282,6 +288,37 @@ def descriptor_matches_health(
     return True
 
 
+def health_is_same_account(
+    health: Mapping[str, Any],
+    *,
+    data_root: str | Path | None = None,
+) -> bool:
+    """An SLM daemon of this account and this data folder answered.
+
+    Weaker than :func:`descriptor_matches_health` (it does not prove the exact
+    process), for callers that must recognise a sibling daemon of their own
+    namespace whose instance the descriptor no longer records. A daemon run by
+    another account on this computer never passes: its owner differs, and so
+    does its data folder.
+    """
+    root = _canonical_path(data_root) if data_root is not None else canonical_data_root()
+    expected = {
+        "service": DAEMON_SERVICE,
+        "daemon_protocol": str(DAEMON_PROTOCOL),
+        "owner_id": owner_id(),
+        "namespace_id": namespace_id_for(root),
+    }
+    return all(hmac.compare_digest(str(value), str(health.get(key, "")))
+               for key, value in expected.items())
+
+
+def health_is_other_account(health: Mapping[str, Any]) -> bool:
+    """The answer came from an SLM daemon run by another account on this computer."""
+    other = str(health.get("owner_id", "") or "")
+    return (str(health.get("service", "")) == DAEMON_SERVICE
+            and bool(other) and other != owner_id())
+
+
 def clear_descriptor(
     instance_id: str,
     *,
@@ -298,3 +335,67 @@ def clear_descriptor(
         return True
     except OSError:
         return False
+
+
+def write_mirror_atomic(path: Path, text: str) -> None:
+    """Write a plain-text mirror (pid or port) atomically with mode 0600."""
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def publish_if_owner(descriptor: DaemonDescriptor, lock: "InstanceLock") -> bool:
+    """Publish the daemon record, but only as the holder of the instance lock.
+
+    The record names the one process that owns the data folder. A process that
+    does not hold the lock never writes it, however it came to believe it
+    should; that is what keeps a losing starter from overwriting the winner.
+    """
+    still_owns = getattr(lock, "still_owns_file", None)
+    if not lock.held or (still_owns is not None and not still_owns()):
+        logger.warning("not the instance-lock owner; record untouched")
+        return False
+    root = _canonical_path(descriptor.data_root)
+    write_descriptor(descriptor, data_root=root)
+    base = root / "daemon.json"
+    # Mirrors are a courtesy; a reader holding one open (Windows) must not
+    # fail a daemon start. The guardian repairs a missing mirror.
+    for name, value in (("daemon.pid", descriptor.pid), ("daemon.port", descriptor.port)):
+        try:
+            write_mirror_atomic(base.with_name(name), str(value))
+        except OSError as exc:
+            logger.warning("could not write the %s mirror: %s", name, exc)
+    return True
+
+
+def clear_descriptor_if_owner(
+    instance_id: str,
+    lock: "InstanceLock",
+    *,
+    data_root: str | Path | None = None,
+) -> bool:
+    """Remove the record and its mirrors, only as owner of that instance."""
+    if not lock.held:
+        return False
+    descriptor = read_descriptor(data_root=data_root)
+    if descriptor is None or not clear_descriptor(instance_id, data_root=data_root):
+        return False
+    base = descriptor_path(data_root)
+    for name, expected in (
+        ("daemon.pid", str(descriptor.pid)),
+        ("daemon.port", str(descriptor.port)),
+    ):
+        path = base.with_name(name)
+        try:
+            if path.read_text(encoding="utf-8").strip() == expected:
+                path.unlink()
+        except OSError:
+            pass
+    return True

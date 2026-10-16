@@ -300,8 +300,7 @@ def test_get_fail_open_on_corrupt_db(
 
 def test_c06_aes_key_persisted_to_file(tmp_path: Path) -> None:
     """C-06: _get_or_persist_aes_key() must write 32 bytes to opt-key.bin on first open."""
-    from superlocalmemory.optimize.storage.db import CacheDB, _KEY_FILE
-    import importlib
+    from superlocalmemory.optimize.storage.db import CacheDB
 
     key_file = tmp_path / "opt-key.bin"
 

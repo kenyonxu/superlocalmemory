@@ -25,13 +25,12 @@ the production write boundary -- that is ``unified_daemon.py``'s
 ``unified_daemon.py`` and must not be removed.
 """
 
-import json
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -200,9 +199,16 @@ def create_app() -> FastAPI:
     from superlocalmemory.server.routes.v3_api import router as v3_router
 
     application.include_router(memories_router)
+    # 4.1.21: the summary routes moved out of memories.py; saved views are new.
+    from superlocalmemory.server.routes.summaries import router as summaries_router
+    from superlocalmemory.server.routes.views import router as views_router
+    application.include_router(summaries_router)
+    application.include_router(views_router)
     application.include_router(stats_router)
     application.include_router(profiles_router)
     application.include_router(backup_router)
+    from superlocalmemory.server.routes.backup_encryption import router as backup_encryption_router
+    application.include_router(backup_encryption_router)
     application.include_router(data_io_router)
     application.include_router(events_router)
     application.include_router(agents_router)
@@ -270,7 +276,7 @@ def create_app() -> FastAPI:
                 "asset version rewrite unavailable, serving index.html as "
                 "written: %s: %s", type(exc).__name__, exc,
             )
-            return index_path.read_text().replace("__SLM_VERSION__", _v)
+            return index_path.read_text(encoding="utf-8").replace("__SLM_VERSION__", _v)
 
     @application.get("/health")
     async def health_check():
@@ -285,6 +291,12 @@ def create_app() -> FastAPI:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
+    # Outermost: another computer needs credentials (access_gate), and a
+    # proxied request never counts as local (forwarded_guard).
+    from superlocalmemory.server.access_gate import NonLocalAccessGate
+    from superlocalmemory.server.forwarded_guard import ForwardedLoopbackDemotion
+    application.add_middleware(NonLocalAccessGate)
+    application.add_middleware(ForwardedLoopbackDemotion)
     return application
 
 
@@ -305,6 +317,8 @@ if __name__ == "__main__":
     print("API Documentation: http://localhost:8000/docs")
     print("\nPress Ctrl+C to stop\n")
 
+    from superlocalmemory.server.forwarded_guard import uvicorn_proxy_options
     uvicorn.run(
         app, host="127.0.0.1", port=8000, log_level="info",
+        **uvicorn_proxy_options(),
     )

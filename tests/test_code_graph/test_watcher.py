@@ -10,11 +10,9 @@ excluded directory filtering, start/stop lifecycle.
 from __future__ import annotations
 
 import time
-import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from superlocalmemory.code_graph.watcher import (
     DEBOUNCE_SECONDS,

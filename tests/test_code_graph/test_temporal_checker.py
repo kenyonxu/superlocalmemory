@@ -8,8 +8,6 @@ from __future__ import annotations
 import pytest
 
 from superlocalmemory.code_graph.bridge.temporal_checker import (
-    DeletedCodeMemory,
-    StaleLink,
     TemporalChecker,
 )
 from superlocalmemory.code_graph.database import CodeGraphDatabase

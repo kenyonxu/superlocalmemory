@@ -14,6 +14,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { CURSOR_SKILLS } from '../build-cursor-plugin.mjs';
 
 // ---------------------------------------------------------------------------
 // Module path (relative to this file location: scripts/__tests__/)
@@ -52,8 +53,10 @@ function readFile(p) {
   return fs.readFileSync(p, 'utf8');
 }
 
-// The 7 new skills
-const NEW_SKILLS = [
+// The fixture skills: a few named ones plus every CURSOR_SKILLS name, since
+// cursorPlan() requires each of those to exist in the rendered skills plan
+// (fails loudly otherwise, like the missing-logo check).
+const NEW_SKILLS = [...new Set([
   'slm-cache',
   'slm-compress',
   'slm-graph',
@@ -61,7 +64,11 @@ const NEW_SKILLS = [
   'slm-remember',
   'slm-session',
   'slm-status',
-];
+  // A skill outside CURSOR_SKILLS, so pruneOrphans can remove one without
+  // cursorPlan() refusing the build for a missing Cursor skill.
+  'slm-prune-fixture',
+  ...CURSOR_SKILLS,
+])];
 
 // Minimal fixture manifest — DOC-CORRECT layout
 function makeManifest(overrides = {}) {
@@ -148,6 +155,10 @@ function setupFixture(tmp, overrides = {}) {
   writeFile(tmp, 'plugin-src/settings.json', '{"permissions":{"allow":[]}}\n');
   writeFile(tmp, 'plugin-src/requirements.txt', 'superlocalmemory>=3.6.14\n');
   writeFile(tmp, 'plugin-src/rules/CLAUDE.md.fragment', '<!-- SLM -->\n');
+  writeFile(tmp, 'assets/branding/slm-mark.svg', '<svg xmlns="http://www.w3.org/2000/svg"/>\n');
+  // The plugin README and licence the Claude plugin directory requires (4.2.6).
+  writeFile(tmp, 'plugin-src/docs/README.md', '# SuperLocalMemory plugin\n');
+  writeFile(tmp, 'LICENSE', 'GNU AFFERO GENERAL PUBLIC LICENSE\n');
   return manifest;
 }
 
@@ -208,7 +219,9 @@ describe('renderPluginJson', () => {
     // REGRESSION: author.url must NOT be silently dropped
     assert.equal(parsed.author.url, 'https://github.com/qualixar/superlocalmemory');
     // pointers relative to plugin root
-    assert.ok(parsed.hooks && parsed.hooks.includes('hooks.json'), 'hooks pointer present');
+    // No hooks pointer (6698da5a): Claude Code loads plugin/hooks/hooks.json by
+    // convention, and declaring it too made it load twice and reject the plugin.
+    assert.equal(parsed.hooks, undefined, 'hooks pointer must be absent');
     assert.ok(parsed.mcpServers && parsed.mcpServers.includes('.mcp.json'), 'mcpServers pointer present');
     // keys must be sorted at top level
     const keys = Object.keys(parsed);
@@ -223,10 +236,10 @@ describe('renderPluginJson', () => {
 });
 
 // ---------------------------------------------------------------------------
-// TEST 3 — renderMarketplaceJson: source="./plugin", no version in plugin entry
+// TEST 3 — renderMarketplaceJson: Claude Code and Codex entries, both versioned
 // ---------------------------------------------------------------------------
 describe('renderMarketplaceJson', () => {
-  test('source="./plugin", no version in plugin entry, owner.name=Qualixar', async () => {
+  test('source="./plugin" + Codex entry, versioned entries, owner.name=Qualixar', async () => {
     const { renderMarketplaceJson } = await getModule();
     const manifest = makeManifest();
     const json = renderMarketplaceJson(manifest);
@@ -234,12 +247,18 @@ describe('renderMarketplaceJson', () => {
     assert.equal(parsed.name, 'qualixar');
     assert.equal(parsed.owner.name, 'Qualixar');
     assert.ok(Array.isArray(parsed.plugins));
-    assert.equal(parsed.plugins.length, 1);
+    // Two entries since 361ff1ec: the Codex build is offered under its own name
+    // so Codex no longer installs the Claude Code tree.
+    assert.equal(parsed.plugins.length, 2);
     assert.equal(parsed.plugins[0].name, 'superlocalmemory');
     // DOC-CORRECT: source must be "./plugin" not "./"
     assert.equal(parsed.plugins[0].source, './plugin', 'source must be ./plugin');
-    // AC-3: NO version key in plugin entry
-    assert.equal(parsed.plugins[0].version, undefined, 'plugin entry must have no version key');
+    assert.equal(parsed.plugins[1].name, 'superlocalmemory-codex');
+    assert.equal(parsed.plugins[1].source, './codex-plugin');
+    // Versioned since a8187098: without a version a client never sees an update.
+    for (const entry of parsed.plugins) {
+      assert.equal(entry.version, manifest.version, `${entry.name} must carry the version`);
+    }
   });
 });
 
@@ -247,28 +266,39 @@ describe('renderMarketplaceJson', () => {
 // TEST 4 — buildPlan: 7 skills in plugin/skills/, no commands/, marketplace at root
 // ---------------------------------------------------------------------------
 describe('buildPlan', () => {
-  test('builds 7 skills in plugin/skills/ + plugin.json + marketplace.json + agents + extras', async () => {
+  test('builds every fixture skill in plugin/skills/ + plugin.json + marketplace.json + agents + extras', async () => {
     const { buildPlan } = await getModule();
     const tmp = makeTmp();
     const manifest = setupFixture(tmp);
     const plan = buildPlan(tmp, manifest);
 
-    // 7 skill SKILL.md files
-    const skillFiles = [...plan.keys()].filter(k => k.endsWith('SKILL.md'));
-    assert.equal(skillFiles.length, 7, `expected 7 SKILL.md, got ${skillFiles.length}`);
+    // One SKILL.md per fixture skill, in plugin/skills/ specifically — NOT
+    // plugin/cursor-skills/, the curated subset, which also ends in
+    // "SKILL.md" and would otherwise double-count here.
+    const skillsDir = `plugin${path.sep}skills${path.sep}`;
+    const skillFiles = [...plan.keys()].filter(
+      (k) => k.endsWith('SKILL.md') && k.includes(skillsDir),
+    );
+    assert.equal(
+      skillFiles.length, NEW_SKILLS.length,
+      `expected ${NEW_SKILLS.length} SKILL.md, got ${skillFiles.length}`,
+    );
 
     // All in plugin/skills/
     for (const f of skillFiles) {
-      assert.ok(f.includes(`plugin${path.sep}skills${path.sep}`), `SKILL.md must be in plugin/skills/: ${f}`);
+      assert.ok(f.includes(skillsDir), `SKILL.md must be in plugin/skills/: ${f}`);
     }
 
     // plugin/.claude-plugin/plugin.json
-    const pluginJsonFiles = [...plan.keys()].filter(k => k.endsWith('plugin.json'));
+    // (plus the Cursor-format pair: plugin/.cursor-plugin/plugin.json and the
+    // repo-root .cursor-plugin/marketplace.json — tested in build-cursor-plugin.test.mjs)
+    const isCursor = (k) => k.includes(`${path.sep}.cursor-plugin${path.sep}`);
+    const pluginJsonFiles = [...plan.keys()].filter(k => k.endsWith('plugin.json') && !isCursor(k));
     assert.equal(pluginJsonFiles.length, 1);
     assert.ok(pluginJsonFiles[0].includes(`plugin${path.sep}.claude-plugin`), 'plugin.json must be in plugin/.claude-plugin/');
 
     // marketplace.json at repo .claude-plugin/ (not plugin/)
-    const marketplaceFiles = [...plan.keys()].filter(k => k.endsWith('marketplace.json'));
+    const marketplaceFiles = [...plan.keys()].filter(k => k.endsWith('marketplace.json') && !isCursor(k));
     assert.equal(marketplaceFiles.length, 1);
     // must be in <root>/.claude-plugin/marketplace.json
     const mf = marketplaceFiles[0];
@@ -281,6 +311,27 @@ describe('buildPlan', () => {
     // _GENERATED.md banner
     const banners = [...plan.keys()].filter(k => k.endsWith('_GENERATED.md'));
     assert.equal(banners.length, 1, 'exactly 1 _GENERATED.md banner in plugin root');
+  });
+
+  test('requirements-cpu-torch.txt propagates into plugin/ when present in plugin-src/', async () => {
+    const { buildPlan } = await getModule();
+    const tmp = makeTmp();
+    const manifest = setupFixture(tmp);
+    writeFile(tmp, 'plugin-src/requirements-cpu-torch.txt', 'torch==2.13.0\n');
+    const plan = buildPlan(tmp, manifest);
+    const pinFiles = [...plan.keys()].filter((k) => k.endsWith('requirements-cpu-torch.txt'));
+    assert.equal(pinFiles.length, 1, 'expected exactly one requirements-cpu-torch.txt in the plan');
+    assert.ok(pinFiles[0].includes(`plugin${path.sep}requirements-cpu-torch.txt`));
+    assert.equal(plan.get(pinFiles[0]), 'torch==2.13.0\n');
+  });
+
+  test('build does not fail when requirements-cpu-torch.txt is absent (optional rootFile)', async () => {
+    const { buildPlan } = await getModule();
+    const tmp = makeTmp();
+    const manifest = setupFixture(tmp); // no requirements-cpu-torch.txt written
+    const plan = buildPlan(tmp, manifest);
+    const pinFiles = [...plan.keys()].filter((k) => k.endsWith('requirements-cpu-torch.txt'));
+    assert.equal(pinFiles.length, 0);
   });
 
   test('manifest.targets.plugin validation: throws on missing plugin key', async () => {
@@ -382,21 +433,21 @@ describe('pruneOrphans', () => {
     const manifest = setupFixture(tmp);
     applyPlan(buildPlan(tmp, manifest));
 
-    // Simulate skill removed: build without slm-status
+    // Simulate skill removed: build without slm-prune-fixture
     const reducedManifest = makeManifest({
-      skills: manifest.skills.filter(s => s.name !== 'slm-status'),
+      skills: manifest.skills.filter(s => s.name !== 'slm-prune-fixture'),
     });
-    // Copy remaining skill sources (slm-status source stays — plugin-src untouched)
+    // Copy remaining skill sources (slm-prune-fixture source stays — plugin-src untouched)
     const reducedPlan = buildPlan(tmp, reducedManifest);
     const roots = deriveManagedRoots(tmp, reducedManifest);
     assert.ok(reducedPlan.size > 0, 'plan must not be empty');
 
     pruneOrphans(tmp, reducedPlan, roots);
 
-    // slm-status removed from plugin/
-    assert.ok(!fs.existsSync(path.join(tmp, 'plugin', 'skills', 'slm-status')));
+    // slm-prune-fixture removed from plugin/
+    assert.ok(!fs.existsSync(path.join(tmp, 'plugin', 'skills', 'slm-prune-fixture')));
     // plugin-src untouched
-    assert.ok(fs.existsSync(path.join(tmp, 'plugin-src', 'skills', 'slm-status', 'SKILL.md')));
+    assert.ok(fs.existsSync(path.join(tmp, 'plugin-src', 'skills', 'slm-prune-fixture', 'SKILL.md')));
   });
 
   test('pruneOrphans: escape guard never exits plugin/ root', async () => {
@@ -598,15 +649,24 @@ describe('Integration: real repo build', () => {
     assert.ok(fs.existsSync(p), '.claude-plugin/marketplace.json must exist');
     const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
     assert.equal(parsed.plugins[0].source, './plugin');
-    assert.equal(parsed.plugins[0].version, undefined, 'no version in marketplace plugin entry');
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(REPO_ROOT, 'plugin-src', 'manifest.json'), 'utf8'));
+    for (const entry of parsed.plugins) {
+      assert.equal(entry.version, manifest.version, `${entry.name} must carry the version`);
+    }
   });
 
-  test('plugin/.mcp.json has SLM_MCP_PROFILE=code', () => {
+  test('plugin/.mcp.json leaves the profile and data dir to the user', () => {
+    // 175b013f: forcing SLM_MCP_PROFILE dropped tools the user had chosen and
+    // SLM_DATA_DIR pointed the editor at an empty private store. Only the
+    // agent id (attribution, not configuration) is set.
     const p = path.join(REPO_ROOT, 'plugin', '.mcp.json');
     assert.ok(fs.existsSync(p), 'plugin/.mcp.json must exist');
     const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
     const server = Object.values(parsed.mcpServers)[0];
-    assert.equal(server.env.SLM_MCP_PROFILE, 'code', 'SLM_MCP_PROFILE must be code');
+    assert.equal(server.env.SLM_MCP_PROFILE, undefined, 'must not force a tool profile');
+    assert.equal(server.env.SLM_DATA_DIR, undefined, 'must not re-point the data dir');
+    assert.equal(server.env.SLM_AGENT_ID, 'claude_code');
   });
 
   test('all 7 skills exist in plugin/skills/', () => {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -16,6 +17,8 @@ from typing import Callable, Iterator
 
 from superlocalmemory.infra.data_root import state_path
 
+logger = logging.getLogger(__name__)
+
 _RUNTIME_BIND_LOCK = threading.Lock()
 _REQUEST_PROFILE: ContextVar[str | None] = ContextVar(
     "slm_request_profile", default=None,
@@ -25,6 +28,13 @@ _REQUEST_PROFILE: ContextVar[str | None] = ContextVar(
 # profile switch or engine reconfigure is aborted with HTTP 503.
 # Tests can monkeypatch this module-level value to keep runs fast.
 _DRAIN_TIMEOUT_SECS: float = 5.0
+
+#: Before that drain, how long a transition waits for background units already
+#: running (one memory being materialized, a warm-up recall) to finish, with new
+#: ones held back. Requests are served normally meanwhile. A background unit
+#: could hold its lease longer than the drain timeout on a large store, so a
+#: settings change or profile switch failed with 503 though nothing was wrong.
+_BACKGROUND_SETTLE_SECS: float = 30.0
 
 
 class TransitionDrainTimeout(Exception):
@@ -36,9 +46,29 @@ class TransitionDrainTimeout(Exception):
     """
 
 
+_REQUEST_PIN: ContextVar[object | None] = ContextVar("slm_request_pin", default=None)
+
+
 def current_request_profile() -> str | None:
     """Return the immutable profile snapshot admitted for this request."""
     return _REQUEST_PROFILE.get()
+
+
+def current_request_pin():
+    """The caller workspace pinned for this request (see ``caller_workspace``)."""
+    return _REQUEST_PIN.get()
+
+
+@contextmanager
+def pin_request_workspace(pin) -> Iterator[None]:
+    """Make ``pin`` this request's workspace for every gate and the handler."""
+    pin_token = _REQUEST_PIN.set(pin)
+    profile_token = _REQUEST_PROFILE.set(pin.profile_id)
+    try:
+        yield
+    finally:
+        _REQUEST_PROFILE.reset(profile_token)
+        _REQUEST_PIN.reset(pin_token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +87,8 @@ class ProfileRuntime:
         self._snapshot = ProfileSnapshot(profile_id, generation)
         self._active_operations = 0
         self._transitioning = False
+        self._background_paused = 0
+        self._background_active = 0  # leases taken through operation_nowait()
 
     @property
     def snapshot(self) -> ProfileSnapshot:
@@ -68,6 +100,36 @@ class ProfileRuntime:
         with self._condition:
             return self._transitioning
 
+    @property
+    def active_operations(self) -> int:
+        """Admitted operations in flight (a transition waits for these)."""
+        with self._condition:
+            return self._active_operations
+
+    @property
+    def background_paused(self) -> bool:
+        """Background work must not take a new lease (requests are still served)."""
+        with self._condition:
+            return self._background_paused > 0
+
+    @contextmanager
+    def pausing_background(self) -> Iterator[None]:
+        """Let a coming transition drain without waiting on background work.
+
+        A background unit (one memory being materialized) can hold its lease
+        longer than the drain timeout on a large store, so a transition never
+        found a gap. While this is held, background admission is skipped;
+        requests are admitted as usual.
+        """
+        with self._condition:
+            self._background_paused += 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._background_paused -= 1
+                self._condition.notify_all()
+
     def acquire_operation(self) -> ProfileSnapshot:
         """Admit an operation only when no profile transition is active."""
         with self._condition:
@@ -76,6 +138,23 @@ class ProfileRuntime:
             self._active_operations += 1
             return self._snapshot
 
+    def acquire_lease(self):
+        """Admit one foreground operation whose ownership can be transferred."""
+        from superlocalmemory.server.profile_lease import OperationLease
+
+        return OperationLease(self, self.acquire_operation())
+
+    def retain_operation(self, lease):
+        """Fork a live admission, including while its generation is draining."""
+        from superlocalmemory.server.profile_lease import OperationLease
+
+        with lease._lock, self._condition:
+            if (lease.runtime is not self or lease._released
+                    or lease.snapshot != self._snapshot):
+                raise RuntimeError("cannot retain an expired profile operation")
+            self._active_operations += 1
+            return OperationLease(self, lease.snapshot)
+
     def _try_acquire_operation_nowait(self) -> ProfileSnapshot | None:
         """Non-blocking acquire: returns None immediately when a transition is pending.
 
@@ -83,10 +162,30 @@ class ProfileRuntime:
         drain window of a pending profile switch.
         """
         with self._condition:
-            if self._transitioning:
+            if self._transitioning or self._background_paused:
                 return None
             self._active_operations += 1
+            self._background_active += 1
             return self._snapshot
+
+    def _release_background(self) -> None:
+        with self._condition:
+            self._background_active -= 1
+            self._condition.notify_all()
+        self.release_operation()
+
+    def _settle_background(self) -> None:
+        """With background admission paused (caller holds the condition): wait,
+        bounded, for running background units to finish. Requests keep being
+        admitted, so this never holds anyone."""
+        deadline = _time.monotonic() + _BACKGROUND_SETTLE_SECS
+        while self._background_active > 0:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                logger.info("transition: %d background unit(s) still running after %.0f s",
+                            self._background_active, _BACKGROUND_SETTLE_SECS)
+                return
+            self._condition.wait(timeout=min(remaining, 0.25))
 
     def release_operation(self) -> None:
         with self._condition:
@@ -127,7 +226,7 @@ class ProfileRuntime:
             yield snapshot
         finally:
             if acquired:
-                self.release_operation()
+                self._release_background()
 
     def transition(
         self,
@@ -140,12 +239,21 @@ class ProfileRuntime:
         within _DRAIN_TIMEOUT_SECS.  The flag is always reset on timeout so
         the daemon remains responsive (no permanent _transitioning=True wedge).
         """
-        deadline = _time.monotonic() + _DRAIN_TIMEOUT_SECS
+        with self.pausing_background():
+            return self._transition(target_profile, commit)
+
+    def _transition(
+        self,
+        target_profile: str,
+        commit: Callable[[ProfileSnapshot, str], None],
+    ) -> ProfileSnapshot:
         with self._condition:
             while self._transitioning:
                 self._condition.wait()
             if target_profile == self._snapshot.profile_id:
                 return self._snapshot
+            self._settle_background()
+            deadline = _time.monotonic() + _DRAIN_TIMEOUT_SECS
             self._transitioning = True
             while self._active_operations > 0:
                 remaining = deadline - _time.monotonic()
@@ -155,7 +263,7 @@ class ProfileRuntime:
                     self._condition.notify_all()
                     raise TransitionDrainTimeout(
                         f"Profile switch to '{target_profile}' timed out after "
-                        f"{_DRAIN_TIMEOUT_SECS:.0f}s: {self._active_operations} "
+                        f"{_DRAIN_TIMEOUT_SECS:g}s: {self._active_operations} "
                         "in-flight operation(s) did not drain. "
                         "Try again when no active requests are in progress."
                     )
@@ -181,16 +289,25 @@ class ProfileRuntime:
             self._condition.notify_all()
             return self._snapshot
 
-    def reconfigure(self, commit: Callable[[ProfileSnapshot], None]) -> ProfileSnapshot:
+    def reconfigure(self, commit: Callable[[ProfileSnapshot], None], *,
+                    drain_timeout: float | None = None) -> ProfileSnapshot:
         """Run a same-profile engine transition behind the operation barrier.
 
         Raises TransitionDrainTimeout if in-flight operations do not drain
-        within _DRAIN_TIMEOUT_SECS (same semantics as transition()).
+        within ``drain_timeout`` (default _DRAIN_TIMEOUT_SECS, same semantics as
+        transition()).
         """
-        deadline = _time.monotonic() + _DRAIN_TIMEOUT_SECS
+        with self.pausing_background():
+            return self._reconfigure(commit, drain_timeout)
+
+    def _reconfigure(self, commit: Callable[[ProfileSnapshot], None],
+                     drain_timeout: float | None) -> ProfileSnapshot:
+        budget = _DRAIN_TIMEOUT_SECS if drain_timeout is None else float(drain_timeout)
         with self._condition:
             while self._transitioning:
                 self._condition.wait()
+            self._settle_background()
+            deadline = _time.monotonic() + budget
             self._transitioning = True
             while self._active_operations > 0:
                 remaining = deadline - _time.monotonic()
@@ -198,7 +315,7 @@ class ProfileRuntime:
                     self._transitioning = False
                     self._condition.notify_all()
                     raise TransitionDrainTimeout(
-                        f"Engine reconfigure timed out after {_DRAIN_TIMEOUT_SECS:.0f}s: "
+                        f"Engine reconfigure timed out after {budget:g}s: "
                         f"{self._active_operations} in-flight operation(s) did not drain."
                     )
                 self._condition.wait(timeout=min(remaining, 0.25))
@@ -398,6 +515,9 @@ def reconfigure_daemon_engine(app_state, new_config, *, mode_change: bool) -> No
         # Direct route/unit usage without a resident daemon retains the
         # established persistence-only behavior.
         new_config.save(mode_change=mode_change)
+        if mode_change:
+            from superlocalmemory.server.mode_selection import publish_selection
+            publish_selection(new_config)
         return
     runtime = get_profile_runtime(app_state)
 
@@ -406,6 +526,9 @@ def reconfigure_daemon_engine(app_state, new_config, *, mode_change: bool) -> No
         # switch. Runtime truth always wins over that stale config snapshot.
         new_config.active_profile = snapshot.profile_id
         callback(new_config, mode_change=mode_change)
+        if mode_change:
+            from superlocalmemory.server.mode_selection import publish_selection
+            publish_selection(new_config)
 
     runtime.reconfigure(_commit)
 
@@ -428,10 +551,24 @@ class ProfileRuntimeMiddleware:
             "/api/v3/mode/set",
             "/api/v3/embedding/config",
             "/api/v3/scope/config",
+            # Per-run cancellation revokes a background token and needs no
+            # profile lease; waiting here would make a transition uninterruptible.
+            "/api/v3/answer-check/calibration/cancel",
+            # Erasing the active profile moves the service to another one first,
+            # which drains every lease, this request's own included.
+            "/api/compliance/gdpr/erase",
         }
         return profile_switch or config_transition
 
     async def __call__(self, scope, receive, send) -> None:
+        from superlocalmemory.server.recall_ingress import is_recall, serve
+
+        if is_recall(scope):
+            await serve(self._call, self._app_state, scope, receive, send)
+        else:
+            await self._call(scope, receive, send)
+
+    async def _call(self, scope, receive, send) -> None:
         if scope.get("type") != "http":
             await self._app(scope, receive, send)
             return
@@ -444,60 +581,38 @@ class ProfileRuntimeMiddleware:
             await self._app(scope, receive, send)
             return
 
-        import asyncio
+        from superlocalmemory.server.profile_lease import acquire_request_lease
 
         runtime = get_profile_runtime(self._app_state)
-        acquire_task = asyncio.create_task(
-            asyncio.to_thread(runtime.acquire_operation)
-        )
-        try:
-            # Shield the worker so cancellation cannot strand a lease that the
-            # thread acquires after this coroutine has already unwound.
-            snapshot = await asyncio.shield(acquire_task)
-        except asyncio.CancelledError:
-            await acquire_task
-            runtime.release_operation()
-            raise
-        scope.setdefault("state", {})["profile_snapshot"] = snapshot
-        token = _REQUEST_PROFILE.set(snapshot.profile_id)
+        lease = await acquire_request_lease(runtime)
+        await self._serve_admitted(scope, receive, send, lease)
 
-        # The operation lease guards the SYNCHRONOUS route work that produces
-        # the response — not the streaming of its body. A long-lived SSE body
-        # would otherwise hold the lease for its whole lifetime and make every
-        # profile switch time out during drain (HTTP 503):
-        #   * /events/stream runs `while True: await sleep(1)` FOREVER while a
-        #     dashboard tab is open;
-        #   * /api/v3/chat/stream streams LLM tokens for up to 120s.
-        # Release the lease the instant the response starts. By then the route
-        # handler has finished its engine work and returned its Response
-        # (FastAPI buffers normal responses before sending response.start).
-        # Streaming generators that still need the engine (chat recall) already
-        # re-acquire their own short-lived lease internally, and /events/stream
-        # only reads the EventBus DB — neither depends on this outer lease.
-        released = False
+    async def _serve_admitted(self, scope, receive, send, lease):
+        from superlocalmemory.server.profile_lease import bind_request_lease
 
-        def _release_lease_once() -> None:
-            # Single-task coroutine chain — a plain flag is sufficient; the
-            # underlying release_operation() is lock-guarded and idempotent-safe
-            # only via this guard, so never call it twice.
-            nonlocal released
-            if not released:
-                released = True
-                runtime.release_operation()
+        scope.setdefault("state", {})["profile_snapshot"] = lease.snapshot
+        # A signed-in caller's workspace was pinned before the gates ran and is
+        # theirs alone: a daemon switch landing now cannot change what they act
+        # on (PR 248 review, finding 2). A caller without a binding (the machine
+        # owner) is authorized independently of the workspace, so it acts on
+        # the generation it was admitted under, as before.
+        pin = scope["state"].get("caller_workspace")
+        bound = pin is not None and pin.bound
+        token = _REQUEST_PROFILE.set(pin.profile_id if bound else lease.snapshot.profile_id)
 
         async def _send(message) -> None:
+            # Streaming bodies do not keep the request's admission. Any work
+            # already forked into an executor retains its own counted lease.
             if message.get("type") == "http.response.start":
-                _release_lease_once()
+                lease.release()
             await send(message)
 
         try:
-            await self._app(scope, receive, _send)
+            with bind_request_lease(lease):
+                await self._app(scope, receive, _send)
         finally:
             _REQUEST_PROFILE.reset(token)
-            # Safety net: a request that errors before emitting response.start
-            # (or an ASGI app that never sends one) must still release its lease.
-            # Release is lock-only and must not itself be cancellation-prone.
-            _release_lease_once()
+            lease.release()
 
 
 __all__ = [
@@ -508,8 +623,10 @@ __all__ = [
     "TransitionDrainTimeout",
     "bind_profile_runtime",
     "commit_daemon_profile_switch",
+    "current_request_pin",
     "current_request_profile",
     "get_profile_runtime",
     "persist_active_profile",
+    "pin_request_workspace",
     "reconfigure_daemon_engine",
 ]

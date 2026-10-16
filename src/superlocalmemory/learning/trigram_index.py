@@ -68,6 +68,18 @@ _CACHE_CONN: Optional[sqlite3.Connection] = None
 _CACHE_CONN_LOCK = threading.Lock()
 _CACHE_CONN_OWNER_PID: int | None = None
 
+#: Aliases joined to their entities, without those the pre-4.1.25 fuzzy merge
+#: and model mapping wrote: they may name another thing (encoding/entity_match). A store whose
+#: alias table predates the ``source`` column gets the plain join.
+_ALIAS_JOIN = "LEFT JOIN entity_aliases ea ON ea.entity_id = ce.entity_id"
+_TRUSTED_ALIAS_JOIN = (f"{_ALIAS_JOIN} AND COALESCE(ea.source, '') "
+                       "NOT IN ('jaro_winkler', 'llm')")
+
+
+def _alias_join(conn: sqlite3.Connection) -> str:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(entity_aliases)")}
+    return _TRUSTED_ALIAS_JOIN if "source" in cols else _ALIAS_JOIN
+
 
 def _reset_cache_conn_for_child() -> None:
     """S9-W2 C5 fork safety: wipe the inherited handle in the child.
@@ -297,7 +309,7 @@ class TrigramIndex:
                 "SELECT ce.entity_id, ce.canonical_name, "
                 "       COALESCE(ea.alias, '') AS alias "
                 "FROM canonical_entities ce "
-                "LEFT JOIN entity_aliases ea USING (entity_id) "
+                f"{_alias_join(src)} "
                 "WHERE ce.profile_id = ? "
                 "LIMIT ?",
                 (_ACTIVE_PROFILE, self._MAX_REBUILD_ROWS),

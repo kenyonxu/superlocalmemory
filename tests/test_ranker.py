@@ -1,5 +1,4 @@
 """Tests for Adaptive Ranker — Task 10 of V3 build."""
-import pytest
 from superlocalmemory.learning.ranker import AdaptiveRanker, PHASE_2_THRESHOLD, PHASE_3_THRESHOLD
 
 

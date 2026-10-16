@@ -1,10 +1,9 @@
 {
+  "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "superlocalmemory": {
-      "command": "slm",
-      "args": [
-        "mcp"
-      ]
+      "type": "local",
+      "command": ["slm", "mcp"]
     }
   }
 }

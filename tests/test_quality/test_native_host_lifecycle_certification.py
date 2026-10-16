@@ -216,8 +216,10 @@ def test_shipped_codex_and_claude_assets_declare_the_same_native_lifecycle() -> 
 
     assert codex_server["args"] == ["mcp"]
     assert "slm" in str(codex_server["command"])
-    assert claude_server["args"] == []
-    assert "slm-launch" in str(claude_server["command"])
+    # #139: POSIX runs the launcher (it ignores args); Windows runs cmd.exe
+    # with the installed slm. Both expansions: test_mcp_command_per_platform.py.
+    assert claude_server["command"] == "${ComSpec:-${CLAUDE_PLUGIN_ROOT}/scripts/slm-launch}"
+    assert claude_server["args"][-1].endswith("& slm mcp")
     # 4.1.3: neither host pins a profile. Forcing one from a plugin removed
     # tools the user had enabled; unset resolves to the raw server, so saying
     # nothing exposes more than "code" ever did.
@@ -227,6 +229,9 @@ def test_shipped_codex_and_claude_assets_declare_the_same_native_lifecycle() -> 
     for hooks in (CODEX_HOOKS, CLAUDE_HOOKS):
         starts = _hook_commands(hooks, "SessionStart")
         stops = _hook_commands(hooks, "Stop")
+        # Claude plugin hooks run slm through scripts/slm-run (4.1.20, #141).
+        starts = [c.replace('/scripts/slm-run" hook', ' slm hook') for c in starts]
+        stops = [c.replace('/scripts/slm-run" hook', ' slm hook') for c in stops]
         assert any("slm hook start" in command for command in starts), hooks
         assert any("slm hook stop" in command for command in stops), hooks
 

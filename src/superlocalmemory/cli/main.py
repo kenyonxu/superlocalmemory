@@ -35,19 +35,23 @@ operating modes:
           Optional integrations, backup, and downloads have separate network
           behavior; assess the complete deployment for privacy requirements.
 
-  Mode B  Smart Local — Uses a local Ollama LLM for summarization and
-          enrichment. The Ollama endpoint and enabled integrations determine
-          the data path. Requires: ollama running with a model pulled.
+  Mode B  Smart Local — Uses a model running on this machine for summarization
+          and enrichment: Ollama by default, but any local OpenAI-compatible
+          server works. The configured endpoint and enabled integrations
+          determine the data path. Requires: a local model server running
+          with a model pulled.
 
-  Mode C  Full Power — Uses a cloud LLM (OpenAI, Anthropic, etc.) for
-          provider-assisted enrichment and retrieval behavior.
+  Mode C  Full Power — Uses your own endpoint, or a cloud provider (OpenAI,
+          Anthropic, etc.), for provider-assisted enrichment and retrieval
+          behavior. A key is required for a cloud provider, but not for a
+          keyless custom endpoint.
 
 quick start:
   slm setup                   Interactive first-time setup
   slm remember "some fact"    Store a memory
   slm recall "search query"   Semantic search across memories
   slm list -n 20              Show 20 most recent memories
-  slm dashboard               Open web dashboard at localhost:8765
+  slm dashboard               Open web dashboard on the configured daemon port
 
 ide integration:
   slm mcp                     Start MCP server (used by IDEs)
@@ -72,15 +76,19 @@ documentation:
 
 
 _NO_DAEMON_COMMANDS = {
-    "setup", "mode", "provider", "connect", "upgrade-hosts", "migrate", "mcp", "warmup", "hooks", "codex",
+    "setup", "mode", "provider", "connect", "upgrade-hosts", "migrate", "mcp", "tools", "warmup", "hooks", "codex",
     "config", "evolve", "db",
     # v3.4.22 escape hatches — never auto-start the daemon on these.
     "disable", "enable", "clear-cache", "reconfigure", "benchmark",
-    "rotate-token",
+    "rotate-token", "token",
+    # 4.1.20: remote access settings, keys and certificates are files only.
+    "remote",
     "evidence",
     # v4.0.2 receipt summary is a direct read-only learning.db query.
     "brain",
     "diagnostics",
+    # Doctor must observe a stopped/crashed daemon without recovering it first.
+    "doctor",
     # LLD-06 — agents launched through wrap start the daemon on demand.
     "wrap",
     # V3.6 Optimize commands that are config read/write only.
@@ -96,7 +104,26 @@ _NO_DAEMON_COMMANDS = {
     # V4.0.7: summaries read memory.db directly and are extractive by default,
     # so they need neither the daemon nor a language model.
     "summary",
+    # 4.1.19: backup encryption reads the credential store and files only.
+    "backup",
+    # 4.1.22: `slm models` is a read-only catalogue + Ollama /api/tags report.
+    "models",
+    # Images & documents: the daemon runs the install; these only ask it, and say
+    # so when it is down instead of starting one.
+    "media", "features",
 }
+
+
+def _add_tag_args(parser: argparse.ArgumentParser) -> None:
+    """``--tag`` (repeatable) and ``--tags-match`` for recall and list (4.1.22)."""
+    parser.add_argument("--tag", dest="tags", action="append", default=None,
+                        metavar="LABEL",
+                        help="Only memories saved with this tag. Repeat for more tags; "
+                             "case and spacing do not matter.")
+    parser.add_argument("--tags-match", dest="tags_match", choices=("all", "any"),
+                        default="all",
+                        help="With several --tag: 'all' (default) needs every tag, "
+                             "'any' needs at least one.")
 
 
 def _command_requires_daemon(args: argparse.Namespace) -> bool:
@@ -112,6 +139,11 @@ def _command_requires_daemon(args: argparse.Namespace) -> bool:
 
 def main() -> None:
     """Parse CLI arguments and dispatch to command handlers."""
+    # First, before anything prints: on a Windows pipe or file Python encodes
+    # with the code page, which has no ✓ or ✗, and output would crash.
+    from superlocalmemory.cli.stdio_encoding import make_stdio_safe
+    make_stdio_safe()
+
     # Fast path: hook invocations bypass argparse entirely (stdlib only, ~30ms)
     if len(sys.argv) >= 3 and sys.argv[1] == "hook":
         from superlocalmemory.hooks.hook_handlers import handle_hook
@@ -191,6 +223,11 @@ def main() -> None:
                     "  note: data migration check failed — run `slm doctor` to diagnose.",
                     file=sys.stderr,
                 )
+            # 4.1.25: offer the answer check the way setup does (setup and
+            # init run their own step; the offer goes to stderr only).
+            if len(sys.argv) < 2 or sys.argv[1] not in ("setup", "init"):
+                from superlocalmemory.cli import laya_offer
+                laya_offer.after_upgrade()
 
     parser = argparse.ArgumentParser(
         prog="slm",
@@ -223,6 +260,10 @@ def main() -> None:
         "--auto", action="store_true",
         help="Non-interactive mode: use defaults (for CI/scripts)",
     )
+    setup_p.add_argument(
+        "--no-laya", action="store_true",
+        help="Don't install the local answer check (installed by default on Apple Silicon)",
+    )
 
     mode_p = sub.add_parser("mode", help="Get or set operating mode (a/b/c)")
     mode_p.add_argument(
@@ -236,8 +277,31 @@ def main() -> None:
     )
     provider_p.add_argument(
         "provider", nargs="?",
-        choices=["openai", "anthropic", "azure", "ollama", "openrouter"],
-        help="Provider to configure; omit to use the interactive selector",
+        choices=["openai", "anthropic", "azure", "ollama", "openrouter", "custom"],
+        help=(
+            "Provider to configure; omit to use the interactive selector. "
+            "'custom' points at your own OpenAI-compatible endpoint "
+            "(llama.cpp, vLLM, LM Studio, …) — no key required."
+        ),
+    )
+    provider_p.add_argument(
+        "--endpoint", metavar="URL", default=None,
+        help="Endpoint URL for provider=custom (e.g. http://192.168.1.50:8041/v1)",
+    )
+    provider_p.add_argument(
+        "--key", dest="api_key", metavar="KEY", default=None,
+        help="API key for provider=custom; omit for a keyless local server",
+    )
+    provider_p.add_argument(
+        "--model", metavar="NAME", default=None,
+        help="Model name for provider=custom",
+    )
+    provider_p.add_argument(
+        "--mode", choices=["b", "c"], default=None,
+        help=(
+            "Target mode for provider=custom: 'b' (a local model on this "
+            "machine) or 'c' (your own endpoint). Default: c"
+        ),
     )
 
     connect_p = sub.add_parser("connect", help="Auto-configure a supported IDE integration")
@@ -283,9 +347,9 @@ def main() -> None:
     connect_p.add_argument(
         "--port",
         type=int,
-        default=8765,
+        default=None,
         dest="daemon_port",
-        help="SLM daemon port for http/http-mcp-remote transport (default: 8765)",
+        help="SLM daemon port for http/http-mcp-remote transport (default: configured instance)",
     )
     connect_p.add_argument(
         "--verify",
@@ -359,6 +423,10 @@ def main() -> None:
         "--profile", default="",
         help="Workspace to re-derive. Default: all of them",
     )
+    from superlocalmemory.cli.fidelity_cmd import register_db_fidelity_parser
+    register_db_fidelity_parser(db_sub)  # 4.1.22: facts that changed their memory
+    from superlocalmemory.cli.integrity_cmd import register_db_integrity_parsers
+    register_db_integrity_parsers(db_sub)  # 4.1.22: store health and receipted repair
 
     db_reembed_p = db_sub.add_parser(
         "reembed",
@@ -400,6 +468,29 @@ def main() -> None:
         action="store_true",
         help="Daemon must be stopped. Allows delete_unverified. Use for a leaked store.",
     )
+    db_points_p = db_sub.add_parser(
+        "restore-points", help="List the copies of your memories you can go back to",
+    )
+    db_points_p.add_argument("--json", action="store_true", help="Output JSON")
+    db_restore_p = db_sub.add_parser(
+        "restore", help="Go back to a restore point (applied when SLM next starts)",
+    )
+    db_restore_p.add_argument("point_id", nargs="?", default=None,
+                              help="Restore point id from `slm db restore-points`")
+    db_restore_p.add_argument("--yes", action="store_true", help="Confirm without asking")
+    db_restore_p.add_argument("--cancel", action="store_true",
+                              help="Cancel a restore that has not run yet")
+    db_restore_p.add_argument("--no-reimport", dest="no_reimport", action="store_true",
+                              help="Do not re-add memories saved after the restore point")
+    db_restore_p.add_argument("--json", action="store_true", help="Output JSON")
+    db_downgrade_p = db_sub.add_parser(
+        "prepare-downgrade",
+        help="Get your memories ready to run on the previous SLM version",
+    )
+    db_downgrade_p.add_argument("--yes", action="store_true", help="Confirm without asking")
+    db_downgrade_p.add_argument("--cancel", action="store_true",
+                                help="Cancel a prepared downgrade")
+    db_downgrade_p.add_argument("--json", action="store_true", help="Output JSON")
 
     # -- Mesh inspection (v3.7.9, M-03) --------------------------------
     mesh_p = sub.add_parser("mesh", help="Inspect the local agent mesh (status/peers)")
@@ -413,6 +504,18 @@ def main() -> None:
     remember_p = sub.add_parser("remember", help="Store a memory (extracts facts, builds graph)")
     remember_p.add_argument("content", help="Content to remember")
     remember_p.add_argument("--tags", default="", help="Comma-separated tags")
+    remember_p.add_argument(
+        "--kind", default="",
+        help="What sort of memory this is: rule, decision, status, procedure, "
+             "prospective (plan/to-do), opinion, correction, episodic or semantic. "
+             "Rules and decisions saved this way load at the start of later sessions.",
+    )
+    remember_p.add_argument(
+        "--replaces", default=None,
+        help="Id of an earlier memory this one replaces (a fact_id or memory_id "
+             "from remember or recall). The old one stops being returned; undo "
+             "with review_correction.",
+    )
     remember_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
     remember_p.add_argument(
         "--sync", dest="sync_mode", action="store_true",
@@ -443,6 +546,23 @@ def main() -> None:
              "(24h, 7d, 30d, 1y) or an explicit range (2026-07-01..2026-07-31). "
              "Default: no time filter.",
     )
+    recall_p.add_argument("--project", default="",
+                          help="Only memories saved under this project (a name or a path). "
+                               "If none of the memories found were, the results are not "
+                               "narrowed and recall says so.")
+    recall_p.add_argument("--project-strict", dest="project_strict", action="store_true",
+                          help="With --project: only that project's memories, even if none.")
+    recall_p.add_argument("--prefer-project", dest="prefer_project", default="",
+                          help="Rank memories saved under this project above others of "
+                               "similar relevance; removes nothing.")
+    recall_p.add_argument("--saved-by", dest="saved_by", default="",
+                          help="Only memories saved by this agent (e.g. claude-desktop).")
+    recall_p.add_argument("--about", default="",
+                          help="Only memories that mention this name (a person, project or tool).")
+    recall_p.add_argument("--kind", default="",
+                          help="Only memories of this kind (e.g. decision, rule, status). "
+                               "See 'slm remember --help' for the full list.")
+    _add_tag_args(recall_p)
     recall_p.add_argument(
         "--as-of", dest="as_of", default="",
         help="Point-in-time recall: an ISO-8601 timestamp "
@@ -456,6 +576,21 @@ def main() -> None:
     recall_p.add_argument(
         "--valid-at", dest="valid_at", default="",
         help="Strict event-time boundary: return only facts valid at this ISO-8601 time.",
+    )
+    recall_p.add_argument(
+        "--depth", type=int, choices=(0, 1, 2), default=1,
+        help="0 glance (ids and one-line previews), 1 recall (full facts, default), "
+             "2 context (+ source memory, same-session neighbours, facts about the same "
+             "entities, the correction that replaced it).",
+    )
+    recall_p.add_argument(
+        "--max-tokens", dest="max_tokens", type=int, default=0,
+        help="Cap the returned results at this many (estimated) tokens; never exceeded.",
+    )
+    recall_p.add_argument(
+        "--show-weak", dest="show_weak", action="store_true",
+        help="When nothing in memory supports the question, show the closest weak "
+             "matches (labelled [weak]) instead of nothing.",
     )
     recall_p.add_argument(
         "--include-unknown", action="store_true",
@@ -527,11 +662,16 @@ def main() -> None:
     )
     correction_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
-    list_p = sub.add_parser("list", help="List recent memories chronologically (shows IDs for delete/update)")
+    _list_help = ("List recent memories, newest first, with each one's kind and the "
+                  "ID that slm update and slm delete take")
+    list_p = sub.add_parser("list", help=_list_help, description=_list_help)
     list_p.add_argument(
         "--limit", "-n", type=int, default=CANONICAL_LIST_LIMIT,
         help=f"Number of entries (default {CANONICAL_LIST_LIMIT})",
     )
+    list_p.add_argument("--kind", default="",
+                       help="Only memories of this kind (e.g. decision, rule, status).")
+    _add_tag_args(list_p)
     list_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     # -- Diagnostics ---------------------------------------------------
@@ -545,17 +685,26 @@ def main() -> None:
     health_p = sub.add_parser("health", help="Math layer health (scoring, consistency, and lifecycle layers)")
     health_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
+    models_p = sub.add_parser(
+        "models", help="Installed Ollama models + recommendations, and the hosted catalogue",
+    )
+    models_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
+
     trace_p = sub.add_parser("trace", help="Recall with per-channel score breakdown")
     trace_p.add_argument("query", help="Search query")
     trace_p.add_argument("--limit", type=int, default=10, help="Max results (default 10)")
     trace_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     # -- Diagnostics (continued) ----------------------------------------
-    doctor_p = sub.add_parser("doctor", help="Pre-flight check: deps, embedding worker, connectivity")
+    doctor_p = sub.add_parser(
+        "doctor", help="Pre-flight check: deps, embedding worker, connectivity",
+        description="Check dependencies, configuration and daemon health. "
+        "Exit codes: 0 for passes or warnings only; 1 if any check fails.",
+    )
     doctor_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
     doctor_p.add_argument(
         "--quick", action="store_true",
-        help="Run only the fast checks (deps + config); skip daemon/embedding probes",
+        help="Run fast checks, including daemon health; skip embedding worker and Ollama probes",
     )
     doctor_p.add_argument(
         "--deep", action="store_true",
@@ -566,6 +715,15 @@ def main() -> None:
         "--fix", action="store_true",
         help="Auto-repair fixable components (re-download missing models, "
              "install sqlite-vec) before checking, then report",
+    )
+    doctor_p.add_argument(
+        "--refile-hidden", action="store_true",
+        help="Show the memories hidden even though they are scored to keep "
+             "(dry run); with --yes, re-file exactly those",
+    )
+    doctor_p.add_argument(
+        "--yes", action="store_true",
+        help="Apply --refile-hidden instead of only showing what it would do",
     )
 
     # v3.8.2 super-help — grouped overview of every command + focused topics.
@@ -602,11 +760,24 @@ def main() -> None:
 
     # -- Services ------------------------------------------------------
     sub.add_parser("mcp", help="Start MCP server (stdio transport for IDE integration)")
-    sub.add_parser("warmup", help="Pre-download embedding model (~500MB, one-time)")
+    tools_p = sub.add_parser(
+        "tools", help="Show or choose how many MCP tools every connected app sees")
+    tools_p.add_argument("action", nargs="?", choices=["set"], default=None)
+    tools_p.add_argument("name", nargs="?", default=None,
+                         help="core, code, full (default), power, mesh, whole, or default")
+    tools_p.add_argument("--json", action="store_true", help="Output structured JSON")
+    warmup_p = sub.add_parser(
+        "warmup",
+        help="Load the embedding model (~500MB download the first time) and "
+             "confirm recall is ready; exits non-zero if it is not")
+    warmup_p.add_argument(
+        "--timeout", type=float, default=None, metavar="SECONDS",
+        help="How long to wait for a starting daemon to become ready "
+             "(default 120; 0 checks once without waiting)")
 
     dashboard_p = sub.add_parser("dashboard", help="Open web dashboard")
     dashboard_p.add_argument(
-        "--port", type=int, default=8765, help="Port (default 8765)",
+        "--port", type=int, default=None, help="Port (default: configured instance)",
     )
 
     # V3.3.21: Daemon serve mode
@@ -723,6 +894,9 @@ def main() -> None:
         help="Apply precision changes",
     )
     quantize_p.add_argument("--profile", default="", help="Target profile")
+    quantize_p.add_argument("--repair-sketches", action="store_true",
+                            help="Repair QJL sketches only; preserve embedding precision "
+                                 "(preview by default)")
     quantize_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     consolidate_p = sub.add_parser("consolidate", help="Run memory consolidation pipeline")
@@ -907,6 +1081,19 @@ def main() -> None:
         help="Rotate the SLM install token (run `slm restart` afterwards)",
     )
 
+    # `slm token show`: the key the dashboard asks for when a key is required.
+    token_p = sub.add_parser(
+        "token", help="Show the key the dashboard asks for when a key is required",
+    )
+    token_sub = token_p.add_subparsers(dest="token_command", title="token subcommands")
+    token_sub.add_parser(
+        "show", help="Print the SuperLocalMemory key (readable only by you)",
+    )
+
+    # 4.1.20: remote access for AI tools on other computers (TLS, named keys).
+    from superlocalmemory.cli.remote_commands import add_parser as _add_remote_parser
+    _add_remote_parser(sub)
+
     # ---- SLM v3.6 Optimize subcommands (additive, never modify above) ----
 
     # slm optimize status|on|off|savings
@@ -1018,8 +1205,39 @@ def main() -> None:
     # V4.0.7: the readable summary layer from issue #113. The generators shipped
     # in 4.0.6 with no caller; this is the surface that makes them reachable.
     from superlocalmemory.cli.summary_cmd import register_summary_parser
-
     register_summary_parser(sub)
+
+    # 4.1.19: memory kinds (status, settings, undoable classification runs).
+    from superlocalmemory.cli.kinds_cmd import register_kinds_parser
+    register_kinds_parser(sub)
+    from superlocalmemory.cli.enrich_cmd import register_enrich_parser
+    register_enrich_parser(sub)
+    # 4.1.25: the workspace login policy from the terminal (the owner's way back in).
+    from superlocalmemory.cli.team_cmd import register_team_parser
+    register_team_parser(sub)
+    # 4.1.25: folder sources (add, list, report, rescan, remove) through the daemon.
+    from superlocalmemory.cli.sources_cmd import register_sources_parser
+    register_sources_parser(sub)
+
+    # 4.1.25: turn images and documents on or off, see what is on.
+    from superlocalmemory.cli.features_cmd import register_features_parser
+    from superlocalmemory.cli.media_cmd import register_media_parser
+    register_features_parser(sub)
+    register_media_parser(sub)
+
+    # 4.1.21: saved views — named, profile-scoped recall queries (issue #113).
+    from superlocalmemory.cli.view_cmd import register_view_parser
+
+    register_view_parser(sub)
+    from superlocalmemory.cli.corrections_cmd import register_corrections_parsers
+    register_corrections_parsers(sub)  # 4.1.22: corrections your own actions overtook
+    from superlocalmemory.cli.outcome_cmd import register_outcome_parser
+    register_outcome_parser(sub)  # 4.1.25: report whether recalled memories helped
+    from superlocalmemory.cli.embedder_cmd import register_embedder_parser
+    register_embedder_parser(sub)
+
+    from superlocalmemory.cli.backup_cmd import add_backup_parser
+    add_backup_parser(sub)
 
     # V4.0.6: GDPR subject-rights CLI (Art.15/17/20)
     gdpr_p = sub.add_parser(
@@ -1051,6 +1269,11 @@ def main() -> None:
     gdpr_export_p.add_argument(
         "--output", default=None, metavar="FILE",
         help="Write export JSON to FILE (default: stdout)",
+    )
+    gdpr_export_p.add_argument(
+        "--include-embeddings", action="store_true", dest="include_embeddings",
+        help=("Include embeddings and other binary columns (base64). "
+              "Omitted by default: they are derived numbers and make the file much larger"),
     )
     gdpr_export_p.add_argument(
         "--json", action="store_true", help="Output structured JSON envelope",
@@ -1116,6 +1339,13 @@ def main() -> None:
         choices=["retry", "force_reconcile", "cancel"],
         help="Remediation action to apply")
     ops_resolve_p.add_argument(
+        "--json", action="store_true", help="Output structured JSON (agent-native)")
+    ops_repair_p = ops_sub.add_parser(
+        "repair-saves",
+        help="Re-file saves dead-lettered on another memory (dry run unless --apply)")
+    ops_repair_p.add_argument(
+        "--apply", action="store_true", help="Back up memory.db, then repair")
+    ops_repair_p.add_argument(
         "--json", action="store_true", help="Output structured JSON (agent-native)")
     ops_status_p = ops_sub.add_parser(
         "status", help="Quick failure count + writer stall overview")

@@ -26,11 +26,9 @@ data, so the search card is empty regardless of which profile is active.
 
 from __future__ import annotations
 
-import asyncio
 import threading
 import time
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -77,7 +75,6 @@ def test_search_endpoint_passes_fast_true_to_engine(
     and capturing the kwargs it is called with.
     """
     from superlocalmemory.server.unified_daemon import create_app
-    from superlocalmemory.storage.models import RecallResponse
 
     engine = engine_with_mock_deps
     _add_profile(engine, "default")
@@ -264,7 +261,6 @@ def test_concurrent_recalls_do_not_corrupt_each_others_disabled_channels(
     We simulate concurrency by intercepting _run_channels and recording the
     disabled set each call sees.
     """
-    from superlocalmemory.core.recall_pipeline import run_recall
 
     engine = engine_with_mock_deps
     if engine._retrieval_engine is None:

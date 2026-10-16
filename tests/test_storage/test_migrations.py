@@ -19,7 +19,6 @@ from pathlib import Path
 import pytest
 
 from superlocalmemory.storage.migrations import (
-    CURRENT_SCHEMA_VERSION,
     backup_database,
     get_schema_version,
     is_v1_database,

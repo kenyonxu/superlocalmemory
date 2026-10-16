@@ -1,18 +1,12 @@
 # Troubleshooting
-> SuperLocalMemory V4 Documentation
-> https://superlocalmemory.com | Part of Qualixar
 
-Solutions for common issues. If your problem is not listed here, run `slm status --json` and check the output for clues.
+Solutions for common issues. If your problem is not listed here, run `slm doctor`
+and `slm status --json` and check the output for clues.
 
-<!-- UX-G1: document the planned slm doctor --fix auto-repair mode so the
-     health-ladder self-healing surface has a user-facing verb in docs now,
-     even though the CLI flag lands in a follow-up cycle. -->
-> **Planned (next cycle): `slm doctor --fix`** — an auto-repair mode that
-> applies the safe, reversible fixes `slm doctor` identifies (rebuild
-> trigram cache, stop orphan worker processes, WAL truncate, port reset).
-> Today, run `slm doctor` to see findings and apply the recommended
-> commands manually. The `--fix` flag lands in a follow-up release;
-> tracked as Stage 8 UX-G1.
+`slm doctor` checks dependencies, the embedding worker, daemon connectivity and
+configuration. `slm doctor --fix` first repairs what it can (re-downloads missing
+models, installs sqlite-vec) and then reports. `slm doctor --quick` runs only the
+fast checks, and `slm doctor --deep` reads every database page.
 
 ---
 
@@ -45,7 +39,7 @@ npx superlocalmemory status
 
 ### "Python not found" during setup
 
-SLM V4 requires Python 3.10 or later for the math engine.
+SLM requires Python 3.12 or later, up to 3.14.
 
 ```bash
 # Check Python version
@@ -94,13 +88,10 @@ slm profile switch work
 slm recall "your query"
 ```
 
-**Check your mode:**
-
-```bash
-slm mode
-```
-
-Mode A uses math-based retrieval. If you recently switched from Mode C, the retrieval behavior changes. Both modes search the same memories, but ranking differs.
+**Check for a filter:** a `--project`, `--kind`, `--tag` or `--window` narrows
+the search, and `--known-as-of` or `--valid-at` can hide recent memories. Run the
+recall again without them. An empty result with a `tag_scope` or `project_scope`
+note says what the filter did. See [Recall](recall.md).
 
 **Try a broader query:**
 
@@ -117,7 +108,7 @@ slm list --limit 20            # Browse recent memories directly
 slm recall "your query" --limit 3
 ```
 
-Fewer results means only the highest-confidence matches are returned.
+Fewer results means only the top matches are returned.
 
 **Use trace to debug:**
 
@@ -127,13 +118,50 @@ slm trace "your query"
 
 This shows which channels contributed what. If BM25 is dominating with weak keyword matches, the query may need different terms.
 
-**Rebuild the graph:**
+**Re-derive the graph:**
 
 ```bash
-slm consolidate --cognitive
+slm db regraph --check    # how far the graph copy has drifted; changes nothing
+slm db regraph            # re-derive it from the store
 ```
 
-`consolidate --cognitive` rebuilds the entity graph (and pattern index) from your memories; use it when entity relationships look wrong or after bulk imports.
+Use it when entity relationships look wrong or after bulk imports.
+
+## Answer Check Issues
+
+See [Answer Check](answer-check.md) for the full feature. Quick fixes:
+
+### "On this Mac" isn't offered / "Needs a Mac with Apple Silicon"
+
+The on-device option needs Apple Silicon. Choose **Online with Jev** in
+Settings → Answer check instead, or leave the check off.
+
+### Setup fails with a download error
+
+If the dashboard shows *"Couldn't reach the download server. If your
+network blocks downloads, use 'Use an existing install'"* — common on a
+locked-down company network — open **Advanced — use an existing install**
+and point it at a Python interpreter and model copied over from another
+machine, instead of downloading again.
+
+### A saved key won't test successfully
+
+- *"The key was not accepted."* — re-check or regenerate the key.
+- *"The account has no credit left."* — add credit with your provider.
+- *"Too many requests — try again in a minute."* — wait, then retry; keys
+  are rate-limited to one test every few seconds.
+
+### Every recall reports the check as unjudged on one of several SLM processes
+
+Expected when more than one SLM process runs on the same machine at once —
+only one of them runs the on-device model; the others report recalls as if
+the check were off rather than loading a second copy of it.
+
+### Uninstalling SLM doesn't remove the on-device model
+
+Uninstalling leaves the on-device answer-check model (about 1.1 GB) in
+`~/.superlocalmemory/runtimes/laya`; choose **Remove** in Settings → Answer
+check first, or delete that folder afterwards.
 
 ## Mode C Issues
 
@@ -154,8 +182,8 @@ export OPENAI_API_KEY="sk-..."
 ### "Connection timeout" or network errors
 
 ```bash
-# Test connectivity to your provider
-slm status --json
+# Re-run the provider connection test
+slm provider set <provider>
 
 # Check if you're behind a proxy
 echo $HTTP_PROXY
@@ -173,8 +201,8 @@ export HTTPS_PROXY="http://proxy.company.com:8080"
 Cloud LLM calls add latency. If speed matters more than maximum recall quality:
 
 ```bash
-slm mode b    # Local LLM (fast, no network)
-slm mode a    # Math-only (fastest)
+slm mode b    # A model on this machine (no network)
+slm mode a    # No language model (fastest)
 ```
 
 ## Migration Issues
@@ -182,15 +210,18 @@ slm mode a    # Math-only (fastest)
 ### Migration failed or was interrupted
 
 ```bash
-# Check if backup exists
-ls ~/.superlocalmemory/backups/
+# See which schema migrations ran and which did not
+slm db migrate --status
 
-# Roll back to V2
-slm migrate --rollback
+# An update that changes the store takes a restore point first; list it
+slm db restore-points
 
-# Try migration again
-slm migrate
+# Start the service again; unfinished migrations resume in order
+slm restart
 ```
+
+Schema migrations are additive and forward-only: there is no rollback command. To go back,
+restore the restore point (`slm db restore <point_id>`) or a verified complete backup.
 
 ### "Database is locked"
 
@@ -201,17 +232,18 @@ Close all IDE sessions that might be accessing SLM, then retry:
 lsof ~/.superlocalmemory/memory.db
 
 # Close IDEs, then retry
-slm migrate
+slm restart
 ```
 
-### Migration succeeded but recall quality seems worse
+### An upgrade finished but recall quality seems worse
 
-After migration, the entity graph and BM25 index are rebuilt from existing data. This process is automatic but can take a moment for large databases.
+Embeddings and the graph are rebuilt from existing data, which can take a moment
+on a large database. Check and complete them:
 
 ```bash
-# Force a full re-index + consolidation pass
-slm consolidate --cognitive
-slm decay
+slm db integrity            # read-only health report
+slm db reembed              # backfill facts that never got an embedding
+slm db regraph              # re-derive the graph copy
 ```
 
 ## IDE Connection Issues
@@ -232,10 +264,10 @@ slm connect <your-ide>    # Regenerates the config
 
 3. **Restart the IDE completely** (not just reload the window).
 
-4. **Test the MCP server directly:**
+4. **Check the install:**
 
 ```bash
-npx superlocalmemory mcp --test
+slm doctor
 ```
 
 ### "Connection refused" in IDE
@@ -257,13 +289,24 @@ slm status
 
 ### Multiple IDEs conflicting
 
-Each IDE has its own MCP config file. They do not conflict. All IDEs share the same underlying database. Concurrent access is safe (SQLite WAL mode handles this).
+Each IDE has its own MCP config file. They do not conflict. All IDEs share the same underlying database through the SLM daemon, which is the single writer.
 
 ## Database Issues
 
+### Check the memory store
+
+```bash
+slm db integrity            # read-only; safe while SLM runs
+slm db integrity --pages    # also reads every page (slow on a large store)
+slm db repair --root ~/.superlocalmemory   # preview what a repair would do
+```
+
+See [Memory store check](#memory-store-check) below.
+
 ### Database corruption
 
-Extremely rare with SQLite WAL mode, but if it happens:
+Extremely rare with SQLite WAL mode. If `slm db integrity --pages` reports the
+file itself is unsound:
 
 1. **Stop the daemon first** — a live `cp` of `memory.db` alone is unsafe (WAL/SHM may be uncheckpointed and companion stores diverge):
 
@@ -288,38 +331,120 @@ Extremely rare with SQLite WAL mode, but if it happens:
 ### Database is too large
 
 ```bash
-# Check size — the JSON payload reports memory.db size + row counts.
+# Check size: the JSON payload reports memory.db size and row counts.
 slm status --json
 
-# Consolidate (merges redundant memories, reclaims space)
-slm consolidate --cognitive
+# Decay applies the lifecycle policy: it fades and archives stale memories.
+slm decay              # preview
+slm decay --execute
 
-# Decay applies the lifecycle policy to fade / archive stale memories.
-# Tune retention via the configuration file (see docs/configuration.md).
-slm decay
+# Drop old LanceDB vector-store versions (only on a store that uses LanceDB).
+slm db compact
 ```
+
+## Native libraries on macOS
+
+On a Mac, NumPy, SciPy and PyTorch (which SLM uses for its maths and its
+embedding model) hand linear algebra to Apple's Accelerate framework. Two
+kinds of work go there:
+
+- **Matrix products and vector lengths.** Everything SLM does when it saves,
+  recalls, runs background maintenance or computes embeddings is this kind.
+- **Matrix factorizations** (QR, Cholesky, SVD and the solvers built on
+  them). Accelerate has reported defects here on recent macOS releases: QR
+  writes outside its memory for square matrices of roughly 576 to 1,000 rows
+  (found by us, and the reason SLM avoids it), Cholesky can
+  crash at very large sizes ([scipy#26145](https://github.com/scipy/scipy/issues/26145)), SVD can
+  hang on a matrix that contains an infinite value
+  ([numpy#32591](https://github.com/numpy/numpy/issues/32591)), and one
+  symmetric solver no longer notices a singular matrix on macOS 26.5
+  ([scipy#25313](https://github.com/scipy/scipy/issues/25313)).
+
+What SLM does about it:
+
+- Saving, recall, maintenance and embedding make **no** factorization calls.
+  The test suite counts every call into Accelerate's factorization routines
+  while it saves, recalls and maintains a store, and fails if there is one.
+- The random rotation used to compress embeddings is computed without
+  Accelerate's QR.
+- One feature still uses a factorization: learning the match threshold of the
+  experimental semantic cache in SLM Optimize (off by default). Its matrix is
+  never larger than 10 x 10, far below any reported failure size, and a test
+  runs it under macOS Guard Malloc, which stops the process on the first
+  out-of-bounds write.
+
+Nothing needs to be configured. If SLM ever quits unexpectedly on a Mac and
+the crash report names `libLAPACK` or `Accelerate`, please open an issue with
+that report and the output of `slm status --json`.
+
+## Memory store check
+
+SLM checks your memory store once after each upgrade, a few minutes after it
+starts. The check only reads and counts; it never changes the store. The result
+appears in the dashboard under **Health**, in the **Memory store** card, in plain
+words: for example search vectors that no longer match their memory, LanceDB
+entries for memories that are gone, leftover rows from deleted memories, erased
+words still stored, index updates that never finished, and memories that lost
+their searchable fact. **Check again** runs it on demand.
+
+If something is listed, **Repair now** fixes it. It first saves a full backup copy
+of your memory, and if that copy cannot be made nothing is changed. Then it runs
+the same repair as `slm db repair --apply` and checks again. Recall keeps working
+meanwhile, and the repair removes no memory you have. The card shows the backup's
+location. From a terminal, use `slm db integrity` and `slm db repair`; see the
+[CLI reference](cli-reference.md#embedding-models-and-store-health).
+
+If the card says the check or repair did not finish, it shows the reason. Run
+`slm doctor`, look at `logs/daemon.log` in the data folder, and try again.
+
+## Web access
+
+Web access connects an AI app on the internet to your memory; see [Web
+access](remote-access/README.md). Problems show up on the dashboard's
+**Connected apps** page or as an error code in the app.
+
+**The page says Connected apps are not available right now.** The local service
+is not running or cannot be reached. Run `slm status`, then `slm restart`.
+
+**Sign-in does not finish or the link expired.** Use **Continue sign-in** if your
+browser blocked the page, or **Restart sign-in**, which keeps the permissions you
+chose. Sign in with the same GitHub account in the app.
+
+**The app says the computer is asleep or offline** (`connector_asleep`,
+`connector_offline`). Web access needs this computer on and online. The gateway
+treats it as asleep after 45 seconds with no heartbeat. Wake it, check its
+network, and try again. A sleep never shows up as an empty recall.
+
+**`DAILY_LIMIT_REACHED`.** The free daily allowance of tool calls is used up. It
+resets at midnight UTC. Local use is not affected.
+
+**`relay_busy` or `relay_timeout`.** Too many calls at once, or one took longer
+than 25 seconds. Make one call at a time and try again.
+
+**`TOOL_DENIED` or `INSUFFICIENT_SCOPE`.** The app was not given that permission,
+for example saving. Remove the app under **Your connected apps** and add it again
+with the permission ticked.
+
+**`REVOKED` or `ENTITLEMENT_REQUIRED`.** The app was removed, or Web access has
+ended. Turn it on again on the Connected apps page. If it says **Web access ends
+on (date)** or **Sign in again to keep Web access working**, check that this
+computer is online and sign in again.
+
+**The app saves nothing.** Saving is a separate permission. Check the app's row
+under **Your connected apps**: it shows **Save** only when that was allowed.
 
 ## Health Check
 
-Run a full diagnostic:
+Run a diagnostic:
 
 ```bash
 slm health
 ```
 
-This reports the status of:
-
-| Component | What it checks |
-|-----------|---------------|
-| Database | Integrity, size, table counts |
-| Embedding model | Loaded, version, dimension |
-| Fisher-Rao | Similarity layer active |
-| Sheaf | Consistency layer active |
-| Langevin | Lifecycle layer active |
-| BM25 index | Token count, index health |
-| Entity graph | Node count, edge count |
-
-If any component shows an error, the output includes a suggested fix.
+It reports the number of memories, how many have a similarity-layer entry, how
+many have a lifecycle position, and the current mode. For dependencies, the
+embedding worker and the daemon, use `slm doctor`; for the database, use
+`slm db integrity`.
 
 ## Getting Help
 
@@ -331,4 +456,4 @@ If none of the above resolves your issue:
 
 ---
 
-*SuperLocalMemory V4 — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*
+*SuperLocalMemory — Copyright 2026 Varun Pratap Bhardwaj. AGPL-3.0-or-later. Part of Qualixar.*

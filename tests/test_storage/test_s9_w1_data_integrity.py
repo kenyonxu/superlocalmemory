@@ -25,7 +25,6 @@ import hashlib
 import sqlite3
 from pathlib import Path
 
-import pytest
 
 from superlocalmemory.storage import migration_runner
 from superlocalmemory.storage.migrations import (

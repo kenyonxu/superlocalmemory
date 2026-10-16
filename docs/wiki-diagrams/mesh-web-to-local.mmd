@@ -1,0 +1,19 @@
+sequenceDiagram
+    participant App as Web app
+    participant GW as Connection gateway
+    participant RL as Relay on your computer
+    participant BR as Mesh broker
+    participant LA as Local agent
+    App->>GW: mesh_send(to, message)
+    GW->>RL: relayed call with a signed grant
+    RL->>RL: grant has slm:mesh AND the key allows mesh
+    RL->>BR: send as a web peer
+    BR->>BR: reject control characters, 20 sends per 60 s,<br/>redact secrets, 4096 byte limit
+    BR-->>App: ok, message id, expires in 48 h
+    LA->>BR: mesh_inbox
+    BR-->>LA: message in an envelope marked untrusted-peer
+    LA->>BR: mesh_send to the web app's peer id
+    App->>BR: mesh_wait(1 to 20 s)
+    BR-->>App: messages + ack_ids (lease 120 s)
+    App->>BR: next call carries ack = those ids
+    Note over App,BR: no ack within 120 s: the message comes again<br/>flagged as a repeat, 3 hand-overs at most

@@ -9,8 +9,6 @@ TDD RED phase: tests written before implementation.
 
 from __future__ import annotations
 
-import pytest
-
 from superlocalmemory.core.config import ParameterizationConfig
 from superlocalmemory.parameterization.pattern_extractor import (
     PatternAssertion,

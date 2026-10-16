@@ -95,20 +95,24 @@ class TestDetectTier:
         assert adapter._tier == "oauth"
 
     def test_explicit_ics_tier_from_config(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SLM_DATA_DIR", str(tmp_path))  # saved paths must be in imports/
+        ics = tmp_path / "imports" / "export.ics"
+        ics.parent.mkdir()
+        ics.write_text("BEGIN:VCALENDAR\nEND:VCALENDAR\n", encoding="utf-8")
         cfg = tmp_path / "adapters.json"
         cfg.write_text(json.dumps(
-            {"calendar": {"tier": "ics", "ics_path": "/cal/export.ics"}}))
+            {"calendar": {"tier": "ics", "ics_path": str(ics)}}), encoding="utf-8")
         monkeypatch.setattr(calendar_adapter, "_adapters_config_path", lambda: cfg)
 
         adapter = CalendarAdapter(tier="auto")
         adapter._detect_tier()
 
         assert adapter._tier == "ics"
-        assert adapter._ics_path == "/cal/export.ics"
+        assert adapter._ics_path == str(ics.resolve())
 
     def test_oauth_selected_when_gmail_refresh_token_present(self, monkeypatch, tmp_path):
         cfg = tmp_path / "adapters.json"
-        cfg.write_text(json.dumps({"calendar": {}}))
+        cfg.write_text(json.dumps({"calendar": {}}), encoding="utf-8")
         monkeypatch.setattr(calendar_adapter, "_adapters_config_path", lambda: cfg)
         monkeypatch.setattr(
             "superlocalmemory.ingestion.credentials.has_credential",

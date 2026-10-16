@@ -2,7 +2,7 @@
 
 Built by `scripts/build-codex-plugin.mjs` from the single source in `plugin-src/`. Version stamped from `plugin-src/manifest.json`.
 
-Version: **4.2.0**
+Version: **4.2.6**
 
 ## Derived — do not edit by hand
 
@@ -20,12 +20,16 @@ Version: **4.2.0**
 - `agents/slm-loop-runner.md`
 - `agents/slm-memory-advisor.md`
 - `agents/slm-optimize-advisor.md`
+- `assets/icon.svg`
 - `commands/slm-loop.md`
+- `skills/slm-bot-memory/SKILL.md`
 - `skills/slm-cache/SKILL.md`
 - `skills/slm-compress/SKILL.md`
+- `skills/slm-getting-started-bot/SKILL.md`
 - `skills/slm-governance/SKILL.md`
 - `skills/slm-graph/SKILL.md`
 - `skills/slm-loop/SKILL.md`
+- `skills/slm-media/SKILL.md`
 - `skills/slm-mesh/SKILL.md`
 - `skills/slm-profile/SKILL.md`
 - `skills/slm-recall/SKILL.md`
@@ -33,6 +37,7 @@ Version: **4.2.0**
 - `skills/slm-scope/SKILL.md`
 - `skills/slm-session/SKILL.md`
 - `skills/slm-status/SKILL.md`
+- `skills/slm-web-access/SKILL.md`
 
 ## Authored here — no source to derive from
 

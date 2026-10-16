@@ -8,20 +8,29 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 import os
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from superlocalmemory.core.session_identity import synthetic_session_id
+
 from superlocalmemory.core.config import CANONICAL_RECALL_LIMIT
+from superlocalmemory.core.session_identity import synthetic_session_id
 from superlocalmemory.core.status_contract import (
     COUNT_QUERIES,
     counts_from_sqlite,
     projection_queue_depth,
     store_size_mb,
 )
-from superlocalmemory.server.routes.helpers import SLM_VERSION, get_read_connection
 from superlocalmemory.server.route_mutations import authorize_route_mutation
+from superlocalmemory.server.routes.helpers import SLM_VERSION, get_read_connection
+
+if TYPE_CHECKING:
+    from superlocalmemory.core.config import LLMConfig, SLMConfig
+
+from superlocalmemory.storage.database import visible_fact_clause_for_connection
+from superlocalmemory.storage.erasure_visibility import erasure_endpoint_clause
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +95,9 @@ async def _apply_runtime_config(request: Request, config, *, mode_change: bool) 
 
 def _require_manage(request: Request) -> None:
     """Use one explicit authorization boundary for dashboard configuration."""
-    from superlocalmemory.server.rbac_enforce import require_manage
+    from superlocalmemory.server.rbac_enforce import require_global_manage
 
-    require_manage(request)
+    require_global_manage(request)
 
 
 def _resolve_profile(request: Request, requested: str = "") -> str:
@@ -99,7 +108,16 @@ def _resolve_profile(request: Request, requested: str = "") -> str:
 
     if requested and not isinstance(requested, str):
         raise HTTPException(status_code=422, detail="profile must be a string")
-    profile = requested.strip() if requested else get_active_profile()
+    if requested:
+        profile = requested.strip()
+    else:
+        # A signed-in person's own workspace when they name none, exactly as
+        # /recall routes it (caller_workspace.route_to_bound). The daemon's
+        # active workspace here sent a viewer of another workspace to the
+        # owner's: the Recall Lab then said "That isn't in SuperLocalMemory".
+        from superlocalmemory.server.caller_workspace import bound_workspace
+
+        profile = bound_workspace() or get_active_profile()
     require_permission(request, Permission.READ, profile=profile)
     return profile
 
@@ -123,7 +141,7 @@ def _require_manage_for_profile(request: Request, profile: str) -> None:
 # ── Dashboard ────────────────────────────────────────────────
 
 @router.get("/dashboard")
-async def dashboard(request: Request):
+def dashboard(request: Request):
     """Dashboard summary: mode, memory count, health score, recent activity."""
     try:
         from superlocalmemory.core.config import SLMConfig
@@ -161,12 +179,18 @@ async def dashboard(request: Request):
             except Exception:
                 pass
 
-        from superlocalmemory.core.modes import dashboard_mode_fields
+        from superlocalmemory.core.modes import (
+            dashboard_mode_fields,
+            mode_short_name,
+            mode_tagline,
+        )
 
         # Mode record is the single source of truth for locality claims (F-03).
         payload = {
             "mode": config.mode.value,
-            "mode_name": {"a": "Local Guardian", "b": "Smart Local", "c": "Full Power"}.get(config.mode.value, "Unknown"),
+            "mode_name": mode_short_name(config.mode),
+            # #112: what the mode gives you, in the one wording every surface uses.
+            "mode_tagline": mode_tagline(config.mode),
             "provider": config.llm.provider or "none",
             "model": config.llm.model or "",
             "memory_count": memory_count,
@@ -197,7 +221,7 @@ async def dashboard(request: Request):
 # ── Mode ─────────────────────────────────────────────────────
 
 @router.get("/mode")
-async def get_mode(request: Request):
+def get_mode(request: Request):
     """Get current mode, provider, model — single source of truth for UI."""
     try:
         from superlocalmemory.core.config import SLMConfig
@@ -217,11 +241,36 @@ async def get_mode(request: Request):
             "endpoint": _endpoint_host,
             "capabilities": {
                 "llm_available": bool(config.llm.provider),
-                "cross_encoder": config.retrieval.use_cross_encoder if hasattr(config, 'retrieval') else False,
+                "cross_encoder": config.retrieval.reranker_enabled() if hasattr(config, 'retrieval') else False,
             },
         }
     except Exception as e:
         return _internal_error()
+
+
+def _mode_c_quick_switch_refusal(llm_config: "LLMConfig") -> dict | None:
+    """What the Mode C one-click quick-switch (PUT /api/v3/mode) must refuse (#112).
+
+    Allowed: a cloud API key, OR a deliberately configured custom endpoint —
+    llama.cpp, vLLM, LM Studio, or any other self-hosted OpenAI-compatible
+    server — with no key. Ollama's default endpoint does not count: that is
+    Mode B's own local model, not "my own endpoint" chosen for Mode C.
+
+    Refused only when NEITHER is present, since the daemon would come up with
+    nothing to call. Returns ``None`` when the switch may proceed, or the
+    JSON error body to send with it when it must not.
+    """
+    if llm_config.api_key or llm_config.has_custom_endpoint:
+        return None
+    return {
+        "error": (
+            "Mode C needs a cloud API key, or a configured custom endpoint "
+            "(llama.cpp, vLLM, or any other OpenAI-compatible server). "
+            "Configure one in Settings → Step 2 (uses POST /api/v3/mode/set), "
+            "or run `slm provider set`."
+        ),
+        "code": "mode_c_requires_api_key",
+    }
 
 
 @router.put("/mode")
@@ -229,8 +278,8 @@ async def set_mode(request: Request):
     """Switch operating mode. Body: {"mode": "a"|"b"|"c"}"""
     # SEC-H-01: mode switch reconfigures the whole engine — admin-only (MANAGE)
     # on top of machine auth. Owner keeps MANAGE; personal mode unaffected.
-    from superlocalmemory.server.rbac_enforce import require_manage
-    require_manage(request)
+    from superlocalmemory.server.rbac_enforce import require_global_manage
+    require_global_manage(request)
     try:
         body = await request.json()
         new_mode = body.get("mode", "").lower()
@@ -246,20 +295,15 @@ async def set_mode(request: Request):
         # Safety: a bare ``{mode:"c"}`` body (e.g., a stray dashboard button
         # click) used to silently auto-default the model to
         # ``anthropic/claude-sonnet-4`` with no API key, writing phantom state
-        # into config.json. Refuse that path — Mode C requires explicit
-        # provider+key via POST /api/v3/mode/set.
-        if new_mode == "c" and not old_config.llm.api_key:
-            return JSONResponse(
-                {
-                    "error": (
-                        "Mode C requires a cloud API key. "
-                        "Configure provider + key in Settings → Step 2 "
-                        "(uses POST /api/v3/mode/set)."
-                    ),
-                    "code": "mode_c_requires_api_key",
-                },
-                status_code=400,
-            )
+        # into config.json. Refuse that path unless a cloud key or a
+        # deliberately configured custom endpoint already exists — either
+        # one means the daemon has something to call. A genuinely bare
+        # config still needs explicit provider setup via POST
+        # /api/v3/mode/set.
+        if new_mode == "c":
+            _refusal = _mode_c_quick_switch_refusal(old_config.llm)
+            if _refusal is not None:
+                return JSONResponse(_refusal, status_code=400)
 
         # Apply new mode's structural presets (retrieval, math, channel_weights)
         # by building a fresh template, then graft them onto the loaded config so
@@ -284,18 +328,10 @@ async def set_mode(request: Request):
             source="PUT /api/v3/mode",
         )
 
-        # V3.3: Check if embedding model changed — flag for re-indexing
-        needs_reindex = (
-            old_config.embedding.provider != new_config.embedding.provider
-            or old_config.embedding.model_name != new_config.embedding.model_name
-        )
-
-        return {
-            "success": True,
-            "mode": new_mode,
-            "needs_reindex": needs_reindex,
-            "message": "Embedding re-indexing will run on next recall." if needs_reindex else "",
-        }
+        # A quick switch grafts retrieval/math/channel presets only: the embedding
+        # model never changes here (POST /mode/set and PUT /embedding/config do that,
+        # as a background re-index), so there is never anything to re-index.
+        return {"success": True, "mode": new_mode, "needs_reindex": False, "message": ""}
     except Exception as e:
         return _internal_error()
 
@@ -432,8 +468,8 @@ async def set_full_config(request: Request):
     V3.4.24: Also accepts embedding_* fields for custom embedding endpoints.
     """
     # SEC-H-01: sets the LLM provider + API key for the whole engine — admin-only.
-    from superlocalmemory.server.rbac_enforce import require_manage
-    require_manage(request)
+    from superlocalmemory.server.rbac_enforce import require_global_manage
+    require_global_manage(request)
     try:
         body = await request.json()
         if not isinstance(body, dict):
@@ -532,12 +568,15 @@ async def set_full_config(request: Request):
 
         # Update embedding only when the dashboard explicitly sent those fields;
         # absence means "leave it alone" (AIDEV-86 / broader fix).
+        _queued, _note = None, {}  # a background re-index started by this save; what a 200 says
         _emb_fields = ("embedding_provider", "embedding_endpoint", "embedding_key",
                        "embedding_model", "embedding_dimension")
         if any(k in body for k in _emb_fields):
             _old_emb = config.embedding
-            _new_provider = body.get("embedding_provider", "")
             _new_model = body.get("embedding_model", "")
+            from superlocalmemory.core.embedding_providers import resolve_embedding_provider
+            _new_provider = resolve_embedding_provider(  # ValueError -> 400 below
+                body.get("embedding_provider", ""), _new_model)
             _new_dim = int(body.get("embedding_dimension", 0) or 0)
             # The same range the other save route enforces. Without it a
             # dashboard save with no dimension field stored a width of zero.
@@ -551,14 +590,7 @@ async def set_full_config(request: Request):
             # fields, so a width that the store cannot hold arrived here
             # untouched while the other route refused it — one door bolted, the
             # other open.
-            if not bool(body.get("force")):
-                _refusal = _refuse_incompatible_embedding(
-                    config, config.embedding, _new_model, _new_dim,
-                    new_provider=_new_provider,
-                )
-                if _refusal is not None:
-                    return _refusal
-            config.embedding = EmbeddingConfig(
+            _new_emb = EmbeddingConfig(
                 provider=_new_provider,
                 api_endpoint=body.get("embedding_endpoint", ""),
                 api_key=body.get("embedding_key", ""),
@@ -575,6 +607,19 @@ async def set_full_config(request: Request):
                 api_version=_old_emb.api_version,
                 deployment_name=_old_emb.deployment_name,
             )
+            # 4.1.22: a new space is re-indexed in the background; the rest applies now.
+            from superlocalmemory.server.routes.embedding_reindex import queue_if_new_space
+            _queued = queue_if_new_space(request, _old_emb, _new_emb, force=bool(body.get("force")))
+            if _queued is not None and _queued.status_code != 202:
+                return _queued
+            _refusal = None if _queued is not None or bool(body.get("force")) or getattr(
+                request.app.state, "embedding_reindex", None) else _refuse_incompatible_embedding(
+                config, _old_emb, _new_model, _new_dim, new_provider=_new_provider)
+            if _refusal is not None:
+                return _refusal
+            if _queued is None:
+                from superlocalmemory.server.routes.embedding_reindex import saved_switch_note
+                _note, config.embedding = saved_switch_note(request, _old_emb, _new_emb), _new_emb
 
         # When the mode actually changed, apply the new mode's structural presets
         # (retrieval topology, math thresholds, channel weights) so the user gets
@@ -604,7 +649,7 @@ async def set_full_config(request: Request):
         except Exception:
             pass
 
-        return {
+        _saved = {
             "success": True,
             "mode": new_mode,
             "provider": config.llm.provider or "none",
@@ -613,6 +658,9 @@ async def set_full_config(request: Request):
             "embedding_model": config.embedding.model_name,
             "embedding_dimension": config.embedding.dimension,
         }
+        if _queued is not None:  # embedding stays live until the background re-index is done
+            return JSONResponse({**_saved, **json.loads(_queued.body)}, status_code=202)
+        return {**_saved, **_note}
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception as e:
@@ -622,7 +670,7 @@ async def set_full_config(request: Request):
 # ── V3.4.24: Embedding Configuration ────────────────────────────────
 
 @router.get("/embedding/config")
-async def get_embedding_config(request: Request):
+def get_embedding_config(request: Request):
     """Return current embedding configuration."""
     try:
         from superlocalmemory.core.config import SLMConfig
@@ -712,8 +760,8 @@ def _refuse_incompatible_embedding(
                     f"this store holds {stored}-dimensional ones. Vectors of "
                     f"different widths cannot be compared, so every memory "
                     f"already stored would become unfindable by meaning. "
-                    f"Rebuild them first with: slm db migrate — or resend with "
-                    f"force=true if they have already been rebuilt."
+                    f"Switch with: slm embedder switch {new_model} --dimension "
+                    f"{effective} (re-indexes in the background) — or resend with force=true."
                 ),
             },
             status_code=409,
@@ -727,15 +775,20 @@ def _refuse_incompatible_embedding(
 async def set_embedding_config(request: Request):
     """Update embedding configuration independently of mode switch."""
     # SEC-H-01: swapping the embedding provider/key affects all recall — admin-only.
-    from superlocalmemory.server.rbac_enforce import require_manage
-    require_manage(request)
+    from superlocalmemory.server.rbac_enforce import require_global_manage
+    require_global_manage(request)
     try:
         body = await request.json()
         from superlocalmemory.core.config import SLMConfig, EmbeddingConfig
         config = getattr(request.app.state, "config", None) or SLMConfig.load()
 
-        new_provider = body.get("provider", config.embedding.provider)
         new_model = body.get("model_name", config.embedding.model_name)
+        from superlocalmemory.core.embedding_providers import resolve_embedding_provider
+        try:
+            new_provider = resolve_embedding_provider(
+                body.get("provider", ""), new_model, config.embedding.provider)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
         new_dim = int(body.get("dimension", config.embedding.dimension) or 768)
         if not (64 <= new_dim <= 8192):
             return JSONResponse({"error": f"Dimension must be 64-8192, got {new_dim}"}, status_code=400)
@@ -750,14 +803,7 @@ async def set_embedding_config(request: Request):
         # compared, so the store would keep answering similarity questions and
         # every answer would be noise. ``force=true`` is the escape hatch for
         # somebody who has already re-embedded.
-        if not bool(body.get("force")):
-            refusal = _refuse_incompatible_embedding(
-                config, old_emb, new_model, new_dim, new_provider=new_provider,
-            )
-            if refusal is not None:
-                return refusal
-
-        config.embedding = EmbeddingConfig(
+        new_emb = EmbeddingConfig(
             model_name=new_model,
             dimension=new_dim,
             provider=new_provider,
@@ -775,13 +821,19 @@ async def set_embedding_config(request: Request):
             api_version=old_emb.api_version,
             deployment_name=old_emb.deployment_name,
         )
+        # 4.1.22: a new embedding space is re-indexed in the background (202 + job).
+        from superlocalmemory.server.routes.embedding_reindex import queue_if_new_space
+        queued = queue_if_new_space(request, old_emb, new_emb, force=bool(body.get("force")))
+        if queued is not None:
+            return queued
+        refusal = None if bool(body.get("force")) or getattr(request.app.state, "embedding_reindex", None) else (
+            _refuse_incompatible_embedding(config, old_emb, new_model, new_dim, new_provider=new_provider))
+        if refusal is not None:
+            return refusal
+        from superlocalmemory.server.routes.embedding_reindex import saved_switch_note
+        note = saved_switch_note(request, old_emb, new_emb)  # never "on next recall": see there
+        config.embedding = new_emb
         await _apply_runtime_config(request, config, mode_change=False)
-
-        needs_reindex = (
-            old_emb.provider != new_provider
-            or old_emb.model_name != new_model
-            or old_emb.dimension != new_dim
-        )
 
         # Kill workers so next request uses new config
         try:
@@ -794,14 +846,14 @@ async def set_embedding_config(request: Request):
             "provider": new_provider,
             "model_name": new_model,
             "dimension": new_dim,
-            "needs_reindex": needs_reindex,
+            **note,
         }
     except Exception as e:
         return _internal_error()
 
 
 @router.get("/scope/config")
-async def get_scope_config(request: Request):
+def get_scope_config(request: Request):
     """Return runtime multi-scope defaults used by daemon writes and recalls."""
     try:
         from superlocalmemory.core.config import SLMConfig
@@ -816,8 +868,8 @@ async def get_scope_config(request: Request):
 async def set_scope_config(request: Request):
     """Validate, persist, and hot-apply explicit multi-scope defaults."""
     # SEC-H-01: scope defaults govern cross-profile recall visibility — admin-only.
-    from superlocalmemory.server.rbac_enforce import require_manage
-    require_manage(request)
+    from superlocalmemory.server.rbac_enforce import require_global_manage
+    require_global_manage(request)
     try:
         body = await request.json()
         from superlocalmemory.core.config import SLMConfig, ScopeConfig
@@ -904,13 +956,18 @@ async def test_embedding_endpoint(request: Request):
 
 
 @router.get("/embed/ping")
-async def embed_ping():
+def embed_ping(request: Request):
     """V3.5.9: Liveness probe for McpEmbedderProxy. Returns 200 when daemon
-    embedder is ready so the proxy knows the daemon is reachable."""
+    embedder is ready so the proxy knows the daemon is reachable.
+
+    ``embedder`` says which model the daemon embeds with (never builds the engine),
+    so another process can refuse a daemon that is not on its own embedding space.
+    """
     try:
-        from .helpers import get_engine_lazy
-        # We just need to confirm the route is alive — engine check is optional
-        return {"ok": True}
+        from superlocalmemory.core.daemon_text_embedder import describe_embedder
+
+        engine = getattr(request.app.state, "engine", None)
+        return {"ok": True, "embedder": describe_embedder(getattr(engine, "_embedder", None))}
     except Exception:
         logger.exception("embedder liveness probe failed")
         return JSONResponse({"ok": False, "error": "Internal server error"}, status_code=503)
@@ -928,6 +985,9 @@ async def embed_texts(request: Request):
     try:
         body = await request.json()
         texts = body.get("texts", [])
+        prompt = body.get("prompt", "document")
+        if prompt not in ("document", "query"):
+            return JSONResponse({"error": "prompt must be 'document' or 'query'"}, status_code=400)
         if not texts:
             return {"embeddings": []}
 
@@ -938,11 +998,19 @@ async def embed_texts(request: Request):
                 {"error": "Embedder not available in daemon"},
                 status_code=503,
             )
+        # A caller that names its model and vector size gets vectors only from that model.
+        if body.get("model") and body.get("dimension"):
+            from superlocalmemory.core.daemon_text_embedder import embedder_identity
+
+            if (str(body["model"]), int(body["dimension"])) != embedder_identity(engine._embedder):
+                return JSONResponse({"error": "model_mismatch"}, status_code=409)
 
         loop = asyncio.get_event_loop()
+        from superlocalmemory.core.daemon_text_embedder import embed_with_prompt
+
         embeddings = await loop.run_in_executor(
             None,
-            lambda: engine._embedder.embed_batch(texts),
+            lambda: embed_with_prompt(engine._embedder, texts, prompt),
         )
         return {"embeddings": embeddings}
     except Exception as e:
@@ -1084,7 +1152,7 @@ async def test_provider(request: Request):
 
 
 @router.get("/ollama/status")
-async def ollama_status():
+def ollama_status():
     """Check if Ollama is running and list available models."""
     try:
         import httpx
@@ -1104,7 +1172,7 @@ async def ollama_status():
 # ── Provider ─────────────────────────────────────────────────
 
 @router.get("/providers")
-async def list_providers():
+def list_providers():
     """List available LLM providers with presets."""
     try:
         from superlocalmemory.core.config import SLMConfig
@@ -1115,7 +1183,7 @@ async def list_providers():
 
 
 @router.get("/provider")
-async def get_provider():
+def get_provider():
     """Get current provider configuration (API key masked)."""
     try:
         from superlocalmemory.core.config import SLMConfig
@@ -1140,10 +1208,10 @@ async def set_provider(request: Request):
     # Swapping the provider + API key redirects all LLM traffic (prompt/output
     # interception risk) — admin-only, on top of mutation auth.
     from superlocalmemory.server.route_mutations import authorize_route_mutation
-    from superlocalmemory.server.rbac_enforce import require_manage
+    from superlocalmemory.server.rbac_enforce import require_global_manage
     _auth = authorize_route_mutation(request, operation="update",
                                      source_agent_id="http-set-provider")
-    require_manage(request)
+    require_global_manage(request)
     try:
         body = await request.json()
         provider = body.get("provider", "")
@@ -1188,11 +1256,21 @@ async def recall_trace(request: Request):
     """
     import asyncio
     import time as _time
+    # 4.1.20: it returns memory content, so it needs READ on the workspace when
+    # team accounts are on. The RBAC middleware gates GET only; this is a POST.
+    # The recall below runs on exactly the workspace that was checked: without
+    # it the engine searched its own active workspace, so a person signed in to
+    # one workspace read another's memories.
+    _profile = _resolve_profile(request)
     try:
         body = await request.json()
         query = body.get("query", "")
         limit = body.get("limit", CANONICAL_RECALL_LIMIT)
-        window = body.get("window", "") or ""
+        # 4.1.20 (R5): an unreadable window is a 400, never an unfiltered trace.
+        from superlocalmemory.server.time_filter_error import checked_window_or_400
+        window = checked_window_or_400(body.get("window", "") or "")
+        if not isinstance(window, str):
+            return window
         as_of_raw = (body.get("as_of", "") or "").strip()
         raw_known_as_of = body.get("known_as_of", "")
         raw_valid_at = body.get("valid_at", "")
@@ -1205,6 +1283,12 @@ async def recall_trace(request: Request):
         include_unknown = body.get("include_unknown", False)
         if not isinstance(include_unknown, bool):
             return JSONResponse({"error": "invalid_include_unknown"}, status_code=400)
+        show_weak = body.get("show_weak", False)
+        if not isinstance(show_weak, bool):
+            return JSONResponse({"error": "invalid_show_weak"}, status_code=400)
+        include_related = body.get("include_related", True)  # a person is looking
+        if not isinstance(include_related, bool):
+            return JSONResponse({"error": "invalid_include_related"}, status_code=400)
 
         # Normalize as_of at HTTP boundary. Invalid → 400.
         _as_of: str | None = None
@@ -1239,13 +1323,17 @@ async def recall_trace(request: Request):
 
         loop = asyncio.get_event_loop()
         t0 = _time.monotonic()
+        from superlocalmemory.core.answer_check_history import call_as_dashboard
         response = await loop.run_in_executor(
             None,
-            lambda: engine.recall(
-                query, limit=limit, fast=False,
+            lambda: call_as_dashboard(  # a dashboard test, never agent traffic
+                engine.recall, query, limit=limit, fast=False,
+                profile_id=_profile,
                 window=window or None, as_of=_as_of,
                 known_as_of=_known_as_of, valid_at=_valid_at,
                 include_unknown=include_unknown,
+                **({"show_weak": True} if show_weak else {}),
+                **({"include_related": True} if include_related else {}),
                 # Whoever asked, by the name they arrived under. Without a name
                 # the record of this recall is discarded and no outcome
                 # reported afterwards can be matched back to it.
@@ -1254,20 +1342,23 @@ async def recall_trace(request: Request):
         )
         elapsed_ms = round((_time.monotonic() - t0) * 1000, 1)
 
+        from superlocalmemory.core.kind_query import engine_display_min_confidence
         from superlocalmemory.server.recall_serializer import (
             recall_response_metadata,
             serialize_recall_response,
         )
+        from superlocalmemory.server.routes.answer_check_history import answer_check_block
         results, no_confident_match = serialize_recall_response(
             response,
             limit=limit,
             per_fact_max=300,
             total_max=max(300, limit * 300),
+            display_min_confidence=engine_display_min_confidence(engine),
         )
 
         # Record learning signals (non-blocking, non-critical)
         try:
-            _record_learning_signals(query, results)
+            _record_learning_signals(query, results, profile_id=_profile)
         except Exception as _sig_exc:
             import logging as _log
             _log.getLogger(__name__).warning("Learning signal error: %s", _sig_exc)
@@ -1281,19 +1372,23 @@ async def recall_trace(request: Request):
             "synthesis": "",
             "no_confident_match": no_confident_match,
             **recall_response_metadata(response),
+            "answer_check": answer_check_block(response),
         }
     except Exception as e:
         return _internal_error()
 
 
-def _record_learning_signals(query: str, results: list) -> None:
-    """Record feedback + co-retrieval + confidence boost for any recall."""
+def _record_learning_signals(query: str, results: list, profile_id: str = "") -> None:
+    """Record feedback + co-retrieval + confidence boost for any recall.
+
+    ``profile_id`` is the workspace the recall ran on; signals are filed there.
+    """
     from superlocalmemory.core.config import SLMConfig
 
     from superlocalmemory.infra.data_root import canonical_data_root
     slm_dir = canonical_data_root()
     config = SLMConfig.load()
-    pid = config.active_profile
+    pid = profile_id or config.active_profile
     fact_ids = [r.get("fact_id", "") for r in results[:10] if r.get("fact_id")]
     if not fact_ids:
         return
@@ -1327,7 +1422,7 @@ def _record_learning_signals(query: str, results: list) -> None:
 # ── Trust Dashboard ──────────────────────────────────────────
 
 @router.get("/trust/dashboard")
-async def trust_dashboard(request: Request):
+def trust_dashboard(request: Request):
     """Trust overview: per-agent scores, alerts. Queries DB directly."""
     try:
         from superlocalmemory.core.config import SLMConfig
@@ -1379,7 +1474,7 @@ async def trust_dashboard(request: Request):
 # ── Math Health ──────────────────────────────────────────────
 
 @router.get("/math/health")
-async def math_health(request: Request):
+def math_health(request: Request):
     """Mathematical layer health: Fisher, sheaf, Langevin status. Queries DB directly."""
     try:
         # v3.6.12 (math-1): report CONFIG-DERIVED status, not a hardcoded
@@ -1421,7 +1516,7 @@ async def math_health(request: Request):
 # ── Auto-Capture / Auto-Recall Config ────────────────────────
 
 @router.get("/auto-capture/config")
-async def get_auto_capture_config():
+def get_auto_capture_config():
     """Get auto-capture configuration."""
     try:
         from superlocalmemory.hooks.rules_engine import RulesEngine
@@ -1452,7 +1547,7 @@ async def set_auto_capture_config(request: Request):
 
 
 @router.get("/auto-recall/config")
-async def get_auto_recall_config():
+def get_auto_recall_config():
     """Get auto-recall configuration."""
     try:
         from superlocalmemory.hooks.rules_engine import RulesEngine
@@ -1510,7 +1605,7 @@ def _runtime_config_snapshot(config) -> dict:
 
 
 @router.get("/runtime/config")
-async def get_runtime_config(request: Request):
+def get_runtime_config(request: Request):
     """User-facing runtime behaviour settings.
 
     Recall depth (top_k), reranker on/off (use_cross_encoder), and memory
@@ -1605,7 +1700,7 @@ async def set_runtime_config(request: Request):
 # ── IDE Status ───────────────────────────────────────────────
 
 @router.get("/ide/status")
-async def ide_status():
+def ide_status():
     """Get IDE connection status."""
     try:
         from superlocalmemory.hooks.ide_connector import IDEConnector
@@ -1639,7 +1734,7 @@ async def ide_connect(request: Request):
 # ── Active Memory (V3.1) ────────────────────────────────────
 
 @router.get("/learning/signals")
-async def learning_signals():
+def learning_signals():
     """Get zero-cost learning signal statistics."""
     try:
         from superlocalmemory.learning.signals import LearningSignals
@@ -1709,7 +1804,7 @@ async def run_consolidation(request: Request):
 
 
 @router.get("/hooks/status")
-async def hooks_status():
+def hooks_status():
     """Check if Claude Code hooks are installed."""
     try:
         from superlocalmemory.hooks.claude_code_hooks import check_status
@@ -1739,7 +1834,7 @@ def _load_auto_invoke_json() -> dict:
     config_path = MEMORY_DIR / "config.json"
     if config_path.exists():
         try:
-            data = json.loads(config_path.read_text())
+            data = json.loads(config_path.read_text(encoding="utf-8"))
             return data.get("auto_invoke", {})
         except (json.JSONDecodeError, IOError):
             pass
@@ -1753,18 +1848,18 @@ def _save_auto_invoke_json(auto_invoke_data: dict) -> None:
     cfg: dict = {}
     if config_path.exists():
         try:
-            cfg = json.loads(config_path.read_text())
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, IOError):
             pass
     cfg["auto_invoke"] = auto_invoke_data
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(cfg, indent=2))
+    config_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
 # ── 1. GET /api/v3/auto-invoke/config ─────────────────────────
 
 @router.get("/auto-invoke/config")
-async def get_auto_invoke_config(request: Request):
+def get_auto_invoke_config(request: Request):
     """Get current auto-invoke configuration."""
     try:
         from superlocalmemory.core.config import AutoInvokeConfig
@@ -1827,7 +1922,7 @@ async def set_auto_invoke_config(request: Request):
 # ── 3. GET /api/v3/associations ───────────────────────────────
 
 @router.get("/associations")
-async def get_associations(
+def get_associations(
     request: Request,
     limit: int = 50,
     type: str = "",
@@ -1836,7 +1931,7 @@ async def get_associations(
     """Get association edges for a profile with content previews."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import get_active_profile, DB_PATH
+        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3
 
         if not DB_PATH.exists():
@@ -1854,7 +1949,11 @@ async def get_associations(
             "FROM association_edges ae "
             "LEFT JOIN atomic_facts sf ON sf.fact_id = ae.source_fact_id "
             "LEFT JOIN atomic_facts tf ON tf.fact_id = ae.target_fact_id "
-            "WHERE ae.profile_id = ? "
+            "WHERE ae.profile_id = ?"
+            f"{visible_fact_clause_for_connection(conn, 'sf')}"
+            f"{visible_fact_clause_for_connection(conn, 'tf')}"
+            f"{erasure_endpoint_clause(conn, 'ae', 'source_fact_id', 'sf')}"
+            f"{erasure_endpoint_clause(conn, 'ae', 'target_fact_id', 'tf')} "
         )
         if type:
             sql += "AND ae.association_type = ? "
@@ -1899,11 +1998,11 @@ async def get_associations(
 # ── 4. GET /api/v3/associations/stats ─────────────────────────
 
 @router.get("/associations/stats")
-async def get_association_stats(request: Request, profile: str = ""):
+def get_association_stats(request: Request, profile: str = ""):
     """Get association graph statistics."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import get_active_profile, DB_PATH
+        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3
 
         if not DB_PATH.exists():
@@ -1972,10 +2071,13 @@ async def get_association_stats(request: Request, profile: str = ""):
             for dr in degree_rows:
                 fact_id = dr["fact_id"]
                 preview_row = conn.execute(
-                    "SELECT content FROM atomic_facts WHERE fact_id = ?",
-                    (fact_id,),
+                    "SELECT content FROM atomic_facts WHERE fact_id = ? AND profile_id = ?"
+                    f"{visible_fact_clause_for_connection(conn)}",
+                    (fact_id, pid),
                 ).fetchone()
-                preview = (dict(preview_row).get("content", "")[:80]) if preview_row else ""
+                if not preview_row:
+                    continue
+                preview = dict(preview_row).get("content", "")[:80]
                 top_facts.append({
                     "fact_id": fact_id,
                     "degree": dr["degree"],
@@ -2000,11 +2102,11 @@ async def get_association_stats(request: Request, profile: str = ""):
 # ── 5. GET /api/v3/consolidation/status ───────────────────────
 
 @router.get("/consolidation/status")
-async def get_consolidation_status(request: Request, profile: str = ""):
+def get_consolidation_status(request: Request, profile: str = ""):
     """Get consolidation status and last run results."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import get_active_profile, DB_PATH
+        from superlocalmemory.server.routes.helpers import DB_PATH
         from superlocalmemory.core.config import SLMConfig
         import sqlite3
 
@@ -2099,7 +2201,6 @@ async def trigger_consolidation(request: Request):
         lightweight = body.get("lightweight", False)
         profile = body.get("profile", "")
 
-        from superlocalmemory.server.routes.helpers import get_active_profile
         pid = _resolve_mutation_profile(profile)
         _require_manage_for_profile(request, pid)
         authorization = authorize_route_mutation(
@@ -2147,11 +2248,12 @@ async def trigger_consolidation(request: Request):
 # ── 7. GET /api/v3/core-memory ────────────────────────────────
 
 @router.get("/core-memory")
-async def get_core_memory(request: Request, profile: str = ""):
+def get_core_memory(request: Request, profile: str = ""):
     """Get all Core Memory blocks for a profile."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import get_active_profile, DB_PATH
+        from superlocalmemory.server.routes.helpers import DB_PATH
+        from superlocalmemory.storage.erasure_visibility import aggregate_erasure_clause
         import sqlite3
 
         if not DB_PATH.exists():
@@ -2163,7 +2265,10 @@ async def get_core_memory(request: Request, profile: str = ""):
         rows = conn.execute(
             "SELECT block_id, block_type, content, char_count, version, "
             "compiled_by, updated_at FROM core_memory_blocks "
-            "WHERE profile_id = ? ORDER BY block_type",
+            "WHERE profile_id = ?"
+            + aggregate_erasure_clause(
+                conn, "core_memory_blocks", column="source_fact_ids")
+            + " ORDER BY block_type",
             (pid,),
         ).fetchall()
 
@@ -2210,6 +2315,13 @@ async def update_core_memory_block(block_id: str, request: Request):
         from superlocalmemory.server.routes.helpers import DB_PATH, get_active_profile
         from superlocalmemory.storage.memory_write import memory_write
         from datetime import datetime, timezone
+        from superlocalmemory.memory_core import prepare_user_text
+
+        # An edited block is user text: prepared like a save.
+        content = prepare_user_text(
+            getattr(getattr(request.app.state, "engine", None), "_config", None),
+            str(content),
+        ).text
 
         if not DB_PATH.exists():
             return JSONResponse(
@@ -2268,13 +2380,13 @@ async def update_core_memory_block(block_id: str, request: Request):
 # ── 9. GET /api/v3/vector-store/status ────────────────────────
 
 @router.get("/vector-store/status")
-async def get_vector_store_status(request: Request, profile: str = ""):
+def get_vector_store_status(request: Request, profile: str = ""):
     """Get VectorStore health and statistics."""
     pid = _resolve_profile(request, profile)
     try:
         from superlocalmemory.core.config import SLMConfig
         from superlocalmemory.server.routes.helpers import DB_PATH
-        import sqlite3
+        import sqlite3  # noqa: F401
 
         config = SLMConfig.load()
 
@@ -2330,11 +2442,11 @@ async def get_vector_store_status(request: Request, profile: str = ""):
 # ── 1a. GET /api/v3/forgetting/stats ────────────────────────
 
 @router.get("/forgetting/stats")
-async def forgetting_stats(request: Request, profile: str = ""):
+def forgetting_stats(request: Request, profile: str = ""):
     """Get memory retention zone distribution."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import get_active_profile, DB_PATH
+        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3 as _sqlite3
 
         zones = {"active": 0, "warm": 0, "cold": 0, "archive": 0, "forgotten": 0}
@@ -2381,7 +2493,7 @@ async def run_forgetting(request: Request):
         body = await request.json()
         profile = body.get("profile", "")
 
-        from superlocalmemory.server.routes.helpers import get_active_profile, DB_PATH
+        from superlocalmemory.server.routes.helpers import DB_PATH
         from superlocalmemory.storage.memory_write import memory_write as _memory_write
         pid = _resolve_mutation_profile(profile)
         _require_manage_for_profile(request, pid)
@@ -2462,11 +2574,11 @@ async def run_forgetting(request: Request):
 # ── 1c. GET /api/v3/quantization/stats ──────────────────────
 
 @router.get("/quantization/stats")
-async def quantization_stats(request: Request, profile: str = ""):
+def quantization_stats(request: Request, profile: str = ""):
     """Get embedding quantization tier distribution."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import get_active_profile, DB_PATH
+        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3 as _sqlite3
 
         tiers = {"float32": 0, "int8": 0, "polar4": 0, "polar2": 0}
@@ -2525,11 +2637,11 @@ async def quantization_stats(request: Request, profile: str = ""):
 # ── 1d. GET /api/v3/ccq/blocks ──────────────────────────────
 
 @router.get("/ccq/blocks")
-async def ccq_blocks(request: Request, profile: str = "", limit: int = 50):
+def ccq_blocks(request: Request, profile: str = "", limit: int = 50):
     """Get CCQ consolidated blocks."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import get_active_profile, DB_PATH
+        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3 as _sqlite3
 
         if not DB_PATH.exists():
@@ -2585,11 +2697,11 @@ async def ccq_blocks(request: Request, profile: str = "", limit: int = 50):
 # ── 1e. GET /api/v3/soft-prompts ─────────────────────────────
 
 @router.get("/soft-prompts")
-async def get_soft_prompts(request: Request, profile: str = ""):
+def get_soft_prompts(request: Request, profile: str = ""):
     """Get active soft prompt templates."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import get_active_profile, DB_PATH
+        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3 as _sqlite3
 
         if not DB_PATH.exists():
@@ -2638,7 +2750,7 @@ async def get_soft_prompts(request: Request, profile: str = ""):
 # ── 1f. GET /api/v3/health/processes ─────────────────────────
 
 @router.get("/health/processes")
-async def process_health(request: Request):
+def process_health(request: Request):
     """Get SLM process health status."""
     _resolve_profile(request)
     try:
@@ -2650,13 +2762,11 @@ async def process_health(request: Request):
         }
 
         # Check parent process
+        from superlocalmemory.core.platform_utils import is_pid_alive
+
         try:
-            _os.kill(_os.getppid(), 0)
-            processes["parent"]["status"] = "running"
-        except ProcessLookupError:
-            processes["parent"]["status"] = "dead"
-        except PermissionError:
-            processes["parent"]["status"] = "running"
+            alive = is_pid_alive(_os.getppid())
+            processes["parent"]["status"] = "running" if alive else "dead"
         except OSError:
             processes["parent"]["status"] = "unknown"
 
@@ -2688,7 +2798,7 @@ async def process_health(request: Request):
 # ── v3.4.1: Graph Communities ──────────────────────────────────
 
 @router.get("/graph/communities")
-async def get_graph_communities(request: Request, profile: str = ""):
+def get_graph_communities(request: Request, profile: str = ""):
     """Get community assignments with TF-IDF labels, entities, and colors.
 
     v3.4.1: Uses TF-IDF labels from config table (computed by GraphAnalyzer
@@ -2697,7 +2807,7 @@ async def get_graph_communities(request: Request, profile: str = ""):
     """
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import get_active_profile, DB_PATH
+        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3
 
         if not DB_PATH.exists():
@@ -2753,7 +2863,8 @@ async def get_graph_communities(request: Request, profile: str = ""):
                     fact_rows = conn.execute(
                         "SELECT af.content FROM fact_importance fi "
                         "JOIN atomic_facts af ON fi.fact_id = af.fact_id "
-                        "WHERE fi.profile_id = ? AND fi.community_id = ? "
+                        "WHERE fi.profile_id = ? AND fi.community_id = ?"
+                        f"{visible_fact_clause_for_connection(conn, 'af')} "
                         "ORDER BY fi.pagerank_score DESC LIMIT 20",
                         (pid, comm_id),
                     ).fetchall()
@@ -2779,7 +2890,8 @@ async def get_graph_communities(request: Request, profile: str = ""):
                 ent_rows = conn.execute(
                     "SELECT af.canonical_entities_json FROM fact_importance fi "
                     "JOIN atomic_facts af ON fi.fact_id = af.fact_id "
-                    "WHERE fi.profile_id = ? AND fi.community_id = ? "
+                    "WHERE fi.profile_id = ? AND fi.community_id = ?"
+                        f"{visible_fact_clause_for_connection(conn, 'af')} "
                     "ORDER BY fi.pagerank_score DESC LIMIT 10",
                     (pid, comm_id),
                 ).fetchall()
@@ -2846,11 +2958,11 @@ async def run_community_detection(request: Request):
 
 
 @router.get("/v33/overview")
-async def v33_overview(request: Request, profile: str = ""):
+def v33_overview(request: Request, profile: str = ""):
     """Get SLM 3.3 feature overview -- all new capabilities at a glance."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import get_active_profile, DB_PATH
+        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3 as _sqlite3
 
         overview: dict = {
@@ -2965,11 +3077,10 @@ async def v33_overview(request: Request, profile: str = ""):
         # Process health
         try:
             import os as _os
-            _os.kill(_os.getppid(), 0)
-            overview["process_health"] = {"healthy": True}
-        except ProcessLookupError:
-            overview["process_health"] = {"healthy": False}
-        except (PermissionError, OSError):
+
+            from superlocalmemory.core.platform_utils import is_pid_alive
+            overview["process_health"] = {"healthy": is_pid_alive(_os.getppid())}
+        except OSError:
             overview["process_health"] = {"healthy": True}
 
         conn.close()
@@ -2981,16 +3092,19 @@ async def v33_overview(request: Request, profile: str = ""):
 # ── MCP Profiles ─────────────────────────────────────────────
 
 @router.get("/mcp/profiles")
-async def get_mcp_profiles(request: Request):
+def get_mcp_profiles(request: Request):
     """MCP profile summary: current profile, all profiles with tool counts and names.
 
     Reads only the env var SLM_MCP_PROFILE and the pure-data profiles module.
     No engine required — safe to call at any point in the daemon lifecycle.
 
     Note on 'current': when SLM_MCP_PROFILE is unset the MCP server falls
-    back to the legacy _ESSENTIAL_TOOLS set.  The UI reports 'core' for that
-    state because 'core' is the recommended named-profile equivalent for new
-    installs and is the closest documented starting point for users.
+    back to the legacy _ESSENTIAL_TOOLS set, which is asserted equal to the
+    `full` profile — not `core` — by
+    tests/test_mcp/test_mcp_exposure_contract.py
+    (`test_registration_exposure_is_exact_and_duplicate_free`, exposure
+    "essential"). The UI must report 'full' for that state; claiming 'core'
+    understated the real no-profile surface by 36 tools (L3-05).
     """
     try:
         from superlocalmemory.mcp.profiles import (
@@ -3001,9 +3115,14 @@ async def get_mcp_profiles(request: Request):
 
         raw_profile = os.environ.get("SLM_MCP_PROFILE", "").strip().lower()
         canonical = _PROFILE_ALIASES.get(raw_profile, raw_profile)
-        # Blank env var, "whole", or an unknown value all resolve to "core"
-        # for UI display purposes (safe, conservative default).
-        if not canonical or canonical == "whole" or canonical not in _PROFILE_DEFINITIONS:
+        if not raw_profile:
+            # No SLM_MCP_PROFILE set: the real, measured default (see
+            # docstring above).
+            current = "full"
+        elif canonical == "whole" or canonical not in _PROFILE_DEFINITIONS:
+            # "whole" (all 107 tools) and any unrecognized value have no
+            # single named profile that represents them exactly; fall back
+            # to the smallest, safest documented profile for UI display.
             current = "core"
         else:
             current = canonical

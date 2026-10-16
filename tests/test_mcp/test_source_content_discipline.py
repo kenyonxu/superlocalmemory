@@ -13,7 +13,6 @@ TDD RED suite. Tests for:
 
 from __future__ import annotations
 
-import pytest
 
 from superlocalmemory.core.injection import (
     _PROMPT_TEMPLATE_PATTERNS,

@@ -79,255 +79,10 @@
    * IDs use od-* prefix to avoid colliding with legacy Bootstrap IDs.
    * Tab switching uses data-od-tab / data-od-pane to isolate from shell nav.
    */
-  function buildSkeleton() {
-    return (
-      // Page header
-      '<div class="page-head">' +
-        '<h2>Governance</h2>' +
-        '<p>Who can access this workspace, how memory ages, trust, and ' +
-        'compliance — with the controls to act on them. Nothing here is ' +
-        'read-only.</p>' +
-      '</div>' +
-
-      // Tab bar
-      '<div class="tabs" id="od-ops-tabs">' +
-        '<button class="tab active" data-od-tab="lifecycle">Lifecycle</button>' +
-        '<button class="tab" data-od-tab="access">Access &amp; Users</button>' +
-        '<button class="tab" data-od-tab="trust">Trust</button>' +
-        '<button class="tab" data-od-tab="compliance">Compliance</button>' +
-        // Ingestion tab — restored: re-mounts #ingestion-overview + #ingestion-adapters
-        // so ng-ingestion.js (loaded in index.html) can populate them on call.
-        '<button class="tab" data-od-tab="ingestion">Ingestion</button>' +
-      '</div>' +
-
-      // ══════ LIFECYCLE TAB ══════════════════════════════════════════════
-      '<section class="tabpane active" data-od-pane="lifecycle">' +
-
-        // State KPI strip: 5 lifecycle buckets
-        '<div class="kpi-strip" ' +
-          'style="margin-bottom:16px;grid-template-columns:repeat(5,1fr)" ' +
-          'id="od-lc-states">' +
-          '<div class="dim" style="padding:12px">Loading…</div>' +
-        '</div>' +
-
-        // Two-column: age table + compaction preview
-        '<div class="grid" style="grid-template-columns:1fr 1fr;align-items:start">' +
-
-          '<div class="card">' +
-            '<div class="card-head"><h3>Average memory age by state</h3></div>' +
-            '<div class="card-pad">' +
-              '<table class="tbl" id="od-lc-ages">' +
-                '<thead><tr>' +
-                  '<th>State</th>' +
-                  '<th>Avg age (d)</th>' +
-                  '<th>Newest (d)</th>' +
-                  '<th>Oldest (d)</th>' +
-                '</tr></thead>' +
-                '<tbody>' +
-                  '<tr><td colspan="4" class="dim" style="text-align:center;padding:20px">Loading…</td></tr>' +
-                '</tbody>' +
-              '</table>' +
-            '</div>' +
-          '</div>' +
-
-          '<div class="card">' +
-            '<div class="card-head">' +
-              '<h3>Compaction preview</h3>' +
-              '<span class="sub">dry-run · no changes applied</span>' +
-            '</div>' +
-            '<div class="card-pad">' +
-              '<p class="muted" style="font-size:13px" id="od-compact-summary">' +
-                'Click "Re-run dry-run" to preview which memories would be transitioned.' +
-              '</p>' +
-              '<div id="od-compact-detail" style="margin:14px 0"></div>' +
-              '<div style="display:flex;gap:8px">' +
-                // CRIT(b): wired via addEventListener in wireCompactBtns(), never auto-fired
-                '<button class="btn sm" id="od-compact-preview-btn">Re-run dry-run</button>' +
-                '<button class="btn sm primary" id="od-compact-apply-btn">Apply compaction</button>' +
-              '</div>' +
-            '</div>' +
-          '</div>' +
-
-        '</div>' + // end two-column grid
-
-        // Recent transitions table
-        '<div class="card" style="margin-top:16px">' +
-          '<div class="card-head"><h3>Recent transitions</h3></div>' +
-          '<div class="card-pad">' +
-            '<table class="tbl" id="od-lc-trans">' +
-              '<thead><tr>' +
-                '<th>Memory</th><th>Transition</th><th>Reason</th><th>When</th>' +
-              '</tr></thead>' +
-              '<tbody>' +
-                '<tr><td colspan="4" class="dim" style="text-align:center;padding:20px">Loading…</td></tr>' +
-              '</tbody>' +
-            '</table>' +
-          '</div>' +
-        '</div>' +
-
-        // System control — restart the daemon without a terminal
-        '<div class="card" style="margin-top:16px;max-width:640px">' +
-          '<div class="card-head"><h3>System control</h3></div>' +
-          '<div class="card-pad">' +
-            '<p class="muted" style="font-size:13px" id="od-restart-summary">' +
-              'Restart the memory daemon — applies pending config changes and ' +
-              'clears transient state. Memories are never affected.</p>' +
-            '<button class="btn sm" id="od-restart-daemon-btn" style="margin-top:10px">' +
-              'Restart daemon</button>' +
-          '</div>' +
-        '</div>' +
-
-      '</section>' +
-
-      // ══════ TRUST TAB ═════════════════════════════════════════════════
-      '<section class="tabpane" data-od-pane="trust">' +
-
-        '<div class="card" style="max-width:640px">' +
-          '<div class="card-head"><h3>Trust enforcement</h3></div>' +
-          '<div class="card-pad" id="od-trust-ctl">' +
-            '<div class="dim" style="padding:20px;text-align:center">Loading trust data…</div>' +
-          '</div>' +
-        '</div>' +
-
-      '</section>' +
-
-      // ══════ ACCESS & USERS TAB ════════════════════════════════════════
-      // First-class governance surface for non-technical admins: who can use
-      // this workspace and at what role. The card is populated by od-team.js
-      // (window.odRenderTeam) into #od-team-mount during odRenderOperations().
-      '<section class="tabpane" data-od-pane="access">' +
-        '<div class="card" id="od-team-mount">' +
-          '<div class="card-head"><h3>Team &amp; access</h3></div>' +
-          '<div class="card-pad"><p class="muted">Loading…</p></div>' +
-        '</div>' +
-      '</section>' +
-
-      // ══════ COMPLIANCE TAB ════════════════════════════════════════════
-      '<section class="tabpane" data-od-pane="compliance">' +
-
-        // KPI strip: 3 cards with icons
-        '<div class="kpi-strip" ' +
-          'style="margin-bottom:16px;grid-template-columns:repeat(3,1fr)" ' +
-          'id="od-comp-kpi">' +
-          '<div class="dim" style="padding:12px">Loading…</div>' +
-        '</div>' +
-
-        // Retention policies table with New policy button
-        '<div class="card">' +
-          '<div class="card-head">' +
-            '<h3>Active retention policies</h3>' +
-            '<div class="spacer"></div>' +
-            // New policy button — shows alert since write endpoint is not yet exposed
-            '<button class="btn sm" id="od-new-policy-btn">' +
-              safeIcon('plus') + ' New policy' +
-            '</button>' +
-          '</div>' +
-          '<div class="card-pad">' +
-            '<table class="tbl" id="od-ret">' +
-              '<thead><tr>' +
-                '<th>Policy</th>' +
-                '<th>Retention (days)</th>' +
-                '<th>Category</th>' +
-                '<th>Action</th>' +
-                '<th></th>' +
-              '</tr></thead>' +
-              '<tbody>' +
-                '<tr><td colspan="5" class="dim" style="text-align:center;padding:20px">Loading…</td></tr>' +
-              '</tbody>' +
-            '</table>' +
-          '</div>' +
-        '</div>' +
-
-        // Data privacy & GDPR — export, run retention, erase (dashboard-operable)
-        '<div class="card" style="margin-top:16px">' +
-          '<div class="card-head"><h3>Data privacy &amp; GDPR</h3></div>' +
-          '<div class="card-pad">' +
-            '<p class="muted" style="font-size:13px" id="od-gdpr-summary">' +
-              'Manage this profile\'s data under GDPR — export a full copy, run ' +
-              'retention now, or erase everything for this profile.</p>' +
-            '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">' +
-              '<button class="btn sm" id="od-gdpr-export-btn">' + safeIcon('download') + ' Export my data</button>' +
-              '<button class="btn sm" id="od-retention-run-btn">Run retention now</button>' +
-              '<button class="btn sm" id="od-gdpr-erase-btn" style="border-color:#ff6b6b;color:#ff6b6b">Erase this profile…</button>' +
-            '</div>' +
-          '</div>' +
-        '</div>' +
-
-        // Audit trail with All/Denied segment filter + event-type API filter
-        '<div class="card" style="margin-top:16px">' +
-          '<div class="card-head">' +
-            '<h3>Audit trail</h3>' +
-            // Task C: chain-integrity badge
-            '<span id="od-audit-chain-status"></span>' +
-            '<div class="spacer"></div>' +
-            // Task C: event-type filter select (calls API)
-            '<select id="od-audit-evt-filter" style="padding:4px 8px;border-radius:6px;' +
-              'border:1px solid var(--border);background:var(--card);color:var(--fg);font-size:12px">' +
-              '<option value="">All types</option>' +
-              '<option value="recall">recall</option>' +
-              '<option value="remember">remember</option>' +
-              '<option value="delete">delete</option>' +
-              '<option value="lifecycle_transition">lifecycle</option>' +
-              '<option value="access_denied">access_denied</option>' +
-              '<option value="retention_enforced">retention</option>' +
-            '</select>' +
-            '<div class="seg" id="od-audit-filter">' +
-              '<button class="active" data-filter="all">All</button>' +
-              '<button data-filter="denied">Denied</button>' +
-            '</div>' +
-          '</div>' +
-          '<div class="card-pad">' +
-            '<table class="tbl" id="od-audit">' +
-              '<thead><tr>' +
-                '<th>Timestamp</th>' +
-                '<th>Event</th>' +
-                '<th>Actor</th>' +
-                '<th>Action</th>' +
-                '<th>Target</th>' +
-                '<th>Result</th>' +
-              '</tr></thead>' +
-              '<tbody id="od-audit-body">' +
-                '<tr><td colspan="6" class="dim" style="text-align:center;padding:20px">Loading…</td></tr>' +
-              '</tbody>' +
-            '</table>' +
-          '</div>' +
-        '</div>' +
-
-      '</section>' +
-
-      // ══════ INGESTION TAB ═════════════════════════════════════════════
-      // Restoration: mounts #ingestion-overview and #ingestion-adapters so that
-      // window.loadIngestionStatus() (ng-ingestion.js) can populate them.
-      // ng-ingestion.js is loaded in index.html and defines loadIngestionStatus().
-      // Adapter action buttons use data-act-click="adapter-action" which is handled
-      // by event-delegation.js → adapterAction() defined in ng-ingestion.js.
-      // Backend: GET /api/adapters · POST /api/adapters/{enable|disable|start|stop}
-      '<section class="tabpane" data-od-pane="ingestion">' +
-
-        '<div class="page-head" style="margin-bottom:16px">' +
-          '<h2 style="font-size:20px;margin-bottom:6px">Connectors &amp; Ingestion</h2>' +
-          '<p style="font-size:13.5px">' +
-            'Gmail, Calendar, and Transcript adapters — enable to start building memory ' +
-            'from external sources. All processing is local.' +
-          '</p>' +
-        '</div>' +
-
-        // #ingestion-overview — ng-ingestion.js: 4 stat cards (Available/Enabled/Running/Privacy)
-        '<div id="ingestion-overview"></div>' +
-
-        // #ingestion-adapters — ng-ingestion.js: adapter cards (Gmail/Calendar/Transcript)
-        '<div id="ingestion-adapters" style="margin-top:16px"></div>' +
-
-      '</section>'
-    );
-  }
-
-  // ─── Tab switching ────────────────────────────────────────────────────────
-  /**
-   * Wire the internal tab bar.
-   * Uses data-od-tab on buttons and data-od-pane on sections.
-   * No onclick attributes — CSP-safe addEventListener only.
-   */
+  var moduleContext = { esc:esc, timeAgo:timeAgo, fmtNum:fmtNum, safeIcon:safeIcon, injectCtlStyle:injectCtlStyle };
+  var SLMOperationsLayout = window.SLMOperationsLayout(moduleContext);
+  Object.assign(moduleContext, SLMOperationsLayout);
+  var { buildSkeleton } = SLMOperationsLayout;
   function initTabs(root) {
     var buttons = root.querySelectorAll('[data-od-tab]');
     var panes   = root.querySelectorAll('[data-od-pane]');
@@ -394,7 +149,7 @@
 
     if (ageKeys.length === 0) {
       ageTbody.innerHTML =
-        '<tr><td colspan="4" class="dim" style="text-align:center;padding:16px">' +
+        '<tr><td colspan="4" class="muted-info" style="text-align:center;padding:16px">' +
         'No age data available yet.</td></tr>';
       return;
     }
@@ -427,7 +182,7 @@
 
     if (trans.length === 0) {
       transTbody.innerHTML =
-        '<tr><td colspan="4" class="dim" style="text-align:center;padding:16px">' +
+        '<tr><td colspan="4" class="muted-info" style="text-align:center;padding:16px">' +
         'No recent transitions. Transitions appear here when memories change lifecycle state.' +
         '</td></tr>';
       return;
@@ -440,10 +195,10 @@
       var when       = t.timestamp ? esc(timeAgo(t.timestamp)) : '—';
       return (
         '<tr>' +
-          '<td class="mono dim">' + idLabel + '</td>' +
+          '<td class="mono muted-info">' + idLabel + '</td>' +
           '<td><span class="badge neutral">' + transition + '</span></td>' +
-          '<td class="dim">' + reason + '</td>' +
-          '<td class="dim">' + when + '</td>' +
+          '<td class="muted-info">' + reason + '</td>' +
+          '<td class="muted-info">' + when + '</td>' +
         '</tr>'
       );
     }).join('');
@@ -490,7 +245,7 @@
           .then(function (data) {
             if (data && data.success === false) {
               if (summaryEl) summaryEl.innerHTML =
-                '<span class="dim">' + esc(data.error || 'Compaction unavailable.') + '</span>';
+                '<span class="muted-info">' + esc(data.error || 'Compaction unavailable.') + '</span>';
               return;
             }
             var recs = Number(data.candidates || 0);
@@ -558,7 +313,7 @@
           .then(function (data) {
             if (data && data.success === false) {
               if (summaryEl) summaryEl.innerHTML =
-                '<span class="dim">' + esc(data.error || 'Compaction failed.') + '</span>';
+                '<span class="muted-info">' + esc(data.error || 'Compaction failed.') + '</span>';
               return;
             }
             var n = Number(data.applied || 0);
@@ -588,19 +343,16 @@
    * detached `slm restart`), then polls /health until the fresh daemon is back
    * and reloads the dashboard. Wired via addEventListener — never auto-fired.
    */
-  function wireRestartBtn() {
-    var btn = document.getElementById('od-restart-daemon-btn');
-    var summary = document.getElementById('od-restart-summary');
-    if (!btn) return;
-    btn.addEventListener('click', function () {
-      window.confirmDestructive({
-        title: 'Restart memory daemon',
-        target: 'Memory daemon',
-        consequence: 'Will be unavailable for a few seconds. Your memories are not affected.',
-        confirmLabel: 'Restart',
-      }).then(function(confirmed) {
-        if (!confirmed) return;
-        btn.disabled = true;
+  function restartDaemon(btn, summary) {
+    var label = btn.textContent;
+    window.confirmDestructive({
+      title: 'Restart memory daemon',
+      target: 'Memory daemon',
+      consequence: 'Will be unavailable for a few seconds. Your memories are not affected.',
+      confirmLabel: 'Restart',
+    }).then(function(confirmed) {
+      if (!confirmed) return;
+      btn.disabled = true;
       btn.textContent = 'Restarting…';
       if (summary) summary.textContent = 'Restart requested — waiting for the daemon to come back…';
 
@@ -613,7 +365,7 @@
         .then(function (data) {
           if (data && data.success === false) {
             if (summary) summary.textContent = 'Restart failed: ' + (data.error || 'unknown error');
-            btn.disabled = false; btn.textContent = 'Restart daemon';
+            btn.disabled = false; btn.textContent = label;
             return;
           }
           // Poll /health until the fresh daemon reports ready, then reload.
@@ -634,7 +386,7 @@
               clearInterval(poll);
               if (summary) summary.textContent =
                 'Daemon is taking longer than expected. Refresh the page in a moment.';
-              btn.disabled = false; btn.textContent = 'Restart daemon';
+              btn.disabled = false; btn.textContent = label;
             }
           }, 1000);
         })
@@ -654,12 +406,21 @@
                 }
               })
               .catch(function () {});
-            if (tries > 30) { clearInterval(poll); btn.disabled = false; btn.textContent = 'Restart daemon'; }
+            if (tries > 30) { clearInterval(poll); btn.disabled = false; btn.textContent = label; }
           }, 1000);
         });
-      });
     });
   }
+
+  function wireRestartBtn() {
+    var btn = document.getElementById('od-restart-daemon-btn');
+    var summary = document.getElementById('od-restart-summary');
+    if (!btn) return;
+    btn.addEventListener('click', function () { restartDaemon(btn, summary); });
+  }
+
+  // Shared with the images-and-documents card (od-features.js).
+  window.odRestartDaemon = restartDaemon;
 
   // ─── Trust ────────────────────────────────────────────────────────────────
   /**
@@ -688,7 +449,7 @@
         '<div class="od-ops-ctl">' +
           '<div>' +
             '<b>' + esc(label) + '</b>' +
-            '<div class="dim" style="font-size:12.5px">' + esc(sublabel) + '</div>' +
+            '<div class="muted-info" style="font-size:12.5px">' + esc(sublabel) + '</div>' +
           '</div>' +
           control +
         '</div>'
@@ -733,442 +494,9 @@
    * Populate the compliance KPI strip — 3 cards with icons.
    * Icons via window.slmIcon() so they work in dynamically-injected content.
    */
-  function populateComplianceKpi(comp) {
-    var kpiEl = document.getElementById('od-comp-kpi');
-    if (!kpiEl) return;
-
-    var auditCount = comp ? Number(comp.audit_events_count || 0)        : 0;
-    var retCount   = comp && comp.retention_policies ? comp.retention_policies.length : 0;
-    var abacCount  = comp ? Number(comp.abac_policies_count || 0)       : 0;
-
-    kpiEl.innerHTML = (
-      '<div class="card kpi">' +
-        // Design uses data-ic="shield". Shield is not in the icon registry (od-shell.js).
-        // safeIcon('health') (pulse/waveform) is the closest semantic match for audit monitoring.
-        '<div class="label">' + safeIcon('health') + ' Audit events</div>' +
-        '<div class="value num">' + fmtNum(auditCount) + '</div>' +
-      '</div>' +
-      '<div class="card kpi">' +
-        '<div class="label">' + safeIcon('clock') + ' Retention policies</div>' +
-        '<div class="value num">' + fmtNum(retCount) + '</div>' +
-      '</div>' +
-      '<div class="card kpi">' +
-        '<div class="label">' + safeIcon('lock') + ' ABAC rules</div>' +
-        '<div class="value num">' + fmtNum(abacCount) + '</div>' +
-      '</div>'
-    );
-  }
-  /**
-   * Populate the retention policies table.
-   * CRIT(c): policy name, category, action go through esc().
-   * Empty state explains how to add policies via MCP tool.
-   */
-  function populateRetentionPolicies(comp) {
-    var retTbody = document.querySelector('#od-ret tbody');
-    if (!retTbody) return;
-
-    var policies = (comp && comp.retention_policies) || [];
-
-    if (policies.length === 0) {
-      retTbody.innerHTML =
-        '<tr><td colspan="5" class="dim" style="text-align:center;padding:20px">' +
-        'No retention policies configured. Use the set_retention_policy MCP tool to add one.' +
-        '</td></tr>';
-      return;
-    }
-
-    var ACTION_CLS = { archive: 'neutral', tombstone: 'danger', notify: 'warn' };
-
-    // Build rows then wire delete buttons post-inject (avoids inline onclick — CSP safe)
-    retTbody.innerHTML = policies.map(function (p) {
-      var ac = ACTION_CLS[p.action] || 'neutral';
-      return (
-        '<tr>' +
-          '<td><b>' + esc(p.name || '') + '</b></td>' +
-          '<td class="num">' + esc(String(p.retention_days || '—')) + '</td>' +
-          '<td><span class="badge neutral">' + esc(p.category || 'all') + '</span></td>' +
-          '<td><span class="badge ' + ac + '">' + esc(p.action || '') + '</span></td>' +
-          // Task E: per-row delete — data-pol-name used by wireRetentionDeleteBtns()
-          '<td style="text-align:right">' +
-            '<button class="btn sm danger" data-pol-name="' + esc(p.name || '') + '">' +
-              'Delete' +
-            '</button>' +
-          '</td>' +
-        '</tr>'
-      );
-    }).join('');
-
-    // Task E: wire delete buttons (CSP-safe addEventListener after innerHTML set)
-    wireRetentionDeleteBtns(retTbody);
-  }
-
-  // Cache of all audit rows (for client-side All/Denied filter)
-  var _allAuditRows = [];
-  /**
-   * Task C: Populate the audit trail table.
-   * auditFull: response from /api/compliance/audit (preferred, up to 100 events).
-   * comp: response from /api/compliance/status (fallback, recent_audit_events).
-   * CRIT(c): actor, action, target, result all through esc().
-   */
-  function populateAuditTrail(comp, auditFull) {
-    var auditTbody = document.getElementById('od-audit-body');
-    if (!auditTbody) return;
-
-    // Prefer full audit endpoint data; fall back to status data
-    var events = (auditFull && auditFull.events) || (comp && comp.recent_audit_events) || [];
-    _allAuditRows = events;
-
-    renderAuditRows(auditTbody, events);
-  }
-
-  /**
-   * Task C: Render the chain-integrity badge inside the audit trail card header.
-   * Appended to #od-audit-chain-status if it exists.
-   */
-  function showAuditChainStatus(auditFull) {
-    var el = document.getElementById('od-audit-chain-status');
-    if (!el || !auditFull) return;
-    var ok = auditFull.chain_verified !== false;
-    el.innerHTML = ok
-      ? '<span class="badge ok" style="margin-left:8px">Chain verified</span>'
-      : '<span class="badge danger" style="margin-left:8px">Chain integrity issue</span>';
-  }
-
-  /** Task C: re-fetch audit trail from API with a specific event_type filter. */
-  function fetchAndRenderAudit(eventType) {
-    var auditTbody = document.getElementById('od-audit-body');
-    if (!auditTbody) return;
-    auditTbody.innerHTML = '<tr><td colspan="6" class="dim" style="text-align:center;padding:16px">Loading…</td></tr>';
-    var url = '/api/compliance/audit?limit=100';
-    if (eventType && eventType !== 'all') url += '&event_type=' + encodeURIComponent(eventType);
-    fetch(url)
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (d) {
-        if (!d) return;
-        _allAuditRows = d.events || [];
-        renderAuditRows(auditTbody, _allAuditRows);
-        showAuditChainStatus(d);
-      })
-      .catch(function () {
-        if (auditTbody) auditTbody.innerHTML = '<tr><td colspan="6" class="dim" style="text-align:center;padding:16px">Failed to load audit trail.</td></tr>';
-      });
-  }
-
-  /** Render audit table rows into tbody, filtering by mode ('all' or 'denied'). */
-  function renderAuditRows(tbody, events) {
-    if (events.length === 0) {
-      tbody.innerHTML =
-        '<tr><td colspan="6" class="dim" style="text-align:center;padding:20px">' +
-        'No audit events recorded yet.</td></tr>';
-      return;
-    }
-
-    var EV_CLS = {
-      recall:               'cyan',
-      remember:             'ok',
-      delete:               'danger',
-      lifecycle_transition: 'warn',
-      access_denied:        'danger',
-      retention_enforced:   'warn',
-    };
-
-    tbody.innerHTML = events.slice(0, 50).map(function (ev) {
-      var evc      = EV_CLS[ev.event_type] || 'neutral';
-      var isOk     = ev.result === 'success' || ev.result === 'allowed';
-      var isDenied = ev.result === 'denied'  || ev.result === 'error';
-      var resultCls = isOk ? 'ok' : isDenied ? 'danger' : 'neutral';
-      // CRIT(c): all user-sourced strings through esc()
-      return (
-        '<tr>' +
-          '<td class="mono dim" style="font-size:12px">' + esc(ev.timestamp || '') + '</td>' +
-          '<td><span class="badge ' + evc + '">' + esc(ev.event_type || '') + '</span></td>' +
-          '<td class="mono" style="font-size:12px">' + esc(ev.actor || '') + '</td>' +
-          '<td>' + esc(ev.action || '') + '</td>' +
-          '<td class="dim">' + esc(ev.target || '') + '</td>' +
-          '<td><span class="badge ' + resultCls + '">' + esc(ev.result || '') + '</span></td>' +
-        '</tr>'
-      );
-    }).join('');
-  }
-  /**
-   * Task C: Wire audit filters.
-   * - All/Denied segment: client-side filter (fast).
-   * - Event-type select (#od-audit-evt-filter): calls API to get filtered results.
-   */
-  function wireAuditFilter(auditFull) {
-    var filterEl = document.getElementById('od-audit-filter');
-    var tbody    = document.getElementById('od-audit-body');
-    if (!filterEl || !tbody) return;
-
-    // All / Denied segment buttons — client-side
-    filterEl.querySelectorAll('button').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var mode = btn.getAttribute('data-filter');
-        filterEl.querySelectorAll('button').forEach(function (b) {
-          b.classList.remove('active');
-        });
-        btn.classList.add('active');
-
-        var rows = (mode === 'denied')
-          ? _allAuditRows.filter(function (ev) {
-              return ev.result === 'denied' || ev.result === 'error' ||
-                     (ev.event_type && ev.event_type.indexOf('denied') >= 0);
-            })
-          : _allAuditRows;
-
-        renderAuditRows(tbody, rows);
-      });
-    });
-
-    // Task C: Event-type select — re-fetches from API
-    var evtSelect = document.getElementById('od-audit-evt-filter');
-    if (evtSelect) {
-      evtSelect.addEventListener('change', function () {
-        fetchAndRenderAudit(evtSelect.value);
-      });
-    }
-  }
-
-  /**
-   * Task E: Wire delete buttons injected by populateRetentionPolicies.
-   * Data attribute data-pol-name carries the policy name (already esc'd in innerHTML).
-   * Uses confirmDestructive before calling DELETE /api/compliance/retention-policy?name=.
-   */
-  function wireRetentionDeleteBtns(tbody) {
-    tbody.querySelectorAll('[data-pol-name]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var policyName = btn.getAttribute('data-pol-name');
-        window.confirmDestructive({
-          title: 'Delete retention policy',
-          target: policyName,
-          consequence: 'This policy will no longer be enforced on any memory.',
-          confirmLabel: 'Delete',
-        }).then(function (confirmed) {
-          if (!confirmed) return;
-          btn.disabled = true;
-          fetch('/api/compliance/retention-policy?name=' + encodeURIComponent(policyName), {
-            method: 'DELETE',
-          })
-            .then(function (r) { return r.json(); })
-            .then(function (d) {
-              if (d && d.success !== false) {
-                var pane = document.getElementById('operations-pane');
-                if (pane && typeof window.odRenderOperations === 'function') {
-                  window.odRenderOperations(pane);
-                }
-              } else {
-                btn.disabled = false;
-                if (typeof console !== 'undefined') {
-                  console.error('[od-ops] retention delete failed:', d && d.error);
-                }
-              }
-            })
-            .catch(function () { btn.disabled = false; });
-        });
-      });
-    });
-  }
-
-  /**
-   * Wire the "New policy" button.
-   * Informs user that the write endpoint is not yet exposed.
-   */
-  function wireNewPolicyBtn() {
-    var btn = document.getElementById('od-new-policy-btn');
-    if (!btn) return;
-    btn.addEventListener('click', openRetentionPolicyModal);
-  }
-
-  /**
-   * Wire the GDPR data-privacy controls: export (download), run retention now,
-   * and erase-this-profile (typed confirmation). All dashboard-operable.
-   */
-  function wireGdprBtns() {
-    var summary = document.getElementById('od-gdpr-summary');
-    var exportBtn = document.getElementById('od-gdpr-export-btn');
-    var runBtn = document.getElementById('od-retention-run-btn');
-    var eraseBtn = document.getElementById('od-gdpr-erase-btn');
-
-    if (exportBtn) {
-      exportBtn.addEventListener('click', function () {
-        // Stream the JSON attachment to a download via a temporary anchor.
-        var a = document.createElement('a');
-        a.href = '/api/compliance/gdpr/export';
-        a.download = '';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        if (summary) summary.textContent = 'Export started — check your downloads.';
-      });
-    }
-
-    if (runBtn) {
-      runBtn.addEventListener('click', function () {
-        runBtn.disabled = true; runBtn.textContent = 'Running…';
-        fetch('/api/compliance/retention/enforce', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-        })
-          .then(function (r) { return r.json(); })
-          .then(function (d) {
-            if (!summary) return;
-            // Task E: surface all returned counts from the enforce response
-            if (d && d.success) {
-              var parts = [];
-              if (d.archived != null)    parts.push('archived ' + fmtNum(d.archived));
-              if (d.tombstoned != null)  parts.push('tombstoned ' + fmtNum(d.tombstoned));
-              if (d.notified != null)    parts.push('flagged ' + fmtNum(d.notified));
-              if (d.evaluated != null)   parts.push('evaluated ' + fmtNum(d.evaluated));
-              if (d.policies_run != null) parts.push('policies run: ' + fmtNum(d.policies_run));
-              summary.textContent = 'Retention applied — ' + (parts.join(', ') || 'no changes needed') + '.';
-            } else {
-              summary.textContent = 'Retention failed: ' + ((d && d.error) || 'unknown');
-            }
-          })
-          .catch(function () { if (summary) summary.textContent = 'Retention run failed. Check console.'; })
-          .finally(function () { runBtn.disabled = false; runBtn.textContent = 'Run retention now'; });
-      });
-    }
-
-    if (eraseBtn) {
-      eraseBtn.addEventListener('click', async function () {
-        // Resolve the active profile so the confirmation is unambiguous.
-        var profile = 'default';
-        try {
-          var s = await fetch('/status', { cache: 'no-store' }).then(function (r) { return r.json(); });
-          profile = s.profile || s.active_profile || 'default';
-        } catch (e) {}
-        if (profile === 'default') {
-          window.alert('The default profile cannot be erased.');
-          return;
-        }
-        var typed = window.prompt(
-          'This PERMANENTLY erases ALL data for profile "' + profile + '".\n' +
-          'This cannot be undone.\n\nType the profile name to confirm:');
-        if (typed !== profile) {
-          if (typed !== null && summary) summary.textContent = 'Erase cancelled — name did not match.';
-          return;
-        }
-        eraseBtn.disabled = true; eraseBtn.textContent = 'Erasing…';
-        fetch('/api/compliance/gdpr/erase', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ confirm: profile }),
-        })
-          .then(function (r) { return r.json(); })
-          .then(function (d) {
-            if (summary) {
-              summary.textContent = d && d.success
-                ? ('Profile "' + profile + '" erased. Reloading…')
-                : ('Erase failed: ' + ((d && d.error) || 'unknown'));
-            }
-            if (d && d.success) setTimeout(function () { window.location.reload(); }, 900);
-          })
-          .catch(function () { if (summary) summary.textContent = 'Erase failed. Check console.'; })
-          .finally(function () { eraseBtn.disabled = false; eraseBtn.textContent = 'Erase this profile…'; });
-      });
-    }
-  }
-
-  /**
-   * OD-styled "New retention policy" modal → POST /api/compliance/retention-policy.
-   * Non-technical users define GDPR/retention rules without a CLI. On success
-   * the Compliance tab reloads so the new policy appears immediately.
-   */
-  function openRetentionPolicyModal() {
-    var existing = document.getElementById('od-retention-overlay');
-    if (existing) existing.remove();
-
-    var overlay = document.createElement('div');
-    overlay.id = 'od-retention-overlay';
-    overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-modal', 'true');
-    overlay.style.cssText =
-      'position:fixed;inset:0;z-index:11000;display:flex;align-items:center;' +
-      'justify-content:center;background:rgba(0,0,0,0.45);backdrop-filter:blur(2px)';
-
-    var card = document.createElement('div');
-    card.style.cssText =
-      'width:min(460px,93vw);background:var(--card,#1a1f2e);color:var(--fg,#e8ecf3);' +
-      'border:1px solid var(--border,rgba(255,255,255,0.1));border-radius:14px;' +
-      'box-shadow:0 20px 60px rgba(0,0,0,0.4);padding:22px 22px 18px';
-
-    var fieldStyle =
-      'width:100%;box-sizing:border-box;padding:9px 11px;font-size:0.9rem;margin-top:4px;' +
-      'background:var(--page,rgba(255,255,255,0.04));color:var(--fg,#e8ecf3);' +
-      'border:1px solid var(--border,rgba(255,255,255,0.14));border-radius:8px;outline:none';
-    var labelStyle = 'display:block;margin-top:12px;font-size:0.8rem;color:var(--fg-3,#8b93a7)';
-
-    card.innerHTML =
-      '<h3 style="margin:0 0 4px;font-size:1.05rem;font-weight:600">New retention policy</h3>' +
-      '<p style="margin:0 0 8px;font-size:0.8125rem;color:var(--fg-3,#8b93a7)">' +
-        'Automatically age out memories older than a set period — GDPR-style retention.</p>' +
-      '<label style="' + labelStyle + '">Policy name' +
-        '<input id="od-rp-name" type="text" maxlength="60" placeholder="e.g. GDPR 90-day" style="' + fieldStyle + '"></label>' +
-      '<label style="' + labelStyle + '">Retain for (days)' +
-        '<input id="od-rp-days" type="number" min="1" value="90" style="' + fieldStyle + '"></label>' +
-      '<label style="' + labelStyle + '">Framework' +
-        '<select id="od-rp-cat" style="' + fieldStyle + '">' +
-          '<option value="gdpr">GDPR</option><option value="hipaa">HIPAA</option>' +
-          '<option value="sox">SOX</option><option value="custom">Custom</option>' +
-        '</select></label>' +
-      '<label style="' + labelStyle + '">When a memory expires' +
-        '<select id="od-rp-action" style="' + fieldStyle + '">' +
-          '<option value="archive">Archive (keep, hide from recall)</option>' +
-          '<option value="tombstone">Tombstone (mark deleted)</option>' +
-          '<option value="notify">Notify only (no change)</option>' +
-        '</select></label>' +
-      '<div id="od-rp-err" style="min-height:18px;margin:8px 2px 0;font-size:0.75rem;color:#ff6b6b"></div>' +
-      '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">' +
-        '<button type="button" id="od-rp-cancel" style="padding:8px 14px;font-size:0.85rem;border-radius:8px;cursor:pointer;background:transparent;color:var(--fg-3,#8b93a7);border:1px solid var(--border,rgba(255,255,255,0.14))">Cancel</button>' +
-        '<button type="button" id="od-rp-create" style="padding:8px 16px;font-size:0.85rem;border-radius:8px;cursor:pointer;background:var(--violet,#7c5cff);color:#fff;border:1px solid transparent;font-weight:600">Create policy</button>' +
-      '</div>';
-
-    overlay.appendChild(card);
-    document.body.appendChild(overlay);
-    setTimeout(function () { var n = document.getElementById('od-rp-name'); if (n) n.focus(); }, 30);
-
-    function close() { document.removeEventListener('keydown', onKey); overlay.remove(); }
-    function onKey(e) { if (e.key === 'Escape') close(); }
-    var errEl = document.getElementById('od-rp-err');
-    var createBtn = document.getElementById('od-rp-create');
-
-    async function submit() {
-      var name = (document.getElementById('od-rp-name').value || '').trim();
-      var days = parseInt(document.getElementById('od-rp-days').value, 10);
-      var cat = document.getElementById('od-rp-cat').value;
-      var action = document.getElementById('od-rp-action').value;
-      if (!name) { errEl.textContent = 'Please enter a policy name.'; return; }
-      if (!(days >= 1)) { errEl.textContent = 'Retention days must be a positive number.'; return; }
-      createBtn.disabled = true; createBtn.textContent = 'Creating…'; errEl.textContent = '';
-      try {
-        var r = await fetch('/api/compliance/retention-policy', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: name, retention_days: days, category: cat, action: action }),
-        });
-        var data = await r.json().catch(function () { return {}; });
-        if (!r.ok || data.success === false) {
-          errEl.textContent = (data && data.error) || 'Failed to create policy.';
-          createBtn.disabled = false; createBtn.textContent = 'Create policy';
-          return;
-        }
-        close();
-        if (typeof window.odRenderOperations === 'function') {
-          // Reload the Operations pane so the new policy shows in the table.
-          var pane = document.getElementById('operations-pane');
-          if (pane) window.odRenderOperations(pane);
-        }
-      } catch (e) {
-        errEl.textContent = 'Network error creating policy.';
-        createBtn.disabled = false; createBtn.textContent = 'Create policy';
-      }
-    }
-
-    document.getElementById('od-rp-cancel').addEventListener('click', close);
-    createBtn.addEventListener('click', submit);
-    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
-    document.addEventListener('keydown', onKey);
-  }
-
+  var SLMOperationsCompliance = window.SLMOperationsCompliance(moduleContext);
+  Object.assign(moduleContext, SLMOperationsCompliance);
+  var { populateComplianceKpi, populateRetentionPolicies, normalizeAuditEvent, populateAuditTrail, showAuditChainStatus, fetchAndRenderAudit, renderAuditRows, wireAuditFilter, wireRetentionDeleteBtns, wireNewPolicyBtn, wireGdprBtns, openRetentionPolicyModal } = SLMOperationsCompliance;
   // ─── Main entry point ─────────────────────────────────────────────────────
   /**
    * Fetch all operations endpoints, inject the OD skeleton, and populate with real data.
@@ -1178,13 +506,15 @@
    */
   function odRenderOperations(container) {
     if (!container) return;
+    var selected = container.querySelector('[data-od-tab].active');
+    var selectedTab = selected && selected.dataset.odTab;
 
     container.innerHTML =
       '<div style="color:var(--fg-2);text-align:center;padding:48px 0">' +
       'Loading operations data…</div>';
 
     // Reset audit row cache on each render
-    _allAuditRows = [];
+    SLMOperationsCompliance.resetAudit();
 
     Promise.all([
       fetch('/api/lifecycle/status').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
@@ -1206,6 +536,10 @@
 
       // Wire tab switching (CSP-safe)
       initTabs(container);
+      if (selectedTab) {
+        var selectedButton = container.querySelector('[data-od-tab="' + selectedTab + '"]');
+        if (selectedButton) { selectedButton.click(); selectedButton.focus(); }
+      }
 
       // Populate lifecycle
       populateLifecycle(lc);

@@ -1,7 +1,7 @@
 # crewai-superlocalmemory
 
 CrewAI [`StorageBackend`](https://docs.crewai.com/) (memory storage) backed by
-the local data root of [SuperLocalMemory V4.0.0](https://github.com/qualixar/superlocalmemory).
+the local data root of [SuperLocalMemory](https://github.com/qualixar/superlocalmemory).
 
 Give a CrewAI agent or crew durable, scope-aware memory stored in your local
 SLM data root and visible through every other SLM surface (CLI, MCP,
@@ -10,22 +10,24 @@ connectors, backup, and downloads have separate network behavior.
 
 ## Prerequisites
 
-- Python >=3.11,<3.15 (3.11, 3.12, 3.13, 3.14)
-- [SuperLocalMemory V4.0.0](https://github.com/qualixar/superlocalmemory) installed in the same environment
+- Python >=3.12,<3.14 (3.12, 3.13)
+- [SuperLocalMemory](https://github.com/qualixar/superlocalmemory) installed in a **separate** virtual environment; set `SLM_ENGINE_PYTHON` to its Python executable
 - `crewai >= 1.14.6`
-- Supported platforms: Apple Silicon macOS, 64-bit Windows, 64-bit Linux — Intel Mac and 32-bit Windows (Win32) are outside the V4.0.0 support contract (`cryptography==50.0.0` has no wheel for those architectures).
+- Supported platforms: Apple Silicon macOS, 64-bit Windows, 64-bit Linux — Intel Mac and 32-bit Windows (Win32) are outside the SuperLocalMemory support contract (`cryptography==50.0.0` has no wheel for those architectures).
+
+The isolated installation recipe is in [framework-adapters.md](../../../docs/framework-adapters.md). These adapters do not install the SLM runtime into the framework environment. Close owned service/backend/collection resources when finished.
 
 ## Installation
 
 ```bash
-pip install crewai-superlocalmemory
+pip install ./superlocalmemory/ide/integrations/crewai
 ```
 
-Or from source:
+Or from a clone of the repository:
 
 ```bash
-cd ide/integrations/crewai
-pip install -e .
+git clone https://github.com/qualixar/superlocalmemory
+pip install ./superlocalmemory/ide/integrations/crewai
 ```
 
 ## Quick start
@@ -39,13 +41,15 @@ backend = SuperLocalMemoryBackend()
 # Direct usage (framework-free core):
 from crewai_superlocalmemory._v3_crewai_store import V3CrewAIStore
 
-store = V3CrewAIStore("~/.superlocalmemory/memory.db")
+import os
+from pathlib import Path
+store = V3CrewAIStore(Path(os.environ.get("SLM_DATA_DIR", "./example-memory")) / "memory.db")
 store.save({
     "id": "r1",
     "content": "Ada prefers dark mode.",
     "embedding": [0.1, 0.2, 0.3],
     "scope": "/project/alpha",
-    "category": "contextual",
+    "categories": ["contextual"],
     "metadata": {},
 })
 
@@ -54,6 +58,7 @@ for record, score in results:
     print(record["id"], score)
 
 store.close()
+backend.close()
 ```
 
 ## How it works
@@ -83,6 +88,6 @@ AGPL-3.0 — see [LICENSE](../../../LICENSE).
 
 ## Links
 
-- [SuperLocalMemory V4.0.0](https://github.com/qualixar/superlocalmemory)
+- [SuperLocalMemory](https://github.com/qualixar/superlocalmemory)
 - [Documentation](https://superlocalmemory.com/)
 - [CrewAI](https://docs.crewai.com/)

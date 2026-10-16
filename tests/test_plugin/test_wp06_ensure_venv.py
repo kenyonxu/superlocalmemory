@@ -12,7 +12,7 @@ Tests verify:
   - Fails loud (non-zero exit + stderr) when CLAUDE_PLUGIN_DATA unset
   - Fails loud (non-zero exit + stderr) when CLAUDE_PLUGIN_ROOT unset
   - Sentinel written LAST: truncating sentinel triggers rebuild on next run
-  - Rejects python < 3.11 with non-zero exit + stderr
+  - Rejects python < 3.12 with non-zero exit + stderr
 
 NOTE: These tests write to tmp directories and do not touch ~/.superlocalmemory/.
 """
@@ -21,15 +21,14 @@ from __future__ import annotations
 
 import os
 import platform
-import shutil
 import stat
 import subprocess
-import sys
-import tempfile
 import time
 from pathlib import Path
 
 import pytest
+
+from tests._portable import committed_executable
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -60,7 +59,15 @@ def _run_venv_sh(
     timeout: int = 120,
 ) -> subprocess.CompletedProcess:
     """Run ensure-venv.sh with given ROOT and DATA dirs."""
-    env = {**os.environ, "CLAUDE_PLUGIN_ROOT": str(root), "CLAUDE_PLUGIN_DATA": str(data)}
+    # SLM_LAUNCHER=plugin: these tests are about building the venv. Without it
+    # an slm already on the developer's PATH means the venv is not needed and
+    # the script (correctly, #140) skips the build.
+    env = {
+        **os.environ,
+        "CLAUDE_PLUGIN_ROOT": str(root),
+        "CLAUDE_PLUGIN_DATA": str(data),
+        "SLM_LAUNCHER": "plugin",
+    }
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
@@ -91,10 +98,7 @@ def test_ensure_venv_sh_exists() -> None:
 
 def test_ensure_venv_sh_is_executable() -> None:
     assert ENSURE_VENV_SH.exists(), f"ensure-venv.sh not found at {ENSURE_VENV_SH}"
-    mode = ENSURE_VENV_SH.stat().st_mode
-    assert mode & stat.S_IXUSR, (
-        f"ensure-venv.sh must be user-executable (+x), mode={oct(mode)}"
-    )
+    assert committed_executable(ENSURE_VENV_SH), "ensure-venv.sh must be user-executable (+x)"
 
 
 # ---------------------------------------------------------------------------
@@ -252,22 +256,21 @@ def test_truncated_sentinel_triggers_rebuild(tmp_path: pytest.TempPathFactory) -
 
 
 # ---------------------------------------------------------------------------
-# T8 — Rejects Python < 3.11 (guard at top of script)
+# T8 — Rejects Python < 3.12 (guard at top of script)
 # ---------------------------------------------------------------------------
 def test_rejects_python_less_than_3_11(tmp_path: pytest.TempPathFactory) -> None:
-    """Verify the script's py≥3.11 guard: if we can find a python < 3.11 on PATH,
+    """Verify the script's py≥3.12 guard: if we can find a python < 3.12 on PATH,
     test it; else mock by patching the python3 binary in PATH via a wrapper.
     """
     root, data = _make_roots(tmp_path)
 
-    # Create fake python wrappers (all candidate names the script's resolver
-    # probes) that report version 3.10.x
+    # Create a fake python3 wrapper that reports version 3.11.x (now unsupported)
     fake_py_dir = tmp_path / "fake-python"
     fake_py_dir.mkdir()
     _shim = (
         "#!/bin/bash\n"
         'if [[ "$@" == "--version" || "$*" == *"--version"* || "$*" == *"-V"* ]]; then\n'
-        '  echo "Python 3.10.14"\n'
+        '  echo "Python 3.11.9"\n'
         '  exit 0\n'
         'elif [[ "$*" == *"-c"* ]]; then\n'
         '  # For version check via -c "import sys; ..." — exit 1 to simulate guard failure\n'
@@ -288,6 +291,8 @@ def test_rejects_python_less_than_3_11(tmp_path: pytest.TempPathFactory) -> None
         **os.environ,
         "CLAUDE_PLUGIN_ROOT": str(root),
         "CLAUDE_PLUGIN_DATA": str(data),
+        # The guard applies when the plugin venv is the one that will run (#140).
+        "SLM_LAUNCHER": "plugin",
         "PATH": f"{fake_py_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
     }
     result = subprocess.run(
@@ -298,10 +303,10 @@ def test_rejects_python_less_than_3_11(tmp_path: pytest.TempPathFactory) -> None
         timeout=10,
     )
     assert result.returncode != 0, (
-        f"Script must exit non-zero when python3 < 3.11. "
+        f"Script must exit non-zero when python3 < 3.12. "
         f"returncode={result.returncode}, stderr={result.stderr!r}"
     )
     assert result.stderr, (
-        f"Script must emit an error message to stderr when python3 < 3.11. "
+        f"Script must emit an error message to stderr when python3 < 3.12. "
         f"stderr={result.stderr!r}"
     )

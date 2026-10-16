@@ -24,8 +24,6 @@ so a crash mid-pass re-queues the work rather than losing it.
 
 from __future__ import annotations
 
-import pytest
-
 from superlocalmemory.core.projection_drain import _VectorBatch
 
 

@@ -23,8 +23,7 @@ import signal
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import NamedTuple
 
 logger = logging.getLogger("superlocalmemory.ingestion")
@@ -75,9 +74,8 @@ class BaseAdapter:
                     logger.info("Parent daemon died, adapter exiting")
                     break
             except ImportError:
-                try:
-                    os.kill(self._parent_pid, 0)
-                except (ProcessLookupError, PermissionError):
+                from superlocalmemory.core.platform_utils import is_pid_alive
+                if not is_pid_alive(self._parent_pid):
                     logger.info("Parent daemon died, adapter exiting")
                     break
 

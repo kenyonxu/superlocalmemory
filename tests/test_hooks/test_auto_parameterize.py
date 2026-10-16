@@ -9,10 +9,8 @@ TDD RED phase: tests written before implementation.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock
 
-import pytest
 
 from superlocalmemory.core.config import ParameterizationConfig
 from superlocalmemory.hooks.auto_parameterize import AutoParameterizeHook
@@ -182,7 +180,7 @@ def test_on_session_end_lifecycle_exception():
 
 def test_rate_limit_naive_timestamp():
     """Rate limiting handles naive (no-tzinfo) _last_run timestamp."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     hook = _make_hook(config=_make_config(refresh_interval_hours=24))
     # Set a naive timestamp (no timezone)
     hook._last_run = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")

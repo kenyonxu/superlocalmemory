@@ -31,7 +31,7 @@ from superlocalmemory.core.config import (
 from superlocalmemory.core.engine_capabilities import Capabilities, CapabilityError
 from superlocalmemory.core.modes import get_capabilities
 from superlocalmemory.storage.models import (
-    AtomicFact, FactType, MemoryRecord, Mode, RecallResponse,
+    AtomicFact, MemoryRecord, Mode, RecallResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -162,11 +162,14 @@ class MemoryEngine:
         self._scene_builder = None
         self._entropy_gate = None
         self._retrieval_engine = None
+        # 4.1.19: suggests a memory kind per new fact (core/memory_kind_wiring).
+        self._kind_classifier = None
         self._trust_scorer = None
         self._ann_index = None
         self._sheaf_checker = None
         self._provenance = None
         self._adaptive_learner = None
+        self._kind_reconcile = None  # background start-up kind check (kind_reconcile_task)
         self._compliance_checker = None
         self._vector_store = None
         self._access_log = None
@@ -227,6 +230,9 @@ class MemoryEngine:
 
         self._init_db_layer()
 
+        from superlocalmemory.core.derived_cache_policy import sync_cache_with_redaction
+        sync_cache_with_redaction(self._config)
+
         if self._capabilities is Capabilities.FULL:
             self._init_heavy_layer()
         else:
@@ -235,6 +241,11 @@ class MemoryEngine:
             self._try_init_proxy()
 
         self._initialized = True
+        try:  # started once the engine is up, see _init_db_layer's note
+            from superlocalmemory.core.kind_reconcile_task import KindReconcileTask
+            self._kind_reconcile = KindReconcileTask(self._db, self._profile_id).start()
+        except Exception as exc:
+            logger.warning("Memory kind reconcile skipped at start: %s", exc)
         logger.info(
             "MemoryEngine initialized: mode=%s profile=%s capabilities=%s",
             self._config.mode.value, self._profile_id,
@@ -329,6 +340,12 @@ class MemoryEngine:
         from superlocalmemory.learning.adaptive import AdaptiveLearner
         self._adaptive_learner = AdaptiveLearner(self._db)
 
+        # 4.1.19 (L1-15): repair a 4.1.18 downgrade window's fact_type drift on
+        # confirmed kinds. 4.1.22: on its own thread, never on the
+        # start-up path - finding those rows reads the whole store (22 s on
+        # 2 GB). Its state is on the memory-kinds status; a failure is a
+        # warning there, never a failed start (core/kind_reconcile_task.py).
+
     def _try_init_proxy(self) -> None:
         """V3.5.9: Attach McpEmbedderProxy when running in LIGHT mode.
 
@@ -337,12 +354,18 @@ class MemoryEngine:
         skips if the daemon is not running — keyword recall still works.
         """
         try:
+            from superlocalmemory.core.text_provider import init_light_mode_embedder
+            managed = init_light_mode_embedder(self._config)
+            if managed is not None:  # checks the daemon's model, recovers when it starts
+                self._embedder = managed
+                return
             from superlocalmemory.core.mcp_embedder_proxy import McpEmbedderProxy
-            port = getattr(self._config, "daemon_port", 8765)
-            proxy = McpEmbedderProxy(port=port)
+            # Bound to the daemon that owns this data root, never to whatever
+            # answers on the configured port.
+            proxy = McpEmbedderProxy()
             if proxy.is_available():
                 self._embedder = proxy
-                logger.info("MCP embedder proxy attached (daemon port %d)", port)
+                logger.info("MCP embedder proxy attached (this data root's daemon)")
             else:
                 logger.debug("Daemon not reachable — MCP will run without embedder")
         except Exception as exc:
@@ -355,12 +378,12 @@ class MemoryEngine:
             _init_auto_invoker, _init_consolidation,
         )
 
-        self._embedder = init_embedder(self._config)
-
-        # Rebuild the complete vector projection before VectorStore opens it.
-        # This preserves the previous vec0 table until the shadow activation
-        # succeeds, including across embedding-dimension changes.
-        self._check_embedding_migration()
+        # Built on the space the store holds, never on a model config.json merely
+        # names: a different model is re-indexed in the background by the daemon
+        # (core/embedding_live.py, core/embedding_reindex.py), not here.
+        from superlocalmemory.core.embedding_live import bind_live_space, take_preset_embedder
+        bind_live_space(self._config, self._db)
+        self._embedder = take_preset_embedder(self._config) or init_embedder(self._config)
 
         if self._caps.llm_fact_extraction:
             self._llm = LLMBackbone(self._config.llm)
@@ -372,13 +395,15 @@ class MemoryEngine:
 
         # H-03 (3.7.9): surface mode-capability degradation explicitly at
         # startup. validate_mode_config existed but was never called, so Mode B
-        # silently using rule-based extraction after Ollama vanished (update,
-        # restart, port conflict) went unwarned. Each mode only checks its own
-        # capabilities, so passing the single llm-availability signal is safe.
+        # silently using rule-based extraction after its local model vanished
+        # (update, restart, port conflict) went unwarned. Each mode only
+        # checks its own capabilities, so passing the single llm-availability
+        # signal is safe — Mode B's model may be Ollama or any other local
+        # OpenAI-compatible server (#112); the check is vendor-neutral.
         from superlocalmemory.core.modes import validate_mode_config
         _llm_up = getattr(self, "_llm", None) is not None
         for _warning in validate_mode_config(
-            self._config.mode, has_ollama=_llm_up, has_cloud_llm=_llm_up,
+            self._config.mode, has_llm=_llm_up, has_cloud_llm=_llm_up,
         ):
             logger.warning("Mode config: %s", _warning)
 
@@ -414,6 +439,9 @@ class MemoryEngine:
             self._entity_resolver, self._trust_scorer,
             vector_store=self._vector_store,
         )
+        # Reads the live answer-check judge and settings; never starts a model.
+        from superlocalmemory.core.memory_kind_wiring import build_kind_classifier
+        self._kind_classifier = build_kind_classifier(self)
 
         self._provenance = ProvenanceTracker(self._db)
         # self._adaptive_learner is initialized in _init_db_layer() because
@@ -460,6 +488,7 @@ class MemoryEngine:
             self._maintenance_scheduler = MaintenanceScheduler(
                 self._db, self._config, self._profile_id,
                 embedder=self._embedder,  # v3.8.2: periodic NULL-embedding self-heal
+                fact_writer=self._store_coverage_fact,  # 4.2.5: coverage backfill
             )
             self._maintenance_scheduler.start()
         except Exception as exc:
@@ -550,7 +579,10 @@ class MemoryEngine:
         provenance_kind: str | None = None,
         profile_id: str | None = None,
     ) -> list[str]:
-        """Store content and extract structured facts. Returns fact_ids.
+        """Store content and finish canonical materialization. Returns fact_ids.
+
+        Standalone callers own the work they queue, so enrichment finishes
+        before success. Without an embedder, lexical materialization suffices.
 
         Multi-scope: ``scope`` sets the visibility (personal/shared/global).
         ``shared_with`` is a list of profile_ids for shared scope.
@@ -585,9 +617,25 @@ class MemoryEngine:
             session_date=session_date,
             speaker=speaker,
             role=role,
-            require_complete=False,
+            require_complete=True,
             profile_id=profile_id,
             provenance_kind=provenance_kind,
+        )
+
+    def _store_coverage_fact(self, fact: AtomicFact) -> str:
+        """Add one sentence fact to its existing memory (core/coverage_backfill.py).
+
+        ``store_fact_direct`` gives a prebuilt fact a memory of its own; a
+        coverage fact belongs to the memory it was cut from, so deleting that
+        memory deletes it too.
+        """
+        from superlocalmemory.core.store_pipeline import run_store_fact_direct
+
+        return run_store_fact_direct(
+            fact, fact.profile_id, db=self._db, embedder=self._embedder,
+            entity_resolver=self._entity_resolver, ann_index=self._ann_index,
+            graph_builder=self._graph_builder, retrieval_engine=self._retrieval_engine,
+            vector_store=self._vector_store,
         )
 
     def store_fact_direct(
@@ -679,7 +727,8 @@ class MemoryEngine:
             def _best_effort_embed():
                 from superlocalmemory.core.recall_gate import background_work
                 with background_work():
-                    return _embedder_ref.embed(text)
+                    from superlocalmemory.core.bounded_embedding import embed_source
+                    return embed_source(_embedder_ref, text)
 
             _future = self._store_fast_embed_pool.submit(_best_effort_embed)
             try:
@@ -1023,8 +1072,6 @@ class MemoryEngine:
         pid = (profile_id or "").strip() or self._profile_id
         from superlocalmemory.core.engine_ingestion import _require_known_profile
         _require_known_profile(self, pid)
-        import re as _re
-        import uuid as _uuid
         from datetime import datetime, timezone
         from superlocalmemory.core.engine_ingestion import content_passes_admission
         if not content_passes_admission(content):
@@ -1058,49 +1105,13 @@ class MemoryEngine:
             metadata=metadata or {},
             scope=scope, shared_with=shared_with,
         )
-        self._db.store_memory(record)
-        # Lightweight regex entities (matches store_pipeline verbatim path) so
-        # the entity_graph channel has something to work with before enrichment.
-        ents = sorted(
-            {m.group(1) for m in _re.finditer(
-                r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+){0,3})\b", fact_text)}
-            | {m.group(1) for m in _re.finditer(r"\b([A-Z]{2,})\b", fact_text)}
-        )
-        # Workstream D (3.8.4) — warm-guard synchronous embed.
-        #
-        # Original contract (3.8.2): queryable admission NEVER acquires the
-        # embedding worker lock. On a clean Mode-A install the background model
-        # load owns that lock for up to 180s, turning the receipt-first path into
-        # a hidden synchronous wait. The canonical materializer promotes this
-        # fact with its full pipeline (embedding, Fisher, entities, graph edges).
-        #
-        # 3.8.4 extension: when the embedder is PROVABLY warm (_available is True)
-        # AND is a local embedder (not a remote cloud/OpenAI endpoint), compute the
-        # embedding synchronously with a hard 1s cap. On timeout or any
-        # exception, fall through to emb=None — the materializer fills it async.
-        # This preserves the 3.8.2 invariant for cold start while eliminating the
-        # semantic-channel blind spot on warm daemons (the top UX complaint).
+        from superlocalmemory.core.legacy_source_admission import admit_source
+        fact = admit_source(self._db, record, fact_text, now,
+                            getattr(self._config.store, "max_verbatim_chars", 24000),
+                            provenance_kind=provenance_kind)
+        fact_text = fact.content
+        # All model work follows the short durable source transaction.
         emb, fmean, fvar = self._warm_guard_embed(fact_text)
-        from superlocalmemory.storage.models import validate_provenance_kind
-        fact = AtomicFact(
-            fact_id=_uuid.uuid4().hex[:16], memory_id=record.memory_id,
-            profile_id=pid, content=fact_text,
-            fact_type=FactType.EPISODIC, entities=ents,
-            observation_date=session_date or now[:10],
-            confidence=0.7, importance=0.5,
-            # The vector is attached after this row exists, not with it. The
-            # projection that the meaning-based channel searches has a foreign
-            # key onto this row, so it cannot be written first; and writing this
-            # column first would hide the fact from the repair pass if the
-            # projection then failed. _attach_vector owns that ordering.
-            embedding=None, fisher_mean=None, fisher_variance=None,
-            created_at=now,
-            scope=scope, shared_with=shared_with,
-            # Governance tag: same leniency as canonical_store — an
-            # out-of-vocabulary value files as untagged, never fails the write.
-            provenance_kind=validate_provenance_kind(provenance_kind),
-        )
-        self._db.store_fact(fact)  # FTS5 trigger → immediately BM25-recallable
         # Attach the vector so the meaning-based channel finds it now, through
         # the same ordering every other write path uses.
         if emb and index_external:
@@ -1131,8 +1142,20 @@ class MemoryEngine:
         known_as_of: str | None = None,
         valid_at: str | None = None,
         include_unknown: bool = False,
+        answer_check: str | None = None,
+        facets: Any = None,
+        show_weak: bool = False,
+        include_related: bool = False,
     ) -> RecallResponse:
         """Recall relevant facts for a query.
+
+        ``show_weak``: when nothing in memory supports the question, return the
+        weak matches labelled ``weak`` instead of nothing (4.1.25).
+
+        ``answer_check``: "full" (default) or "no_reorder" (the check without
+        the opt-in reorder: the loop gate). A recall that is not a question runs
+        inside ``core.answer_check_scope.skip_answer_check()`` instead — never
+        judged, sent or billed.
 
         ``session_id`` gives the recall continuity: memories this session was
         recently shown are held in a small in-process working set and bias the
@@ -1178,6 +1201,13 @@ class MemoryEngine:
 
         pid = profile_id or self._profile_id
 
+        # One identity for this recall, allocated before ranking so the bandit
+        # play, any shadow-test assignment and the outcome ticket all carry the
+        # id the caller gets back (they used to be two UUIDs).
+        import uuid as _uuid
+
+        answer_id = _uuid.uuid4().hex
+
         from superlocalmemory.core.recall_pipeline import run_recall
         try:
             response = run_recall(
@@ -1199,6 +1229,11 @@ class MemoryEngine:
                 known_as_of=known_as_of,
                 valid_at=valid_at,
                 include_unknown=include_unknown,
+                answer_check=answer_check,
+                facets=facets,
+                query_id=answer_id,
+                show_weak=show_weak,
+                include_related=include_related,
             )
         except Exception:
             # Diagnostics are intentionally not recorded here.  A recall is a
@@ -1223,21 +1258,18 @@ class MemoryEngine:
         # allowed to influence ranking stays a separate, explicit setting that
         # remains off unless an operator turns it on.
         try:
-            import uuid
-
             from superlocalmemory.learning.outcome_queue import (
                 RecallEvent,
                 enqueue_recall,
             )
 
-            # A fresh id per answer, put on the response as well as the
+            # The id allocated above, put on the response as well as the
             # ticket. `calibration_id` was the obvious candidate and is wrong:
             # it is None on most paths, and an empty join key is exactly the
             # state that made all 162 recorded outcomes unmatchable. Returning
             # it is what makes it useful -- until an answer carried its own
             # name, no caller could quote one back, so an outcome could only
             # ever be matched by guessing from overlapping memories.
-            answer_id = uuid.uuid4().hex
             try:
                 response.query_id = answer_id
             except Exception:  # noqa: BLE001 -- an older response shape
@@ -1254,6 +1286,14 @@ class MemoryEngine:
             ))
         except Exception as exc:  # noqa: BLE001 -- a read must not fail on this
             logger.debug("recall outcome ticket skipped: %s", exc)
+
+        # 4.1.20: the Answer Check history. One append to an in-memory ring --
+        # no I/O; the daemon's writer thread saves it. Outcomes and timings only.
+        try:
+            from superlocalmemory.core.answer_check_history import record_recall_verdict
+            record_recall_verdict(response, profile_id=str(pid))
+        except Exception as exc:  # noqa: BLE001 -- a read must not fail on this
+            logger.debug("answer-check history skipped: %s", type(exc).__name__)
 
         return response
 
@@ -1325,26 +1365,30 @@ class MemoryEngine:
                 speaker_a, speaker_b, self._profile_id,
             )
 
-    def close_session(self, session_id: str) -> int:
+    def close_session(self, session_id: str, profile_id: str | None = None) -> int:
         """Create session-level temporal summary and release its working set.
 
         The working set is what the session was recently looking at. It exists
         to connect one turn to the next, so it has no meaning once there are no
         more turns; holding it would let a later session that reuses this id
         inherit ranking bias from a conversation that already ended.
+
+        ``profile_id`` closes a session of that profile (per-request routing,
+        the active profile is not moved); ``None`` = the active profile.
         """
         self._ensure_init()
+        target = profile_id or self._profile_id
 
         try:
             from superlocalmemory.core.working_memory import discard
 
-            discard(self._profile_id, session_id)
+            discard(target, session_id)
         except Exception as exc:  # pragma: no cover — never block a close
             logger.debug("working-set discard skipped: %s", exc)
 
         from superlocalmemory.core.store_pipeline import run_close_session
         return run_close_session(
-            session_id, self._profile_id, db=self._db,
+            session_id, target, db=self._db,
         )
 
     # -- Lifecycle ----------------------------------------------------------
@@ -1358,7 +1402,19 @@ class MemoryEngine:
         service manager SIGKILL the daemon and leave its children behind.
         References are cleared before invoking each cleanup hook, so a second
         close is safe even when one optional cleanup hook fails.
+
+        The pools are shut down without waiting, the embedder is shut down
+        (which wakes an embed in flight), and only then are the pool threads
+        joined -- within ``thread_join.CLOSE_JOIN_SECONDS`` in total, never
+        unbounded -- before the database closes under them. ``close()`` used
+        to return with those threads still running.
         """
+        from superlocalmemory.core.thread_join import executor_threads, join_threads
+
+        owned_threads: list = []
+        reconcile, self._kind_reconcile = getattr(self, "_kind_reconcile", None), None
+        if reconcile is not None:  # interrupts its read; joined with the pools below
+            owned_threads.extend(reconcile.stop())
         scheduler = getattr(self, "_maintenance_scheduler", None)
         self._maintenance_scheduler = None
         if scheduler is not None:
@@ -1380,6 +1436,7 @@ class MemoryEngine:
             self._store_fast_embed_pool_closed = True
             self._store_fast_embed_pool = None
         if embed_pool is not None:
+            owned_threads.extend(executor_threads(embed_pool))
             try:
                 embed_pool.shutdown(wait=False, cancel_futures=True)
             except Exception:
@@ -1391,6 +1448,12 @@ class MemoryEngine:
         retrieval = getattr(self, "_retrieval_engine", None)
         self._retrieval_engine = None
         if retrieval is not None:
+            worker_threads = getattr(retrieval, "worker_threads", None)
+            if callable(worker_threads):
+                try:
+                    owned_threads.extend(worker_threads())
+                except Exception:
+                    logger.debug("engine cleanup: retrieval threads unreadable", exc_info=True)
             reranker = getattr(retrieval, "_reranker", None)
             try:
                 if reranker is not None:
@@ -1403,6 +1466,14 @@ class MemoryEngine:
                             unload()
             except Exception:
                 logger.warning("engine cleanup: reranker shutdown failed", exc_info=True)
+            try:
+                # Any judge, not only Laya. Off the engine, stopped unless the
+                # next engine shares it, and marked closed so a switch racing
+                # this close cannot start a model nobody would stop.
+                from superlocalmemory.core.engine_wiring import release_sufficiency_judge
+                release_sufficiency_judge(retrieval, final=True)
+            except Exception:
+                logger.warning("engine cleanup: sufficiency judge shutdown failed", exc_info=True)
             try:
                 retrieval.close(wait=False)
             except TypeError:
@@ -1439,6 +1510,10 @@ class MemoryEngine:
             except Exception:
                 logger.warning("engine cleanup: embedder unload failed", exc_info=True)
 
+        # Bounded: the embedder shutdown above has already woken any worker
+        # waiting on the model, so a healthy pool drains in milliseconds.
+        join_threads(owned_threads, owner="engine")
+
         db = getattr(self, "_db", None)
         self._db = None
         if db is not None:
@@ -1468,24 +1543,6 @@ class MemoryEngine:
         return self._db.get_fact_count(self._profile_id)
 
     # -- Internal -----------------------------------------------------------
-
-    def _check_embedding_migration(self) -> None:
-        """Detect embedding model change and re-index if needed."""
-        try:
-            from superlocalmemory.storage.embedding_migrator import (
-                check_embedding_migration,
-                run_embedding_migration,
-            )
-            if check_embedding_migration(self._config):
-                count = run_embedding_migration(
-                    self._config, self._db, self._embedder,
-                )
-                if count > 0:
-                    logger.info(
-                        "Embedding migration: %d facts re-embedded", count,
-                    )
-        except Exception as exc:
-            logger.warning("Embedding migration check failed: %s", exc)
 
     def _ensure_init(self) -> None:
         if not self._initialized:

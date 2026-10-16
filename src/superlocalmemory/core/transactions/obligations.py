@@ -193,6 +193,45 @@ class ObligationLedger:
         ).fetchall()
         return tuple(_row_to_obligation(row) for row in rows)
 
+    def mark_if_unchanged(
+        self,
+        conn: sqlite3.Connection,
+        seen: Obligation,
+        state: ObligationState,
+        *,
+        detail: Mapping[str, Any] | None = None,
+        bump_verify_attempts: bool = False,
+    ) -> int:
+        """Mark ``seen`` only if nobody has written it since it was read.
+
+        For a background reader that decides from a snapshot: if the owning
+        service closed the obligation in the meantime, its write wins and this
+        one is dropped (returns 0) instead of overwriting a newer truth.
+        """
+        detail_json = None if detail is None else json.dumps(
+            dict(detail), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        cursor = conn.execute(
+            "UPDATE projection_obligations SET "
+            "state = ?, detail = ?, "
+            "verify_attempts = verify_attempts + ?, "
+            "updated_at = ? "
+            "WHERE operation_id = ? AND owner = ? AND kind = ? "
+            "AND state = ? AND updated_at = ?",
+            (
+                str(state),
+                detail_json,
+                1 if bump_verify_attempts else 0,
+                time.time(),
+                seen.operation_id,
+                seen.owner,
+                str(seen.kind),
+                str(seen.state),
+                seen.updated_at,
+            ),
+        )
+        return cursor.rowcount
+
     def pending_operation_ids(
         self,
         conn: sqlite3.Connection,
@@ -200,6 +239,7 @@ class ObligationLedger:
         profile_id: str | None = None,
         limit: int = 100,
         max_attempts: int = 10,
+        kind: ObligationKind | None = None,
     ) -> tuple[str, ...]:
         where = "state NOT IN (?, ?) AND attempts < ?"
         params: list[Any] = [
@@ -208,6 +248,9 @@ class ObligationLedger:
         if profile_id is not None:
             where += " AND profile_id = ?"
             params.append(profile_id)
+        if kind is not None:
+            where += " AND kind = ?"
+            params.append(str(kind))
         params.append(limit)
         rows = conn.execute(
             f"SELECT DISTINCT operation_id FROM projection_obligations "
@@ -223,12 +266,16 @@ class ObligationLedger:
         profile_id: str | None = None,
         limit: int = 100,
         max_attempts: int = 10,
+        kind: ObligationKind | None = None,
     ) -> tuple[str, ...]:
         where = "m.operation_id IS NULL AND o.attempts < ?"
         params: list[Any] = [max_attempts]
         if profile_id is not None:
             where += " AND o.profile_id = ?"
             params.append(profile_id)
+        if kind is not None:
+            where += " AND o.kind = ?"
+            params.append(str(kind))
         params.append(limit)
         rows = conn.execute(
             f"SELECT DISTINCT o.operation_id FROM projection_obligations o "
@@ -237,6 +284,74 @@ class ObligationLedger:
             tuple(params),
         ).fetchall()
         return tuple(row[0] for row in rows)
+
+    def unfinished_erase_operation_ids(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        profile_id: str,
+        limit: int = 100,
+        now: float | None = None,
+        backoff: tuple[int, float, float] = (0, 0.0, 0.0),
+    ) -> tuple[str, ...]:
+        """Erasures with an obligation due for re-proof, oldest touch first.
+
+        Deliberately not bounded by ``attempts``: an erase obligation is closed
+        by proof, not by retrying, so one exhausted by an earlier release must
+        still be re-proven. Admin-cancelled obligations are left as cancelled.
+
+        ``backoff`` is ``(free, base_s, cap_s)``: the first ``free`` re-proofs
+        are due at once; after that an obligation is due ``base_s * 2**k``
+        seconds after its last touch (k = re-proofs beyond ``free``), never
+        more than ``cap_s``. Computed in SQL so a waiting obligation never
+        takes a slot from one that is due.
+        """
+        rows = _due_erasures(conn, "AND profile_id = ? ", (profile_id,),
+                             "operation_id", limit=limit, now=now, backoff=backoff)
+        return tuple(row[0] for row in rows)
+
+    def due_erasures_in_every_profile(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        limit: int = 100,
+        now: float | None = None,
+        backoff: tuple[int, float, float] = (0, 0.0, 0.0),
+    ) -> tuple[tuple[str, str], ...]:
+        """``(operation_id, profile_id)`` of every profile's erasures due for
+        re-proof, oldest touch first, under the same rules as
+        :meth:`unfinished_erase_operation_ids`.
+
+        One pass, bounded by ``limit`` across all profiles. A profile that no
+        longer exists is skipped: there is no profile left to prove it in.
+        """
+        rows = _due_erasures(
+            conn, "AND profile_id IN (SELECT profile_id FROM profiles) ", (),
+            "operation_id, profile_id", limit=limit, now=now, backoff=backoff)
+        return tuple((row[0], row[1]) for row in rows)
+
+
+def _due_erasures(
+    conn: sqlite3.Connection, profile_clause: str, profile_params: tuple, group_by: str,
+    *, limit: int, now: float | None, backoff: tuple[int, float, float],
+) -> list[Any]:
+    """The erase obligations due for re-proof, grouped by ``group_by``."""
+    free, base_s, cap_s = backoff
+    return conn.execute(
+        f"SELECT {group_by} FROM projection_obligations "
+        f"WHERE kind = ? {profile_clause}AND state NOT IN (?, ?) "
+        "AND (detail IS NULL OR detail NOT LIKE '%admin_cancel%') "
+        "AND updated_at + CASE WHEN verify_attempts < ? THEN 0 "
+        "ELSE MIN(?, ? * (1 << MIN(verify_attempts - ?, 30))) END <= ? "
+        f"GROUP BY {group_by} ORDER BY MIN(updated_at) LIMIT ?",
+        (
+            str(ObligationKind.ERASE), *profile_params,
+            str(ObligationState.VERIFIED), str(ObligationState.ERASED),
+            free, cap_s, base_s, free,
+            time.time() if now is None else now,
+            limit,
+        ),
+    ).fetchall()
 
 
 def _row_to_obligation(row: Any) -> Obligation:

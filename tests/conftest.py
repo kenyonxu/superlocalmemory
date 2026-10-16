@@ -14,92 +14,39 @@ memory across parallel test runs. Each worker consumes 0.5-1.5 GB.
 
 from __future__ import annotations
 
-import os
-import secrets
 import sqlite3
 import sys
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-# Capture and deny the real user namespace before replacing environment paths.
-_REAL_HOME = Path.home().resolve()
-_REAL_DATA_ROOT = Path(
-    os.environ.get("SLM_DATA_DIR")
-    or os.environ.get("SL_MEMORY_PATH")
-    or os.environ.get("SLM_HOME")
-    or (_REAL_HOME / ".superlocalmemory")
-).expanduser().resolve(strict=False)
-
-
-def _pytest_isolation_audit(event: str, args: tuple) -> None:
-    """Deny direct live-state opens and public-daemon socket connections."""
-    if event == "open" and args and isinstance(args[0], (str, bytes, os.PathLike)):
-        candidate = Path(args[0]).expanduser().resolve(strict=False)
-        if candidate == _REAL_DATA_ROOT or candidate.is_relative_to(_REAL_DATA_ROOT):
-            raise PermissionError(f"pytest denied live SLM state path: {candidate}")
-    if event == "socket.connect" and len(args) >= 2:
-        address = args[1]
-        if (
-            isinstance(address, tuple)
-            and len(address) >= 2
-            and str(address[0]).lower() in {"127.0.0.1", "localhost", "::1"}
-            and int(address[1]) in {8765, 8767}
-        ):
-            raise PermissionError(
-                f"pytest denied live SLM daemon port: {address[1]}"
-            )
-
-
-sys.addaudithook(_pytest_isolation_audit)
-
-# Establish a pytest-owned namespace before test modules are imported. Several
-# production modules resolve HOME and daemon paths at import time, so a normal
-# fixture is too late to protect the user's live installation.
-_TEST_ISOLATION_DIR = tempfile.TemporaryDirectory(prefix="slm-pytest-")
-_TEST_ROOT = Path(_TEST_ISOLATION_DIR.name).resolve()
-_TEST_HOME = _TEST_ROOT / "home"
-_TEST_DATA_DIR = _TEST_ROOT / "canonical-data"
-_TEST_DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-os.environ["SLM_TEST_ISOLATION"] = "1"
-os.environ["SLM_TEST_ROOT"] = str(_TEST_ROOT)
-os.environ["SLM_TEST_REAL_DATA_ROOT"] = str(_REAL_DATA_ROOT)
-os.environ["HOME"] = str(_TEST_HOME)
-os.environ["USERPROFILE"] = str(_TEST_HOME)
-os.environ["XDG_CONFIG_HOME"] = str(_TEST_HOME / ".config")
-os.environ["XDG_CACHE_HOME"] = str(_TEST_HOME / ".cache")
-os.environ["XDG_DATA_HOME"] = str(_TEST_HOME / ".local" / "share")
-os.environ["SLM_DATA_DIR"] = str(_TEST_DATA_DIR)
-os.environ["SL_MEMORY_PATH"] = str(_TEST_ROOT / "wrong-legacy-alias")
-os.environ["SLM_HOME"] = str(_TEST_ROOT / "wrong-hook-alias")
-os.environ["SLM_DAEMON_PORT"] = str(20_000 + secrets.randbelow(40_000))
-os.environ["SLM_TEST_INSTANCE_CAPABILITY"] = secrets.token_urlsafe(32)
-for _unsafe_env in (
-    "SLM_TEST_ALLOW_LIVE_HOME",
-    "SLM_HOOK_DAEMON_URL",
-    "SLM_MESH_PEER_URL",
-    "SLM_MESH_SHARED_SECRET",
-    "SLM_MESH_HOST",
-    "SLM_MESH_WS_PORT",
-    "SLM_MESH_DISCOVERY",
-    "SLM_DAEMON_HOST",
-    "SLM_HOST",
-):
-    os.environ.pop(_unsafe_env, None)
+# Live-root isolation (audit hook, pytest-owned HOME and data root) lives in
+# isort: off
+# tests/_isolation_plugin.py so it also holds under --noconftest. Importing it
+# here is a no-op when pyproject's addopts already loaded it.
+from tests._isolation_plugin import (  # noqa: E402,F401  (re-exported for tests)
+    _LIVE_ROOT_GUARD,
+    ensure_registered as _ensure_isolation_plugin,
+)
 
 import numpy as np  # noqa: E402  (isolation must be installed before imports)
 import pytest  # noqa: E402  (isolation must be installed before imports)
 
+# A test that leaves a product thread (slm-*, LanceDB's loop) or a child
+# process (embedding/reranker worker) running fails by name (audit C-3).
+from tests.thread_leak_guard import (  # noqa: E402,F401  (pytest hook registration)
+    pytest_runtest_setup,
+    pytest_runtest_teardown,
+)
+# isort: on
 
-@pytest.fixture(autouse=True, scope="function")
-def _block_live_slm_home_writes(tmp_path, monkeypatch):
-    """Give each test an isolated data root with no live-home escape hatch."""
-    data_dir = tmp_path
-    data_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("SLM_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("SL_MEMORY_PATH", str(tmp_path / "wrong-legacy-alias"))
-    monkeypatch.setenv("SLM_HOME", str(tmp_path / "wrong-hook-alias"))
+pytest_plugins = ["tests.daemon_descriptor_guard"]
+
+
+def pytest_configure(config) -> None:
+    """Fail tests on swallowed live-root refusals even when addopts were overridden."""
+    _ensure_isolation_plugin(config)
+    from tests.dev_metadata import check_installed_version
+
+    check_installed_version()
 
 
 # V3.3.14: Windows CI fix — KeyboardInterrupt during daemon thread teardown.
@@ -163,16 +110,6 @@ def pytest_sessionfinish(session, exitstatus):
                 pass
 
 
-def pytest_unconfigure(config) -> None:
-    """Release the collection-time namespace before interpreter teardown.
-
-    ``TemporaryDirectory`` otherwise waits for its weakref finalizer, which
-    emits a ``ResourceWarning`` under ``-X dev`` and hides real fixture leaks
-    in the same shutdown window.
-    """
-    _TEST_ISOLATION_DIR.cleanup()
-
-
 # ---------------------------------------------------------------------------
 # Session-scoped worker cleanup (prevents orphaned subprocess leak)
 # ---------------------------------------------------------------------------
@@ -225,6 +162,12 @@ def _prevent_heavy_model_loading():
         _patch(
             "superlocalmemory.core.worker_pool.WorkerPool.shared",
             return_value=mock_pool,
+        ),
+        # 4.1.18: with the default "auto", a dev Mac that has laya-mlx installed
+        # would start a real Laya worker in every engine a test builds.
+        _patch(
+            "superlocalmemory.core.engine_wiring.init_sufficiency_judge",
+            return_value=None,
         ),
     ]
     for p in patches:
@@ -287,6 +230,73 @@ def cleanup_slm_workers_between_tests():
         pass
 
 
+@pytest.fixture(autouse=True)
+def closes_admission_journals(monkeypatch):
+    """Close every ``AdmissionJournal`` a test builds, the way shutdown does.
+
+    A journal owns a group-commit writer thread (``slm-journal-writer``) and a
+    pool of reader connections. The runtime closes its journal in ``stop()``;
+    tests build journals inline in many folders and rarely close them, so the
+    writer stayed parked until its idle exit and was reported against the
+    test. Every journal built during any test is closed when the test ends,
+    so a new test cannot leak one by forgetting to. ``close()`` is not final:
+    a journal held by a wider-scoped fixture reopens on its next operation.
+    """
+    from superlocalmemory.storage.admission_journal import AdmissionJournal
+
+    built: list[AdmissionJournal] = []
+    original_init = AdmissionJournal.__init__
+
+    def _tracking_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        built.append(self)
+
+    monkeypatch.setattr(AdmissionJournal, "__init__", _tracking_init)
+    yield built
+    for journal in built:
+        journal.close()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_recall_cache():
+    """Each test asks its own questions: kept recall answers and dashboard
+    summaries never cross tests."""
+    def clear():
+        cache = sys.modules.get("superlocalmemory.server.recall_cache")
+        if cache is not None:
+            cache.clear()
+        views = sys.modules.get("superlocalmemory.server.view_cache")
+        if views is not None:
+            views.drop()
+
+    clear()
+    yield
+    clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_daemon_enrichment_pool():
+    """Give back the daemon's enrichment pool a test created (audit C-5).
+
+    The pool is module-global in ``unified_daemon`` and created on the first
+    inline enrichment. Only the app lifespan shuts it down, so a ``TestClient``
+    used without its context manager left ``slm-enrich`` threads running for
+    the rest of the session. After each test: shut it down, join its threads
+    (bounded), and reopen it for the next test -- exactly what a daemon
+    restart in one process does.
+    """
+    yield
+    daemon = sys.modules.get("superlocalmemory.server.unified_daemon")
+    if daemon is None or getattr(daemon, "_enrichment_pool", None) is None:
+        return
+    from superlocalmemory.core.thread_join import executor_threads, join_threads
+
+    threads = executor_threads(daemon._enrichment_pool)
+    daemon._shutdown_enrichment_pool_if_created()
+    daemon._open_enrichment_pool()
+    join_threads(threads, owner="test enrichment pool")
+
+
 @pytest.fixture
 def in_memory_db():
     """Create an in-memory SQLite database with full SLM schema.
@@ -336,6 +346,11 @@ def mode_a_config(tmp_path):
     # subprocess per test adds 3s teardown overhead (kills ONNX worker).
     # 13 engine tests × 3s = 39s wasted. Cross-encoder has its own tests.
     config.retrieval.use_cross_encoder = False
+    # 4.1.25: the answer-support gate has its own tests (test_hard_abstain,
+    # test_support_gate, the answerability harness). A mock embedder's random
+    # vectors give it nothing to measure, so engine tests that are about
+    # something else would abstain on every question.
+    config.retrieval.answer_support_gate = False
     return config
 
 

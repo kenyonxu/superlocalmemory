@@ -2,7 +2,16 @@
 # Licensed under AGPL-3.0-or-later - see LICENSE file
 # Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
 
-"""Rules engine for configurable auto-capture and auto-recall behavior."""
+"""Rules engine for configurable auto-capture and auto-recall behavior.
+
+Rules live under ``"rules"`` in config.json. ``auto_recall.on_every_prompt``
+switches the per-prompt recall hooks and ``auto_capture.capture_session_summary``
+the end-of-session summary (both wired in 4.1.25; turning a whole section off
+turns its hooks off too). Before 4.1.25 every dashboard save wrote
+``on_every_prompt: false``, the unused default of the time; a store saved
+before ``rules_version`` 2 drops that one value rather than end per-prompt
+recall nobody chose to end.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +26,7 @@ DEFAULT_RULES = {
     "auto_recall": {
         "enabled": True,
         "on_session_start": True,
-        "on_every_prompt": False,
+        "on_every_prompt": True,
         "max_memories_injected": 10,
         "relevance_threshold": 0.3,
     },
@@ -32,17 +41,41 @@ DEFAULT_RULES = {
 }
 
 
+#: 2 = on_every_prompt is wired (4.1.25). Stored alongside "rules".
+RULES_VERSION = 2
+
+
+def _merged(stored: dict) -> dict:
+    """Each section's defaults overlaid by what was stored (new dicts)."""
+    out = {name: dict(section) for name, section in DEFAULT_RULES.items()}
+    for name, value in stored.items():
+        out[name] = {**out.get(name, {}), **value} if isinstance(value, dict) else value
+    return out
+
+
+def _upgraded(stored: dict, version: int) -> dict:
+    if version >= RULES_VERSION:
+        return stored
+    recall = stored.get("auto_recall")
+    if not isinstance(recall, dict) or "on_every_prompt" not in recall:
+        return stored
+    kept = {k: v for k, v in recall.items() if k != "on_every_prompt"}
+    return {**stored, "auto_recall": kept}
+
+
 class RulesEngine:
     """Manage configurable rules for auto-capture and auto-recall."""
 
     def __init__(self, config: dict | None = None, config_path: Path | None = None):
         if config:
-            self._rules = {**DEFAULT_RULES, **config}
+            self._rules = _merged(config)
         elif config_path and config_path.exists():
-            data = json.loads(config_path.read_text())
-            self._rules = {**DEFAULT_RULES, **data.get("rules", {})}
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            version = data.get("rules_version", 1)
+            stored = data.get("rules", {})
+            self._rules = _merged(_upgraded(stored, version if isinstance(version, int) else 1))
         else:
-            self._rules = dict(DEFAULT_RULES)
+            self._rules = _merged({})
 
     def should_capture(self, category: str, confidence: float) -> bool:
         """Check if a category should be captured based on rules."""
@@ -50,7 +83,8 @@ class RulesEngine:
         if not capture_rules.get("enabled", True):
             return False
 
-        category_key = f"capture_{category}s" if not category.endswith("s") else f"capture_{category}"
+        category_key = (f"capture_{category}s" if not category.endswith("s")
+                        else f"capture_{category}")
         if not capture_rules.get(category_key, True):
             return False
 
@@ -66,9 +100,18 @@ class RulesEngine:
         if trigger == "session_start":
             return recall_rules.get("on_session_start", True)
         if trigger == "every_prompt":
-            return recall_rules.get("on_every_prompt", False)
+            return recall_rules.get("on_every_prompt", True)
 
         return True
+
+    def per_prompt_recall_on(self) -> bool:
+        """The per-prompt recall hooks (UserPromptSubmit and Codex's prompt)."""
+        return bool(self.should_recall("every_prompt"))
+
+    def captures_session_summary(self) -> bool:
+        capture = self._rules.get("auto_capture", {})
+        return bool(capture.get("enabled", True)
+                    and capture.get("capture_session_summary", True))
 
     def get_recall_config(self) -> dict:
         """Get auto-recall configuration."""
@@ -87,13 +130,30 @@ class RulesEngine:
     def save(self, config_path: Path) -> None:
         """Save rules to config file."""
         if config_path.exists():
-            data = json.loads(config_path.read_text())
+            data = json.loads(config_path.read_text(encoding="utf-8"))
         else:
             data = {}
         data["rules"] = self._rules
+        data["rules_version"] = RULES_VERSION
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(json.dumps(data, indent=2))
+        config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def to_dict(self) -> dict:
         """Export rules as dict."""
         return dict(self._rules)
+
+
+def _config_path() -> Path:
+    from superlocalmemory.infra.data_root import state_path
+
+    return state_path("config.json")
+
+
+def load(config_path: Path | None = None) -> RulesEngine:
+    """The stored rules, or the defaults when they cannot be read. Never raises:
+    hooks call this on every prompt and must fail open."""
+    try:
+        return RulesEngine(config_path=config_path or _config_path())
+    except Exception as exc:  # noqa: BLE001 — a bad config never breaks a hook
+        logger.debug("rules unreadable, using defaults: %s", exc)
+        return RulesEngine()

@@ -20,7 +20,6 @@ pytestmark = pytest.mark.skipif(
 from superlocalmemory.code_graph.database import CodeGraphDatabase
 from superlocalmemory.code_graph.graph_engine import (
     GraphEngine,
-    GraphIndex,
     NodeNotFoundError,
 )
 from superlocalmemory.code_graph.graph_store import GraphStore

@@ -12,6 +12,7 @@ is kept in sync as a cache for backward compatibility.
 """
 import asyncio
 import logging
+from pathlib import Path
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
@@ -22,10 +23,9 @@ from .helpers import (
     get_db_connection, validate_profile_name,
     ProfileSwitch, DB_PATH,
     sync_profiles, ensure_profile_in_db, ensure_profile_in_json,
-    delete_profile_from_db,
-    _load_profiles_json, _save_profiles_json,
+    delete_profile_from_db, PICTURES_PENDING,
+    _load_profiles_json, _save_profiles_json, get_active_profile,
 )
-from superlocalmemory.storage.memory_write import memory_write
 from superlocalmemory.server.profile_runtime import (
     commit_daemon_profile_switch,
     get_profile_runtime,
@@ -66,17 +66,39 @@ def _get_memory_count(profile: str) -> int:
         return 0
 
 
+def _visible_profile_ids(request: Request) -> set[str] | None:
+    """The workspaces this caller may see, or ``None`` for all of them.
+
+    The machine owner sees every workspace. A signed-in user sees only the
+    workspaces they belong to (any role grants READ): before 4.1.25 (audit
+    OPS-09) a viewer of ``default`` got every workspace's name, description
+    and memory count.
+    """
+    from superlocalmemory.server.rbac_enforce import resolve_principal
+
+    principal = resolve_principal(request)  # an ended session is a 401
+    if principal.get("kind") != "user":
+        return None
+    rbac = getattr(request.app.state, "rbac", None)
+    if rbac is None:
+        return set()
+    return {row["profile_id"] for row in rbac.list_user_profiles(principal["user_id"])}
+
+
 @router.get("/api/profiles")
-async def list_profiles(request: Request):
+def list_profiles(request: Request):
     """List available memory profiles (synced from SQLite + profiles.json)."""
     try:
+        visible = _visible_profile_ids(request)
         merged = sync_profiles()
-        active = get_profile_runtime(request.app.state).snapshot.profile_id
+        active = get_active_profile()  # the caller's own (pinned for this request)
 
         profiles = []
         for p in merged:
             # profile_id is the canonical key (PK, FK target, used by engine)
             pid = p.get('profile_id', p.get('name', ''))
+            if visible is not None and pid not in visible:
+                continue  # never named, never counted
             count = _get_memory_count(pid)
             profiles.append({
                 "name": pid,
@@ -89,12 +111,31 @@ async def list_profiles(request: Request):
 
         return {
             "profiles": profiles,
-            "active_profile": active,
+            "active_profile": active if visible is None or active in visible else "",
             "total_profiles": len(profiles),
         }
 
+    except HTTPException:
+        raise
     except Exception:
         raise _internal_error("Profile list error")
+
+
+def _switch_session_workspace(request: Request, name: str, authorization) -> dict:
+    """Bind ``name`` to the caller's session; nobody else's workspace moves."""
+    from superlocalmemory.server.caller_workspace import session_workspaces
+    from superlocalmemory.server.rbac_enforce import _session_token
+
+    previous = get_active_profile()
+    session_workspaces(request.app.state).bind(_session_token(request), name)
+    count = _get_memory_count(name)
+    authorization.complete()
+    return {
+        "success": True, "active_profile": name,
+        "previous_profile": previous, "memory_count": count,
+        "scope": "session",
+        "message": f"Switched to profile '{name}' ({count} memories).",
+    }
 
 
 @router.post("/api/profiles/{name}/switch")
@@ -114,11 +155,18 @@ async def switch_profile(name: str, request: Request):
                 detail=f"Profile '{name}' not found. Available: {available}",
             )
 
+        from superlocalmemory.access.rbac import Permission as _SwitchPerm
+
+        # Entering a workspace needs READ on it for a signed-in user (the
+        # mutation gate's rule for this path); the owner needs MANAGE there.
         authorization = authorize_route_mutation(
             request,
             operation="update",
             source_agent_id="http-profile-switch",
             profile_id=name,
+            permission=_SwitchPerm.READ,
+            owner_permission=_SwitchPerm.MANAGE,
+            operation_policy=False,
         )
         # RBAC (C4): a logged-in user may only activate a workspace they belong
         # to — this is the read boundary. Switching sets the active tenant for
@@ -133,6 +181,9 @@ async def switch_profile(name: str, request: Request):
                     status_code=403,
                     detail="You are not a member of this workspace.",
                 )
+            # A signed-in person moves only themselves (PR 248 review,
+            # finding 2): the daemon-wide workspace is the machine owner's.
+            return _switch_session_workspace(request, name, authorization)
         runtime = get_profile_runtime(request.app.state)
         previous = runtime.snapshot.profile_id
         try:
@@ -188,13 +239,18 @@ async def create_profile(body: ProfileSwitch, request: Request):
         if name in merged_ids:
             raise HTTPException(status_code=409, detail=f"Profile '{name}' already exists")
 
+        from superlocalmemory.storage.pending_media_moves import creation_blocker
+
+        blocker = await asyncio.to_thread(creation_blocker, Path(DB_PATH).parent, name)
+        if blocker:
+            raise HTTPException(status_code=409, detail=blocker)
+
         authorization = authorize_route_mutation(
             request,
             operation="update",
             source_agent_id="http-profile-create",
         )
         # RBAC (C3): creating a tenant is an administrative action.
-        from superlocalmemory.access.rbac import Permission as _Perm
         from superlocalmemory.server.rbac_enforce import require_manage as _rbac_manage
         _principal = _rbac_manage(request)
         # Write to BOTH stores atomically
@@ -225,7 +281,8 @@ async def create_profile(body: ProfileSwitch, request: Request):
 
 @router.delete("/api/profiles/{name}")
 async def delete_profile(name: str, request: Request):
-    """Delete a profile. Moves its memories to 'default'."""
+    """Delete a profile. Moves all of its memories -- and everything that makes
+    them findable, linked and correctable -- to 'default'."""
     try:
         if name == 'default':
             raise HTTPException(status_code=400, detail="Cannot delete 'default' profile")
@@ -251,29 +308,17 @@ async def delete_profile(name: str, request: Request):
         # profile being deleted (not the active one).
         from superlocalmemory.server.rbac_enforce import require_manage as _rbac_manage
         _rbac_manage(request, profile=name)
-        # Move data to default before deleting (bypasses CASCADE).
-        # memory_write: write lock + busy_timeout — two UPDATEs are atomic.
-        moved = 0
-        with memory_write(DB_PATH) as conn:
-            try:
-                cur = conn.execute(
-                    "UPDATE atomic_facts SET profile_id = 'default' WHERE profile_id = ?",
-                    (name,),
-                )
-                moved = cur.rowcount
-            except Exception:
-                pass
-            try:
-                cur2 = conn.execute(
-                    "UPDATE memories SET profile_id = 'default' WHERE profile_id = ?",
-                    (name,),
-                )
-                moved += cur2.rowcount
-            except Exception:
-                pass
-
-        # Delete from BOTH stores
-        delete_profile_from_db(name)
+        # Every profile-scoped row moves, merges or goes, in one memory.db
+        # transaction with the profile row (storage/profile_fold.py).
+        from superlocalmemory.storage.profile_fold import ProfileFoldError
+        from superlocalmemory.storage.profile_fold_sidecars import SidecarFoldError
+        try:
+            counts = await asyncio.to_thread(delete_profile_from_db, name)
+        except (ProfileFoldError, SidecarFoldError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        pictures_pending = bool(counts.pop(PICTURES_PENDING, False))
+        moved = int(counts.get("memories") or 0)
+        facts = int(counts.get("atomic_facts") or 0)
 
         profiles = json_config.get('profiles', {})
         profiles.pop(name, None)
@@ -281,9 +326,14 @@ async def delete_profile(name: str, request: Request):
         _save_profiles_json(json_config)
 
         authorization.complete()
+        note = (" Its pictures and documents will finish moving shortly."
+                if pictures_pending else "")
         return {
             "success": True,
-            "message": f"Profile '{name}' deleted. {moved} memories moved to 'default'.",
+            "message": (f"Profile '{name}' deleted. {moved} memories ({facts} facts) "
+                        f"moved to 'default'.{note}"),
+            "moved": {k: v for k, v in counts.items() if isinstance(v, int) and v},
+            **({"pictures_pending": True} if pictures_pending else {}),
         }
 
     except HTTPException:

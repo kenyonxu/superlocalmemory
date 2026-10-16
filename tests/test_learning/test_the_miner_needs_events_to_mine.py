@@ -89,16 +89,31 @@ def test_the_assertion_names_the_skill_and_its_evidence(db):
     assert evidence >= MIN_INVOCATIONS
 
 
-def test_mining_twice_reinforces_rather_than_duplicating(db):
+def test_mining_twice_neither_duplicates_nor_reinforces(db):
+    """The same events mined twice are the same evidence (audit BRN-02): no
+    duplicate row, and no confidence gained from re-running the miner."""
     seed_skill_events(db, invocations=MIN_INVOCATIONS, failures=2)
     miner = SkillPerformanceMiner(db)
 
     first = miner.mine("default")
+    before = _skill_row(db)
     second = miner.mine("default")
 
     assert count_skill_assertions(db) == 1, "a second pass duplicated the row"
     assert first.get("assertions_created", 0) == 1
-    assert second.get("assertions_reinforced", 0) == 1
+    assert second.get("assertions_reinforced", 0) == 0
+    assert second.get("assertions_unchanged", 0) == 1
+    assert _skill_row(db) == before
+
+
+def _skill_row(db) -> tuple:
+    import sqlite3 as _sq
+
+    with _sq.connect(db) as conn:
+        return conn.execute(
+            "SELECT confidence, evidence_count, reinforcement_count, updated_at "
+            "FROM behavioral_assertions WHERE category = 'skill_performance'"
+        ).fetchone()
 
 
 def test_two_profiles_do_not_share_skill_history(db):

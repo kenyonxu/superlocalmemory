@@ -32,8 +32,6 @@ from __future__ import annotations
 import ast
 import pathlib
 
-import pytest
-
 _SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "superlocalmemory"
 _BRIDGE = _SRC / "code_graph" / "bridge"
 

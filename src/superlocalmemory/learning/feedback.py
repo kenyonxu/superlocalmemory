@@ -203,6 +203,14 @@ def _load_or_create_hash_key(db_path: Path) -> bytes:
             "process-local key", db_path, exc,
         )
         return key
+    # Windows ignores 0o600: apply the owner-only access list while the file
+    # is still empty.
+    from superlocalmemory.infra.owner_only_acl import restrict_to_owner
+
+    try:
+        restrict_to_owner(key_path)
+    except OSError as exc:
+        logger.warning("could not make %s readable only by you: %s", key_path.name, exc)
     with os.fdopen(fd, "wb") as handle:
         handle.write(key)
         handle.flush()
@@ -269,9 +277,15 @@ class FeedbackCollector:
     def _connect(self) -> sqlite3.Connection:
         """Open a connection with WAL mode and busy timeout."""
         conn = sqlite3.connect(str(self._db_path), timeout=10)
-        apply_journal_mode(conn)
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.row_factory = sqlite3.Row
+        try:
+            apply_journal_mode(conn)
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.row_factory = sqlite3.Row
+        except BaseException:
+            # Setup failed: close it now, or the file stays open (Windows
+            # then cannot delete or replace it) for as long as the error lives.
+            conn.close()
+            raise
         return conn
 
     # ------------------------------------------------------------------

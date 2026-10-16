@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from superlocalmemory.hooks.ide_connector import (
-    AdapterStatus,
     CrossPlatformConnector,
 )
 

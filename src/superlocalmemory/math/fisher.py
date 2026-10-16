@@ -162,6 +162,12 @@ class FisherRaoMetric:
 
         _validate(mu1, sig1, mu2, sig2)
 
+        # Pinele et al. (2020), doi:10.3390/e22040404, Eq. 22 uses std dev.
+        # Geomstats normal.py DiagonalNormalMetric applies sqrt to covariance:
+        # https://github.com/geomstats/geomstats/blob/main/geomstats/information_geometry/normal.py
+        # Reference checked 2026-10-11. Our storage/public inputs are variances.
+        sig1, sig2 = np.sqrt(sig1), np.sqrt(sig2)
+
         # Per-component: delta_i = ((mu1-mu2)^2 + 2*(sigma1-sigma2)^2) / (4*s1*s2)
         mu_diff_sq = (mu1 - mu2) ** 2
         sig_diff_sq = (sig1 - sig2) ** 2

@@ -9,7 +9,6 @@ import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 
 from superlocalmemory.core.injection import (
     InjectableMemory,
@@ -319,7 +318,7 @@ class TestRenderContext:
         result = render_context(mems, mode="B", cfg=None, wrap=True)
 
         assert "sk-proj-abcdefghijklmnopqrstuvwxyz123456" not in result
-        assert "[REDACTED:OPENAI" in result
+        assert "[redacted]" in result and "[REDACTED:" not in result
         assert "fact_id=fact-7" in result
         assert "source_type=gmail" in result
         assert "source_id=message-42" in result

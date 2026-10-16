@@ -20,6 +20,7 @@ from superlocalmemory.infra.daemon_identity import (
     write_descriptor,
 )
 from superlocalmemory.infra.process_identity import process_start_token_for
+from tests._urlopen_fake import patch_urlopen
 
 
 class _HealthResponse:
@@ -56,7 +57,7 @@ def test_matching_descriptor_and_health_are_adopted() -> None:
 
     descriptor = _owned_descriptor()
     health = {"status": "ok", **descriptor.public_health_fields()}
-    with patch("urllib.request.urlopen", return_value=_HealthResponse(health)) as request:
+    with patch_urlopen(return_value=_HealthResponse(health)) as request:
         assert daemon.is_daemon_running()
     assert request.call_count == 1
     assert ":43123/health" in request.call_args.args[0]
@@ -66,14 +67,14 @@ def test_foreign_health_is_rejected_without_rewriting_local_state() -> None:
     from superlocalmemory.cli import daemon
 
     descriptor = _owned_descriptor()
-    original = Path(os.environ["SLM_DATA_DIR"], "daemon.json").read_text()
+    original = Path(os.environ["SLM_DATA_DIR"], "daemon.json").read_text(encoding="utf-8")
     health = {"status": "ok", **descriptor.public_health_fields()}
     health["namespace_id"] = "foreign"
 
-    with patch("urllib.request.urlopen", return_value=_HealthResponse(health)):
+    with patch_urlopen(return_value=_HealthResponse(health)):
         assert not daemon.is_daemon_running()
 
-    assert Path(os.environ["SLM_DATA_DIR"], "daemon.json").read_text() == original
+    assert Path(os.environ["SLM_DATA_DIR"], "daemon.json").read_text(encoding="utf-8") == original
 
 
 def test_custom_port_never_falls_through_to_fixed_legacy_port() -> None:
@@ -91,7 +92,7 @@ def test_custom_port_never_falls_through_to_fixed_legacy_port() -> None:
             })
         raise OSError("configured port unavailable")
 
-    with patch("urllib.request.urlopen", side_effect=_foreign_only):
+    with patch_urlopen(side_effect=_foreign_only):
         assert not daemon.is_daemon_running()
 
     assert calls == ["http://127.0.0.1:43124/health"]
@@ -104,7 +105,7 @@ def test_health_redirect_to_another_origin_is_rejected() -> None:
     health = {"status": "ok", **descriptor.public_health_fields()}
     redirected = _HealthResponse(health, final_url="http://127.0.0.1:8767/health")
 
-    with patch("urllib.request.urlopen", return_value=redirected):
+    with patch_urlopen(return_value=redirected):
         assert not daemon.is_daemon_running()
 
 
@@ -112,8 +113,8 @@ def test_arbitrary_live_pid_without_descriptor_is_rejected() -> None:
     from superlocalmemory.cli import daemon
 
     root = Path(os.environ["SLM_DATA_DIR"])
-    (root / "daemon.pid").write_text(str(os.getpid()))
-    (root / "daemon.port").write_text("43125")
+    (root / "daemon.pid").write_text(str(os.getpid()), encoding="utf-8")
+    (root / "daemon.port").write_text("43125", encoding="utf-8")
 
     with patch.object(daemon, "_is_verified_legacy_process", return_value=False):
         assert not daemon.is_daemon_running()
@@ -150,9 +151,10 @@ def test_reused_pid_with_wrong_process_identity_is_rejected() -> None:
     )
     write_descriptor(descriptor, data_root=root)
 
-    with patch("urllib.request.urlopen") as request:
+    # The stale record is rejected; the only probe allowed is the same-account
+    # health fallback, and an unanswered port cannot rescue it.
+    with patch_urlopen(side_effect=OSError("closed")):
         assert not daemon.is_daemon_running()
-    request.assert_not_called()
 
 
 def test_legacy_descriptor_with_wrong_creation_time_needs_identity_proof() -> None:
@@ -178,7 +180,7 @@ def test_legacy_descriptor_with_wrong_creation_time_needs_identity_proof() -> No
     )
     write_descriptor(descriptor, data_root=root)
 
-    with patch("urllib.request.urlopen", side_effect=OSError("no listener")):
+    with patch_urlopen(side_effect=OSError("no listener")):
         assert not daemon.is_daemon_running()
 
 
@@ -188,11 +190,11 @@ def test_get_port_uses_only_valid_owned_descriptor() -> None:
     _owned_descriptor(port=43126)
     assert daemon._get_port() == 43126
 
-    Path(os.environ["SLM_DATA_DIR"], "daemon.json").write_text("malformed")
+    Path(os.environ["SLM_DATA_DIR"], "daemon.json").write_text("malformed", encoding="utf-8")
     assert daemon._get_port() == daemon._DEFAULT_PORT
 
 
-def test_launcher_passes_and_publishes_one_process_identity() -> None:
+def test_launcher_passes_one_process_identity_and_leaves_the_record_to_the_child() -> None:
     from superlocalmemory.cli import daemon
 
     fake_process = MagicMock(pid=54321)
@@ -203,13 +205,15 @@ def test_launcher_passes_and_publishes_one_process_identity() -> None:
     ):
         assert daemon._start_daemon_subprocess()
 
-    child_env = popen.call_args.kwargs["env"]
-    descriptor = read_descriptor()
-    assert descriptor is not None
-    assert descriptor.pid == 54321
-    assert descriptor.state == "starting"
-    assert child_env["SLM_DAEMON_INSTANCE_ID"] == descriptor.instance_id
-    assert child_env["SLM_DAEMON_CAPABILITY"] == descriptor.capability
+    # The daemon launch, not the last Popen: on Windows, writing the
+    # descriptor then runs icacls to make it owner-only.
+    [launch] = [c for c in popen.call_args_list
+                if "superlocalmemory.server.unified_daemon" in c.args[0]]
+    child_env = launch.kwargs["env"]
+    # Only the daemon that owns the data folder writes the record.
+    assert read_descriptor() is None
+    assert child_env["SLM_DAEMON_INSTANCE_ID"]
+    assert child_env["SLM_DAEMON_CAPABILITY"]
 
 
 def test_wait_requires_matching_health_not_only_a_live_starting_pid() -> None:
@@ -229,7 +233,7 @@ def test_wait_requires_matching_health_not_only_a_live_starting_pid() -> None:
     foreign["instance_id"] = "foreign-instance"
 
     with (
-        patch("urllib.request.urlopen", return_value=_HealthResponse(foreign)),
+        patch_urlopen(return_value=_HealthResponse(foreign)),
         patch("time.sleep"),
     ):
         assert not daemon._wait_for_daemon(timeout=1)
@@ -242,7 +246,7 @@ def test_daemon_request_refuses_foreign_identity_before_write() -> None:
     foreign = {"status": "ok", **descriptor.public_health_fields()}
     foreign["namespace_id"] = "foreign"
 
-    with patch("urllib.request.urlopen", return_value=_HealthResponse(foreign)) as request:
+    with patch_urlopen(return_value=_HealthResponse(foreign)) as request:
         assert daemon.daemon_request("POST", "/remember", {"content": "blocked"}) is None
     assert request.call_count == 1
 
@@ -260,7 +264,7 @@ def test_daemon_request_sends_private_capability_after_identity_match() -> None:
         seen_headers.append(dict(request.header_items()))
         return _HealthResponse({"ok": True})
 
-    with patch("urllib.request.urlopen", side_effect=_respond):
+    with patch_urlopen(side_effect=_respond):
         result = daemon.daemon_request("POST", "/remember", {"content": "owned"})
 
     assert result == {"ok": True}
@@ -282,7 +286,7 @@ def test_daemon_request_preserves_profile_conflict() -> None:
         io.BytesIO(b'{"detail":"profile mismatch: expected work"}'),
     )
 
-    with patch("urllib.request.urlopen", side_effect=[_HealthResponse(health), conflict]):
+    with patch_urlopen(side_effect=[_HealthResponse(health), conflict]):
         with pytest.raises(daemon.DaemonConflict) as caught:
             daemon.daemon_request(
                 "POST",
@@ -320,7 +324,12 @@ def test_daemon_request_carries_structured_conflict_code() -> None:
         ),
     )
 
-    with patch("urllib.request.urlopen", side_effect=[_HealthResponse(health), conflict]):
+    # Merge 4.2.6: the request travels through the egress gate
+    # (core.outbound_http.urlopen -> _send), so a plain urlopen patch alone
+    # lets it escape to a real socket. patch_urlopen fakes both exits — the
+    # file's own helper for exactly this — and the structured-code branch in
+    # daemon_request is reached again in the merged call sequence.
+    with patch_urlopen(side_effect=[_HealthResponse(health), conflict]):
         with pytest.raises(daemon.DaemonConflict) as caught:
             daemon.daemon_request(
                 "PATCH",
@@ -352,7 +361,7 @@ def test_daemon_request_forwards_explicit_user_session_after_identity_match(
         seen_headers.append(dict(request.header_items()))
         return _HealthResponse({"ok": True})
 
-    with patch("urllib.request.urlopen", side_effect=_respond):
+    with patch_urlopen(side_effect=_respond):
         assert daemon.daemon_request("DELETE", "/memories/fact-1") == {"ok": True}
 
     normalized = {key.lower(): value for key, value in seen_headers[0].items()}
@@ -374,7 +383,7 @@ def test_daemon_request_omits_blank_user_session_after_identity_match(monkeypatc
         seen_headers.append(dict(request.header_items()))
         return _HealthResponse({"ok": True})
 
-    with patch("urllib.request.urlopen", side_effect=_respond):
+    with patch_urlopen(side_effect=_respond):
         assert daemon.daemon_request("POST", "/remember", {"content": "owned"}) == {"ok": True}
 
     normalized = {key.lower(): value for key, value in seen_headers[0].items()}
@@ -467,7 +476,7 @@ def test_legacy_stop_request_refuses_descriptor_replacement() -> None:
     replacement = _owned_descriptor(port=43136)
     with (
         patch.object(daemon, "read_descriptor", return_value=replacement),
-        patch("urllib.request.urlopen") as request,
+        patch_urlopen() as request,
     ):
         assert daemon.daemon_request(
             "POST",
@@ -513,7 +522,14 @@ def test_stop_request_stays_bound_to_captured_daemon_instance() -> None:
 
     request.assert_called_once_with(
         "http://127.0.0.1:43135/health",
-        timeout=2,
+        # 4.1.22: the "nothing proves a start is in progress" health probe
+        # reads with the same short, fixed budget as the starting-daemon
+        # polling loop (STARTING_PROBE_S) only on Windows, where a closed
+        # port cost the old, longer default the full read timeout on a
+        # platform slow to refuse it. POSIX (this test's platform) keeps
+        # the original 2 s budget -- see daemon_startup.health_probe_timeout
+        # and its correction after this test briefly expected 0.5 s here.
+        timeout=2.0,
     )
 
 

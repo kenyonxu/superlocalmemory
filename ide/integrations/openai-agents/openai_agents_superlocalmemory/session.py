@@ -17,8 +17,11 @@ Usage::
 
     from openai_agents_superlocalmemory import SLMSession
 
+    # https://openai.github.io/openai-agents-python/sessions/
+    from agents import Agent, Runner
     session = SLMSession(session_id="user-42-conv-7")
-    runner = Runner(session=session)
+    result = await Runner.run(Agent(name="Assistant"), "Hello", session=session)
+    session.close()
 """
 
 from __future__ import annotations
@@ -28,8 +31,8 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-from agents.memory import SessionABC
 from agents.items import TResponseInputItem
+from agents.memory import SessionABC
 
 
 # ``SLM_INSTALL_DIR`` is legacy installer metadata only. It is deliberately

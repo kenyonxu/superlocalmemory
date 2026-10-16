@@ -8,6 +8,7 @@
 //   GET /api/agents           → {agents: [{agent_id, profile_id, registered_at}], count, stats}
 //   GET /api/trust/stats      → {avg_trust_score, total_signals, enforcement, by_signal_type}
 //   GET /api/events/stats     → {total_events, events_last_24h, "memory.stored", "memory.recalled", ...}
+//   GET /api/learning/readiness → {status, learning_demonstrated, settled_from_outcomes, labelled_outcomes, active_model, ...}
 //
 // JSON key mapping for events/stats: top-level dot-notation keys e.g. data["memory.stored"]
 // JSON key mapping for agents: data.stats.total_agents, data.agents[].{agent_id, profile_id, registered_at}
@@ -68,10 +69,15 @@
   }
 
   /** Return the CSS var color for a status class. */
+  // The -text variants (not the plain status colors): --warn in particular
+  // measured 2.33:1 for the "Unreachable" daemon-status value on this
+  // card's plain --card background — under WCAG AA (4.5:1). The -text
+  // tokens (design-system.css) are tuned for exactly this "status color as
+  // readable text" pairing.
   function statusColor(cls) {
-    if (cls === 'ok')     return 'var(--ok)';
-    if (cls === 'warn')   return 'var(--warn)';
-    if (cls === 'danger') return 'var(--danger)';
+    if (cls === 'ok')     return 'var(--ok-text)';
+    if (cls === 'warn')   return 'var(--warn-text)';
+    if (cls === 'danger') return 'var(--danger-text)';
     return 'var(--fg-2)';
   }
 
@@ -93,12 +99,13 @@
       '<div class="page-head">' +
         '<h2>System health</h2>' +
         '<p>Math layers, the connected-agent stream and daemon status — ' +
-        'click any card to drill down. All green means your memory is learning correctly.</p>' +
+        'click any card to drill down. A running daemon is not evidence of learning: ' +
+        'the Learning card reports what reported outcomes have actually changed.</p>' +
       '</div>' +
 
       // KPI strip: 4 status cards (Daemon, Memory DB, Math layers, Mesh broker)
-      '<section class="kpi-strip" style="margin-bottom:16px" id="od-h-status">' +
-        '<div class="card kpi"><div class="dim" style="font-size:12px;padding:20px">Loading status…</div></div>' +
+      '<section class="kpi-strip kpi-5" style="margin-bottom:16px" id="od-h-status">' +
+        '<div class="card kpi"><div class="muted-info" style="font-size:12px;padding:20px">Loading status…</div></div>' +
       '</section>' +
 
       // Two-column: Math health + Trust signals
@@ -110,7 +117,7 @@
             '<span class="sub">Scoring layers · Consistency · Lifecycle</span>' +
           '</div>' +
           '<div class="card-pad" id="od-h-math">' +
-            '<div class="dim" style="text-align:center;padding:20px">Loading…</div>' +
+            '<div class="muted-info" style="text-align:center;padding:20px">Loading…</div>' +
           '</div>' +
         '</div>' +
 
@@ -122,11 +129,11 @@
           '<div class="card-pad">' +
             '<div style="display:flex;gap:24px;margin-bottom:16px">' +
               '<div>' +
-                '<div class="dim" style="font-size:11px">Avg trust score</div>' +
+                '<div class="muted-info" style="font-size:11px">Avg trust score</div>' +
                 '<div class="num" style="font-size:24px;font-weight:700" id="od-h-trust-avg">—</div>' +
               '</div>' +
               '<div>' +
-                '<div class="dim" style="font-size:11px">Total signals</div>' +
+                '<div class="muted-info" style="font-size:11px">Total signals</div>' +
                 '<div class="num" style="font-size:24px;font-weight:700" id="od-h-trust-total">—</div>' +
               '</div>' +
             '</div>' +
@@ -139,31 +146,29 @@
       // Connected agents card (full-width)
       '<div class="card" style="margin-top:16px">' +
         '<div class="card-head">' +
-          '<h3>Connected agents</h3>' +
-          '<span class="sub">live write / recall stream</span>' +
+          '<h3>Connected local apps</h3>' +
+          '<span class="sub">initialized MCP processes on this computer</span>' +
           '<div class="spacer"></div>' +
           // pulse class + explicit dot color as in design
-          '<span class="badge neutral pulse" style="border-radius:99px">' +
-            '<span class="dot" style="background:var(--ok)"></span> live' +
-          '</span>' +
+          '<a class="badge neutral" href="#apps-pane">Manage apps</a>' +
         '</div>' +
         '<div class="card-pad">' +
           // Summary stats row: 4 metrics
           '<div style="display:flex;gap:24px;margin-bottom:16px;flex-wrap:wrap" id="od-h-agent-stats">' +
             '<div>' +
-              '<div class="dim" style="font-size:11px">Total agents</div>' +
+              '<div class="muted-info" style="font-size:11px">Confirmed connections</div>' +
               '<div class="num" style="font-size:22px;font-weight:700" id="od-h-agent-total">—</div>' +
             '</div>' +
             '<div>' +
-              '<div class="dim" style="font-size:11px">Active 24h</div>' +
+              '<div class="muted-info" style="font-size:11px">Reconnect needed</div>' +
               '<div class="num" style="font-size:22px;font-weight:700" id="od-h-agent-active">—</div>' +
             '</div>' +
             '<div>' +
-              '<div class="dim" style="font-size:11px">Total writes</div>' +
+              '<div class="muted-info" style="font-size:11px">Total writes</div>' +
               '<div class="num" style="font-size:22px;font-weight:700" id="od-h-agent-writes">—</div>' +
             '</div>' +
             '<div>' +
-              '<div class="dim" style="font-size:11px">Total recalls</div>' +
+              '<div class="muted-info" style="font-size:11px">Total recalls</div>' +
               '<div class="num" style="font-size:22px;font-weight:700" id="od-h-agent-recalls">—</div>' +
             '</div>' +
           '</div>' +
@@ -171,15 +176,15 @@
           // Protocol, Trust, Writes, Recalls — no per-agent endpoint; display '—'
           '<table class="tbl" id="od-h-agents-tbl">' +
             '<thead><tr>' +
-              '<th>Agent</th>' +
+              '<th>App</th>' +
               '<th>Protocol</th>' +
-              '<th>Trust</th>' +
-              '<th>Writes</th>' +
-              '<th>Recalls</th>' +
-              '<th>Last seen</th>' +
+              '<th>Version</th>' +
+              '<th>Tools</th>' +
+              '<th>Status</th>' +
+              '<th>Connected since</th>' +
             '</tr></thead>' +
             '<tbody id="od-h-agents-body">' +
-              '<tr><td colspan="6" class="dim" style="text-align:center;padding:24px">Loading…</td></tr>' +
+              '<tr><td colspan="6" class="muted-info" style="text-align:center;padding:24px">Loading…</td></tr>' +
             '</tbody>' +
           '</table>' +
         '</div>' +
@@ -195,7 +200,7 @@
           '<span class="sub">models &amp; dependencies · self-healing</span>' +
         '</div>' +
         '<div class="card-pad" id="od-h-components">' +
-          '<div class="dim" style="text-align:center;padding:20px">Loading…</div>' +
+          '<div class="muted-info" style="text-align:center;padding:20px">Loading…</div>' +
         '</div>' +
       '</div>'
     );
@@ -212,7 +217,29 @@
    * @param {Object|null} statsData   /api/stats response
    * @param {Object|null} mathData    /api/v3/math/health response
    */
-  function populateKpiStrip(healthData, statsData, mathData) {
+  /**
+   * Learning card from /api/learning/readiness. Separate from liveness: a
+   * healthy daemon with no settled outcome says "Not demonstrated".
+   */
+  function learningCard(d) {
+    if (!d || d.available === false) {
+      return { cls: 'neutral', value: 'Unknown', detail: 'learning state unavailable' };
+    }
+    var settled = Number(d.settled_from_outcomes || 0);
+    var labelled = Number(d.labelled_outcomes || 0);
+    var status = String(d.status || 'collecting');
+    var model = d.active_model ? 'model active' : 'no trained model';
+    if (status === 'testing') model = 'candidate model under live test';
+    var detail = esc(String(settled)) + ' outcome-settled recall(s) · ' +
+      esc(String(labelled)) + ' labelled outcome(s) · ' + esc(model);
+    if (!d.learning_demonstrated) {
+      return { cls: 'warn', value: 'Not demonstrated',
+               detail: detail + ' · report outcomes with the recall query_id' };
+    }
+    return { cls: 'ok', value: 'Demonstrated', detail: detail };
+  }
+
+  function populateKpiStrip(healthData, statsData, mathData, learningData) {
     var strip = document.getElementById('od-h-status');
     if (!strip) return;
 
@@ -233,8 +260,12 @@
         : (runtime === 'warming' ? 'neutral' : 'warn'));
     var daemonVal = !healthData ? 'Unreachable'
       : (RUNTIME_LABELS[runtime] || (healthData.status === 'ok' ? 'Healthy' : 'Degraded'));
+    // The dashboard is served BY the daemon, so the page's own port is the
+    // daemon's real port (it was hard-coded to 8765).
+    var livePort = (window.location && window.location.port) || '';
     var daemonDetail = healthData
-      ? 'port 8765 · v' + esc(String(healthData.version || '?'))
+      ? (livePort ? 'port ' + esc(livePort) + ' · ' : '') +
+        'v' + esc(String(healthData.version || '?'))
       : 'daemon unreachable';
     if (healthData && healthData.projection && healthData.projection.behind) {
       // The graph copy being behind is not a daemon fault, and it does change
@@ -266,8 +297,11 @@
     var meshVal = 'Not set up';
     var meshDetail = 'coordinating several machines is not configured here';
 
+    var learn = learningCard(learningData);
+
     var CARDS = [
       { label: 'Daemon',       cls: daemonCls, value: daemonVal, detail: daemonDetail },
+      { label: 'Learning',     cls: learn.cls, value: learn.value, detail: learn.detail },
       { label: 'Memory DB',    cls: dbCls,     value: dbVal,     detail: dbDetail },
       { label: 'Math layers',  cls: mathCls,   value: mathVal,   detail: mathDetail },
       { label: 'Mesh broker',  cls: meshCls,   value: meshVal,   detail: meshDetail },
@@ -278,7 +312,7 @@
         '<div class="card kpi" style="cursor:pointer">' +
           '<div class="label">' + safeIcon('health') + ' ' + esc(c.label) + '</div>' +
           '<div class="value" style="font-size:20px;color:' + statusColor(c.cls) + '">' + c.value + '</div>' +
-          '<div class="dim" style="font-size:12px;margin-top:4px">' + c.detail + '</div>' +
+          '<div class="muted-info" style="font-size:12px;margin-top:4px">' + c.detail + '</div>' +
         '</div>'
       );
     }).join('');
@@ -338,7 +372,7 @@
 
       var kvsHtml = kvs.map(function (kv) {
         return '<span class="mono" style="font-size:12px">' +
-          '<span class="dim">' + esc(kv[0]) + '</span> ' + esc(kv[1]) +
+          '<span class="muted-info">' + esc(kv[0]) + '</span> ' + esc(kv[1]) +
           '</span>';
       }).join('');
 
@@ -362,7 +396,7 @@
 
     // API's own note (clarifies config-derived vs live probe)
     if (mathData.note) {
-      html += '<p class="dim" style="font-size:11px;margin-top:10px;font-style:italic">' +
+      html += '<p class="muted-info" style="font-size:11px;margin-top:10px;font-style:italic">' +
         esc(mathData.note) + '</p>';
     }
 
@@ -452,13 +486,11 @@
     var writesEl  = document.getElementById('od-h-agent-writes');
     var recallsEl = document.getElementById('od-h-agent-recalls');
 
-    var stats = (agentsData && agentsData.stats) || {};
-    var agents = (agentsData && agentsData.agents) || [];
-    var total  = stats.total_agents != null ? stats.total_agents : agents.length;
+    var total = agentsData && Number.isSafeInteger(agentsData.confirmed_count) ? agentsData.confirmed_count
+      : (agentsData && Number.isSafeInteger(agentsData.count) ? agentsData.count : null);
 
-    if (totalEl)   totalEl.textContent   = fmtNum(total);
-    // TODO: no per-agent last_seen endpoint in current API; active_24h cannot be determined
-    if (activeEl)  activeEl.textContent  = '—';
+    if (totalEl)   totalEl.textContent   = total === null ? '—' : fmtNum(total);
+    if (activeEl)  activeEl.textContent  = agentsData ? fmtNum((agentsData.stale_count || 0) + (agentsData.unreported_count || 0)) : '—';
 
     var writes  = eventsStats ? (eventsStats['memory.stored']   || 0) : 0;
     var recalls = eventsStats ? (eventsStats['memory.recalled'] || 0) : 0;
@@ -480,12 +512,13 @@
     var tbody = document.getElementById('od-h-agents-body');
     if (!tbody) return;
 
-    var agents = (agentsData && agentsData.agents) || [];
+    var agents = (agentsData && agentsData.apps) || [];
 
     if (agents.length === 0) {
       tbody.innerHTML =
-        '<tr><td colspan="6" class="dim" style="text-align:center;padding:24px">' +
-        'No agents registered. Agents appear automatically when they connect via MCP, CLI, or REST.' +
+        '<tr><td colspan="6" class="muted-info" style="text-align:center;padding:24px">' +
+        (agentsData ? 'No local apps connected.' : 'Local app status unavailable.') +
+        ' <a href="#apps-pane">Connect an app or refresh its status</a>' +
         '</td></tr>';
       return;
     }
@@ -496,16 +529,12 @@
       // CRIT(c): agent_id through esc()
       rows += (
         '<tr>' +
-          '<td><b>' + esc(a.agent_id || '') + '</b></td>' +
-          // TODO: Protocol — no protocol field in /api/agents response
-          '<td><span class="badge neutral">—</span></td>' +
-          // TODO: Trust score — only aggregate available via /api/trust/stats, not per-agent
-          '<td><span class="badge neutral">—</span></td>' +
-          // TODO: Writes per-agent — no per-agent write count in current API
-          '<td class="num dim">—</td>' +
-          // TODO: Recalls per-agent — no per-agent recall count in current API
-          '<td class="num dim">—</td>' +
-          '<td class="dim">' + esc(timeAgo(a.registered_at)) + '</td>' +
+          '<td><b>' + esc(a.name || a.host || '') + '</b></td>' +
+          '<td>MCP stdio</td>' +
+          '<td>' + esc(a.code_version) + '</td>' +
+          '<td class="num">' + (a.version_reported === false ? '—' : esc((a.tools || []).length)) + '</td>' +
+          '<td>' + (a.version_reported === false ? 'Connection unconfirmed · version unreported' : (a.stale_version ? 'Stale version · reconnect in Connected apps' : 'Connected')) + '</td>' +
+          '<td class="muted-info">' + esc(timeAgo(a.connected_at)) + '</td>' +
         '</tr>'
       );
     }
@@ -531,9 +560,10 @@
       fetch('/health').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
       fetch('/api/stats').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
       fetch('/api/v3/math/health').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      fetch('/api/agents').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      fetch('/api/v3/local-apps').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
       fetch('/api/trust/stats').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
       fetch('/api/events/stats').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      fetch('/api/learning/readiness').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
     ]).then(function (results) {
       var healthData  = results[0];
       var statsData   = results[1];
@@ -541,25 +571,29 @@
       var agentsData  = results[3];
       var trustStats  = results[4];
       var eventsStats = results[5];
+      var learningData = results[6];
 
       // Inject static skeleton — no API data inside
       container.innerHTML = buildSkeleton();
 
       // Populate each section with real API data
-      populateKpiStrip(healthData, statsData, mathData);
+      populateKpiStrip(healthData, statsData, mathData, learningData);
       populateMathHealth(mathData);
       populateTrustSignals(trustStats);
       populateAgentSummary(agentsData, eventsStats);
       populateAgentTable(agentsData);
+      if (typeof window.odMountDaemonControls === 'function') window.odMountDaemonControls(container);
       // v3.8.2 UX-6: component "what's missing" report (od-components.js).
       if (typeof window.odRenderComponents === 'function') {
         window.odRenderComponents(document.getElementById('od-h-components'));
       }
+      if (window.odMountMemoryHealth) window.odMountMemoryHealth(container);
 
     }).catch(function (err) {
       container.innerHTML =
         '<div style="color:var(--danger);text-align:center;padding:48px 0">' +
-        'Failed to load health data. Check the daemon is running on port 8765.</div>';
+        'Failed to load health data. <button id="od-health-retry" class="btn secondary">Retry health check</button></div>';
+      document.getElementById('od-health-retry').addEventListener('click', function () { odRenderHealth(container); });
       if (typeof console !== 'undefined') {
         console.error('[od-health] render error:', err);
       }

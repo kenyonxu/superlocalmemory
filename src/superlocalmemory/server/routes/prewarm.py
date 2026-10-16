@@ -66,7 +66,6 @@ async def prewarm(request: Request) -> JSONResponse:
     # Gates 1-3 first (cheap; reject hostile peers before reading body).
     try:
         from superlocalmemory.hooks.prewarm_auth import (
-            MAX_BODY_BYTES,
             authorize,
             check_body_size,
         )

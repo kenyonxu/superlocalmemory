@@ -27,6 +27,9 @@ class _StrictToolServer:
     def __init__(self) -> None:
         self.tools: dict[str, object] = {}
 
+    def configure_tool_surface(self, allowed: frozenset[str]) -> None:
+        self.allowed = allowed
+
     def tool(self, *args, **kwargs):
         del args, kwargs
 
@@ -94,9 +97,12 @@ def _register_every_tool(target) -> None:
     from superlocalmemory.mcp.tools_mesh import register_mesh_tools
     from superlocalmemory.mcp.tools_optimize import register_optimize_tools
     from superlocalmemory.mcp.tools_loops import register_loop_tools
+    from superlocalmemory.mcp.tools_media import register_document_tools, register_media_tools
     from superlocalmemory.mcp.tools_ops import register_ops_tools
     from superlocalmemory.mcp.tools_brain import register_brain_tools
+    from superlocalmemory.mcp.tools_kinds import register_kind_tools
     from superlocalmemory.mcp.tools_summaries import register_summary_tools
+    from superlocalmemory.mcp.tools_views import register_view_tools
     from superlocalmemory.mcp.tools_v28 import register_v28_tools
     from superlocalmemory.mcp.tools_v3 import register_v3_tools
     from superlocalmemory.mcp.tools_v33 import register_v33_tools
@@ -116,6 +122,12 @@ def _register_every_tool(target) -> None:
     register_ops_tools(target, get_engine)
     register_brain_tools(target, get_engine)
     register_summary_tools(target, get_engine)
+    register_view_tools(target, get_engine)
+    register_kind_tools(target, get_engine)
+    register_media_tools(target)
+    register_document_tools(target)
+    from superlocalmemory.mcp.tools_media_upload import register_upload_link_tool
+    register_upload_link_tool(target)
     from superlocalmemory.mcp.tools_context import register_prestage_tool
     register_prestage_tool(target, lambda *a, **k: [])
 
@@ -127,15 +139,17 @@ def _register_every_tool(target) -> None:
         # clients; prestage_context remains a raw-server-only tool.
         # v4.0.8: +get_memory_summary. The essential/fallback surface must
         # mirror the full profile, so it moves with it.
-        ("essential", "", 50),
+        # 4.1.21: +run_view, +manage_view (saved views, issue #113).
+        # Media handlers stay registered for actionable refusals while hidden.
+        ("essential", "", 63),
         # v4.0.8: get_memory_summary added to CORE — the summary layer's MCP
         # surface (issue #113). Counts bumped deliberately, which is what
         # this contract exists to force.
-        ("named-core", "core", 18),
+        ("named-core", "core", 19),
         # v4.1.12: +settle_session_outcomes and
         # +observe_bounded_loop_execution_learning. Both are whole-profile
         # tools; smaller profiles retain their explicit allowlists.
-        ("whole", "whole", 97),
+        ("whole", "whole", 110),
     ),
 )
 def test_registration_exposure_is_exact_and_duplicate_free(
@@ -149,7 +163,7 @@ def test_registration_exposure_is_exact_and_duplicate_free(
     strict = _StrictToolServer()
 
     if exposure == "essential":
-        expected = mod._ESSENTIAL_TOOLS
+        expected = mod._ESSENTIAL_TOOLS | mod._MEDIA_TOOLS
         target = mod._FilteredServer(strict, expected)
     elif exposure == "named-core":
         expected = mod._PROFILE_DEFINITIONS["core"]
@@ -168,6 +182,12 @@ def test_registration_exposure_is_exact_and_duplicate_free(
     assert len(actual_names) == expected_count
     assert len(actual_names) == len(set(actual_names))
     assert set(actual_names) == set(strict.tools)
+
+    import asyncio
+
+    listed_names = {tool.name for tool in asyncio.run(mod.server.list_tools())}
+    assert listed_names == set(strict.tools) - mod._MEDIA_TOOLS
+    assert len(listed_names) == {"essential": 58, "named-core": 19, "whole": 105}[exposure]
 
 
 @pytest.mark.asyncio
@@ -263,14 +283,14 @@ async def test_attribution_reports_current_product_identity(
 def test_imported_server_exposes_product_name_and_whole_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Imported MCP server keeps product identity and whole surface at 97."""
+    """Imported MCP server keeps product identity and whole surface at 110."""
     mod = _fresh_server(monkeypatch, "whole")
     # Public SLMFastMCP/MCPServer attribute — do not assert private internals.
     assert mod.server.name == "SuperLocalMemory V4"
     strict = _StrictToolServer()
     _register_every_tool(strict)
-    assert len(strict.tools) == 97
+    assert len(strict.tools) == 110
     actual_names = [tool.name for tool in mod.server._tool_manager.list_tools()]
-    assert len(actual_names) == 97
+    assert len(actual_names) == 110
     assert len(actual_names) == len(set(actual_names))
     assert set(actual_names) == set(strict.tools)

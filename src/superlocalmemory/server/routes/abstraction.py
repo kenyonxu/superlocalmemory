@@ -27,6 +27,7 @@ from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
 from superlocalmemory.server.routes.helpers import DB_PATH, get_active_profile, get_read_connection
+from superlocalmemory.storage.erasure_visibility import aggregate_erasure_clause
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +196,11 @@ def get_consolidated(
             "       generated_by, source_earliest, source_latest, created_at "
             "  FROM consolidated_summaries "
             " WHERE profile_id = ? "
-            " ORDER BY source_count DESC, created_at DESC, summary_id ASC "
+            # A summary quotes its sources. While any source's erasure has
+            # started (projection_tombstones row) the summary is withheld.
+            + aggregate_erasure_clause(
+                conn, "consolidated_summaries", column="source_fact_ids")
+            + " ORDER BY source_count DESC, created_at DESC, summary_id ASC "
             " LIMIT ?",
             (pid, scan),
         ).fetchall()
@@ -304,6 +309,9 @@ def get_memory_health() -> JSONResponse:
             "display_summaries": health.display_summaries,
             "hidden_by_forgetting": health.hidden_by_forgetting,
             "inconsistently_hidden": health.inconsistently_hidden,
+            "missing_projection": health.missing_projection,
+            "indexing": health.indexing,
+            "index_verified": health.index_verified,
             "reachability": round(health.reachability, 4),
             "healthy": health.healthy,
             "unavailable": list(health.unavailable),

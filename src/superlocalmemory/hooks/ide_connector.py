@@ -57,14 +57,16 @@ IDE_CONFIGS: dict[str, dict[str, Any]] = {
     "continue_dev": {
         "name": "Continue.dev",
         "detect_paths": [".continue"],
-        "config_files": [".continue/config.json"],
-        "type": "json_merge",
+        "config_files": [".continue/config.yaml"],
+        "type": "portable",
+        "portable_id": "continue",
     },
     "zed": {
         "name": "Zed Editor",
         "detect_paths": [".config/zed"],
         "config_files": [".config/zed/settings.json"],
-        "type": "json_merge",
+        "type": "portable",
+        "portable_id": "zed",
     },
 }
 
@@ -121,6 +123,10 @@ class IDEConnector:  # pragma: no cover — legacy shim, covered by test_ide_con
 
         config = IDE_CONFIGS[ide_id]
         config_type = config["type"]
+        if config_type == "portable":
+            from superlocalmemory.hooks.portable_kit import connect_ide
+
+            return connect_ide(config["portable_id"], home=self._home)["error"] is None
 
         for config_file in config["config_files"]:
             path = self._home / config_file
@@ -171,7 +177,7 @@ class IDEConnector:  # pragma: no cover — legacy shim, covered by test_ide_con
         """Append SLM section to a markdown file. Idempotent."""
         content = ""
         if path.exists():
-            content = path.read_text()
+            content = path.read_text(encoding="utf-8")
 
         # Check if already configured (idempotent)
         if SLM_MARKER in content:
@@ -185,7 +191,7 @@ class IDEConnector:  # pragma: no cover — legacy shim, covered by test_ide_con
         )
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content + "\n" + section)
+        path.write_text(content + "\n" + section, encoding="utf-8")
         return True
 
     def _merge_json(
@@ -203,7 +209,7 @@ class IDEConnector:  # pragma: no cover — legacy shim, covered by test_ide_con
         data: dict[str, Any] = {}
         if path.exists():
             try:
-                data = json.loads(path.read_text())
+                data = json.loads(path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 data = {}
 
@@ -217,17 +223,20 @@ class IDEConnector:  # pragma: no cover — legacy shim, covered by test_ide_con
         elif transport == "http-mcp-remote":
             block = {"type": "stdio", "command": "mcp-remote", "args": [base_url]}
         else:
+            from superlocalmemory.hooks.portable_kit import _pin_stdio_runtime
+
             block = {
                 "type": "stdio",
                 "command": "slm",
                 "args": ["mcp"],
                 "enabled": True,
             }
+            _pin_stdio_runtime(block, "unknown")
 
         data["mcpServers"]["superlocalmemory"] = block
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2))
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         return True
 
 

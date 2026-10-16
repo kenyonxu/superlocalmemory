@@ -30,7 +30,6 @@ def _client(tmp_path, monkeypatch):
 
     original_get_store = None
     try:
-        from superlocalmemory.optimize.config.store import ConfigStore as CS
         monkeypatch.setattr(mod, "ConfigStore", lambda: store)
     except Exception:
         pass

@@ -18,7 +18,6 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Final
 
-
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -99,19 +98,21 @@ class SignalType(str, Enum):
 
 
 class Mode(str, Enum):
-    """Operating modes.
+    """Operating modes, named by what the user gets (#112) — never by a vendor.
 
     A — All data stays on this device. No AI language model runs anywhere.
         Fastest and most private.
-    B — All data stays on this device. Uses a local Ollama AI model to
-        improve recall quality. Requires Ollama to be installed and running.
-    C — Uses a cloud AI provider (OpenAI, Anthropic, …) for the best recall
-        quality. Queries leave this device; an API key is required.
+    B — All data stays on this device. Uses a model running on this
+        machine to improve recall quality — Ollama by default, but any
+        local OpenAI-compatible server works.
+    C — Uses your own endpoint, or a cloud provider (OpenAI, Anthropic, …),
+        for the best recall quality. Queries leave this device; a key is
+        required for a cloud provider, but not for a keyless custom endpoint.
     """
 
     A = "a"  # Local Guardian — on-device only, no LLM
-    B = "b"  # Smart Local — on-device + local Ollama LLM, no cloud
-    C = "c"  # Cloud LLM — best accuracy, queries leave device, API key needed
+    B = "b"  # Smart Local — on-device + a local model (Ollama by default), no cloud
+    C = "c"  # Full Power — your own endpoint or a cloud provider, best accuracy
 
 
 # ---------------------------------------------------------------------------
@@ -294,9 +295,24 @@ class AtomicFact:
     # v3.4.65: Core Memory Block explicit pin (M015)
     pinned: bool = False
 
-    # Governance gating tag (M052), controlled vocabulary — see
+    # Governance gating tag (fork, M064), controlled vocabulary — see
     # PROVENANCE_KINDS above. None = not yet tagged.
     provenance_kind: str | None = None
+
+    # WP-19 (M060): a stored stub (receipt, session boilerplate). Listed and
+    # counted like any memory, never used as a recall answer.
+    non_answer: bool = False
+
+    # 4.1.19 (M052): nine-kind memory typing — all optional, all nullable.
+    # NULL/None means untyped: no caller, user, model or rules pass has ever
+    # classified this fact. Values and vocabulary live in
+    # storage.memory_kinds (the only module allowed to spell a kind as a
+    # literal); this dataclass only carries them.
+    memory_kind: str | None = None
+    memory_kind_source: str | None = None
+    memory_kind_confidence: float | None = None
+    memory_kind_recipe: str | None = None
+    memory_kind_at: str | None = None
 
     created_at: str = field(default_factory=_now)
 
@@ -520,6 +536,8 @@ class RetrievalResult:
     relevance_score: float | None = None
     ranking_score: float | None = None
     memory_confidence: float | None = None
+    match_confidence: float | None = None
+    confidence_basis: str = "unmeasured"
     rank_position: int = 0
     evidence_chain: list[str] = field(default_factory=list)
     trust_score: float = 0.5
@@ -527,6 +545,23 @@ class RetrievalResult:
     # can validate that a fact_id observed in tool output really came from
     # this install. Empty string by default preserves backward-compat.
     marker: str = ""
+    # The cross-encoder's score for this result, when it ran: what later
+    # layers may reorder only within a bound (retrieval/reranker_lead.py).
+    rerank_score: float | None = None
+    # 4.1.25: what each signal says about this result
+    # (``retrieval.evidence_features``): raw cosine, hub baseline and the
+    # hub-corrected cosine, the cross-encoder's raw score, raw BM25, keyword
+    # coverage and entity hit. Measurement only: nothing ranks or abstains on
+    # it yet. In-process and in recall trace; the recall envelope is unchanged.
+    evidence: dict = field(default_factory=dict)
+    # 4.1.25: the answer-support gate's probability that this memory answers
+    # the question (``retrieval.support_gate``), and whether it is below the
+    # gate's threshold. None / False when the gate did not run.
+    support: float | None = None
+    weak: bool = False
+    #: "supported", "weak" or "related" (``retrieval.support_tiers``); "" when
+    #: the gate did not run.
+    tier: str = ""
 
 
 @dataclass
@@ -557,6 +592,27 @@ class RecallResponse:
     # be mistaken for a reranked response.
     reranker_applied: bool = False
     reranker_status: str = "not_configured"
+    # 4.1.18: what the local cross-encoder reported when a later, opt-in step
+    # (the online answer check, ``reranker_status == "jev_listwise"``) replaced
+    # the order it produced. Empty when nothing replaced it — ``reranker_status``
+    # is then the local reranker's own. Additive — backward compatible.
+    local_reranker_status: str = ""
+    # 4.1.18: what became of the answer check on this recall — "judged",
+    # "off", "skipped", "busy", "warming" or "unavailable"
+    # (``retrieval.answer_check_status``). The recall pipeline always sets it;
+    # the default describes a response that never reached the check. Lets a
+    # caller comparing two runs tell "not judged this time" from "nothing
+    # answers". Additive — backward compatible.
+    answer_check_status: str = "skipped"
+    # 4.1.20: why the check gave no verdict ("budget", "not_a_question", ...),
+    # or "reused" for a verdict repeated from an identical earlier check
+    # (``retrieval.answer_check_status.DETAIL_*``). Additive.
+    answer_check_detail: str = ""
+    # 4.1.20: timing and provenance of the answer check (an AnswerCheckTrace).
+    # In-process only — deliberately absent from recall_response_metadata, so
+    # MCP and HTTP recall envelopes are unchanged. Typed Any to keep the
+    # storage -> retrieval import direction.
+    answer_check_trace: Any = None
     # Wave Q2b: precomputed community summary for the cluster the top results
     # fall into (thematic context). None unless results cluster into one
     # community above threshold. Additive — backward compatible.
@@ -577,3 +633,56 @@ class RecallResponse:
     # key is a reporting gap and ``empty`` is an answer. Additive — backward
     # compatible.
     channel_status: dict[str, str] = field(default_factory=dict)
+    # 4.1.25: how many seconds the entity graph this recall walked was
+    # behind the store. 0.0 is the normal case (writes are spliced into the
+    # graph on the next recall); positive only while a large backlog waits for
+    # its background rebuild; None when the graph did not run. Removed memories
+    # are never in it either way. Additive -- backward compatible.
+    graph_lag_s: float | None = None
+    # 4.1.20: milliseconds spent in each retrieval stage of this recall --
+    # "query_embedding", "channels" (which includes it), "rerank" and
+    # "retrieval_total". A recall that is slow, or that came back with
+    # ``warming`` channels, says which stage used its time. Empty when the
+    # response did not come from the retrieval engine. In-process, like
+    # ``answer_check_trace``: the MCP/HTTP recall envelope is unchanged.
+    stage_ms: dict[str, float] = field(default_factory=dict)
+    # 4.1.25: question-level evidence (``retrieval.evidence_features.
+    # query_evidence``): the nonsense-phrase check and the content-term count.
+    # In-process and in recall trace, like ``stage_ms``. Additive.
+    query_evidence: dict = field(default_factory=dict)
+    # 4.1.21 (#150): what a recall's project did - ``{"filter": {...}}`` when
+    # ``project`` was given (``applied`` False, with a plain ``note``, when it
+    # fell back to unfiltered results), ``{"prefer": {...}}`` when
+    # ``prefer_project`` was. None when neither was. Additive.
+    project_scope: dict | None = None
+    # 4.1.22: what a recall's ``tags`` filter did -
+    # ``{"tags", "keys", "match", "applied", "matched", "note", "reason"}``.
+    # Unlike ``project_scope``, ``applied`` is always True (tags are a hard
+    # filter that never falls back); ``reason``/``note`` are only present
+    # when ``matched`` is 0, distinguishing "nobody ever saved this tag" from
+    # "something has it, just not among this question's candidates". None
+    # when the recall named no tags. Additive.
+    tag_scope: dict | None = None
+    # checked / degraded / not_checked. Degraded recalls retain only source
+    # projections independently verified against the immutable memory table.
+    source_fidelity_status: str = "not_checked"
+    # 4.1.25: the answer-support gate (``retrieval.support_gate``) -
+    # "supported" / "unsupported", or "" when it did not run; its best
+    # probability, threshold and recipe version; whether weak matches were
+    # shown on request (``show_weak``). ``abstention_note`` is the sentence a
+    # person reads when recall abstains. ``answer_check_insufficient`` keeps
+    # the answer check's own verdict (None when it gave none), since the gate,
+    # not the check alone, decides ``abstained``. Additive.
+    support_status: str = ""
+    #: "supported" / "related" / "none" (``retrieval.support_tiers``).
+    support_tier: str = ""
+    #: 4.1.25: recall ran before its models and inputs were ready; results are
+    #: keyword finds, and ``status_note`` says so in plain words.
+    warming_up: bool = False
+    status_note: str = ""
+    support_best: float | None = None
+    support_threshold: float | None = None
+    support_version: str = ""
+    weak_shown: bool = False
+    abstention_note: str = ""
+    answer_check_insufficient: bool | None = None

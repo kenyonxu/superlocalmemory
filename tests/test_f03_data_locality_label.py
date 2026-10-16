@@ -10,8 +10,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 from superlocalmemory.core.modes import (
     MODE_A,
     MODE_B,

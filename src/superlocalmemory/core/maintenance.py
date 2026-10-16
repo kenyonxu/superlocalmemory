@@ -18,13 +18,23 @@ License: AGPL-3.0-or-later
 """
 from __future__ import annotations
 
-import hashlib
 import logging
-import math as _math
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import numpy as np
+
+from superlocalmemory.core.langevin_tier import (  # noqa: F401 - re-exported
+    _LANGEVIN_DIM,
+    _MAX_NORM,
+    _age_days,
+    _anchor_to_retention,
+    _compute_equilibrium_radius,
+    _direction_seed,
+    _langevin_pass,
+    _retention_radius,
+    _seed_langevin_position,
+)
 
 if TYPE_CHECKING:
     from superlocalmemory.core.config import SLMConfig
@@ -45,8 +55,6 @@ class _ConsolidationDisabled(Exception):
 # Backfill constants
 _BACKFILL_BURN_IN_STEPS = 50  # retained for compatibility; no longer applied
                               # at seed time -- see _seed_langevin_position
-_LANGEVIN_DIM = 8
-_MAX_NORM = 0.99
 
 # ELC zone vocabulary: EbbinghausCurve returns 'archive'/'forgotten' but
 # atomic_facts.lifecycle CHECK only allows 'active|warm|cold|archived'.
@@ -55,110 +63,10 @@ _VALID_LIFECYCLE_ZONES: frozenset[str] = frozenset({"active", "warm", "cold", "a
 _ELC_ZONE_REMAP: dict[str, str] = {"archive": "archived", "forgotten": "archived"}
 
 
-def _age_days(created_at: str | None) -> float:
-    """Age in days from an ISO timestamp.
-
-    Naive timestamps (no offset, no Z) are assumed UTC — some store paths
-    persist created_at without timezone info, and subtracting a naive
-    datetime from datetime.now(UTC) raises TypeError, which previously
-    aborted the whole backfill loop.
-    """
-    if not created_at:
-        return 0.0
-    try:
-        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return 0.0
-    if created.tzinfo is None:
-        created = created.replace(tzinfo=UTC)
-    return max(0.0, (datetime.now(UTC) - created).total_seconds() / 86400.0)
-
-
-def _compute_equilibrium_radius(
-    access_count: int,
-    age_days: float,
-    importance: float,
-    temperature: float = 0.3,
-    dim: int = 8,
-) -> float:
-    """SUPERSEDED by ``_retention_radius``. No production caller remains.
-
-    Kept because its behaviour is what several tests characterise, and because
-    deleting the thing a bug report names makes the report unreadable later.
-
-    Do not reach for this as the seed authority. ``r_eq = sqrt(T*dim / 2*a)``
-    scales as sqrt(dim) while the band boundaries in ``math/langevin.py`` are
-    dimension-independent constants, so at T=0.3, dim=8 its entire reachable
-    range over every possible input is [0.5210, 0.6330]: ACTIVE needs
-    alpha_eff > 13.33 against a maximum of ~4.05, and a memory accessed
-    100,000 times at maximum importance still lands in WARM. GitHub #136.
-
-    r_eq ≈ sqrt(T * dim / (2 * effective_alpha))
-    """
-    alpha, beta, gamma, delta = 3.0, 0.8, 0.005, 0.5
-    effective_alpha = (
-        alpha
-        + beta * _math.log(access_count + 1) / 10.0
-        - gamma * min(age_days, 365.0) / 365.0
-        + delta * importance
-    )
-    effective_alpha = max(0.1, effective_alpha)
-    r_eq = _math.sqrt(temperature * dim / (2.0 * effective_alpha))
-    return min(r_eq, _MAX_NORM * 0.95)
-
-
-def _direction_seed(fact_id: str) -> int:
-    """A stable per-fact seed. ``hash()`` is salted per process and unusable."""
-    digest = hashlib.blake2b(fact_id.encode("utf-8"), digest_size=8).digest()
-    return int.from_bytes(digest, "big")
-
-
-def _retention_radius(
-    access_count: int, age_days: float, importance: float,
-) -> float:
-    """``1 - R(t)`` on the store's own timescale.
-
-    ``EbbinghausCurve`` is parameterised in HOURS -- ``max_strength`` is 100,
-    i.e. about four days -- because it models working-memory decay. Applied
-    verbatim it puts a one-day-old memory at r=0.94, archived. Measured, which
-    is the only reason this is not what shipped.
-
-    So the curve's SHAPE is used and its TIME CONSTANT is taken from the
-    ladder the product already documents in ``core/tier_manager.py``:
-    ``ARCHIVE_AFTER_DAYS`` days without access must reach
-    ``archive_threshold`` retention. That fixes S exactly, invents no new
-    constant, and leaves one authority for "how long is a long time here".
-
-    Strength then scales that constant, so being used extends the time
-    constant -- the same job ``ACCESS_BOOST_MULTIPLIER`` does in the tier
-    ladder, expressed continuously.
-    """
-    # Imported here, like LangevinDynamics below: this module is loaded on the
-    # daemon's start path and the config/ebbinghaus pair costs real time.
-    from superlocalmemory.core.config import ForgettingConfig
-    from superlocalmemory.math.ebbinghaus import EbbinghausCurve
-    from superlocalmemory.math.langevin import _MAX_NORM
-
-    curve = EbbinghausCurve(ForgettingConfig())
-    strength = curve.memory_strength(
-        access_count=access_count,
-        importance=importance,
-        confirmation_count=0,
-        emotional_salience=0.0,
-    )
-    # Same conversion the decay path uses — one derivation, not two copies.
-    # 4.1.15 scaled the seed here and left the decay path unscaled, so the
-    # decay cycle overwrote every corrected tier minutes later.
-    retention = curve.retention(
-        max(0.0, age_days) * 24.0, curve.store_scaled_strength(strength),
-    )
-    return min(max(1.0 - retention, 0.0), _MAX_NORM * 0.95)
-
-
 def _persist_lifecycle(
     db: object,
     profile_id: str,
-    updates: "list[tuple[str, str | None, object]]",
+    updates: "list[tuple[str, str, object]]",
 ) -> int:
     """Write a computed tier to the authority AND the mirror, together.
 
@@ -179,10 +87,6 @@ def _persist_lifecycle(
     no mirror, so it still goes through ``update_fact``; without it the backfill
     would recompute the same facts on every pass and never converge.
 
-    ``lifecycle`` may be None, which the lifecycle guard uses to say "persist
-    the position, leave the zone alone": the radius proposed a cooling the
-    score authority has not signed, or one it already holds.
-
     Returns the number of facts whose tier was written.
     """
     if not updates:
@@ -195,8 +99,6 @@ def _persist_lifecycle(
 
     by_zone: dict[str, list[str]] = {}
     for fact_id, lifecycle, _position in updates:
-        if lifecycle is None:
-            continue  # position-only: refused cooling or a no-op re-affirm
         by_zone.setdefault(str(lifecycle), []).append(fact_id)
 
     written = 0
@@ -208,137 +110,6 @@ def _persist_lifecycle(
         except Exception as exc:  # noqa: BLE001 -- maintenance is best-effort
             logger.warning("lifecycle persist failed for %s: %s", zone, exc)
     return written
-
-
-def _seed_langevin_position(
-    access_count: int,
-    age_days: float,
-    importance: float,
-    temperature: float = 0.3,
-    dim: int = 8,
-    *,
-    fact_id: str = "",
-) -> list[float]:
-    """Place a fact at the radius its Ebbinghaus retention implies.
-
-    Radius is ``1 - R(t)``. A memory written a moment ago has R = 1 and sits at
-    the centre; one left alone decays outward; using it raises S and pulls it
-    back in. That is the README's claim, and until 4.1.15 the code did not
-    implement it: the old equilibrium radius ``sqrt(T*dim / 2*alpha_eff)``
-    could only ever return a value in [0.5210, 0.6330] whatever the inputs, so
-    ACTIVE was unreachable and the whole metadata domain was worth 0.91
-    standard deviations of the diffusion noise applied on top of it.
-
-    The direction is seeded from ``fact_id`` so a tier is reproducible. A tier
-    nobody can reproduce is a support case nobody can answer. Direction still
-    varies per fact, so facts do not collapse onto one point.
-    """
-    r_eq = _retention_radius(access_count, age_days, importance)
-    rng = np.random.default_rng(_direction_seed(fact_id))
-    direction = rng.standard_normal(dim)
-    norm = float(np.linalg.norm(direction))
-    if norm < 1e-8:
-        direction = np.ones(dim)
-        norm = float(np.linalg.norm(direction))
-    return (direction / norm * r_eq).tolist()
-
-
-# ---------------------------------------------------------------------------
-# Lifecycle guard (GitHub #136 follow-up, 运维笔记 §19)
-# ---------------------------------------------------------------------------
-#
-# Two writers touch the zone. The score authority (the decay cycle's
-# batch_upsert_retention) derives it from retention_score. The radius domain
-# (the three Langevin write sites below) derives it from position. Positions
-# saturate at the boundary and then the radius convicts every fact to
-# archived, whatever the score says -- production measured 3,306 such rows
-# whose score still read 1.0. The rule from here on: the radius may warm
-# freely, it may never cool past the score authority's zone. Cooling still
-# happens, through the decay cycle, at most one tick later.
-
-# Both spellings, one rank: atomic_facts says 'archived', fact_retention says
-# 'archive'.
-_ZONE_COLDNESS: dict[str, int] = {
-    "active": 0, "warm": 1, "cold": 2,
-    "archive": 3, "archived": 3, "forgotten": 4,
-}
-
-
-def _is_colder(proposed: str | None, current: str | None) -> bool:
-    """True when ``proposed`` is a strictly colder zone than ``current``.
-
-    Total function: an unrecognized zone on either side answers False. The
-    guard exists to stop a KNOWN-worse overwrite, not to freeze the writer on
-    input it cannot read (a legacy spelling, a test double).
-    """
-    p = _ZONE_COLDNESS.get(str(proposed or "").strip().lower())
-    c = _ZONE_COLDNESS.get(str(current or "").strip().lower())
-    return p is not None and c is not None and p > c
-
-
-def _current_zone_map(
-    db: "DatabaseManager", profile_id: str, facts: list,
-) -> dict[str, str]:
-    """fact_id -> current zone: the authority overlaid on the mirror.
-
-    The mirror copy comes from the facts this pass already loaded; the
-    authority overlay (``fact_retention.lifecycle_zone``) is one indexed read.
-    Unrecognized values are dropped -- an unreadable zone must behave like no
-    zone, not like a freeze. Best-effort: if the authority read itself fails,
-    the mirror map still stands, and if both fail the radius path behaves
-    exactly as it did before the guard existed.
-    """
-    zones: dict[str, str] = {}
-    for f in facts:
-        lifecycle = getattr(f, "lifecycle", None)
-        value = getattr(lifecycle, "value", lifecycle)
-        key = str(value or "").strip().lower()
-        fact_id = str(getattr(f, "fact_id", "") or "")
-        if fact_id and key in _ZONE_COLDNESS:
-            zones[fact_id] = key
-    try:
-        rows = db.execute(
-            "SELECT fact_id, lifecycle_zone FROM fact_retention "
-            "WHERE profile_id = ?",
-            (profile_id,),
-        )
-        for row in rows:
-            d = dict(row)
-            key = str(d.get("lifecycle_zone") or "").strip().lower()
-            fact_id = str(d.get("fact_id") or "")
-            if fact_id and key in _ZONE_COLDNESS:
-                zones[fact_id] = key
-    except Exception:  # noqa: BLE001 -- the guard must never break maintenance
-        logger.debug(
-            "lifecycle guard: authority zone read failed", exc_info=True,
-        )
-    return zones
-
-
-def _guard_zone_updates(
-    updates: "list[tuple[str, str, object]]",
-    current_zones: dict[str, str],
-) -> "tuple[list[tuple[str, str | None, object]], int]":
-    """Clamp radius-proposed zones against the score authority's zone.
-
-    Returns ``(guarded, refused)``. The position always survives. A proposal
-    strictly warmer than the authority is written; equal ranks and refused
-    coolings come back with the zone set to None, which ``_persist_lifecycle``
-    reads as "persist the position, leave the zone alone" -- skipping the
-    no-op write keeps ``fact_retention.last_computed_at`` meaning "the score
-    authority computed", not "the radius path re-affirmed".
-    """
-    guarded: list[tuple[str, str | None, object]] = []
-    refused = 0
-    for fact_id, proposed, position in updates:
-        current = current_zones.get(fact_id)
-        if current is None or _is_colder(current, proposed):
-            guarded.append((fact_id, proposed, position))
-            continue
-        if _is_colder(proposed, current):
-            refused += 1
-        guarded.append((fact_id, None, position))
-    return guarded, refused
 
 
 def close_stale_sessions(
@@ -445,7 +216,6 @@ def run_maintenance(
     counts: dict[str, int] = {
         "langevin_backfilled": 0,
         "langevin_updated": 0,
-        "langevin_guard_refused": 0,         # radius cooling the score did not sign
         "fisher_coupled": 0,
         "fisher_posterior_updated": 0,       # P1-9: Fisher bayesian_update on access
         "ebbinghaus_coupled": 0,             # Phase 5: Ebbinghaus-Langevin coupling
@@ -478,6 +248,15 @@ def run_maintenance(
         counts["orphan_metadata_gc"] = db.gc_orphaned_embedding_metadata()
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("orphan metadata GC skipped: %s", exc)
+    # 4.1.22: ...and the vectors that sweep (and every fact delete) leaves with
+    # no reference. They cannot be results but still take nearest-neighbour slots.
+    from superlocalmemory.storage.vector_residue import sweep_unreferenced_vectors
+    counts["unreferenced_vectors_gc"] = sweep_unreferenced_vectors(db.db_path)
+    try:  # deleted words leave the keyword index at once from now on
+        from superlocalmemory.storage.fts_residue import ensure_secure_delete
+        ensure_secure_delete(db)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("keyword index secure delete skipped: %s", exc)
 
     # v3.8.x: self-healing NULL-embedding backfill.  Facts stored while the
     # embedder was unavailable end up with NULL embedding and are invisible to
@@ -519,12 +298,6 @@ def run_maintenance(
     if not facts:
         return counts
 
-    # The guard's authority snapshot: built once per pass, before any radius
-    # write site runs. Gated the same way as the writers themselves.
-    current_zones: dict[str, str] = {}
-    if config.math.langevin_persist_positions:
-        current_zones = _current_zone_map(db, profile_id, facts)
-
     # T3b: backfill fact-expansion alt-keys (Mode A, entity-alias based) for
     # facts stored before expansion existed. Bounded per run + skips already-
     # populated and entity-less facts, so it converges without re-work churn.
@@ -560,11 +333,6 @@ def run_maintenance(
 
             backfilled = 0
             for f in facts:
-                # NO-OVERWRITE, and it is load-bearing: the seed is a
-                # measurement taken once. M051 clears positions so this
-                # backfill re-measures; if this guard came off, every pass
-                # would reseed every fact and the clear/reseed ordering the
-                # repair depends on would mean nothing.
                 if f.langevin_position is not None:
                     continue
                 age_days = _age_days(f.created_at)
@@ -583,11 +351,9 @@ def run_maintenance(
                 )
                 weight = ld.compute_lifecycle_weight(position)
                 lifecycle = ld.get_lifecycle_state(weight).value
-                guarded, refused = _guard_zone_updates(
-                    [(f.fact_id, lifecycle, position)], current_zones,
+                _persist_lifecycle(
+                    db, profile_id, [(f.fact_id, lifecycle, position)],
                 )
-                counts["langevin_guard_refused"] += refused
-                _persist_lifecycle(db, profile_id, guarded)
                 f.langevin_position = position  # update in-memory for step 1b
                 backfilled += 1
 
@@ -621,14 +387,11 @@ def run_maintenance(
                 })
 
             if fact_dicts:
-                results = ld.batch_step(fact_dicts)
-                guarded, refused = _guard_zone_updates(
-                    [(r["fact_id"], r["lifecycle"], r["position"])
-                     for r in results],
-                    current_zones,
-                )
-                counts["langevin_guard_refused"] += refused
-                _persist_lifecycle(db, profile_id, guarded)
+                results = _langevin_pass(ld, fact_dicts)
+                _persist_lifecycle(db, profile_id, [
+                    (r["fact_id"], r["lifecycle"], r["position"])
+                    for r in results
+                ])
                 counts["langevin_updated"] = len(results)
         except Exception as exc:
             logger.warning("Langevin maintenance failed: %s", exc)
@@ -664,18 +427,17 @@ def run_maintenance(
                         temperature=eff_temp,
                     )
                     age_days = _age_days(f.created_at)
-                    new_pos, weight = coupled_ld.step(
-                        position=f.langevin_position,
-                        access_count=f.access_count,
-                        age_days=age_days,
-                        importance=f.importance,
+                    (coupled,) = _langevin_pass(coupled_ld, [{
+                        "fact_id": f.fact_id,
+                        "position": f.langevin_position,
+                        "access_count": f.access_count,
+                        "age_days": age_days,
+                        "importance": f.importance,
+                    }])
+                    new_pos, lifecycle = coupled["position"], coupled["lifecycle"]
+                    _persist_lifecycle(
+                        db, profile_id, [(f.fact_id, lifecycle, new_pos)],
                     )
-                    lifecycle = coupled_ld.get_lifecycle_state(weight).value
-                    guarded, refused = _guard_zone_updates(
-                        [(f.fact_id, lifecycle, new_pos)], current_zones,
-                    )
-                    counts["langevin_guard_refused"] += refused
-                    _persist_lifecycle(db, profile_id, guarded)
                     coupled_count += 1
 
             counts["fisher_coupled"] = coupled_count
@@ -690,8 +452,8 @@ def run_maintenance(
     # Gate: config.math.fisher_bayesian_update (default True).
     if config.math.fisher_bayesian_update:
         try:
-            import json as _json
             from superlocalmemory.math.fisher import FisherRaoMetric
+            from superlocalmemory.storage.embedding_codec import encode_float_vector
 
             # Inline migration — harmless no-op if column already exists.
             try:
@@ -732,11 +494,15 @@ def run_maintenance(
                 # watermark only by the number of updates ACTUALLY applied (not to
                 # acc), so accesses beyond the per-run cap are applied on subsequent
                 # runs instead of being silently dropped.
+                # The stored form is float32, like every other vector on a fact.
+                # Writing JSON text here undid the conversion one accessed fact
+                # per pass, and the next start converted it back again.
                 db.execute(
                     "UPDATE atomic_facts "
                     "SET fisher_variance = ?, fisher_last_applied_access = ? "
                     "WHERE fact_id = ?",
-                    (_json.dumps(current_var), last_applied + applied, f.fact_id),
+                    (encode_float_vector(current_var), last_applied + applied,
+                     f.fact_id),
                 )
                 # Refresh in-memory so step 1d ELC sees the updated variance.
                 f.fisher_variance = current_var
@@ -774,7 +540,6 @@ def run_maintenance(
             coupling = EbbinghausLangevinCoupling(
                 ebbinghaus, langevin, fisher_coupling, config.forgetting,
             )
-            import numpy as np
 
             # Build fact_id → last_accessed_at lookup from fact_retention.
             # Using real last-access time (not created_at) so hot facts are not
@@ -1000,11 +765,9 @@ def run_maintenance(
 
     logger.info(
         "Maintenance complete: %d backfilled, %d Langevin, %d Fisher-coupled, "
-        "%d guard-refused, %d Sheaf, %d entity-summaries, "
-        "%d facts-consolidated, %d code-links",
+        "%d Sheaf, %d entity-summaries, %d facts-consolidated, %d code-links",
         counts["langevin_backfilled"], counts["langevin_updated"],
-        counts["fisher_coupled"], counts["langevin_guard_refused"],
-        counts["sheaf_checked"],
+        counts["fisher_coupled"], counts["sheaf_checked"],
         counts["entity_summaries_consolidated"],
         counts["facts_consolidated"],
         counts["bridge_links"],

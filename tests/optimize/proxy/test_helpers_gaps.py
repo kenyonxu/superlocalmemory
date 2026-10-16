@@ -11,7 +11,6 @@ from superlocalmemory.optimize.proxy._helpers import (
     _MockTransport,
     _filter_response_headers,
     _parse_sse_to_json,
-    _safe_cache_hit_callbacks,
     _safe_compress,
     _stream_and_cache_forward,
     _stream_forward,
@@ -19,7 +18,6 @@ from superlocalmemory.optimize.proxy._helpers import (
 from superlocalmemory.optimize.proxy.lifecycle import (
     HookChain,
     ProxyRequest,
-    ProviderResponse,
 )
 
 

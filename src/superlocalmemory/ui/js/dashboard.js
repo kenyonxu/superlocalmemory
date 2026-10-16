@@ -71,7 +71,7 @@ window.refreshDashboard = function(options) {
 async function loadDashboardStats() {
     try {
         var r = await fetch('/api/stats', { credentials: 'same-origin' });
-        if (!r.ok) return false;
+        if (!r.ok) { markStatsUnavailable(); return false; }
         var data = await r.json();
         var ov = data.overview || {};
 
@@ -87,6 +87,7 @@ async function loadDashboardStats() {
         setKpiValue('k-edges', edges);
         setKpiValue('k-facts', facts);
         setKpiValue('k-clu',   clusters);
+        setTextById('k-mem-delta', facts.toLocaleString() + ' facts extracted');
 
         // Legacy hidden compat IDs (core.js loadStats() may race — that's OK,
         // the hidden IDs are only a data bridge, not visible).
@@ -97,19 +98,59 @@ async function loadDashboardStats() {
         loadDashboardSources(data);
         return true;
     } catch (e) {
-        // Non-fatal: KPI strip shows — values
+        // Non-fatal: the tiles say "Unavailable" with a retry, never a bare dash.
+        markStatsUnavailable();
         return false;
+    }
+}
+
+// A tile whose call failed or timed out: say so and offer a retry. The other
+// tiles keep their own values, one slow endpoint never blanks the page.
+function markStatsUnavailable() {
+    ['k-mem', 'k-nodes'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = '';
+        var span = document.createElement('span');
+        span.className = 'kpi-unavailable';
+        span.textContent = 'Unavailable';
+        el.appendChild(span);
+    });
+    ['k-edges', 'k-clu'].forEach(function (id) { setTextById(id, '0'); });
+    var delta = document.getElementById('k-mem-delta');
+    if (delta && !delta.querySelector('button')) {
+        delta.textContent = '';
+        var b = document.createElement('button');
+        b.type = 'button'; b.className = 'kpi-retry'; b.textContent = 'Retry';
+        b.addEventListener('click', function (e) {
+            e.stopPropagation();
+            delta.textContent = ' ';
+            window.refreshDashboard({ force: true });
+        });
+        delta.appendChild(b);
     }
 }
 
 // ----------------------------------------------------------------
 // loadDashboardTimeline — renders real daily fact counts from /api/timeline
 // ----------------------------------------------------------------
+function localDateKey(date) {
+    var month = String(date.getMonth() + 1).padStart(2, '0');
+    var day = String(date.getDate()).padStart(2, '0');
+    return date.getFullYear() + '-' + month + '-' + day;
+}
+
 async function loadDashboardTimeline() {
     var spBig = document.getElementById('sp-big');
     if (!spBig) return true;
     try {
-        var response = await fetch('/api/timeline?days=365&group_by=day&include_categories=false', {
+        // Both sides key by the browser's LOCAL calendar day: the server buckets
+        // with this offset, and the loop below builds local YYYY-MM-DD keys.
+        // toISOString() keyed local midnights by their UTC date, which is the
+        // previous day east of UTC -- today's activity never matched.
+        var tzOffsetMinutes = -new Date().getTimezoneOffset();
+        var response = await fetch('/api/timeline?days=365&group_by=day&include_categories=false'
+            + '&tz_offset_minutes=' + encodeURIComponent(String(tzOffsetMinutes)), {
             credentials: 'same-origin'
         });
         if (!response.ok) throw new Error('timeline unavailable');
@@ -125,7 +166,7 @@ async function loadDashboardTimeline() {
         for (var dayOffset = 364; dayOffset >= 0; dayOffset--) {
             var day = new Date(today);
             day.setDate(today.getDate() - dayOffset);
-            counts.push(byDate[day.toISOString().slice(0, 10)] || 0);
+            counts.push(byDate[localDateKey(day)] || 0);
         }
         var total = counts.reduce(function(sum, value) { return sum + value; }, 0);
         var avgEl = document.getElementById('k-avg-day');
@@ -161,9 +202,9 @@ async function loadDashboardFeed() {
     if (!feedEl) return true;
 
     var CATEGORY_COLORS = {
-        'episodic':  ['rgba(34,197,94,0.12)',  '#22c55e'],
+        'episodic':  ['rgba(124,92,255,0.14)', '#8F76FF'],
         'semantic':  ['rgba(139,92,246,0.12)', '#8b5cf6'],
-        'temporal':  ['rgba(6,182,212,0.12)',  '#06b6d4'],
+        'temporal':  ['rgba(255,46,136,0.14)', '#FF4F9C'],
         'opinion':   ['rgba(245,158,11,0.12)', '#f59e0b'],
         'default':   ['rgba(100,116,139,0.12)','#64748b'],
     };
@@ -264,7 +305,7 @@ function loadDashboardSources(stats) {
         'cli-sync': 'CLI sync',
         'unknown': 'Unclassified'
     };
-    var COLORS = ['var(--violet)', 'var(--cyan)', 'var(--warn,#f59e0b)', 'var(--fg-3)'];
+    var COLORS = ['var(--violet)', 'var(--cyan)', 'var(--warn,#f59e0b)', 'var(--fg-2)'];
     var total = sources.reduce(function(sum, source) {
         return sum + (Number(source.count) || 0);
     }, 0);
@@ -328,8 +369,71 @@ function setTextById(id, val) {
     if (el) el.textContent = String(val);
 }
 
+// Answer check (4.1.18): one extra System-card row — on-device Laya,
+// hosted Jev, or off. A separate, independent fetch from GET
+// /api/v3/answer-check (see routes/answer_check.py) rather than a new field
+// on /api/v3/dashboard, so this stays a dashboard.js-only change. Fail-open:
+// a status line that cannot load must never block the rest of the card.
+//
+// Rendered from status.active — what actually runs — not status.mode: the
+// never-chosen starting mode "auto" runs the on-device check once it is set
+// up, and the card must not say "Off" while it does.
+function answerCheckSummaryText(status) {
+    var jev = status.jev || {};
+    var providerName = jev.provider === 'openrouter' ? 'OpenRouter' : 'TypeSafe';
+    if (status.laya && status.laya.state === 'failed') {
+        return 'On this Mac · failed' + (status.laya.error ? ': ' + status.laya.error : '');
+    }
+    if (status.active === 'laya') {
+        return 'On this Mac · configured' + (status.mode === 'auto' ? ' (turned on by itself)' : '');
+    }
+    if (status.active === 'jev') {
+        // No live health signal exists for the hosted check; the status carries
+        // only the last Test, so say that and never "ready".
+        var test = (status.tests || {}).jev;
+        var line = 'Online (' + providerName + ') · ' + (!test ? 'not tested yet'
+            : test.ok ? 'last test passed'
+            : 'last test failed' + (test.message ? ': ' + test.message : ''));
+        if (jev.rerank && jev.rerank.active) line += ' · reordering on';
+        return line;
+    }
+    // Nothing runs. Say why when something was chosen.
+    if (status.mode === 'laya') return 'On this Mac · not checking';
+    if (status.mode === 'jev') return 'Online (' + providerName + ') · off';
+    if (status.laya.state === 'installing') return 'On this Mac · setting up';
+    return null;
+}
+
+function loadAnswerCheckSummary() {
+    fetch('/api/v3/answer-check', { credentials: 'same-origin' }).then(function (r) {
+        return r.ok ? r.json() : null;
+    }).then(function (status) {
+        var el = document.getElementById('dashboard-answer-check');
+        if (!el || !status || !status.laya) return;
+        el.innerHTML = '';
+        var text = answerCheckSummaryText(status);
+        if (text) { el.textContent = text; return; }
+        var neverConfigured = status.laya.state === 'not_installed' &&
+            !(status.jev && status.jev.has_key);
+        if (neverConfigured) {
+            var link = document.createElement('a');
+            link.href = '#';
+            link.textContent = 'Not set up — Set up';
+            link.addEventListener('click', function (e) {
+                e.preventDefault();
+                var navLink = document.querySelector('.nav-link[data-tab="settings-pane"]');
+                if (navLink) navLink.click();
+            });
+            el.appendChild(link);
+            return;
+        }
+        el.textContent = 'Off';
+    }).catch(function () {});
+}
+
 async function loadDashboard() {
     var PANE_ID = 'dashboard-pane';
+    loadAnswerCheckSummary();
     try {
         var response = await fetch('/api/v3/dashboard', { credentials: 'same-origin' });
         if (!response.ok) {
@@ -341,7 +445,8 @@ async function loadDashboard() {
         clearPaneError(PANE_ID, true);
 
         setTextById('dashboard-mode',     'Mode ' + data.mode.toUpperCase());
-        setTextById('dashboard-mode-desc', data.mode_name + (data.provider !== 'none' ? ' — ' + data.provider : ''));
+        // #112: the mode's own wording; the provider has its own row below.
+        setTextById('dashboard-mode-desc', data.mode_tagline || data.mode_name);
         setTextById('dashboard-memory-count', data.fact_count || data.memory_count || '0');
         setTextById('dashboard-provider', data.provider === 'none' ? 'None' : data.provider);
         setTextById('dashboard-model',    data.model || '');
@@ -370,6 +475,11 @@ async function loadDashboard() {
             parts.push('v' + (ver || '?'));
             subtitle.textContent = parts.join(' · ');
         }
+
+        // Hero chips: mode, profile, version
+        setTextById('dash-chip-mode', 'Mode ' + data.mode.toUpperCase() + (data.mode_name ? ' · ' + data.mode_name : ''));
+        setTextById('dash-chip-profile', 'Profile: ' + (data.profile || 'default'));
+        setTextById('dash-chip-version', ver ? 'v' + ver : 'Version unknown');
 
         // Update mode badge in sidebar (ng-premount hidden element)
         var badge = document.getElementById('mode-badge');

@@ -198,7 +198,6 @@ class TestIncrementalSync:
         drain's job and is covered against real backends in
         tests/test_core/test_the_drain_projects_what_recall_can_return.py.
         """
-        from superlocalmemory.storage import projection_outbox
 
         orch._cozo = MagicMock()
         orch._update_status("cozo", "active")

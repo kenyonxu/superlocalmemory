@@ -21,6 +21,17 @@ from superlocalmemory.core.transactions.owners import (
     OperationContext,
     ProjectionOwner,
 )
+from superlocalmemory.core.transactions.tombstones import (
+    TOMBSTONE_ABSENT,
+    TOMBSTONE_CONFLICT,
+    TOMBSTONE_WRITTEN,
+    _err,
+    _table_exists,
+    is_tombstoned,
+    tombstone_memory_id,
+    write_tombstones,
+    write_tombstones_status,
+)
 
 logger = logging.getLogger("superlocalmemory.core.transactions.erasure")
 
@@ -266,6 +277,7 @@ class ErasureService:
             self._prove_owner(context, name) for name in sorted(self._owners)
         ]
         proofs.extend(extra_proofs)
+        proofs.extend(self._journal_proofs(db, context, subject_type))
         owners_erased = bool(proofs) and all(p.erased for p in proofs)
         # Fail closed: COMPLETE requires proven owner erasure AND, when the
         # caller threads its remove() result, a clean tombstone step (no
@@ -351,6 +363,40 @@ class ErasureService:
             completed_at=completed_at,
             persisted=persisted,
         )
+
+    @staticmethod
+    def _journal_proofs(
+        db: object, context: OperationContext, subject_type: str,
+    ) -> list[ErasureProofRecord]:
+        """Journal a targeted erasure outside every backup (see ``infra.erased_subjects``).
+
+        Adds a proof only when something is NOT done: the journal could not be
+        written (a restore would bring the facts back unnoticed), or a snapshot
+        still holds them (the erasure is not complete while it does).
+        """
+        if subject_type == "profile" or not context.fact_ids:
+            return []
+        from superlocalmemory.infra.erased_subjects import register_targeted_erasure
+
+        journalled, holding = register_targeted_erasure(
+            db, context.profile_id, tuple(sorted(set(context.fact_ids))), context.operation_id)
+        out: list[ErasureProofRecord] = []
+        if not journalled:
+            out.append(ErasureProofRecord("restore_journal", False, "", ("not-written",)))
+        if holding:
+            out.append(ErasureProofRecord("backup_copies", False, "", tuple(holding)))
+        return out
+
+    def prove_erased(
+        self, context: OperationContext, owner: str,
+    ) -> ErasureProofRecord:
+        """Read-only re-proof that one owner's projection holds no residue.
+
+        Used by the background redrive to complete erase obligations whose
+        purge already happened. Never writes: callers decide whether and how
+        to record the proof.
+        """
+        return self._prove_owner(context, owner)
 
     def _prove_owner(
         self, context: OperationContext, name: str,
@@ -626,112 +672,6 @@ def verify_receipt(
     )
 
 
-# Tombstone write outcomes. WRITTEN/ABSENT are non-failures (ABSENT = the
-# table does not exist on an older schema, or there were no fact ids);
-# CONFLICT and ERROR must fail the erasure closed on a modern store.
-TOMBSTONE_WRITTEN = "written"
-TOMBSTONE_ABSENT = "absent"
-TOMBSTONE_CONFLICT = "conflict"
-TOMBSTONE_ERROR = "error"
-
-
-def write_tombstones_status(
-    db: object,
-    profile_id: str,
-    fact_ids: tuple[str, ...],
-    erasure_id: str,
-    created_at: float,
-    memory_id: str | None = None,
-) -> str:
-    """Write projection tombstones and report a precise outcome code.
-
-    Returns one of TOMBSTONE_WRITTEN / TOMBSTONE_ABSENT / TOMBSTONE_CONFLICT /
-    TOMBSTONE_ERROR so callers can fail an erasure closed on a real failure
-    while still tolerating an older schema without the tombstone table.
-    """
-    if not fact_ids:
-        return TOMBSTONE_ABSENT
-    try:
-        with db.raw_connection() as conn:
-            if not _table_exists(conn, "projection_tombstones"):
-                return TOMBSTONE_ABSENT
-            for fact_id in fact_ids:
-                conn.execute(
-                    "INSERT INTO projection_tombstones "
-                    "(profile_id, fact_id, erasure_id, memory_id, created_at) "
-                    "VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(profile_id, fact_id) DO UPDATE SET "
-                    "memory_id = COALESCE(projection_tombstones.memory_id, excluded.memory_id)",
-                    (profile_id, fact_id, erasure_id, memory_id, created_at),
-                )
-                stored = conn.execute(
-                    "SELECT memory_id FROM projection_tombstones "
-                    "WHERE profile_id = ? AND fact_id = ?",
-                    (profile_id, fact_id),
-                ).fetchone()
-                if (
-                    stored is not None
-                    and memory_id is not None
-                    and stored[0] is not None
-                    and stored[0] != memory_id
-                ):
-                    logger.error(
-                        "tombstone provenance conflict for %s: stored=%r != passed=%r; "
-                        "failing closed",
-                        fact_id[:16], stored[0], memory_id,
-                    )
-                    try:
-                        conn.rollback()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    return TOMBSTONE_CONFLICT
-            conn.commit()
-        return TOMBSTONE_WRITTEN
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("erasure tombstone write skipped: %s", _err(exc))
-        return TOMBSTONE_ERROR
-
-
-def write_tombstones(
-    db: object,
-    profile_id: str,
-    fact_ids: tuple[str, ...],
-    erasure_id: str,
-    created_at: float,
-    memory_id: str | None = None,
-) -> bool:
-    """Backward-compatible boolean wrapper: True only on a clean write."""
-    return (
-        write_tombstones_status(
-            db, profile_id, fact_ids, erasure_id, created_at, memory_id
-        )
-        == TOMBSTONE_WRITTEN
-    )
-
-
-def is_tombstoned(conn: object, profile_id: str, fact_id: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM projection_tombstones WHERE profile_id = ? AND fact_id = ?",
-        (profile_id, fact_id),
-    ).fetchone()
-    return row is not None
-
-
-def tombstone_memory_id(db: object, profile_id: str, fact_id: str) -> str | None:
-    try:
-        with db.raw_connection() as conn:
-            if not _table_exists(conn, "projection_tombstones"):
-                return None
-            row = conn.execute(
-                "SELECT memory_id FROM projection_tombstones "
-                "WHERE profile_id = ? AND fact_id = ?",
-                (profile_id, fact_id),
-            ).fetchone()
-            return row[0] if row and row[0] else None
-    except Exception:  # noqa: BLE001
-        return None
-
-
 def _proofs_from_json(payload: str) -> tuple[ErasureProofRecord, ...]:
     try:
         parsed = json.loads(payload)
@@ -759,13 +699,6 @@ def _proofs_from_json(payload: str) -> tuple[ErasureProofRecord, ...]:
         except KeyError:
             continue
     return tuple(records)
-
-
-def _table_exists(conn: object, name: str) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        (name,),
-    ).fetchone() is not None
 
 
 def _receipt_version_supported(conn: object) -> int:
@@ -801,10 +734,6 @@ def _receipt_row_version(conn: object, erasure_id: str) -> int:
         return int(row[0]) if row and row[0] is not None else _RECEIPT_V1
     except Exception:  # noqa: BLE001
         return _RECEIPT_V1
-
-
-def _err(exc: BaseException) -> str:
-    return f"{type(exc).__name__}: {exc}"[:500]
 
 
 __all__ = [

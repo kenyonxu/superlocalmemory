@@ -7,9 +7,6 @@ from pathlib import Path
 
 from superlocalmemory.code_graph.config import (
     CodeGraphConfig,
-    DEFAULT_EXCLUDE_DIRS,
-    DEFAULT_EXTENSION_MAP,
-    DEFAULT_LANGUAGES,
 )
 
 

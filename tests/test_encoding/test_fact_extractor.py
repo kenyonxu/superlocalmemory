@@ -35,10 +35,10 @@ from superlocalmemory.encoding.fact_extractor import (
 )
 from superlocalmemory.storage.models import AtomicFact, FactType, Mode, SignalType
 
-
 # ---------------------------------------------------------------------------
 # chunk_turns
 # ---------------------------------------------------------------------------
+
 
 class TestChunkTurns:
     def test_empty_input(self) -> None:
@@ -81,6 +81,7 @@ class TestChunkTurns:
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
+
 
 class TestHelpers:
     def test_split_sentences(self) -> None:
@@ -169,14 +170,19 @@ class TestScoreImportance:
 
     def test_entity_frequency_boost(self) -> None:
         score = _score_importance(
-            "Alice is great", ["Alice"], {"Alice": 10, "Bob": 1}, False,
+            "Alice is great",
+            ["Alice"],
+            {"Alice": 10, "Bob": 1},
+            False,
         )
         assert score > 0.3
 
     def test_capped_at_one(self) -> None:
         score = _score_importance(
             "I love this amazing incredible thing",
-            ["Alice"], {"Alice": 100}, True,
+            ["Alice"],
+            {"Alice": 100},
+            True,
         )
         assert score <= 1.0
 
@@ -195,6 +201,7 @@ class TestSignalFromFactType:
 # ---------------------------------------------------------------------------
 # FactExtractor Mode A
 # ---------------------------------------------------------------------------
+
 
 class TestFactExtractorModeA:
     def _make_extractor(self, **overrides) -> FactExtractor:
@@ -250,7 +257,8 @@ class TestFactExtractorModeA:
         result = FactExtractor._infer_speaker(
             "Alice works at Google",
             ["Alice works at Google", "Nice"],
-            "User", "Assistant",
+            "User",
+            "Assistant",
         )
         assert result == "User"  # Index 0 = even = speaker_a
 
@@ -263,6 +271,7 @@ class TestFactExtractorModeA:
 # FactExtractor Mode B/C (LLM)
 # ---------------------------------------------------------------------------
 
+
 class TestFactExtractorModeLLM:
     def _mock_llm(self, response: str) -> MagicMock:
         llm = MagicMock()
@@ -271,27 +280,65 @@ class TestFactExtractorModeLLM:
         return llm
 
     def test_llm_extraction(self) -> None:
-        response = json.dumps([
-            {"text": "Alice works at Google as a software engineer",
-             "fact_type": "semantic", "entities": ["Alice", "Google"],
-             "importance": 7, "confidence": 0.95},
-        ])
+        response = json.dumps(
+            [
+                {
+                    "text": "Alice works at Google as a software engineer",
+                    "fact_type": "semantic",
+                    "entities": ["Alice", "Google"],
+                    "importance": 7,
+                    "confidence": 0.95,
+                },
+            ]
+        )
         llm = self._mock_llm(response)
         ext = FactExtractor(config=EncodingConfig(), llm=llm, mode=Mode.C)
 
         facts = ext.extract_facts(
-            ["Alice works at Google"], session_id="s1", session_date="2026-03-11",
+            ["Alice works at Google as a software engineer"],
+            session_id="s1",
+            session_date="2026-03-11",
         )
         assert len(facts) == 1
         assert facts[0].content == "Alice works at Google as a software engineer"
         assert facts[0].fact_type == FactType.SEMANTIC
         assert "Alice" in facts[0].entities
 
+    def test_llm_extraction_requests_content_only_answer(self) -> None:
+        # Issue #128 bug 1: structured extraction must ask Ollama for
+        # content-only answers (think=False) so thinking models don't
+        # burn the token budget on chain-of-thought and return a
+        # truncated trace with empty content.
+        response = json.dumps(
+            [
+                {
+                    "text": "Alice works at Google",
+                    "fact_type": "semantic",
+                    "entities": ["Alice", "Google"],
+                    "importance": 7,
+                    "confidence": 0.9,
+                },
+            ]
+        )
+        llm = self._mock_llm(response)
+        ext = FactExtractor(config=EncodingConfig(), llm=llm, mode=Mode.C)
+
+        ext.extract_facts(
+            ["Alice works at Google as a software engineer"],
+            session_id="s1",
+            session_date="2026-03-11",
+        )
+
+        # First call is the structured extraction; a later call may be the
+        # unrelated entity-reflexion pass, which does not set think=False.
+        assert llm.generate.call_args_list[0].kwargs.get("think") is False
+
     def test_llm_fallback_to_local(self) -> None:
         llm = self._mock_llm("")  # Empty response triggers fallback
         ext = FactExtractor(
             config=EncodingConfig(min_fact_confidence=0.0),
-            llm=llm, mode=Mode.B,
+            llm=llm,
+            mode=Mode.B,
         )
         facts = ext.extract_facts(
             ["Alice Smith works at Google as an engineer."],
@@ -305,7 +352,8 @@ class TestFactExtractorModeLLM:
         llm.generate.side_effect = RuntimeError("API timeout")
         ext = FactExtractor(
             config=EncodingConfig(min_fact_confidence=0.0),
-            llm=llm, mode=Mode.C,
+            llm=llm,
+            mode=Mode.C,
         )
         facts = ext.extract_facts(
             ["Alice Smith works at Google as an engineer."],
@@ -317,15 +365,23 @@ class TestFactExtractorModeLLM:
         llm = self._mock_llm("not valid json at all {{{")
         ext = FactExtractor(config=EncodingConfig(), llm=llm, mode=Mode.C)
         facts = ext.extract_facts(
-            ["Alice works at Google"], session_id="s1",
+            ["Alice works at Google as a software engineer"],
+            session_id="s1",
         )
         # Should fall back to local extraction
 
     def test_llm_importance_normalization(self) -> None:
-        response = json.dumps([
-            {"text": "Alice loves hiking", "fact_type": "opinion",
-             "entities": ["Alice"], "importance": 10, "confidence": 0.9},
-        ])
+        response = json.dumps(
+            [
+                {
+                    "text": "Alice loves hiking",
+                    "fact_type": "opinion",
+                    "entities": ["Alice"],
+                    "importance": 10,
+                    "confidence": 0.9,
+                },
+            ]
+        )
         llm = self._mock_llm(response)
         ext = FactExtractor(config=EncodingConfig(), llm=llm, mode=Mode.C)
         facts = ext.extract_facts(["Alice loves hiking"], session_id="s1")
@@ -333,10 +389,16 @@ class TestFactExtractorModeLLM:
         assert facts[0].importance == 1.0  # 10/10 = 1.0
 
     def test_llm_item_with_string_entities(self) -> None:
-        response = json.dumps([
-            {"text": "Alice is an engineer", "entities": "Alice",
-             "importance": 5, "confidence": 0.8},
-        ])
+        response = json.dumps(
+            [
+                {
+                    "text": "Alice is an engineer",
+                    "entities": "Alice",
+                    "importance": 5,
+                    "confidence": 0.8,
+                },
+            ]
+        )
         llm = self._mock_llm(response)
         ext = FactExtractor(config=EncodingConfig(), llm=llm, mode=Mode.C)
         facts = ext.extract_facts(["Alice is an engineer"], session_id="s1")
@@ -348,7 +410,8 @@ class TestFactExtractorModeLLM:
         llm.is_available.return_value = False
         ext = FactExtractor(
             config=EncodingConfig(min_fact_confidence=0.0),
-            llm=llm, mode=Mode.C,
+            llm=llm,
+            mode=Mode.C,
         )
         facts = ext.extract_facts(
             ["Alice Smith works at Google as an engineer."],
@@ -366,22 +429,26 @@ class TestFactExtractorModeLLM:
         trace = (
             "Let me think step by step. Alice is the subject, Google the "
             "employer. Final answer: "
-            + json.dumps([
-                {"text": "Alice works at Google as a software engineer",
-                 "fact_type": "semantic", "entities": ["Alice", "Google"],
-                 "importance": 7, "confidence": 0.95},
-            ])
+            + json.dumps(
+                [
+                    {
+                        "text": "Alice works at Google as a software engineer",
+                        "fact_type": "semantic",
+                        "entities": ["Alice", "Google"],
+                        "importance": 7,
+                        "confidence": 0.95,
+                    },
+                ]
+            )
         )
         llm = self._mock_llm(trace)
         ext = FactExtractor(config=EncodingConfig(), llm=llm, mode=Mode.B)
         facts = ext.extract_facts(
-            ["Alice works at Google"], session_id="s1",
+            ["Alice works at Google as a software engineer"],
+            session_id="s1",
         )
         assert len(facts) == 1
-        assert (
-            facts[0].content
-            == "Alice works at Google as a software engineer"
-        )
+        assert facts[0].content == "Alice works at Google as a software engineer"
         assert "Alice" in facts[0].entities
         assert "Google" in facts[0].entities
         assert facts[0].importance == 0.7
@@ -394,122 +461,145 @@ class TestFactExtractorModeLLM:
         trace = (
             "Candidates [Alice, Google] ranked [1] and [2]. "
             "Trial parse failed. Final answer: "
-            + json.dumps([
-                {"text": "Alice works at Google as a software engineer",
-                 "fact_type": "semantic", "entities": ["Alice", "Google"],
-                 "importance": 7, "confidence": 0.95},
-            ])
+            + json.dumps(
+                [
+                    {
+                        "text": "Alice works at Google as a software engineer",
+                        "fact_type": "semantic",
+                        "entities": ["Alice", "Google"],
+                        "importance": 7,
+                        "confidence": 0.95,
+                    },
+                ]
+            )
             + " Done."
         )
         llm = self._mock_llm(trace)
         ext = FactExtractor(config=EncodingConfig(), llm=llm, mode=Mode.B)
         facts = ext.extract_facts(
-            ["Alice works at Google"], session_id="s1",
+            ["Alice works at Google as a software engineer"],
+            session_id="s1",
         )
         assert len(facts) == 1
-        assert (
-            facts[0].content
-            == "Alice works at Google as a software engineer"
-        )
+        assert facts[0].content == "Alice works at Google as a software engineer"
 
     def test_llm_trial_payload_does_not_shadow_final_answer(self) -> None:
         # A mid-trace trial array is itself viable — first-wins would
         # store the draft as a real memory. Last-viable must store the
         # final answer instead.
-        trial = json.dumps([
-            {"text": "Alice drinks coffee every morning",
-             "fact_type": "habit", "entities": ["Alice"],
-             "importance": 3, "confidence": 0.8},
-        ])
-        final = json.dumps([
-            {"text": "Alice works at Google as a software engineer",
-             "fact_type": "semantic", "entities": ["Alice", "Google"],
-             "importance": 7, "confidence": 0.95},
-        ])
+        trial = json.dumps(
+            [
+                {
+                    "text": "Alice drinks coffee every morning",
+                    "fact_type": "habit",
+                    "entities": ["Alice"],
+                    "importance": 3,
+                    "confidence": 0.8,
+                },
+            ]
+        )
+        final = json.dumps(
+            [
+                {
+                    "text": "Alice works at Google as a software engineer",
+                    "fact_type": "semantic",
+                    "entities": ["Alice", "Google"],
+                    "importance": 7,
+                    "confidence": 0.95,
+                },
+            ]
+        )
         trace = f"Draft attempt: {trial} On reflection, better: Final: {final}"
         llm = self._mock_llm(trace)
         ext = FactExtractor(config=EncodingConfig(), llm=llm, mode=Mode.B)
         facts = ext.extract_facts(
-            ["Alice works at Google"], session_id="s1",
+            ["Alice works at Google as a software engineer"],
+            session_id="s1",
         )
         assert len(facts) == 1
-        assert (
-            facts[0].content
-            == "Alice works at Google as a software engineer"
-        )
+        assert facts[0].content == "Alice works at Google as a software engineer"
 
     def test_llm_trailing_decoy_falls_through_to_answer(self) -> None:
         # A trailing decoy yielding zero facts ([{"name": ...}] has no
         # text) must not shadow the real answer above it.
-        final = json.dumps([
-            {"text": "Alice works at Google as a software engineer",
-             "fact_type": "semantic", "entities": ["Alice", "Google"],
-             "importance": 7, "confidence": 0.95},
-        ])
-        trace = f"Final: {final} Metadata: [{{\"name\": \"Alice\"}}]"
+        final = json.dumps(
+            [
+                {
+                    "text": "Alice works at Google as a software engineer",
+                    "fact_type": "semantic",
+                    "entities": ["Alice", "Google"],
+                    "importance": 7,
+                    "confidence": 0.95,
+                },
+            ]
+        )
+        trace = f'Final: {final} Metadata: [{{"name": "Alice"}}]'
         llm = self._mock_llm(trace)
         ext = FactExtractor(config=EncodingConfig(), llm=llm, mode=Mode.B)
         facts = ext.extract_facts(
-            ["Alice works at Google"], session_id="s1",
+            ["Alice works at Google as a software engineer"],
+            session_id="s1",
         )
         assert len(facts) == 1
-        assert (
-            facts[0].content
-            == "Alice works at Google as a software engineer"
-        )
+        assert facts[0].content == "Alice works at Google as a software engineer"
 
     def test_llm_trailing_citation_loses_to_schema_fit(self) -> None:
         # A trailing citation array carries text but not the fact schema.
         # Schema fit (text + fact_type) outranks position: the earlier
         # full-schema answer wins even though it is not last.
-        final = json.dumps([
-            {"text": "Alice works at Google as a software engineer",
-             "fact_type": "semantic", "entities": ["Alice", "Google"],
-             "importance": 7, "confidence": 0.95},
-        ])
-        trace = (
-            f"Final: {final} Sources: "
-            + json.dumps([{"text": "Source biography of Alice", "url": "x"}])
+        final = json.dumps(
+            [
+                {
+                    "text": "Alice works at Google as a software engineer",
+                    "fact_type": "semantic",
+                    "entities": ["Alice", "Google"],
+                    "importance": 7,
+                    "confidence": 0.95,
+                },
+            ]
+        )
+        trace = f"Final: {final} Sources: " + json.dumps(
+            [{"text": "Source biography of Alice", "url": "x"}]
         )
         llm = self._mock_llm(trace)
         ext = FactExtractor(config=EncodingConfig(), llm=llm, mode=Mode.B)
         facts = ext.extract_facts(
-            ["Alice works at Google"], session_id="s1",
+            ["Alice works at Google as a software engineer"],
+            session_id="s1",
         )
         assert len(facts) == 1
-        assert (
-            facts[0].content
-            == "Alice works at Google as a software engineer"
-        )
+        assert facts[0].content == "Alice works at Google as a software engineer"
 
     def test_llm_type_alias_counts_for_schema_fit(self) -> None:
         # _item_to_fact accepts `type` as a fact_type alias, so the fit
         # score must too — otherwise an aliased real array loses to noise.
-        final = json.dumps([
-            {"text": "Alice works at Google as a software engineer",
-             "type": "semantic", "entities": ["Alice", "Google"],
-             "importance": 7, "confidence": 0.95},
-        ])
-        trace = (
-            "Candidates [Alice, Google] ranked [1]. "
-            f"Final: {final}"
+        final = json.dumps(
+            [
+                {
+                    "text": "Alice works at Google as a software engineer",
+                    "type": "semantic",
+                    "entities": ["Alice", "Google"],
+                    "importance": 7,
+                    "confidence": 0.95,
+                },
+            ]
         )
+        trace = f"Candidates [Alice, Google] ranked [1]. Final: {final}"
         llm = self._mock_llm(trace)
         ext = FactExtractor(config=EncodingConfig(), llm=llm, mode=Mode.B)
         facts = ext.extract_facts(
-            ["Alice works at Google"], session_id="s1",
+            ["Alice works at Google as a software engineer"],
+            session_id="s1",
         )
         assert len(facts) == 1
-        assert (
-            facts[0].content
-            == "Alice works at Google as a software engineer"
-        )
+        assert facts[0].content == "Alice works at Google as a software engineer"
 
     def test_llm_empty_response_warns(self, caplog) -> None:
         llm = self._mock_llm("")
         ext = FactExtractor(
             config=EncodingConfig(min_fact_confidence=0.0),
-            llm=llm, mode=Mode.B,
+            llm=llm,
+            mode=Mode.B,
         )
         with caplog.at_level("WARNING"):
             facts = ext.extract_facts(
@@ -523,6 +613,7 @@ class TestFactExtractorModeLLM:
 # ---------------------------------------------------------------------------
 # Deduplication
 # ---------------------------------------------------------------------------
+
 
 class TestDeduplication:
     def test_keeps_higher_importance(self) -> None:

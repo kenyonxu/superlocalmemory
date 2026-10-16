@@ -14,6 +14,14 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from superlocalmemory.core import judge_selection
+
+# Re-exported: stop an engine's answer check, and "what would run" (starts nothing).
+from superlocalmemory.core.judge_selection import (  # noqa: F401
+    release_sufficiency_judge,
+    resolve_judge_mode,
+)
+
 if TYPE_CHECKING:
     from superlocalmemory.core.config import SLMConfig
     from superlocalmemory.core.hooks import HookRegistry
@@ -165,9 +173,9 @@ def _try_service_embedder(
         emb = cls(emb_cfg, proxy_http=proxy_http, proxy_https=proxy_https)
         if emb.is_available:
             return emb
-        logger.warning("EmbeddingService not available. BM25-only mode. Run 'slm doctor' to diagnose.")
+        logger.warning("EmbeddingService unavailable. BM25-only mode. Run 'slm doctor'.")
     except Exception as exc:
-        logger.warning("Embeddings unavailable (%s). BM25-only mode. Run 'slm doctor' to diagnose.", exc)
+        logger.warning("Embeddings unavailable (%s). BM25-only mode. Run 'slm doctor'.", exc)
     return None
 
 
@@ -175,69 +183,37 @@ def init_embedder(config: SLMConfig) -> Any | None:
     """Initialize the best available embedding provider.
 
     Priority order:
-    1. Explicit provider in config (ollama / cloud / sentence-transformers)
+    1. Explicit provider in config (ollama / cloud / sentence-transformers / slm-media)
     2. Auto-detect: Ollama first (lightweight), then sentence-transformers
        subprocess (NEVER in-process for Mode A/B)
     3. If nothing works -> None (BM25-only mode)
 
     Memory safety: Mode A/B NEVER load sentence-transformers in-process.
-    EmbeddingService uses subprocess isolation — the main process stays
-    at ~60MB and never imports torch.
+    EmbeddingService uses subprocess isolation, so the main process stays
+    at ~60MB and never imports torch. The routing is in core/text_provider.py.
     """
+    from superlocalmemory.core.embedding_recipe import build_with_recipe
     from superlocalmemory.core.embeddings import EmbeddingService
-    from superlocalmemory.storage.models import Mode
+    from superlocalmemory.core.text_provider import route_embedder
+    from superlocalmemory.retrieval.embedding_calibration import apply_to
+    apply_to(config)
 
-    emb_cfg = config.embedding
-    provider = emb_cfg.provider
-    # Read proxy config for embedding worker (needed for HuggingFace access
-    # in network-restricted environments, e.g. mainland China).
-    _pxy = getattr(config, 'proxy', None)
-    _pxy_http = getattr(_pxy, 'http', '') or ''
-    _pxy_https = getattr(_pxy, 'https', '') or ''
-
-    # v3.4.55: When provider is ollama, use Ollama's embedding API as
-    # PRIMARY. The stored vectors were created by Ollama's nomic-embed-text;
-    # sentence-transformers' nomic-embed-text-v1.5 produces different vectors.
-    # Mixing them degrades semantic recall. ST subprocess is the fallback,
-    # not the primary — this also eliminates the 2-3 minute cold-start
-    # where the ST model loads from disk (~2.1 GB) on every daemon restart.
-    if provider == "ollama":
-        result = _try_ollama_embedder(emb_cfg)
-        if result is not None:
-            logger.info("Using Ollama embeddings (nomic-embed-text, local)")
-            return result
-        st_emb = _try_service_embedder(EmbeddingService, emb_cfg, proxy_http=_pxy_http, proxy_https=_pxy_https)
-        if st_emb is not None:
-            logger.warning("Ollama unavailable; falling back to sentence-transformers subprocess")
-            return st_emb
-        return None
-
-    # --- V3.4.24: Explicit OpenAI-compatible provider ---
-    if provider == "openai" and emb_cfg.is_openai_compatible:
-        logger.info(
-            "Using OpenAI-compatible embedding endpoint: %s (model=%s, dim=%d)",
-            emb_cfg.api_endpoint, emb_cfg.model_name, emb_cfg.dimension,
+    def _build(target: Any) -> Any | None:
+        # Read proxy config for embedding worker (needed for HuggingFace access
+        # in network-restricted environments, e.g. mainland China).
+        _pxy = getattr(target, 'proxy', None)
+        _pxy_http = getattr(_pxy, 'http', '') or ''
+        _pxy_https = getattr(_pxy, 'https', '') or ''
+        return route_embedder(
+            target,
+            try_ollama=_try_ollama_embedder,
+            try_service=lambda emb_cfg: _try_service_embedder(
+                EmbeddingService, emb_cfg,
+                proxy_http=_pxy_http, proxy_https=_pxy_https,
+            ),
         )
-        return _try_service_embedder(EmbeddingService, emb_cfg, proxy_http=_pxy_http, proxy_https=_pxy_https)
 
-    # --- Explicit cloud provider ---
-    if provider == "cloud" or emb_cfg.is_cloud:
-        return _try_service_embedder(EmbeddingService, emb_cfg, proxy_http=_pxy_http, proxy_https=_pxy_https)
-
-    # --- Explicit sentence-transformers (subprocess-isolated) ---
-    if provider == "sentence-transformers":
-        return _try_service_embedder(EmbeddingService, emb_cfg, proxy_http=_pxy_http, proxy_https=_pxy_https)
-
-    # --- Auto-detect: try Ollama first (lightweight, <1s) ---
-    ollama_emb = _try_ollama_embedder(emb_cfg)
-    if ollama_emb is not None:
-        logger.info("Auto-detected Ollama embeddings (fast path)")
-        return ollama_emb
-
-    # --- Fallback: sentence-transformers subprocess ---
-    # EmbeddingService ALWAYS uses subprocess isolation (see embeddings.py).
-    # The main process never imports torch — safe for Mode A/B.
-    return _try_service_embedder(EmbeddingService, emb_cfg, proxy_http=_pxy_http, proxy_https=_pxy_https)
+    return build_with_recipe(config, _build)
 
 
 # ---------------------------------------------------------------------------
@@ -251,15 +227,15 @@ def init_encoding(
     llm: Any,
 ) -> dict[str, Any]:
     """Create all encoding components. Returns dict of components."""
-    from superlocalmemory.encoding.fact_extractor import FactExtractor
-    from superlocalmemory.encoding.entity_resolver import EntityResolver
-    from superlocalmemory.encoding.temporal_parser import TemporalParser
-    from superlocalmemory.encoding.type_router import TypeRouter
-    from superlocalmemory.encoding.graph_builder import GraphBuilder
     from superlocalmemory.encoding.consolidator import MemoryConsolidator
+    from superlocalmemory.encoding.entity_resolver import EntityResolver
+    from superlocalmemory.encoding.entropy_gate import EntropyGate
+    from superlocalmemory.encoding.fact_extractor import FactExtractor
+    from superlocalmemory.encoding.graph_builder import GraphBuilder
     from superlocalmemory.encoding.observation_builder import ObservationBuilder
     from superlocalmemory.encoding.scene_builder import SceneBuilder
-    from superlocalmemory.encoding.entropy_gate import EntropyGate
+    from superlocalmemory.encoding.temporal_parser import TemporalParser
+    from superlocalmemory.encoding.type_router import TypeRouter
     from superlocalmemory.retrieval.ann_index import ANNIndex
 
     ann_index = ANNIndex(dimension=config.embedding.dimension)
@@ -280,6 +256,9 @@ def init_encoding(
     # V3.2: VectorStore (Phase 1) -- sqlite-vec KNN. Scene assignment also
     # consumes it, so initialize it before the encoding component is wired.
     vector_store = _init_vector_store(config)
+    from superlocalmemory.retrieval.canonical_vector_index import candidate_vector_source
+    consolidator.use_vector_source(  # recall's own exact neighbour search, not a full scan
+        candidate_vector_source(db, vector_store, config.embedding.dimension))
     scene_builder = SceneBuilder(db, embedder, vector_store=vector_store)
     entropy_gate = EntropyGate(
         embedder, config.encoding.entropy_threshold,
@@ -330,7 +309,8 @@ def _init_vector_store(config: SLMConfig) -> Any | None:
     """Create VectorStore if sqlite-vec is available. Returns None on failure."""
     try:
         from superlocalmemory.retrieval.vector_store import (
-            VectorStore, VectorStoreConfig,
+            VectorStore,
+            VectorStoreConfig,
         )
         vec_config = VectorStoreConfig(
             dimension=config.embedding.dimension,
@@ -340,9 +320,9 @@ def _init_vector_store(config: SLMConfig) -> Any | None:
         if vs.available:
             logger.info("VectorStore initialized (sqlite-vec KNN enabled)")
             return vs
-        logger.debug("VectorStore unavailable; using ANNIndex fallback")
+        logger.warning("VectorStore unavailable; using ANNIndex fallback")
     except Exception as exc:
-        logger.debug("VectorStore init failed: %s", exc)
+        logger.warning("VectorStore init failed: %s", exc)
     return None
 
 
@@ -579,23 +559,29 @@ def _init_quantization_aware_search(
 ) -> Any | None:
     """Create QuantizationAwareSearch if quantized store is available.
 
-    Returns None on failure — SemanticChannel falls back to VectorStore KNN.
-    Stateless wrapper: zero memory overhead, no workers, no threads.
+    Returns None on an explicit disable or a reported initialization failure.
+    No workers or threads; reuses the canonical candidate vector index.
     """
-    if vector_store is None:
+    if not config.quantization.enabled:
+        logger.info("Quantized search disabled by configuration")
         return None
     try:
-        from superlocalmemory.retrieval.quantization_aware_search import QuantizationAwareSearch
-        from superlocalmemory.storage.quantized_store import QuantizedEmbeddingStore
+        from dataclasses import replace
+
         from superlocalmemory.math.polar_quant import PolarQuantEncoder
         from superlocalmemory.math.qjl import QJLEncoder
+        from superlocalmemory.retrieval.canonical_vector_index import candidate_vector_source
+        from superlocalmemory.retrieval.quantization_aware_search import QuantizationAwareSearch
+        from superlocalmemory.storage.quantized_store import QuantizedEmbeddingStore
 
-        polar = PolarQuantEncoder(dimension=config.embedding.dimension)
-        qjl: QJLEncoder | None = None
-        try:
-            qjl = QJLEncoder(dimension=config.embedding.dimension)
-        except Exception:
-            pass  # QJL is optional (HR-07)
+        vector_store = candidate_vector_source(db, vector_store, config.embedding.dimension)
+        if vector_store is None or not vector_store.available:
+            logger.warning("Quantized tiers unavailable: no vector candidate store")
+            return None
+        polar = PolarQuantEncoder(replace(
+            config.quantization.polar, dimension=config.embedding.dimension,
+        ))
+        qjl = QJLEncoder(config.quantization.qjl)
 
         q_store = QuantizedEmbeddingStore(
             db=db, polar=polar, qjl=qjl, config=config.quantization,
@@ -608,8 +594,26 @@ def _init_quantization_aware_search(
         logger.info("QuantizationAwareSearch initialized (3-tier quantization pipeline)")
         return qas
     except Exception as exc:
-        logger.debug("QuantizationAwareSearch init failed (non-fatal): %s", exc)
+        logger.warning("Quantized tiers unavailable; using float32 search: %s", exc)
         return None
+
+
+def init_sufficiency_judge(retrieval_config: Any) -> Any:
+    """The answer check the config asks for, or None. Rules: judge_selection.
+    Stays here because tests/conftest.py patches it, so no engine a test
+    builds — or switches — starts a real model."""
+    return judge_selection.build_sufficiency_judge(retrieval_config)
+
+
+def attach_sufficiency_judge(retrieval_engine: Any, retrieval_config: Any) -> str:
+    """Switch the engine's answer check now; returns "laya", "jev" or "off".
+    The old judge comes off the engine and stops before the new one is built;
+    the builder is looked up through this module, so the conftest guard holds."""
+    from superlocalmemory.core.answer_check_reload import remember_settings
+    result = judge_selection.swap_sufficiency_judge(
+        retrieval_engine, lambda: init_sufficiency_judge(retrieval_config))
+    remember_settings(retrieval_engine, retrieval_config)
+    return result
 
 
 def init_retrieval(
@@ -623,16 +627,18 @@ def init_retrieval(
     """Create the RetrievalEngine — six candidate producers (semantic, BM25,
     entity_graph, temporal, spreading_activation, hopfield) fused via RRF.
     Returns the engine."""
-    from superlocalmemory.retrieval.engine import RetrievalEngine
-    from superlocalmemory.retrieval.semantic_channel import SemanticChannel
     from superlocalmemory.retrieval.bm25_channel import BM25Channel
-    from superlocalmemory.retrieval.entity_channel import EntityGraphChannel
-    from superlocalmemory.retrieval.temporal_channel import TemporalChannel
-    from superlocalmemory.retrieval.profile_channel import ProfileChannel
     from superlocalmemory.retrieval.bridge_discovery import BridgeDiscovery
+    from superlocalmemory.retrieval.engine import RetrievalEngine
+    from superlocalmemory.retrieval.entity_channel import EntityGraphChannel
+    from superlocalmemory.retrieval.profile_channel import ProfileChannel
+    from superlocalmemory.retrieval.semantic_channel import SemanticChannel
+    from superlocalmemory.retrieval.temporal_channel import TemporalChannel
 
-    # V3.3.19: TurboQuant 3-tier search (stateless, zero memory overhead)
-    qas = _init_quantization_aware_search(vector_store, db, config)
+    qas = _init_quantization_aware_search(vector_store, db, config)  # V3.3.19 TurboQuant
+    from superlocalmemory.retrieval import canonical_vector_index as cvi
+    from superlocalmemory.retrieval import kind_scope
+    vectors = cvi.candidate_vector_source(db, vector_store, config.embedding.dimension)
 
     channels: dict = {
         "semantic": SemanticChannel(
@@ -640,8 +646,7 @@ def init_retrieval(
             fisher_temperature=config.math.fisher_temperature,
             embedder=embedder,
             fisher_mode=config.math.fisher_mode,
-            vector_store=vector_store,
-            quantization_aware_search=qas,
+            vector_store=vectors, quantization_aware_search=qas,
         ),
         "bm25": BM25Channel(db),
         "entity_graph": EntityGraphChannel(db, entity_resolver),
@@ -649,19 +654,21 @@ def init_retrieval(
     }
 
     # Phase 3: Register SpreadingActivation as 5th channel
-    sa_channel = _init_spreading_activation(db, vector_store)
+    sa_channel = _init_spreading_activation(db, vectors)
     if sa_channel is not None:
         channels["spreading_activation"] = sa_channel
 
     # Phase G: Register Hopfield as 6th channel
-    hopfield_channel = _init_hopfield_channel(db, vector_store, config)
+    hopfield_channel = _init_hopfield_channel(db, vectors, config)
     if hopfield_channel is not None:
         channels["hopfield"] = hopfield_channel
 
     reranker = None
-    if config.retrieval.use_cross_encoder:
+    if config.retrieval.reranker_enabled():
         reranker = init_reranker(config.retrieval)
 
+    from superlocalmemory.retrieval.embedding_calibration import apply_to
+    apply_to(config, embedder)  # also covers a warm preset handed over by staged activation
     profile_ch = ProfileChannel(db)
     bridge = BridgeDiscovery(db)
 
@@ -672,13 +679,21 @@ def init_retrieval(
         profile_channel=profile_ch,
         bridge_discovery=bridge,
         trust_scorer=trust_scorer,
+        sufficiency_judge=init_sufficiency_judge(config.retrieval),
+        # M3: RetrievalConfig (config.retrieval) has no memory_kinds section —
+        # it lives on the top-level SLMConfig this function already has, so
+        # the kind facet's threshold is threaded through here rather than
+        # RetrievalEngine reaching for a config section it was never given.
+        display_min_confidence=config.memory_kinds.display_min_confidence,
     )
-
+    from superlocalmemory.core.answer_check_reload import remember_settings
+    remember_settings(engine, config.retrieval, config.base_dir)
+    judge_selection.register_engine(engine)  # so a switch reaches this engine too
+    kind_scope.attach(engine, db, vectors, config.embedding.dimension)  # kind recall
     # V3.3.13: Ensure reranker warmup is in progress.
     # The CrossEncoderReranker constructor starts background warmup, but
     # callers can also call warmup_sync() to block until ready.
     # Here we just log warmup status — benchmark scripts call warmup_sync() explicitly.
-    #
     # v3.4.42: Distinguish the legitimate "another process owns the
     # reranker worker" case (machine-wide singleton — usually the unified
     # daemon) from a real warmup failure. Before this fix, any CLI process
@@ -766,17 +781,21 @@ def wire_hooks(
     except Exception:
         pass
 
-    # -- Tamper-proof audit chain (all operations logged with hash chain) --
+    # -- Tamper-evident audit chain (all operations logged with hash chain) --
     try:
         from superlocalmemory.compliance.audit import AuditChain
+        from superlocalmemory.core.audit_record import audit_metadata
         audit_path = config.db_path.parent / "audit_chain.db"
         audit_chain = AuditChain(audit_path)
-        for op in ("store", "recall", "delete"):
+        for op in ("store", "recall", "delete", "update"):
+            # Who (the authenticated actor, the connection's agent, the user),
+            # what (content hash, fact ids, operation id) -- L-16 / G-L2.
             hooks.register_post(op, lambda ctx, _op=op: audit_chain.log(
                 operation=_op,
                 agent_id=ctx.get("agent_id", "unknown"),
                 profile_id=ctx.get("profile_id", profile_id),
                 content_hash=ctx.get("content_hash", ""),
+                metadata=audit_metadata(ctx),
             ))
         result["audit_chain"] = audit_chain
     except Exception:

@@ -473,6 +473,7 @@ class CacheDB:
         model: str,
         ttl_expires: float | None,
         tags: list[str],
+        profile_id: str = "",
     ) -> None:
         try:
             # 1) zlib-compress
@@ -483,17 +484,18 @@ class CacheDB:
             self._db.execute(
                 "INSERT INTO llmcache_entries "
                 "(entry_id, cache_key, tenant_id, model, provider, value_blob, compressed, "
-                " ttl_expires, tag_json, byte_size) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?) "
+                " ttl_expires, tag_json, byte_size, profile_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?) "
                 "ON CONFLICT(cache_key, tenant_id) DO UPDATE SET "
                 "  value_blob=excluded.value_blob, model=excluded.model, provider=excluded.provider, "
                 "  ttl_expires=excluded.ttl_expires, tag_json=excluded.tag_json, "
-                "  byte_size=excluded.byte_size, hit_count=0, last_hit_at=NULL, "
+                "  byte_size=excluded.byte_size, profile_id=excluded.profile_id, "
+                "  hit_count=0, last_hit_at=NULL, "
                 "  created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
                 (
                     entry_id, key, tenant_id, model, "",
                     encrypted_blob, ttl_expires,
-                    json.dumps(tags or []), len(encrypted_blob),
+                    json.dumps(tags or []), len(encrypted_blob), profile_id,
                 ),
             )
         except sqlite3.Error as exc:
@@ -507,6 +509,7 @@ class CacheDB:
         entry_id: str,
         ttl_seconds: int | None = None,
         tags: list[str] | None = None,
+        profile_id: str = "",
     ) -> None:
         """Like set(), but writes a caller-supplied entry_id instead of auto-generating one.
 
@@ -520,18 +523,19 @@ class CacheDB:
             self._db.execute(
                 "INSERT INTO llmcache_entries "
                 "(entry_id, cache_key, tenant_id, model, provider, value_blob, compressed, "
-                " ttl_expires, tag_json, byte_size) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?) "
+                " ttl_expires, tag_json, byte_size, profile_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?) "
                 "ON CONFLICT(cache_key, tenant_id) DO UPDATE SET "
                 "  entry_id=excluded.entry_id, value_blob=excluded.value_blob, "
                 "  model=excluded.model, provider=excluded.provider, "
                 "  ttl_expires=excluded.ttl_expires, tag_json=excluded.tag_json, "
-                "  byte_size=excluded.byte_size, hit_count=0, last_hit_at=NULL, "
+                "  byte_size=excluded.byte_size, profile_id=excluded.profile_id, "
+                "  hit_count=0, last_hit_at=NULL, "
                 "  created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
                 (
                     entry_id, key, tenant_id, "", "",
                     encrypted_blob, ttl_expires,
-                    json.dumps(tags or []), len(encrypted_blob),
+                    json.dumps(tags or []), len(encrypted_blob), profile_id,
                 ),
             )
         except sqlite3.Error as exc:
@@ -907,6 +911,7 @@ class CacheDB:
         ttl_expires: float | None = None,
         *,
         tenant_id: str = "default",
+        profile_id: str = "",
     ) -> None:
         import hashlib
         try:
@@ -915,13 +920,13 @@ class CacheDB:
             self._db.execute(
                 "INSERT OR REPLACE INTO llmcache_ccr_originals "
                 "(ccr_id, tenant_id, original_blob, compressed_hash, "
-                " byte_size_orig, byte_size_comp, ttl_expires) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " byte_size_orig, byte_size_comp, ttl_expires, profile_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ccr_id, tenant_id, encrypted,
                     hashlib.sha256(original).hexdigest(),
                     len(original), len(compressed),
-                    ttl_expires,
+                    ttl_expires, profile_id,
                 ),
             )
         except sqlite3.Error as exc:

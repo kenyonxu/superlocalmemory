@@ -27,20 +27,27 @@ import os
 import socket
 import sys
 import time
-from dataclasses import replace
+from typing import TYPE_CHECKING
 
+from superlocalmemory.cli import daemon_startup as _startup
+from superlocalmemory.cli.daemon_errors import (  # noqa: F401 - re-exported
+    DaemonServerError,
+    server_error_from,
+)
 from superlocalmemory.infra.daemon_identity import (
     build_descriptor,
     descriptor_matches_health,
     descriptor_path,
-    process_create_time_for,
+    health_is_other_account,
+    health_is_same_account,
     read_descriptor,
-    write_descriptor,
 )
 from superlocalmemory.infra.data_root import (
     assert_no_durable_root_conflict,
     state_path,
 )
+from superlocalmemory.infra.instance_lock import instance_lock_is_held
+from superlocalmemory.cli.deployment import configured_port
 from superlocalmemory.infra.process_identity import (
     compare_start_tokens,
     process_start_token_for,
@@ -48,10 +55,10 @@ from superlocalmemory.infra.process_identity import (
 
 logger = logging.getLogger(__name__)
 
-try:
-    _DEFAULT_PORT = int(os.environ.get("SLM_DAEMON_PORT", "") or 8765)
-except ValueError:
-    _DEFAULT_PORT = 8765
+if TYPE_CHECKING:
+    from subprocess import Popen
+
+_DEFAULT_PORT = configured_port()
 _LEGACY_PORT = 8767   # backward-compat redirect
 _DEFAULT_IDLE_TIMEOUT = 0  # v3.4.3: 24/7 default (was 1800)
 _PID_FILE = None  # test-only override; runtime resolution stays dynamic
@@ -69,11 +76,8 @@ def _is_pid_alive(pid: int) -> bool:
         import psutil
         return psutil.pid_exists(pid)
     except ImportError:
-        try:
-            os.kill(pid, 0)
-            return True
-        except (ProcessLookupError, PermissionError):
-            return False
+        from superlocalmemory.core.platform_utils import is_pid_alive
+        return is_pid_alive(pid)
 
 
 _CREATE_TIME_TOLERANCE_SECONDS = 1.0
@@ -228,27 +232,85 @@ def wait_for_owned_daemon_shutdown(
     return False
 
 
+def _wait_for_republished_record(
+    timeout_s: float = 6.0, poll_s: float = 0.25,
+) -> bool:
+    """Wait for the owning daemon to publish a record that names a live process.
+
+    Only the daemon writes the record; a client that finds it stale or damaged
+    while health still answers waits for the daemon's guardian to repair it.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        descriptor = read_descriptor()
+        if descriptor is not None and _descriptor_process_is_alive(descriptor):
+            if descriptor.state == "starting":
+                return True
+            health = _fetch_health(descriptor.port)
+            if health is not None and descriptor_matches_health(descriptor, health):
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_s)
+
+
+def _health_fallback(port: int) -> bool:
+    """The record is stale or damaged: trust only a same-account daemon's repair.
+
+    A daemon of another account or data folder never passes, and nothing here
+    reads or returns a capability (health carries none).
+    """
+    health = _fetch_health(port)
+    if health is None or not health_is_same_account(health):
+        return False
+    recorded = read_descriptor()
+    if recorded is not None and descriptor_matches_health(recorded, health):
+        return True  # health proves the recorded instance; nothing to wait for
+    return _wait_for_republished_record()
+
+
+def _record_port_hint() -> int:
+    """Port for a damaged record: the plain mirror if sane, else the default."""
+    try:
+        text = descriptor_path().with_name("daemon.port").read_text(encoding="utf-8")
+        port = int(text.strip())
+        if 1 <= port <= 65535:
+            return port
+    except (OSError, ValueError):
+        pass
+    return _get_port()
+
+
+def _owner_without_record() -> bool:
+    """The record is gone but a daemon holds the lock: wait for its repair."""
+    return instance_lock_is_held() and _wait_for_republished_record()
+
+
 def is_daemon_running() -> bool:
     """Return True only for a daemon owned by this canonical data namespace.
 
     A PID or an HTTP 200 proves liveness, not ownership. V3.7 requires the
     private local descriptor and the health endpoint to agree on namespace,
     process instance, capability fingerprint, owner, PID, protocol, and port.
+    A stale or damaged record next to a healthy same-account daemon is waited
+    out (the daemon repairs it) rather than reported as "not running".
     """
     local_descriptor_path = descriptor_path()
     descriptor = read_descriptor()
     if descriptor is not None:
         if not _descriptor_process_is_alive(descriptor):
-            return False
+            return _health_fallback(descriptor.port)
         if descriptor.state == "starting":
             return True
         health = _fetch_health(descriptor.port)
         return health is not None and descriptor_matches_health(descriptor, health)
 
-    # A malformed or foreign descriptor must fail closed; never fall through
-    # to legacy PID/port adoption in the same namespace.
+    # A malformed or foreign descriptor never falls through to legacy PID/port
+    # adoption in the same namespace; only the health fallback may rescue it.
     if local_descriptor_path.exists():
-        return False
+        return _health_fallback(_record_port_hint())
+    if _owner_without_record():
+        return True
 
     legacy = _verified_legacy_health()
     return legacy is not None
@@ -268,23 +330,36 @@ def owned_daemon_process_alive() -> bool:
     daemon is not skipped as "already stopped" while it keeps running and
     holding the port — which then made Step 3 refuse to start a second
     daemon on the still-occupied port and fail the whole restart.
+
+    A stale or damaged record beside a healthy same-account daemon takes the
+    same health fallback as ``is_daemon_running``.
     """
     descriptor = read_descriptor()
     if descriptor is not None:
-        return _descriptor_process_is_alive(descriptor)
-    if descriptor_path().exists():
+        if _descriptor_process_is_alive(descriptor):
+            return True
+        port = descriptor.port
+    elif descriptor_path().exists():
+        port = _record_port_hint()
+    elif _owner_without_record():
+        repaired = read_descriptor()
+        return repaired is not None and _descriptor_process_is_alive(repaired)
+    else:
+        return _verified_legacy_health() is not None
+    if not _health_fallback(port):
         return False
-    return _verified_legacy_health() is not None
+    repaired = read_descriptor()
+    return repaired is not None and _descriptor_process_is_alive(repaired)
 
 
-def _fetch_health(port: int) -> dict | None:
+def _fetch_health(port: int, timeout: float = 2.0) -> dict | None:
     """Fetch loopback health without following cross-namespace discovery."""
     try:
         import urllib.request
 
         expected_url = f"http://127.0.0.1:{port}/health"
         response = urllib.request.urlopen(
-            expected_url, timeout=2,
+            expected_url, timeout=max(0.05, min(float(timeout), 2.0)),
         )
         if response.status != 200:
             return None
@@ -298,6 +373,25 @@ def _fetch_health(port: int) -> dict | None:
         return None
 
 
+def _process_is_this_account(process) -> bool:
+    """The process runs as the account running this code.
+
+    On a computer shared by several accounts, another account's daemon can
+    hold a PID a stale ``daemon.pid`` here still names. Windows has no uid,
+    so there the account is the user name the process runs as. A process
+    whose account cannot be read is not counted as this account's.
+    """
+    getuid = getattr(os, "getuid", None)
+    try:
+        if getuid is not None:
+            return int(process.uids().real) == int(getuid())
+        from superlocalmemory.core.platform_utils import current_account
+
+        return str(process.username()).casefold() == current_account().casefold()
+    except Exception:
+        return False
+
+
 def _is_verified_legacy_process(pid: int) -> bool:
     """One-release bridge for a same-root V3.6 unified-daemon process."""
     if not _is_pid_alive(pid):
@@ -306,6 +400,8 @@ def _is_verified_legacy_process(pid: int) -> bool:
         import psutil
 
         process = psutil.Process(pid)
+        if not _process_is_this_account(process):
+            return False
         command = " ".join(process.cmdline())
         return "superlocalmemory.server.unified_daemon" in command
     except Exception:
@@ -317,8 +413,11 @@ def _verified_legacy_health() -> dict | None:
     pid_file = descriptor_path().with_name("daemon.pid")
     port_file = descriptor_path().with_name("daemon.port")
     try:
-        pid = int(pid_file.read_text().strip())
-        port = int(port_file.read_text().strip()) if port_file.exists() else _DEFAULT_PORT
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+        port = (
+            int(port_file.read_text(encoding="utf-8").strip())
+            if port_file.exists() else _DEFAULT_PORT
+        )
     except (OSError, ValueError):
         return None
     if not _is_verified_legacy_process(pid):
@@ -338,11 +437,11 @@ def _get_port() -> int:
     if descriptor is not None:
         return descriptor.port
     if descriptor_path().exists():
-        return _DEFAULT_PORT
+        return configured_port()
     legacy = _verified_legacy_health()
     if legacy is not None:
         return int(legacy["_legacy_port"])
-    return _DEFAULT_PORT
+    return configured_port()
 
 
 def _health_is_owned(health: dict, *, port: int | None = None) -> bool:
@@ -378,6 +477,16 @@ def _health_is_owned(health: dict, *, port: int | None = None) -> bool:
         )
     except (TypeError, ValueError):
         return False
+
+
+def owned_daemon_answers(port: int) -> bool:
+    """This account's own daemon answers on ``port`` (proven, not assumed).
+
+    Use before sending anything to a loopback port: on a shared computer the
+    port may belong to another account's SuperLocalMemory, or to anything.
+    """
+    health = _fetch_health(int(port))
+    return health is not None and _health_is_owned(health, port=int(port))
 
 
 class DaemonRefused(RuntimeError):
@@ -425,11 +534,91 @@ class DaemonNotFound(RuntimeError):
     ``unknown_profile`` indistinguishable from a dead daemon (#audit).
     """
 
-    def __init__(self, status: int, code: str, message: str, path: str = "") -> None:
+    def __init__(self, status: int, code: str, message: str, path: str = "", *,
+                 error_code: str = "", error_message: str = "") -> None:
         self.status = int(status)
         self.code = code or "not_found"
         self.message = message or "daemon returned 404"
+        # A per-request-routing route answers an unknown profile with
+        # ``{"error": {"code": "unknown_profile", ...}}`` rather than a
+        # ``detail``. Kept apart from ``code`` so no existing caller changes;
+        # a routed caller reads it (mcp/tools_core._routed_daemon_call).
+        self.error_code = error_code
+        self.error_message = error_message
         super().__init__(self.message + (f" for {path}" if path else ""))
+
+
+def not_found_from(payload: object, path: str = "") -> DaemonNotFound:
+    """The :class:`DaemonNotFound` for a 404 response body.
+
+    L3-11: every 404 in this codebase is a plain FastAPI
+    HTTPException(404, detail="...") -- {"detail": "..."} or {"detail": {...}}
+    -- so ``code`` and ``message`` come from ``detail``. The routed-profile
+    routes' ``{"error": {...}}`` body fills ``error_code``/``error_message``.
+    """
+    code, message = "not_found", "daemon returned 404"
+    error_code, error_message = "", ""
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        if isinstance(detail, dict):
+            code = str(detail.get("code", code))
+            message = str(detail.get("message", message))
+        elif isinstance(detail, str) and detail:
+            message = detail
+        error = payload.get("error")
+        if isinstance(error, dict) and isinstance(error.get("code"), str):
+            error_code = error["code"]
+            error_message = str(error.get("message", ""))
+    return DaemonNotFound(404, code, message, path,
+                          error_code=error_code, error_message=error_message)
+
+
+class DaemonRateLimited(RuntimeError):
+    """The daemon answered 429: it is busy and the caller may retry shortly.
+
+    Raised only when the caller passes ``preserve_rate_limited=True``.
+    """
+
+
+class DaemonUnprocessable(RuntimeError):
+    """The daemon answered 422: it refused the request itself, before any work.
+
+    Raised only when the caller passes ``preserve_unprocessable=True``. Without
+    it a 422 collapses to ``None``, which callers read as "daemon unavailable"
+    and retry - pointless for a request that will be refused every time.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code or "INVALID_REQUEST"
+        self.message = message or "the daemon refused this request"
+        super().__init__(self.message)
+
+
+def _unprocessable(exc) -> DaemonUnprocessable:
+    """Read ``{"detail": {"code", "message"}}``, ``{"detail": "text"}``, or
+    FastAPI's own list-shaped validation-error body —
+    ``{"detail": [{"type": ..., "loc": [...], "msg": "..."}, ...]}`` — which a
+    request that fails Pydantic's own field validation (e.g. a fact_id over
+    the field's max_length) gets before any route code runs (L3-11). Without
+    this branch the message silently went empty for exactly that shape.
+    """
+    try:
+        detail = json.loads(exc.read().decode()).get("detail")
+    except Exception:  # noqa: BLE001 - an unreadable body still means "refused"
+        detail = None
+    if isinstance(detail, dict):
+        return DaemonUnprocessable(str(detail.get("code") or ""),
+                                   str(detail.get("message") or ""))
+    if isinstance(detail, list):
+        messages = [
+            str(item.get("msg", "")) for item in detail
+            if isinstance(item, dict) and item.get("msg")
+        ]
+        return DaemonUnprocessable("", "; ".join(messages) or "the request was invalid")
+    message = detail if isinstance(detail, str) else ""
+    # The daemon's own wording for a key reused for another request.
+    code = "IDEMPOTENCY_CONFLICT" if message.startswith("idempotency key ") else ""
+    return DaemonUnprocessable(code, message)
 
 
 def daemon_request(
@@ -443,6 +632,10 @@ def daemon_request(
     verify_health: bool = True,
     preserve_conflict: bool = False,
     preserve_not_found: bool = False,
+    preserve_unprocessable: bool = False,
+    preserve_server_error: bool = False,
+    preserve_rate_limited: bool = False,
+    start_wait_seconds: float | None = None,
 ) -> dict | None:
     """Send a request only after validating the owned daemon identity.
 
@@ -460,7 +653,18 @@ def daemon_request(
     busy-but-alive daemon does not get misreported as not running. Only
     meaningful for the descriptor path — the legacy bridge has no capability
     header and still needs health to identify its target.
+
+    ``start_wait_seconds`` — 4.1.22: when the daemon is *starting* (this
+    process is spawning it, or its descriptor says so), wait up to this long
+    (default: the ``daemon_startup`` budget, never more than
+    ``timeout_seconds``) for it to answer, instead of failing at once. Nothing
+    starting means no wait. Callers pinning a descriptor never wait.
     """
+    unpinned = expected_descriptor is _EXPECTED_DESCRIPTOR_UNSET and expected_legacy is None
+    wait_cap = (
+        timeout_seconds if start_wait_seconds is None
+        else min(start_wait_seconds, timeout_seconds)
+    )
     legacy = None
     if expected_legacy is not None:
         # Legacy daemons have no capability header. Bind the compatibility
@@ -484,11 +688,22 @@ def daemon_request(
             if expected_descriptor is _EXPECTED_DESCRIPTOR_UNSET
             else expected_descriptor
         )
+    if descriptor is None and unpinned and _startup.this_process_is_spawning():
+        ready = _startup.wait_for_starting_daemon(cap=wait_cap)
+        descriptor = ready[0] if ready is not None else read_descriptor()
     capability: str | None = None
     target_instance: str | None = None
     if descriptor is not None:
         if verify_health:
-            health = _fetch_health(descriptor.port)
+            probe_began = time.monotonic()
+            health = _startup.probe_health(
+                sys.modules[__name__], descriptor.port, _startup.health_probe_timeout(descriptor),
+            )
+            if health is None and unpinned:
+                ready = _startup.wait_for_starting_daemon(
+                    cap=wait_cap, already_waited=time.monotonic() - probe_began)
+                if ready is not None:
+                    descriptor, health = ready
             if health is None or not descriptor_matches_health(descriptor, health):
                 return None
             if method.upper() == "GET" and path == "/health":
@@ -509,7 +724,9 @@ def daemon_request(
         import urllib.error
         import urllib.request
         url = f"http://127.0.0.1:{port}{path}"
-        data = json.dumps(body).encode() if body else None
+        # An empty dict is still a body: handlers that declare one reject a
+        # bodiless POST with 422, which callers would read as "no daemon".
+        data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json"} if data else {}
         if capability is not None and target_instance is not None:
             headers["X-SLM-Daemon-Capability"] = capability
@@ -518,11 +735,28 @@ def daemon_request(
         # does not replace a dashboard user's profile-scoped authorization in
         # governed workspaces. The user opts in by supplying an explicit
         # session through the process environment (never logged or persisted).
-        user_session = os.environ.get("SLM_USER_SESSION", "").strip()
+        # The caller's own session: the one an HTTP MCP request carried when
+        # this runs inside the daemon on its behalf (the daemon's environment
+        # is not the caller's), else this process's SLM_USER_SESSION (OPS-16).
+        from superlocalmemory.core.caller_session import presented_session
+
+        user_session = presented_session()
         if user_session:
             headers["X-SLM-User-Session"] = user_session
+        from superlocalmemory.server.caller_workspace import current_owner_workspace_binding
+
+        owner_binding = current_owner_workspace_binding()
+        if owner_binding:
+            headers["X-SLM-Workspace-Binding"] = owner_binding
+        # The connection's agent name (SLM_AGENT_ID, or an /mcp/<agent> name
+        # vouched by the capability; a bare URL name is only a claim). The
+        # daemon believes it only alongside the capability (L-15).
+        from superlocalmemory.core.agent_attribution import forwarded_headers
+
+        headers.update(forwarded_headers(capability))
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        resp = urllib.request.urlopen(req, timeout=timeout_seconds)
+        from superlocalmemory.core import outbound_http  # never via a proxy
+        resp = outbound_http.urlopen(req, timeout=timeout_seconds)
         return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
         # A refusal is an answer, not a failure to get one. Returning None here
@@ -553,17 +787,19 @@ def daemon_request(
                 pass
             raise DaemonConflict(detail, code=code) from exc
         if exc.code == 404 and preserve_not_found:
-            code, message = "not_found", "daemon returned 404"
+            # The reason is read from the body (not_found_from): discarding
+            # it made "Memory not found" or "no such profile" look alike.
             try:
                 payload = json.loads(exc.read().decode())
-                if isinstance(payload, dict):
-                    err = payload.get("error", {})
-                    if isinstance(err, dict):
-                        code = str(err.get("code", code))
-                        message = str(err.get("message", message))
             except Exception:
-                pass
-            raise DaemonNotFound(exc.code, code, message, path) from exc
+                payload = None
+            raise not_found_from(payload, path) from exc
+        if exc.code == 422 and preserve_unprocessable:
+            raise _unprocessable(exc) from exc
+        if exc.code == 429 and preserve_rate_limited:
+            raise DaemonRateLimited("the daemon is busy") from exc
+        if exc.code >= 500 and preserve_server_error:
+            raise server_error_from(exc) from exc
         return None
     except Exception:
         return None
@@ -582,6 +818,55 @@ def _port_file_path():
 
 def _lock_file_path():
     return _LOCK_FILE or state_path("daemon.lock")
+
+
+def start_lock_is_held() -> bool:
+    """Is some OTHER process holding ``daemon.lock`` right now?
+
+    A non-mutating probe: tries the same non-blocking exclusive lock
+    ``ensure_daemon`` takes, and releases it at once if acquired. Used by
+    ``daemon_startup`` (4.1.22) to tell a cross-process start-in-progress
+    (the lock is held, but the other process has not written a descriptor
+    yet) apart from "nothing is starting" -- before this, that window had no
+    signal at all, so a caller fell into ``ensure_daemon``'s old flat 60 s
+    wait instead of the bounded start-wait budget, or a diagnosis call
+    reported "no daemon" while one was actually starting.
+    """
+    lock_file = _lock_file_path()
+    if not lock_file.exists():
+        return False
+    try:
+        lock_fd = open(lock_file, "w", encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            try:
+                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+            except (IOError, OSError):
+                return True
+            try:
+                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+            except (IOError, OSError):
+                pass
+            return False
+        else:
+            import fcntl
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (IOError, OSError):
+                return True
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except (IOError, OSError):
+                pass
+            return False
+    finally:
+        try:
+            lock_fd.close()
+        except Exception:
+            pass
 
 
 def _start_daemon_subprocess(*, port: int | None = None) -> bool:
@@ -611,7 +896,7 @@ def _start_daemon_subprocess(*, port: int | None = None) -> bool:
     # 4.1.14 audit: bind the port ensure_daemon probed — probing a custom
     # port and then spawning on the default opened the browser on a port
     # with no daemon (or refused a start the probe had cleared).
-    _target_port = port if port is not None else _DEFAULT_PORT
+    _target_port = port if port is not None else configured_port()
     if _has_tcp_listener(_target_port):
         logger.warning("daemon port %d is already owned; refusing a second start", _target_port)
         return False
@@ -655,32 +940,86 @@ def _start_daemon_subprocess(*, port: int | None = None) -> bool:
     daemon_env["SLM_DAEMON_CAPABILITY"] = bootstrap_descriptor.capability
     kwargs["env"] = daemon_env
 
-    with open(log_file, "a") as lf:
+    with open(log_file, "a", encoding="utf-8") as lf:
+        log_offset = lf.tell()
         proc = subprocess.Popen(cmd, stdout=lf, stderr=lf, **kwargs)
 
-    # Publish the exact child identity immediately so concurrent callers know
-    # this namespace is warming up. If the child won the race and already
-    # published the same instance as ready, never overwrite it with starting.
-    child_descriptor = replace(
-        bootstrap_descriptor,
-        pid=proc.pid,
-        process_create_time=process_create_time_for(proc.pid),
-        process_start_token=process_start_token_for(proc.pid),
-    )
-    current = read_descriptor()
-    if not (
-        current is not None
-        and current.instance_id == child_descriptor.instance_id
-        and current.pid == child_descriptor.pid
-        and current.state == "ready"
-    ):
-        write_descriptor(child_descriptor)
+    # The child writes the record itself once it owns the data folder. The
+    # parent never does: a child that loses a start race must not overwrite
+    # the record of the daemon that won it.
+    ready = _wait_for_daemon(timeout=60, proc=proc)
+    if not ready and (exit_code := proc.poll()) is not None:
+        from superlocalmemory.cli.daemon_start_error import startup_error
 
-    # One-release compatibility mirrors; never sufficient for ownership.
-    _pid_file_path().write_text(str(proc.pid))
-    _port_file_path().write_text(str(_target_port))
+        logger.error("%s", startup_error(log_file, log_offset, exit_code))
+    return ready
 
-    return _wait_for_daemon(timeout=60)
+
+def _wait_bounded_for_lock_holder() -> bool:
+    """Wait (bounded) for whoever holds ``daemon.lock`` to finish starting it.
+
+    4.1.22: the file-lock branch of ``ensure_daemon`` used to wait a flat
+    60 s here regardless of ``SLM_DAEMON_START_WAIT_S`` -- long enough to
+    outlive a host's own ~60 s tool-call timeout before this process ever
+    reported anything back. The holder has no descriptor to read yet in the
+    window right after it wins the lock, so ``wait_for_starting_daemon``
+    treats a currently-held lock as its own evidence of a start in progress
+    (see ``daemon.start_lock_is_held``).
+    """
+    _startup.wait_for_starting_daemon()
+    return is_daemon_running()
+
+
+def _data_folder_is_owned() -> bool:
+    """A daemon owns this data folder: it holds the lock or the record names it."""
+    if instance_lock_is_held():
+        return True
+    descriptor = read_descriptor()
+    return descriptor is not None and _descriptor_process_is_alive(descriptor)
+
+
+def _wait_while_owned() -> bool | None:
+    """Never spawn into an owned folder: wait the start budget for owned health.
+
+    True: the daemon answered. False: the budget ran out while it still owned
+    the folder. None: ownership ended first, so the caller may start one.
+    """
+    deadline = time.monotonic() + _startup.start_wait_budget()
+    while not is_daemon_running():
+        if not _data_folder_is_owned():
+            return None
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.25)
+    return True
+
+
+def _recovery_root():
+    from pathlib import Path
+
+    from superlocalmemory.core.config import SLMConfig
+
+    return Path(SLMConfig.load().db_path).parent
+
+
+def _recovery_state() -> tuple[str, str] | None:
+    """``(kind, message)`` when a restore forbids starting now, or None.
+
+    Kind is ``restore_running`` (wait) or ``recovery_needed`` (run the
+    recovery command). Unreadable settings never block.
+    """
+    try:
+        from superlocalmemory.server.backup_restore_txn import start_refusal
+
+        return start_refusal(_recovery_root())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _recovery_block() -> str | None:
+    """Why a restore forbids starting now, or None (unreadable settings never block)."""
+    found = _recovery_state()
+    return found[1] if found else None
 
 
 def ensure_daemon(*, port: int | None = None) -> bool:
@@ -704,6 +1043,11 @@ def ensure_daemon(*, port: int | None = None) -> bool:
     """
     if is_daemon_running():
         return True
+    blocked = _recovery_block()
+    if blocked:
+        # A restore left the stores mixed: never start on them (see backup_restore_txn).
+        logger.error("Not starting SuperLocalMemory: %s", blocked)
+        return False
     if (
         os.environ.get("SLM_TEST_ISOLATION") == "1"
         and os.environ.get("SLM_TEST_ALLOW_DAEMON_SPAWN") != "1"
@@ -712,13 +1056,24 @@ def ensure_daemon(*, port: int | None = None) -> bool:
             "pytest isolation blocked daemon spawn; use an owned daemon fixture",
         )
         return False
+    if _data_folder_is_owned():
+        waited = _wait_while_owned()
+        if waited is not None:
+            return waited
+    if _startup.this_process_is_spawning():
+        # 4.1.22: another thread of THIS process holds the start lock and is
+        # spawning. Never spawn twice; wait the bounded start budget only.
+        _startup.wait_for_starting_daemon()
+        return is_daemon_running()
 
     # File lock — prevent concurrent starts from multiple CLI/MCP calls
     lock_fd = None
+    spawn_mark = _startup.spawning()
+    marked = False
     try:
         lock_file = _lock_file_path()
         lock_file.parent.mkdir(parents=True, exist_ok=True)
-        lock_fd = open(lock_file, "w")
+        lock_fd = open(lock_file, "w", encoding="utf-8")
 
         # Cross-platform file locking
         if sys.platform == "win32":
@@ -726,20 +1081,29 @@ def ensure_daemon(*, port: int | None = None) -> bool:
             try:
                 msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
             except (IOError, OSError):
-                # Another process is starting the daemon — just wait for it
+                # Another process holds the start lock — wait the same
+                # bounded start budget a same-process contender gets (4.1.22;
+                # this used to be a flat 60 s wait that could outlive a
+                # host's own tool-call timeout).
                 lock_fd.close()
-                return _wait_for_daemon(timeout=60)
+                return _wait_bounded_for_lock_holder()
         else:
             import fcntl
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except (IOError, OSError):
                 lock_fd.close()
-                return _wait_for_daemon(timeout=60)
+                return _wait_bounded_for_lock_holder()
+        spawn_mark.__enter__()  # released in finally; see daemon_startup
+        marked = True
 
         # Re-check after acquiring lock (another process may have started it)
         if is_daemon_running():
             return True
+        if _data_folder_is_owned():
+            waited = _wait_while_owned()
+            if waited is not None:
+                return waited
 
         # v3.6.9 (#36): TCP-level check catches a systemd-started daemon that
         # has bound the port but hasn't written a PID file yet (e.g. different
@@ -756,6 +1120,15 @@ def ensure_daemon(*, port: int | None = None) -> bool:
         probe_port = port if port is not None else _get_port()
         if _has_tcp_listener(probe_port):
             occupant = _fetch_health(probe_port)
+            if occupant is not None and health_is_other_account(occupant):
+                logger.error(
+                    "SLM daemon will not start: port %d is used by SuperLocalMemory "
+                    "running for another account on this computer. Each account "
+                    "needs its own port: set SLM_DAEMON_PORT (for example %d) for "
+                    "this account, then run `slm restart`.",
+                    probe_port, probe_port + 1,
+                )
+                return False
             if occupant is not None and not _health_is_owned(
                 occupant, port=probe_port,
             ):
@@ -766,7 +1139,7 @@ def ensure_daemon(*, port: int | None = None) -> bool:
                 _stale_hint = ""
                 try:
                     _pid_text = (
-                        descriptor_path().with_name("daemon.pid").read_text().strip()
+                        descriptor_path().with_name("daemon.pid").read_text(encoding="utf-8").strip()
                     )
                     if _pid_text and str(occupant.get("pid")) == _pid_text:
                         _stale_hint = (
@@ -801,85 +1174,63 @@ def ensure_daemon(*, port: int | None = None) -> bool:
         logger.warning("ensure_daemon error: %s (run `slm doctor`)", exc)
         return False
     finally:
+        if marked:
+            spawn_mark.__exit__(None, None, None)
         if lock_fd:
             try:
                 lock_fd.close()
             except Exception:
                 pass
-            try:
-                _lock_file_path().unlink(missing_ok=True)
-            except Exception:
-                pass
+            # The lock file is never unlinked: removing a locked file lets a
+            # third starter lock a fresh inode while this one is still held.
 
 
-def _wait_for_daemon(timeout: int = 60) -> bool:
-    """Wait for matching owned health; liveness alone is never readiness."""
+def _wait_for_daemon(timeout: int = 60, *, proc: Popen | None = None) -> bool:
+    """Wait for owned health, stopping when our child and any race winner die."""
     for _ in range(timeout * 2):  # check every 0.5s
         time.sleep(0.5)
         descriptor = read_descriptor()
-        if descriptor is not None:
-            if not _descriptor_process_is_alive(descriptor):
-                continue
+        live = descriptor is not None and _descriptor_process_is_alive(descriptor)
+        if live:
             health = _fetch_health(descriptor.port)
             if health is not None and descriptor_matches_health(descriptor, health):
                 return True
             continue
-        if descriptor_path().exists():
+        if proc is not None and proc.poll() is not None:
+            # A competing child may have published between our read and poll.
+            # Its live record wins even when the child we spawned lost the race.
+            winner = read_descriptor()
+            if winner is None or not _descriptor_process_is_alive(winner):
+                # Another starter can own the namespace before it publishes
+                # daemon.json. A kernel-held instance lock is live ownership
+                # evidence; our exited child does not invalidate that winner.
+                if instance_lock_is_held():
+                    continue
+                return False
             continue
-        if _verified_legacy_health() is not None:
+        if (
+            descriptor is None and not descriptor_path().exists()
+            and _verified_legacy_health() is not None
+        ):
             return True
     return False
 
 
-_GENERIC_UNAVAILABLE = {
-    "reason": "unknown",
-    "message": "Owned daemon is unavailable; retry later.",
-    "hint": "Run `slm doctor`, then `slm restart` if it stays down.",
-}
-
-_LIVENESS_DIAGNOSIS = {
-    "process_exited": (
-        "daemon_process_exited",
-        "the recorded daemon process (pid {pid}) is no longer running",
-        "Start it again with `slm start`.",
-    ),
-    "process_zombie": (
-        "daemon_process_exited",
-        "the recorded daemon process (pid {pid}) has exited and is awaiting "
-        "reaping by its parent",
-        "Start it again with `slm start`.",
-    ),
-    "process_unreadable": (
-        "daemon_process_unreadable",
-        "the recorded daemon process (pid {pid}) could not be inspected; it "
-        "may belong to another user",
-        "Run `slm restart` to publish a fresh descriptor.",
-    ),
-    "start_token_mismatch": (
-        "pid_reused_by_another_process",
-        "pid {pid} is alive but is a different process than the daemon that "
-        "wrote {path}; the daemon exited and its pid was recycled",
-        "Run `slm restart` to publish a fresh descriptor.",
-    ),
-    "identity_mismatch": (
-        "daemon_identity_mismatch",
-        "pid {pid} did not match the process identity recorded in {path} and "
-        "the process on port {port} did not prove it owns that identity; the "
-        "recorded creation time can also diverge on its own if this machine's "
-        "clock is stepped (common under WSL2)",
-        "Run `slm restart` to publish a fresh descriptor.",
-    ),
-}
+# The diagnosis tables and body live in daemon_diagnosis (4.1.22); these names
+# stay importable from here.
+from superlocalmemory.cli.daemon_diagnosis import (  # noqa: E402, F401 - re-exported
+    _GENERIC_UNAVAILABLE,
+    _LIVENESS_DIAGNOSIS,
+)
 
 
 def describe_daemon_unavailability() -> dict[str, str]:
     """Explain *why* the owned daemon cannot be used, in actionable terms.
 
     "Owned daemon is unavailable" is true of a stopped daemon, a recycled PID,
-    an unreachable port and an identity mismatch alike, which left issue #104's
-    reporter with nothing to act on. This names the specific evidence instead.
-    Diagnosis is best-effort and never raises: a broken diagnosis must not
-    replace the caller's real error.
+    an unreachable port, an identity mismatch and a daemon still starting
+    alike, which left issue #104's reporter with nothing to act on. This names
+    the specific evidence instead. Best-effort and never raises.
     """
     try:
         return _describe_daemon_unavailability()
@@ -888,85 +1239,18 @@ def describe_daemon_unavailability() -> dict[str, str]:
 
 
 def _describe_daemon_unavailability() -> dict[str, str]:
-    path = descriptor_path()
-    descriptor = read_descriptor()
-    if descriptor is None:
-        if path.exists():
-            return {
-                "reason": "descriptor_unusable",
-                "message": (
-                    f"{path} is unreadable, malformed, or belongs to another "
-                    f"data root or user."
-                ),
-                "hint": "Run `slm restart` to publish a fresh descriptor.",
-            }
-        if _verified_legacy_health() is not None:
-            return {
-                "reason": "legacy_daemon_request_failed",
-                "message": (
-                    "a pre-descriptor daemon answered health but rejected or "
-                    "dropped the request."
-                ),
-                "hint": "Run `slm restart` to upgrade it to an owned daemon.",
-            }
-        return {
-            "reason": "no_daemon",
-            "message": f"no daemon is registered for this data root ({path} is absent).",
-            "hint": "Run `slm start`.",
-        }
+    from superlocalmemory.cli import daemon_diagnosis
 
-    alive, evidence = _resolve_descriptor_liveness(descriptor)
-    if not alive:
-        reason, template, hint = _LIVENESS_DIAGNOSIS.get(
-            evidence,
-            (
-                "daemon_identity_mismatch",
-                "pid {pid} did not match the identity recorded in {path}",
-                "Run `slm restart` to publish a fresh descriptor.",
-            ),
-        )
-        return {
-            "reason": reason,
-            "message": template.format(
-                pid=descriptor.pid, port=descriptor.port, path=path,
-            ) + ".",
-            "hint": hint,
-        }
-
-    health = _fetch_health(descriptor.port)
-    if health is None:
-        return {
-            "reason": "daemon_unreachable",
-            "message": (
-                f"the owned daemon (pid {descriptor.pid}) is running but did "
-                f"not answer http://127.0.0.1:{descriptor.port}/health within "
-                f"2s."
-            ),
-            "hint": (
-                "Check `slm logs` for a stalled request, or `slm restart` if "
-                "it stays unresponsive."
-            ),
-        }
-    if not descriptor_matches_health(descriptor, health):
-        return {
-            "reason": "port_owned_by_another_daemon",
-            "message": (
-                f"port {descriptor.port} answered health but with a different "
-                f"daemon identity than {path} records."
-            ),
-            "hint": (
-                "Another SuperLocalMemory instance holds that port. Stop it, "
-                "or set SLM_DAEMON_PORT to a free port."
-            ),
-        }
-    return {
-        "reason": "request_rejected",
-        "message": (
-            f"the owned daemon (pid {descriptor.pid}) is healthy but rejected "
-            f"or dropped this request."
-        ),
-        "hint": "Check `slm logs` for the failing request.",
-    }
+    found = _recovery_state()
+    if found:
+        kind, message = found
+        if kind == "restore_running":
+            return {"reason": kind, "message": message,
+                    "hint": "Wait for the restore to finish; it starts the service again."}
+        # The stores may be mixed: the fix is the recovery command, not a retry.
+        return {"reason": "recovery_needed", "message": message,
+                "hint": "Run `slm backup restore-safety-copy`, then `slm serve start`."}
+    return daemon_diagnosis.describe(sys.modules[__name__])
 
 
 def stop_daemon() -> bool:
@@ -1004,6 +1288,14 @@ def stop_daemon() -> bool:
     if descriptor is not None:
         if not _descriptor_process_is_alive(descriptor):
             return False
+        if descriptor.state == "starting":
+            # 4.1.22: a starting daemon cannot take /stop yet. Returning False
+            # here printed "not running" and left it running; wait for it.
+            # Bounded (never a flat hang forever) and configurable via
+            # SLM_DAEMON_STOP_WAIT_S -- a daemon wedged permanently in
+            # "starting" must not make this command hang indefinitely.
+            ready = _startup.wait_for_starting_daemon(seconds=_startup.stop_wait_budget())
+            descriptor = ready[0] if ready is not None else descriptor
         response = daemon_request(
             "POST",
             "/stop",

@@ -11,12 +11,13 @@ provides an unbiased correction to improve approximate similarity.
 Pipeline:
   1. Random projection: projected = R @ residual  (m x d matrix)
   2. Sign quantize: bits = (projected > 0)
-  3. Pack bits into bytes
+  3. Store a versioned residual norm followed by packed bits
 
 Query-time correction:
   1. Project query: q_proj = R @ query
   2. Unpack signs to +/-1
-  3. Estimate: correction = dot(q_proj, signs) / m
+  3. Estimate: sqrt(pi/(2*m)) * ||residual|| * dot(q_proj, signs)
+     (R = S/sqrt(m), so this is Equation 4's sqrt(pi/2)/m scaling.)
 
 HR-07: QJL is OPTIONAL -- system works without it.
 HR-08: No new pip dependencies (numpy + stdlib only).
@@ -32,12 +33,37 @@ License: AGPL-3.0-or-later
 
 from __future__ import annotations
 
+import logging
 import math
+import struct
+from functools import lru_cache
 
 import numpy as np
 from numpy.typing import NDArray
 
 from superlocalmemory.core.config import QJLConfig
+
+logger = logging.getLogger(__name__)
+_HEADER = struct.Struct("<4sd")
+_VERSION = b"QJL1"
+
+
+@lru_cache(maxsize=1)
+def _warn_legacy() -> None:
+    logger.warning("Legacy QJL signs lack residual magnitude; recompress to enable correction")
+
+
+def _unpack_payload(payload: bytes, m: int) -> tuple[float, bytes]:
+    size = (m + 7) // 8
+    if len(payload) == size:
+        _warn_legacy()
+        return 0.0, payload
+    if len(payload) != _HEADER.size + size:
+        raise ValueError("Invalid QJL payload length")
+    version, norm = _HEADER.unpack_from(payload)
+    if version != _VERSION or not math.isfinite(norm) or norm < 0:
+        raise ValueError("Invalid QJL payload header")
+    return norm, payload[_HEADER.size:]
 
 
 class QJLEncoder:
@@ -76,18 +102,25 @@ class QJLEncoder:
             residual: Difference between original and decoded embedding.
 
         Returns:
-            Packed bits as bytes (ceil(projection_dim / 8) bytes).
+            QJL1 header, float64 residual norm, and ceil(m/8) sign bytes.
         """
         self._ensure_projection(len(residual))
         projected = self._R @ residual
         bits = (projected > 0).astype(np.uint8)
-        return np.packbits(bits).tobytes()
+        norm = float(np.linalg.norm(residual))
+        if not math.isfinite(norm):
+            raise ValueError("QJL residual must be finite")
+        return _HEADER.pack(_VERSION, norm) + np.packbits(bits).tobytes()
 
     def estimate_correction(self, query: NDArray, qjl_bits: bytes) -> float:
         """Estimate inner product correction from QJL bits.
 
         This is the asymmetric estimator from the QJL paper:
-          correction = dot(R @ query, signs) / m
+          correction = sqrt(pi/(2*m)) * ||residual|| * dot(R @ query, signs)
+        See https://arxiv.org/html/2406.03482, Definition 3.1, Equation 4;
+        https://arxiv.org/html/2504.19874, Algorithm 2 stores ||residual||.
+        Sign-only legacy payloads cannot recover magnitude; skip correction
+        with a warning until their embeddings are recompressed.
 
         Args:
             query:     Query embedding.
@@ -98,10 +131,11 @@ class QJLEncoder:
         """
         self._ensure_projection(len(query))
         m = self._config.projection_dim
+        norm, packed = _unpack_payload(qjl_bits, m)
 
         # Unpack bits
         bits = np.unpackbits(
-            np.frombuffer(qjl_bits, dtype=np.uint8),
+            np.frombuffer(packed, dtype=np.uint8),
         )[:m]
 
         # Convert 0/1 to -1/+1
@@ -111,5 +145,5 @@ class QJLEncoder:
         q_proj = self._R @ query
 
         # Asymmetric estimator
-        correction = float(np.dot(q_proj, signs)) / m
+        correction = math.sqrt(math.pi / (2 * m)) * norm * float(np.dot(q_proj, signs))
         return correction

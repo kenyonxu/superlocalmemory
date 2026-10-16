@@ -13,13 +13,35 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from superlocalmemory.core import answer_check_state as _answer_check_state
+from superlocalmemory.core import config_upgrades as _config_upgrades
+from superlocalmemory.core import memory_kind_config as _memory_kind_config
+from superlocalmemory.core import model_catalog as _catalog
+from superlocalmemory.core.hopfield_config import HopfieldConfig, load_hopfield_config
+from superlocalmemory.core.memory_kind_config import MemoryKindConfig
 from superlocalmemory.infra.data_root import DynamicStatePath, canonical_data_root
 from superlocalmemory.storage.models import Mode
 
 logger = logging.getLogger(__name__)
+
+
+def _restrict_config_to_owner(path: Path) -> None:
+    """Make the (still empty) config file readable by its owner only.
+
+    config.json can hold API keys. POSIX: 0o600. Windows, where mode bits do
+    nothing: the owner-only access list. Best effort — failing to tighten it
+    must not stop settings from being saved — but never silent.
+    """
+    from superlocalmemory.infra.owner_only_acl import restrict_to_owner
+
+    try:
+        restrict_to_owner(path)
+    except OSError as exc:
+        logger.warning("could not make %s readable only by you: %s", path.name, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +95,8 @@ class EmbeddingConfig:
     model_name: str = "nomic-ai/nomic-embed-text-v1.5"
     dimension: int = 768
     # Provider: "" = auto-detect, "sentence-transformers", "ollama", "cloud",
-    # "openai" (V3.4.24: any OpenAI-compatible /v1/embeddings endpoint)
+    # "openai" (V3.4.24: any OpenAI-compatible /v1/embeddings endpoint),
+    # "slm-media" (the managed model environment's worker; see core/text_provider.py)
     provider: str = ""
     # Ollama settings (used when provider="ollama" or auto-detected)
     ollama_model: str = "nomic-embed-text"
@@ -131,6 +154,18 @@ class LLMConfig:
     def is_available(self) -> bool:
         return bool(self.provider)
 
+    @property
+    def has_custom_endpoint(self) -> bool:
+        """True when a deliberately configured non-Ollama endpoint exists (#112).
+
+        Mode C's quick-switch guard (PUT /api/v3/mode) needs to tell "nothing
+        is configured" apart from "a keyless custom endpoint — llama.cpp,
+        vLLM, LM Studio, or any other self-hosted OpenAI-compatible server —
+        is already set up". Ollama's endpoint is excluded on purpose: it is
+        Mode B's default, never "my own endpoint" for Mode C by itself.
+        """
+        return bool(self.api_base) and self.provider not in ("", "ollama")
+
 
 # ---------------------------------------------------------------------------
 # Channel Weights
@@ -147,6 +182,9 @@ class ChannelWeights:
     temporal: float = 1.0
     spreading_activation: float = 1.0  # Phase 3: 5th channel (BC-08: default value)
     hopfield: float = 0.8  # Phase G: 6th channel (Hopfield associative memory)
+    # Pictures and pages. Not in as_dict(): the weight joins a recall only when
+    # the picture channel ran, so a recall without pictures is unchanged.
+    media: float = 1.0
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -236,6 +274,17 @@ class ScopeConfig:
 # Encoding Config
 # ---------------------------------------------------------------------------
 
+def _load_coverage_settings(encoding: "EncodingConfig", section: object) -> None:
+    """The two coverage limits from config.json; anything but a whole number
+    of 0 or more keeps the default."""
+    if not isinstance(section, dict):
+        return
+    for key in ("coverage_facts_per_memory", "coverage_backfill_per_memory"):
+        value = section.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            setattr(encoding, key, value)
+
+
 @dataclass
 class EncodingConfig:
     """Configuration for the encoding (memory creation) pipeline."""
@@ -243,6 +292,11 @@ class EncodingConfig:
     # Fact extraction
     chunk_size: int = 10           # Conversation turns per extraction chunk
     max_facts_per_chunk: int = 10  # V3.3.11: increased from 5 to preserve more details
+    # 4.2.5: verbatim facts per memory for sentences extraction missed (0 = off)
+    coverage_facts_per_memory: int = 40
+    # 4.2.5: the same, for memories saved before it (the daemon backfill);
+    # config.json "encoding" turns it on, e.g. 10
+    coverage_backfill_per_memory: int = 0  # off until measured on a large store
     min_fact_confidence: float = 0.3
 
     # Entity resolution
@@ -291,6 +345,41 @@ class RetrievalConfig:
     # relevant facts before reranking. See bench-v342-locomo.md.
     use_cross_encoder: bool = True
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"
+    # 4.1.18: a separate decision on whether a recall actually answers the
+    # question (retrieval/sufficiency.py). Exactly one backend runs, never two:
+    #   "laya" — local Laya-MLX (Apple Silicon); memory text stays on the machine.
+    #   "jev"  — hosted Jev; needs a key and ``sufficiency_jev_consent``; the
+    #            question and the top memories are sent to the chosen provider.
+    #   "off"  — no answer check.
+    #   "auto" — "laya" when it is installed and supported, otherwise "off".
+    #            "auto" NEVER resolves to "jev": data leaves the machine only
+    #            when someone chose that.
+    # Switching takes effect without a restart (engine_wiring.attach_
+    # sufficiency_judge): the running check stops before the next one starts.
+    sufficiency_judge: str = "auto"
+    # An interpreter with laya-mlx installed. "" = find one: the SLM-managed
+    # install when it is ready, else SLM's own (the ``laya`` extra). When set
+    # it is used or the check is off — never silently swapped for another.
+    sufficiency_python: str = ""
+    # A Hugging Face repo id, or a local snapshot folder. Responses name the
+    # weights as repo@revision, never by their path on this machine.
+    sufficiency_model: str = "aac6fef/laya-mlx"
+    # Where the Laya weights are cached. "" = the Hugging Face default.
+    sufficiency_hf_home: str = ""
+    sufficiency_timeout_s: float = 1.5
+    # Hosted Jev. The key is NOT here: it lives in its own owner-only file
+    # (core/judge_keys.py) so no config dump can ever carry it.
+    sufficiency_jev_provider: str = "typesafe"  # "typesafe" | "openrouter"
+    sufficiency_jev_consent: bool = False
+    sufficiency_jev_timeout_s: float = 2.0
+    # Optional, inside the Jev option only: the same single request also asks
+    # Jev to reorder the top ``sufficiency_jev_rerank_k`` results (clamped to
+    # 5..30). It sends more memories than the answer check alone, so it has its
+    # own consent, and both must be the boolean True. Laya never reorders.
+    # Turning Jev off, removing its key or withdrawing either consent clears both.
+    sufficiency_jev_rerank: bool = False
+    sufficiency_jev_rerank_k: int = 20
+    sufficiency_jev_rerank_consent: bool = False
     # "" = PyTorch (~500MB stable), "onnx" = ONNX (leaks on ARM64 CoreML),
     # "openai"/"remote" = v3.8.12 (issue #105) OpenAI-compatible /v1/rerank
     # endpoint (llama-server, TEI, Infinity, vLLM, Cohere-shaped services).
@@ -311,9 +400,10 @@ class RetrievalConfig:
     # When persisted for backward compatibility, config.json is atomically
     # forced to owner-only mode 0600 by save().
     cross_encoder_api_key: str = ""
-    # Per-request read budget for the remote reranker. Recall is interactive,
-    # so this stays tight: a slow reranker degrades to fusion scores rather
-    # than holding the recall open.
+    # Per-request read budget for the remote reranker. It can only TIGHTEN the
+    # per-call limit: each rerank call, retries included, is held to 1 s of
+    # wall clock (SLM_REMOTE_RERANK_DEADLINE_S allows longer), so a slow or
+    # hung reranker degrades to fusion order rather than holding recall open.
     cross_encoder_timeout_seconds: float = 15.0
 
     # v3.9.x (issue #112): plain-HTTP trust for private-LAN reranker endpoints.
@@ -389,7 +479,25 @@ class RetrievalConfig:
     # semantic >= 0.85 or bm25 > 0. The discriminator is earned channel evidence.
     # Env kill-switch: SLM_RECALL_NO_FLOOR=1 disables without release.
     evidence_floor_enabled: bool = True
-    min_semantic_evidence: float = 0.60   # Minimum cosine similarity to keep a result
+    # Minimum RAW cosine for meaning-only evidence (the channel stores (cos+1)/2; the
+    # floor is converted once in retrieval.time_window.has_primary_evidence). Measured
+    # 2026-10-11 on a 26k-fact store: unrelated text peaks at raw 0.61, true answers
+    # start at 0.62. Keyword, entity and time evidence pass regardless of this value.
+    min_semantic_evidence: float = 0.60
+    # 4.1.25: the answer-support gate (retrieval/support_gate.py). When no
+    # recalled memory supports the question, recall returns nothing with a
+    # plain reason (``show_weak`` shows the weak matches). Env kill-switch:
+    # SLM_RECALL_NO_SUPPORT_GATE=1 disables it without a release.
+    answer_support_gate: bool = True
+    # 4.1.25: query rewriting for the keyword channel only (retrieval/
+    # query_rewrite.py): base forms and entity aliases in every mode; in Mode B
+    # optionally a few keywords from the LOCAL model, bounded by the timeout and
+    # failing open. The gate and the cross-encoder always read the original
+    # question, so a rewrite can never make nonsense answer.
+    query_rewrite: bool = True
+    query_rewrite_llm: bool = False
+    query_rewrite_timeout_s: float = 0.8
+    media_min_score: float = 0.30   # Picture similarity that counts as evidence
 
     # v3.6.6: Recall output budget — protect consuming agents from 585KB responses.
     recall_per_fact_max_chars: int = 2400  # ~600 tokens; head 70% + tail 30%
@@ -414,6 +522,49 @@ class RetrievalConfig:
     # this window that zero is read as "not computed yet", not as "unrelated".
     write_recency_floor_enabled: bool = True
     write_recency_floor_minutes: float = 60.0
+
+    # 4.1.19: kind-aware ordering (retrieval/kind_aware.py). False = recall's
+    # order is exactly what it is without the pass. The boost is how far a
+    # memory whose kind matches the question may pass a neighbour with a higher
+    # ranking key, as a fraction of its own key; clamped to [0, 0.5], and a
+    # non-number reads as 0.15. Only the boolean False turns the pass off.
+    kind_aware: bool = True
+    kind_aware_boost: float = 0.15
+    # 4.1.20: the Answer Check tab's history — outcomes and timings of recent
+    # checks (never questions or memories), kept on this machine. Days clamp to
+    # 1..365, rows per profile to 1,000..10,000 (a data export carries at most
+    # 10,000 rows per table). Names must not start with ``sufficiency_``.
+    answer_check_history: bool = True
+    answer_check_history_days: int = 30
+    answer_check_history_max_rows: int = 10_000
+
+    def __post_init__(self) -> None:
+        from superlocalmemory.retrieval.kind_aware import validated_settings
+
+        enabled, boost = validated_settings(self.kind_aware, self.kind_aware_boost)
+        if (enabled, boost) != (self.kind_aware, self.kind_aware_boost):
+            logger.warning("retrieval.kind_aware=%r, kind_aware_boost=%r is out of range; "
+                           "using %r, %r", self.kind_aware, self.kind_aware_boost,
+                           enabled, boost)
+        self.kind_aware, self.kind_aware_boost = enabled, boost
+
+    def reranker_enabled(self) -> bool:
+        """Whether the cross-encoder reranker should run right now.
+
+        `use_cross_encoder` is the user's persisted choice (config.json,
+        ``slm reconfigure``). ``SLM_RERANKER_ENABLED`` is a process-only
+        override for RAM-constrained shared hosts (the Cursor/Grok "lite" bot
+        profile) — read here, at the point of use, rather than written into
+        this field, so it can never leak into config.json through a later
+        ``SLMConfig.save()``. Unset env = the persisted value, unchanged.
+        Every caller that decides or *reports* whether the reranker is active
+        goes through this one method, so the dashboard/doctor/MCP status can
+        never disagree with what engine_wiring actually built.
+        """
+        override = os.environ.get("SLM_RERANKER_ENABLED")
+        if override is not None:
+            return override.strip().lower() not in ("0", "false", "no", "off")
+        return self.use_cross_encoder
 
 
 # ---------------------------------------------------------------------------
@@ -446,13 +597,23 @@ class MathConfig:
     ebbinghaus_langevin_coupling_enabled: bool = False
 
     # Sheaf (at encoding time, NOT retrieval)
-    sheaf_at_encoding: bool = True
+    # 4.1.18: off by default. A measured A/B on a real store showed it changes
+    # no recall answer, while it runs on every store and every maintenance
+    # pass. This one flag gates all three places it is used: the store-time
+    # check, the maintenance pass, and Mode A contradiction detection in the
+    # temporal validator (which finds none without it). True turns it back on.
+    sheaf_at_encoding: bool = False
     sheaf_contradiction_threshold: float = 0.45
     # Max edges to check per fact during sheaf consistency.
     # At 18K+ edges, coboundary computation becomes O(N*dim^2) and hangs.
     # Facts with more edges than this skip sheaf check (still get contradiction
     # detection via consolidator UPDATE/SUPERSEDE path).
     sheaf_max_edges_per_check: int = 200
+    # Every config saved before 4.1.18 wrote sheaf_at_encoding: true because
+    # save() writes the whole section — a stored default, not a choice. A
+    # section without this marker is read as that old default and switched
+    # off once; a section with it is respected, so turning it back on sticks.
+    sheaf_default_reviewed: bool = True
 
     # Rate-Distortion (production only, disabled for benchmarks)
 
@@ -578,45 +739,6 @@ class ForgettingConfig:
 
 
 @dataclass(frozen=True)
-class HopfieldConfig:
-    """Modern Continuous Hopfield Network configuration (Ramsauer et al., 2020).
-
-    Energy: E(xi) = -log(sum_i exp(B * xi' * x_i)) + B/2 * ||xi||^2
-    Update: xi_new = X' @ softmax(B * X @ xi)
-    Beta:   B = 1/sqrt(d) where d = dimension
-    Storage capacity: O(e^{d/2}) -- exponential in dimension.
-    """
-
-    enabled: bool = True
-    dimension: int = 768
-    max_iterations: int = 1
-    convergence_epsilon: float = 1e-6
-    prefilter_threshold: int = 10_000
-    # How many candidates the index hands to this stage. This stage decides final
-    # membership, so a fact ranked past this number by the index never reaches it
-    # and can never be returned — the size of this pool is a direct limit on which
-    # memories are reachable at all.
-    #
-    #
-    # Chosen by measurement against the 2 s recall ceiling, on a 517 MB store:
-    #   150 -> p95   998 ms, 0 channel timeouts
-    #   300 -> p95 1054 ms, 0
-    #   500 -> p95 1140 ms, 0      <- here: 3.3x the reachability of 150 for +142 ms
-    #   750 -> p95 1278 ms, 0
-    #  1000 -> p95 1947-2737 ms, 2-25 timeouts
-    #
-    # 1000 is excluded twice over: it breaches the ceiling, and a channel that
-    # misses its deadline contributes nothing to fusion — so whether it lands
-    # varies with machine load and the same question stops returning the same
-    # answer. 500 keeps ~860 ms of headroom, which is several times the observed
-    # run-to-run variance, and stays clear of the region where the cost curve
-    # turned non-linear for reasons that were never explained.
-    prefilter_candidates: int = 500
-    skip_threshold: int = 100_000
-    cache_ttl_seconds: float = 60.0
-
-
-@dataclass(frozen=True)
 class ReaperConfig:
     """Process health & stale reaper configuration (Phase H0).
 
@@ -668,6 +790,8 @@ class QuantizationConfig:
     qjl: QJLConfig = field(default_factory=QJLConfig)
     default_bit_width: int = 32
     eap_enabled: bool = True
+    #: Inert: no code reclaims vectors, so False changes nothing (EAP says so when it runs).
+    #: Kept so a saved config that names it still loads.
     keep_float32_backup: bool = True
     auto_compact_interval_hours: int = 6
     polar_search_penalty: float = 0.97  # V3.3.8: 0.95→0.97, TurboQuant has lower MSE
@@ -1189,6 +1313,9 @@ class SLMConfig:
     health: HealthConfig = field(default_factory=HealthConfig)
     # v3.8.4-G: Graph thinning parameters (#84)
     graph_pruning: GraphPruningConfig = field(default_factory=GraphPruningConfig)
+    # 4.1.19: memory kinds. Stored in memory_kinds.json (one file for every
+    # mode, like the answer check), see core/memory_kind_config.py.
+    memory_kinds: MemoryKindConfig = field(default_factory=MemoryKindConfig)
 
     # v3.4.3: Daemon configuration
     daemon_idle_timeout: int = 0       # 0 = 24/7 (no auto-kill). >0 = seconds before auto-kill.
@@ -1261,7 +1388,7 @@ class SLMConfig:
             try:
                 import json as _json
                 _disk_mode = str(
-                    _json.loads(path.read_text()).get("mode", "")
+                    _json.loads(path.read_text(encoding="utf-8")).get("mode", "")
                 ).lower()
                 _active_mode = cls.read_current_mode(path.parent)
                 if _disk_mode and _active_mode and _disk_mode != _active_mode:
@@ -1280,7 +1407,7 @@ class SLMConfig:
 
         import json
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
             # An already-corrupt/truncated config.json must NOT brick every `slm`
             # call — degrade to the Mode-A default and warn rather than raise.
@@ -1302,7 +1429,7 @@ class SLMConfig:
                 )
             except Exception:
                 raw_base_dir = _runtime_base
-        config = cls.for_mode(
+        config = cls._mode_template(
             mode,
             llm_provider=llm_data.get("provider", ""),
             llm_model=llm_data.get("model", ""),
@@ -1314,6 +1441,8 @@ class SLMConfig:
             embedding_deployment=emb_data.get("deployment_name", ""),
             embedding_model_name=emb_data.get("model_name", ""),
             embedding_dimension=int(emb_data.get("dimension", 0) or 0),
+            embedding_ollama_model=emb_data.get("ollama_model", ""),
+            embedding_ollama_base_url=emb_data.get("ollama_base_url", ""),
             base_dir=raw_base_dir,
         )
         # Preserve Ollama-specific embedding settings from JSON (for_mode()
@@ -1349,6 +1478,8 @@ class SLMConfig:
             config.scale_auto_promote_min_edges = 100_000
 
         # V3.3 config fields (additive — defaults work if missing from JSON)
+        config.hopfield = load_hopfield_config(data.get("hopfield"))
+        _load_coverage_settings(config.encoding, data.get("encoding"))
         fg = data.get("forgetting", {})
         if fg:
             config.forgetting = ForgettingConfig(**{
@@ -1430,6 +1561,12 @@ class SLMConfig:
                 k: v for k, v in rt.items()
                 if k in RetrievalConfig.__dataclass_fields__
             })
+        # 4.1.18: the answer check's settings have one home, whichever config
+        # file this is (config.json or a mode_<x>.json) — see
+        # core/answer_check_state.py. Nothing stored yet = this file's values.
+        config.retrieval = _answer_check_state.overlay_safely(config.retrieval, path.parent)
+        config.memory_kinds = _memory_kind_config.load_memory_kind_config(
+            path.parent, data.get("memory_kinds"))
 
         # 4.1.0 (#124): restore the two sections save() now writes. This runs
         # AFTER for_mode() has applied its presets, so a value someone chose
@@ -1450,6 +1587,7 @@ class SLMConfig:
                 rng = fields.get("langevin_weight_range")
                 if isinstance(rng, list):
                     fields["langevin_weight_range"] = tuple(rng)
+                fields = _config_upgrades.sheaf_reviewed(mth, fields, path.parent)
                 config.math = MathConfig(**fields)
             except (TypeError, ValueError) as exc:
                 logger.warning(
@@ -1589,6 +1727,7 @@ class SLMConfig:
         # that clone a config via replace() will lose unknown-key preservation,
         # which is acceptable: the primary contract is load→save round-trip.
         config._raw_preserved: dict = dict(data)  # type: ignore[attr-defined]
+        _answer_check_state.remember_baseline(config)
         return config
 
     def save(
@@ -1617,7 +1756,7 @@ class SLMConfig:
         existing = {}
         if path.exists():
             try:
-                existing = json.loads(path.read_text())
+                existing = json.loads(path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -1654,11 +1793,16 @@ class SLMConfig:
                 "api_endpoint": self.embedding.api_endpoint,
                 "api_key": self.embedding.api_key,
                 "deployment_name": self.embedding.deployment_name,
+                "ollama_model": self.embedding.ollama_model,
+                "ollama_base_url": self.embedding.ollama_base_url,
             },
             # Persist the complete retrieval contract.  Saving only the
             # cross-encoder subset silently reset channel limits, evidence
             # floors, and agentic settings on the next mode/provider change.
-            "retrieval": asdict(self.retrieval),
+            # The answer check's settings are the exception once they have
+            # their own file (core/answer_check_state.retrieval_to_save).
+            "retrieval": _answer_check_state.retrieval_to_save(
+                self, path.parent, mode_change=mode_change),
         }
 
         # V3.4.11: Persist evolution config (C-CONFIGSAVE fix)
@@ -1739,6 +1883,7 @@ class SLMConfig:
         # restart and then silently reverted to the dataclass default, with
         # nothing said. Reported as #124.
         for _section, _obj in (
+            ("hopfield", self.hopfield),
             ("forgetting", self.forgetting),
             ("quantization", self.quantization),
             ("sagq", self.sagq),
@@ -1746,7 +1891,11 @@ class SLMConfig:
             ("math", self.math),
             ("channel_weights", self.channel_weights),
         ):
+            # Saving to a new path has no on-disk section yet: start from the
+            # section this config was loaded with so unknown keys survive.
             _base = existing.get(_section)
+            if not isinstance(_base, dict):
+                _base = (getattr(self, "_raw_preserved", None) or {}).get(_section)
             _merged = dict(_base) if isinstance(_base, dict) else {}
             _merged.update(asdict(_obj))
             data[_section] = _merged
@@ -1779,6 +1928,7 @@ class SLMConfig:
         )
         _tmp = Path(_tmp_name)
         try:
+            _restrict_config_to_owner(_tmp)
             with _os.fdopen(_fd, "w", encoding="utf-8") as _handle:
                 json.dump(data, _handle, indent=2)
                 _handle.write("\n")
@@ -1800,25 +1950,25 @@ class SLMConfig:
         return {
             "openai": {
                 "base_url": "https://api.openai.com/v1",
-                "model": "gpt-4.1-mini",
-                "embedding_model": "text-embedding-3-large",
+                "model": _catalog.OPENAI_LLM,
+                "embedding_model": _catalog.OPENAI_EMBEDDING,
                 "env_key": "OPENAI_API_KEY",
             },
             "anthropic": {
                 "base_url": "https://api.anthropic.com",
-                "model": "claude-sonnet-4-6",
+                "model": _catalog.ANTHROPIC_LLM,
                 "embedding_model": "",
                 "env_key": "ANTHROPIC_API_KEY",
             },
             "ollama": {
                 "base_url": "http://localhost:11434",
-                "model": "llama3.2",
+                "model": _catalog.DEFAULT_LOCAL_LLM,
                 "embedding_model": "nomic-embed-text",
                 "env_key": "",
             },
             "openrouter": {
                 "base_url": "https://openrouter.ai/api/v1",
-                "model": "openai/gpt-4.1-mini",
+                "model": _catalog.DEFAULT_HOSTED_LLM,
                 "embedding_model": "",
                 "env_key": "OPENROUTER_API_KEY",
             },
@@ -1830,7 +1980,22 @@ class SLMConfig:
         return cls.for_mode(Mode.A)
 
     @classmethod
-    def for_mode(
+    def for_mode(cls, mode: Mode, base_dir: Path | None = None, **overrides) -> SLMConfig:
+        """Create config with mode-appropriate defaults.
+
+        4.1.18: the answer check's settings are the person's, not the mode's,
+        so the template carries what is stored for them (core/answer_check_
+        state.py). A dashboard mode switch builds the new engine from this
+        template's ``retrieval``; without this it reset the check to defaults.
+        """
+        config = cls._mode_template(mode, base_dir, **overrides)
+        config.retrieval = _answer_check_state.overlay_safely(config.retrieval, config.base_dir)
+        config.memory_kinds = _memory_kind_config.load_memory_kind_config(config.base_dir)
+        _answer_check_state.remember_baseline(config)
+        return config
+
+    @classmethod
+    def _mode_template(
         cls,
         mode: Mode,
         base_dir: Path | None = None,
@@ -1845,8 +2010,10 @@ class SLMConfig:
         embedding_deployment: str = "",
         embedding_model_name: str = "",
         embedding_dimension: int = 0,
+        embedding_ollama_model: str = "",
+        embedding_ollama_base_url: str = "",
     ) -> SLMConfig:
-        """Create config with mode-appropriate defaults."""
+        """The mode's presets alone — nothing read from disk."""
         # resolve base dir via slm_home() at call time when base_dir is not explicit.
         if base_dir is None:
             try:
@@ -1868,6 +2035,14 @@ class SLMConfig:
                     provider="openai",
                     api_endpoint=embedding_endpoint,
                     api_key=embedding_key,
+                )
+            elif _a_provider == "ollama":
+                _a_emb = EmbeddingConfig(
+                    model_name="nomic-ai/nomic-embed-text-v1.5",
+                    dimension=768,
+                    provider=_a_provider,
+                    ollama_model=embedding_ollama_model or "nomic-embed-text",
+                    ollama_base_url=embedding_ollama_base_url or "http://localhost:11434",
                 )
             else:
                 _a_emb = EmbeddingConfig(
@@ -1913,6 +2088,14 @@ class SLMConfig:
                     api_endpoint=embedding_endpoint,
                     api_key=embedding_key,
                 )
+            elif _b_provider == "ollama":
+                _b_emb = EmbeddingConfig(
+                    model_name="nomic-ai/nomic-embed-text-v1.5",
+                    dimension=768,
+                    provider=_b_provider,
+                    ollama_model=embedding_ollama_model or "nomic-embed-text",
+                    ollama_base_url=embedding_ollama_base_url or "http://localhost:11434",
+                )
             else:
                 _b_emb = EmbeddingConfig(
                     model_name="nomic-ai/nomic-embed-text-v1.5",
@@ -1925,7 +2108,7 @@ class SLMConfig:
                 embedding=_b_emb,
                 llm=LLMConfig(
                     provider=llm_provider or "ollama",
-                    model=llm_model or "llama3.2",
+                    model=llm_model or _catalog.DEFAULT_LOCAL_LLM,
                     api_base=llm_api_base or "http://localhost:11434",
                     api_key=llm_api_key or "",
                 ),
@@ -1939,21 +2122,21 @@ class SLMConfig:
         # Mode C — FULL POWER, UNRESTRICTED
         # Don't carry over local-only providers (ollama) to cloud mode
         c_provider = llm_provider if llm_provider not in ("ollama", "") else "openrouter"
-        c_model = llm_model if llm_provider not in ("ollama", "") else "anthropic/claude-sonnet-4"
+        c_model = llm_model if llm_provider not in ("ollama", "") else _catalog.DEFAULT_HOSTED_LLM
         # V3.4.24: If user chose "openai" provider, honour it in Mode C too.
         _c_emb_provider = embedding_provider or ""
         if _c_emb_provider == "openai" and embedding_endpoint:
             _c_emb = EmbeddingConfig(
-                model_name=embedding_model_name or "text-embedding-3-large",
-                dimension=embedding_dimension or 3072,
+                model_name=embedding_model_name or _catalog.OPENAI_EMBEDDING,
+                dimension=embedding_dimension or _catalog.OPENAI_EMBEDDING_DIMENSION,
                 provider="openai",
                 api_endpoint=embedding_endpoint,
                 api_key=embedding_key,
             )
         elif embedding_endpoint:
             _c_emb = EmbeddingConfig(
-                model_name=embedding_model_name or "text-embedding-3-large",
-                dimension=embedding_dimension or 3072,
+                model_name=embedding_model_name or _catalog.OPENAI_EMBEDDING,
+                dimension=embedding_dimension or _catalog.OPENAI_EMBEDDING_DIMENSION,
                 provider=_c_emb_provider,
                 api_endpoint=embedding_endpoint,
                 api_key=embedding_key,
@@ -2098,6 +2281,12 @@ class SLMConfig:
         old_mode = old_config.mode.value.lower()
         new_mode_val = _M(new_mode.lower())
 
+        # 4.1.18: the answer check's settings get their one home before any
+        # per-mode file is read, seeded from what is in effect now — so the
+        # target mode's copy can never bring back a withdrawn consent.
+        _answer_check_state.ensure(
+            _base, seed=lambda: _answer_check_state.snapshot(old_config.retrieval))
+
         # 1. Save current config to its per-mode file (preserve customizations)
         if old_mode != new_mode.lower():
             old_path = cls._mode_config_path(_base, old_config.mode)
@@ -2130,7 +2319,7 @@ class SLMConfig:
                     new_config,
                     llm=LLMConfig(
                         provider="ollama",
-                        model="llama3.2",
+                        model=_catalog.DEFAULT_LOCAL_LLM,
                         api_base="http://localhost:11434",
                     ),
                 )
@@ -2139,7 +2328,7 @@ class SLMConfig:
                     new_config,
                     llm=LLMConfig(
                         provider="openrouter",
-                        model="anthropic/claude-sonnet-4",
+                        model=_catalog.DEFAULT_HOSTED_LLM,
                     ),
                 )
 
@@ -2173,16 +2362,35 @@ class SLMConfig:
 
         legacy = _base / "config.json"
         if not legacy.exists():
-            # No config at all — write defaults and current_mode
+            # No config at all — write defaults and current_mode.
+            #
+            # This is the path every fresh install (and every CI runner,
+            # which never has a prior config.json) takes on first boot.
+            # It used to default to Mode B — pointed at
+            # http://localhost:11434 for both the LLM and embeddings — with
+            # no reachability check (LLMBackbone.is_available() always
+            # returns True for the "ollama" provider; see llm/backbone.py).
+            # A machine with no local model silently got Mode B anyway,
+            # breaking Mode A's own promise ("no language model runs") and,
+            # on a machine where nothing answers at all on 11434, leaving
+            # enrichment unable to ever reach a terminal "complete" state.
+            # Every other zero-config default in this module (SLMConfig.
+            # default(), SLMConfig.load() with no file, the setup wizard's
+            # non-interactive path) is Mode A; this one now matches them.
             from superlocalmemory.storage.models import Mode as _M
-            _def = cls.for_mode(_M.B, base_dir=_base)
+            _def = cls.for_mode(_M.A, base_dir=_base)
+            # First run only, off until the memory check passes (core/one_model_default.py).
+            from superlocalmemory.core.one_model_default import apply_first_run_default
+            _one_model = apply_first_run_default(_def, _base)
             _def.save(legacy)
-            cls.write_current_mode("b", _base)
+            cls.write_current_mode("a", _base)
             for _m in (_M.A, _M.B, _M.C):
                 _mp = cls._mode_config_path(_base, _m)
                 if not _mp.exists():
                     try:
                         _mc = cls.for_mode(_m, base_dir=_base)
+                        if _one_model and _m == _M.A:
+                            _mc.embedding = _def.embedding
                         _mc.save(_mp)
                     except Exception:
                         pass

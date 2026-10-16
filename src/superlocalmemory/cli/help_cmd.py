@@ -58,7 +58,7 @@ slm compress — Compression control
 COMPRESSION SAFETY WARNING
 ---------------------------
   Safe mode (default):
-    - Code/JSON compression: extractive, structure-preserving, lossless.
+    - Code passes through byte-for-byte; JSON is minified value-preserving.
     - Prose compression: DISABLED in safe mode. Enable manually.
     - CCR: DISABLED by default. Originals stored for reversible retrieval.
     - This mode is production-safe for all use cases.

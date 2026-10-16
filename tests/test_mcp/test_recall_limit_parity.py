@@ -18,10 +18,8 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import inspect
-from argparse import Namespace
 from unittest.mock import MagicMock
 
-import pytest
 
 
 # ---------------------------------------------------------------------------

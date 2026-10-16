@@ -1,15 +1,13 @@
 # Security Policy
 
-## SuperLocalMemory V4 Security
+## SuperLocalMemory Security
 
 ### Supported Versions
 
 | Version | Supported |
 |:--------|:---------:|
-| 4.0.x | Yes |
-| 3.8.x | Security fixes only |
-| 3.7.x | Security fixes only |
-| < 3.7 | No |
+| 4.2.x | Yes (current line; fixes ship in the next 4.2 release, so upgrade to the latest) |
+| 4.1.x and older | No (upgrade to 4.2.x) |
 
 ### Reporting Vulnerabilities
 
@@ -30,7 +28,7 @@ We will respond within 48 hours and provide a fix timeline within 7 days.
 #### Mode A (Zero-LLM, local core)
 - The core store/recall path can run locally at the configured SLM data root
   (default: `~/.superlocalmemory/`)
-- The local core has no telemetry, analytics, or phone-home behavior
+- In Mode A the store and recall path sends no memory content off this computer, and SLM collects no usage analytics from it; the optional features listed below are the exceptions
 - Configured remote embedding, remote reranking, connectors, cloud backups, or
   model downloads can make network calls during store/recall or related jobs;
   assess those explicit choices before treating an installation as local-only
@@ -52,27 +50,99 @@ controls in addition to the session: `Origin` must match the daemon,
 (`src/superlocalmemory/server/routes/backup.py`, `server/origin.py`,
 `server/rbac_enforce.py`). See `docs/rbac-teams.md`.
 
+Every read that returns memory needs READ on the workspace when
+login is required, including the dashboard search and memory chat (sent as
+POST) and the mesh read routes (`GET /mesh/*`). This computer's own agents
+(daemon capability) and mesh nodes (shared secret) are programs, not people,
+and keep reading without a user session; a mesh node reads only the workspace
+the node serves, whatever `?profile=` it asks for.
+
+#### Network access
+
+**Another computer must sign in to read.** When the daemon is bound to a
+network address, a request from another computer is refused (`401
+remote_auth_required`) before any route runs unless it presents the SLM API
+key (`X-SLM-API-Key`), a team-account session, the daemon capability, the mesh
+shared secret (mesh routes only), or comes from an address you allowlisted for
+LAN use (`SLM_REMOTE=1` with `SLM_MCP_ALLOWED_HOSTS`). This covers reads as
+well as writes, and the dashboard WebSocket. Only the dashboard page itself, its static files and
+`/health` are served without them; `/mcp` has its own check (below). The
+install token is not accepted from another computer.
+
+**Remote access.** Off by default. When enabled with `slm remote
+enable`, SLM opens a second listener that only speaks TLS and only serves
+`/mcp` and `/health`. The dashboard, the HTTP API and the internal hook
+endpoints are never reachable through it, and every caller on it is treated as
+remote, even from `127.0.0.1`. Callers present a named key (`Authorization:
+Bearer slmr_...`). SLM stores only a hash of each key, refuses every remote key
+if the key file is writable or readable by other users, and checks revocation
+on every request. Keys are `read` or `write`. Server-management tools (profile
+switching, code-graph indexing of local paths, maintenance, mesh, retention,
+loops, pattern deletes) are refused to every remote caller and hidden from its
+tool list; tool names are matched exactly, and batched requests, repeated JSON
+keys and MCP methods other than tool calls are refused; any HTTP method but
+`POST` gets `405` at once. Every key is bound to one profile (`slm remote keys
+add <name> --profile <p>`, default the active profile): a different `profile_id`
+anywhere in a call is refused, never rewritten; recall, remember and correction
+review are served for the key's profile without moving the host's active one;
+tools that only work on the active profile are refused while another profile is
+active (a profile switch waits for one that is running); remote saves stay
+`personal` to the key's profile. A key without a profile binding is
+refused until it is bound. A key holder can read
+the full text of every memory in its profile, including paths written into
+those memories; other host details (data folder, home, account, environment,
+paths in errors, tracebacks and receipts) are withheld from remote answers.
+A remote key's `slm_cache_*` and reversible-compression entries are its own: it
+cannot read or overwrite a local agent's. Company mode (`require_login = true`) refuses
+remote keys. The install token, hook token and daemon capability are accepted
+only from this computer and are never valid on the remote listener; SLM's own
+hooks only talk to the daemon on this computer. MCP requests from other
+computers over plain HTTP are refused (`403 remote_requires_tls`) unless
+`SLM_REMOTE_ALLOW_PLAINTEXT=1`; if a key was sent over plain HTTP, revoke it.
+Memory sent to your own SLM server is stored as written, the same as a local
+save. Credential redaction still applies to everything the SLM server sends to
+third parties. The Hermes plugin's remote mode opens no network connection of
+its own; it uses the MCP server configured in Hermes.
+
+**A proxied request is never local.** SuperLocalMemory trusts a caller on
+`127.0.0.1` as the local user. It decides that from the socket peer only:
+forwarding headers (`X-Forwarded-For`, `Forwarded`, `X-Real-IP` and the like)
+are ignored unless you name your proxy in `SLM_TRUSTED_PROXIES`
+(comma-separated addresses or networks), and a request that reaches the daemon
+from loopback carrying any forwarding header is treated as coming from another
+computer. A reverse proxy on the same machine therefore cannot hand its
+callers local trust. A same-machine proxy that strips every forwarding header
+still looks local; configure the proxy to send `X-Forwarded-For`. See
+`docs/distributed-deployment.md`.
+
 #### Data Protection
 - Parameterized SQL queries throughout (no SQL injection)
 - XSS protection via `escapeHtml()` in all UI rendering
 - Security headers: X-Frame-Options, CSP, X-Content-Type-Options
 - CORS whitelist with credential control
-- Secret/PII redaction before persistence and before the remote-reranker
-  trust boundary ( `src/superlocalmemory/retrieval/remote_reranker.py`:
-  `redact_secrets` + `redact_pii_text` as best-effort, not DLP); remote
-  reranker responses are bounded (8 MiB), redirects are not followed, and
-  malformed values suppress bodies without logging them. Remote *embedding*
-  (`core/embeddings.py` `_openai_compatible_embed_batch`) sends raw input
-  text with optional Bearer and does **not** apply the remote-reranker
-  HTTPS/non-loopback, userinfo/query/fragment rejections or body-suppression
-  — scope SSRF claims to the reranker path.
+- Credentials are stored as written: SuperLocalMemory keeps the keys and
+  passwords you save so an agent can recall them. Opt-in PII redaction at save
+  (`SLM_PII_REDACTION=1`) removes personal data on every save path.
+- Credential redaction on egress: every request that can carry memory text
+  off this machine goes through one gate (`core/outbound_http.py`), which
+  redacts credentials for any host that is not loopback. That covers LLM
+  providers, cloud embedders, the remote reranker, the Jev answer check, a
+  LAN Ollama, and mesh peers. Context injected into an agent session uses
+  the same redaction. Requests to loopback do not go through an
+  environment proxy. A test fails the build if new code opens an outbound
+  request outside the gate. Redaction is pattern-based and best-effort, not
+  DLP: a credential with no recognisable shape or label can still pass.
+- Remote reranker responses are bounded (8 MiB), redirects are not
+  followed, and malformed values suppress bodies without logging them. The
+  reranker's HTTPS/non-loopback, userinfo/query/fragment rejections apply to
+  the reranker path only; scope SSRF claims to it.
 
 #### Model Supply Chain (Untrusted Checkpoints)
 
 SuperLocalMemory loads local embedding, reranker, and compression models via
 Hugging Face. Two risks apply:
 
-- **`trust_remote_code`**: since v3.7.9, `trust_remote_code=True` is passed only
+- **`trust_remote_code`**: `trust_remote_code=True` is passed only
   for an internal allowlist of pinned models (the nomic-embed family, which
   requires custom modeling code). Any other model — including one swapped into
   config through a write path — loads with `trust_remote_code=False` and cannot
@@ -86,14 +156,27 @@ Only install models from sources you trust. A malicious checkpoint can execute
 code under your user account at load time regardless of these mitigations.
 
 #### Backup and credential-at-rest caveats
-- Production backups are independent per-file `sqlite3.backup()` snapshots via
-  `BackupManager` (not a coherent cross-store epoch); companion failures are
-  non-critical. The coherent `BackupCoordinator` exists as a primitive but is
-  not wired to production/routes. Dashboard Export is `memory.db`-only gz.
-- Legacy backup destination follows process `umask`, not source-file modes;
-  place backups on an encrypted/private volume and verify `0600`/`0700`.
-- Stop the daemon (`slm serve stop`) before offline whole-root copy/restore
-  so WAL/SHM checkpoint; include sidecars and `lance/` if present.
+- Three things are called backup. Scheduled local backups copy each store with
+  `sqlite3.backup()` into `backups/`, one file at a time, so they are not a single
+  point-in-time epoch across stores. Recovery points are whole-store copies built by
+  the coordinator (every store, the picture and PDF originals and a manifest), which
+  can be verified before an export or a restore; the dashboard export is one such
+  archive. Restore points are the copies SLM takes before an update.
+- A restore is all or nothing: the store is held so no daemon can write part-way,
+  everything the restore may change is copied first, and a failure puts those files
+  back. If even that fails, `slm backup restore-safety-copy` brings back the safety copy
+  taken after the service stopped. Restores and exports never carry accounts, sessions
+  or the sign-in policy, so a restore cannot undo a removed user or turn company mode off.
+- An erasure cannot rewrite a backup. Each backup that holds an erased profile is
+  recorded as an obligation, replayed on every restore, and ends only when the backup is
+  deleted or re-read clean. Copies outside SLM's control (exports you made, cloud backups
+  already uploaded) are yours to remove.
+- Local backup files are not encrypted and follow the process `umask`, not the
+  source-file modes; place the data folder and its backups on an encrypted volume and
+  verify `0600`/`0700`. Cloud backups are encrypted on this computer before upload
+  (AES-256-GCM); pictures, PDFs and `media.db` are never uploaded.
+- Stop the daemon (`slm serve stop`) before an offline whole-folder copy or restore so
+  the write-ahead log checkpoints; include `-wal`/`-shm` sidecars and `lance/` if present.
 - Credentials: OS keychain preferred (macOS Keychain / Windows Credential
   Locker / Linux Secret Service); fallback is owner-only plaintext
   `~/.superlocalmemory/.credentials.json` (`0600`, `0700` parent, atomic
@@ -106,19 +189,20 @@ code under your user account at load time regardless of these mitigations.
   (`.feedback-hash-key`, 32 bytes). Read-only data root falls back to a
   process-local key, losing cross-restart grouping.
 
-#### Migrations (V4.0.0)
-- `M038_learning_feedback_channel` (eager) and `M039_scene_fact_members`
-  (deferred, after engine tables exist) are automatically applied at startup;
+#### Migrations
+- Schema migrations are additive and apply automatically at startup, in order;
   no manual `slm db migrate` is normally required. `slm db migrate` is
-  forward-only (`status`/`--dry-run`/apply) — no rollback. Downgrade requires
-  a verified pre-upgrade complete backup (stop daemon, whole-root copy).
+  forward-only (`--status`, `--dry-run`, apply), with no rollback, and SLM refuses
+  to run against a database written by a newer build. An update that changes the
+  store first takes a verified restore point; going back means restoring it
+  (`slm db restore`) or a verified complete backup (stop the daemon, whole-folder copy).
 
 #### Compliance
 - GDPR Article 15 (right to access): full data export
-- GDPR Article 17 (right to erasure): complete erasure including learning data
+- GDPR Article 17 (right to erasure): erasure across the stores and derived copies SLM controls, with a result that says what remains; backups carry an erasure obligation (see above)
 - EU AI Act data sovereignty: assess the configured deployment and egress path;
   Mode A's local core alone is not a legal or network-locality guarantee
-- Tamper-proof audit trail with SHA-256 hash chain
+- Tamper-evident audit trail with a SHA-256 hash chain
 - Bounded / content-free diagnostics export: `slm diagnostics export`
 
 ### Dependencies

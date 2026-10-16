@@ -1,0 +1,57 @@
+{
+  "compatibility_date": "2026-07-01",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
+  "workers_dev": false,
+  "observability": {
+    "enabled": false
+  },
+  "name": "slm-remote-mcp",
+  "main": "src/worker-resource.ts",
+  "routes": [
+    {
+      "pattern": "mcp.superlocalmemory.com",
+      "custom_domain": true
+    }
+  ],
+  "services": [
+    {
+      "binding": "AUTH_SERVER",
+      "service": "slm-remote-auth"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "UPLOAD_IP",
+      "namespace_id": "423003",
+      "simple": {
+        "limit": 20,
+        "period": 60
+      }
+    },
+    {
+      "name": "UPLOAD_CONN",
+      "namespace_id": "423004",
+      "simple": {
+        "limit": 60,
+        "period": 60
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REGISTRIES",
+        "class_name": "RegistryDO",
+        "script_name": "slm-remote-authority"
+      },
+      {
+        "name": "RELAYS",
+        "class_name": "RelayDO",
+        "script_name": "slm-remote-authority"
+      }
+    ]
+  }
+}

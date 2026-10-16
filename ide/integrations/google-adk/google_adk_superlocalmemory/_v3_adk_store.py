@@ -113,7 +113,7 @@ def _load_v3_types():
     except ImportError as exc:  # pragma: no cover - defensive
         raise ImportError(
             "SuperLocalMemory V3 is not installed in this Python environment. "
-            "Install it with: python -m pip install superlocalmemory."
+            "Install SLM in its own environment and set SLM_ENGINE_PYTHON to its Python executable."
         ) from exc
     return SLMConfig, MemoryEngine, Mode
 
@@ -122,6 +122,19 @@ def _load_v3_types():
 # Store core
 # ---------------------------------------------------------------------------
 
+def _event_envelope(app_name, user_id, session_id, idx, event, now):
+    """Keep short event bodies queryable with the adapter's established envelope."""
+    return {
+        "adapter": "google-adk memory service", "app_name": app_name,
+        "user_id": user_id, "session_id": session_id, "event_index": idx,
+        "event": {"text": event.get("text", "") or "",
+                  "author": event.get("author", "") or "unknown",
+                  "timestamp_float": float(event.get("timestamp_float", 0.0)),
+                  "timestamp_iso": event.get("timestamp_iso", now)},
+        "created_at": now,
+    }
+
+
 class V3ADKStore:
     """Session-event storage backed by a SuperLocalMemory V3 engine.
 
@@ -129,6 +142,22 @@ class V3ADKStore:
     not import any Google ADK types.  The ``memory_service.py`` wrapper handles
     all ADK-typed conversions.
     """
+
+    def __new__(cls, db_path):
+        import os
+
+        python = os.environ.get("SLM_ENGINE_PYTHON")
+        if python:
+            import importlib.util
+
+            bridge = Path(__file__).with_name("_engine_bridge.py")
+            if not bridge.exists():  # source checkout; wheel bundles a regular file
+                bridge = Path(__file__).resolve().parents[2] / "_engine_bridge.py"
+            spec = importlib.util.spec_from_file_location("_slm_engine_bridge", bridge)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module.RemoteStore(python, __file__, cls.__name__, db_path)
+        return super().__new__(cls)
 
     def __init__(self, db_path: str | Path) -> None:
         SLMConfig, MemoryEngine, Mode = _load_v3_types()
@@ -149,12 +178,7 @@ class V3ADKStore:
         session_id: str,
         events: list[dict[str, Any]],
     ) -> None:
-        """Replace all stored events for a session with the supplied list.
-
-        Calling this again for the same (app_name, user_id, session_id) is safe
-        and idempotent: existing events are deleted before the new ones are
-        written.  An empty ``events`` list therefore clears the session.
-        """
+        """Replace a session's stored events; an empty list clears the session."""
         _validate_component(app_name, "app_name")
         _validate_component(user_id, "user_id")
         _validate_component(session_id, "session_id")
@@ -164,27 +188,7 @@ class V3ADKStore:
 
         now = _now_iso()
         for idx, event in enumerate(events):
-            text = event.get("text", "") or ""
-            author = event.get("author", "") or "unknown"
-            ts_float = float(event.get("timestamp_float", 0.0))
-            ts_iso = event.get("timestamp_iso", now)
-
-            # Envelope keeps content substantial (≥ ~120 chars) so SLM ingestion
-            # always produces a queryable atomic-fact row even for short text.
-            envelope = {
-                "adapter": "google-adk memory service",
-                "app_name": app_name,
-                "user_id": user_id,
-                "session_id": session_id,
-                "event_index": idx,
-                "event": {
-                    "text": text,
-                    "author": author,
-                    "timestamp_float": ts_float,
-                    "timestamp_iso": ts_iso,
-                },
-                "created_at": now,
-            }
+            envelope = _event_envelope(app_name, user_id, session_id, idx, event, now)
             content = json.dumps(envelope, ensure_ascii=False)
             if len(content.encode("utf-8")) > MAX_CONTENT_BYTES:
                 raise ValueError(
@@ -214,16 +218,7 @@ class V3ADKStore:
         query: str,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """Semantic search over stored events for one app+user namespace.
-
-        Calls ``engine.recall`` for semantic ranking, post-filters results to
-        the target app+user namespace by checking the fact's ``session_id``
-        prefix, then fetches the stored memory envelope for each match.
-
-        Falls back to an ordered DB prefix scan when recall returns no
-        results in the namespace (e.g., facts not yet extracted from very short
-        events), so callers always get *some* results when events are present.
-        """
+        """Recall within a namespace; use an ordered scan when recall has no matches."""
         _validate_component(app_name, "app_name")
         _validate_component(user_id, "user_id")
         limit = min(int(limit), _MAX_SCAN)

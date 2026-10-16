@@ -259,18 +259,15 @@ def test_export_is_post_only_and_removes_transport_archive(
     monkeypatch,
     tmp_path,
 ) -> None:
-    backup_dir = tmp_path / "backups"
-    backup_dir.mkdir()
-    snapshot = backup_dir / "snapshot.db"
-    snapshot.write_bytes(b"sqlite-snapshot")
+    import sqlite3
 
-    class FakeManager:
-        def create_backup(self, label: str):
-            assert label == "export"
-            return snapshot.name
+    for name in ("memory.db", "learning.db", "audit_chain.db", "pending.db"):
+        conn = sqlite3.connect(tmp_path / name)
+        conn.execute("CREATE TABLE t (x)")
+        conn.commit()
+        conn.close()
 
     monkeypatch.setattr(backup, "_require_manage", lambda request: {"kind": "owner"})
-    monkeypatch.setattr(backup, "_get_backup_manager", FakeManager)
     monkeypatch.setattr(backup, "MEMORY_DIR", tmp_path)
     monkeypatch.setattr(backup, "BACKUP_AVAILABLE", True)
 
@@ -282,8 +279,7 @@ def test_export_is_post_only_and_removes_transport_archive(
 
     response = backup.export_backup(_request())
     transport = response.path
-    assert transport.endswith(".db.gz")
-    assert snapshot.exists()
+    assert transport.endswith(".tar.gz")
     assert Path(transport).exists()
     asyncio.run(response.background())
     assert not Path(transport).exists()

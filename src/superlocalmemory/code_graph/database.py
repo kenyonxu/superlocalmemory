@@ -11,7 +11,6 @@ retry with backoff, transaction support. Points at a separate SQLite file.
 from __future__ import annotations
 from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
 
-import json
 import logging
 import sqlite3
 import threading
@@ -111,10 +110,16 @@ class CodeGraphDatabase:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=_BUSY_TIMEOUT_MS / 1000)
         conn.row_factory = sqlite3.Row
-        apply_journal_mode(conn)
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        _load_vector_extension(conn)
+        try:
+            apply_journal_mode(conn)
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            _load_vector_extension(conn)
+        except BaseException:
+            # Setup failed: close it now, or the file stays open (Windows
+            # then cannot delete or replace it) for as long as the error lives.
+            conn.close()
+            raise
         return conn
 
     def execute(

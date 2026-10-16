@@ -32,6 +32,10 @@ from superlocalmemory.hooks.portable_kit import IDE_MATRIX, connect_ide
 ROOT = Path(__file__).resolve().parents[2]
 PORTABLE_HOSTS = ("cursor", "antigravity", "gemini-cli", "continue")
 GENERIC_STDIO_CLIENTS = ("grok", "muse", "hermes")
+# A real, non-default profile: since 2d7a6a17 ``slm connect`` refuses an
+# unknown profile name before writing any host config, so the certified write
+# must use one SLM defines. "code" also proves the value is carried verbatim.
+CERT_PROFILE = "code"
 REQUIRED_LIFECYCLE_TOOLS = {
     "session_init",
     "recall",
@@ -111,8 +115,8 @@ def test_portable_host_connect_is_additive_and_idempotent(host: str, tmp_path: P
         config_path, descriptor.fmt, descriptor.server_key
     )
 
-    first = connect_ide(host, home=tmp_path, profile="cert-profile")
-    second = connect_ide(host, home=tmp_path, profile="cert-profile")
+    first = connect_ide(host, home=tmp_path, profile=CERT_PROFILE)
+    second = connect_ide(host, home=tmp_path, profile=CERT_PROFILE)
 
     assert first["error"] is None
     assert second["error"] is None
@@ -125,22 +129,22 @@ def test_portable_host_connect_is_additive_and_idempotent(host: str, tmp_path: P
     if descriptor.fmt == "json":
         assert rendered[descriptor.server_key]["unrelated"] == preserved
         slm = rendered[descriptor.server_key]["superlocalmemory"]
-        assert slm["command"] == "slm"
-        assert slm["args"] == ["mcp"]
-        assert slm["env"]["SLM_MCP_PROFILE"] == "cert-profile"
+        assert slm["command"] == sys.executable
+        assert slm["args"] == ["-m", "superlocalmemory.cli", "mcp"]
+        assert slm["env"]["SLM_MCP_PROFILE"] == CERT_PROFILE
     else:
         providers = rendered[descriptor.server_key]
         assert providers[0] == preserved
         matches = [
             provider
             for provider in providers
-            if provider.get("params", {}).get("serverName") == "superlocalmemory"
+            if provider.get("name") == "superlocalmemory"
         ]
         assert len(matches) == 1
-        slm = matches[0]["params"]
-        assert slm["command"] == "slm"
-        assert slm["args"] == ["mcp"]
-        assert slm["env"]["SLM_MCP_PROFILE"] == "cert-profile"
+        slm = matches[0]
+        assert slm["command"] == sys.executable
+        assert slm["args"] == ["-m", "superlocalmemory.cli", "mcp"]
+        assert slm["env"]["SLM_MCP_PROFILE"] == CERT_PROFILE
 
 
 @pytest.mark.asyncio
@@ -174,10 +178,14 @@ async def test_generic_cli_clients_can_use_the_standard_stdio_mcp_contract(
         cwd=ROOT,
     )
 
-    async with stdio_client(params) as (read_stream, write_stream):
-        async with ClientSession(read_stream, write_stream) as session:
-            initialized = await asyncio.wait_for(session.initialize(), timeout=15)
-            listed = await asyncio.wait_for(session.list_tools(), timeout=15)
+    # A real file for the server's stderr. stdio_client's default (errlog=sys.stderr)
+    # is bound when mcp.client.stdio is first imported; if an earlier test imported it
+    # under capsys, that default is a dead in-memory buffer with no fileno.
+    with open(tmp_path / f"mcp-server-{client_id}.err", "w", encoding="utf-8") as errlog:
+        async with stdio_client(params, errlog=errlog) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                initialized = await asyncio.wait_for(session.initialize(), timeout=15)
+                listed = await asyncio.wait_for(session.list_tools(), timeout=15)
 
     protocol_version = getattr(
         initialized, "protocol_version", getattr(initialized, "protocolVersion", None)
@@ -185,4 +193,7 @@ async def test_generic_cli_clients_can_use_the_standard_stdio_mcp_contract(
     assert protocol_version
     names = {tool.name for tool in listed.tools}
     assert REQUIRED_LIFECYCLE_TOOLS <= names
-    assert not data_dir.exists(), "MCP discovery must not initialize a data store"
+    # An initialized transport owns a presence registry, not a memory store.
+    assert {path.name for path in data_dir.iterdir()} <= {"mcp-processes"}
+    assert not list(data_dir.rglob("*.db")), "MCP discovery must not initialize a data store"
+    assert not list((data_dir / "mcp-processes").glob("*.json")), "transport must unregister"

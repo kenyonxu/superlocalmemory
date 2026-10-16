@@ -172,7 +172,6 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
             from superlocalmemory.code_graph.parser import CodeParser
             from superlocalmemory.code_graph.graph_store import GraphStore
             from superlocalmemory.code_graph.graph_engine import GraphEngine
-            from superlocalmemory.code_graph.search import HybridSearch
             from superlocalmemory.code_graph.flows import FlowDetector
             from superlocalmemory.code_graph.communities import CommunityDetector
 

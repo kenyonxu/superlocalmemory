@@ -18,7 +18,6 @@ import pytest
 from superlocalmemory.core.config import PolarQuantConfig, QJLConfig
 from superlocalmemory.math.qjl import QJLEncoder
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -46,11 +45,11 @@ def _random_vec(d: int, seed: int = 0) -> np.ndarray:
 
 
 def test_qjl_encode_produces_correct_length(qjl_encoder: QJLEncoder) -> None:
-    """QJL bits = ceil(projection_dim / 8) bytes."""
+    """Versioned QJL includes a 12-byte residual norm header."""
     residual = _random_vec(768, seed=1)
     qjl_bits = qjl_encoder.encode_residual(residual)
 
-    expected_bytes = (128 + 7) // 8  # ceil(128/8) = 16 bytes
+    expected_bytes = 12 + (128 + 7) // 8
     assert isinstance(qjl_bits, bytes)
     assert len(qjl_bits) == expected_bytes
 
@@ -120,10 +119,7 @@ def test_qjl_correction_improves_polar(tmp_path) -> None:
     correction = qjl.estimate_correction(query, qjl_bits)
     corrected_sim = polar_sim + correction
 
-    # The corrected similarity should be closer to truth
-    polar_error = abs(true_sim - polar_sim)
-    corrected_error = abs(true_sim - corrected_sim)
-
     # QJL may not always improve a single sample, but over many trials it does.
     # For this specific test, we just verify the correction is non-zero.
     assert abs(correction) > 0.0, "QJL correction should be non-zero"
+    assert np.isfinite(corrected_sim - true_sim)

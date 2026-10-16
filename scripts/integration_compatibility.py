@@ -8,16 +8,17 @@ import ast
 import copy
 import json
 import os
+import re
 import stat
+import subprocess
 import sys
 import tempfile
 import tomllib
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
-
 
 SCHEMA = "superlocalmemory.integration-compatibility/v1"
 REQUIRED_MEMORY_TOOLS = {"remember", "recall", "update_memory", "forget"}
@@ -57,16 +58,45 @@ def _parse_config(path: Path, fmt: str) -> dict[str, Any]:
 
 
 def _extract_slm_block(data: dict[str, Any], descriptor: Any) -> dict[str, Any]:
-    container = data[descriptor.server_key]
+    container = data
+    for key in descriptor.server_key.split("."):  # OpenClaw: mcp.servers
+        container = container[key]
     if descriptor.fmt == "yaml":
         matches = [
             item for item in container
-            if item.get("params", {}).get("serverName") == "superlocalmemory"
+            if isinstance(item, dict) and item.get("name") == "superlocalmemory"
         ]
         if len(matches) != 1:
             raise ValueError("Continue config must contain exactly one SLM provider")
-        return matches[0]["params"]
+        return matches[0]
     return container["superlocalmemory"]
+
+
+def _validate_start_command(block: dict[str, Any]) -> None:
+    """Accept only a pinned SLM entry point or Python module argv, never a shell.
+
+    Do not resolve symlinks: a venv interpreter must retain its venv identity.
+    This checks launch shape, not whether an external host executed the file.
+    """
+    command = block.get("command")
+    args = block.get("args", [])
+    if isinstance(command, list) and command and args == []:
+        command, args = command[0], command[1:]
+    if not isinstance(command, str) or not isinstance(args, list):
+        raise AssertionError("unsafe start command: expected executable and argv")
+    if any(ord(char) < 32 or char in ";&|`$<>" for char in command):
+        raise AssertionError("unsafe start command: shell syntax or control characters")
+    posix, windows = PurePosixPath(command), PureWindowsPath(command)
+    path = windows if windows.is_absolute() else posix
+    if not path.is_absolute() or ".." in path.parts:
+        raise AssertionError("unsafe start command: executable must be absolute")
+    name = path.name.lower()
+    expected = ["mcp"] if name in {"slm", "slm.exe"} else [
+        "-m", "superlocalmemory.cli", "mcp"
+    ]
+    if (name not in {"slm", "slm.exe"}
+            and not re.fullmatch(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?", name)) or args != expected:
+        raise AssertionError("unsafe start command: expected pinned SLM MCP argv")
 
 
 def _portable_config(repo: Path, client_id: str, work: Path) -> str:
@@ -87,8 +117,7 @@ def _portable_config(repo: Path, client_id: str, work: Path) -> str:
     path = Path(first["mcp_path"])
     data = _parse_config(path, descriptor.fmt)
     block = _extract_slm_block(data, descriptor)
-    if block.get("command") != "slm" or block.get("args") != ["mcp"]:
-        raise AssertionError(f"unsafe start command for {client_id}: {block!r}")
+    _validate_start_command(block)
     # The generated path is host-dependent for clients such as Claude Desktop
     # (macOS Application Support vs Linux .config). Release evidence records
     # the portable contract that was executed, not a host-specific temp path.
@@ -195,16 +224,48 @@ def _active_adapter(repo: Path, client_id: str, work: Path) -> str:
     return restarted.target_path.relative_to(work).as_posix()
 
 
+#: Whether files here carry a POSIX executable bit (not on Windows).
+HAS_EXECUTABLE_BIT = os.name != "nt"
+
+
+def _ships_executable(repo: Path, path: Path) -> bool:
+    """Whether ``path`` ships with its executable bit set.
+
+    Windows files have no executable bit (``st_mode`` is always ``0o666``), so
+    there the answer is the mode Git recorded, ``100755``, which is what a
+    release build packs.
+    """
+    if HAS_EXECUTABLE_BIT:
+        return bool(path.stat().st_mode & stat.S_IXUSR)
+    done = subprocess.run(
+        ["git", "ls-files", "--stage", "--", path.relative_to(repo).as_posix()],
+        cwd=repo, capture_output=True, text=True, encoding="utf-8", check=False,
+    )
+    return done.returncode == 0 and done.stdout.split(maxsplit=1)[:1] == ["100755"]
+
+
 def _plugin_package(repo: Path, _client_id: str, _work: Path) -> str:
     config = repo / "plugin/.mcp.json"
     data = json.loads(config.read_text(encoding="utf-8"))
     block = data["mcpServers"]["superlocalmemory"]
     command = block.get("command", "")
     prefix = "${CLAUDE_PLUGIN_ROOT}/"
-    if not command.startswith(prefix) or block.get("args") != []:
+    # Since #139 one entry serves every platform: "${ComSpec:-<launcher>}"
+    # runs cmd.exe on Windows (args start the installed slm) and the bundled
+    # launcher everywhere else. The launcher is still what POSIX hosts start.
+    split = re.fullmatch(r"\$\{ComSpec:-(\$\{CLAUDE_PLUGIN_ROOT\}/[^}]+)\}", command)
+    args = block.get("args")
+    if split:
+        command = split.group(1)
+        if (not isinstance(args, list) or args[:3] != ["/d", "/s", "/c"]
+                or len(args) != 4 or not str(args[3]).rstrip().endswith("slm mcp")):
+            raise AssertionError(f"invalid Claude plugin start command: {block!r}")
+    elif args != []:
+        raise AssertionError(f"invalid Claude plugin start command: {block!r}")
+    if not command.startswith(prefix):
         raise AssertionError(f"invalid Claude plugin start command: {block!r}")
     launcher = repo / "plugin" / command.removeprefix(prefix)
-    if not launcher.is_file() or not launcher.stat().st_mode & stat.S_IXUSR:
+    if not launcher.is_file() or not _ships_executable(repo, launcher):
         raise AssertionError("Claude plugin launcher is missing or not executable")
     source = repo / "plugin-src/.mcp.json"
     if json.loads(source.read_text(encoding="utf-8")) != data:
@@ -212,11 +273,60 @@ def _plugin_package(repo: Path, _client_id: str, _work: Path) -> str:
     return launcher.relative_to(repo).as_posix()
 
 
+def _hermes_package(repo: Path, _client_id: str, _work: Path) -> str:
+    """Validate the native package locally without launching a Hermes host."""
+    package = repo / "hermes-plugin"
+    manifest = _parse_config(package / "plugin.yaml", "yaml")
+    if manifest.get("name") != "superlocalmemory" or manifest.get("api_version") != 1:
+        raise AssertionError("invalid Hermes native plugin manifest")
+    inventory = _parse_config(package / "command-inventory.json", "json")
+    if not {"remember", "recall", "update", "forget"} <= set(inventory["primary_commands"]):
+        raise AssertionError("Hermes command inventory lacks the memory surface")
+    tree = ast.parse((package / "__init__.py").read_text(encoding="utf-8"))
+    functions = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    if "register" not in functions:
+        raise AssertionError("Hermes package lacks its native register entry point")
+    hooks = manifest.get("provides_hooks", [])
+    if not hooks or not set(hooks) <= functions:
+        raise AssertionError("Hermes manifest declares an unimplemented lifecycle hook")
+    tools = {
+        node.args[0].value for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "register_tool" and node.args
+        and isinstance(node.args[0], ast.Constant)
+    }
+    if set(manifest.get("provides_tools", [])) != tools:
+        raise AssertionError("Hermes manifest and native tool registrations disagree")
+    for skill in inventory["skills"]:
+        if not (package / "skills" / skill / "SKILL.md").is_file():
+            raise AssertionError(f"Hermes package is missing skill: {skill}")
+    ast.parse((package / "remote.py").read_text(encoding="utf-8"))
+    return "hermes-plugin/plugin.yaml"
+
+
+def _hermes_config(_repo: Path, _client_id: str, work: Path) -> str:
+    """Round-trip the optional dashboard MCP setup independently of its plugin."""
+    from superlocalmemory.server.local_host_setup import configure_hermes
+
+    home = work / "dashboard-hermes"
+    path = home / ".hermes/config.yaml"
+    if not configure_hermes("core", home=home):
+        raise AssertionError("Hermes dashboard config generation failed")
+    first = path.read_bytes()
+    if not configure_hermes("core", home=home) or path.read_bytes() != first:
+        raise AssertionError("Hermes dashboard config is not idempotent")
+    data = _parse_config(path, "yaml")
+    _validate_start_command(data["mcp_servers"]["superlocalmemory"])
+    return "hermes:dashboard-config"
+
+
 CHECKERS: dict[str, Callable[[Path, str, Path], str]] = {
     "portable_config": _portable_config,
     "mcp_surface": _mcp_surface,
     "active_adapter": _active_adapter,
     "plugin_package": _plugin_package,
+    "hermes_package": _hermes_package,
+    "hermes_config": _hermes_config,
 }
 
 
@@ -331,6 +441,19 @@ def build_evidence(
     }
 
 
+def _render_evidence(evidence: dict[str, Any]) -> str:
+    """Keep each client/check on one line so release diffs remain bounded."""
+    fields = []
+    for key, value in sorted(evidence.items()):
+        if isinstance(value, list):
+            rows = ["    " + json.dumps(row, sort_keys=True) for row in value]
+            rendered = "[\n" + ",\n".join(rows) + "\n  ]"
+        else:
+            rendered = json.dumps(value, indent=2, sort_keys=True).replace("\n", "\n  ")
+        fields.append(f"  {json.dumps(key)}: {rendered}")
+    return "{\n" + ",\n".join(fields) + "\n}\n"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
@@ -340,7 +463,7 @@ def main() -> int:
     repo = args.repo.resolve()
     manifest = load_manifest(args.manifest or repo / "ide/integration-contracts.json")
     evidence = build_evidence(repo, manifest)
-    rendered = json.dumps(evidence, indent=2, sort_keys=True) + "\n"
+    rendered = _render_evidence(evidence)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered, encoding="utf-8")

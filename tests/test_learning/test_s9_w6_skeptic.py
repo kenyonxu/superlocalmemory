@@ -5,7 +5,6 @@
 """Stage 9 W6 skeptic-correctness regression tests.
 
 Covers the S9-SKEP findings closed in W6:
-  * S9-SKEP-01 — ``_critical_t`` narrow-except + module-level scipy cache
   * S9-SKEP-04 — wall-clock TTL skew detector on register_signal
   * S9-SKEP-07 — ``reward_archive`` TOCTOU re-verify under RESERVED lock
   * S9-SKEP-08 — Row-factory-independent positional indexing
@@ -24,32 +23,9 @@ import time
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# S9-SKEP-01 — _critical_t + scipy cache
-# ---------------------------------------------------------------------------
-
-def test_s9_skep_01_scipy_cache_is_module_level() -> None:
-    """Module-level _SCIPY_T holds the resolved scipy.stats.t or None.
-
-    Prior implementation re-imported on every call behind a broad
-    ``except Exception`` that swallowed ValueErrors from ``.ppf``.
-    """
-    from superlocalmemory.learning import shadow_test as st
-
-    assert hasattr(st, "_SCIPY_T"), "module-level scipy cache missing"
-    # If scipy is importable in CI, cache is not None. If not, it's None.
-    # Either way the attribute exists and subsequent calls don't re-import.
-    val = st._critical_t(29, alpha=0.05)
-    assert val > 0.0
-
-
-def test_s9_skep_01_critical_t_stable_across_calls() -> None:
-    """Two calls with identical args return identical results (not a mix
-    of scipy and table)."""
-    from superlocalmemory.learning.shadow_test import _critical_t
-    a = _critical_t(18, alpha=0.05)
-    b = _critical_t(18, alpha=0.05)
-    assert a == b
+# S9-SKEP-01 (_critical_t + scipy cache) retired in 4.1.25: the paired t-test
+# it guarded could never reach a decision (audit BRN-01). The always-valid
+# replacement is covered in tests/test_learning/test_shadow_test.py.
 
 
 # ---------------------------------------------------------------------------

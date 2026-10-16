@@ -1,0 +1,57 @@
+{
+  "compatibility_date": "2026-07-01",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
+  "workers_dev": false,
+  "observability": {
+    "enabled": false
+  },
+  "name": "slm-remote-authority",
+  "main": "src/worker-authority.ts",
+  // Daily tool-call cap per connection (RegistryDO). Code default 50 = Connect Free;
+  // 500 while the 4.1.23 beta measures real usage. Change here, no code change.
+  "vars": { "DAILY_TOOL_CALL_LIMIT": "500" },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REGISTRIES",
+        "class_name": "RegistryDO"
+      },
+      {
+        "name": "RELAYS",
+        "class_name": "RelayDO"
+      },
+      {
+        "name": "TOKEN_INDEX",
+        "class_name": "TokenIndexDO"
+      },
+      {
+        "name": "OWNERS",
+        "class_name": "OwnerIndexDO"
+      },
+      {
+        "name": "BOOTSTRAPS",
+        "class_name": "BootstrapDO"
+      },
+      {
+        "name": "DEVICES",
+        "class_name": "DeviceIndexDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "slm-remote-v1",
+      "new_sqlite_classes": [
+        "RegistryDO",
+        "RelayDO",
+        "TokenIndexDO",
+        "OwnerIndexDO",
+        "BootstrapDO",
+        "DeviceIndexDO"
+      ]
+    }
+  ]
+}

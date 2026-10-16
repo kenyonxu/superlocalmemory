@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from superlocalmemory.storage.database import _scope_where
+from superlocalmemory.storage.erasure_visibility import erasure_clause_for_db
 
 
 def authorized_fact_ids(
@@ -92,8 +93,10 @@ def authorized_fact_ids(
         if callable(clause_fn):
             try:
                 visible = clause_fn(db)
-            except Exception:  # noqa: BLE001 -- fall back to scope-only
-                visible = ""
+            except Exception:  # visibility lookup failed: never authorize scope-only
+                return set()
+        else:
+            visible = erasure_clause_for_db(db)
         rows = db.execute(
             f"SELECT fact_id FROM atomic_facts WHERE fact_id IN ({placeholders}) "
             f"AND {where}{visible}",
@@ -124,3 +127,22 @@ def filter_authorized_results(
         include_shared=include_shared,
     )
     return [item for item in materialized if item[0] in allowed]
+
+
+def authorized_topk(
+    db: Any, ranked: list[tuple[str, float]], profile_id: str, top_k: int,
+    *, include_global: bool = False, include_shared: bool = False,
+) -> list[tuple[str, float]]:
+    """Recheck cached rankings in bounded pages, refilling erased candidate slots."""
+    if top_k <= 0:
+        return []
+    out: list[tuple[str, float]] = []
+    page_size = max(32, min(top_k, 800))
+    for start in range(0, len(ranked), page_size):
+        out.extend(filter_authorized_results(
+            db, ranked[start:start + page_size], profile_id,
+            include_global=include_global, include_shared=include_shared,
+        ))
+        if len(out) >= top_k:
+            break
+    return out[:top_k]

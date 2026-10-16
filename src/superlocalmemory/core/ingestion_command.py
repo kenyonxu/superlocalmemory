@@ -22,14 +22,28 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
+from superlocalmemory.core.ingestion_lease_owner import owner_token, release_dead_owner_leases
 from superlocalmemory.core.materialization_control import MaterializationDeferred
 from superlocalmemory.storage.database import DatabaseManager
+from superlocalmemory.storage.idempotency_identity import same_principal
 
 logger = logging.getLogger("superlocalmemory.ingestion_command")
 
 _MATERIALIZATION_LOCKS = tuple(threading.RLock() for _ in range(64))
 _MAX_AUTOMATIC_MATERIALIZATION_ATTEMPTS = 10
 _NEVER_RETRY_AT = 9_999_999_999.0
+
+
+def is_terminal_failure(state: str, attempt_count: int, next_retry_at: float) -> bool:
+    """True for an operation that failed and will never be tried again (so it will never gain facts).
+
+    Either the reaper gave up on it (``next_retry_at`` is the never-retry stamp) or the automatic
+    attempts are used up, which also takes it out of ``list_materializable``.
+    """
+    return state == IngestionState.FAILED.value and (
+        float(next_retry_at) >= _NEVER_RETRY_AT
+        or int(attempt_count) >= _MAX_AUTOMATIC_MATERIALIZATION_ATTEMPTS
+    )
 
 
 def _materialization_lock(operation_id: str) -> threading.RLock:
@@ -211,6 +225,10 @@ class IngestionOperationRepository:
         )
         return self._from_row(rows[0]) if rows else None
 
+    def find_for_request(self, request: IngestionRequest) -> IngestionOperation | None:
+        """The stored operation that owns this request's idempotency key."""
+        return self._find_request(request)
+
     @staticmethod
     def _assert_same_request(
         existing: IngestionOperation, request: IngestionRequest
@@ -221,7 +239,7 @@ class IngestionOperationRepository:
             existing.metadata == request.metadata,
             existing.scope == request.scope,
             existing.shared_with == request.shared_with,
-            existing.trusted_actor_id == request.trusted_actor_id,
+            same_principal(existing.trusted_actor_id, request.trusted_actor_id),
             existing.session_id == request.session_id,
             existing.session_date == request.session_date,
             existing.speaker == request.speaker,
@@ -418,6 +436,7 @@ class IngestionOperationRepository:
         derivation_state: dict[str, bool],
         lease_owner: str,
         lease_seconds: float,
+        lineage_plan: Any = None,  # derivation_lineage.checkpoint_with_lineage
     ) -> IngestionOperation:
         """Durably checkpoint relational derivation before external indexes."""
         rows = self.db.execute(
@@ -439,16 +458,9 @@ class IngestionOperationRepository:
         if not rows:
             raise InvalidStateTransition("enriching checkpoint lost ownership")
         operation = self._from_row(rows[0])
-        from superlocalmemory.core.derivation_lineage import capture_operation_lineage
+        from superlocalmemory.core.derivation_lineage import apply_checkpoint_lineage
 
-        capture_operation_lineage(
-            self.db,
-            operation_id=operation.operation_id,
-            profile_id=operation.profile_id,
-            raw_content=operation.raw_content,
-            fact_ids=operation.final_fact_ids,
-            derivation_version=operation.derivation_version,
-        )
+        apply_checkpoint_lineage(self.db, operation, lineage_plan)
         return operation
 
     def renew_enriching_lease(
@@ -550,6 +562,9 @@ class IngestionOperationRepository:
                     raise InvalidStateTransition(
                         "enriching lease ownership was lost"
                     )
+                if target is IngestionState.COMPLETE:
+                    # A save that finished has no failure left to report.
+                    self._clear_dead_letters(operation_id)
                 if is_exhausted:
                     # Fix E: INSERT dead-letter row inside the same transaction.
                     # Failure to write (e.g. M031 not yet migrated) must NOT
@@ -622,6 +637,20 @@ class IngestionOperationRepository:
                 ) from exc
         return self._from_row(rows[0])
 
+    def _clear_dead_letters(self, operation_id: str) -> None:
+        """Remove the dead-letter rows of ``operation_id`` (an earlier failed attempt).
+
+        A store without the table (not migrated yet) has none to remove.
+        """
+        try:
+            self.db.execute(
+                "DELETE FROM dead_letter_operations WHERE original_op_id=?",
+                (operation_id,),
+            )
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+
     def defer_enriching(
         self,
         operation_id: str,
@@ -658,14 +687,13 @@ class IngestionOperationRepository:
         ``list_materializable`` intentionally excludes operations at the retry
         cap.  If a worker dies while such an operation is still ``enriching``,
         it otherwise becomes a permanent phantom: no worker can reclaim it and
-        it never reaches a terminal state.  Queryable facts are already durable,
-        so reaping abandons only optional derivation work.
+        it never reaches a terminal state; queryable facts stay, only derivation is abandoned.
 
-        Each candidate is transitioned with a compare-and-swap update in its
-        own bounded transaction.  A dead-letter record is supplemental; an
-        older database without M031 is still terminalized safely.
+        Each candidate gets its own compare-and-swap transaction (dead-letter row optional,
+        M031). Leases of a process that has exited are released first (crash restart).
         """
         cutoff = time.time() if now is None else float(now)
+        release_dead_owner_leases(self.db, now=cutoff)
         batch_limit = max(1, min(int(limit), 500))
         candidates = self.db.execute(
             "SELECT operation_id, attempt_count, last_error, raw_content, "
@@ -788,7 +816,7 @@ class IngestionCommand:
         self._projector = project
         self._derivation_version = derivation_version
         self._lease_seconds = max(1.0, float(lease_seconds))
-        self._owner = f"ingestion-worker:{uuid.uuid4().hex}"
+        self._owner = owner_token()
 
     def _run_with_lease_heartbeat(
         self,
@@ -953,15 +981,17 @@ class IngestionCommand:
                 name for name, complete in derivation_state.items()
                 if not complete
             )
-            with self.repository.db.transaction():
-                checkpointed = self.repository.checkpoint_enriching(
-                    operation_id,
-                    final_fact_ids=fact_ids,
-                    derivation_version=self._derivation_version,
-                    derivation_state=derivation_state,
-                    lease_owner=self._owner,
-                    lease_seconds=self._lease_seconds,
-                )
+            from superlocalmemory.core.derivation_lineage import checkpoint_with_lineage
+
+            # Lineage is read and checked first; the one transaction only writes.
+            checkpointed = checkpoint_with_lineage(
+                self.repository, enriching,
+                final_fact_ids=fact_ids,
+                derivation_version=self._derivation_version,
+                derivation_state=derivation_state,
+                lease_owner=self._owner,
+                lease_seconds=self._lease_seconds,
+            )
             if materialization_error or incomplete:
                 error = materialization_error or (
                     "incomplete derivation stages: " + ", ".join(incomplete)

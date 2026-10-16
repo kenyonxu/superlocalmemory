@@ -537,6 +537,11 @@ def _compute_bandit_snapshot(profile_id: str,
         )
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("bandit snapshot: %s", exc)
+    finally:
+        # This runs on a worker thread; the bandit keeps one connection per
+        # thread, which would otherwise hold learning.db open for good.
+        from superlocalmemory.learning.bandit import close_threadlocal_conn
+        close_threadlocal_conn()
 
     return {
         "strata_active": strata_active,
@@ -820,7 +825,7 @@ def _compute_cross_platform() -> dict:
         from superlocalmemory.cli.context_commands import (
             build_default_adapters as _build_adapters,
         )
-        _adapters = _build_adapters()
+        _adapters = _build_adapters(include_project_scope=False)
     except Exception as exc:  # pragma: no cover — defensive
         _adapters = []
         logger.debug("brain: adapter factory failed: %s", exc)
@@ -1624,21 +1629,17 @@ def _compute_shadow_preview(profile_id: str) -> dict:
                 (profile_id,),
             ).fetchone()
             cand_id = int(row[0]) if row and row[0] is not None else None
+            # Observations per arm of the live test. The arms are disjoint by
+            # design (one recall is served by one model), so the old
+            # "paired" count — the INTERSECT of the arms' query ids — was 0
+            # by construction. Report the real sample.
             paired = 0
             if cand_id is not None:
                 try:
                     c = conn.execute(
                         "SELECT COUNT(DISTINCT query_id) "
-                        "FROM shadow_observations "
-                        "WHERE candidate_id = ? "
-                        "  AND query_id IN ("
-                        "    SELECT query_id FROM shadow_observations "
-                        "    WHERE candidate_id = ? AND arm = 'active' "
-                        "    INTERSECT "
-                        "    SELECT query_id FROM shadow_observations "
-                        "    WHERE candidate_id = ? AND arm = 'candidate' "
-                        "  )",
-                        (cand_id, cand_id, cand_id),
+                        "FROM shadow_observations WHERE candidate_id = ?",
+                        (cand_id,),
                     ).fetchone()
                     paired = int(c[0]) if c and c[0] is not None else 0
                 except sqlite3.Error:
@@ -1739,7 +1740,7 @@ async def get_brain_evolution_timeseries(
 
 @router.get("/learning/stats",
             dependencies=[Depends(require_install_token)])
-async def learning_stats_deprecated(
+def learning_stats_deprecated(
     request: Request, profile_id: str | None = None,
 ) -> dict:
     profile_id = _authorized_profile(request, profile_id)
@@ -1753,7 +1754,7 @@ async def learning_stats_deprecated(
 
 @router.get("/patterns",
             dependencies=[Depends(require_install_token)])
-async def patterns_deprecated(
+def patterns_deprecated(
     request: Request, profile_id: str | None = None,
 ) -> dict:
     profile_id = _authorized_profile(request, profile_id)
@@ -1766,7 +1767,7 @@ async def patterns_deprecated(
 
 @router.get("/bounded-loops/evidence",
             dependencies=[Depends(require_install_token)])
-async def bounded_loops_evidence(
+def bounded_loops_evidence(
     request: Request, profile_id: str | None = None, limit: int = 20,
 ) -> dict:
     """Terminal Bounded Loops runs this profile has observed.
@@ -1874,7 +1875,7 @@ async def bounded_loops_evidence(
 
 @router.get("/behavioral",
             dependencies=[Depends(require_install_token)])
-async def behavioral_deprecated(
+def behavioral_deprecated(
     request: Request, profile_id: str | None = None,
 ) -> dict:
     profile_id = _authorized_profile(request, profile_id)

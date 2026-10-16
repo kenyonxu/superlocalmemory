@@ -26,6 +26,7 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 
 from __future__ import annotations
 
+import http.client as _hclient
 import json as _json
 import sys
 import urllib.error as _uerr
@@ -33,8 +34,20 @@ import urllib.request as _urq
 from argparse import Namespace
 from typing import Any
 
+from superlocalmemory.cli.daemon_paths import InvalidDaemonId, describe, validate_daemon_id
+from superlocalmemory.core import outbound_http as _outbound
+
 
 _VALID_ACTIONS = ("retry", "force_reconcile", "cancel")
+
+# Issue #148: building or sending a request can itself raise -- a non-ASCII
+# path segment fails deep inside http.client's request-line encoding
+# (UnicodeEncodeError), and an ASCII-but-unsafe one (a space, a control
+# character) fails its path validation (http.client.InvalidURL). Both are
+# malformed-input errors, never caught by the HTTPError/URLError handling
+# below, so without this they reached main() as a raw traceback. Listed
+# here as the one place every daemon call in this module converts them.
+_REQUEST_BUILD_ERRORS = (UnicodeEncodeError, UnicodeDecodeError, ValueError, _hclient.InvalidURL)
 
 
 # ---------------------------------------------------------------------------
@@ -50,14 +63,40 @@ def _get_daemon_port() -> int:
         return 8765
 
 
+def _owned_daemon_port() -> int:
+    """The port of this account's own daemon, or exit with a plain message.
+
+    On a computer shared by several accounts the port may be answered by
+    another account's SuperLocalMemory, so the operation request waits until
+    the daemon proves it is this account's.
+    """
+    port = _get_daemon_port()
+    try:
+        from superlocalmemory.cli.daemon import owned_daemon_answers
+
+        owned = owned_daemon_answers(port)
+    except Exception:
+        owned = False
+    if not owned:
+        _die(
+            f"Your SLM daemon is not answering on port {port} (if something "
+            "answers there, it is not your SuperLocalMemory).\n"
+            "Make sure the daemon is running: slm serve"
+        )
+    return port
+
+
 def _daemon_get(path: str, timeout_s: float = 10.0) -> dict | None:
     """HTTP GET to the daemon; return parsed JSON or None on failure."""
-    port = _get_daemon_port()
+    port = _owned_daemon_port()
     url = f"http://127.0.0.1:{port}{path}"
     try:
-        with _urq.urlopen(url, timeout=timeout_s) as resp:  # noqa: S310
-            raw = resp.read().decode()
-        return _json.loads(raw)
+        # Only the connect+send phase is wrapped: this is where
+        # http.client actually raises on a bad path (see
+        # _REQUEST_BUILD_ERRORS below). Reading and decoding the response
+        # happens after, outside this try, so a malformed response body
+        # is never misreported as an invalid request path.
+        resp = _outbound.urlopen(url, timeout=timeout_s)
     except _uerr.HTTPError as exc:
         if exc.code == 403:
             _die(
@@ -71,12 +110,23 @@ def _daemon_get(path: str, timeout_s: float = 10.0) -> dict | None:
             f"Could not reach SLM daemon at {url}: {exc.reason}\n"
             "Make sure the daemon is running: slm serve"
         )
-    return None  # unreachable; _die exits
+    except _REQUEST_BUILD_ERRORS:
+        # Defense in depth: every caller of _daemon_get is expected to
+        # validate a user-supplied path segment first (see
+        # cli/daemon_paths.py), so this should never fire -- but a request
+        # that cannot be built or sent must still end in a friendly
+        # one-liner, not whatever stdlib exception leaked out of
+        # http.client.
+        _die(f"invalid request path {describe(path)}")
+        return None  # unreachable; _die exits
+    with resp:
+        raw = resp.read().decode()
+    return _json.loads(raw)
 
 
 def _daemon_post(path: str, body: dict, timeout_s: float = 10.0) -> dict | None:
     """HTTP POST to the daemon; return parsed JSON or None on failure."""
-    port = _get_daemon_port()
+    port = _owned_daemon_port()
     url = f"http://127.0.0.1:{port}{path}"
     try:
         req = _urq.Request(
@@ -85,9 +135,8 @@ def _daemon_post(path: str, body: dict, timeout_s: float = 10.0) -> dict | None:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with _urq.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310
-            raw = resp.read().decode()
-        return _json.loads(raw)
+        # Same split as _daemon_get: only build+connect+send is wrapped.
+        resp = _outbound.urlopen(req, timeout=timeout_s)
     except _uerr.HTTPError as exc:
         if exc.code == 403:
             _die(
@@ -104,7 +153,13 @@ def _daemon_post(path: str, body: dict, timeout_s: float = 10.0) -> dict | None:
             f"Could not reach SLM daemon at {url}: {exc.reason}\n"
             "Make sure the daemon is running: slm serve"
         )
-    return None  # unreachable; _die exits
+    except _REQUEST_BUILD_ERRORS:
+        # Same defense in depth as _daemon_get -- see the comment there.
+        _die(f"invalid request path {describe(path)}")
+        return None  # unreachable; _die exits
+    with resp:
+        raw = resp.read().decode()
+    return _json.loads(raw)
 
 
 def _die(message: str) -> None:
@@ -125,6 +180,14 @@ def _cmd_ops_list(args: Namespace) -> None:
     profile = getattr(args, "profile", None)
     path = "/operations/failed"
     if profile:
+        # Same bug class as operation_id: profile is interpolated into a
+        # daemon URL (here, a query value). The daemon's own
+        # validate_profile_name (server/routes/helpers.py) already
+        # restricts every profile it will accept to ^[a-zA-Z0-9_-]+$.
+        try:
+            validate_daemon_id(profile, label="--profile value")
+        except InvalidDaemonId:
+            _die(f"invalid --profile value {describe(profile)}")
         path = f"{path}?profile={profile}"
 
     data = _daemon_get(path)
@@ -177,6 +240,10 @@ def _cmd_ops_list(args: Namespace) -> None:
                 f"attempts={entry.get('attempts', '?')} "
                 f"profile={entry.get('profile_id', '?')}"
             )
+            if entry.get("error"):
+                print(f"    error: {entry['error']}")
+            if entry.get("what_happened"):
+                print(f"    {entry['what_happened']}")
         print()
 
     print("Use `slm ops resolve <id> --action cancel|retry|force_reconcile` to remediate.")
@@ -189,6 +256,21 @@ def _cmd_ops_resolve(args: Namespace) -> None:
 
     if action not in _VALID_ACTIONS:
         _die(f"--action must be one of: {', '.join(_VALID_ACTIONS)}")
+
+    # Issue #148: operation_id is interpolated straight into a daemon URL
+    # path below. The daemon only ever issues uuid.uuid4().hex-shaped IDs
+    # (see core/operation_request.py), so anything outside
+    # [A-Za-z0-9_-]+ -- a pasted "..." placeholder, a typo with a space or
+    # slash -- cannot be a real ID. Reject it here, before it is ever
+    # interpolated into a path or reaches a socket, instead of letting
+    # http.client discover the problem by crashing on it.
+    try:
+        validate_daemon_id(operation_id, label="operation ID")
+    except InvalidDaemonId:
+        _die(
+            f"invalid operation ID {describe(operation_id)} "
+            "— run 'slm ops list' to see valid IDs"
+        )
 
     result = _daemon_post(
         f"/operations/{operation_id}/resolve",
@@ -213,11 +295,29 @@ def _cmd_ops_resolve(args: Namespace) -> None:
         sys.exit(1)
 
 
+def _status_with_key() -> dict | None:
+    """/status asked through the daemon client, which sends this computer's key."""
+    try:
+        from superlocalmemory.cli.daemon import daemon_request
+
+        found = daemon_request("GET", "/status")
+    except Exception:  # noqa: BLE001 - the caller reports a plain message
+        return None
+    return found if isinstance(found, dict) else None
+
+
 def _cmd_ops_status(args: Namespace) -> None:
     """Quick ops-focused health status from the daemon."""
     data = _daemon_get("/status")
     if data is None:
         return
+    if data.get("details_hidden"):
+        # Where everyone must sign in, a bare request gets the short answer and
+        # its zeros would read as "healthy". Ask again with this computer's key.
+        data = _status_with_key() or data
+        if data.get("details_hidden"):
+            _die("This workspace requires sign-in to show operations status. "
+                 "Sign in, or set SLM_USER_SESSION, then run it again.")
 
     fields = {
         "dead_letter_count": data.get("dead_letter_count", 0),
@@ -226,6 +326,7 @@ def _cmd_ops_status(args: Namespace) -> None:
         "writer_stalled": data.get("writer_stalled", False),
         "writer_stalled_op_id": data.get("writer_stalled_op_id"),
         "writer_stalled_age_s": data.get("writer_stalled_age_s"),
+        "unreadable_saves": data.get("unreadable_saves", 0),
     }
 
     if getattr(args, "json", False):
@@ -236,6 +337,7 @@ def _cmd_ops_status(args: Namespace) -> None:
         fields["dead_letter_count"]
         + fields["degraded_operations"]
         + fields["exhausted_obligations"]
+        + max(0, int(fields["unreadable_saves"] or 0))
     )
     stalled = fields["writer_stalled"]
 
@@ -250,6 +352,8 @@ def _cmd_ops_status(args: Namespace) -> None:
         print(f"  degraded manifests     : {fields['degraded_operations']}")
     if fields["exhausted_obligations"]:
         print(f"  exhausted obligations  : {fields['exhausted_obligations']}")
+    if fields["unreadable_saves"] and fields["unreadable_saves"] > 0:
+        print(f"  unreadable saves       : {fields['unreadable_saves']} (kept, set aside)")
     if stalled:
         op_id = fields["writer_stalled_op_id"] or "?"
         age = fields["writer_stalled_age_s"]
@@ -265,17 +369,21 @@ def _cmd_ops_status(args: Namespace) -> None:
 def cmd_ops(args: Namespace) -> None:
     """Dispatch ``slm ops`` subcommands."""
     sub = getattr(args, "ops_command", None)
+    from superlocalmemory.cli.ops_repair_cmd import cmd_ops_repair_saves
+
     handlers = {
         "list": _cmd_ops_list,
         "resolve": _cmd_ops_resolve,
         "status": _cmd_ops_status,
+        "repair-saves": cmd_ops_repair_saves,
     }
     handler = handlers.get(sub)
     if handler:
         handler(args)
     else:
-        print("Usage: slm ops <list|resolve|status> [options]")
+        print("Usage: slm ops <list|resolve|status|repair-saves> [options]")
         print("  slm ops list [--profile P] [--json]")
         print("  slm ops resolve <id> --action {retry|force_reconcile|cancel} [--json]")
         print("  slm ops status [--json]")
+        print("  slm ops repair-saves [--apply] [--json]")
         sys.exit(1)

@@ -1,0 +1,15 @@
+{
+  "mcp": {
+    "servers": {
+      "superlocalmemory": {
+        "command": "slm",
+        "args": [
+          "mcp"
+        ],
+        "env": {
+          "SLM_AGENT_ID": "openclaw"
+        }
+      }
+    }
+  }
+}

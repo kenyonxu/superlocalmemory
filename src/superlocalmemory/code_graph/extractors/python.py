@@ -17,7 +17,6 @@ import json
 import logging
 from typing import Any
 
-from superlocalmemory.code_graph.config import CodeGraphConfig
 from superlocalmemory.code_graph.extractors import BaseExtractor
 from superlocalmemory.code_graph.models import (
     EdgeKind,

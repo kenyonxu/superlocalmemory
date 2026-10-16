@@ -24,16 +24,23 @@ License: AGPL-3.0-or-later
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 __all__ = [
     "parse_timestamp",
     "parse_window",
     "in_window",
     "infer_window_from_query",
+    "HUB_CORRECTED_DOOR",
+    "has_primary_evidence",
+    "semantic_floor_on_channel_scale",
+    "windowed_candidates",
 ]
 
 _REL = re.compile(r"^\s*(\d+)\s*([hdwmy])\s*$", re.IGNORECASE)
+_DATE_ONLY = re.compile(r"^\s*\d{4}-\d{2}-\d{2}\s*$")
 
 # Hours per unit. Month and year are documented approximations.
 _UNIT_HOURS: dict[str, int] = {
@@ -91,11 +98,7 @@ def parse_window(
     if isinstance(window, (tuple, list)):
         if len(window) != 2:
             return None
-        start = parse_timestamp(window[0])
-        end = parse_timestamp(window[1])
-        if start is None or end is None:
-            return None
-        return (start, end) if start <= end else (end, start)
+        return _explicit_range(window[0], window[1])
 
     # String forms: relative "<int><unit>" or an explicit range written as
     # "start..end" / "start,end" (so it survives URL params, JSON, and CLI args
@@ -110,13 +113,30 @@ def parse_window(
         for sep in ("..", ","):
             if sep in window:
                 left, _, right = window.partition(sep)
-                start = parse_timestamp(left)
-                end = parse_timestamp(right)
-                if start is None or end is None:
-                    return None
-                return (start, end) if start <= end else (end, start)
+                return _explicit_range(left, right)
 
     return None
+
+
+def _explicit_range(left: object, right: object) -> tuple[datetime, datetime] | None:
+    """Order the two ends; a date-only END covers that whole day.
+
+    "2026-07-01..2026-07-31" means all of July. Read as instants, its end was
+    31 July 00:00 and the last day fell outside its own range. The end of a
+    date-only bound is the last microsecond of that day — the same set as an
+    exclusive end at the next midnight, at datetime's full resolution. An end
+    written with a time is taken exactly as written.
+    """
+    ends = []
+    for raw in (left, right):
+        parsed = parse_timestamp(raw) if isinstance(raw, str) else None
+        if parsed is None:
+            return None
+        ends.append((parsed, bool(_DATE_ONLY.match(raw))))
+    (start, _), (end, end_is_date) = sorted(ends, key=lambda item: (item[0], item[1]))
+    if end_is_date:
+        end = end + timedelta(days=1) - timedelta(microseconds=1)
+    return (start, end)
 
 
 # Natural-language temporal-scope patterns → relative window spec. Ordered:
@@ -179,3 +199,66 @@ def in_window(
         return False
     start, end = bounds
     return start <= dt <= end
+
+
+def semantic_floor_on_channel_scale(min_semantic: float) -> float:
+    """``min_semantic`` is a raw cosine; the semantic channel stores every score as
+    ``(cosine + 1) / 2`` (``semantic_channel.py``, M-01), so the floor is compared on
+    that scale. Comparing the two directly made the floor fire at raw cosine 0.20,
+    which unrelated text passes every time, so recall never abstained. Measured on
+    a 26k-fact store with the built-in model: no-answer questions reach raw 0.53-0.61
+    against random facts, true answers sit at 0.62-0.90; raw 0.60 separates them.
+    """
+    return (min_semantic + 1.0) / 2.0
+
+
+#: 4.1.25: a memory whose cosine stands this far above its own hub baseline
+#: (``retrieval/hub_baseline``) has meaning evidence even under the raw floor.
+#: Measured on the answerability harness: paraphrases with no shared word reach
+#: 0.106-0.164 against raw cosines of 0.55-0.59. The floor only decides what
+#: the cross-encoder and the answer-support gate get to see; the gate decides
+#: whether recall answers.
+HUB_CORRECTED_DOOR = 0.10
+
+
+def has_primary_evidence(channel_scores: Mapping[str, float] | None,
+                         min_semantic: float, min_media: float = 0.30, *,
+                         hub_corrected: float | None = None) -> bool:
+    """The evidence floor's test (``RetrievalEngine._apply_evidence_floor``):
+    meaning at or above the raw cosine ``min_semantic``, or ``hub_corrected``
+    at or above ``HUB_CORRECTED_DOOR``, or any keyword, entity or time
+    evidence, or a picture match at or above ``min_media``. Associative
+    channels (Hopfield, spreading activation) do not count.
+    """
+    cs = channel_scores or {}
+    return (
+        cs.get("semantic", 0.0) >= semantic_floor_on_channel_scale(min_semantic)
+        or (hub_corrected is not None and hub_corrected >= HUB_CORRECTED_DOOR)
+        or cs.get("bm25", 0.0) > 0.0
+        or cs.get("entity_graph", 0.0) > 0.0
+        or cs.get("temporal", 0.0) > 0.0
+        or ("media" in cs and cs["media"] >= min_media)
+    )
+
+
+def windowed_candidates(fused: Sequence[Any], inside: Callable[[str], bool], *,
+                        explicit: bool, min_semantic: float,
+                        min_media: float = 0.30) -> list[Any]:
+    """The candidates a time window keeps.
+
+    An explicit window is the caller's instruction and is honoured even when it
+    keeps nothing. A window inferred from the question's wording ("recently",
+    "last week") must never make recall worse: it narrows only when some
+    candidate inside it has primary evidence. Otherwise every candidate stays.
+    Without that, a question carrying such a word about an older memory kept
+    only unrelated recent facts, which the evidence floor then removed, and
+    recall answered with nothing (measured: 36 questions made of a stored
+    memory's own words, on a copy of a 22k-fact store).
+    """
+    kept = [fr for fr in fused if inside(fr.fact_id)]
+    if explicit:
+        return kept
+    if any(has_primary_evidence(getattr(fr, "channel_scores", None), min_semantic, min_media)
+           for fr in kept):
+        return kept
+    return list(fused)

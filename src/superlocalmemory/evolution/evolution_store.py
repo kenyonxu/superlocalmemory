@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Optional
 
 from superlocalmemory.evolution.types import (
-    EvolutionCandidate,
     EvolutionRecord,
     EvolutionStatus,
     EvolutionType,
@@ -141,8 +140,7 @@ class EvolutionStore:
         missing. Existing rows backfill to 'default' — the historical profile.
         """
         # skill_evolution_log: additive column (safe, preserves rows).
-        cols = {r[1] for r in conn.execute(
-            "PRAGMA table_info(skill_evolution_log)").fetchall()}
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(skill_evolution_log)").fetchall()}
         if cols and "profile_id" not in cols:
             conn.execute(
                 "ALTER TABLE skill_evolution_log "
@@ -156,12 +154,11 @@ class EvolutionStore:
         # evolution_cycle_state: PK changes from (key) to (profile_id, key).
         # SQLite cannot alter a PK in place → rebuild + copy, backfilling
         # existing counters to the 'default' profile.
-        cyc_cols = {r[1] for r in conn.execute(
-            "PRAGMA table_info(evolution_cycle_state)").fetchall()}
+        cyc_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(evolution_cycle_state)").fetchall()
+        }
         if cyc_cols and "profile_id" not in cyc_cols:
-            conn.execute(
-                "ALTER TABLE evolution_cycle_state RENAME TO _evo_cycle_old"
-            )
+            conn.execute("ALTER TABLE evolution_cycle_state RENAME TO _evo_cycle_old")
             conn.execute(
                 "CREATE TABLE evolution_cycle_state ("
                 " profile_id TEXT NOT NULL DEFAULT 'default',"
@@ -256,10 +253,7 @@ class EvolutionStore:
 
     def prune_recovered(self, active_degraded_skills: set[str]) -> None:
         """Remove tracking for skills that recovered."""
-        recovered = [
-            k for k in self._addressed_degradations
-            if k not in active_degraded_skills
-        ]
+        recovered = [k for k in self._addressed_degradations if k not in active_degraded_skills]
         for k in recovered:
             del self._addressed_degradations[k]
 
@@ -358,11 +352,18 @@ class EvolutionStore:
             prev_hash = row[0] if row else "genesis"
 
             # Canonical, delimited payload over ALL persisted fields (P2-3).
-            payload = "|".join((
-                prev_hash, record_id,
-                from_status.value, to_status.value,
-                ts, actor_id, reason, metadata_str,
-            ))
+            payload = "|".join(
+                (
+                    prev_hash,
+                    record_id,
+                    from_status.value,
+                    to_status.value,
+                    ts,
+                    actor_id,
+                    reason,
+                    metadata_str,
+                )
+            )
             transition_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
             conn.execute(
@@ -396,7 +397,9 @@ class EvolutionStore:
             conn.close()
 
     def get_latest_status(
-        self, record_id: str, profile_id: str,
+        self,
+        record_id: str,
+        profile_id: str,
     ) -> EvolutionStatus | None:
         """Return the to_status of the highest-seq transition for record_id.
 
@@ -439,7 +442,7 @@ class EvolutionStore:
     # ------------------------------------------------------------------
 
     def save_record(self, record: EvolutionRecord, profile_id: str) -> None:
-        """DEPRECATED: use insert_record() for new records and append_transition() for state changes.
+        """DEPRECATED: insert new records; append transitions for state changes.
 
         Retained for backward-compatibility with existing tests and callers.
         Uses INSERT OR REPLACE — mutable semantics, not append-only.
@@ -489,8 +492,7 @@ class EvolutionStore:
         conn.row_factory = sqlite3.Row
         try:
             row = conn.execute(
-                "SELECT * FROM skill_evolution_log "
-                "WHERE id = ? AND profile_id = ?",
+                "SELECT * FROM skill_evolution_log WHERE id = ? AND profile_id = ?",
                 (record_id, profile_id),
             ).fetchone()
             if not row:
@@ -500,7 +502,10 @@ class EvolutionStore:
             conn.close()
 
     def get_skill_history(
-        self, skill_name: str, profile_id: str, limit: int = 20,
+        self,
+        skill_name: str,
+        profile_id: str,
+        limit: int = 20,
     ) -> list[EvolutionRecord]:
         conn = sqlite3.connect(self._db_path, timeout=10)
         conn.row_factory = sqlite3.Row
@@ -586,8 +591,8 @@ class EvolutionStore:
                 "total": total,
                 "by_status": by_status,
                 "by_type": by_type,
-                "cycle_budget_remaining":
-                    MAX_EVOLUTIONS_PER_CYCLE - self._get_cycle_count(profile_id),
+                "cycle_budget_remaining": MAX_EVOLUTIONS_PER_CYCLE
+                - self._get_cycle_count(profile_id),
             }
         finally:
             conn.close()
@@ -599,7 +604,11 @@ class EvolutionStore:
         except (json.JSONDecodeError, TypeError):
             evidence = ()
 
+        artifact = self._artifact_from_transitions(row)
         return EvolutionRecord(
+            quarantine_dir_name=artifact.get("quarantine_dir_name", ""),
+            verified_content_hash=artifact.get("content_hash", ""),
+            source_skill_path=artifact.get("source_skill_path", ""),
             id=row["id"],
             skill_name=row["skill_name"],
             parent_skill_id=row.get("parent_skill_id"),
@@ -612,8 +621,25 @@ class EvolutionStore:
             original_content=row.get("original_content", ""),
             evolved_content=row.get("evolved_content", ""),
             content_diff=row.get("content_diff", ""),
-            blind_verified=bool(row.get("blind_verified", 0)),
+            blind_verified=bool(artifact) or bool(row.get("blind_verified", 0)),
             rejection_reason=row.get("rejection_reason", ""),
             created_at=row.get("created_at", ""),
             completed_at=row.get("completed_at"),
         )
+
+    def _artifact_from_transitions(self, row: dict) -> dict:
+        """Recover the artifact from the profile-scoped, append-only audit chain."""
+        transitions = self.get_transitions(row["id"], row.get("profile_id", "default"))
+        for transition in reversed(transitions):
+            if transition["to_status"] not in ("verified_quarantined", "promoted"):
+                continue
+            try:
+                meta = transition.get("metadata", {})
+                if isinstance(meta, str):
+                    meta = json.loads(meta)
+                name = meta.get("quarantine_dir_name", "")
+                if isinstance(name, str) and name and Path(name).name == name:
+                    return meta
+            except (ValueError, TypeError, AttributeError):
+                break
+        return {}

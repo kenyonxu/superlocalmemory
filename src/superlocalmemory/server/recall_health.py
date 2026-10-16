@@ -56,6 +56,11 @@ HEAL_PROBE = "__recall_health_rewarm__"
 # Default cadence. 5 min keeps nomic-embed resident (Ollama default unload is
 # 5 min) and the page cache warm without meaningful load.
 DEFAULT_INTERVAL_S = 300
+# A heal that keeps failing (no model on disk, no network) respawns an embedding
+# worker each time and cannot succeed. Failed heals back off: 300 s, 600 s, ...
+# and stop after MAX_HEAL_ATTEMPTS until a healthy tick or a restart.
+HEAL_BACKOFF_BASE_S = 300
+MAX_HEAL_ATTEMPTS = 4
 
 
 @dataclass
@@ -79,6 +84,18 @@ class RecallHealth:
     last_tick_at: float = 0.0
     #: Whether the embedder could produce a vector at the last tick.
     embedder_alive: bool = True
+    #: The cross-encoder reranker. Not watched before 4.1.18: on a real daemon
+    #: it died and stayed dead for seven days while /health reported
+    #: recall_healthy. ``reranker_ready`` is None when the configured reranker
+    #: has no local model to judge (RemoteReranker).
+    reranker_configured: bool = False
+    reranker_ready: bool | None = None
+    reranker_rearms: int = 0
+    #: Self-heal backoff (see HEAL_BACKOFF_BASE_S). ``next_heal_at`` is a unix
+    #: timestamp; ``heal_stopped`` stays set until a healthy tick.
+    heal_failures_in_row: int = 0
+    next_heal_at: float = 0.0
+    heal_stopped: bool = False
 
 
 def _max_semantic(results) -> float:
@@ -101,6 +118,59 @@ def _get_embedder(engine):
         re_eng = getattr(engine, "_retrieval_engine", None)
         emb = getattr(re_eng, "_embedder", None) if re_eng is not None else None
     return emb
+
+
+def _get_reranker(engine):
+    """The retrieval engine's reranker, or None when none is configured."""
+    re_eng = getattr(engine, "_retrieval_engine", None)
+    return getattr(re_eng, "_reranker", None) if re_eng is not None else None
+
+
+def _watch_reranker(engine, state: RecallHealth, *, log) -> None:
+    """Report the reranker, and re-arm its warm-up if its model is gone.
+
+    Every way a reranker worker dies — the 500-request recycle, the 30-minute
+    idle kill, a crash — leaves no model loaded. The reranker re-warms itself
+    when a recall reaches it; this is a second path that does not depend on
+    recall traffic, so a quiet daemon recovers too. Starting the warm-up is
+    idempotent and never blocks.
+    """
+    reranker = _get_reranker(engine)
+    state.reranker_configured = reranker is not None
+    start = getattr(reranker, "_start_background_warmup", None)
+    if reranker is None or not callable(start) or not hasattr(reranker, "_model_loaded"):
+        state.reranker_ready = None
+        return
+    state.reranker_ready = bool(reranker._model_loaded)
+    if state.reranker_ready or getattr(reranker, "_worker_loading", False):
+        return
+    try:
+        started = start()
+    except Exception as exc:
+        log.critical("recall-health: could not re-arm the reranker warm-up: %s", exc)
+        return
+    if started is False:
+        return  # refused: the reranker's own backoff decides when to retry
+    state.reranker_rearms += 1
+    log.warning(
+        "recall-health: reranker had no model loaded — re-armed its warm-up "
+        "(re-arm #%d)", state.reranker_rearms,
+    )
+
+
+def _embedder_produces_vector(engine) -> bool:
+    """Ask the embedder for one vector. True only if it returns a non-empty one."""
+    emb = _get_embedder(engine)
+    if emb is None:
+        return False
+    try:
+        vec = emb.embed(HEAL_PROBE)
+    except Exception:
+        return False
+    try:
+        return vec is not None and len(vec) > 0
+    except TypeError:
+        return bool(vec)
 
 
 def _embedder_is_dead(engine) -> bool:
@@ -162,6 +232,70 @@ def _heal_embedder(engine, *, log) -> bool:
     return vec is not None and bool(vec)
 
 
+def _reset_heal(state: RecallHealth) -> None:
+    """Forget failed heals: the embedder works again."""
+    state.heal_failures_in_row = 0
+    state.next_heal_at = 0.0
+    state.heal_stopped = False
+
+
+def _note_heal_failed(state: RecallHealth, log) -> None:
+    """Count a failed heal, schedule the next one, stop after the cap."""
+    state.heal_failures_in_row += 1
+    k = state.heal_failures_in_row
+    state.next_heal_at = time.time() + HEAL_BACKOFF_BASE_S * 2 ** (k - 1)
+    if k >= MAX_HEAL_ATTEMPTS:
+        state.heal_stopped = True
+        log.warning(
+            "recall-health: embedder self-heal stopped after %d failed "
+            "attempts; run 'slm warmup' or restart the daemon", k,
+        )
+
+
+def _heal_paused(state: RecallHealth) -> bool:
+    return state.heal_stopped or time.time() < state.next_heal_at
+
+
+def _tier3_heal(engine, state: RecallHealth, dead: bool, n_results: int,
+                log) -> RecallHealth:
+    """Tier 3: self-heal, unless the backoff says a heal cannot help yet."""
+    if _heal_paused(state):
+        state.healthy = False
+        state.consecutive_failures += 1
+        state.last_error = (
+            "embedder self-heal stopped after repeated failures"
+            if state.heal_stopped else "embedder self-heal paused (backing off)"
+        )
+        log.debug("recall-health: %s", state.last_error)
+        return state
+    # The dead-embedder case already said so above; saying "semantic channel
+    # DEAD (max semantic=0.0)" as well would be a second, differently-worded
+    # CRITICAL about the same tick.
+    if not dead:
+        log.critical(
+            "recall-health: semantic channel DEAD (%d results, max semantic=0.0) "
+            "— embedder returning None; attempting self-heal",
+            n_results,
+        )
+    if _heal_embedder(engine, log=log):
+        state.total_heals += 1
+        state.healthy = True
+        state.consecutive_failures = 0
+        state.last_error = ""
+        _reset_heal(state)
+        log.warning("recall-health: embedder self-heal SUCCEEDED (re-warmed)")
+        return state
+    state.healthy = False
+    state.consecutive_failures += 1
+    state.last_error = "semantic channel dead; embedder heal failed"
+    _note_heal_failed(state, log)
+    log.critical(
+        "recall-health: self-heal FAILED — recall DEGRADED to keyword-only "
+        "(consecutive_failures=%d)", state.consecutive_failures,
+    )
+    return state
+
+
 def run_health_tick(engine, state: RecallHealth, *, probe: str = DEFAULT_PROBE,
                     log=logger, runtime=None) -> RecallHealth:
     """One monitor tick: re-warm (Tier 1), probe (Tier 2), self-heal (Tier 3).
@@ -175,6 +309,7 @@ def run_health_tick(engine, state: RecallHealth, *, probe: str = DEFAULT_PROBE,
     re-warm once the switch has committed.
     """
     state.checks += 1
+    _watch_reranker(engine, state, log=log)
 
     # Tier 1: re-warm. A real full-fusion recall keeps the graph page cache hot
     # and the embedder resident.
@@ -215,20 +350,34 @@ def run_health_tick(engine, state: RecallHealth, *, probe: str = DEFAULT_PROBE,
     state.last_semantic_score = sem
     state.last_tick_at = time.time()
 
-    # Tier 2: readiness. Two independent signatures, and the second one is why
-    # this monitor exists.
+    # Tier 2: readiness.
     #
-    #   * rows present but semantic never fired  -> warm-but-broken
     #   * the embedder cannot produce a vector   -> dead, whatever the recall said
+    #   * rows present but none scored by meaning -> ask the embedder directly
     #
-    # The second used to be missing, and its absence was load-bearing: zero
-    # results was treated as "not this signature", so the case where the embedder
-    # is dead AND the probe matches nothing by keyword -- which is the normal
-    # shape of an idle-timeout kill -- came out as healthy, silently.
+    # The first used to be missing, and its absence was load-bearing: zero
+    # results was treated as healthy, so the case where the embedder is dead AND
+    # the probe matches nothing by keyword -- the normal shape of an idle-timeout
+    # kill -- came out as healthy, silently.
+    #
+    # The second used to be read as an outage on its own. 4.1.18: it is the
+    # ordinary outcome for a working embedder -- the probe phrase is content-free
+    # and only its top three results come back, so none of them need carry a
+    # semantic score. A live daemon logged "semantic channel DEAD" on 1,970
+    # consecutive ticks that way while its real queries scored semantic 1.2. So
+    # the embedder is asked for a vector, and only a failure counts.
+    #
+    # What neither signature can catch, and the old one never did either: a
+    # vector index that is broken while the embedder still works. That needs a
+    # probe whose answer is known to be stored. The old check fired on every
+    # tick, so it would have looked exactly the same during a real index failure.
     dead = _embedder_is_dead(engine)
     state.embedder_alive = not dead
-    broken = dead or (bool(results) and sem <= 0.0)
-    if dead:
+    semantic_silent = bool(results) and sem <= 0.0
+    if semantic_silent and not dead and _embedder_produces_vector(engine):
+        semantic_silent = False
+    broken = dead or semantic_silent
+    if dead and not _heal_paused(state):
         log.critical(
             "recall-health: embedder cannot produce a vector (%d probe results) "
             "— attempting self-heal",
@@ -243,33 +392,10 @@ def run_health_tick(engine, state: RecallHealth, *, probe: str = DEFAULT_PROBE,
         state.healthy = True
         state.consecutive_failures = 0
         state.last_error = ""
+        _reset_heal(state)
         return state
 
-    # Tier 3: self-heal. The dead-embedder case already said so above; saying
-    # "semantic channel DEAD (max semantic=0.0)" as well would be a second,
-    # differently-worded CRITICAL about the same tick, and one of the two would
-    # be describing a symptom the reader does not have.
-    if not dead:
-        log.critical(
-            "recall-health: semantic channel DEAD (%d results, max semantic=0.0) "
-            "— embedder returning None; attempting self-heal",
-            len(results),
-        )
-    if _heal_embedder(engine, log=log):
-        state.total_heals += 1
-        state.healthy = True
-        state.consecutive_failures = 0
-        state.last_error = ""
-        log.warning("recall-health: embedder self-heal SUCCEEDED (re-warmed)")
-    else:
-        state.healthy = False
-        state.consecutive_failures += 1
-        state.last_error = "semantic channel dead; embedder heal failed"
-        log.critical(
-            "recall-health: self-heal FAILED — recall DEGRADED to keyword-only "
-            "(consecutive_failures=%d)", state.consecutive_failures,
-        )
-    return state
+    return _tier3_heal(engine, state, dead, len(results), log)
 
 
 def health_monitor_loop(engine, *, interval_s: int, stop_event: threading.Event,
@@ -329,6 +455,9 @@ def get_recall_health() -> dict:
         "checks": s.checks,
         "last_semantic_score": round(s.last_semantic_score, 4),
         "last_error": s.last_error,
+        "reranker_configured": s.reranker_configured,
+        "reranker_ready": s.reranker_ready,
+        "reranker_rearms": s.reranker_rearms,
         # Proof of life. A tick that finds nothing wrong logs nothing, so there
         # was no way to tell this monitor apart from a thread that never started
         # -- someone spent an hour reading logs for lines that were never going
@@ -340,4 +469,8 @@ def get_recall_health() -> dict:
             round(now - s.last_tick_at, 1) if s.last_tick_at else None
         ),
         "embedder_alive": s.embedder_alive,
+        "embedder_heal_stopped": s.heal_stopped,
+        "embedder_heal_retry_in_s": (
+            None if s.heal_stopped else round(max(0.0, s.next_heal_at - now), 1)
+        ),
     }

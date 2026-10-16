@@ -9,12 +9,8 @@ TDD RED phase: all tests fail before implementation exists.
 from __future__ import annotations
 
 import io
-import sys
 from argparse import Namespace
-from pathlib import Path
 from unittest import mock
-
-import pytest
 
 
 def _run_doctor(tmp_path=None, installs=None, error_logs=None, extra_args=None):
@@ -60,7 +56,6 @@ class TestDoctorInstallVersions:
 
     def test_doctor_output_contains_install_versions_check(self, tmp_path):
         """doctor output includes 'install_versions' check."""
-        from superlocalmemory.cli.commands import cmd_doctor
 
         installs = [
             {"path": "/pipx/venvs/slm/", "version": "4.1.0", "type": "pipx"},
@@ -127,11 +122,12 @@ class TestDoctorInstallVersions:
     def test_doctor_reports_migration_error_log(self, tmp_path):
         """doctor reports ERROR when migration-error-*.log exists."""
         error_log = tmp_path / "migration-error-20260819-120000.log"
-        error_log.write_text("migration failed: test error\n")
+        error_log.write_text("migration failed: test error\n", encoding="utf-8")
+
+        import io
+        from argparse import Namespace
 
         from superlocalmemory.cli.commands import cmd_doctor
-        from argparse import Namespace
-        import io
 
         args = Namespace(json=False, quick=True, fix=False)
         captured = io.StringIO()
@@ -155,9 +151,10 @@ class TestDoctorInstallVersions:
 
     def test_doctor_no_migration_error_check_when_clean(self, tmp_path):
         """doctor reports PASS for migration_errors when no error logs exist."""
-        from superlocalmemory.cli.commands import cmd_doctor
-        from argparse import Namespace
         import io
+        from argparse import Namespace
+
+        from superlocalmemory.cli.commands import cmd_doctor
 
         args = Namespace(json=False, quick=True, fix=False)
         captured = io.StringIO()
@@ -183,10 +180,10 @@ class TestDoctorInstallVersions:
 
     def test_doctor_json_output_includes_install_versions(self, tmp_path):
         """doctor --json output contains install_versions check."""
-        import json
-        from superlocalmemory.cli.commands import cmd_doctor
-        from argparse import Namespace
         import io
+        from argparse import Namespace
+
+        from superlocalmemory.cli.commands import cmd_doctor
 
         args = Namespace(json=True, quick=True, fix=False)
         captured = io.StringIO()

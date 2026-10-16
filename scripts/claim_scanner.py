@@ -165,6 +165,7 @@ SKIP_PARTS = {
     "build",
     "__pycache__",
     "v2-archive",
+    "archive",
     "audits",
     "superpowers",
 }
@@ -192,7 +193,7 @@ class Finding:
 
 def _is_public_surface(path: Path, root: Path) -> bool:
     rel = path.relative_to(root)
-    if any(part in SKIP_PARTS for part in rel.parts):
+    if any(part in SKIP_PARTS or part.startswith(".venv") for part in rel.parts):
         return False
     if path.suffix.lower() not in TEXT_SUFFIXES:
         return False
@@ -304,7 +305,7 @@ def scan_paths(roots: Iterable[Path]) -> list[Finding]:
                 rel = path.relative_to(resolved) if resolved.is_dir() else Path(path.name)
             except ValueError:
                 rel = Path(path.name)
-            if any(part in SKIP_PARTS for part in rel.parts):
+            if any(part in SKIP_PARTS or part.startswith(".venv") for part in rel.parts):
                 continue
             if path.suffix.lower() not in TEXT_SUFFIXES:
                 continue

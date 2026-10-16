@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import os
 import sqlite3
 from pathlib import Path
@@ -10,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from superlocalmemory.hooks.adapter_base import (
-    atomic_write,
     path_sha256,
     sync_log_record,
 )
@@ -85,7 +85,6 @@ async def test_sync_log_row_per_sync_attempt(tmp_path, fake_recall):
         recall_fn=fake_recall,
     )
     # First call writes; second is a content-hash skip.
-    import time as _time
     cp._now_iso = lambda: "2026-04-18T00:00:00+00:00"
     await run_once([adapter])
     await run_once([adapter])
@@ -150,5 +149,8 @@ async def test_first_run_delay_honoured():
         [adapter], interval=0.01, first_run_delay=0.05, iterations=1,
     )
     elapsed = asyncio.get_event_loop().time() - start
-    assert elapsed >= 0.05
+    # asyncio runs a timer up to one clock tick early by design (its
+    # _clock_resolution); on Windows a monotonic tick is about 15.6 ms.
+    tick = time.get_clock_info("monotonic").resolution
+    assert elapsed >= 0.05 - tick
     assert adapter.calls == 1

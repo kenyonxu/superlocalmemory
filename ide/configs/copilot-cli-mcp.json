@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "superlocalmemory": {
+      "type": "local",
+      "command": "slm",
+      "args": [
+        "mcp"
+      ],
+      "env": {
+        "SLM_AGENT_ID": "copilot_cli"
+      },
+      "tools": [
+        "*"
+      ]
+    }
+  }
+}

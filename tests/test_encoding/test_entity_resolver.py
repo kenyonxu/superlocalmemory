@@ -25,8 +25,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from superlocalmemory.encoding.entity_resolver import (
-    JARO_WINKLER_AUTO_MERGE,
-    JARO_WINKLER_LLM_FLOOR,
     EntityResolver,
     _guess_entity_type,
     jaro_winkler,

@@ -130,6 +130,17 @@ class TestEveryReadPathThatAnswersAQuestion:
         """"All memories 5,093" was counting 1,195 withheld summaries."""
         assert store.get_fact_count(_PROFILE) == 2
 
+    def test_the_daily_summary(self, store: DatabaseManager) -> None:
+        """4.1.21 (#113): the summaries hand-roll their SQL and were not on this
+        list, so "Today" quoted a withheld refusal as the owner's own note.
+        Session and project summaries are covered in
+        tests/test_summaries/test_summaries_show_only_visible_memories.py."""
+        from superlocalmemory.summaries import generate_daily_reflection
+
+        result = generate_daily_reflection(store.db_path, "2026-08-01", _PROFILE)
+        assert [f for f in result.source_fact_ids if f.startswith("hide-")] == []
+        assert sorted(result.source_fact_ids) == ["keep-1", "keep-2"]
+
 
 class TestTheEscapeHatchStillWorks:
     def test_repair_and_erasure_can_see_withheld_rows(
@@ -238,18 +249,24 @@ class TestChannelsDoNotSpendTheirBudgetOnWithheldRows:
         src = inspect.getsource(bm25_channel)
         assert "visible_fact_clause" in src
 
-    def test_entity_map_excludes_them(self) -> None:
+    def test_entity_map_excludes_them(self, store: DatabaseManager) -> None:
         """These rows carry their whole cluster's pooled entity list.
 
         That is precisely why they out-ranked real memories here: more entity
         links than any single genuine fact.
         """
-        import inspect
+        from superlocalmemory.retrieval.entity_channel import EntityGraphChannel
 
-        from superlocalmemory.retrieval import entity_channel
+        store.execute(
+            "UPDATE atomic_facts SET canonical_entities_json = ?",
+            ('["shared-entity"]',),
+        )
+        channel = EntityGraphChannel(store, None, None)
+        channel._load_entity_maps(_PROFILE)
 
-        src = inspect.getsource(entity_channel)
-        assert "visible_fact_clause" in src
+        assert sorted(channel._entity_to_facts["shared-entity"]) == ["keep-1", "keep-2"]
+        assert set(channel._fact_to_entities) == {"keep-1", "keep-2"}
+        assert channel._visible_fact_ids == {"keep-1", "keep-2"}
 
     def test_temporal_recency_fallback_excludes_them(self) -> None:
         """Where they won before: no temporal_events, so created_at alone."""
@@ -296,7 +313,9 @@ class TestExportDoesNotSpreadThem:
         """
         import inspect
 
-        from superlocalmemory.server.routes import data_io
+        from superlocalmemory.server.routes import export_memories
 
-        src = inspect.getsource(data_io.export_memories)
+        # The query moved out of the route with the streaming export; the
+        # behavioural proof is tests/test_server/test_export_routes_on_a_real_store.py.
+        src = inspect.getsource(export_memories._query)
         assert "COALESCE(quarantined, 0) = 0" in src

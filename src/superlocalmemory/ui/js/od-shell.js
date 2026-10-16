@@ -61,6 +61,8 @@
   ================================================================ */
   var NAV = [
     { g: 'Overview', items: [
+      // 4.1.20: Jev and Laya, dedicated and first in the group (owner's call).
+      { k: 'answercheck-pane', t: 'Answer Check', i: 'shield', crumb: 'Overview', tag: 'new', hero: true },
       { k: 'dashboard-pane', t: 'Dashboard',   i: 'dashboard', crumb: 'Overview' },
       { k: 'brain-pane',     t: 'Brain',        i: 'brain',     crumb: 'Overview', tag: 'live', hero: true },
     ]},
@@ -69,6 +71,8 @@
       { k: 'memories-pane',  t: 'Memories',           i: 'memories', crumb: 'Memory' },
       { k: 'entities-pane',  t: 'Entity Explorer',    i: 'entity',   crumb: 'Memory' },
       { k: 'agents-pane',    t: 'Multi-Agent Memory', i: 'mesh',     crumb: 'Memory' },
+      // 4.1.25: images and PDFs. Off until the person turns them on.
+      { k: 'media-pane',     t: 'Documents & Images', i: 'pkg',      crumb: 'Memory', tag: 'new' },
     ]},
     { g: 'Intelligence', items: [
       { k: 'skills-pane',    t: 'Skill Evolution',  i: 'skill',    crumb: 'Intelligence' },
@@ -80,7 +84,12 @@
     ]},
     { g: 'Integrations', items: [
       { k: 'mcp-pane',       t: 'MCP & Tools', i: 'plug',     crumb: 'Integrations' },
+      // 4.1.23: the internet-connection flow (ChatGPT, Claude on the web, Composio,
+      // Muse, group bots) left MCP & Tools, which is for local agents. Optional.
+      { k: 'apps-pane',      t: 'Connected apps', i: 'link',  crumb: 'Integrations', tag: 'Optional' },
       { k: 'mesh-pane',      t: 'Mesh Peers',  i: 'mesh',     crumb: 'Integrations' },
+      // 4.1.25: what bots sent through the mesh, with owner controls per peer.
+      { k: 'botmsg-pane',    t: 'Bot messages', i: 'send',    crumb: 'Integrations', tag: 'new' },
       // 4.0.8: was a tab inside Governance. Every other Governance tab governs
       // SLM's OWN data — lifecycle, access, trust, compliance, ingestion.
       // Bounded Loops governs none of it: it is a separate product SLM
@@ -144,7 +153,22 @@
   ================================================================ */
   var THEME_KEY = 'slm-theme';
 
-  function applyTheme(t) {
+  // Follow the system colour scheme until the user picks a theme with the
+  // toggle; only that explicit choice is written to localStorage.
+  function storedTheme() {
+    try {
+      var v = localStorage.getItem(THEME_KEY);
+      return (v === 'light' || v === 'dark') ? v : null;
+    } catch (e) { return null; }
+  }
+  function systemTheme() {
+    try {
+      return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    } catch (e) { return 'dark'; }
+  }
+  function currentTheme() { return storedTheme() || systemTheme(); }
+
+  function applyTheme(t, persist) {
     document.documentElement.setAttribute('data-theme', t);
     document.documentElement.setAttribute('data-bs-theme', t);
     if (t === 'dark') {
@@ -152,7 +176,7 @@
     } else {
       document.body.classList.remove('ng-dark');
     }
-    try { localStorage.setItem(THEME_KEY, t); } catch (e) {}
+    if (persist) { try { localStorage.setItem(THEME_KEY, t); } catch (e) {} }
 
     // Update all [data-theme-icon] placeholders (sun in dark, moon in light)
     document.querySelectorAll('[data-theme-icon]').forEach(function (el) {
@@ -163,8 +187,8 @@
     ['graph-container', 'memory-timeline-chart'].forEach(function (id) {
       var el = document.getElementById(id);
       if (!el) return;
-      el.style.setProperty('background', t === 'dark' ? '#0f1012' : '#ffffff', 'important');
-      el.style.setProperty('background-color', t === 'dark' ? '#0f1012' : '#ffffff', 'important');
+      el.style.setProperty('background', t === 'dark' ? '#0B0A12' : '#ffffff', 'important');
+      el.style.setProperty('background-color', t === 'dark' ? '#0B0A12' : '#ffffff', 'important');
       el.style.setProperty('border-color', t === 'dark' ? 'rgba(255,255,255,0.06)' : '#e5e7eb', 'important');
     });
   }
@@ -172,8 +196,7 @@
   // Apply theme immediately (before DOMContentLoaded) to prevent FOUC.
   // Both data-theme (OD CSS) and data-bs-theme (Bootstrap) must be set here.
   (function initThemeEarly() {
-    var t = 'dark';
-    try { t = localStorage.getItem(THEME_KEY) || 'dark'; } catch (e) {}
+    var t = currentTheme();
     document.documentElement.setAttribute('data-theme', t);
     document.documentElement.setAttribute('data-bs-theme', t);
   }());
@@ -181,7 +204,7 @@
   // Public API — override the core.js definition (which only sets data-bs-theme)
   window.toggleDarkMode = function () {
     var cur = document.documentElement.getAttribute('data-theme') || 'dark';
-    applyTheme(cur === 'dark' ? 'light' : 'dark');
+    applyTheme(cur === 'dark' ? 'light' : 'dark', true);
   };
   window.slmToggleTheme = window.toggleDarkMode;
 
@@ -224,7 +247,19 @@
   /* ================================================================
      Tab activation — single-page SPA switching
   ================================================================ */
+  // On a phone the sidebar is an off-canvas menu over the page. Choosing a
+  // page must close it, or the page you asked for stays hidden behind it.
+  function closeMobileNav() {
+    var sidebarEl = document.getElementById('sidebar');
+    var scrim = document.getElementById('scrim');
+    var menuBtn = document.getElementById('menuBtn');
+    if (sidebarEl) sidebarEl.classList.remove('open');
+    if (scrim) scrim.classList.remove('on');
+    if (menuBtn) menuBtn.setAttribute('aria-expanded', 'false');
+  }
+
   function activateTab(paneId) {
+    closeMobileNav();
     // Hide all Bootstrap tab panes
     document.querySelectorAll('.tab-pane').forEach(function (p) {
       p.classList.remove('show', 'active');
@@ -274,10 +309,7 @@
     // Update URL hash without triggering a scroll
     try { history.replaceState(null, '', '#' + paneId); } catch (e) {}
 
-    // Scroll both the window and the content area to top
-    window.scrollTo({ top: 0, behavior: 'instant' });
-    var contentEl = document.getElementById('main-content');
-    if (contentEl) contentEl.scrollTo({ top: 0, behavior: 'instant' });
+    resetPageScroll();
 
     // Deferred retry ONLY if the first render produced nothing (a pane that ran
     // before it was visible/sized). Re-running unconditionally used to wipe and
@@ -293,9 +325,29 @@
 
     // Scroll the active sidebar item into view (mobile)
     var activeLink = document.querySelector('.nav-link[data-tab="' + paneId + '"]');
-    if (activeLink) {
-      activeLink.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
+    if (activeLink) revealInSidebar(activeLink);
+  }
+
+  // The page scrolls on <body> (html and body both set overflow), so
+  // window.scrollTo alone leaves it where it was.
+  function resetPageScroll() {
+    window.scrollTo({ top: 0, behavior: 'instant' });
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+    var contentEl = document.getElementById('main-content');
+    if (contentEl) contentEl.scrollTo({ top: 0, behavior: 'instant' });
+  }
+
+  // Moves only the sidebar's own list. scrollIntoView also scrolls every
+  // scrollable ancestor, the page included: it left the page 86 px down, with
+  // each pane's first line hidden under the sticky top bar.
+  function revealInSidebar(link) {
+    var list = link.closest('.nav');
+    if (!list) return;
+    var item = link.getBoundingClientRect();
+    var box = list.getBoundingClientRect();
+    if (item.top < box.top) list.scrollTop -= box.top - item.top;
+    else if (item.bottom > box.bottom) list.scrollTop += item.bottom - box.bottom;
   }
 
   /* ================================================================
@@ -327,6 +379,15 @@
   function refreshOdPane(tabId, fnName, state, generation) {
     var oldPane = document.getElementById(tabId);
     if (!oldPane || typeof window[fnName] !== 'function') return Promise.resolve();
+    // These panes own live OAuth form state (MCP: profile data; Connected apps:
+    // the sign-in flow). Refresh in place; cloning and swapping them would
+    // discard selections, focus and sign-in links.
+    if (fnName === 'odRenderMcp' || fnName === 'odRenderApps') {
+      return Promise.resolve(window[fnName](oldPane, { preserveConnectionScope: true })).then(function () {
+        if (state.generation === generation) { state.mounted = true; state.loadedAt = Date.now(); }
+      });
+    }
+
 
     var snapshotId = tabId + '--stale-' + String(generation);
     var freshPane = oldPane.cloneNode(false);
@@ -466,7 +527,7 @@
           return true;
         }
         try {
-          pane.innerHTML = '';
+          if (fnName !== 'odRenderMcp' && fnName !== 'odRenderApps') pane.innerHTML = '';
           window[fnName](pane);
           pane.dataset.slmOdRenderer = fnName;
           var mounted = getPaneLoadState(tabId);
@@ -527,6 +588,9 @@
       case 'loops-pane':
         od('odRenderLoops');
         return true;
+      case 'answercheck-pane':
+        od('odRenderAnswerCheck');
+        return true;
       case 'settings-pane':
         if (od('odRenderSettings')) return true;
         if (typeof loadSettings === 'function') loadSettings();
@@ -541,14 +605,58 @@
       case 'agents-pane':
         od('odRenderAgents');
         return true;
+      case 'media-pane':
+        od('odRenderMedia');
+        return true;
+      case 'botmsg-pane':
+        od('odRenderBotMessages');
+        return true;
       case 'mcp-pane':
         od('odRenderMcp');
+        return true;
+      case 'apps-pane':
+        od('odRenderApps');
         return true;
       case 'backup-pane':
         od('odRenderBackup');
         return true;
     }
     return false;
+  }
+
+  // Lets one pane link to another (MCP & Tools -> Connected apps) with the same
+  // activation path the sidebar uses.
+  window.slmNavigate = function (paneId) {
+    if (NAV_MAP[paneId]) activateTab(paneId);
+  };
+
+  // The sign-in callback (server side) redirects to /#mcp-pane. A fresh page
+  // load of exactly that address, with no query string, means "back from
+  // sign-in": land on Connected apps, where the connection lives now. A reload
+  // or back/forward on MCP & Tools is not that, so it is left alone.
+  function isFreshNavigation() {
+    try {
+      var entries = window.performance && window.performance.getEntriesByType
+        ? window.performance.getEntriesByType('navigation') : [];
+      return !entries || !entries.length || entries[0].type === 'navigate';
+    } catch (e) { return false; }
+  }
+  window.slmIsSignInReturn = function (hash, search) {
+    return hash === 'mcp-pane' && !search && isFreshNavigation();
+  };
+  // Only a connection that is not cancelled can be the one the user just
+  // signed in for; otherwise stay on (or go back to) MCP & Tools.
+  function confirmSignInReturn() {
+    var fetcher = typeof window.slmFetch === 'function' ? window.slmFetch : window.fetch;
+    if (typeof fetcher !== 'function') return;
+    Promise.resolve().then(function () { return fetcher('/api/v3/connections/status', { credentials: 'same-origin' }); })
+      .then(function (response) { return response && response.ok ? response.json() : null; })
+      .then(function (data) {
+        if (!data || !Array.isArray(data.connections)) return;
+        var live = data.connections.some(function (c) { return c && c.state && c.state !== 'cancelled'; });
+        if (!live) { window.__slmAppsReturn = false; activateTab('mcp-pane'); }
+      })
+      .catch(function () { /* stay on Connected apps; it reports its own errors */ });
   }
 
   // Mutating actions and profile switches can invalidate cached panes without
@@ -617,20 +725,25 @@
     var scrim    = document.getElementById('scrim');
     var sidebarEl = document.getElementById('sidebar');
     if (menuBtn && sidebarEl && scrim) {
+      menuBtn.setAttribute('aria-expanded', 'false');
       menuBtn.addEventListener('click', function () {
-        sidebarEl.classList.toggle('open');
-        scrim.classList.toggle('on');
+        var open = sidebarEl.classList.toggle('open');
+        scrim.classList.toggle('on', open);
+        menuBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
       });
-      scrim.addEventListener('click', function () {
-        sidebarEl.classList.remove('open');
-        scrim.classList.remove('on');
+      scrim.addEventListener('click', closeMobileNav);
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && sidebarEl.classList.contains('open')) closeMobileNav();
       });
     }
 
     // 4. Apply current theme (fills icons, syncs classes)
-    var t = 'dark';
-    try { t = localStorage.getItem(THEME_KEY) || 'dark'; } catch (e) {}
-    applyTheme(t);
+    applyTheme(currentTheme(), false);
+    try {
+      var mq = window.matchMedia('(prefers-color-scheme: light)');
+      var onSys = function () { if (!storedTheme()) applyTheme(systemTheme(), false); };
+      if (mq.addEventListener) mq.addEventListener('change', onSys);
+    } catch (e) {}
 
     // 5. Wire theme toggle buttons via addEventListener (NOT onclick — CSP safe)
     document.querySelectorAll('[data-theme-icon]').forEach(function (btn) {
@@ -798,11 +911,17 @@
   document.addEventListener('DOMContentLoaded', function () {
     // Determine initial active pane from URL hash (if valid tab pane)
     var active = 'dashboard-pane';
+    var returnedFromSignIn = false;
     var hash = window.location.hash.replace('#', '');
     if (hash) {
       var el = document.getElementById(hash);
       if (el && el.classList && el.classList.contains('tab-pane')) {
         active = hash;
+        if (window.slmIsSignInReturn(hash, window.location.search)) {
+          active = 'apps-pane';
+          returnedFromSignIn = true;
+          window.__slmAppsReturn = true;   // the pane treats a ready connection as new
+        }
       } else {
         // Stale section anchor from a previous session — strip it so
         // we always land on Dashboard, not a blank screen.
@@ -811,6 +930,13 @@
     }
 
     window.slmShell({ active: active });
+    if (returnedFromSignIn) confirmSignInReturn();
+
+    // The URL now names the pane, and on load the browser scrolls to that
+    // fragment: the pane's first line ended up under the sticky top bar.
+    window.addEventListener('load', function () {
+      (window.requestAnimationFrame || setTimeout)(resetPageScroll);
+    }, { once: true });
 
     // Wire subsequent hash changes (user-triggered navigation, not initial load)
     window.addEventListener('hashchange', handleHash);

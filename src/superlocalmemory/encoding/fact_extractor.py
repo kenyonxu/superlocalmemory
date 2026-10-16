@@ -34,7 +34,16 @@ import uuid
 from typing import Any, Protocol, runtime_checkable
 
 from superlocalmemory.core.config import EncodingConfig
+from superlocalmemory.encoding import llm_kind_hint
+from superlocalmemory.encoding.date_resolution import keep_supported_dates, try_parse_date
+from superlocalmemory.encoding.entity_mentions import extract_mentions
+from superlocalmemory.encoding.fact_extraction_result import (
+    FactExtraction,
+    for_review,
+    partition_facts,
+)
 from superlocalmemory.encoding.prospective_markers import looks_prospective
+from superlocalmemory.encoding.speaker_spans import bounded_turns, normalize_speaker, speaker_spans
 from superlocalmemory.storage.models import AtomicFact, FactType, Mode, SignalType
 
 logger = logging.getLogger(__name__)
@@ -43,6 +52,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Protocols — accept any LLM / embedder without importing concrete classes
 # ---------------------------------------------------------------------------
+
 
 @runtime_checkable
 class LLMBackboneProtocol(Protocol):
@@ -71,11 +81,13 @@ class EmbedderProtocol(Protocol):
 # ---------------------------------------------------------------------------
 
 _DATE_RE = re.compile(
-    r"\b(\d{4}-\d{2}-\d{2})"                                    # ISO
-    r"|\b(\d{1,2}/\d{1,2}/\d{2,4})"                             # US
+    r"\b(\d{4}-\d{2}-\d{2})"  # ISO
+    r"|\b(\d{1,2}/\d{1,2}/\d{2,4})"  # US
+    r"|\b(\d{1,2}\s+(?:January|February|March|April|May|June|July"
+    r"|August|September|October|November|December)\s+\d{4}\b)"
     r"|\b((?:January|February|March|April|May|June|July"
     r"|August|September|October|November|December)"
-    r"\s+\d{1,2}(?:,?\s+\d{4})?)"                               # Month Day Year
+    r"\s+(?:\d{4}\b|\d{1,2}\b(?:,?\s+\d{4})?))"  # Month Day Year
     r"|\b(yesterday|today|tomorrow|last\s+\w+|next\s+\w+)\b",
     re.IGNORECASE,
 )
@@ -84,13 +96,6 @@ _INTERVAL_RE = re.compile(
     r"\b(?:from|between)\s+(.+?)\s+(?:to|and|until|through)\s+(.+?)(?:[.,;]|$)",
     re.IGNORECASE,
 )
-
-_ENTITY_RE = re.compile(
-    r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+){0,3})\b"    # Capitalized word sequences
-    r"|\b([A-Z]{2,})\b"                              # ALL-CAPS abbreviations (NYU, MIT)
-)
-
-_QUOTED_RE = re.compile(r'"([^"]+)"')  # Quoted strings as entities
 
 _OPINION_MARKERS = re.compile(
     r"\b(?:I think|I believe|I feel|in my opinion|I prefer|I like|I love|"
@@ -110,17 +115,53 @@ _EXPERIENCE_MARKERS = re.compile(
 )
 
 
-_EMOTIONAL_KEYWORDS = frozenset({
-    "love", "hate", "amazing", "terrible", "wonderful", "awful", "excited",
-    "angry", "happy", "sad", "scared", "thrilled", "devastated", "furious",
-    "anxious", "grateful", "disappointed", "proud", "embarrassed", "jealous",
-    "best", "worst", "incredible", "horrible", "fantastic", "miserable",
-})
+_EMOTIONAL_KEYWORDS = frozenset(
+    {
+        "love",
+        "hate",
+        "amazing",
+        "terrible",
+        "wonderful",
+        "awful",
+        "excited",
+        "angry",
+        "happy",
+        "sad",
+        "scared",
+        "thrilled",
+        "devastated",
+        "furious",
+        "anxious",
+        "grateful",
+        "disappointed",
+        "proud",
+        "embarrassed",
+        "jealous",
+        "best",
+        "worst",
+        "incredible",
+        "horrible",
+        "fantastic",
+        "miserable",
+    }
+)
 
 _FILLER_PREFIXES = (
-    "good to see", "nice to", "hello", "hi ", "hey ", "how are you",
-    "thanks", "thank you", "bye", "goodbye", "see you", "take care",
-    "sure thing", "no problem", "okay",
+    "good to see",
+    "nice to",
+    "hello",
+    "hi ",
+    "hey ",
+    "how are you",
+    "thanks",
+    "thank you",
+    "bye",
+    "goodbye",
+    "see you",
+    "take care",
+    "sure thing",
+    "no problem",
+    "okay",
 )
 
 
@@ -129,37 +170,21 @@ _FILLER_PREFIXES = (
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = (
-    "You are a precise fact extraction engine for a memory system.\n"
-    "Given conversation turns, extract 2-5 atomic facts. Rules:\n"
-    "1. Use EXPLICIT NAMES — never pronouns (he/she/they/it). Every fact "
-    "must name the subject explicitly.\n"
-    "2. Each fact must be a COMPLETE, STANDALONE statement understandable "
-    "without the original conversation.\n"
-    "3. Convert ALL relative time to ABSOLUTE dates when possible, using "
-    "ONLY the conversation date given in the user message below as your "
-    "reference point — never invent or assume a date. 'Yesterday' resolves "
-    "to one calendar day before that conversation date; 'next month' "
-    "resolves to the following calendar month of that same date. If no "
-    "conversation date is given, leave the date unresolved rather than "
-    "guessing one.\n"
-    "4. Resolve ALL coreferences. 'He went there' must become "
-    "'[Person name] went to [Place name]'.\n"
-    "5. Extract relationships between people when mentioned.\n"
-    "6. Extract preferences, opinions, and experiences as SEPARATE facts.\n"
-    "7. Skip greetings, filler, social pleasantries, and confirmations.\n"
-    "8. For opinions, include a confidence between 0.0-1.0.\n\n"
-    "Classify each fact:\n"
-    "- episodic: personal event or experience (visited, attended, did)\n"
-    "- semantic: objective fact about the world (jobs, locations, relations)\n"
-    "- opinion: subjective belief or preference (likes, thinks, prefers)\n"
-    "- prospective: something planned for later, with a date or deadline\n\n"
-    "Respond ONLY with a JSON array. Example:\n"
-    '[{"text":"Alice works at Google as a software engineer",'
-    '"fact_type":"semantic","entities":["Alice","Google"],'
-    '"referenced_date":null,"importance":7,"confidence":0.95},'
-    '{"text":"Alice prefers Python over Java",'
-    '"fact_type":"opinion","entities":["Alice"],'
-    '"referenced_date":null,"importance":5,"confidence":0.8}]'
+    "Extract 1-5 atomic statements supported by the source, or [] for no facts.\n"
+    "Do not pad the answer. Copy the source wording whenever possible.\n"
+    "Rewrite first person as 'the user' only for the user; use the explicit "
+    "speaker label for another speaker. Never rewrite words inside quotations.\n"
+    "Preserve speaker turns and quote attribution. Never infer names, employers, "
+    "preferences, relationships or identities. Unresolved pronouns stay unresolved.\n"
+    "Keep every number, unit, date, negation, qualifier and step order exactly.\n"
+    "Leave relative date words in the text; deterministic code resolves date fields "
+    "against the conversation date. Unknown date means no date inference.\n"
+    "No calculations, implications, commentary, repeated or near-duplicate facts.\n"
+    "Respond ONLY with a JSON array.\n"
+    "Return objects with fields: text (supported statement), "
+    "fact_type (episodic, semantic, opinion or prospective), entities (names copied "
+    "from source), referenced_date (null unless explicit), importance (1-10), "
+    "confidence (0-1). No example content is provided."
 )
 
 
@@ -167,14 +192,16 @@ _SYSTEM_PROMPT = (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _new_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
 def _split_sentences(text: str) -> list[str]:
     """Split text into sentences using punctuation boundaries."""
-    parts = re.split(r"(?<=[.!?])\s+", text.strip())
-    return [p.strip() for p in parts if len(p.strip()) >= 8]
+    from superlocalmemory.encoding.speaker_spans import split_sentences
+
+    return split_sentences(text)
 
 
 def _extract_date_string(text: str) -> str | None:
@@ -188,79 +215,9 @@ def _extract_date_string(text: str) -> str | None:
     return None
 
 
-def _try_parse_date(raw: str, reference_date: str | None = None) -> str | None:
-    """Attempt to resolve a date string to ISO format.
-
-    Uses dateutil.parser for structured dates and dateparser for
-    relative expressions ("last Monday", "next week").
-    Returns None on failure — never raises.
-    """
-    if not raw:
-        return None
-
-    # Fast path: already ISO
-    iso_match = re.match(r"^\d{4}-\d{2}-\d{2}$", raw.strip())
-    if iso_match:
-        return raw.strip()
-
-    # dateutil for structured dates (March 15, 2026 / 3/15/2026)
-    try:
-        from dateutil import parser as du_parser
-        result = du_parser.parse(raw, fuzzy=True)
-        return result.date().isoformat()
-    except Exception:
-        pass
-
-    # V3.3.21: Rule-based relative date resolution (no dateparser dependency).
-    # Handles the 90% case: yesterday, today, tomorrow, last X, next X.
-    raw_lower = raw.strip().lower()
-    if reference_date:
-        try:
-            from datetime import datetime, timedelta
-            ref_dt = du_parser.parse(reference_date)
-            _RELATIVE_MAP: dict[str, int] = {
-                "yesterday": -1, "today": 0, "tomorrow": 1,
-                "the day before": -2, "the other day": -2,
-                "day before yesterday": -2,
-            }
-            if raw_lower in _RELATIVE_MAP:
-                resolved = ref_dt + timedelta(days=_RELATIVE_MAP[raw_lower])
-                return resolved.date().isoformat()
-            # "last week" = -7, "last month" ≈ -30, "last year" = -365
-            if raw_lower == "last week":
-                return (ref_dt - timedelta(days=7)).date().isoformat()
-            if raw_lower == "last month":
-                month = ref_dt.month - 1 or 12
-                year = ref_dt.year if ref_dt.month > 1 else ref_dt.year - 1
-                return f"{year}-{month:02d}-{ref_dt.day:02d}"
-            if raw_lower == "last year":
-                return f"{ref_dt.year - 1}-{ref_dt.month:02d}-{ref_dt.day:02d}"
-            if raw_lower == "next week":
-                return (ref_dt + timedelta(days=7)).date().isoformat()
-            if raw_lower == "next month":
-                month = ref_dt.month + 1 if ref_dt.month < 12 else 1
-                year = ref_dt.year if ref_dt.month < 12 else ref_dt.year + 1
-                return f"{year}-{month:02d}-{ref_dt.day:02d}"
-        except Exception:
-            pass
-
-    # dateparser for complex relative dates (optional dependency)
-    try:
-        import dateparser
-        settings: dict[str, Any] = {"PREFER_DATES_FROM": "past"}
-        if reference_date:
-            ref = dateparser.parse(reference_date)
-            if ref:
-                settings["RELATIVE_BASE"] = ref
-        result = dateparser.parse(raw, settings=settings)
-        if result:
-            return result.date().isoformat()
-    except ImportError:
-        pass
-    except Exception:
-        pass
-
-    return None
+#: Date resolution lives in ``date_resolution`` with the guard that keeps
+#: measurements ("2004.6 ms", "4.1.21", "$12.50") away from the date parser.
+_try_parse_date = try_parse_date
 
 
 def _extract_interval(text: str, ref_date: str | None = None) -> tuple[str | None, str | None]:
@@ -273,49 +230,9 @@ def _extract_interval(text: str, ref_date: str | None = None) -> tuple[str | Non
 
 
 def _extract_entities(text: str) -> list[str]:
-    """Extract candidate entity names from text using regex heuristics."""
-    entities: set[str] = set()
-
-    # Capitalized word sequences (proper nouns)
-    for match in _ENTITY_RE.finditer(text):
-        candidate = (match.group(1) or match.group(2) or "").strip()
-        # Filter common English words that start sentences
-        # Check first word of multi-word candidates against stop list
-        _first_word = candidate.split()[0].lower() if candidate else ""
-        if _first_word not in {
-            "the", "this", "that", "these", "those", "what", "when", "where",
-            "which", "how", "who", "why", "also", "then", "just", "very",
-            "really", "actually", "maybe", "well", "still", "even",
-            "she", "he", "they", "them", "her", "him", "his", "its",
-            "but", "and", "not", "yes", "yeah", "sure", "okay", "ok",
-            "here", "there", "now", "today", "some", "all", "any",
-            "been", "being", "have", "has", "had", "was", "were",
-            "for", "with", "from", "about", "into", "over",
-            # Sentence starters and conversational words
-            "wow", "did", "so", "gonna", "got", "by", "thanks", "thank",
-            "hey", "hi", "hello", "bye", "good", "great", "nice", "cool",
-            "right", "like", "know", "think", "feel", "want", "need",
-            "make", "take", "give", "tell", "said", "told", "get",
-            "let", "can", "will", "would", "could", "should", "might",
-            "much", "many", "more", "most", "lot", "way", "thing",
-            "something", "anything", "everything", "nothing", "someone",
-            "it", "my", "your", "our", "their", "me", "you", "we", "us",
-            "do", "does", "if", "or", "no", "to", "at", "on", "in",
-            "up", "out", "off", "too", "go", "come", "see", "look",
-            "say", "ask", "try", "keep", "put", "run", "set", "move",
-            "call", "end", "start", "find", "show", "hear", "play",
-            "work", "read", "talk", "turn", "help", "miss", "hope",
-            "love", "hate", "wish", "seem", "mean", "mind", "care",
-        }:
-            entities.add(candidate)
-
-    # Quoted strings
-    for match in _QUOTED_RE.finditer(text):
-        quoted = match.group(1).strip()
-        if len(quoted) >= 2:
-            entities.add(quoted)
-
-    return sorted(entities)
+    """Candidate entity names in ``text``: the shared Mode A rules
+    (encoding/entity_mentions), used by every write path and by questions."""
+    return extract_mentions(text)
 
 
 def _classify_sentence(sentence: str) -> FactType:
@@ -381,15 +298,54 @@ def _signal_from_fact_type(ft: FactType) -> SignalType:
     return mapping.get(ft, SignalType.FACTUAL)
 
 
+#: Model requests per save; the coverage pass keeps what they do not reach.
+_MAX_EXTRACTION_CHUNKS = 5
+
+
 def _is_filler(text: str) -> bool:
     """Return True if text is a greeting, filler, or social pleasantry."""
     low = text.strip().lower()
     return any(low.startswith(prefix) for prefix in _FILLER_PREFIXES)
 
 
+def sentence_fact(
+    normalized: str,
+    session_id: str,
+    session_date: str | None,
+    entity_freq: dict[str, int],
+) -> AtomicFact:
+    """One source sentence as a typed, dated, scored fact (no model call)."""
+    entities = _extract_entities(normalized)
+    fact_type = _classify_sentence(normalized)
+    raw_date = _extract_date_string(normalized)
+    referenced_date = _try_parse_date(raw_date, session_date) if raw_date else None
+    interval_start, interval_end = _extract_interval(normalized, session_date)
+    importance = _score_importance(
+        normalized,
+        entities,
+        entity_freq,
+        referenced_date is not None or interval_start is not None,
+    )
+    return AtomicFact(
+        fact_id=_new_id(),
+        content=normalized,
+        fact_type=fact_type,
+        entities=entities,
+        observation_date=session_date,
+        referenced_date=referenced_date,
+        interval_start=interval_start,
+        interval_end=interval_end,
+        confidence=0.7 if fact_type == FactType.SEMANTIC else 0.6,
+        importance=importance,
+        session_id=session_id,
+        signal_type=_signal_from_fact_type(fact_type),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Chunk builder
 # ---------------------------------------------------------------------------
+
 
 def chunk_turns(
     turns: list[str],
@@ -430,6 +386,7 @@ def chunk_turns(
 # FactExtractor
 # ---------------------------------------------------------------------------
 
+
 class FactExtractor:
     """Extract structured AtomicFacts from conversation turns.
 
@@ -445,11 +402,15 @@ class FactExtractor:
         llm: LLMBackboneProtocol | None = None,
         embedder: EmbedderProtocol | None = None,
         mode: Mode = Mode.A,
+        *,
+        llm_extract_kinds: bool = True,
     ) -> None:
         self._config = config
         self._llm = llm
         self._embedder = embedder
         self._mode = mode
+        #: memory_kinds.llm_extract_kinds — off sends exactly the 4.1.18 prompt.
+        self._extract_kinds = llm_extract_kinds is True
 
     # ------------------------------------------------------------------
     # Public API
@@ -481,16 +442,27 @@ class FactExtractor:
         if not turns:
             return []
 
-        chunks = chunk_turns(turns, self._config.chunk_size, overlap=2)
+        chunks = [[turn] for turn in bounded_turns(turns, speaker_a=speaker_a, speaker_b=speaker_b)]
         all_facts: list[AtomicFact] = []
+        review_candidates: list[AtomicFact] = []
 
-        for chunk in chunks:
+        cap = self._config.max_facts_per_chunk
+        # At most five model requests per save; sentences the extractor does
+        # not reach are kept by the coverage pass (encoding.coverage_facts).
+        for chunk in chunks[:_MAX_EXTRACTION_CHUNKS]:
             chunk_facts = self._extract_chunk(
-                chunk, session_id, session_date, speaker_a, speaker_b,
+                chunk,
+                session_id,
+                session_date,
+                speaker_a,
+                speaker_b,
             )
             all_facts.extend(chunk_facts)
+            review_candidates.extend(getattr(chunk_facts, "review_candidates", ()))
+            if len(self._deduplicate(all_facts)) >= cap:
+                break
 
-        return self._deduplicate(all_facts)
+        return FactExtraction(self._deduplicate(all_facts)[:cap], review_candidates)
 
     # ------------------------------------------------------------------
     # Chunk-level dispatch
@@ -506,22 +478,30 @@ class FactExtractor:
     ) -> list[AtomicFact]:
         """Extract facts from a single chunk — dispatches by mode."""
         use_llm = (
-            self._mode in (Mode.B, Mode.C)
-            and self._llm is not None
-            and self._llm.is_available()
+            self._mode in (Mode.B, Mode.C) and self._llm is not None and self._llm.is_available()
         )
+        review_candidates = ()
         if use_llm:
             facts = self._extract_llm(
-                turns, session_id, session_date, speaker_a, speaker_b,
+                turns,
+                session_id,
+                session_date,
+                speaker_a,
+                speaker_b,
             )
             if facts:
                 return facts
+            review_candidates = getattr(facts, "review_candidates", ())
             # Fallback to local if LLM produced nothing
             logger.info("LLM extraction returned no facts, falling back to local.")
 
-        return self._extract_local(
-            turns, session_id, session_date, speaker_a, speaker_b,
-        )
+        return FactExtraction(self._extract_local(
+            turns,
+            session_id,
+            session_date,
+            speaker_a,
+            speaker_b,
+        ), review_candidates)
 
     # ------------------------------------------------------------------
     # Mode A: Rule-based extraction
@@ -536,20 +516,10 @@ class FactExtractor:
         speaker_b: str,
     ) -> list[AtomicFact]:
         """Rule-based extraction: regex entities, keyword classification, scoring."""
-        combined = "\n".join(turns)
-        raw_sentences = _split_sentences(combined)
-        if not raw_sentences:
-            raw_sentences = [t.strip() for t in turns if len(t.strip()) >= 8]
-
-        # V3.3.12: Sliding window of 2 sentences to preserve cross-sentence context.
-        # "She enrolled at NYU. Starting January 2024." → becomes one combined fact.
-        sentences = list(raw_sentences)  # Keep originals
-        for i in range(len(raw_sentences) - 1):
-            pair = raw_sentences[i].rstrip() + " " + raw_sentences[i + 1].lstrip()
-            if len(pair) <= 300:  # Only combine if not too long
-                sentences.append(pair)
-
-        # Build entity frequency map for importance scoring
+        sentences = []
+        for turn in turns:
+            for span in speaker_spans(turn, speaker_a or "the user"):
+                sentences.extend(_split_sentences(normalize_speaker(span.text, span.speaker)))
         entity_freq: dict[str, int] = {}
         for sent in sentences:
             for ent in _extract_entities(sent):
@@ -566,85 +536,22 @@ class FactExtractor:
                 continue
             seen_texts.add(normalized)
 
-            # V3.3.21: Resolve [Speaker]: prefix AND first-person pronouns.
-            # "[Caroline]: I went to the gym" → "Caroline went to the gym"
-            # This makes facts self-contained and entity-rich for retrieval.
-            # Previous: just prepended "Caroline: I went..." which left pronouns.
-            import re as _re
-            _resolved_speaker: str | None = None
-            _spk_match = _re.match(r"^\[([A-Za-z ]+)\]:?\s*", normalized)
-            if _spk_match:
-                _resolved_speaker = _spk_match.group(1)
-                rest = normalized[_spk_match.end():]
-                # Replace first-person pronouns with speaker name
-                rest = _re.sub(r"\bI'm\b", f"{_resolved_speaker} is", rest)
-                rest = _re.sub(r"\bI've\b", f"{_resolved_speaker} has", rest)
-                rest = _re.sub(r"\bI'll\b", f"{_resolved_speaker} will", rest)
-                rest = _re.sub(r"\bI'd\b", f"{_resolved_speaker} would", rest)
-                rest = _re.sub(r"\bI was\b", f"{_resolved_speaker} was", rest)
-                rest = _re.sub(r"\bI am\b", f"{_resolved_speaker} is", rest)
-                rest = _re.sub(r"\bI\b", _resolved_speaker, rest)
-                rest = _re.sub(r"\bmy\b", f"{_resolved_speaker}'s", rest, flags=_re.IGNORECASE)
-                rest = _re.sub(r"\bme\b", _resolved_speaker, rest)
-                rest = _re.sub(r"\bmyself\b", _resolved_speaker, rest, flags=_re.IGNORECASE)
-                normalized = rest
-
-            # V3.3.21 R4: Post-resolution filler + length check.
-            # After stripping [Speaker]: prefix, the remaining text may be
-            # just "Hey!", "Yeah totally!", "Thanks Mel!" — pure noise.
-            # These passed the pre-resolution filler check because the prefix
-            # was still attached. Re-check after resolution.
-            if _is_filler(normalized) or len(normalized.strip()) < 20:
-                continue
-
-            entities = _extract_entities(normalized)
-            # Ensure resolved speaker is in entities list
-            if _resolved_speaker and _resolved_speaker not in entities:
-                entities = [_resolved_speaker] + entities
-            fact_type = _classify_sentence(normalized)
-
-            # Three-date model: extract and resolve relative dates
-            raw_date = _extract_date_string(normalized)
-            referenced_date = _try_parse_date(raw_date, session_date) if raw_date else None
-            interval_start, interval_end = _extract_interval(normalized, session_date)
-
-            # Resolve relative dates in content for better retrieval
-            # "I went yesterday" + session_date=2023-05-08 → "I went on 2023-05-07"
-            if raw_date and referenced_date and raw_date.lower() in (
-                "yesterday", "today", "last week", "last month", "last year",
-                "this morning", "this afternoon", "this evening",
-                "the other day", "recently", "the day before",
-            ):
-                date_str = referenced_date[:10]  # YYYY-MM-DD
-                normalized = normalized.replace(raw_date, f"on {date_str}")
-
-            has_date = referenced_date is not None or interval_start is not None
-            importance = _score_importance(normalized, entities, entity_freq, has_date)
-
-            if importance < self._config.min_fact_confidence:
-                continue
-
-            # V3.3.12: Speaker inference removed — result was never stored in AtomicFact.
-            # The speaker info is preserved in verbatim facts via [Speaker]: prefix.
-
-            facts.append(AtomicFact(
-                fact_id=_new_id(),
-                content=normalized,
-                fact_type=fact_type,
-                entities=entities,
-                observation_date=session_date,
-                referenced_date=referenced_date,
-                interval_start=interval_start,
-                interval_end=interval_end,
-                confidence=0.7 if fact_type == FactType.SEMANTIC else 0.6,
-                importance=importance,
-                session_id=session_id,
-                signal_type=_signal_from_fact_type(fact_type),
-            ))
+            fact = self._local_fact(normalized, session_id, session_date, entity_freq)
+            if fact.importance >= self._config.min_fact_confidence:
+                facts.append(fact)
 
         # Cap at max_facts_per_chunk, keeping highest importance
         facts.sort(key=lambda f: f.importance, reverse=True)
         return facts[: self._config.max_facts_per_chunk]
+
+    def _local_fact(
+        self,
+        normalized: str,
+        session_id: str,
+        session_date: str | None,
+        entity_freq: dict[str, int],
+    ) -> AtomicFact:
+        return sentence_fact(normalized, session_id, session_date, entity_freq)
 
     # ------------------------------------------------------------------
     # Mode B/C: LLM-based extraction
@@ -660,72 +567,48 @@ class FactExtractor:
     ) -> list[AtomicFact]:
         """LLM-guided extraction: structured JSON prompt, parsed into AtomicFacts."""
         conversation_text = "\n".join(turns)
-        speakers = []
-        if speaker_a:
-            speakers.append(f"Speaker A: {speaker_a}")
-        if speaker_b:
-            speakers.append(f"Speaker B: {speaker_b}")
-        speaker_info = ", ".join(speakers) if speakers else "unknown"
-
+        speaker_info = ", ".join(name for name in (speaker_a, speaker_b) if name) or "unknown"
         prompt = (
-            f"Extract atomic facts from the following conversation.\n"
-            f"Speakers: {speaker_info}\n"
-            f"Conversation date: {session_date or 'unknown'}\n\n"
-            f"--- CONVERSATION ---\n{conversation_text}\n--- END ---\n\n"
-            f"Rules:\n"
-            f"- Extract 2-5 comprehensive, self-contained facts.\n"
-            f"- Use explicit names (never pronouns).\n"
-            f"- Each fact must make sense WITHOUT the original conversation.\n"
-            f"- For dates mentioned (\"yesterday\", \"next week\"), resolve to "
-            f"ISO format relative to {session_date or 'today'}.\n"
-            f"- Skip greetings, filler, and confirmations.\n"
-            f"- importance: 1 (trivial) to 10 (critical)\n"
-            f"- confidence: 0.0 (uncertain) to 1.0 (definite)\n\n"
-            f"Respond with ONLY a JSON array."
+            f"Extract supported atomic statements. Speakers: {speaker_info}\n"
+            f"Conversation date: {session_date or 'unknown'}\n"
+            f"--- SOURCE ---\n{conversation_text}\n--- END SOURCE ---\n"
+            "Use only source information. Return 1-5 facts or [] in the JSON schema."
         )
-
         try:
-            # 4.1.14 audit: structured JSON extraction asks for content-only
-            # answers (think=False). Thinking models otherwise burn the
-            # token budget on chain-of-thought and return truncated traces
-            # with empty content; the thinking fallback below still covers
-            # every other caller and any model that ignores the flag.
             raw = self._llm.generate(  # type: ignore[union-attr]
                 prompt=prompt,
-                system=_SYSTEM_PROMPT,
+                system=llm_kind_hint.system_prompt(_SYSTEM_PROMPT, self._extract_kinds),
                 temperature=0.0,
                 max_tokens=1024,
                 think=False,
             )
             facts = self._parse_llm_response(raw, session_id, session_date)
-            return self._reflexion_refine(conversation_text, facts)
+            from superlocalmemory.encoding.fact_speakers import grounded_speakers
+
+            grounded = grounded_speakers(facts, conversation_text)
+            grounded_ids = {fact.fact_id for fact in grounded}
+            ambiguous = [for_review(fact, ("attribution_changed",))
+                         for fact in facts if fact.fact_id not in grounded_ids]
+            checked = partition_facts(FactExtraction(grounded, ambiguous),
+                                      conversation_text, session_date)
+            return FactExtraction(keep_supported_dates(
+                self._reflexion_refine(conversation_text, checked),
+                conversation_text,
+                reference_date=session_date,
+            ), checked.review_candidates)
         except Exception as exc:
             logger.warning("LLM fact extraction failed: %s", exc)
             return []
 
     def _reflexion_refine(
-        self, source_text: str, facts: list[AtomicFact],
+        self,
+        source_text: str,
+        facts: list[AtomicFact],
     ) -> list[AtomicFact]:
-        """Wave Q1: bounded, fail-open entity self-review (Mode B/C only).
+        """Ground entities deterministically; a second model call adds no evidence."""
+        from superlocalmemory.encoding.fact_grounding import grounded_entities
 
-        Reached only from the LLM extraction path, so Mode A never runs this.
-        Any failure returns the facts unchanged.
-        """
-        if not facts or not getattr(
-            self._config, "enable_entity_reflexion", True,
-        ):
-            return facts
-        try:
-            from superlocalmemory.encoding.entity_reflexion import EntityReflexion
-
-            reflexion = EntityReflexion(
-                self._llm,
-                max_facts=getattr(self._config, "reflexion_max_facts", 8),
-            )
-            return reflexion.refine(source_text, facts)
-        except Exception as exc:
-            logger.debug("Entity reflexion skipped: %s", exc)
-            return facts
+        return grounded_entities(facts, source_text)
 
     @staticmethod
     def _find_json_arrays(raw: str) -> list[list]:
@@ -746,11 +629,7 @@ class FactExtractor:
                 value, _ = decoder.raw_decode(raw, match.start())
             except json.JSONDecodeError:
                 continue
-            if (
-                isinstance(value, list)
-                and value
-                and any(isinstance(item, dict) for item in value)
-            ):
+            if isinstance(value, list) and value and any(isinstance(item, dict) for item in value):
                 found.append(value)
         return found
 
@@ -769,15 +648,7 @@ class FactExtractor:
                 "LLM fact extraction got empty response text; nothing to parse.",
             )
             return []
-
-        # Extract JSON array from potentially wrapped response.
-        # Last-viable-with-best-schema-fit wins. Reasoning traces reason
-        # first and answer last, so a mid-trace trial payload must never
-        # shadow the final answer — but a trailing decoy must not win
-        # either. Candidates score by fact-schema fit (dicts carrying both
-        # text and fact_type); ties break toward the later array, which is
-        # where models put the final answer. A trailing zero-fact decoy
-        # (e.g. [{"name": ...}]) still falls through to the real answer.
+        # Best schema fit wins, with later answers winning ties in thinking traces.
         try:
             candidates = self._find_json_arrays(raw)
             if not candidates:
@@ -786,7 +657,6 @@ class FactExtractor:
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning("JSON parse error in LLM fact response: %s", exc)
             return []
-
         facts: list[AtomicFact] = []
         best_fit = -1
         for items in reversed(candidates):
@@ -796,15 +666,16 @@ class FactExtractor:
                     continue
                 fact = self._item_to_fact(item, session_id, session_date)
                 if fact is not None:
-                    built.append(fact)
+                    built.append(
+                        llm_kind_hint.with_hint(fact, item) if self._extract_kinds else fact
+                    )
             if not built:
                 continue
-            # 4.1.14 audit: score with the same keys the parser accepts —
-            # _item_to_fact takes `type` as a fact_type alias, so the fit
-            # must too, or an aliased real array loses to a decoy.
             fit = sum(
-                1 for item in items[:10]
-                if isinstance(item, dict) and item.get("text")
+                1
+                for item in items[:10]
+                if isinstance(item, dict)
+                and item.get("text")
                 and ("fact_type" in item or "type" in item)
             )
             if fit > best_fit:
@@ -823,24 +694,14 @@ class FactExtractor:
         Returns None if the item is malformed or is filler.
         """
         text = str(item.get("text", "")).strip()
-        if not text or len(text) < 8 or _is_filler(text):
+        from superlocalmemory.encoding.fact_fields import statement_shape
+
+        if not text or len(text) < 8 or not statement_shape(text) or _is_filler(text):
             return None
 
-        # Fact type
-        raw_type = str(item.get("fact_type", item.get("type", "semantic"))).lower()
-        type_map = {
-            "episodic": FactType.EPISODIC,
-            "experience": FactType.EPISODIC,
-            "semantic": FactType.SEMANTIC,
-            "world": FactType.SEMANTIC,
-            "opinion": FactType.OPINION,
-            "prospective": FactType.PROSPECTIVE,
-            # Kept alongside the current word for the reason given in
-            # type_router: an unrecognised type falls through to SEMANTIC.
-            "temporal": FactType.PROSPECTIVE,
-        }
-        fact_type = type_map.get(raw_type, FactType.SEMANTIC)
+        from superlocalmemory.encoding.fact_fields import llm_dates, llm_type, unit_score
 
+        fact_type = llm_type(item)
         # Entities
         raw_entities = item.get("entities", [])
         if isinstance(raw_entities, list):
@@ -850,33 +711,9 @@ class FactExtractor:
         else:
             entities = _extract_entities(text)
 
-        # Referenced date — from LLM or inferred
-        ref_date_raw = item.get("referenced_date") or item.get("date")
-        referenced_date: str | None = None
-        if ref_date_raw and str(ref_date_raw).strip().lower() != "null":
-            referenced_date = _try_parse_date(str(ref_date_raw), session_date)
-
-        # Interval
-        interval_start = item.get("interval_start")
-        interval_end = item.get("interval_end")
-        if interval_start:
-            interval_start = _try_parse_date(str(interval_start), session_date)
-        if interval_end:
-            interval_end = _try_parse_date(str(interval_end), session_date)
-
-        # Importance (LLM returns 1-10, we normalize to 0.0-1.0)
-        raw_importance = item.get("importance", 5)
-        try:
-            importance = min(1.0, max(0.0, float(raw_importance) / 10.0))
-        except (TypeError, ValueError):
-            importance = 0.5
-
-        # Confidence
-        raw_conf = item.get("confidence", 0.8)
-        try:
-            confidence = min(1.0, max(0.0, float(raw_conf)))
-        except (TypeError, ValueError):
-            confidence = 0.8
+        dates = llm_dates(item, session_date)
+        importance = unit_score(item.get("importance", 5), 0.5, 10.0)
+        confidence = unit_score(item.get("confidence", 0.8), 0.8)
 
         return AtomicFact(
             fact_id=_new_id(),
@@ -884,9 +721,7 @@ class FactExtractor:
             fact_type=fact_type,
             entities=entities,
             observation_date=session_date,
-            referenced_date=referenced_date,
-            interval_start=interval_start,
-            interval_end=interval_end,
+            **dates,
             confidence=confidence,
             importance=importance,
             session_id=session_id,
@@ -927,10 +762,14 @@ class FactExtractor:
         Uses lowercased, whitespace-collapsed content as dedup key.
         When duplicates exist, keeps the one with higher importance.
         """
-        seen: dict[str, AtomicFact] = {}
+        from superlocalmemory.encoding.fact_grounding import fact_key
+
+        seen: dict[tuple, AtomicFact] = {}
         for fact in facts:
-            key = re.sub(r"\s+", " ", fact.content.lower().strip())
+            key = fact_key(fact.content)
             existing = seen.get(key)
             if existing is None or fact.importance > existing.importance:
                 seen[key] = fact
-        return list(seen.values())
+        from superlocalmemory.encoding.fact_grounding import collapse_partials
+
+        return collapse_partials(list(seen.values()))

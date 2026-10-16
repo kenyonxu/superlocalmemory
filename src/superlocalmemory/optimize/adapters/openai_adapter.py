@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from superlocalmemory.optimize.adapters.request_identity import cache_request
+from superlocalmemory.optimize.adapters.response_codec import decode_response, encode_response
 
 if TYPE_CHECKING:
     from superlocalmemory.optimize.cache.manager import CacheManager
@@ -39,19 +41,14 @@ class SLMOpenAIAdapter:
         self._is_async: bool = _detect_async_openai(client)
         self.chat = _ChatCompletionsProxy(self)
 
-    def _build_cache_key(self, kwargs: dict) -> str:
-        model = kwargs.get("model", "unknown")
-        messages = kwargs.get("messages", [])
-        exclude = {"model", "messages", "stream", "user", "request_id"}
-        params = {k: v for k, v in kwargs.items() if k not in exclude}
-        canonical = json.dumps(
-            {"messages": messages, "params": params},
-            sort_keys=True, default=str,
-        )
-        return self._cache_manager.build_key(
-            {"model": model, "messages": messages, "params": params},
-            self._tenant_id,
-        )
+    def _cache_request(self, kwargs: dict) -> dict:
+        return cache_request(self._original, "openai", kwargs)
+
+    def _build_cache_key(self, kwargs: dict) -> str | None:
+        return self._cache_manager.build_key(self._cache_request(kwargs), self._tenant_id)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._original, name)
 
     def _should_cache(self, kwargs: dict) -> bool:
         if kwargs.get("stream", False):
@@ -66,18 +63,23 @@ class SLMOpenAIAdapter:
         key = self._build_cache_key(kwargs)
         if key is None:
             return self._original.chat.completions.create(**kwargs)
-        hit = self._cache_view.get(key)
+        try:
+            cached = self._cache_manager.get(self._cache_request(kwargs), self._tenant_id)
+            hit = cached.data if cached is not None and cached.hit else None
+        except Exception as exc:
+            logger.warning("SLM cache read failed: %s", exc)
+            hit = None
         if hit is not None:
             try:
-                import json as _json
-                return _json.loads(hit.decode("utf-8"))
+                return decode_response(hit, "openai")
             except Exception:
                 return self._original.chat.completions.create(**kwargs)
         response = self._original.chat.completions.create(**kwargs)
         try:
-            import json as _json
-            encoded = _json.dumps(response, default=str).encode("utf-8")
-            self._cache_view.set(key, encoded)
+            self._cache_manager.set(
+                self._cache_request(kwargs), encode_response(response, "openai"),
+                self._tenant_id,
+            )
         except Exception as exc:
             logger.warning("SLMOpenAIAdapter: failed to cache response: %s", exc)
         return response
@@ -88,18 +90,23 @@ class SLMOpenAIAdapter:
         key = self._build_cache_key(kwargs)
         if key is None:
             return await self._original.chat.completions.create(**kwargs)
-        hit = self._cache_view.get(key)
+        try:
+            cached = self._cache_manager.get(self._cache_request(kwargs), self._tenant_id)
+            hit = cached.data if cached is not None and cached.hit else None
+        except Exception as exc:
+            logger.warning("SLM cache read failed: %s", exc)
+            hit = None
         if hit is not None:
             try:
-                import json as _json
-                return _json.loads(hit.decode("utf-8"))
+                return decode_response(hit, "openai")
             except Exception:
                 return await self._original.chat.completions.create(**kwargs)
         response = await self._original.chat.completions.create(**kwargs)
         try:
-            import json as _json
-            encoded = _json.dumps(response, default=str).encode("utf-8")
-            self._cache_view.set(key, encoded)
+            self._cache_manager.set(
+                self._cache_request(kwargs), encode_response(response, "openai"),
+                self._tenant_id,
+            )
         except Exception as exc:
             logger.warning("SLMOpenAIAdapter: failed to cache response: %s", exc)
         return response

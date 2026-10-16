@@ -17,7 +17,10 @@ from typing import Any, Callable
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
+
 from superlocalmemory.server.routes.helpers import DB_PATH, get_active_profile, get_read_connection
+from superlocalmemory.storage.database import visible_fact_clause_for_connection
+from superlocalmemory.storage.erasure_visibility import erasure_endpoint_clause
 
 logger = logging.getLogger(__name__)
 
@@ -45,24 +48,46 @@ def _action_changed_this_week(
 
     # New facts
     try:
+        # Q5 (2026-10-06): the "Changed This Week" row showed the raw legacy
+        # fact_type ("episodic"/"semantic"/...) instead of the memory kind
+        # ("Decision", "Rule", ...) every other surface (recall, CLI, MCP,
+        # the Memories table) already shows. Stores without the M052 kind
+        # columns (a pre-4.1.19 store that has not been backfilled yet)
+        # fall back to selecting fact_type alone, same as memories.py's own
+        # degraded-lexical fallback, so this never errors on an unknown
+        # column.
+        has_kind_columns = any(
+            row["name"] == "memory_kind"
+            for row in conn.execute("PRAGMA table_info(atomic_facts)").fetchall()
+        )
+        kind_select = (
+            ", memory_kind, memory_kind_source, memory_kind_confidence"
+            if has_kind_columns else ""
+        )
         rows = conn.execute(
-            "SELECT fact_id, content, fact_type, created_at, session_id, confidence "
+            "SELECT fact_id, content, fact_type, created_at, session_id, "
+            f"confidence{kind_select} "
             "FROM atomic_facts "
-            "WHERE profile_id = ? AND created_at >= datetime('now', ?) "
+            "WHERE profile_id = ? AND created_at >= datetime('now', ?)"
+            f"{visible_fact_clause_for_connection(conn)} "
             "ORDER BY created_at DESC LIMIT ?",
             (pid, f"-{days} days", limit),
         ).fetchall()
-        items = [
-            {
-                "fact_id": dict(r)["fact_id"],
-                "content": (dict(r).get("content") or "")[:200],
-                "fact_type": dict(r).get("fact_type", ""),
-                "created_at": dict(r).get("created_at", ""),
-                "session_id": dict(r).get("session_id", ""),
-                "confidence": round(float(dict(r).get("confidence", 0)), 3),
+        items = []
+        for r in rows:
+            row = dict(r)
+            item = {
+                "fact_id": row["fact_id"],
+                "content": (row.get("content") or "")[:200],
+                "fact_type": row.get("fact_type", ""),
+                "created_at": row.get("created_at", ""),
+                "session_id": row.get("session_id", ""),
+                "confidence": round(float(row.get("confidence", 0)), 3),
             }
-            for r in rows
-        ]
+            if has_kind_columns:
+                from superlocalmemory.storage.memory_kinds import kind_fields
+                item.update(kind_fields(row))
+            items.append(item)
     except Exception as exc:
         logger.debug("changed_this_week new facts failed: %s", exc)
 
@@ -73,7 +98,8 @@ def _action_changed_this_week(
             "cl.reason, cl.timestamp, af.content AS new_content "
             "FROM consolidation_log cl "
             "LEFT JOIN atomic_facts af ON af.fact_id = cl.new_fact_id "
-            "WHERE cl.profile_id = ? AND cl.timestamp >= datetime('now', ?) "
+            "WHERE cl.profile_id = ? AND cl.timestamp >= datetime('now', ?)"
+            f"{visible_fact_clause_for_connection(conn, 'af')} "
             "AND cl.action_type IN ('update', 'supersede') "
             "ORDER BY cl.timestamp DESC LIMIT ?",
             (pid, f"-{days} days", limit),
@@ -113,7 +139,8 @@ def _action_opinions(
         rows = conn.execute(
             "SELECT fact_id, content, created_at, session_id, confidence "
             "FROM atomic_facts "
-            "WHERE profile_id = ? AND fact_type = 'opinion' AND lifecycle = 'active' "
+            "WHERE profile_id = ? AND fact_type = 'opinion' AND lifecycle = 'active'"
+            f"{visible_fact_clause_for_connection(conn)} "
             "ORDER BY created_at DESC LIMIT ?",
             (pid, limit),
         ).fetchall()
@@ -145,7 +172,11 @@ def _action_contradictions(
             "FROM graph_edges ge "
             "LEFT JOIN atomic_facts sf ON sf.fact_id = ge.source_id "
             "LEFT JOIN atomic_facts tf ON tf.fact_id = ge.target_id "
-            "WHERE ge.profile_id = ? AND ge.edge_type = 'contradiction' "
+            "WHERE ge.profile_id = ? AND ge.edge_type = 'contradiction'"
+            f"{visible_fact_clause_for_connection(conn, 'sf')}"
+            f"{visible_fact_clause_for_connection(conn, 'tf')}"
+            f"{erasure_endpoint_clause(conn, 'ge', 'source_id', 'sf')}"
+            f"{erasure_endpoint_clause(conn, 'ge', 'target_id', 'tf')} "
             "ORDER BY ge.weight DESC, ge.created_at DESC LIMIT ?",
             (pid, limit),
         ).fetchall()
@@ -223,7 +254,8 @@ def _action_health(
     try:
         rows = conn.execute(
             "SELECT fact_type, COUNT(*) AS cnt "
-            "FROM atomic_facts WHERE profile_id = ? AND lifecycle = 'active' "
+            "FROM atomic_facts WHERE profile_id = ? AND lifecycle = 'active'"
+            f"{visible_fact_clause_for_connection(conn)} "
             "GROUP BY fact_type",
             (pid,),
         ).fetchall()
@@ -235,7 +267,8 @@ def _action_health(
     try:
         row = conn.execute(
             "SELECT "
-            "(SELECT COUNT(*) FROM atomic_facts WHERE profile_id = ?) AS total_facts, "
+            f"(SELECT COUNT(*) FROM atomic_facts WHERE profile_id = ?"
+            f"{visible_fact_clause_for_connection(conn)}) AS total_facts, "
             "(SELECT COUNT(*) FROM canonical_entities WHERE profile_id = ?) AS total_entities, "
             "(SELECT COUNT(*) FROM graph_edges WHERE profile_id = ?) AS total_edges",
             (pid, pid, pid),
@@ -327,7 +360,7 @@ ALLOWED_ACTIONS: dict[str, Callable] = {
 # ── Endpoint ──────────────────────────────────────────────────────
 
 @router.get("/{action_name}")
-async def insight_action(
+def insight_action(
     action_name: str,
     profile: str = "",
     limit: int = Query(default=50, ge=1, le=200),

@@ -23,10 +23,9 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -561,9 +560,7 @@ class TestE2EV32:
     # ------------------------------------------------------------------
 
     def test_temporal_validator_bi_temporal(self, tmp_path: Path) -> None:
-        """Verify bi-temporal integrity: BOTH valid_until and system_expired_at
-        are set when a fact is invalidated.
-        """
+        """Invalidation expires transaction time without inventing an event boundary."""
         engine = _create_v32_engine(tmp_path)
 
         # Store base facts
@@ -578,7 +575,6 @@ class TestE2EV32:
         if tv is not None:
             assert tv.get("valid_until") is None
 
-        # Direct invalidation test (bypass sheaf detection)
         if engine._temporal_validator:
             engine._temporal_validator.invalidate_fact(
                 fact_id=ids_1[0],
@@ -586,17 +582,15 @@ class TestE2EV32:
                 reason="Test invalidation",
             )
 
-            # Verify bi-temporal fields set
             tv_after = engine._db.get_temporal_validity(ids_1[0])
             assert tv_after is not None
-            assert tv_after.get("valid_until") is not None, (
-                "valid_until not set after invalidation"
+            assert tv_after.get("valid_until") == (tv or {}).get("valid_until"), (
+                "invalidation must preserve the independently established event boundary"
             )
             assert tv_after.get("system_expired_at") is not None, (
                 "system_expired_at not set after invalidation"
             )
 
-            # Verify is_temporally_valid returns False
             assert not engine._temporal_validator.is_temporally_valid(
                 ids_1[0], "default",
             )
@@ -610,6 +604,7 @@ class TestE2EV32:
             tv_double = engine._db.get_temporal_validity(ids_1[0])
             # Original invalidation preserved (not overwritten)
             assert tv_double["invalidated_by"] == "test_fact"
+            assert tv_double["system_expired_at"] == tv_after["system_expired_at"]
 
         engine.close()
 

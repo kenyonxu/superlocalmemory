@@ -13,8 +13,6 @@ Contract (hard rules, enforced by tests):
 """
 
 from __future__ import annotations
-from superlocalmemory.storage.journal_policy import apply_journal_mode, resolve_journal_mode
-
 import logging
 import queue
 import sqlite3
@@ -22,6 +20,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+
+from superlocalmemory.storage.journal_policy import apply_signal_worker_journal_mode
 
 from superlocalmemory.learning import signals as _signals_mod
 from superlocalmemory.learning.signals import (
@@ -119,11 +119,24 @@ class SignalWorker:
             timeout=10,
             check_same_thread=True,
         )
-        apply_journal_mode(conn)
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("PRAGMA foreign_keys=ON")
-        self._conn_thread_id = threading.get_ident()
+        try:
+            # Merge 4.2.6 (ruling S8): this ONE connection is exempt from the
+            # central journal default and pinned to WAL — through the policy
+            # module's own documented exemption helper, so the "modes are
+            # decided in one place" invariant keeps holding. See
+            # storage/journal_policy.SIGNAL_WORKER_JOURNAL_MODE for why the
+            # drain connection needs WAL (bounded stop-path flush, SW3) and
+            # why the convoy the default exists for cannot form here.
+            apply_signal_worker_journal_mode(conn)
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("PRAGMA foreign_keys=ON")
+            self._conn_thread_id = threading.get_ident()
+        except BaseException:
+            # Setup failed: close it now, or the file stays open (Windows
+            # then cannot delete or replace it) for as long as the error lives.
+            conn.close()
+            raise
         return conn
 
     def _run(self) -> None:

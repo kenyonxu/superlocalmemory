@@ -1089,7 +1089,7 @@ class TestBuildVerificationPrompt:
 
 
 class TestParseVerificationResponse:
-    """parse_verification_response — JSON and keyword fallback."""
+    """parse_verification_response — only validated JSON can approve."""
 
     def test_parse_valid_json_passed(self):
         response = json.dumps({
@@ -1130,20 +1130,20 @@ class TestParseVerificationResponse:
     def test_keyword_fallback_approve(self):
         response = "I approve this skill. It looks good and is well-written."
         result = parse_verification_response(response)
-        assert result.passed is True
-        assert result.confidence == 0.6
-        assert result.reasoning == "keyword match"
+        assert result.passed is False
+        assert result.confidence == 0.3
+        assert "Unparseable response" in result.issues
 
     def test_keyword_fallback_reject(self):
         response = "This skill should be rejected. Too many issues."
         result = parse_verification_response(response)
         assert result.passed is False
-        assert result.confidence == 0.6
+        assert result.confidence == 0.3
 
     def test_keyword_fallback_passed_true(self):
         response = 'The result is "passed": true based on my analysis.'
         result = parse_verification_response(response)
-        assert result.passed is True
+        assert result.passed is False
 
     def test_keyword_fallback_passed_false(self):
         response = 'My verdict: "passed": false. Needs work.'

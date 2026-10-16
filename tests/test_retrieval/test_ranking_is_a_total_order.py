@@ -139,11 +139,15 @@ def test_no_score_only_numpy_top_k_in_retrieval_path() -> None:
 
     A '# tie-break: <explanation>' comment on the offending line marks it as
     reviewed and exempt (the explanation must describe the stable secondary key).
-    This test is expected to fail on ann_index.py and hopfield_channel.py until
-    another stream adds explicit tie-breaking at those call sites.
+    CSR construction sorts row indices to group edges, without selecting or
+    ranking candidates. graph_delta.py owns that structural operation; ANN
+    and Hopfield score ties are also checked behaviourally in
+    test_numpy_tie_stability.py.
     """
     offenders: list[str] = []
     for path in sorted(RETRIEVAL.glob("*.py")):
+        if path.name == "graph_delta.py":
+            continue  # CSR row grouping, not candidate top-k.
         source = path.read_text(encoding="utf-8")
         lines = source.splitlines()
         tree = ast.parse(source)

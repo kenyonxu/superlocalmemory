@@ -22,6 +22,13 @@ import re
 _current_agent_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "slm_agent_id", default=""
 )
+# Whether the URL name above is vouched for by a credential. The path segment
+# is chosen by whoever sends the request, so on its own it is a claim (PR 248
+# review, finding 3); only a request presenting this daemon's private
+# capability vouches for the name it uses.
+_agent_id_vouched: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "slm_agent_id_vouched", default=False
+)
 
 # Agent ids arrive from an untrusted URL path segment. They are ATTRIBUTION
 # metadata, never an authenticated principal — but they reach loggers, the
@@ -53,6 +60,30 @@ def get_current_agent_id(env_fallback: bool = True) -> str:
     return "mcp_client"
 
 
+def current_agent_is_vouched() -> bool:
+    """True when this request's agent name is backed by a credential.
+
+    An HTTP name comes from the URL and counts only with the daemon capability.
+    With no URL name, the name is the stdio server's configured
+    ``SLM_AGENT_ID`` (set by whoever configured the agent host, not chosen per
+    request), which stays the connection.
+    """
+    if _current_agent_id.get():
+        return _agent_id_vouched.get()
+    return True
+
+
+def _presents_daemon_capability(scope) -> bool:
+    try:
+        from starlette.requests import Request
+
+        from superlocalmemory.server.rbac_enforce import has_daemon_capability
+
+        return "app" in scope and has_daemon_capability(Request(scope))
+    except Exception:  # noqa: BLE001 - anything unverifiable is a claim
+        return False
+
+
 class AgentIDExtractorASGI:
     """ASGI wrapper that maps ``/mcp/{agent_id}`` → the agent-id ContextVar.
 
@@ -82,6 +113,25 @@ class AgentIDExtractorASGI:
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") == "http":
+            # A relayed request carries how long it may still take; hold it for
+            # this request only (mcp/request_deadline), whatever the path is.
+            from superlocalmemory.mcp.request_deadline import (
+                DEADLINE_HEADER,
+                parse_deadline_header,
+                request_deadline,
+            )
+            wanted = DEADLINE_HEADER.encode("ascii")
+            deadline = next(
+                (parse_deadline_header(v) for k, v in scope.get("headers") or ()
+                 if k.lower() == wanted), None)
+            if deadline is not None:
+                with request_deadline(deadline):
+                    await self._route(scope, receive, send)
+                return
+        await self._route(scope, receive, send)
+
+    async def _route(self, scope, receive, send):
+        if scope.get("type") == "http":
             root_path: str = scope.get("root_path", "")
             full_path: str = scope.get("path", "/")
             # Mount-relative sub-path (what comes AFTER /mcp). When a root_path
@@ -99,6 +149,7 @@ class AgentIDExtractorASGI:
             if first:
                 first = sanitize_agent_id(first)
                 token = _current_agent_id.set(first)
+                vouched = _agent_id_vouched.set(_presents_daemon_capability(scope))
                 # Rewrite the path so the inner app sees the bare mount root,
                 # exactly as it would for a no-agent /mcp/ request.
                 new_full = (root_path + "/") if root_path else "/"
@@ -110,6 +161,7 @@ class AgentIDExtractorASGI:
                 try:
                     await self._app(new_scope, receive, send)
                 finally:
+                    _agent_id_vouched.reset(vouched)
                     _current_agent_id.reset(token)
                 return
         await self._app(scope, receive, send)

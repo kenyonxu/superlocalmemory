@@ -6,7 +6,6 @@
 import pytest
 
 from superlocalmemory.code_graph.models import (
-    CodeMemoryLink,
     EdgeKind,
     FileRecord,
     GraphEdge,

@@ -109,6 +109,11 @@ class ProgressiveAbstraction:
             community_ids = json.loads(d.get("community_ids_json") or "[]")
         except (ValueError, TypeError):
             community_ids = []
+        # The persona stitches its communities' summaries. While any member
+        # fact's erasure has started the persona is withheld until it is
+        # rebuilt (or the erasure heals).
+        if self._persona_has_erasing_source(profile_id, community_ids):
+            return None
         return {
             "profile_id": d.get("profile_id", profile_id),
             "summary": d.get("summary", ""),
@@ -160,6 +165,23 @@ class ProgressiveAbstraction:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _persona_has_erasing_source(self, profile_id: str, community_ids: list) -> bool:
+        from superlocalmemory.storage.erasure_visibility import erasure_clause_for_db
+
+        if not erasure_clause_for_db(self._db):
+            return False
+        for cid in community_ids:
+            for fid in self._community_fact_ids(profile_id, cid):
+                try:
+                    hit = self._db.execute(
+                        "SELECT 1 FROM projection_tombstones WHERE profile_id = ? "
+                        "AND fact_id = ? LIMIT 1", (profile_id, fid))
+                except Exception:  # noqa: BLE001
+                    return True  # cannot prove the persona is clean: withhold
+                if hit:
+                    return True
+        return False
 
     def _community_fact_ids(self, profile_id: str, community_id: Any) -> list[str]:
         try:

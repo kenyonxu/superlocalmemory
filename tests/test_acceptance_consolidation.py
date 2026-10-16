@@ -48,7 +48,6 @@ database deadlocks; fully backward compatible; no memory leaks.
 from __future__ import annotations
 
 import ast
-import inspect
 import pathlib
 
 import pytest

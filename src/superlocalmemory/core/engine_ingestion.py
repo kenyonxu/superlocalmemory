@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import uuid
 from typing import TYPE_CHECKING, Protocol
 
+from superlocalmemory.core.derivation_lineage import checkpoint_with_lineage
 from superlocalmemory.core.ingestion_command import (
     IngestionCommand,
     IngestionOperation,
@@ -25,6 +25,7 @@ from superlocalmemory.core.ingestion_command import (
 )
 
 if TYPE_CHECKING:
+    from superlocalmemory.memory_core import PreparedContent
     from superlocalmemory.core.engine import MemoryEngine
     from superlocalmemory.storage.models import AtomicFact, MemoryRecord
 
@@ -76,18 +77,10 @@ class _ImmediateAdmissionDatabase(Protocol):
 
 
 def _pii_redaction_enabled(engine: "MemoryEngine") -> bool:
-    """C4: opt-in PII redaction on ingest.
+    """Delegate to the shared save step (kept for existing importers)."""
+    from superlocalmemory.memory_core import pii_redaction_enabled
 
-    On when the engine config sets ``pii_redaction`` truthy OR the
-    ``SLM_PII_REDACTION`` env var is set (1/on/true/yes). Default OFF — personal
-    use is unchanged; team/company operators opt in.
-    """
-    cfg = getattr(engine, "_config", None)
-    if cfg is not None and getattr(cfg, "pii_redaction", False):
-        return True
-    return os.environ.get("SLM_PII_REDACTION", "").strip().lower() in (
-        "1", "on", "true", "yes",
-    )
+    return pii_redaction_enabled(getattr(engine, "_config", None))
 
 
 def content_passes_admission(content: str) -> bool:
@@ -102,8 +95,12 @@ def content_passes_admission(content: str) -> bool:
 
     from superlocalmemory.core.injection import is_low_quality
     from superlocalmemory.encoding.entropy_gate import EntropyGate
+    from superlocalmemory.encoding.non_answer import is_empty_structure, is_stub
 
-    return not is_low_quality(content) and EntropyGate().should_pass(content)
+    if is_empty_structure(content):
+        return False  # "[]", "{}" and the like carry nothing to remember
+    # A recognised receipt or session stub is kept durably (marked non-answer).
+    return is_stub(content) or (not is_low_quality(content) and EntropyGate().should_pass(content))
 
 
 def _prebuilt_fact_payload(fact: AtomicFact) -> dict:
@@ -118,12 +115,48 @@ def _prebuilt_fact_payload(fact: AtomicFact) -> dict:
         "fisher_variance", "lifecycle", "langevin_position",
         "emotional_valence", "emotional_arousal", "signal_type", "pinned",
         "created_at", "provenance_kind",
+        "memory_kind", "memory_kind_source", "memory_kind_confidence",
+        "memory_kind_recipe", "memory_kind_at",
     )
     payload = {}
     for name in fields:
         value = getattr(fact, name)
         payload[name] = value.value if name in enum_fields else value
     return payload
+
+
+_TEXT_DERIVED_VECTORS = (
+    "embedding", "fisher_mean", "fisher_variance", "langevin_position",
+)
+
+
+def _prepared_prebuilt(engine: MemoryEngine, fact: AtomicFact) -> tuple["PreparedContent", dict]:
+    """The request text and payload of a prebuilt fact, personal data removed.
+
+    Both carry the same prepared text (background enrichment re-checks it); the
+    caller's fact is left untouched.
+    """
+    from superlocalmemory.memory_core import (
+        pii_redaction_enabled,
+        prepare_metadata,
+        prepare_user_text,
+    )
+
+    prepared = prepare_user_text(engine._config, fact.content)
+    payload = _prebuilt_fact_payload(fact)
+    payload["content"] = prepared.text
+    scrubbed = prepared.pii_count
+    if pii_redaction_enabled(engine._config):
+        for name in ("entities", "canonical_entities"):
+            payload[name], n_names = prepare_metadata(
+                list(payload[name] or []), pii_redaction=True,
+            )
+            scrubbed += n_names
+    if scrubbed:
+        # Everything derived from the old text must be recomputed.
+        for name in _TEXT_DERIVED_VECTORS:
+            payload[name] = None
+    return prepared, payload
 
 
 def _prebuilt_fact_from_payload(payload: dict):
@@ -170,26 +203,22 @@ def build_immediate_admission_handler(
         if not content_passes_admission(request.content):
             return []
 
-        import re
         from datetime import UTC, datetime
 
         from superlocalmemory.core.ingest_gate import apply_ingest_gate
-        from superlocalmemory.core.ingest_policy import scrub_secrets_for_ingest
-        from superlocalmemory.storage.models import AtomicFact, FactType, MemoryRecord
+        from superlocalmemory.storage.models import MemoryRecord
 
-        # Secrets are ALWAYS scrubbed at this shared queryable-write chokepoint,
-        # which both the canonical HTTP /remember runtime and the canonical_store
-        # Python/CLI path funnel through. A credential must never persist verbatim
-        # in any durable representation (memory rows, fact rows), regardless of
-        # ingress surface. The scrub is idempotent: content already scrubbed by an
-        # upstream caller is returned unchanged.
-        scrub = scrub_secrets_for_ingest(request.content)
-        content = scrub.content
-        if scrub.redacted:
-            logger.info("secret scrub: redacted credential material on queryable write")
+        # A memory is stored exactly as written, credentials included: keeping
+        # them is part of what SLM is for. They are stripped only where text
+        # leaves this machine (core/outbound_redaction.py). The stored text must
+        # also equal the request, which background enrichment re-checks.
+        content = request.content
 
         metadata = dict(request.metadata)
         metadata["ingestion_operation_id"] = operation_id
+        from superlocalmemory.tagging import add_extracted
+
+        add_extracted(metadata, content)
         if request.session_id:
             metadata.setdefault("session_id", request.session_id)
         gate = apply_ingest_gate(
@@ -210,37 +239,30 @@ def build_immediate_admission_handler(
             fact.scope = request.scope
             fact.shared_with = list(request.shared_with) or None
             fact.session_id = request.session_id or fact.session_id
-            if request.session_date:
-                fact.observation_date = request.session_date
+            fact.observation_date = fact.observation_date or observation_date
             if request.provenance_kind is not None:
                 # The request-level tag is authoritative when the caller set
                 # one; otherwise the prebuilt fact keeps its own (payload
                 # round-trips it since the field joined _prebuilt_fact_payload).
                 fact.provenance_kind = request.provenance_kind
         else:
-            entities = sorted(
-                {match.group(1) for match in re.finditer(
-                    r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+){0,3})\b", fact_content,
-                )}
-                | {match.group(1) for match in re.finditer(
-                    r"\b([A-Z]{2,})\b", fact_content,
-                )}
+            from superlocalmemory.core.queryable_fact import queryable_fact
+
+            fact = queryable_fact(
+                fact_content, profile_id=request.profile_id, scope=request.scope,
+                shared_with=request.shared_with, session_id=request.session_id,
+                observation_date=observation_date, created_at=now,
             )
-            fact = AtomicFact(
-                fact_id=uuid.uuid4().hex[:16],
-                profile_id=request.profile_id,
-                scope=request.scope,
-                shared_with=list(request.shared_with) or None,
-                content=fact_content,
-                fact_type=FactType.EPISODIC,
-                entities=entities,
-                observation_date=observation_date,
-                session_id=request.session_id,
-                confidence=0.7,
-                importance=0.5,
-                created_at=now,
-                provenance_kind=request.provenance_kind,
-            )
+            # Governance tag (spec section 4): the fresh fact carries the
+            # request's tag like every other write path (None = untagged).
+            fact.provenance_kind = request.provenance_kind
+
+        from superlocalmemory.core.kind_assignment import assign_kinds, store_fact_keeping_kind
+        from superlocalmemory.encoding.non_answer import is_stub, mark
+
+        # A kind declared on the save is confirmed on the searchable fact now.
+        fact = assign_kinds([fact], metadata=metadata, source_type=request.source_type,
+                            classifier=None, db=db)[0]
 
         # A receipt is queryable through FTS immediately, but model-derived
         # values cannot participate in its write transaction.  The materializer
@@ -248,7 +270,11 @@ def build_immediate_admission_handler(
         fact.embedding = None
         fact.fisher_mean = None
         fact.fisher_variance = None
-        memory_id = fact.memory_id or uuid.uuid4().hex
+        from superlocalmemory.storage.source_identity import reuse_source
+
+        reused = None if isinstance(prebuilt_payload, dict) else reuse_source(
+            db, request, metadata, fact)
+        memory_id = reused or fact.memory_id or uuid.uuid4().hex
         existing = db.execute(
             "SELECT profile_id FROM memories WHERE memory_id = ?",
             (memory_id,),
@@ -276,7 +302,35 @@ def build_immediate_admission_handler(
                 shared_with=list(request.shared_with) or None,
             )
             fact.memory_id = db.store_memory(record)
-        return [db.store_fact(fact)]
+        if gate.truncated:
+            from superlocalmemory.core.source_excerpt import attach_source_pointer
+            fact = attach_source_pointer(fact, content, max_verbatim_chars)
+        from superlocalmemory.core.description_metadata import parent_labels
+
+        parent_rows = db.execute('SELECT * FROM memories WHERE memory_id=? AND profile_id=?',
+                                 (fact.memory_id, request.profile_id))
+        if parent_rows:
+            import json
+            parent = dict(parent_rows[0])
+            labels = parent_labels(db, parent)
+            existing_metadata = json.loads(parent['metadata_json'] or '{}')
+            additions = {key: value for key, value in labels.items()
+                         if not existing_metadata.get(key)}
+            if additions:
+                db.execute('UPDATE memories SET metadata_json=? WHERE memory_id=? AND profile_id=?',
+                           (json.dumps({**existing_metadata, **additions}),
+                            fact.memory_id, request.profile_id))
+        stored = store_fact_keeping_kind(db, fact, metadata=metadata, request=request)
+        # Flagged by the save that writes it, in the same transaction. Waiting
+        # for background enrichment left 261 of 291 bare "session ended" rows
+        # unflagged on one real store, and recall can only drop what it was
+        # told is a stub. Marking the id the store returned (not the one
+        # submitted) also catches the same words folding onto a row an older
+        # version stored without the flag, which the dedup path returns early
+        # from. ``mark`` leaves a row the user has decided about alone.
+        if is_stub(fact_content):
+            mark(db, stored, request.profile_id, fact_content)
+        return [stored]
 
     return write_queryable
 
@@ -319,6 +373,7 @@ def canonical_store(
     return_receipt: bool = False,
     profile_id: str | None = None,
     provenance_kind: str | None = None,
+    trusted_metadata: dict | None = None,
 ) -> list[str] | IngestionOperation:
     """Submit canonical evidence, optionally waiting for enrichment completion.
 
@@ -327,6 +382,8 @@ def canonical_store(
     durable receipt without invoking any LLM, embedding, or graph work.  The
     daemon materializer owns that expensive, retryable enrichment.  Explicit
     complete callers retain the historical synchronous contract.
+
+    ``trusted_metadata`` carries server-set reserved keys (never caller input).
 
     ``profile_id`` follows the ``engine.recall`` convention: ``None``/``""``
     targets the engine's active profile; an explicit value routes this one
@@ -358,25 +415,34 @@ def canonical_store(
             error=ValueError("content rejected by local admission policy"),
         )
         return []
-    # Secrets are ALWAYS scrubbed pre-admission (not opt-in): a credential must
-    # never persist verbatim in any durable or queryable representation
-    # (facts, receipts, journal, exports, backups, mesh).
-    from superlocalmemory.core.ingest_policy import scrub_secrets_for_ingest
+    # Credentials are kept as written (see write_queryable); only text that
+    # leaves this machine is screened (core/outbound_redaction.py).
+    # Opt-in PII redaction (config.pii_redaction or SLM_PII_REDACTION) runs in
+    # the shared save step, before the content is extracted, embedded or
+    # persisted; with it off the text is stored byte-identical.
+    from superlocalmemory.memory_core import (
+        pii_redaction_enabled,
+        prepare_key,
+        prepare_metadata,
+        prepare_user_text,
+    )
 
-    _secret_scrub = scrub_secrets_for_ingest(content)
-    if _secret_scrub.redacted:
-        content = _secret_scrub.content
-        logger.info("secret scrub: redacted credential material on ingest")
-    # C4: opt-in PII redaction. When enabled (config.pii_redaction or
-    # SLM_PII_REDACTION), scrub personal identifiers BEFORE the content is
-    # extracted, embedded, or persisted — nothing sensitive ever reaches disk.
-    if _pii_redaction_enabled(engine):
-        from superlocalmemory.core.pii import redact_pii
+    content = prepare_user_text(engine._config, content).text
+    # A caller's metadata never sets a reserved ``_slm_*`` key; the ones the
+    # server itself sets arrive in ``trusted_metadata``, after redaction.
+    from superlocalmemory.core.metadata_guard import strip_reserved_metadata
 
-        scrubbed, n_pii = redact_pii(content)
-        if n_pii:
-            content = scrubbed
-            logger.info("PII redaction: scrubbed %d identifier(s) on ingest", n_pii)
+    metadata, _ = prepare_metadata(
+        strip_reserved_metadata(metadata),
+        pii_redaction=pii_redaction_enabled(engine._config),
+    )
+    metadata.update(trusted_metadata or {})
+    if idempotency_key:
+        idempotency_key = prepare_key(
+            idempotency_key, pii_redaction=pii_redaction_enabled(engine._config),
+        )
+    # Known limit: a retry of a key saved before redaction was turned on raises
+    # IdempotencyConflict to the caller; it is not tolerated as a duplicate here.
     try:
         # Anchor already normalized and validated at function top.
         command = build_engine_ingestion_command(engine, profile_id=profile_id)
@@ -390,7 +456,7 @@ def canonical_store(
             profile_id=profile_id or engine._profile_id,
             source_type=source_type,
             idempotency_key=idempotency_key or uuid.uuid4().hex,
-            metadata=dict(metadata or {}),
+            metadata=metadata,
             scope=scope,
             shared_with=tuple(shared_with or ()),
             trusted_actor_id=trusted_actor_id,
@@ -474,13 +540,14 @@ def canonical_store_fact(
     _require_known_profile(engine, profile_id or engine._profile_id)
     if is_low_quality(fact.content):
         return fact.fact_id
+    prepared, payload = _prepared_prebuilt(engine, fact)
     command = build_engine_ingestion_command(engine, profile_id=profile_id)
     receipt = command.submit(IngestionRequest(
-        content=fact.content,
+        content=prepared.text,
         profile_id=profile_id or engine._profile_id,
         source_type="python-api-prebuilt",
         idempotency_key=f"prebuilt:{fact.fact_id}",
-        metadata={_PREBUILT_FACT_KEY: _prebuilt_fact_payload(fact)},
+        metadata={_PREBUILT_FACT_KEY: payload},
         scope=fact.scope or "personal",
         shared_with=tuple(fact.shared_with or ()),
         trusted_actor_id=trusted_actor_id,
@@ -578,8 +645,8 @@ def build_engine_ingestion_command(
             return MaterializationResult(
                 operation.final_fact_ids, state, operation.last_error,
             )
-        facts = engine._db.get_facts_by_ids(
-            list(operation.final_fact_ids), operation.profile_id,
+        facts = engine._db.get_facts_by_ids(  # withheld facts are still this op's facts
+            list(operation.final_fact_ids), operation.profile_id, include_quarantined=True,
         )
         if len(facts) != len(operation.final_fact_ids):
             state["relational"] = False
@@ -617,14 +684,19 @@ def build_engine_ingestion_command(
             state["provenance"] = provenance_complete
         if state.get("post_hooks") is False:
             try:
+                from superlocalmemory.core.agent_attribution import audit_fields
+                from superlocalmemory.core.audit_record import content_hash
+
                 engine._hooks.run_post("store", {
                     "operation": "store",
                     "agent_id": operation.trusted_actor_id,
                     "profile_id": operation.profile_id,
                     "content_preview": operation.raw_content[:100],
+                    "content_hash": content_hash(operation.raw_content),
                     "ingestion_operation_id": operation.operation_id,
                     "fact_ids": list(operation.final_fact_ids),
                     "fact_count": len(operation.final_fact_ids),
+                    **audit_fields(operation.metadata),
                 })
             except Exception as exc:
                 return MaterializationResult(
@@ -660,7 +732,7 @@ def build_engine_ingestion_command(
         # memory is only for a fault before the checkpoint captured final IDs.
         if operation.final_fact_ids:
             facts = engine._db.get_facts_by_ids(
-                list(operation.final_fact_ids), operation.profile_id,
+                list(operation.final_fact_ids), operation.profile_id, include_quarantined=True,
             )
             if len(facts) != len(operation.final_fact_ids):
                 return MaterializationResult(
@@ -693,8 +765,8 @@ def build_engine_ingestion_command(
             checkpoint_fact_ids: tuple[str, ...],
             state: dict[str, bool],
         ) -> None:
-            repository.checkpoint_enriching(
-                operation.operation_id,
+            checkpoint_with_lineage(
+                repository, operation,
                 final_fact_ids=checkpoint_fact_ids,
                 derivation_version=_DERIVATION_VERSION,
                 derivation_state=state,
@@ -739,6 +811,7 @@ def build_engine_ingestion_command(
             trusted_actor_id=operation.trusted_actor_id,
             pre_authorized=True,
             ingestion_source_type=operation.source_type,
+            kind_classifier=getattr(engine, "_kind_classifier", None),
             ingestion_operation_id=operation.operation_id,
             derivation_report=pipeline_state,
             precompleted_derivation_stages=frozenset({
@@ -790,10 +863,7 @@ def build_engine_ingestion_command(
             operation.operation_id,
             final_fact_ids=(),
             derivation_version=_DERIVATION_VERSION,
-            derivation_state={
-                "pipeline_started": True,
-                "pipeline": False,
-            },
+            derivation_state={"pipeline_started": True, "pipeline": False},
             lease_owner=operation.lease_owner,
             lease_seconds=900.0,
         )
@@ -811,8 +881,8 @@ def build_engine_ingestion_command(
             fact_ids: tuple[str, ...],
             state: dict[str, bool],
         ) -> None:
-            repository.checkpoint_enriching(
-                operation.operation_id,
+            checkpoint_with_lineage(
+                repository, operation,
                 final_fact_ids=fact_ids,
                 derivation_version=_DERIVATION_VERSION,
                 derivation_state=state,
@@ -863,6 +933,7 @@ def build_engine_ingestion_command(
                 trusted_actor_id=operation.trusted_actor_id,
                 pre_authorized=True,
                 ingestion_source_type=operation.source_type,
+                kind_classifier=getattr(engine, "_kind_classifier", None),
                 ingestion_operation_id=operation.operation_id,
                 derivation_report=pipeline_state,
                 precompleted_derivation_stages=(
@@ -969,6 +1040,11 @@ def build_engine_ingestion_command(
             embeddings_complete = (
                 int(dict(embedding_count[0])["count"]) == len(fact_ids)
             )
+            # Each new fact's hub baseline, now, so recall can read it from the
+            # first query (retrieval/hub_baseline.py). Fail-open and outside
+            # the derivation state: the background pass covers anything missed.
+            from superlocalmemory.retrieval.hub_baseline import compute_for_facts
+            compute_for_facts(engine._db, engine._embedder, list(fact_ids))
 
         derivation_state = {
             "pipeline_started": True,
@@ -996,15 +1072,19 @@ def build_engine_ingestion_command(
     def project(operation: IngestionOperation) -> dict[str, bool]:
         facts = engine._db.get_facts_by_ids(
             list(operation.final_fact_ids),
-            operation.profile_id,
+            operation.profile_id, include_quarantined=True,  # a withheld fact is still indexed
         )
         if len(facts) != len(operation.final_fact_ids):
             raise RuntimeError("external projection facts are missing")
 
-        ann_required = engine._ann_index is not None
+        # Mode A remains fully materializable without a model. Empty vector
+        # indexes do not make optional embedding projections mandatory.
+        has_embedder = engine._embedder is not None
+        ann_required = has_embedder and engine._ann_index is not None
         vector_store = engine._vector_store
         vector_required = bool(
-            vector_store is not None and getattr(vector_store, "available", False)
+            has_embedder and vector_store is not None
+            and getattr(vector_store, "available", False)
         )
         ann_complete = True
         vector_complete = True

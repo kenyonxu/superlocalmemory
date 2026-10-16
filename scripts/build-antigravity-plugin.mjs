@@ -190,13 +190,12 @@ files.set('mcp_config.json', JSON.stringify({
     superlocalmemory: {
       command: 'slm',
       args: ['mcp'],
-      // Antigravity is a content-production primary surface. Give it the
-      // full, opt-in power profile while keeping the operator's store path
-      // untouched and the host identity explicit.
+      // No SLM_MCP_PROFILE: the default tool set (full) fits Antigravity's
+      // reported 100-tool ceiling, and `slm tools set <name>` changes it for
+      // every host at once. Never SLM_MCP_ALL_TOOLS=1 here: every tool is
+      // above that ceiling.
       env: {
         SLM_AGENT_ID: AGENT_ID,
-        SLM_MCP_PROFILE: 'power',
-        SLM_MCP_ALL_TOOLS: '1',
       },
     },
   },

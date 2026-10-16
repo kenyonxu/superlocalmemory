@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
 from dataclasses import replace
 
-from superlocalmemory.optimize.cache.key_builder import CacheConfig
 from superlocalmemory.optimize.cache.manager import (
     CacheManager,
     NoOpSemantic,
@@ -535,7 +533,6 @@ def test_get_or_call_none_key_returns_upstream(tmp_cache_db) -> None:
 
 def test_get_or_call_semantic_tier_lookup(tmp_cache_db) -> None:
     """get_or_call tries semantic tier on exact miss when semantic is enabled."""
-    from types import SimpleNamespace
 
     class _FakeSemantic:
         def is_enabled(self):
@@ -711,7 +708,6 @@ def test_tenant_scoped_get_returns_none_on_miss(tmp_cache_db) -> None:
 
 def test_tenant_scoped_get_returns_bytes_on_hit(tmp_cache_db) -> None:
     """_TenantScopedManager.get() returns JSON bytes when key exists."""
-    import json as _json
     cm = CacheManager(tmp_cache_db)
     cm._exact.set("test-key-123", _tenant(42), {"a": 1}, [], "m")
     view = cm.for_tenant(_tenant(42))
@@ -796,7 +792,6 @@ class _HitSemantic(SemanticTier):
 
 def test_c01_get_calls_semantic_lookup_on_exact_miss(tmp_cache_db) -> None:
     """C-01: get() must call _semantic.lookup() on exact cache miss."""
-    import json
     sem = _HitSemantic(b'{"id":"sem","stop_reason":"end_turn"}')
     cm = CacheManager(tmp_cache_db, semantic_tier=sem)
 
@@ -810,7 +805,6 @@ def test_c01_get_calls_semantic_lookup_on_exact_miss(tmp_cache_db) -> None:
 
 def test_c01_get_no_semantic_on_exact_hit(tmp_cache_db) -> None:
     """C-01: get() must NOT call semantic.lookup() when exact cache hits."""
-    import json
     sem = _HitSemantic(b'{"id":"sem"}')
     cm = CacheManager(tmp_cache_db, semantic_tier=sem)
 

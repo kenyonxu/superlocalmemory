@@ -88,24 +88,22 @@ class TestInitialization:
 # Worker lifecycle
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(autouse=False)
-def _clean_reranker_module_state():
-    """Isolate reranker module-level state from suite-order pollution.
+@pytest.fixture
+def isolated_spawn(tmp_path, monkeypatch):
+    """Spawn bookkeeping kept off the machine: no singleton PID check and a
+    tmp PID file. (``_ensure_worker`` still makes its 1 s crash check.)
 
-    ``test_ensure_worker_spawns_subprocess`` and ``test_ensure_worker_respawns_if_dead``
-    pass in isolation but fail when run as part of the full suite. Some
-    earlier test mutates ``subprocess.Popen`` or the PID-file path on the
-    canonical module, and the leak survives across test boundaries
-    because the reranker module binds ``subprocess`` at import time.
-    This fixture re-imports the reranker module under test and yields a
-    fresh reference — expensive enough we only attach it to the two
-    affected tests.
+    Replaces an ``importlib.reload`` of the reranker module that these two
+    tests used (and were skipped over since v3.4.22): reloading rebinds the
+    module's globals under every other test holding the old class, which is
+    itself suite-order pollution. Patching the instance's ``_spawn_process``
+    needs no reload.
     """
-    import importlib
+    from superlocalmemory.retrieval import reranker as mod
 
-    from superlocalmemory.retrieval import reranker as _r
-    importlib.reload(_r)
-    yield _r
+    monkeypatch.setattr(mod, "_is_reranker_worker_alive", lambda: False)
+    monkeypatch.setattr(mod, "_RERANKER_PID_FILE", tmp_path / ".reranker.pid")
+    return tmp_path / ".reranker.pid"
 
 
 class TestWorkerManagement:
@@ -142,37 +140,15 @@ class TestWorkerManagement:
 
         warmup.assert_not_called()
 
-    @pytest.mark.skip(
-        reason=(
-            "Pre-existing suite-order pollution: passes in isolation, "
-            "fails in full suite. Some earlier test leaves state on the "
-            "reranker module's subprocess binding that module-reload and "
-            "targeted patches don't recover from. Logic itself is "
-            "verified by the sibling tests ``test_ensure_worker_noop_if_alive`` "
-            "and ``test_ensure_worker_handles_spawn_failure`` (both pass). "
-            "Tracked for cleanup in v3.4.22 test-suite hardening."
-        ),
-    )
-    def test_ensure_worker_spawns_subprocess(self, tmp_path,
-                                             _clean_reranker_module_state) -> None:
+    def test_ensure_worker_spawns_subprocess(self, isolated_spawn) -> None:
         reranker = _make_reranker(model_name="fake-model")
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         mock_proc.pid = 99999
-        # Patch the module attribute directly — `subprocess.Popen` (plain
-        # target) is brittle under suite-order state pollution because the
-        # reranker module binds `subprocess` at import time and another
-        # test may have left state on the canonical module. Routing via
-        # the module attribute is the robust path. Also patch the PID
-        # file location so we don't touch ``~/.superlocalmemory``.
-        with patch("superlocalmemory.retrieval.reranker._is_reranker_worker_alive",
-                   return_value=False), \
-             patch("superlocalmemory.retrieval.reranker.subprocess.Popen",
-                   return_value=mock_proc), \
-             patch("superlocalmemory.retrieval.reranker._RERANKER_PID_FILE",
-                   tmp_path / ".reranker.pid"):
+        with patch.object(reranker, "_spawn_process", return_value=mock_proc):
             reranker._ensure_worker()
         assert reranker._worker_proc is mock_proc
+        assert isolated_spawn.read_text(encoding="utf-8") == "99999"
 
     def test_ensure_worker_noop_if_alive(self) -> None:
         reranker = _make_reranker(model_name="fake-model")
@@ -183,15 +159,7 @@ class TestWorkerManagement:
             reranker._ensure_worker()
             mock_popen.assert_not_called()
 
-    @pytest.mark.skip(
-        reason=(
-            "Pre-existing suite-order pollution — same root cause as "
-            "``test_ensure_worker_spawns_subprocess`` above. "
-            "Tracked for v3.4.22 test-suite hardening."
-        ),
-    )
-    def test_ensure_worker_respawns_if_dead(self, tmp_path,
-                                              _clean_reranker_module_state) -> None:
+    def test_ensure_worker_respawns_if_dead(self, isolated_spawn) -> None:
         reranker = _make_reranker(model_name="fake-model")
         dead_proc = MagicMock()
         dead_proc.poll.return_value = 1  # Exited
@@ -199,14 +167,11 @@ class TestWorkerManagement:
         new_proc = MagicMock()
         new_proc.poll.return_value = None
         new_proc.pid = 99998
-        with patch("superlocalmemory.retrieval.reranker._is_reranker_worker_alive",
-                   return_value=False), \
-             patch("superlocalmemory.retrieval.reranker.subprocess.Popen",
-                   return_value=new_proc), \
-             patch("superlocalmemory.retrieval.reranker._RERANKER_PID_FILE",
-                   tmp_path / ".reranker.pid"):
+        with patch.object(reranker, "_spawn_process", return_value=new_proc) as spawn:
             reranker._ensure_worker()
+        spawn.assert_called_once()
         assert reranker._worker_proc is new_proc
+        assert isolated_spawn.read_text(encoding="utf-8") == "99998"
 
     def test_ensure_worker_handles_spawn_failure(self) -> None:
         reranker = _make_reranker(model_name="fake-model")
@@ -472,3 +437,112 @@ class TestIsAvailable:
             reranker, "_send_request", return_value={"ok": False},
         ):
             assert reranker.is_available is False
+
+
+# ---------------------------------------------------------------------------
+# Worker recycling (4.1.18)
+# ---------------------------------------------------------------------------
+
+class TestWorkerRecycle:
+    """The module docstring has always claimed recycling was covered; no test
+    existed, and the path was broken.
+
+    After 500 requests the worker is recycled. The old code then sent the live
+    request straight to the freshly spawned worker under the 15 s request
+    timeout. A fresh worker has to import torch and load the model first —
+    22 to 63 s in the daemon logs — so it always timed out. Both recycles in
+    the live daemon's history died exactly that way, and reranking stayed off
+    until the daemon was restarted.
+    """
+
+    def _recycle_ready(self):
+        from superlocalmemory.retrieval import reranker as mod
+
+        reranker = _make_reranker(model_name="fake-model")
+        old = MagicMock()
+        old.poll.return_value = None
+        reranker._worker_proc = old
+        reranker._model_loaded = True
+        reranker._request_count = mod._WORKER_RECYCLE_AFTER
+        return reranker
+
+    def test_recycle_never_sends_a_live_request_to_a_cold_worker(self) -> None:
+        """M-12: the request at the threshold is answered by the warm worker;
+        the replacement is warmed separately and only ever receives a load."""
+        reranker = self._recycle_ready()
+        old = reranker._worker_proc
+
+        with patch.object(reranker, "_ensure_worker") as spawn, \
+                patch.object(reranker, "_readline_with_timeout",
+                             return_value='{"ok": true, "scores": [1.0]}') as read, \
+                patch.object(reranker, "_begin_replacement") as replace:
+            resp = reranker._send_request(
+                {"cmd": "rerank", "query": "q", "documents": ["d"]},
+                timeout=15.0, block=False,
+            )
+
+        assert resp == {"ok": True, "scores": [1.0]}
+        spawn.assert_not_called()
+        old.stdin.write.assert_called_once()
+        read.assert_called_once()
+        replace.assert_called_once()
+
+    def test_recycle_keeps_the_warm_worker_until_its_replacement_is_ready(self) -> None:
+        """4.1.18 dropped the worker here and set the model unloaded, which
+        left every recall unranked for a whole cold load."""
+        reranker = self._recycle_ready()
+        old = reranker._worker_proc
+        with patch.object(reranker, "_begin_replacement"), \
+                patch.object(reranker, "_readline_with_timeout",
+                             return_value='{"ok": true}'):
+            reranker._send_request({"cmd": "ping"})
+        assert reranker._worker_proc is old
+        assert reranker._model_loaded is True
+
+
+class TestConcurrentRecallsAreBothReranked:
+    """A recall that finds the reranker busy waits its turn (bounded) instead of
+    returning unranked fusion order: two recalls at the same moment used to
+    rank the same question differently."""
+
+    def _ready(self):
+        reranker = _make_reranker(model_name="fake-model")
+        proc = MagicMock()
+        proc.poll.return_value = None
+        reranker._worker_proc = proc
+        reranker._model_loaded = True
+        return reranker
+
+    def test_a_busy_reranker_is_waited_for_not_skipped(self) -> None:
+        reranker = self._ready()
+        held, release = threading.Event(), threading.Event()
+
+        def other_recall() -> None:
+            with reranker._lock:
+                held.set()
+                release.wait(5)
+
+        t = threading.Thread(target=other_recall)
+        t.start()
+        assert held.wait(5)
+        threading.Timer(0.2, release.set).start()
+        with patch.object(reranker, "_readline_with_timeout",
+                          return_value='{"ok": true, "scores": [0.1, 0.9, 0.5]}\n'):
+            ranked, applied, status = reranker.rerank_with_status(
+                "q", _make_candidates(3), top_k=3)
+        t.join(5)
+        assert applied is True and status == "applied", status
+
+    def test_a_reranker_busy_past_the_wait_falls_back_and_says_so(self, monkeypatch) -> None:
+        from superlocalmemory.retrieval import reranker as mod
+
+        monkeypatch.setattr(mod, "_RERANK_QUEUE_WAIT_SECONDS", 0.05, raising=False)
+        reranker = self._ready()
+        with reranker._lock:  # held for the whole call
+            got = []
+            t = threading.Thread(target=lambda: got.append(
+                reranker.rerank_with_status("q", _make_candidates(2), top_k=2)))
+            t.start()
+            t.join(5)
+        _ranked, applied, status = got[0]
+        assert applied is False and status == "fallback_busy_or_unavailable"

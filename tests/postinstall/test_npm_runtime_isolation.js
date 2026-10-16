@@ -136,8 +136,8 @@ test('postinstall installs the pinned PyPI wheel, never the bundled tree (#134)'
   const installArg = pipCalls[0].args[pipCalls[0].args.length - 1];
   assert.equal(
     installArg,
-    `superlocalmemory==${PACKAGE_VERSION}`,
-    'the venv must be populated from the pinned PyPI wheel (single source of truth)',
+    `mslm-memory==${PACKAGE_VERSION}`,
+    'the venv must be populated from the pinned fork PyPI wheel (single source of truth)',
   );
   assert.doesNotMatch(
     pipCalls[0].args.join(' '),
@@ -302,12 +302,11 @@ test('postinstall help is read-only and does not bootstrap the runtime', () => {
   assert.equal(calls.length, 0);
 });
 
-test('preuninstall removes code only and never inspects or advertises data deletion', () => {
+test('preuninstall removes code only and never deletes data', () => {
   const source = fs.readFileSync(PREUNINSTALL, 'utf8');
 
-  assert.doesNotMatch(source, /SLM_DATA_DIR|SL_MEMORY_PATH|SLM_HOME/);
-  assert.doesNotMatch(source, /\.superlocalmemory/);
   assert.doesNotMatch(source, /rm\s+-rf|rmdir\s+\/s|Remove-Item/i);
+  assert.doesNotMatch(source, /unlinkSync|rmSync|rmdirSync|\.rm\(/);
   assert.match(source, /memory data is preserved/i);
 });
 

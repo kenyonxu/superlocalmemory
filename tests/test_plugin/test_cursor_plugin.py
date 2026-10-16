@@ -1,0 +1,114 @@
+# Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
+# Licensed under AGPL-3.0-or-later — see LICENSE file
+"""The Cursor-format plugin files that Grok Bot installs, as shipped.
+
+Grok Bot runs Cursor-format plugins. On its plugin computer it spawns an MCP
+server's ``command`` verbatim and does not replace ``${CLAUDE_PLUGIN_ROOT}``, so
+the Claude Code ``.mcp.json`` (which names a script inside the plugin through
+that variable) fails with ENOENT there. The Cursor manifest therefore points at
+its own definition, ``plugin/mcp.cursor.json``, whose command is ``uvx`` on
+PATH, pinned to this release.
+
+These tests read the BUILT tree (what a user installs), not the generator.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import tomllib
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+PLUGIN = REPO / "plugin"
+#: Its own MIT folder since 4.2.6, so plugin/ (Claude) keeps its AGPL licence.
+CURSOR = REPO / "cursor-plugin"
+CURSOR_MANIFEST = CURSOR / ".cursor-plugin" / "plugin.json"
+CURSOR_MCP = CURSOR / "mcp.cursor.json"
+CURSOR_MARKETPLACE = REPO / ".cursor-plugin" / "marketplace.json"
+
+
+def _load(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _package_version() -> str:
+    return tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+
+
+def _server() -> dict:
+    return _load(CURSOR_MCP)["mcpServers"]["superlocalmemory"]
+
+
+def test_the_uvx_pin_is_the_package_version() -> None:
+    server = _server()
+    assert server["command"] == "uvx"
+    # Fork identity (merge 4.2.6, S3 completion): the pinned PyPI
+    # distribution is mslm-memory; the `slm` command it runs is unchanged.
+    assert server["args"] == ["--from", f"mslm-memory=={_package_version()}", "slm", "mcp"]
+
+
+def test_manifest_and_marketplace_carry_the_package_version() -> None:
+    assert _load(CURSOR_MANIFEST)["version"] == _package_version()
+    assert _load(CURSOR_MARKETPLACE)["plugins"][0]["version"] == _package_version()
+
+
+def test_no_cursor_file_contains_a_placeholder() -> None:
+    """Every ``${VAR}`` in a Cursor listing must be declared as a user variable,
+    and Grok Bot replaces none of them on its computer. So: none at all."""
+    for path in (CURSOR_MANIFEST, CURSOR_MCP, CURSOR_MARKETPLACE):
+        assert "${" not in path.read_text(encoding="utf-8"), path
+
+
+def test_the_server_names_the_plugin_format_and_never_repoints_the_store() -> None:
+    env = _server()["env"]
+    assert env["SLM_AGENT_ID"] == "cursor_plugin"
+    # No forced tool set: the default (full), changed for every host by `slm tools set`.
+    assert "SLM_MCP_PROFILE" not in env
+    assert env["SLM_NON_INTERACTIVE"] == "1"
+    assert env["UV_TORCH_BACKEND"] == "cpu"
+    assert "SLM_DATA_DIR" not in env
+
+
+def test_manifest_paths_resolve_inside_the_plugin() -> None:
+    manifest = _load(CURSOR_MANIFEST)
+    for key in ("logo", "skills", "mcpServers"):
+        rel = manifest[key]
+        assert not rel.startswith("/") and ".." not in rel.split("/"), (key, rel)
+        target = (CURSOR / rel).resolve()
+        assert target.exists(), (key, target)
+        assert CURSOR.resolve() in target.parents or target == CURSOR.resolve()
+
+
+def test_every_skill_has_the_frontmatter_cursor_requires() -> None:
+    skills = sorted((PLUGIN / "skills").glob("*/SKILL.md"))
+    assert skills
+    for skill in skills:
+        text = skill.read_text(encoding="utf-8")
+        front = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+        assert front, skill
+        assert re.search(r"^name:\s*\S", front.group(1), re.M), skill
+        assert re.search(r"^description:\s*\S", front.group(1), re.M), skill
+
+
+def test_the_cursor_marketplace_offers_only_the_cursor_ready_tree() -> None:
+    plugins = _load(CURSOR_MARKETPLACE)["plugins"]
+    assert [(p["name"], p["source"]) for p in plugins] == [("superlocalmemory", "./cursor-plugin")]
+
+
+def test_claude_code_still_gets_its_own_definition() -> None:
+    """Adding the Cursor files must not change what Claude Code runs."""
+    claude = _load(PLUGIN / ".claude-plugin" / "plugin.json")
+    assert claude["mcpServers"] == "./.mcp.json"
+    server = _load(PLUGIN / ".mcp.json")["mcpServers"]["superlocalmemory"]
+    assert server["command"] == "${ComSpec:-${CLAUDE_PLUGIN_ROOT}/scripts/slm-launch}"
+    assert server["env"] == {"SLM_AGENT_ID": "claude_code"}
+
+
+def test_the_cursor_bundle_is_mit_and_the_claude_plugin_is_not() -> None:
+    """Cursor's Marketplace excludes copyleft; the engine and plugin/ stay AGPL."""
+    assert _load(CURSOR_MANIFEST)["license"] == "MIT"
+    assert (CURSOR / "LICENSE").read_text(encoding="utf-8").startswith("MIT License")
+    assert "AGPL-3.0-or-later" in (CURSOR / "LICENSE").read_text(encoding="utf-8")
+    assert _load(CURSOR_MARKETPLACE)["plugins"][0]["license"] == "MIT"
+    assert not (PLUGIN / ".cursor-plugin").exists()

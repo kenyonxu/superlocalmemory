@@ -16,7 +16,7 @@ from pathlib import Path
 from superlocalmemory.storage import schema as real_schema
 from superlocalmemory.storage.database import DatabaseManager
 from superlocalmemory.storage.migrations import (
-    M052_provenance_kind_column as M052,
+    M064_provenance_kind_column as M064,
 )
 from superlocalmemory.storage.models import (
     PROVENANCE_KINDS,
@@ -60,9 +60,9 @@ class TestStorageColumn:
 
     def test_migration_additive_and_idempotent(self, tmp_path):
         db = _db(tmp_path)
-        # M052 已跑过;再跑不炸(additive IF NOT EXISTS)
-        M052.run(db)
-        M052.run(db)
+        # M064 已跑过;再跑不炸(additive IF NOT EXISTS)
+        M064.run(db)
+        M064.run(db)
         cols = [r[1] for r in db.execute("PRAGMA table_info(atomic_facts)")]
         assert "provenance_kind" in cols
         # 存量(如有)为 NULL
@@ -76,12 +76,12 @@ class TestStorageColumn:
     def test_migration_adds_column_to_a_store_that_predates_it(
         self, tmp_path: Path,
     ):
-        """Upgrade path: a store whose atomic_facts predates M052 gets the column."""
+        """Upgrade path: a store whose atomic_facts predates M064 gets the column."""
         legacy = tmp_path / "legacy.db"
         with sqlite3.connect(legacy) as conn:
             conn.execute("CREATE TABLE atomic_facts (fact_id TEXT PRIMARY KEY)")
         with sqlite3.connect(legacy) as conn:
-            M052.apply(conn)
+            M064.apply(conn)
             cols = [r[1] for r in conn.execute("PRAGMA table_info(atomic_facts)")]
         assert "provenance_kind" in cols
 

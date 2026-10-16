@@ -1,0 +1,18 @@
+flowchart TD
+    SUB["Submit PDF<br/>check it is a PDF, 100 MB cap"] --> Q["Document row: processing<br/>job: queued"]
+    Q --> CL["Job service claims the job<br/>lease 300 s"]
+    CL --> PA["Parser child process reads one page at a time"]
+    PA --> TX{"Page has a text layer?<br/>20 or more characters"}
+    TX -->|"yes"| T1["Use the text, redact secrets"]
+    TX -->|"no"| T2["Render the page and read it (OCR)"]
+    T1 --> PM["Split into parts of up to 24,000 characters<br/>save one memory per part"]
+    T2 --> PM
+    PM --> IX["Embed the page picture<br/>record the page"]
+    IX --> CP{"Checkpoint after each page"}
+    CP -->|"more pages"| PA
+    CP -->|"over the limit"| FL["Failed with a plain reason"]
+    CP -->|"document removed"| CX["Cancelled, saved pages hidden"]
+    CP -->|"last page done"| DM["Save one memory for the document<br/>title + your words"]
+    DM --> RD["Document: ready, job: done"]
+    classDef out fill:#FFF4E0,stroke:#C27A00,color:#1F2340
+    class FL,CX,RD out

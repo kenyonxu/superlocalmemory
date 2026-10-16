@@ -1,0 +1,339 @@
+# Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar
+# Licensed under AGPL-3.0-or-later - see LICENSE file
+# Part of SuperLocalMemory V3 | https://qualixar.com | https://varunpratap.com
+
+"""``/api/v3/embedding/reindex``: switch the embedding model in the background.
+
+    POST /api/v3/embedding/reindex                  start a switch -> 202 + job
+    GET  /api/v3/embedding/reindex                  progress, live and previous model
+    POST /api/v3/embedding/reindex/rollback         back to the previous model -> 202
+    POST /api/v3/embedding/reindex/cancel           stop a running switch
+    POST /api/v3/embedding/reindex/forget-previous  free the previous vectors
+    GET  /api/v3/embedding/reindex/upgrade          "Upgrade memory engine": the plan
+    POST /api/v3/embedding/reindex/upgrade          start it (a switch to the managed model) -> 202
+
+The dashboard's two save routes (PUT /embedding/config, POST /mode/set) call
+:func:`queue_if_new_space` too: a save that changes the embedding space
+starts a job instead of hot-swapping into a blocking re-embed. One job at a
+time; a second request gets 409 naming the running one.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/v3/embedding/reindex", tags=["embedding"])
+
+_NOT_RUNNING = ("the background re-index runs inside the SLM daemon, which is not "
+                "serving this request; start it with: slm serve")
+
+
+def _require_read(request: Request) -> None:
+    """READ on the active workspace for the two status reads.
+
+    The command line has no session; it proves itself with the daemon
+    capability, so that is accepted too. Company mode with neither is a 401.
+    """
+    from fastapi import HTTPException
+
+    from superlocalmemory.access.rbac import Permission
+    from superlocalmemory.server.rbac_enforce import has_daemon_capability, require_permission
+
+    try:
+        require_permission(request, Permission.READ)
+    except HTTPException:
+        if not has_daemon_capability(request):
+            raise
+
+
+def _runner(request: Request) -> Any:
+    return getattr(request.app.state, "embedding_reindex", None)
+
+
+def _no_runner() -> JSONResponse:
+    return JSONResponse({"error": "daemon_required", "detail": _NOT_RUNNING}, status_code=409)
+
+
+def _invalid(code: str, message: str) -> JSONResponse:
+    # 422 with {code, message}: the CLI shows the reason instead of "not running".
+    return JSONResponse({"error": code, "detail": {"code": code, "message": message}},
+                        status_code=422)
+
+
+def _conflict(exc: Any) -> JSONResponse:
+    job = exc.job
+    return JSONResponse({
+        "error": "reindex_running", "job_id": job["job_id"], "state": job["state"],
+        "detail": (f"a re-index is already {job['state']} (job {job['job_id']}: "
+                   f"{job['from_signature']} -> {job['to_signature']}). Wait for it, or "
+                   "stop it with: slm embedder cancel"),
+    }, status_code=409)
+
+
+def _rollback_detail(job: dict) -> str:
+    """A rollback copies the previous model's vectors back for every unchanged
+    memory (no model call) and embeds only what is new or edited. 4.2.1 said
+    "re-indexing 27415 memories" for it, which read as the multi-hour job a
+    forward switch is; the author's finished in minutes."""
+    reusable = job.get("reusable")
+    reuse = (f"up to {reusable} of the {job['total']} memories have" if reusable
+             else f"memories that have not changed since the switch ({job['total']} in all) have")
+    return (f"going back to {job['to']}: {reuse} the vectors it already made, copied back "
+            "with no model call, so this is much shorter than a full re-index; only "
+            f"memories added or edited since are embedded again. Recall keeps using "
+            f"{job['from']} until it is done. Progress: slm embedder status")
+
+
+def _accepted(job: dict) -> JSONResponse:
+    if job.get("kind") == "rollback":
+        return JSONResponse({"success": True, "accepted": True, "job": job,
+                             "detail": _rollback_detail(job)}, status_code=202)
+    return JSONResponse({"success": True, "accepted": True, "job": job,
+                         "detail": (f"re-indexing {job['total']} memories with "
+                                    f"{job['to']} in the background; recall keeps using "
+                                    f"{job['from']} until it is done. Progress: "
+                                    "slm embedder status")},
+                        status_code=202)
+
+
+def target_config(live: Any, body: dict) -> Any:
+    """The embedding config a request asks for, starting from the live one."""
+    from dataclasses import replace
+
+    from superlocalmemory.core.embedding_providers import resolve_embedding_provider
+
+    model = str(body.get("model_name") or body.get("model") or live.model_name).strip()
+    provider = resolve_embedding_provider(str(body.get("provider") or ""), model, live.provider)
+    dim = int(body.get("dimension") or 0) or (live.dimension if model == live.model_name else 0)
+    if not model:
+        raise ValueError("a model name is required")
+    if not 64 <= dim <= 8192:
+        raise ValueError("the new model's vector size is needed: pass --dimension N "
+                         "(64-8192), for example 768 or 384")
+    endpoint = str(body.get("api_endpoint", live.api_endpoint) or "")
+    same_place = provider == live.provider and endpoint == live.api_endpoint
+    return replace(
+        live, provider=provider, model_name=model, dimension=dim, api_endpoint=endpoint,
+        api_key=str(body.get("api_key") or (live.api_key if same_place else "")),
+        ollama_model=model if provider == "ollama" else live.ollama_model,
+    )
+
+
+def queue_if_new_space(request: Request, live: Any, target: Any, *,
+                       force: bool = False, allow_unapproved: bool = False) -> JSONResponse | None:
+    """None: apply the save as before. Otherwise the response to send instead.
+
+    Same space (or a renamed alias) -> None. No daemon runner (direct use) ->
+    None, the save is persisted and the daemon queues the job when it starts.
+    ``force`` with the same width declares the vectors already match: the new
+    name becomes the live space without a re-index (the old escape hatch).
+    """
+    from superlocalmemory.core.embedding_reindex import NoChange, Refused
+    from superlocalmemory.storage import embedding_spaces as sp
+    from superlocalmemory.storage.embedding_reindex_jobs import JobConflict
+
+    runner = _runner(request)
+    if runner is None or sp.same_space(sp.signature_of(live), sp.signature_of(target)):
+        return None
+    if force and target.dimension == live.dimension:
+        _declare_equivalent(runner, target)
+        return None
+    try:
+        return _accepted(runner.request_switch(target, allow_unapproved=allow_unapproved))
+    except NoChange:
+        return None
+    except JobConflict as exc:
+        return _conflict(exc)
+    except Refused as exc:
+        return JSONResponse({"error": "reindex_refused", "detail": str(exc)}, status_code=409)
+
+
+def saved_switch_note(request: Request, live: Any, target: Any) -> dict:
+    """``needs_reindex`` + ``message`` for a save answered 200, not 202.
+
+    With the daemon's runner a real change of space answers 202 (see
+    :func:`queue_if_new_space`), so a 200 there re-indexes nothing: the same
+    space, an alias, a declared-equivalent ``force``, or no change. Without
+    the runner the save is persisted, every engine stays on the live model,
+    and the daemon queues the job when it loads the configuration.
+    """
+    from superlocalmemory.core.embedding_reindex import pending_switch_message, space_changed
+
+    if _runner(request) is not None or not space_changed(live, target):
+        return {"needs_reindex": False, "message": ""}
+    return {"needs_reindex": True, "message": pending_switch_message(live, target)}
+
+
+def _declare_equivalent(runner: Any, target: Any) -> None:
+    from superlocalmemory.core.embedding_reindex_steps import write_txn
+    from superlocalmemory.storage import embedding_spaces as sp
+    from superlocalmemory.storage.embedding_migrator import _write_stored_signature
+
+    conn = sp.connect(runner.db_path)
+    try:
+        with write_txn(conn, runner.db_path):
+            row = sp.read_space(conn)
+            sp.write_space(conn, sp.signature_of(target), sp.public_config(target),
+                           row.get("prev_signature") if row else None, None)
+    finally:
+        conn.close()
+    _write_stored_signature(runner.data_root, sp.signature_of(target))
+
+
+def _live_config(request: Request) -> Any:
+    from superlocalmemory.core.config import SLMConfig
+
+    engine = getattr(request.app.state, "engine", None)
+    config = getattr(engine, "_config", None) or getattr(request.app.state, "config", None)
+    return (config or SLMConfig.load()).embedding
+
+
+def unfitted_refusal(body: dict, target: Any) -> JSONResponse | None:
+    """409 when text would move to a managed model with no answer-support fit
+    (core/support_fit_guard.py), unless the caller passed ``force``."""
+    from superlocalmemory.core.support_fit_guard import refusal_for
+
+    reason = None if body.get("force") is True else refusal_for(target)
+    if reason is None:
+        return None
+    return JSONResponse({"error": "not_fitted", "detail": reason}, status_code=409)
+
+
+@router.post("")
+async def start_switch(request: Request):
+    from superlocalmemory.server.rbac_enforce import require_global_manage
+
+    require_global_manage(request)
+    runner = _runner(request)
+    if runner is None:
+        return _no_runner()
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("request body must be a JSON object")
+        live = _live_config(request)
+        target = target_config(live, body)
+    except (ValueError, TypeError) as exc:
+        return _invalid("invalid_request", str(exc))
+    from superlocalmemory.storage import embedding_spaces as sp
+
+    if sp.same_space(sp.signature_of(live), sp.signature_of(target)):
+        return _invalid("no_change", f"{target.model_name} is already the embedding model")
+    refused = unfitted_refusal(body, target)
+    if refused is not None:
+        return refused
+    response = await asyncio.to_thread(queue_if_new_space, request, live, target,
+                                       allow_unapproved=body.get("force") is True)
+    return response or _invalid("no_change", f"{target.model_name} is already in use")
+
+
+@router.get("")
+async def reindex_status(request: Request):
+    _require_read(request)
+    runner = _runner(request)
+    if runner is None:
+        return _no_runner()
+    return await asyncio.to_thread(runner.status)
+
+
+async def _call(request: Request, method: str, accepted: bool) -> JSONResponse:
+    from superlocalmemory.core.embedding_reindex import Refused
+    from superlocalmemory.server.rbac_enforce import require_global_manage
+    from superlocalmemory.storage.embedding_reindex_jobs import JobConflict
+
+    require_global_manage(request)
+    runner = _runner(request)
+    if runner is None:
+        return _no_runner()
+    try:
+        result = await asyncio.to_thread(getattr(runner, method))
+    except JobConflict as exc:
+        return _conflict(exc)
+    except Refused as exc:
+        return JSONResponse({"error": "refused", "detail": str(exc)}, status_code=409)
+    if accepted:
+        return _accepted(result)
+    return JSONResponse({"success": True, **({"job": result} if "job_id" in result else result)})
+
+
+def _upgrade_plan(request: Request, runner: Any) -> dict:
+    from superlocalmemory.core import engine_upgrade
+
+    return engine_upgrade.current_plan(_live_config(request), runner.db_path,
+                                       data_root=getattr(runner, "data_root", None))
+
+
+@router.get("/upgrade")
+async def upgrade_plan(request: Request):
+    """What "Upgrade memory engine" would do and whether it can start now (read only)."""
+    _require_read(request)
+    runner = _runner(request)
+    if runner is None:
+        return _no_runner()
+    return await asyncio.to_thread(_upgrade_plan, request, runner)
+
+
+def _upgrade_accepted(job: dict, plan: dict) -> JSONResponse:
+    return JSONResponse({"success": True, "accepted": True, "label": "upgrade", "job": job,
+                         "detail": (f"Upgrading your memory engine: {job['total']} memories are being "
+                                    "re-read with the new engine in the background. Recall keeps working "
+                                    f"on {plan['from']['model']} until it finishes, and you can roll back "
+                                    "afterwards (slm embedder rollback).")},
+                        status_code=202)
+
+
+def _start_upgrade(request: Request, runner: Any) -> JSONResponse:
+    from superlocalmemory.core import engine_upgrade
+    from superlocalmemory.core.embedding_reindex import NoChange, Refused
+    from superlocalmemory.storage.embedding_reindex_jobs import JobConflict
+
+    live = _live_config(request)
+    plan = engine_upgrade.current_plan(live, runner.db_path, data_root=getattr(runner, "data_root", None))
+    if not plan["available"]:
+        return JSONResponse({"error": "upgrade_unavailable", "detail": plan["reason"], "plan": plan},
+                            status_code=409)
+    try:
+        job = runner.request_switch(engine_upgrade.upgrade_target(live))
+    except JobConflict as exc:
+        return _conflict(exc)
+    except (NoChange, Refused) as exc:
+        return JSONResponse({"error": "upgrade_unavailable", "detail": str(exc), "plan": plan},
+                            status_code=409)
+    return _upgrade_accepted(job, plan)
+
+
+@router.post("/upgrade")
+async def start_upgrade(request: Request):
+    """Start "Upgrade memory engine": the ordinary background switch to the managed model."""
+    from superlocalmemory.server.rbac_enforce import require_global_manage
+
+    require_global_manage(request)
+    runner = _runner(request)
+    if runner is None:
+        return _no_runner()
+    return await asyncio.to_thread(_start_upgrade, request, runner)
+
+
+@router.post("/rollback")
+async def rollback(request: Request):
+    return await _call(request, "request_rollback", accepted=True)
+
+
+@router.post("/cancel")
+async def cancel(request: Request):
+    return await _call(request, "cancel", accepted=False)
+
+
+@router.post("/forget-previous")
+async def forget_previous(request: Request):
+    return await _call(request, "forget_previous", accepted=False)
+
+
+__all__ = ["queue_if_new_space", "router", "saved_switch_note", "target_config"]

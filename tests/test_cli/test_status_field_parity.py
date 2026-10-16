@@ -30,7 +30,6 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 # ---------------------------------------------------------------------------
 # Canonical definition — one copy, in the source, shared with the HTTP surface

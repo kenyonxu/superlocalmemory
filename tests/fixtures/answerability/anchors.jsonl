@@ -1,0 +1,97 @@
+{"content": "ensure_daemon() now waits up to 12 seconds for the socket before it spawns a second daemon; the old 3 second wait started duplicate daemons on slow disks.", "key": "code-ensure-daemon", "kind": "code", "project": "core"}
+{"content": "The hub answered HTTP 421 Misdirected Request when a client reused one TLS connection for a different host name; the fix was to turn off connection coalescing in the proxy.", "key": "code-http421", "kind": "code", "project": "core"}
+{"content": "qjl_bits sets how many bits the QJL quantizer keeps per dimension. It defaults to 1, and 2 is allowed for stores under 50k facts.", "key": "code-qjl-bits", "kind": "code", "project": "core"}
+{"content": "rrf_k stays at 15 because the candidate pools hold 50 to 200 items; k=60 flattened the fused ranking too much.", "key": "code-rrf-k", "kind": "code", "project": "core"}
+{"content": "Every SQLite connection sets PRAGMA journal_mode=WAL and busy_timeout=5000, which ended the 'database is locked' errors under concurrent writers.", "key": "code-wal", "kind": "code", "project": "core"}
+{"content": "The migration runner lives in storage/migrations/__init__.py and applies files named M0NN_*.py in numeric order.", "key": "code-migration-runner", "kind": "code", "project": "core"}
+{"content": "Setting SLM_RECALL_NO_FLOOR=1 switches off the evidence floor; it exists for debugging only and must never ship in a default config.", "key": "code-no-floor-env", "kind": "code", "project": "core"}
+{"content": "parse_window() accepts phrases like 'last week' or an ISO date range and returns a pair of UTC datetimes, or None when it cannot read the input.", "key": "code-parse-window", "kind": "code", "project": "core"}
+{"content": "The regex ^\\[[A-Za-z]+\\]:\\s* strips speaker prefixes such as '[Alice]: ' before the cross-encoder scores a fact.", "key": "code-speaker-regex", "kind": "code", "project": "core"}
+{"content": "reranker.warmup_sync(timeout=300) blocks until the cross-encoder worker has loaded its model or the timeout passes, and returns True only when it is ready.", "key": "code-warmup-sync", "kind": "code", "project": "core"}
+{"content": "The atomic_facts_fts table is an FTS5 index kept in sync by triggers, so a fact is keyword-searchable the moment its row is inserted.", "key": "code-fts5", "kind": "code", "project": "core"}
+{"content": "CANONICAL_RECALL_LIMIT is 10; the MCP recall tool caps any larger limit to 50 before it reaches the engine.", "key": "code-recall-limit", "kind": "code", "project": "core"}
+{"content": "Release 4.1.25 adds hub-corrected recall scoring and ships to PyPI and npm on the same day.", "key": "ver-4125", "kind": "release", "project": "core"}
+{"content": "SLM MCP Hub v0.3.4 fixed the resultType field so tool results validate against the MCP schema.", "key": "ver-hub-034", "kind": "release", "project": "core"}
+{"content": "Version 4.1.24 was a narrow release: the multimodal ingestion fix and one dashboard patch, nothing else.", "key": "ver-4124", "kind": "release", "project": "core"}
+{"content": "Python 3.14 is supported from 4.1.20, but lancedb wheels lag behind, so the vector backend stays on sqlite-vec.", "key": "ver-py314", "kind": "release", "project": "core"}
+{"content": "The MCP conformance harness needs Node 22 while the CI workflow still pins Node 20, so that one job fails on every run.", "key": "ver-node22", "kind": "release", "project": "core"}
+{"content": "pydantic 2.13.4 hard-pins pydantic-core 2.46.4, so there is no upgrade path around the garbage-collector crash.", "key": "ver-pydantic", "kind": "release", "project": "core"}
+{"content": "CSLS, cross-domain similarity local scaling, subtracts each item's average similarity to its neighbours so that hub items stop matching every query.", "key": "acr-csls", "kind": "concept", "project": "core"}
+{"content": "RRF means reciprocal rank fusion: every channel adds 1/(k + rank) for each item it returns.", "key": "acr-rrf", "kind": "concept", "project": "core"}
+{"content": "FSRS stability grows with each successful recall, so notes that are used often decay more slowly.", "key": "acr-fsrs", "kind": "concept", "project": "core"}
+{"content": "The SLA for the hosted gateway is 99.5 percent monthly uptime with a 4 hour response for P1 incidents.", "key": "acr-sla", "kind": "concept", "project": "core"}
+{"content": "For a GDPR erasure request we delete the memory rows at once and queue their vectors for purge within 30 days.", "key": "acr-gdpr", "kind": "policy", "project": "core"}
+{"content": "MRR, mean reciprocal rank, averages 1/rank of the first correct answer over all questions.", "key": "acr-mrr", "kind": "concept", "project": "core"}
+{"content": "Payment receipt for the sandbox plan: app id asdk_app_6ac9e8f2b71d40c3, amount 0.00 USD, status succeeded.", "key": "id-asdk-receipt", "kind": "receipt", "project": "core"}
+{"content": "Session 3f9c2a7e-51b4-4d0a-9e6f-2c8b1d7a4e90 ended with 14 memories stored and 2 recalls.", "key": "id-session-stub", "kind": "session", "project": "core"}
+{"content": "Request req_01J9ZK4M8Q2X7V3N5B6C failed with HTTP 503 from the embedding worker after 30 seconds.", "key": "id-req-503", "kind": "log", "project": "core"}
+{"content": "Commit 9d4e1b7 reverted the BM25 tokenizer change because it split version strings like 4.1.25 into three tokens.", "key": "id-commit-revert", "kind": "commit", "project": "core"}
+{"content": "Ticket OPS-4471: the nightly backup job skipped profile 'research' because its lock file was stale.", "key": "id-ticket-ops4471", "kind": "ticket", "project": "core"}
+{"content": "Order ORD-2026-000917 for two replacement SSDs shipped on 3 March 2026, tracking number 1Z999AA10123456784.", "key": "id-order-ssd", "kind": "receipt", "project": "core"}
+{"content": "Licence record LIC-7Q2M-88XT-0PZK belongs to the evaluation tier and expires on 31 December 2026.", "key": "id-license-key", "kind": "receipt", "project": "core"}
+{"content": "Container image sha256:4b1e0c9a7d2f... was tagged slm-worker:2026-09-30 and pushed to the internal registry.", "key": "id-container", "kind": "log", "project": "core"}
+{"content": "Nadia Okafor reviews every storage migration before it merges.", "key": "ppl-nadia", "kind": "person", "project": "core"}
+{"content": "Tomás Rivera maintains the Windows installer and signs the MSI builds.", "key": "ppl-tomas", "kind": "person", "project": "core"}
+{"content": "Mei Tanaka benchmarked LoCoMo and reported 74.8 percent for the zero-LLM mode.", "key": "ppl-mei", "kind": "person", "project": "core"}
+{"content": "Oskar Lindqvist wrote the Hopfield channel and still owns its tests.", "key": "ppl-oskar", "kind": "person", "project": "core"}
+{"content": "Lumen is the codename for the dashboard rewrite; it uses Astro and ships no client-side framework.", "key": "prod-lumen", "kind": "product", "project": "core"}
+{"content": "Orbit is the codename for remote sync; it is paused until someone designs the conflict resolver.", "key": "prod-orbit", "kind": "product", "project": "core"}
+{"content": "Quill is the note importer that reads Markdown vaults and keeps their folder names as tags.", "key": "prod-quill", "kind": "product", "project": "core"}
+{"content": "We decided to keep SQLite as the only database. Postgres support was rejected because local-first installs must work with zero services running.", "key": "dec-sqlite", "kind": "decision", "project": "core"}
+{"content": "We chose AGPL plus a commercial licence so that hosted competitors have to publish their changes.", "key": "dec-agpl", "kind": "decision", "project": "core"}
+{"content": "Decision: nothing is sent home by default. Crash reports are opt-in and stay on disk until the user exports them.", "key": "dec-no-telemetry", "kind": "decision", "project": "core"}
+{"content": "Releases batch the non-blocking fixes; only a blocker justifies an out-of-cycle release.", "key": "dec-batch-releases", "kind": "decision", "project": "core"}
+{"content": "We kept ms-marco-MiniLM-L-12-v2 as the reranker because the larger modernbert reranker lowered LoCoMo from 68.4 to 64.1 percent.", "key": "dec-reranker", "kind": "decision", "project": "core"}
+{"content": "No more than two background agents run at once, because a third one drained the weekly usage limit in a day.", "key": "dec-two-agents", "kind": "decision", "project": "core"}
+{"content": "On 14 August 2026 the embedding worker leaked file descriptors and the daemon reached the open-files limit after six hours.", "key": "ev-fd-leak", "kind": "event", "project": "core"}
+{"content": "On 2 October 2026 we presented the bounded loops paper at a small meetup in Pune.", "key": "ev-meetup", "kind": "event", "project": "core"}
+{"content": "On 9 September 2026 the M057 migration took 41 seconds on a 0.95 GB store.", "key": "ev-m057", "kind": "event", "project": "core"}
+{"content": "The old laptop's battery swelled in July 2026, so all benchmarks after that ran on the new machine.", "key": "ev-laptop", "kind": "event", "project": "core"}
+{"content": "Die nächtliche Sicherung läuft um 03:00 Uhr und behält die letzten sieben Kopien.", "key": "ne-de-backup", "kind": "note", "project": "intl"}
+{"content": "El servidor de pruebas se reinicia cada domingo a las 22:00.", "key": "ne-es-restart", "kind": "note", "project": "intl"}
+{"content": "La clé de chiffrement est renouvelée tous les quatre-vingt-dix jours.", "key": "ne-fr-key", "kind": "note", "project": "intl"}
+{"content": "हर शुक्रवार को डेटाबेस का बैकअप लिया जाता है।", "key": "ne-hi-backup", "kind": "note", "project": "intl"}
+{"content": "ステージング環境のポートは8443です。", "key": "ne-ja-port", "kind": "note", "project": "intl"}
+{"content": "我们的日志保留三十天。", "key": "ne-zh-logs", "kind": "note", "project": "intl"}
+{"content": "O relatório mensal é enviado no primeiro dia útil de cada mês.", "key": "ne-pt-report", "kind": "note", "project": "intl"}
+{"content": "The local web dashboard listens on port 9765.", "key": "pp-dash-port-a", "kind": "fact", "project": "core"}
+{"content": "Port 9765 serves the browser dashboard on this machine.", "key": "pp-dash-port-b", "kind": "fact", "project": "core"}
+{"content": "Raw tool logs are deleted after 21 days.", "key": "pp-retention-a", "kind": "fact", "project": "core"}
+{"content": "We keep unprocessed tool output for three weeks and then remove it.", "key": "pp-retention-b", "kind": "fact", "project": "core"}
+{"content": "The team retro happens every second Thursday afternoon.", "key": "pp-coffee-a", "kind": "fact", "project": "core"}
+{"content": "Every other Thursday, after lunch, we hold the retrospective.", "key": "pp-coffee-b", "kind": "fact", "project": "core"}
+{"content": "Project Kestrel uses PostgreSQL 16 for its payroll database. Redis is only a cache.", "key": "audit-db", "kind": "audit", "project": "audit"}
+{"content": "Kestrel database backups run at 02:40 UTC daily and are kept for 35 days.", "key": "audit-backup", "kind": "audit", "project": "audit"}
+{"content": "Priya Sen owns the Kestrel incident escalation process. Morgan Patel owns analytics.", "key": "audit-owner", "kind": "audit", "project": "audit"}
+{"content": "[Alex Morgan]: Priya said \"I am leaving tomorrow\", but I will stay.", "key": "audit-quote", "kind": "audit", "project": "audit"}
+{"content": "Alex Morgan uses Python for payroll automation and works in finance.", "key": "audit-alex", "kind": "audit", "project": "audit"}
+{"content": "Alexa Morgan uses Rust for payroll automation and works in platform engineering.", "key": "audit-alexa", "kind": "audit", "project": "audit"}
+{"content": "[Alex Morgan]: I use Python for payroll. [Alexa Morgan]: I use Rust for payroll.", "key": "audit-speaker", "kind": "audit", "project": "audit"}
+{"content": "John Smith manages EU deployment; Joan Smith manages the Canada deployment. They are distinct employees.", "key": "audit-smith", "kind": "audit", "project": "audit"}
+{"content": "Postgres is our database server. PostgREST is a separate HTTP API service.", "key": "audit-postgres", "kind": "audit", "project": "audit"}
+{"content": "Orchid access tokens expire after 47 minutes. Refresh tokens expire after 14 days.", "key": "audit-token", "kind": "audit", "project": "audit"}
+{"content": "Orchid support coverage is Monday to Friday from 09:00 to 17:00 UTC.", "key": "audit-support", "kind": "audit", "project": "audit"}
+{"content": "The Atlas rollout was postponed from June 12 to July 19, 2026 because the vendor audit failed.", "key": "audit-rollout", "kind": "audit", "project": "audit"}
+{"content": "The Meridian staging API listens on port 9327; the production API listens on port 9443.", "key": "audit-port", "kind": "audit", "project": "audit"}
+{"content": "Juniper monthly infrastructure budget is USD 1870.50, excluding VAT.", "key": "audit-cost", "kind": "audit", "project": "audit"}
+{"content": "Tundra data must remain in the Frankfurt region. We rejected migration to Virginia.", "key": "audit-nomove", "kind": "audit", "project": "audit"}
+{"content": "The invoice retry helper is `def retry_delay(attempt): return min(120, 3 ** attempt)`. Retries stop after 7 attempts.", "key": "audit-code", "kind": "audit", "project": "audit"}
+{"content": "Priya Sen prefers concise pull request descriptions with test evidence, and dislikes emoji in incident reports.", "key": "audit-pref", "kind": "audit", "project": "audit"}
+{"content": "On 2026-02-18, Morgan Patel rotated the Orchid staging certificate. The expiry is 2026-08-18.", "key": "audit-date", "kind": "audit", "project": "audit"}
+{"content": "The Kestrel CFO salary has not been recorded. Nobody has supplied that number.", "key": "audit-unknown", "kind": "audit", "project": "audit"}
+{"content": "The Meridian daily on-call handoff occurs at 16:15 Asia/Kolkata.", "key": "audit-timezone", "kind": "audit", "project": "audit"}
+{"content": "Joan Smith is allergic to peanuts. John Smith has no known food allergies.", "key": "audit-allergy", "kind": "audit", "project": "audit"}
+{"content": "Alexa Morgan visited Kyoto in April 2026. Alex Morgan visited Lisbon in May 2026.", "key": "audit-trip", "kind": "audit", "project": "audit"}
+{"content": "Juniper emergency VPN recovery phrase is fictional-canary-blue-otter, a synthetic audit value with no access rights.", "key": "audit-vpn", "kind": "audit", "project": "audit"}
+{"content": "As of 2026-01-15, Kestrel primary owner is Alex Morgan.", "key": "audit-old-status", "kind": "audit", "project": "audit"}
+{"content": "As of 2026-08-20, Kestrel primary owner is Alexa Morgan, replacing Alex Morgan.", "key": "audit-new-status", "kind": "audit", "project": "audit"}
+{"content": "In January 2026, Atlas used MySQL 8 as its main database.", "key": "audit-old-db", "kind": "audit", "project": "audit"}
+{"content": "As of September 2026, Atlas uses PostgreSQL 17 as its main database, replacing MySQL 8.", "key": "audit-new-db", "kind": "audit", "project": "audit"}
+{"content": "The Orchid project lead is Priya Sen.", "key": "audit-multi-a", "kind": "audit", "project": "audit"}
+{"content": "Priya Sen prefers Python for data analysis.", "key": "audit-multi-b", "kind": "audit", "project": "audit"}
+{"content": "Kestrel release deployment is forbidden on Fridays. Tuesdays are preferred.", "key": "audit-not-allowed", "kind": "audit", "project": "audit"}
+{"content": "OPS_SOAK4_FINAL_00000: Fictional Cedar deployment 0 uses port 6100. Alice Chen approved the synthetic recovery checklist.", "key": "ops-cedar-0", "kind": "audit", "project": "audit"}
+{"content": "OPS_SOAK4_FINAL_00001: Fictional Cedar deployment 1 uses port 6101. Alice Chen approved the synthetic Cedar recovery checklist.", "key": "ops-cedar-1", "kind": "audit", "project": "audit"}
+{"content": "Alice Chen owns project kestrel deployment ticket AUDIT-0000; the staging port is 5400.", "key": "ops-audit-0000", "kind": "audit", "project": "audit"}
+{"content": "AUDIT-0001: on 2026-02-02 the team decided to keep PostgreSQL for the ledger service.", "key": "ops-audit-0001", "kind": "audit", "project": "audit"}
+{"content": "AUDIT-0005 saved the recovery command python -m backup.restore --tenant audit5 for the fictional tenant.", "key": "ops-audit-0005", "kind": "audit", "project": "audit"}

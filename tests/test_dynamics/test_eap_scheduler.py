@@ -511,3 +511,18 @@ def test_eap_upgrade_to_int8_with_embedding(
     # R=0.6 -> target_bw=8, current_bw=2 -> upgrade
     stats = scheduler.run_eap_cycle("p1")
     assert stats["upgrades"] >= 1
+
+
+def test_forgetting_is_logical_and_a_false_backup_flag_says_it_does_nothing(caplog):
+    """ENG-31: EAP reported ``deleted:10`` while keeping every vector; the flag was inert."""
+    from superlocalmemory.core.config import QuantizationConfig as Config
+
+    cfg = Config(keep_float32_backup=False)
+    scheduler = EAPScheduler(MagicMock(), MagicMock(), MagicMock(), cfg)
+    scheduler._db.execute.return_value = []
+    with caplog.at_level("WARNING"):
+        stats = scheduler.run_eap_cycle("p1")
+
+    assert stats["vectors_reclaimed"] == 0
+    assert "no effect" in stats["note"] and "kept" in stats["note"]
+    assert any("keep_float32_backup=False has no effect" in r.message for r in caplog.records)

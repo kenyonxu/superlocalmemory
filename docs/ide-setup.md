@@ -4,9 +4,12 @@
 
 Connect SuperLocalMemory to your AI coding tool. Once connected, memories are captured and recalled automatically.
 
+For the full plugins (skills, sub-agents, hooks) on Claude Code, Codex, VS Code /
+Copilot, Grok Bot, Hermes and Antigravity, see [Editor and agent plugins](plugins.md).
+
 ---
 
-## Transport Options (v3.6.7+)
+## Transport Options
 
 SLM ships with **two MCP transports**. Pick the one that fits your tool.
 
@@ -14,14 +17,33 @@ SLM ships with **two MCP transports**. Pick the one that fits your tool.
 |-----------|-------------|----------|-------------|
 | **HTTP** (recommended) | All clients share one daemon process | ~2 GB once, flat forever | `slm serve` must be running |
 | **stdio** (universal) | One `slm mcp` subprocess per connection | ~90–110 MB × connections | None — works offline |
-| **`mcp-remote` bridge** | stdio wrapper that tunnels to HTTP | ~50 MB bridge + HTTP pool | npm `mcp-remote` |
+| **`mcp-remote` bridge** | stdio wrapper that tunnels to HTTP | ~50 MB bridge + HTTP pool | npm `mcp-remote`, global **or** via `npx` |
 
 **Quick rule:** use HTTP if your tool supports it. Use `mcp-remote` if your tool is stdio-only but you want shared RAM. Fall back to pure stdio if you are offline or running daemon-free.
 
-The `mcp-remote` bridge package:
+The `mcp-remote` bridge package. There are two ways to get it, and the config has to
+match the one you pick — they are not interchangeable.
+
+**Global install.** Required if you let `slm connect --transport http-mcp-remote` write the
+config for you: it writes `"command": "mcp-remote"`, so that binary has to be on your `PATH`.
+
 ```bash
 npm install -g mcp-remote
 ```
+
+**No global install.** `npx` fetches the same package on demand, but it leaves no `mcp-remote`
+binary on `PATH` — so a hand-written config has to go through `npx` itself:
+
+```json
+{
+  "type": "stdio",
+  "command": "npx",
+  "args": ["-y", "mcp-remote", "http://127.0.0.1:8765/mcp/"]
+}
+```
+
+A config that names `mcp-remote` directly will fail to start with `ENOENT` / `command not
+found` unless the global install above has been done.
 
 ---
 
@@ -33,27 +55,33 @@ The fastest way to connect all your IDEs:
 slm connect
 ```
 
-This scans your system for installed IDEs, configures each one, and verifies the connection. Run it once after installing SLM.
+This configures detected host configurations. Use `slm connect --list --json` for the supported host IDs and install methods. A configuration write leaves host verification pending; use `--verify` with HTTP transport to check the owned daemon and MCP protocol, then check registration inside the host.
 
 To connect a specific IDE:
 
 ```bash
-slm connect claude
+slm connect claude-code
 slm connect cursor
-slm connect vscode
+slm connect vscode-copilot --here   # run from your project root
 ```
 
 ---
 
 ## Claude Code
 
-**Auto:**
+**Plugin (recommended):**
 
 ```bash
-slm connect claude
+claude plugin marketplace add qualixar/superlocalmemory
+claude plugin install superlocalmemory@qualixar
 ```
 
-**Manual — HTTP (recommended, v3.6.7+):**
+The plugin brings the MCP server, skills, sub-agents and hooks. `slm connect
+claude-code` prints these two commands and writes no MCP config; `slm setup`
+can run them for you. Use the manual config below only if you don't want the
+plugin.
+
+**Manual — HTTP (recommended):**
 
 ```bash
 claude mcp add --transport http superlocalmemory http://127.0.0.1:8765/mcp/
@@ -87,15 +115,32 @@ Or edit `~/.claude.json`:
 
 Restart Claude Code. Verify with: `slm status` in a Claude Code session.
 
+**Claude Code plugin on native Windows — install SLM first.** On Windows the
+plugin's MCP server runs the SuperLocalMemory you installed; it does not build
+its own copy. Install it before enabling the plugin, and confirm `slm` is on
+PATH:
+
+```powershell
+pipx install superlocalmemory   # or: pip install superlocalmemory
+slm --version
+```
+
+If `slm` is not on PATH the server does not start, and its log (`/mcp` in
+Claude Code) says `SLM plugin: slm is not on PATH` with the install command.
+Install it, then restart Claude Code. Use pipx or pip: they install `slm.exe`,
+which the editor can start directly. macOS and Linux are unchanged — the
+plugin uses an installed `slm` when there is one and falls back to its own
+environment otherwise.
+
 ---
 
 ## Claude Desktop
 
 Claude Desktop uses a separate config file from Claude Code CLI.
 
-**Manual — HTTP (recommended, v3.6.7+):**
+**Manual — HTTP (recommended):**
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS), `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or `~/.config/Claude/claude_desktop_config.json` (Linux):
 
 ```json
 {
@@ -133,7 +178,7 @@ Restart the Claude Desktop app after editing. Config is not hot-reloaded.
 slm connect cursor
 ```
 
-**Manual — HTTP (recommended, v3.6.7+):**
+**Manual — HTTP (recommended):**
 
 Add to `~/.cursor/mcp.json`:
 
@@ -171,22 +216,20 @@ Restart Cursor. The memory tools appear in the tool list automatically.
 **Auto:**
 
 ```bash
-slm connect vscode
+slm connect vscode-copilot --here
 ```
 
-**Manual — HTTP (recommended, v3.6.7+):**
+**Manual — HTTP (recommended):**
 
-Add to VS Code settings (JSON):
+Save to `.vscode/mcp.json` in your project (the same path as `--here`):
 
 ```json
 {
-  "mcp": {
-    "servers": {
+  "servers": {
       "superlocalmemory": {
         "type": "http",
         "url": "http://127.0.0.1:8765/mcp/"
       }
-    }
   }
 }
 ```
@@ -195,13 +238,11 @@ Add to VS Code settings (JSON):
 
 ```json
 {
-  "mcp": {
-    "servers": {
+  "servers": {
       "superlocalmemory": {
         "command": "npx",
         "args": ["-y", "superlocalmemory", "mcp"]
       }
-    }
   }
 }
 ```
@@ -216,7 +257,7 @@ Add to VS Code settings (JSON):
 slm connect windsurf
 ```
 
-**Manual — HTTP (recommended, v3.6.7+):**
+**Manual — HTTP (recommended):**
 
 Add to `~/.windsurf/mcp.json`:
 
@@ -252,10 +293,10 @@ Add to `~/.windsurf/mcp.json`:
 **Auto:**
 
 ```bash
-slm connect gemini
+slm connect gemini-cli
 ```
 
-**Manual — HTTP (recommended, v3.6.7+):**
+**Manual — HTTP (recommended):**
 
 Add to `~/.gemini/settings.json`:
 
@@ -263,7 +304,7 @@ Add to `~/.gemini/settings.json`:
 {
   "mcpServers": {
     "superlocalmemory": {
-      "url": "http://127.0.0.1:8765/mcp/"
+      "httpUrl": "http://127.0.0.1:8765/mcp/"
     }
   }
 }
@@ -286,15 +327,15 @@ Add to `~/.gemini/settings.json`:
 
 ## Antigravity IDE / agy CLI
 
-Antigravity IDE and the `agy` CLI both read from `~/.gemini/antigravity/mcp_config.json`.
+Antigravity IDE and the `agy` CLI both read from `~/.gemini/config/mcp_config.json`.
 
-**HTTP (recommended, v3.6.7+):**
+**HTTP (recommended):**
 
 ```json
 {
   "mcpServers": {
     "superlocalmemory": {
-      "url": "http://127.0.0.1:8765/mcp/"
+      "serverUrl": "http://127.0.0.1:8765/mcp/"
     }
   }
 }
@@ -338,6 +379,22 @@ args = [
 ]
 ```
 
+**Without the global install**, invoke the same bridge through `npx` — `command` changes too,
+not just the install line:
+
+```toml
+[mcp_servers.superlocalmemory]
+command = "npx"
+args = [
+    "-y",
+    "mcp-remote",
+    "http://127.0.0.1:8765/mcp/",
+    "--allow-http",
+    "--transport",
+    "http-only",
+]
+```
+
 **stdio (if mcp-remote is not available):**
 
 ```toml
@@ -353,7 +410,7 @@ SLM_AGENT_ID = "grok"
 
 ## Hermes Agent
 
-**HTTP (recommended, v3.6.7+):**
+**HTTP (recommended):**
 
 Edit `~/.hermes/config.yaml`:
 
@@ -382,7 +439,7 @@ Both Hermes CLI and Hermes Desktop read the same `~/.hermes/config.yaml`. Restar
 
 ## Kimi
 
-**HTTP (recommended, v3.6.7+):**
+**HTTP (recommended):**
 
 Add to `~/.kimi/mcp.json`:
 
@@ -413,7 +470,7 @@ Add to `~/.kimi/mcp.json`:
 
 ## CommandCode AICLI
 
-**HTTP (recommended, v3.6.7+):**
+**HTTP (recommended):**
 
 Add to `~/.commandcode/mcp.json`:
 
@@ -476,18 +533,17 @@ Restart the IDE after adding the server.
 slm connect continue
 ```
 
-**Manual:** Add to `~/.continue/config.json`:
+**Manual:** Merge into `~/.continue/config.yaml`, preserving your existing header and models:
 
-```json
-{
-  "mcpServers": [
-    {
-      "name": "superlocalmemory",
-      "command": "npx",
-      "args": ["-y", "superlocalmemory", "mcp"]
-    }
-  ]
-}
+```yaml
+# https://docs.continue.dev/reference
+name: SLM Config
+version: 1.0.0
+schema: v1
+mcpServers:
+  - name: superlocalmemory
+    command: slm
+    args: [mcp]
 ```
 
 ---
@@ -517,7 +573,7 @@ slm connect zed
 
 ---
 
-## Framework Adapters (v3.8.0)
+## Framework Adapters
 
 Nine Python packages back their framework's native memory interface with the local SLM data root. Install alongside the framework; no running daemon is required for core usage.
 

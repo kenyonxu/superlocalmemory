@@ -18,7 +18,7 @@ from __future__ import annotations
 # ---------------------------------------------------------------------------
 
 _PROFILE_CORE: frozenset[str] = frozenset({  # 18
-    "remember", "recall", "search", "fetch", "list_recent", "update_memory", "forget",
+    "remember", "recall", "search", "fetch", "expand", "list_recent", "update_memory", "forget",
     "session_init", "close_session",
     "slm_compress", "slm_retrieve", "slm_cache_set", "slm_cache_get", "slm_optimize_stats",
     # A client that can propose a correction must be able to inspect and
@@ -45,31 +45,63 @@ _PROFILE_BRAIN: frozenset[str] = frozenset({
     "observe_bounded_loop_evidence",
 })
 
-_PROFILE_CODE: frozenset[str] = _PROFILE_CORE | _PROFILE_BRAIN | frozenset({  # 32
+#: 4.1.19 WP8: memory-kind management. Base recall/search/list_recent already
+#: carry a `kind` filter in every profile; these four let an agent set,
+#: review and confirm a kind the same way `slm kinds` already does from the
+#: terminal. Varun's call (2026-10-03): default visibility, not power-only —
+#: present in code/full/essential (and therefore power, which is full plus
+#: extras) so every normal session has them, not just governance/admin ones.
+_PROFILE_KINDS: frozenset[str] = frozenset({
+    "set_memory_kind", "memory_kinds_status", "review_memory_kinds",
+    "confirm_memory_kinds",
+})
+
+_PROFILE_CODE: frozenset[str] = _PROFILE_CORE | _PROFILE_BRAIN | _PROFILE_KINDS | frozenset({  # 38
     "build_code_graph", "get_blast_radius", "query_graph",
     "semantic_search_code", "get_review_context", "detect_changes",
-    # switch_profile lets a plugin/IDE session change the active workspace over
-    # MCP (the plugin ships SLM_MCP_PROFILE=code, so it must be here). The
-    # underlying route is RBAC member-gated, so company-mode isolation holds.
+    # switch_profile lets a plugin/IDE session change the active workspace
+    # over MCP (already in _PROFILE_CORE; listed again here for readability
+    # of this profile's composition). The underlying route is RBAC
+    # member-gated, so company-mode isolation holds.
     "switch_profile",
-    # v3.8.0: bounded loops on the MCP surface. Coding agents (the /slm-loop
-    # command's audience) run gated, bounded loops and inspect the ledger.
+    # v3.8.0: bounded loops on the MCP surface. Coding agents — the
+    # audience that opts into SLM_MCP_PROFILE=code for the code-graph tools
+    # above — also run gated, bounded loops and inspect the ledger.
     "slm_loop_run", "slm_loop_history", "slm_loop_show",
     # Retrieval ranks a memory partly on whether it has actually helped, and
-    # the only evidence of that comes from the assistant that used it. The
-    # plugin ships SLM_MCP_PROFILE=code, so without these two the ranker has
-    # no input at all for the audience it exists to serve.
+    # the only evidence of that comes from the assistant that used it. A
+    # session running SLM_MCP_PROFILE=code needs these two or the ranker has
+    # no input at all for that audience.
     "report_outcome", "report_feedback",
 })
 
-_PROFILE_FULL_MESH: frozenset[str] = frozenset({  # 8
-    "mesh_summary", "mesh_peers", "mesh_send", "mesh_inbox",
+_PROFILE_FULL_MESH: frozenset[str] = frozenset({  # 9
+    "mesh_summary", "mesh_peers", "mesh_send", "mesh_inbox", "mesh_wait",
     "mesh_state", "mesh_lock", "mesh_events", "mesh_status",
 })
 
-# 41 base — explicit literal, not runtime _ESSENTIAL_TOOLS (OQ-2).
+_MEDIA_TOOLS: frozenset[str] = frozenset({
+    "remember_media", "get_media", "remember_document", "media_status", "media_upload_link",
+})
+
+
+def _media_tools_if_enabled() -> frozenset[str]:
+    """The image and document tools while images are on, else nothing.
+
+    Read once when this module loads, like the mesh tools. Any error means
+    images are off; this never raises at import.
+    """
+    try:
+        from superlocalmemory.runtimes import features
+        return _MEDIA_TOOLS if features.media_enabled() else frozenset()
+    except Exception:
+        return frozenset()
+
+
+# 42 base — explicit literal, not runtime _ESSENTIAL_TOOLS (OQ-2).
 _PROFILE_FULL: frozenset[str] = frozenset({
-    "remember", "recall", "search", "fetch", "list_recent", "delete_memory", "update_memory",
+    "remember", "recall", "search", "fetch", "expand", "list_recent", "delete_memory",
+    "update_memory",
     "get_status", "session_init", "observe", "close_session", "report_feedback", "forget",
     "run_maintenance", "consolidate_cognitive", "get_soft_prompts", "set_mode", "report_outcome",
     "log_tool_event", "get_assertions", "reinforce_assertion", "contradict_assertion",
@@ -83,16 +115,21 @@ _PROFILE_FULL: frozenset[str] = frozenset({
     # v4.0.8: readable summaries (#113). In core, so it must be in full too —
     # full is asserted to be a superset of core.
     "get_memory_summary",
+    # 4.1.21: saved views (#113). Not in core: core stays the smallest surface,
+    # and a view is a convenience over recall, which core already has.
+    "run_view", "manage_view",
     # prestage_context remains registered but deliberately raw-server-only.
-}) | _PROFILE_FULL_MESH  # 50
+}) | _PROFILE_FULL_MESH | _PROFILE_KINDS | _media_tools_if_enabled()  # 58 (+5 while images are on)
 
-_PROFILE_POWER: frozenset[str] = _PROFILE_FULL | frozenset({  # 62
+_PROFILE_POWER: frozenset[str] = _PROFILE_FULL | frozenset({  # 70 (+5 while images are on)
     "get_version", "get_mode", "health", "consistency_check", "recall_trace",
     "get_lifecycle_status", "set_retention_policy", "compact_memories",
     "get_behavioral_patterns", "audit_trail", "quantize", "get_retention_stats",
+    # memory-kind management (_PROFILE_KINDS) arrives here via _PROFILE_FULL
+    # now that it is a default-visibility surface, not a power-only one.
 })
 
-_PROFILE_MESH: frozenset[str] = _PROFILE_FULL_MESH  # 8
+_PROFILE_MESH: frozenset[str] = _PROFILE_FULL_MESH  # 9
 
 # Canonical name → frozenset mapping.  "whole" is intentionally absent —
 # it maps to the raw server (all tools, D-2 LOCKED).
@@ -119,12 +156,14 @@ _PROFILE_ALIASES: dict[str, str] = {
     "code28": "code",
     "code29": "code",
     "code31": "code",
+    "code34": "code",
     "full38": "full",
     "full39": "full",
     "full42": "full",
     "full46": "full",
     "full47": "full",
     "full49": "full",
+    "full50": "full",
     "power50": "power",
     "power51": "power",
     "power54": "power",

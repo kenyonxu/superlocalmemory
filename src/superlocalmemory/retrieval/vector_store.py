@@ -14,6 +14,7 @@ License: AGPL-3.0-or-later
 
 from __future__ import annotations
 
+import enum
 import logging
 import re
 import sqlite3
@@ -23,12 +24,48 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator
 
-import numpy as np
-
+from superlocalmemory.retrieval import vector_presence
 from superlocalmemory.storage.embedding_codec import encode_embedding
+from superlocalmemory.storage.erasure_visibility import erasure_clause_for_connection
 from superlocalmemory.storage.write_lock import get_write_lock
 
 logger = logging.getLogger(__name__)
+
+
+class VectorDelete(enum.Enum):
+    """The three honest answers to "delete this fact's vector".
+
+    ``delete`` used to answer ``False`` both for "there was nothing to delete"
+    and for "the delete failed", and logged the failure at debug level, so an
+    erasure that left a vector behind looked exactly like one that had nothing
+    to do. A caller that erases must be able to tell them apart.
+
+    Truthiness keeps the old meaning ("a vector was removed") so existing
+    ``if store.delete(fid):`` callers behave as before; erasure callers read
+    :attr:`failed`.
+    """
+
+    DELETED = "deleted"
+    ABSENT = "absent"
+    FAILED = "failed"
+
+    def __bool__(self) -> bool:
+        return self is VectorDelete.DELETED
+
+    @property
+    def failed(self) -> bool:
+        return self is VectorDelete.FAILED
+
+
+def classify_delete(result: object) -> VectorDelete:
+    """A store's answer as a :class:`VectorDelete`.
+
+    A store written before the typed answer returns a bare bool, where ``False``
+    cannot be told from a failure; that is read as a failure, never as success.
+    """
+    if isinstance(result, VectorDelete):
+        return result
+    return VectorDelete.DELETED if result else VectorDelete.FAILED
 
 
 @dataclass(frozen=True)  # Rule 10
@@ -108,13 +145,19 @@ class VectorStore:
 
         conn = sqlite3.connect(str(self._db_path))
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout = 10000")
-        # FK enforcement is OFF here because VectorStore operates on its own
-        # tables (fact_embeddings + embedding_metadata). The store pipeline
-        # guarantees fact/profile exist before calling upsert.
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
+        try:
+            conn.execute("PRAGMA busy_timeout = 10000")
+            # FK enforcement is OFF here because VectorStore operates on its own
+            # tables (fact_embeddings + embedding_metadata). The store pipeline
+            # guarantees fact/profile exist before calling upsert.
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+        except BaseException:
+            # Setup failed: close it now, or the file stays open (Windows
+            # then cannot delete or replace it) for as long as the error lives.
+            conn.close()
+            raise
         return conn
 
     @contextmanager
@@ -243,7 +286,7 @@ class VectorStore:
                 conn.execute(row_map_idx)
                 conn.commit()
         except Exception as exc:
-            logger.debug("vec0 table creation failed: %s", exc)
+            logger.warning("vec0 table creation failed: %s", exc)
             self._available = False
 
     # -- Serialization ------------------------------------------------------
@@ -498,20 +541,28 @@ class VectorStore:
                     " AND COALESCE(af.quarantined, 0) = 0 "
                     if self._has_quarantine_column() else ""
                 )
+                quarantine_filter += erasure_clause_for_connection(conn, "em")
                 if profile_id is not None:
+                    # The profile is BOUND on the metadata side, not joined to
+                    # fe.profile_id: reading the vec0 partition column runs a
+                    # nested statement per candidate row, and its allocations
+                    # take a process-wide SQLite lock that every other read in
+                    # the daemon then waits on. fe.profile_id = ? already holds,
+                    # so the rows are identical
+                    # (tests/test_retrieval/test_vector_search_binds_the_profile.py).
                     sql = (
                         "SELECT fe.rowid, fe.distance, em.fact_id "
                         "FROM fact_embeddings AS fe "
                         "JOIN embedding_metadata AS em "
                         "ON em.vec_rowid = fe.rowid "
-                        "AND em.profile_id = fe.profile_id "
+                        "AND em.profile_id = ? "
                         + quarantine_join +
                         "WHERE fe.embedding MATCH ? "
                         "AND fe.profile_id = ? "
                         + quarantine_filter +
                         "AND fe.k = ?"
                     )
-                    base_params: tuple[object, ...] = (vec_bytes, profile_id)
+                    base_params: tuple[object, ...] = (profile_id, vec_bytes, profile_id)
                     count_sql = "SELECT COUNT(*) AS c FROM fact_embeddings WHERE profile_id = ?"
                     count_params: tuple[object, ...] = (profile_id,)
                 else:
@@ -580,215 +631,82 @@ class VectorStore:
             logger.debug("search failed: %s", exc)
             return []
 
-    def delete(self, fact_id: str) -> bool:
+    def delete(self, fact_id: str) -> VectorDelete:
         """Remove a vector from vec0 and metadata.
 
         Thread-safe: acquires the process-level write lock then self._lock.
-        Returns True if deleted, False if not found or error.
+        Returns :attr:`VectorDelete.DELETED` when a vector was removed,
+        ``ABSENT`` when there was none (or the store is not in use), and
+        ``FAILED`` when it could not be removed or is still there afterwards.
+        A failure is logged at WARNING: it can leave a person's data behind.
         """
         if not self._available:
-            return False
+            return VectorDelete.ABSENT
 
         _wl = get_write_lock(self._db_path)
         with _wl:  # OUTER: process-level write serialisation
             with self._lock:  # INNER: VectorStore per-instance state
                 try:
                     with self._managed_connection() as conn:
-                        row = conn.execute(
-                            "SELECT vec_rowid, profile_id "
-                            "FROM embedding_metadata "
-                            "WHERE fact_id = ?",
-                            (fact_id,),
-                        ).fetchone()
-
-                        rowid = None
-                        owner_profile = None
-                        if row is not None:
-                            rowid = row["vec_rowid"]
-                            owner_profile = str(row["profile_id"])
-                        else:
-                            # Metadata-less orphan: resolve the rowid via the
-                            # fact-addressable map so the raw vec0 row is still
-                            # removable by fact_id.
-                            mrow = conn.execute(
-                                "SELECT vec_rowid, profile_id "
-                                "FROM vector_row_map WHERE fact_id = ?",
-                                (fact_id,),
-                            ).fetchone()
-                            if mrow is not None:
-                                rowid = mrow["vec_rowid"]
-                                owner_profile = str(mrow["profile_id"])
-
-                        if rowid is None:
-                            return False
-
-                        vector_row = conn.execute(
-                            "SELECT profile_id FROM fact_embeddings WHERE rowid = ?",
-                            (rowid,),
-                        ).fetchone()
-                        if vector_row is not None and (
-                            str(vector_row["profile_id"]) == owner_profile
-                        ):
-                            conn.execute(
-                                "DELETE FROM fact_embeddings WHERE rowid = ?",
-                                (rowid,),
-                            )
-                        conn.execute(
-                            "DELETE FROM embedding_metadata WHERE vec_rowid = ?",
-                            (rowid,),
-                        )
-                        conn.execute(
-                            "DELETE FROM vector_row_map WHERE fact_id = ?",
-                            (fact_id,),
-                        )
-                        conn.commit()
-                    return True
+                        return self._delete_locked(conn, fact_id)
                 except Exception as exc:
-                    logger.debug("delete failed for fact_id=%s: %s", fact_id, exc)
-                    return False
+                    logger.warning("vector delete failed for fact_id=%s: %s", fact_id, exc)
+                    return VectorDelete.FAILED
 
+    @staticmethod
+    def _delete_locked(conn: sqlite3.Connection, fact_id: str) -> VectorDelete:
+        # A model switch's staged and previous copies go with it.
+        from superlocalmemory.storage.embedding_spaces import purge_fact
+        purge_fact(conn, fact_id)
+        conn.commit()
+        row = conn.execute(
+            "SELECT vec_rowid, profile_id FROM embedding_metadata WHERE fact_id = ?",
+            (fact_id,),
+        ).fetchone()
+        if row is None:
+            # Metadata-less orphan: resolve the rowid via the fact-addressable
+            # map so the raw vec0 row is still removable by fact_id.
+            row = conn.execute(
+                "SELECT vec_rowid, profile_id FROM vector_row_map WHERE fact_id = ?",
+                (fact_id,),
+            ).fetchone()
+        if row is None:
+            return VectorDelete.ABSENT
+        rowid, owner_profile = row["vec_rowid"], str(row["profile_id"])
+        vector_row = conn.execute(
+            "SELECT profile_id FROM fact_embeddings WHERE rowid = ?", (rowid,),
+        ).fetchone()
+        owned = vector_row is not None and str(vector_row["profile_id"]) == owner_profile
+        if owned:
+            conn.execute("DELETE FROM fact_embeddings WHERE rowid = ?", (rowid,))
+        conn.execute("DELETE FROM embedding_metadata WHERE vec_rowid = ?", (rowid,))
+        conn.execute("DELETE FROM vector_row_map WHERE fact_id = ?", (fact_id,))
+        conn.commit()
+        if owned and conn.execute(
+                "SELECT 1 FROM fact_embeddings WHERE rowid = ?", (rowid,)).fetchone():
+            return VectorDelete.FAILED
+        return VectorDelete.DELETED
+
+    # Read-only presence and inventory queries live in vector_presence so
+    # this module stays within the file-size limit.
     def raw_vector_present(self, fact_id: str) -> bool:
-        if not self._available:
-            try:
-                conn = sqlite3.connect(str(self._db_path))
-                try:
-                    row = conn.execute(
-                        "SELECT 1 FROM vector_row_map WHERE fact_id = ? LIMIT 1",
-                        (fact_id,),
-                    ).fetchone()
-                    return row is not None
-                finally:
-                    conn.close()
-            except Exception:
-                return False
-        try:
-            with self._managed_connection() as conn:
-                row = conn.execute(
-                    "SELECT 1 FROM vector_row_map vrm "
-                    "WHERE vrm.fact_id = ? "
-                    "AND EXISTS (SELECT 1 FROM fact_embeddings fe "
-                    "WHERE fe.rowid = vrm.vec_rowid)",
-                    (fact_id,),
-                ).fetchone()
-                return row is not None
-        except Exception:
-            try:
-                conn2 = sqlite3.connect(str(self._db_path))
-                try:
-                    row = conn2.execute(
-                        "SELECT 1 FROM vector_row_map WHERE fact_id = ? LIMIT 1",
-                        (fact_id,),
-                    ).fetchone()
-                    return row is not None
-                finally:
-                    conn2.close()
-            except Exception:
-                return False
+        return vector_presence.raw_vector_present(self, fact_id)
 
     def is_searchable_by_meaning(
         self,
         fact_id: str,
         profile_id: str | None = None,
     ) -> bool:
-        """Return True if search() would be able to return this fact.
-
-        The check mirrors search()'s own join:
-
-            FROM fact_embeddings AS fe
-            JOIN embedding_metadata AS em
-              ON em.vec_rowid = fe.rowid
-             AND em.profile_id = fe.profile_id
-
-        A fact that has a vector in fact_embeddings but no row in
-        embedding_metadata will NOT be returned by search(), so this method
-        returns False for it — even though raw_vector_present() would return
-        True.  Callers that need to decide whether a fact requires re-embedding
-        must use this method, not raw_vector_present().
-
-        Returns False on any error or when the store is unavailable (fail-
-        closed: never optimistic).
-        """
-        if not self._available:
-            return False
-        try:
-            with self._managed_connection() as conn:
-                if profile_id is not None:
-                    sql = (
-                        "SELECT 1 FROM fact_embeddings AS fe "
-                        "JOIN embedding_metadata AS em "
-                        "ON em.vec_rowid = fe.rowid "
-                        "AND em.profile_id = fe.profile_id "
-                        "WHERE em.fact_id = ? "
-                        "AND fe.profile_id = ? "
-                        "LIMIT 1"
-                    )
-                    row = conn.execute(sql, (fact_id, profile_id)).fetchone()
-                else:
-                    sql = (
-                        "SELECT 1 FROM fact_embeddings AS fe "
-                        "JOIN embedding_metadata AS em "
-                        "ON em.vec_rowid = fe.rowid "
-                        "AND em.profile_id = fe.profile_id "
-                        "WHERE em.fact_id = ? "
-                        "LIMIT 1"
-                    )
-                    row = conn.execute(sql, (fact_id,)).fetchone()
-                return row is not None
-        except Exception:
-            return False
+        return vector_presence.is_searchable_by_meaning(self, fact_id, profile_id)
 
     def count(self, profile_id: str | None = None) -> int:
-        """Count complete metadata/vector pairs in the store.
-
-        Returns 0 if unavailable.
-        """
-        if not self._available:
-            return 0
-
-        try:
-            with self._managed_connection() as conn:
-                if profile_id is not None:
-                    row = conn.execute(
-                        "SELECT COUNT(*) AS c "
-                        "FROM embedding_metadata em "
-                        "JOIN fact_embeddings fe "
-                        "ON fe.rowid = em.vec_rowid "
-                        "AND fe.profile_id = em.profile_id "
-                        "WHERE em.profile_id = ?",
-                        (profile_id,),
-                    ).fetchone()
-                else:
-                    row = conn.execute(
-                        "SELECT COUNT(*) AS c "
-                        "FROM embedding_metadata em "
-                        "JOIN fact_embeddings fe "
-                        "ON fe.rowid = em.vec_rowid "
-                        "AND fe.profile_id = em.profile_id",
-                    ).fetchone()
-            return int(row["c"]) if row else 0
-        except Exception as exc:
-            logger.debug("count failed: %s", exc)
-            return 0
+        return vector_presence.count(self, profile_id)
 
     def indexed_fact_ids(self, profile_id: str) -> set[str]:
-        """Return fact IDs backed by both metadata and a vec0 payload."""
-        if not self._available:
-            return set()
-        try:
-            with self._managed_connection() as conn:
-                rows = conn.execute(
-                    "SELECT em.fact_id "
-                    "FROM embedding_metadata em "
-                    "JOIN fact_embeddings fe "
-                    "ON fe.rowid = em.vec_rowid "
-                    "AND fe.profile_id = em.profile_id "
-                    "WHERE em.profile_id = ?",
-                    (profile_id,),
-                ).fetchall()
-            return {str(row["fact_id"]) for row in rows}
-        except Exception as exc:
-            logger.debug("indexed_fact_ids failed: %s", exc)
-            return set()
+        return vector_presence.indexed_fact_ids(self, profile_id)
+
+    def indexed_among(self, profile_id: str, fact_ids) -> set[str]:
+        return vector_presence.indexed_among(self, profile_id, fact_ids)
 
     def gc_orphaned_vectors(self, profile_id: str | None = None) -> int:
         """Physically remove vec0 rows not referenced by any fact-addressable

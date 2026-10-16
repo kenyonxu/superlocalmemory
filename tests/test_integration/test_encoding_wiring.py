@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,10 +37,8 @@ import pytest
 
 from superlocalmemory.core.config import RetrievalConfig, SLMConfig
 from superlocalmemory.core.engine import MemoryEngine
+from superlocalmemory.storage.embedding_codec import decode_embedding, decode_float_vector
 from superlocalmemory.storage.models import Mode
-
-pytestmark = pytest.mark.slow
-
 
 # ---------------------------------------------------------------------------
 # Mock Embedder (deterministic, zero model loading)
@@ -83,13 +82,13 @@ class _MockEmbedder:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
-def engine(tmp_path: Path) -> MemoryEngine:
+def engine(tmp_path: Path) -> Iterator[MemoryEngine]:
     config = SLMConfig.for_mode(Mode.A, base_dir=tmp_path)
     config.db_path = tmp_path / "test.db"
     config.retrieval = RetrievalConfig(use_cross_encoder=False)
     eng = MemoryEngine(config)
     with patch(
-        "superlocalmemory.core.embeddings.EmbeddingService",
+        "superlocalmemory.core.engine_wiring.init_embedder",
         return_value=_MockEmbedder(768),
     ):
         eng.initialize()
@@ -97,7 +96,10 @@ def engine(tmp_path: Path) -> MemoryEngine:
     # materializer). These tests assert enrichment artifacts synchronously,
     # so drive the complete path. See tests/conftest.force_sync_enrichment.
     from tests.conftest import force_sync_enrichment
-    return force_sync_enrichment(eng)
+    try:
+        yield force_sync_enrichment(eng)
+    finally:
+        eng.close()
 
 
 def _query(engine: MemoryEngine, sql: str, params: tuple = ()) -> list[dict]:
@@ -142,7 +144,7 @@ class TestFactExtractionWiring:
         assert len(rows) >= 1
         for r in rows:
             assert r["embedding"] is not None
-            emb = json.loads(r["embedding"])
+            emb = decode_embedding(r["embedding"])
             assert len(emb) == 768
 
     def test_fisher_mean_stored(self, engine: MemoryEngine) -> None:
@@ -151,7 +153,7 @@ class TestFactExtractionWiring:
         assert len(rows) >= 1
         for r in rows:
             assert r["fisher_mean"] is not None
-            fm = json.loads(r["fisher_mean"])
+            fm = decode_float_vector(r["fisher_mean"], field="fisher_mean")
             assert len(fm) == 768
 
     def test_fisher_variance_stored(self, engine: MemoryEngine) -> None:
@@ -160,7 +162,7 @@ class TestFactExtractionWiring:
         assert len(rows) >= 1
         for r in rows:
             assert r["fisher_variance"] is not None
-            fv = json.loads(r["fisher_variance"])
+            fv = decode_float_vector(r["fisher_variance"], field="fisher_variance")
             assert len(fv) == 768
 
     def test_created_at_populated(self, engine: MemoryEngine) -> None:
@@ -305,11 +307,23 @@ class TestGraphBuilderWiring:
         assert len(rows) >= 1, "Shared entity (Alice) should produce graph edges"
 
     def test_entity_edges_exist(self, engine: MemoryEngine) -> None:
-        engine.store("Bob works at Microsoft as a principal engineer in the cloud infrastructure team.", session_id="s1")
-        engine.store("Bob lives in Seattle near the waterfront in a modern apartment building.", session_id="s1")
+        # Sentence-leading "Bob" is also an English verb and is filtered by
+        # entity_mentions; use a name both statements actually resolve.
+        engine.store(
+            "Robert works at Microsoft as a principal engineer in the cloud infrastructure team.",
+            session_id="s1",
+        )
+        engine.store(
+            "Robert lives in Seattle near the waterfront in a modern apartment building.",
+            session_id="s1",
+        )
         rows = _query(engine,
             "SELECT * FROM graph_edges WHERE profile_id = 'default' AND edge_type = 'entity'")
-        assert len(rows) >= 1, "Shared entity (Bob) should produce entity edges"
+        facts = _query(engine, "SELECT canonical_entities_json FROM atomic_facts")
+        entities = [set(json.loads(f["canonical_entities_json"])) for f in facts]
+        assert set.intersection(*entities), "Fixture must share a resolved entity"
+        assert len(rows) >= 1, "Shared entity (Robert) should produce entity edges"
+
 
     def test_semantic_or_any_edges_exist(self, engine: MemoryEngine) -> None:
         engine.store("Charlie is a musician who plays guitar.",

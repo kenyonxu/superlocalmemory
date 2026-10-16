@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import importlib.util
+import json
+import os
 import pathlib
 import re
 import subprocess
 import sys
 import types
-
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 PLUGIN = REPO / "hermes-plugin"
@@ -23,6 +23,22 @@ def _runtime() -> str:
     return (PLUGIN / "__init__.py").read_text(encoding="utf-8")
 
 
+def _product_version() -> str:
+    match = re.search(r'(?m)^version = "(\d+\.\d+\.\d+)"',
+                      (REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    assert match, "pyproject.toml has no version"
+    return match.group(1)
+
+
+def test_the_plugin_is_built_for_this_release() -> None:
+    """The plugin only runs with the SLM release it was built with, so the
+    build must stamp that release; a hand-kept number went stale (4.1.12)."""
+    version = _product_version()
+    pinned = re.search(r"_RELEASE_SLM_VERSION = \((\d+), (\d+), (\d+)\)", _runtime())
+    assert pinned and ".".join(pinned.groups()) == version
+    assert re.search(r"(?m)^version: (.+)$", _manifest()).group(1) == version
+
+
 def test_native_hermes_plugin_declares_additive_contract() -> None:
     manifest = _manifest()
     assert "name: superlocalmemory" in manifest
@@ -34,7 +50,7 @@ def test_native_hermes_plugin_declares_additive_contract() -> None:
 
 def test_plugin_registers_all_skills_agents_and_lifecycle_hooks() -> None:
     runtime = _runtime()
-    for skill in json.loads((PLUGIN / "command-inventory.json").read_text())["skills"]:
+    for skill in json.loads((PLUGIN / "command-inventory.json").read_text(encoding="utf-8"))["skills"]:
         assert f'ctx.register_skill("{skill}"' in runtime
     for role in ("memory", "governance", "optimize", "loop"):
         assert role in runtime
@@ -50,7 +66,7 @@ def test_plugin_registers_all_skills_agents_and_lifecycle_hooks() -> None:
 def test_all_cli_commands_have_router_and_generated_slash_aliases() -> None:
     inventory = json.loads((PLUGIN / "command-inventory.json").read_text(encoding="utf-8"))
     commands = inventory["primary_commands"]
-    assert len(commands) == 60
+    assert len(commands) == 75  # includes outcome reporting, Memory health (enrich) and `slm tools`
     assert len(set(commands)) == len(commands)
     runtime = _runtime()
     assert 'ctx.register_command("slm", plugin.slash_router' in runtime
@@ -62,12 +78,16 @@ def test_inventory_matches_the_real_slm_parser_tree() -> None:
     """A CLI addition cannot ship without Hermes reachability."""
     inventory = json.loads((PLUGIN / "command-inventory.json").read_text(encoding="utf-8"))
     result = subprocess.run(
-        [str(REPO / ".venv" / "bin" / "slm"), "--help"],
+        # The CLI of the interpreter running the suite (CI has no .venv).
+        [sys.executable, "-m", "superlocalmemory.cli.main", "--help"],
         text=True, capture_output=True, check=True, timeout=30,
+        # argparse wraps the command list to the terminal width; on a narrow
+        # CI terminal the list breaks across lines. Pin a wide one.
+        env={**os.environ, "COLUMNS": "10000"},
     )
-    match = re.search(r"\{([^}]+)\} \.\.\.", result.stdout)
+    match = re.search(r"\{([^}]+)\}\s+\.\.\.", result.stdout)
     assert match, result.stdout[:500]
-    parser_commands = set(match.group(1).split(","))
+    parser_commands = {c.strip() for c in match.group(1).split(",") if c.strip()}
     expected = set(inventory["primary_commands"]) | set(inventory["aliases"])
     assert parser_commands == expected
 
@@ -191,7 +211,11 @@ def test_register_uses_real_hermes_hook_and_tool_shapes() -> None:
         def __init__(self):
             self.hooks, self.tools, self.commands, self.skills = {}, {}, {}, {}
         def register_hook(self, name, callback): self.hooks[name] = callback
-        def register_tool(self, name, namespace, schema, callback, description): self.tools[name] = (namespace, schema, callback, description)
+        # Hermes' real signature (hermes_cli/plugins.py): check_fn is the 5th argument, description is keyword.
+        def register_tool(self, name, namespace, schema, callback, check_fn=None, requires_env=None,
+                          is_async=False, description="", emoji="", override=False):
+            assert check_fn is None or callable(check_fn), (name, check_fn)
+            self.tools[name] = (namespace, schema, callback, description)
         def register_command(self, name, callback, description, arguments): self.commands[name] = callback
         def register_skill(self, name, path): self.skills[name] = path
 
@@ -251,7 +275,14 @@ def test_subagent_handle_round_trips_and_cli_refuses_stale_slm(monkeypatch) -> N
     assert plugin.agent_cancel_tool(handle)["accepted"] is True
     assert plugin.agent_result_tool(handle)["ready"] is True
     monkeypatch.setattr(module.shutil, "which", lambda _: "/tmp/slm")
-    monkeypatch.setattr(module, "_slm_version", lambda _: "4.1.11")
-    assert "requires exactly SLM CLI 4.1.12" in plugin.slash_router("status")
-    monkeypatch.setattr(module, "_slm_version", lambda _: "4.1.13")
-    assert "requires exactly SLM CLI 4.1.12" in plugin.slash_router("status")
+    major, minor, patch = (int(p) for p in _product_version().split("."))
+    expected = f"needs SLM CLI {major}.{minor}.{patch} or a newer {major}.x"
+    older = f"{major}.{minor - 1}.9" if patch == 0 else f"{major}.{minor}.{patch - 1}"
+    monkeypatch.setattr(module, "_slm_version", lambda _: older)
+    refused = plugin.slash_router("status")
+    assert expected in refused and "hermes plugins install" in refused  # says how to fix it
+    monkeypatch.setattr(module, "_slm_version", lambda _: f"{major + 1}.0.0")
+    assert expected in plugin.slash_router("status")  # another major is refused
+    # A routine SLM upgrade (a newer patch or minor) keeps the plugin working.
+    assert module._REMOTE.compatible(f"{major}.{minor}.{patch + 1}", (major, minor, patch))
+    assert module._REMOTE.compatible(f"{major}.{minor + 1}.0", (major, minor, patch))

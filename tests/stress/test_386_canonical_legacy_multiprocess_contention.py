@@ -26,7 +26,10 @@ _FOREGROUND_WRITES = 48
 _FOREGROUND_CONCURRENCY = 8
 _LEGACY_WRITES_PER_PROCESS = 48
 _READER_THREADS = 4
-_REMEMBER_DEADLINE_MS = 2_000
+_REMEMBER_DEADLINE_MS = 2_000  # the daemon's journal (durability) budget
+_ACCEPT_AFTER_MS = 1_200  # the daemon's wait for the canonical commit
+_FOREGROUND_TOTAL_SECONDS = 60.0  # all 48 calls through 8 workers, queueing included
+_DRAIN_SECONDS = 30.0
 _PROCESS_DEADLINE_SECONDS = 8.0
 _ACTOR_ID = "multiprocess-contention-daemon"
 
@@ -92,12 +95,16 @@ def _legacy_memory_write_worker(
     results: multiprocessing.queues.Queue,
     count: int,
 ) -> None:
-    """Use the legacy short-lived ``memory_write`` path in a spawned process."""
-    from superlocalmemory.storage.memory_write import memory_write
+    """Use the legacy short-lived ``memory_write`` path in a spawned process.
 
+    Everything, the import included, runs inside the try: any failure reaches
+    the parent as a named error, never as a bare exit code.
+    """
     started = time.monotonic()
     max_operation_seconds = 0.0
     try:
+        from superlocalmemory.storage.memory_write import memory_write
+
         if not start.wait(timeout=_PROCESS_DEADLINE_SECONDS):
             raise TimeoutError("parent did not release the legacy writer")
         for sequence in range(count):
@@ -135,13 +142,18 @@ def _legacy_database_manager_worker(
     results: multiprocessing.queues.Queue,
     count: int,
 ) -> None:
-    """Use a separate legacy ``DatabaseManager`` in a spawned process."""
-    from superlocalmemory.storage.database import DatabaseManager
+    """Use a separate legacy ``DatabaseManager`` in a spawned process.
 
-    db = DatabaseManager(db_path)
+    The import and the manager's construction run inside the try, so a
+    failure opening the database is reported by name like any other.
+    """
     started = time.monotonic()
     max_operation_seconds = 0.0
+    db = None
     try:
+        from superlocalmemory.storage.database import DatabaseManager
+
+        db = DatabaseManager(db_path)
         if not start.wait(timeout=_PROCESS_DEADLINE_SECONDS):
             raise TimeoutError("parent did not release the legacy manager")
         for sequence in range(count):
@@ -171,7 +183,8 @@ def _legacy_database_manager_worker(
             }
         )
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
 
 def _actor():
@@ -230,7 +243,8 @@ def test_386_canonical_remember_survives_legacy_multiprocess_contention(
 ) -> None:
     """Canonical writes, legacy DML, and strict RO FTS snapshots all finish.
 
-    The individual 2s remember deadline is the foreground service contract;
+    The daemon's remember budgets are the foreground service contract: each
+    remember is committed, or durably accepted, never refused;
     legacy child processes have an 8s total cap.  Counts prove that contention
     caused neither duplicated work nor silently lost writes.
 
@@ -267,6 +281,7 @@ def test_386_canonical_remember_survives_legacy_multiprocess_contention(
     foreground_errors: list[BaseException] = []
     reader_errors: list[BaseException] = []
     foreground_elapsed: list[float] = []
+    statuses: list[str] = []
     writes_complete = threading.Event()
     errors_lock = threading.Lock()
     try:
@@ -280,8 +295,13 @@ def test_386_canonical_remember_survives_legacy_multiprocess_contention(
                     _remember_request(sequence),
                     _actor(),
                     deadline_ms=_REMEMBER_DEADLINE_MS,
+                    accept_after_ms=_ACCEPT_AFTER_MS,
                 )
-                assert receipt.payload["status"] == "queryable"
+                # Committed in time, or durably accepted while the writer was
+                # busy. Never refused: contention is not a failure.
+                assert receipt.payload["status"] in {"queryable", "accepted"}
+                with errors_lock:
+                    statuses.append(receipt.payload["status"])
             except BaseException as exc:
                 with errors_lock:
                     foreground_errors.append(exc)
@@ -318,30 +338,45 @@ def test_386_canonical_remember_survives_legacy_multiprocess_contention(
                 snapshot_futures = [
                     reader_pool.submit(strict_reader) for _ in range(_READER_THREADS)
                 ]
-                for future in foreground_futures:
-                    future.result(timeout=_PROCESS_DEADLINE_SECONDS)
-                writes_complete.set()
+                try:
+                    # The per-call contract is asserted on foreground_elapsed;
+                    # this bound covers queueing 48 calls through 8 workers.
+                    for future in foreground_futures:
+                        future.result(timeout=_FOREGROUND_TOTAL_SECONDS)
+                finally:
+                    # Always release the readers, or a timeout above leaves
+                    # them spinning and the executor exit hangs forever.
+                    writes_complete.set()
                 snapshot_counts = [
                     future.result(timeout=_PROCESS_DEADLINE_SECONDS) for future in snapshot_futures
                 ]
 
         for child in children:
             child.join(timeout=_PROCESS_DEADLINE_SECONDS)
-            assert child.exitcode == 0, f"{child.name} failed with {child.exitcode}"
         child_results = []
         for _ in children:
             try:
                 child_results.append(results.get(timeout=1.0))
-            except Empty as exc:
-                pytest.fail(f"legacy worker did not report a result: {exc}")
-
-        child_errors = [str(result["error"]) for result in child_results if not result["ok"]]
+            except Empty:
+                break
+        child_errors = [
+            f"{result['worker']}: {result['error']}" for result in child_results if not result["ok"]
+        ]
+        # A child's own error names the failure; check it before exit codes.
+        assert not child_errors, f"legacy child failures: {child_errors!r}"
+        for child in children:
+            assert child.exitcode == 0, (
+                f"{child.name} exited with {child.exitcode} before reporting; "
+                f"reports received: {child_results!r} (its traceback is in captured stderr)"
+            )
+        assert len(child_results) == len(children), (
+            f"legacy workers reported {len(child_results)} of {len(children)} results"
+        )
         assert not foreground_errors, (
             "foreground remember failures: "
             f"{[_exception_chain(error) for error in foreground_errors]!r}"
         )
         assert not reader_errors, f"strict read failures: {reader_errors!r}"
-        assert not child_errors, f"legacy child failures: {child_errors!r}"
         _assert_no_busy([*foreground_errors, *reader_errors, *child_errors])
         assert foreground_elapsed
         assert max(foreground_elapsed) < _REMEMBER_DEADLINE_MS / 1_000 + 0.5
@@ -351,6 +386,15 @@ def test_386_canonical_remember_survives_legacy_multiprocess_contention(
             for result in child_results
         )
         assert sum(snapshot_counts) > 0
+        # Every accepted memory is committed, exactly once, without a resend.
+        assert harness.runtime.wait_for_deferred(timeout=_DRAIN_SECONDS), (
+            f"{harness.runtime.deferred_count} accepted remember(s) never committed"
+        )
+        print(
+            f"\n386: {statuses.count('queryable')} queryable, "
+            f"{statuses.count('accepted')} accepted; max ack "
+            f"{max(foreground_elapsed):.3f}s"
+        )
         assert (
             _strict_read_count(
                 harness.db_path,

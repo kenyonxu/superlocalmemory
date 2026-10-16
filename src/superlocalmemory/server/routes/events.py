@@ -179,7 +179,7 @@ async def event_stream(
 
 
 @router.get("/api/events")
-async def get_events(
+def get_events(
     since_id: Optional[int] = None,
     limit: int = Query(50, ge=1, le=200),
     event_type: Optional[str] = None,
@@ -202,7 +202,7 @@ async def get_events(
 
 
 @router.get("/api/events/stats")
-async def get_event_stats():
+def get_event_stats():
     """Get Event Bus statistics."""
     if not EVENT_BUS_AVAILABLE:
         return {"total_events": 0, "message": "Event Bus not available"}

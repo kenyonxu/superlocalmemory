@@ -13,6 +13,8 @@ import json
 import sqlite3
 import time
 from pathlib import Path
+
+from superlocalmemory.compliance.erasure_outcome import subject_ref
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -419,7 +421,8 @@ def test_entity_erase_produces_non_empty_proofs(tmp_path: Path) -> None:
     with db.raw_connection() as conn:
         row = conn.execute(
             "SELECT owner_evidence_json FROM erasure_receipts "
-            "WHERE subject_type = 'entity' AND subject_id = 'Alice' AND profile_id = 'p1'"
+            "WHERE subject_type = 'entity' AND subject_id = ? AND profile_id = 'p1'",
+            (subject_ref("entity", "Alice"),),
         ).fetchone()
 
     assert row is not None, "erasure receipt must be persisted"
@@ -455,7 +458,8 @@ def test_entity_erase_proofs_reflect_actual_stores(tmp_path: Path) -> None:
     with db.raw_connection() as conn:
         row = conn.execute(
             "SELECT owner_evidence_json FROM erasure_receipts "
-            "WHERE subject_type = 'entity' AND subject_id = 'Bob'"
+            "WHERE subject_type = 'entity' AND subject_id = ?",
+            (subject_ref("entity", "Bob"),),
         ).fetchone()
 
     assert row is not None
@@ -697,6 +701,17 @@ def test_signing_key_fail_closed_on_unreadable(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setattr(_mk, "_signing_key_path", lambda: bad_path / "key")
     # Make the parent unwritable so os.open fails
     os.chmod(str(bad_path), 0o444)
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        # root ignores mode bits, so the chmod alone cannot make os.open
+        # fail; deny it for this directory the way the kernel would.
+        real_open = os.open
+
+        def denied(path, *args, **kwargs):
+            if str(path).startswith(str(bad_path)):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(_mk.os, "open", denied)
 
     try:
         import pytest

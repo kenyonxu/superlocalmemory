@@ -282,7 +282,7 @@ def test_vec0_delete_fallback_and_gc(tmp_path):
         c.execute("DELETE FROM embedding_metadata WHERE fact_id='f2'")
         c.commit()
     assert vs.raw_vector_present("f2") is True
-    assert vs.delete("f2") is True  # map fallback resolves the rowid
+    assert vs.delete("f2").name == "DELETED"  # map fallback resolves the rowid
     assert vs.raw_vector_present("f2") is False
 
     # Truly unmapped orphan: drop both metadata and map for f3.

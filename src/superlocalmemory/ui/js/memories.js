@@ -109,7 +109,7 @@ function renderMemoriesTable(memories, showScores) {
         if (showScores) {
             var score = mem.score || 0;
             var pct = Math.round(score * 100);
-            var barColor = pct >= 70 ? '#43e97b' : pct >= 40 ? '#f9c74f' : '#f94144';
+            var barColor = pct >= 70 ? '#9B82FF' : pct >= 40 ? '#f9c74f' : '#f94144';
             scoreCell = '<td><span class="score-label">' + escapeHtml(String(pct)) + '%</span>'
                 + '<div class="score-bar-container"><div class="score-bar">'
                 + '<div class="score-bar-fill" style="width:' + pct + '%;background:' + barColor + '"></div>'

@@ -10,13 +10,8 @@ Contract:
 """
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
 from superlocalmemory.migrations.v3_4_25_to_v3_4_26 import (
     is_ready,
-    migrate,
     migrate_if_safe,
 )
 
@@ -91,6 +86,7 @@ class TestConcurrentMigrateSafety:
         self, tmp_path, monkeypatch,
     ):
         import threading
+
         import superlocalmemory.migrations.v3_4_25_to_v3_4_26 as mod
         monkeypatch.setattr(mod, "_daemon_running", lambda: False)
 

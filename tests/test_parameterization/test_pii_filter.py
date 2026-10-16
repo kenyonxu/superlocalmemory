@@ -9,9 +9,8 @@ TDD RED phase: tests written before implementation.
 
 from __future__ import annotations
 
-import pytest
 
-from superlocalmemory.parameterization.pii_filter import PIIFilter, PII_PATTERNS
+from superlocalmemory.parameterization.pii_filter import PIIFilter
 
 
 # ---------------------------------------------------------------

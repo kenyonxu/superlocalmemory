@@ -122,7 +122,8 @@ class TestSessionInitTool:
         assert result["memory_count"] == 2
         assert len(result["memories"]) == 2
         mock_pool_recall.assert_called_once_with(
-            "project context /my/project", limit=10, fast=None,
+            "project context project", limit=10, fast=None,
+            prefer_project="/my/project",  # 4.1.21 (#150)
         )
 
     @patch("superlocalmemory.mcp.tools_active._emit_event")
@@ -176,7 +177,11 @@ class TestSessionInitTool:
         learning = result["learning"]
         assert learning["feedback_signals"] == 75
         assert learning["phase"] == 2
-        assert learning["status"] == "learning"
+        # Status comes from the model registry and settled plays, never from
+        # the signal count (audit BRN-12). This mock engine has no store, so
+        # nothing is claimed.
+        assert learning["status"] not in ("learning", "trained")
+        assert learning["learning_demonstrated"] is False
 
     @patch("superlocalmemory.mcp.tools_active._emit_event")
     @patch("superlocalmemory.mcp.tools_active._register_agent", create=True)

@@ -16,9 +16,16 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
+
+# Everything here drives the POSIX reaper (ps, signals, parent PIDs). On Windows
+# process_reaper.py defines no-op stubs instead, by design; their contract is
+# checked on every platform in test_process_reaper_windows_stubs.py.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="the process reaper is POSIX-only; Windows has no-op stubs",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -33,7 +40,6 @@ class TestFindOrphans:
             ReaperConfig,
             SlmProcessInfo,
             find_orphans,
-            find_slm_processes,
         )
 
         config = ReaperConfig(orphan_age_threshold_hours=0.0)
@@ -165,14 +171,15 @@ class TestKillOrphan:
             f"pathlib.Path(\\\"{ready_file}\\\").touch(); "
             "time.sleep(300)'"
             f"], start_new_session=True)\n"
-            f"pathlib.Path('{pid_file}').write_text(str(proc.pid))\n"
+            f"pathlib.Path('{pid_file}').write_text(str(proc.pid))\n",
+            encoding="utf-8",
         )
         # Run launcher, which starts child in new session then exits
         subprocess.run(
             [sys.executable, str(launcher)], timeout=5, check=True
         )
 
-        target_pid = int(pid_file.read_text().strip())
+        target_pid = int(pid_file.read_text(encoding="utf-8").strip())
 
         # Wait for the process to be fully running
         deadline = time.monotonic() + 5.0
@@ -195,12 +202,19 @@ class TestKillOrphan:
         # Create a SIGTERM-ignoring subprocess
         script = tmp_path / "stubborn.py"
         script.write_text(
-            "import signal, time\n"
+            "import signal, sys, time\n"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-            "time.sleep(300)\n"
+            "sys.stdout.write('ready\\n'); sys.stdout.flush()\n"
+            "time.sleep(300)\n",
+            encoding="utf-8",
         )
-        proc = subprocess.Popen([sys.executable, str(script)])
-        time.sleep(0.5)  # Let it start and register handler
+        proc = subprocess.Popen([sys.executable, str(script)],
+                                stdout=subprocess.PIPE, text=True)
+        # Wait until SIGTERM is really ignored. A fixed sleep lost the race on
+        # a loaded machine: SIGTERM arrived before the handler and killed it.
+        ready = proc.stdout.readline()
+        proc.stdout.close()
+        assert ready.strip() == "ready"
 
         try:
             result = kill_orphan(proc.pid, graceful_timeout_seconds=1.0)
@@ -1018,7 +1032,7 @@ class TestReapStaleOrphanKillPath:
 
         old_time = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
         data = {"pids": [{"pid": 55555, "ppid": 1, "started_at": old_time}]}
-        tmp_pid_file.write_text(json.dumps(data))
+        tmp_pid_file.write_text(json.dumps(data), encoding="utf-8")
 
         # os.kill(55555, 0) must succeed (process alive)
         original_kill = os.kill
@@ -1067,7 +1081,7 @@ class TestReapStaleOrphanKillPath:
 
         old_time = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
         data = {"pids": [{"pid": 55556, "ppid": 1, "started_at": old_time}]}
-        tmp_pid_file.write_text(json.dumps(data))
+        tmp_pid_file.write_text(json.dumps(data), encoding="utf-8")
 
         original_kill = os.kill
 
@@ -1109,7 +1123,7 @@ class TestReapStaleOrphanKillPath:
 
         # Write a record with an unparseable timestamp
         data = {"pids": [{"pid": 55559, "ppid": 1, "started_at": "INVALID-TIMESTAMP"}]}
-        tmp_pid_file.write_text(json.dumps(data))
+        tmp_pid_file.write_text(json.dumps(data), encoding="utf-8")
 
         original_kill = os.kill
 

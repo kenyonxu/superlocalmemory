@@ -1,0 +1,18 @@
+sequenceDiagram
+    participant App as Web app
+    participant SL as Your SLM
+    participant P as You (browser)
+    participant GW as Connection gateway
+    participant RL as Relay on your computer
+    App->>SL: media_upload_link(kind: image or document)
+    SL->>SL: mint a link: token hash only, 10 minutes,<br/>at most 3 open per connection
+    SL-->>App: one-time URL
+    App-->>P: gives you the URL
+    P->>GW: open the link, choose the file
+    GW->>RL: info, then chunks of up to 700 KB, then finish
+    RL->>RL: check the token and the app's write and media permission on every step
+    RL->>RL: check file type from the first bytes, size, order
+    RL->>SL: save the picture or PDF
+    SL-->>RL: stored, processing, duplicate, refused or warming
+    RL-->>GW: plain-language result
+    GW-->>P: Saved to your memory

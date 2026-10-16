@@ -31,24 +31,40 @@ from superlocalmemory.hooks.cross_platform_connector import (
 from superlocalmemory.mcp.tools_context import prestage_context
 
 
-def _noop_recall(_q: str, _limit: int, _profile: str) -> list[dict]:
-    """Placeholder recall when the daemon/engine isn't reachable."""
-    return []
+def _daemon_recall(q: str, limit: int, _profile: str, *, project: str = "") -> list[dict]:
+    """Recall through a RUNNING daemon, as ``{"text", "score"}`` rows.
+
+    Never starts one: building a context file is not a reason to launch the
+    memory service. Not a question either, so it is never judged. ``project``
+    is recall's project filter (#150). The active profile serves it, as before.
+    """
+    from superlocalmemory.cli.daemon import _get_port, is_daemon_running
+    from superlocalmemory.core.answer_check_scope import context_load
+    from superlocalmemory.mcp._daemon_proxy import DaemonPoolProxy
+
+    if not is_daemon_running():
+        return []
+    with context_load():
+        raw = DaemonPoolProxy(port=_get_port()).recall(
+            q, limit=limit, project=project or "", answer_check=False)
+    if not isinstance(raw, dict) or raw.get("ok") is False:
+        return []
+    return [{"text": r.get("content", ""), "score": float(r.get("score") or 0.0)}
+            for r in raw.get("results", []) if isinstance(r, dict)]
 
 
 def _get_recall_fn() -> RecallFn:
-    """Wire the real recall engine if available, else no-op."""
-    try:
-        from superlocalmemory.core.engine import Engine  # pragma: no cover
-        eng = Engine.get_shared()
-        def _fn(q: str, limit: int, profile_id: str) -> list[dict]:
-            try:
-                return eng.recall(q, limit=limit) or []  # type: ignore
-            except Exception:
-                return []
-        return _fn
-    except Exception:
-        return _noop_recall
+    """Recall through the running daemon; nothing when none is running.
+
+    This used to call ``Engine.get_shared()``, which does not exist, so the
+    import failed silently and every context file was built from no memories.
+    """
+    def _fn(q: str, limit: int, profile_id: str, *, project: str = "") -> list[dict]:
+        try:
+            return _daemon_recall(q, limit, profile_id, project=project)
+        except Exception:  # noqa: BLE001 - a context file is advisory
+            return []
+    return _fn
 
 
 def _default_sync_log_db() -> Path:
@@ -63,21 +79,38 @@ def build_default_adapters(
     *, base_dir: Path | None = None,
     recall_fn: RecallFn | None = None,
     sync_log_db: Path | None = None,
+    include_project_scope: bool = True,
 ) -> list:
+    """Adapters that write SLM context into each host's rules files.
+
+    The working directory is only a project when someone is standing in one.
+    The daemon passes ``include_project_scope=False``: it serves every project
+    at once, and taking the project from its working directory sent the
+    project-scoped adapters to whatever directory it happened to start in.
+    Under launchd that is "/", so they tried to write /.cursor and /.agent —
+    2,904 read-only failures in one daemon's log. The root of the disk is never
+    a project, whoever calls this.
+    """
     base = Path(base_dir or Path.cwd())
+    resolved = base.resolve()
+    if resolved == Path(resolved.anchor):
+        include_project_scope = False
     recall = recall_fn or _get_recall_fn()
     db = sync_log_db or _default_sync_log_db()
     adapters: list = []
-    adapters.append(CursorAdapter(scope="project", base_dir=base,
-                                  sync_log_db=db, recall_fn=recall))
+    if include_project_scope:
+        adapters.append(CursorAdapter(scope="project", base_dir=base,
+                                      sync_log_db=db, recall_fn=recall))
     adapters.append(CursorAdapter(scope="global", base_dir=Path.home(),
                                   sync_log_db=db, recall_fn=recall))
-    adapters.append(AntigravityAdapter(scope="workspace", base_dir=base,
-                                       sync_log_db=db, recall_fn=recall))
+    if include_project_scope:
+        adapters.append(AntigravityAdapter(scope="workspace", base_dir=base,
+                                           sync_log_db=db, recall_fn=recall))
     adapters.append(AntigravityAdapter(scope="global", base_dir=Path.home(),
                                        sync_log_db=db, recall_fn=recall))
-    adapters.append(CopilotAdapter(base_dir=base, sync_log_db=db,
-                                   recall_fn=recall))
+    if include_project_scope:
+        adapters.append(CopilotAdapter(base_dir=base, sync_log_db=db,
+                                       recall_fn=recall))
     return adapters
 
 
@@ -169,9 +202,12 @@ def cmd_context(args: Namespace) -> None:
         return
 
     # Build a full markdown / JSON payload for CLI consumption.
+    # #150: the working directory is the project, so each section asks for
+    # that project's memories rather than canned global words.
     payload = build_payload(
         profile_id, "project", Path.cwd(),
         recall_fn=_get_recall_fn(),
+        project=str(Path.cwd()),
     )
     if getattr(args, "json", False):
         print(_json.dumps({

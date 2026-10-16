@@ -16,7 +16,6 @@ from __future__ import annotations
 import io
 import json
 import os
-import sys
 import tempfile
 import time
 from unittest.mock import patch
@@ -158,19 +157,19 @@ class TestStateFile:
 
     def test_corrupt_file_returns_empty(self, tmp_path):
         path = str(tmp_path / "corrupt.json")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write("not valid JSON {{{")
         assert tsh.load_state(path) == []
 
     def test_wrong_version_returns_empty(self, tmp_path):
         path = str(tmp_path / "wrong-version.json")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump({"version": 99, "window": [["alpha"]]}, f)
         assert tsh.load_state(path) == []
 
     def test_wrong_shape_returns_empty(self, tmp_path):
         path = str(tmp_path / "wrong-shape.json")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump({"version": 1, "window": "not a list"}, f)
         assert tsh.load_state(path) == []
 
@@ -342,7 +341,7 @@ class TestLogging:
             }))):
                 tsh.main()
             assert os.path.exists(log_path)
-            with open(log_path) as f:
+            with open(log_path, encoding="utf-8") as f:
                 content = f.read()
             # TSV format: contains timestamp, sess_hash, etc.
             assert "\t" in content
@@ -351,3 +350,21 @@ class TestLogging:
                 os.remove(path)
             except OSError:
                 pass
+
+
+def test_the_log_does_not_keep_the_prompt_unless_asked(monkeypatch, tmp_path):
+    """The log names no profile, so an erasure cannot reach it: it must not hold the text."""
+    log_path = str(tmp_path / "topic-shift.log")
+    monkeypatch.setattr(tsh, "_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(tsh, "_LOG_PATH", log_path)
+    monkeypatch.setattr(tsh, "_LOG_ENABLED", True)
+    monkeypatch.setattr(tsh, "_LOG_PROMPT_TEXT", False)
+
+    tsh._log_decision("s", ["alpha"], [], 0, False, "my secret prompt about Alice Zebrowski")
+
+    text = open(log_path, encoding="utf-8").read()
+    assert "Zebrowski" not in text and "[38 chars]" in text
+
+    monkeypatch.setattr(tsh, "_LOG_PROMPT_TEXT", True)
+    tsh._log_decision("s", ["alpha"], [], 0, False, "opted in to the text")
+    assert "opted in to the text" in open(log_path, encoding="utf-8").read()

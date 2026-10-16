@@ -25,7 +25,7 @@ def _get_version() -> str:
     try:
         pkg_json = pkg_root / "package.json"
         if pkg_json.exists():
-            with open(pkg_json) as f:
+            with open(pkg_json, encoding="utf-8") as f:
                 v = json.load(f).get("version", "")
                 if v:
                     return v
@@ -78,4 +78,9 @@ def json_print(
         envelope["metadata"] = metadata
     if next_actions:
         envelope["next_actions"] = next_actions
-    print(json.dumps(envelope, indent=2, default=str))
+    # Q9 (2026-10-06): this is the "Agent-native JSON output (for scripts,
+    # CI/CD)" path (see cli/main.py's own description of --json) — a script
+    # or an agent capturing this over a Bash tool pays per byte, not per
+    # readable line, so compact rather than indent=2. Every caller already
+    # parses with json.loads; none relies on pretty formatting.
+    print(json.dumps(envelope, separators=(",", ":"), default=str))

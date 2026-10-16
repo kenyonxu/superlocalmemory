@@ -11,8 +11,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from superlocalmemory.core.config import ParameterizationConfig
 from superlocalmemory.parameterization.prompt_injector import PromptInjector
 from superlocalmemory.parameterization.soft_prompt_generator import (

@@ -95,6 +95,9 @@ add_attribution.py
 # ==== BUILD ARTIFACTS ====
 build/
 dist/
+# Release builds kept by hand at the top level (dist_407/, dist_4115/ ...).
+# Anchored to the root so a source folder named dist* is never ignored.
+/dist*/
 *.dmg
 *.exe
 *.tgz
@@ -237,5 +240,6 @@ scratchpad/
 # stale on the next commit, and a plan published with any item open reads as
 # self-documented non-compliance (F-11). Public record of shipped work = CHANGELOG.md.
 docs/audits/
-.slm-venv/
-dist_*/
+
+# ==== UPGRADE FIXTURES (stores are rebuilt on demand; manifests live in tests/upgrade/manifests/) ====
+tests/upgrade/fixtures/

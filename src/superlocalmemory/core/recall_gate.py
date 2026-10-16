@@ -14,11 +14,17 @@ recall.
 from __future__ import annotations
 
 import threading
+import time
 from contextlib import contextmanager
 from typing import Callable, Iterator
 
 _condition = threading.Condition(threading.Lock())
 _active = 0
+#: In-flight recalls that already hold their query embedding. Such a recall
+#: never asks the embedder again (the vector is cached for the question), so a
+#: background embed may use the embedder while the recall runs its channels,
+#: reranks and is judged. See ``wait_for_embedder_idle``.
+_embedded = 0
 _work_context = threading.local()
 
 
@@ -28,17 +34,116 @@ def begin_recall() -> None:
         _active += 1
 
 
-def end_recall() -> None:
-    global _active
+def end_recall(*, embedded: bool = False) -> None:
+    global _active, _embedded
     with _condition:
         _active = max(0, _active - 1)
-        if _active == 0:
+        if embedded:
+            _embedded = max(0, _embedded - 1)
+        if _active == 0 or _active == _embedded:
             _condition.notify_all()
+
+
+def _waiting_for_embedder() -> int:
+    """Recalls in flight that may still ask the embedder (caller holds the lock)."""
+    return max(0, _active - _embedded)
+
+
+def recalls_needing_embedder() -> int:
+    with _condition:
+        return _waiting_for_embedder()
+
+
+def mark_query_embedded() -> None:
+    """The recall running on this thread has its query embedding.
+
+    Called by retrieval once the query vector is in hand (or known not to be
+    needed). Only a recall counted through ``RecallHold`` can be marked; a
+    plain ``begin_recall`` keeps background embeds waiting until it ends.
+    """
+    hold = getattr(_work_context, "recall_hold", None)
+    if hold is not None:
+        hold._mark_embedded()
 
 
 def in_flight() -> int:
     with _condition:
         return _active
+
+
+class RecallHold:
+    """One recall's place in the in-flight count, held until its work settles.
+
+    The recall's coroutine holds it, and so does each piece of engine work it
+    hands to a thread. The count drops exactly once, when the last holder lets
+    go: a recall answered by the keyword fallback while its engine call still
+    runs keeps counting until that call ends, and a recall cancelled before its
+    work started drops at once. Work that has not started when the coroutine
+    leaves is skipped, because nobody is left to read its answer.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._holders = 1
+        self._owner_gone = False
+        self._embedded = False
+        begin_recall()
+
+    def run(self, fn: Callable[..., object], *args: object) -> object:
+        """Run ``fn`` on the calling thread while holding the recall in flight."""
+        with self._lock:
+            if self._owner_gone:
+                return None  # the recall already answered or was cancelled
+            self._holders += 1
+        previous = getattr(_work_context, "recall_hold", None)
+        _work_context.recall_hold = self
+        try:
+            return fn(*args)
+        finally:
+            _work_context.recall_hold = previous
+            self._release()
+
+    def _mark_embedded(self) -> None:
+        global _embedded
+        with self._lock:
+            if self._embedded or self._holders == 0:
+                return
+            self._embedded = True
+            with _condition:
+                _embedded += 1
+                if _active == _embedded:
+                    _condition.notify_all()
+
+    def leave(self) -> None:
+        """The recall's coroutine is done; work still running keeps the count."""
+        with self._lock:
+            if self._owner_gone:
+                return
+            self._owner_gone = True
+        self._release()
+
+    def _release(self) -> None:
+        with self._lock:
+            self._holders -= 1
+            last = self._holders == 0
+            embedded = self._embedded
+        if last:
+            end_recall(embedded=embedded)
+
+
+def yield_to_recalls(max_seconds: float = 30.0) -> None:
+    """Wait while any recall is in flight, at most ``max_seconds``.
+
+    For background writers that share the store with recall: steady recall
+    traffic slows them, but can never stop them.
+    """
+    deadline = time.monotonic() + max(0.0, max_seconds)
+    with _condition:
+        while _active > 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            _condition.wait(timeout=min(remaining, 0.1))
 
 
 @contextmanager
@@ -86,10 +191,49 @@ def background_preempt_requested() -> bool:
         return False
 
 
+@contextmanager
+def idle_wait_deadline(deadline: float) -> Iterator[None]:
+    """Bound ``wait_for_foreground_idle`` on this thread to ``deadline``.
+
+    ``deadline`` is a ``time.monotonic()`` value. Opt-in: callers that never
+    enter this context wait exactly as before. A job that may yield for a
+    long time under steady recall load (memory-kind backfill) uses it so its
+    thread is never stuck inside a wait it cannot leave; it gives that batch
+    up and tries again later instead.
+    """
+    previous = getattr(_work_context, "idle_deadline", None)
+    _work_context.idle_deadline = deadline
+    try:
+        yield
+    finally:
+        _work_context.idle_deadline = previous
+
+
+def wait_for_embedder_idle() -> None:
+    """Block background embedding while a recall may still need the embedder.
+
+    Narrower than ``wait_for_foreground_idle``: a recall that already has its
+    query vector does not hold the embedder back for the rest of its run. At
+    most the one background text being embedded can delay a recall that
+    arrives meanwhile, exactly as before (``EmbeddingService._request_lock``).
+    """
+    if not is_background_work():
+        return
+    deadline = getattr(_work_context, "idle_deadline", None)
+    with _condition:
+        while _waiting_for_embedder() > 0:
+            if deadline is not None and time.monotonic() >= deadline:
+                return
+            _condition.wait(timeout=0.1)
+
+
 def wait_for_foreground_idle() -> None:
     """Block background inference while an interactive recall is active."""
     if not is_background_work():
         return
+    deadline = getattr(_work_context, "idle_deadline", None)
     with _condition:
         while _active > 0:
+            if deadline is not None and time.monotonic() >= deadline:
+                return
             _condition.wait(timeout=0.1)

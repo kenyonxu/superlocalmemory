@@ -24,13 +24,18 @@ Covers:
 from __future__ import annotations
 
 import multiprocessing as mp
+import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 import pytest
 
-from superlocalmemory.retrieval.vector_store import VectorStore, VectorStoreConfig
+from superlocalmemory.retrieval.vector_store import (
+    VectorDelete,
+    VectorStore,
+    VectorStoreConfig,
+)
 from superlocalmemory.storage import schema as real_schema
 
 # ---------------------------------------------------------------------------
@@ -152,7 +157,7 @@ class TestFallback:
             vs = VectorStore(db_path, cfg)
             assert vs.upsert("f1", "p1", [1.0] * DIM) is False
             assert vs.search([1.0] * DIM) == []
-            assert vs.delete("f1") is False
+            assert vs.delete("f1") is VectorDelete.ABSENT
             assert vs.count() == 0
 
 
@@ -528,15 +533,35 @@ class TestDelete:
         vs.upsert("f1", "p1", _vec(1, 0, 0, 0))
         assert vs.count() == 1
         result = vs.delete("f1")
-        assert result is True
+        assert result is VectorDelete.DELETED
+        assert result  # truthy: a vector was removed
         assert vs.count() == 0
 
-    def test_delete_nonexistent_returns_false(self, tmp_path: Path) -> None:
+    def test_delete_nonexistent_is_absent_not_failed(self, tmp_path: Path) -> None:
         db_path = _make_db(tmp_path)
         cfg = VectorStoreConfig(dimension=DIM, enabled=True)
         vs = VectorStore(db_path, cfg)
         result = vs.delete("nonexistent")
-        assert result is False
+        assert result is VectorDelete.ABSENT
+        assert not result.failed
+
+    def test_delete_that_cannot_run_is_failed_and_warns(
+            self, tmp_path: Path, caplog) -> None:
+        """A failed delete used to read as False, the same as nothing to delete."""
+        db_path = _make_db(tmp_path)
+        vs = VectorStore(db_path, VectorStoreConfig(dimension=DIM, enabled=True))
+        vs.upsert("f1", "p1", _vec(1, 0, 0, 0))
+
+        def _boom(*_a, **_k):
+            raise sqlite3.OperationalError("database is locked")
+
+        with patch.object(VectorStore, "_delete_locked", _boom), \
+                caplog.at_level("WARNING", logger="superlocalmemory.retrieval.vector_store"):
+            result = vs.delete("f1")
+
+        assert result is VectorDelete.FAILED and result.failed
+        assert any("vector delete failed" in r.message for r in caplog.records
+                   if r.levelname == "WARNING")
 
 
 @_needs_sqlite_vec
@@ -788,7 +813,7 @@ class TestIsSearchableByMeaning:
 
     def test_returns_false_on_error_not_raises(self, tmp_path: Path) -> None:
         """Any exception from the DB must be caught — fail-closed, not crash."""
-        from unittest.mock import patch as _patch, MagicMock
+        from unittest.mock import patch as _patch
 
         db_path = _make_db(tmp_path)
         cfg = VectorStoreConfig(dimension=DIM, enabled=True)

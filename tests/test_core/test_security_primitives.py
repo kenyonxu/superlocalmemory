@@ -13,11 +13,9 @@ RED→GREEN→REFACTOR. These were written before the implementation.
 from __future__ import annotations
 
 import hashlib
-import os
 import stat
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -42,7 +40,7 @@ def test_safe_resolve_rejects_escape_via_absolute(tmp_path: Path) -> None:
     base.mkdir()
     other = tmp_path / "other" / "file.txt"
     other.parent.mkdir()
-    other.write_text("x")
+    other.write_text("x", encoding="utf-8")
     with pytest.raises(sp.PathTraversalError):
         sp.safe_resolve(base, str(other))
 

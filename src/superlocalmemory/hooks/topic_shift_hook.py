@@ -117,6 +117,9 @@ _LOG_DIR: str | None = None
 _LOG_PATH: str | None = None
 _LOG_ENABLED = os.environ.get("SLM_TOPIC_SHIFT_LOG", "1") != "0"
 _LOG_PROMPT_PREVIEW_CHARS = 80
+#: The log is not covered by an erasure (it names no profile), so it does not
+#: keep what the person typed unless they ask for it, to tune the threshold.
+_LOG_PROMPT_TEXT = os.environ.get("SLM_TOPIC_SHIFT_LOG_PROMPT", "0") == "1"
 
 
 # --------------------------------------------------------------------------
@@ -265,8 +268,8 @@ def _log_decision(
         os.makedirs(log_dir, exist_ok=True)
         ts = time.strftime("%Y-%m-%dT%H:%M:%S")
         sh = hashlib.sha256(session_id.encode()).hexdigest()[:8]
-        preview = (prompt[:_LOG_PROMPT_PREVIEW_CHARS]
-                   .replace("\t", " ").replace("\n", " "))
+        preview = (prompt[:_LOG_PROMPT_PREVIEW_CHARS].replace("\t", " ").replace("\n", " ")
+                   if _LOG_PROMPT_TEXT else f"[{len(prompt)} chars]")
         line = (f"{ts}\t{sh}\t{len(current_words)}\t{len(window)}"
                 f"\t{max_overlap}\t{int(fired)}\t{preview}\n")
         with open(log_path, "a", encoding="utf-8") as f:

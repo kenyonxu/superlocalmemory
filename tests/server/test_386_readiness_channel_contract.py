@@ -12,7 +12,9 @@ def _health_route(app):
     return next(route for route in app.routes if getattr(route, "path", None) == "/health")
 
 
-def test_386_full_readiness_requires_healthy_required_retrieval_channels(tmp_path, monkeypatch) -> None:
+def test_386_full_readiness_requires_healthy_required_retrieval_channels(
+    tmp_path, monkeypatch,
+) -> None:
     """Warm embeddings alone cannot override a failed semantic/recall probe."""
     from superlocalmemory.server import unified_daemon
 

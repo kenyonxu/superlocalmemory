@@ -80,7 +80,6 @@ class TestStallThresholdConstructor:
         """Normal sub-1s writes must NOT be affected by the watchdog."""
         from superlocalmemory.storage.write_coordinator import (
             WriteCoordinator,
-            WriteDeadlineExceededError,
         )
         db_path = tmp_path / "memory.db"
         _install_write_commits(db_path)

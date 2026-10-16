@@ -44,6 +44,8 @@ from superlocalmemory.learning.ranker_common import (  # noqa: E402
     _build_training_matrix,
     _compute_eval_metrics,
     _shadow_test_improved,
+    holdout_metrics,
+    split_by_query,
 )
 from superlocalmemory.learning.ranker_retrain_legacy import (  # noqa: E402
     _retrain_ranker_impl,
@@ -200,11 +202,18 @@ def _run_shadow_cycle(
         prior_row = None
 
     feature_names = _feature_names()
+    # Query-disjoint holdout: metrics and the gate below are measured on
+    # queries the booster never saw (they were computed on its own training
+    # rows before 4.1.25). Too few queries for a holdout -> train on all and
+    # let the live shadow test be the only judge.
+    train_rows, holdout_rows = split_by_query(rows)
+    if len({r.get("query_id") for r in train_rows}) < 2 or not holdout_rows:
+        train_rows, holdout_rows = rows, []
 
     try:
         booster, metrics = _train_booster(
             learning_db_path, profile_id,
-            training_rows=rows, feature_names=feature_names,
+            training_rows=train_rows, feature_names=feature_names,
             prior_row=prior_row,
         )
     except RetrainWallTimeExceeded as exc:
@@ -227,10 +236,19 @@ def _run_shadow_cycle(
         out["metrics"] = metrics
         return out
 
-    # In-sample shadow gate — cheap filter before spending live recalls.
-    if prior_row is not None:
+    if holdout_rows:
+        try:
+            metrics = {**(metrics or {}),
+                       **holdout_metrics(booster, holdout_rows, feature_names)}
+        except Exception as exc:  # pragma: no cover — metrics are advisory
+            logger.debug("holdout metrics skipped: %s", exc)
+
+    # Offline paired gate on the SAME held-out labelled queries (both models
+    # rank identical queries, so a paired comparison is valid here) — a cheap
+    # filter before spending live recalls on the independent-groups test.
+    if prior_row is not None and holdout_rows:
         if not _shadow_test_improved(
-            prior_row, booster, rows, feature_names,
+            prior_row, booster, holdout_rows, feature_names,
         ):
             out["aborted"] = "insample_shadow_fail"
             out["metrics"] = metrics
@@ -248,7 +266,8 @@ def _run_shadow_cycle(
             learning_db_path, profile_id=profile_id,
             state_bytes=state_bytes, feature_names=feature_names,
             trained_on_count=len(rows), metrics=metrics,
-            shadow_results={"in_sample_pass": prior_row is not None},
+            shadow_results={"holdout_gate_pass": bool(prior_row is not None
+                                                       and holdout_rows)},
         )
     except sqlite3.Error as exc:
         logger.warning("persist_candidate failed: %s", exc)

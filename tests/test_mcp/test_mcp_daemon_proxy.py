@@ -73,6 +73,7 @@ class TestDaemonPoolProxy:
         assert "session_id=s-1" in captured["path"]
         assert captured["kwargs"] == {
             "timeout_seconds": 30.0, "preserve_not_found": True,
+            "preserve_server_error": True,  # a busy daemon is not an outage
         }
 
     def test_recall_forwards_fast_flag(self, monkeypatch):
@@ -139,7 +140,8 @@ class TestDaemonPoolProxy:
         assert captured == {
             "method": "POST",
             "path": "/remember",
-            "kwargs": {"preserve_conflict": True, "preserve_not_found": True},
+            "kwargs": {"preserve_conflict": True, "preserve_not_found": True,
+                       "preserve_unprocessable": True},
             "body": {
                 "content": "identity-bound content",
                 "tags": "audit",
@@ -148,11 +150,48 @@ class TestDaemonPoolProxy:
                     "agent_id": "caller-label",
                     "profile_id": "work",
                 },
+                "scope": None,
+                "shared_with": None,
                 "session_id": "",
+                "session_date": "",
                 "idempotency_key": None,
                 "profile_id": "work",
             },
         }
+
+    def test_store_carries_scope_shared_with_and_session_date(self, monkeypatch):
+        """L3-24: these three must reach the request as top-level body
+        fields, the same way the daemon-owned branch in tools_core.remember
+        always sends them -- not left stranded inside "metadata", where
+        RememberRequest never reads them as scope/shared_with/session_date
+        at all."""
+        captured = {}
+
+        def _owned_request(method, path, body=None, **kwargs):
+            captured.update(body=body)
+            return {"ok": True, "fact_ids": ["f1"], "count": 1}
+
+        monkeypatch.setattr(
+            "superlocalmemory.cli.daemon.daemon_request", _owned_request,
+        )
+
+        DaemonPoolProxy(port=9999).store(
+            "shared content",
+            metadata={
+                "scope": "shared",
+                "shared_with": ["team-a", "team-b"],
+                "session_date": "2026-03-14",
+            },
+        )
+
+        body = captured["body"]
+        assert body["scope"] == "shared"
+        assert body["shared_with"] == ["team-a", "team-b"]
+        assert body["session_date"] == "2026-03-14"
+        # Not duplicated inside the free-form metadata the server merges in.
+        assert "scope" not in body["metadata"]
+        assert "shared_with" not in body["metadata"]
+        assert "session_date" not in body["metadata"]
 
     def test_recall_returns_ok_false_on_http_error(self, monkeypatch):
         def _owned_request(*args, **kwargs):
@@ -169,11 +208,12 @@ class TestDaemonPoolProxy:
         assert out["retryable"] is True
 
     def test_store_returns_ok_false_on_http_error(self, monkeypatch):
-        def _fake_urlopen(req, timeout=30):
+        def _slow_request(*args, **kwargs):
             raise TimeoutError("slow")
 
-        import superlocalmemory.mcp._daemon_proxy as mod
-        monkeypatch.setattr(mod.urllib.request, "urlopen", _fake_urlopen)
+        monkeypatch.setattr(
+            "superlocalmemory.cli.daemon.daemon_request", _slow_request,
+        )
 
         proxy = DaemonPoolProxy(port=9999)
         out = proxy.store("x")

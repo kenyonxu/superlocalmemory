@@ -15,7 +15,6 @@ import pytest
 
 from superlocalmemory.core.config import ForgettingConfig
 from superlocalmemory.dynamics.ebbinghaus_langevin_coupling import (
-    EbbinghausCouplingState,
     EbbinghausLangevinCoupling,
 )
 from superlocalmemory.dynamics.fisher_langevin_coupling import (

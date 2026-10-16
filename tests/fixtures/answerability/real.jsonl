@@ -1,0 +1,109 @@
+{"category": "code_identifier", "expected": ["code-ensure-daemon"], "qid": "r-code-1", "question": "How long does ensure_daemon wait for the socket?"}
+{"category": "code_identifier", "expected": ["code-http421"], "qid": "r-code-2", "question": "What caused the HTTP 421 errors from the hub?"}
+{"category": "code_identifier", "expected": ["code-qjl-bits"], "qid": "r-code-3", "question": "What does qjl_bits control?"}
+{"category": "code_identifier", "expected": ["code-rrf-k"], "qid": "r-code-4", "question": "Why is rrf_k set to 15?"}
+{"category": "code_identifier", "expected": ["code-wal"], "qid": "r-code-5", "question": "What busy_timeout do SQLite connections use?"}
+{"category": "code_identifier", "expected": ["code-migration-runner"], "qid": "r-code-6", "question": "Where does the migration runner live?"}
+{"category": "code_identifier", "expected": ["code-no-floor-env"], "qid": "r-code-7", "question": "What does SLM_RECALL_NO_FLOOR do?"}
+{"category": "code_identifier", "expected": ["code-parse-window"], "qid": "r-code-8", "question": "What does parse_window return?"}
+{"category": "code_identifier", "expected": ["code-warmup-sync"], "qid": "r-code-9", "question": "What does warmup_sync return when the reranker is ready?"}
+{"category": "code_identifier", "expected": ["code-fts5"], "qid": "r-code-10", "question": "How is atomic_facts_fts kept in sync?"}
+{"category": "code_identifier", "expected": ["code-recall-limit"], "qid": "r-code-11", "question": "What is CANONICAL_RECALL_LIMIT?"}
+{"category": "bare_identifier", "expected": ["code-ensure-daemon"], "qid": "r-code-12", "question": "ensure_daemon"}
+{"category": "bare_identifier", "expected": ["code-qjl-bits"], "qid": "r-code-13", "question": "qjl_bits"}
+{"category": "bare_identifier", "expected": ["code-http421"], "qid": "r-code-14", "question": "HTTP 421"}
+{"category": "version", "expected": ["ver-4125"], "qid": "r-ver-1", "question": "What does release 4.1.25 add?"}
+{"category": "version", "expected": ["ver-hub-034"], "qid": "r-ver-2", "question": "What did hub v0.3.4 fix?"}
+{"category": "version", "expected": ["ver-4124"], "qid": "r-ver-3", "question": "What went into 4.1.24?"}
+{"category": "version", "expected": ["ver-node22"], "qid": "r-ver-4", "question": "Which Node version does the conformance harness need?"}
+{"category": "version", "expected": ["ver-pydantic"], "qid": "r-ver-5", "question": "Why can't we upgrade pydantic-core past 2.46.4?"}
+{"category": "version", "expected": ["ver-py314"], "qid": "r-ver-6", "question": "Since which release is Python 3.14 supported?"}
+{"category": "bare_identifier", "expected": ["ver-hub-034"], "qid": "r-ver-7", "question": "v0.3.4"}
+{"category": "acronym", "expected": ["acr-csls"], "qid": "r-acr-1", "question": "What is CSLS?"}
+{"category": "acronym", "expected": ["acr-rrf"], "qid": "r-acr-2", "question": "What does RRF stand for?"}
+{"category": "acronym", "expected": ["acr-fsrs"], "qid": "r-acr-3", "question": "How does FSRS stability change?"}
+{"category": "acronym", "expected": ["acr-sla"], "qid": "r-acr-4", "question": "What is the SLA for P1 incidents?"}
+{"category": "acronym", "expected": ["acr-gdpr"], "qid": "r-acr-5", "question": "How do we handle a GDPR erasure request?"}
+{"category": "acronym", "expected": ["acr-mrr"], "qid": "r-acr-6", "question": "What is MRR?"}
+{"category": "exact_id", "expected": ["id-asdk-receipt"], "qid": "r-id-1", "question": "asdk_app_6ac9e8f2b71d40c3"}
+{"category": "exact_id", "expected": ["id-session-stub"], "qid": "r-id-2", "question": "How many memories were stored in session 3f9c2a7e-51b4-4d0a-9e6f-2c8b1d7a4e90?"}
+{"category": "exact_id", "expected": ["id-req-503"], "qid": "r-id-3", "question": "What happened to request req_01J9ZK4M8Q2X7V3N5B6C?"}
+{"category": "exact_id", "expected": ["id-commit-revert"], "qid": "r-id-4", "question": "What did commit 9d4e1b7 revert?"}
+{"category": "exact_id", "expected": ["id-ticket-ops4471"], "qid": "r-id-5", "question": "What was ticket OPS-4471 about?"}
+{"category": "exact_id", "expected": ["id-order-ssd"], "qid": "r-id-6", "question": "ORD-2026-000917"}
+{"category": "exact_id", "expected": ["id-license-key"], "qid": "r-id-7", "question": "When does licence LIC-7Q2M-88XT-0PZK expire?"}
+{"category": "exact_id", "expected": ["ops-audit-0005"], "qid": "r-id-8", "question": "AUDIT-0005"}
+{"category": "id_note_paraphrase", "expected": ["id-asdk-receipt"], "qid": "r-idp-1", "question": "What was the app identifier on the free sandbox payment?"}
+{"category": "id_note_paraphrase", "expected": ["id-req-503"], "qid": "r-idp-2", "question": "Why did the embedding worker request fail?"}
+{"category": "id_note_paraphrase", "expected": ["id-ticket-ops4471"], "qid": "r-idp-3", "question": "Which profile did the nightly backup skip?"}
+{"category": "id_note_paraphrase", "expected": ["id-order-ssd"], "qid": "r-idp-4", "question": "When did the replacement SSDs ship?"}
+{"category": "id_note_paraphrase", "expected": ["id-license-key"], "qid": "r-idp-5", "question": "Which tier does the evaluation licence belong to?"}
+{"category": "id_note_paraphrase", "expected": ["id-container"], "qid": "r-idp-6", "question": "What tag was the worker container image given?"}
+{"category": "name", "expected": ["ppl-nadia"], "qid": "r-name-1", "question": "Who reviews storage migrations?"}
+{"category": "name", "expected": ["ppl-tomas"], "qid": "r-name-2", "question": "What does Tomás Rivera maintain?"}
+{"category": "name", "expected": ["ppl-mei"], "qid": "r-name-3", "question": "What LoCoMo score did Mei Tanaka report?"}
+{"category": "name", "expected": ["ppl-oskar"], "qid": "r-name-4", "question": "Who wrote the Hopfield channel?"}
+{"category": "name", "expected": ["prod-lumen"], "qid": "r-name-5", "question": "What is Lumen?"}
+{"category": "name", "expected": ["prod-orbit"], "qid": "r-name-6", "question": "Why is Orbit paused?"}
+{"category": "name", "expected": ["prod-quill"], "qid": "r-name-7", "question": "What does Quill import?"}
+{"category": "decision", "expected": ["dec-sqlite"], "qid": "r-dec-1", "question": "Why did we reject Postgres support?"}
+{"category": "decision", "expected": ["dec-agpl"], "qid": "r-dec-2", "question": "Why did we pick the AGPL?"}
+{"category": "decision", "expected": ["dec-no-telemetry"], "qid": "r-dec-3", "question": "Are crash reports sent automatically?"}
+{"category": "decision", "expected": ["dec-batch-releases"], "qid": "r-dec-4", "question": "When is an out-of-cycle release justified?"}
+{"category": "decision", "expected": ["dec-reranker"], "qid": "r-dec-5", "question": "Why did we keep the MiniLM reranker?"}
+{"category": "decision", "expected": ["dec-two-agents"], "qid": "r-dec-6", "question": "How many background agents may run at once?"}
+{"category": "event", "expected": ["ev-fd-leak"], "qid": "r-ev-1", "question": "When did the embedding worker leak file descriptors?"}
+{"category": "event", "expected": ["ev-meetup"], "qid": "r-ev-2", "question": "Where did we present the bounded loops paper?"}
+{"category": "event", "expected": ["ev-m057"], "qid": "r-ev-3", "question": "How long did the M057 migration take?"}
+{"category": "semantic_only", "expected": ["dec-sqlite"], "qid": "r-sem-1", "question": "Why don't we need a separate server process for storage?"}
+{"category": "semantic_only", "expected": ["dec-no-telemetry"], "qid": "r-sem-2", "question": "Do we phone home with usage data?"}
+{"category": "semantic_only", "expected": ["ev-fd-leak"], "qid": "r-sem-3", "question": "When did the process run out of handles?"}
+{"category": "semantic_only", "expected": ["code-wal"], "qid": "r-sem-4", "question": "How did we stop write contention failures?"}
+{"category": "semantic_only", "expected": ["ppl-tomas"], "qid": "r-sem-5", "question": "Who looks after the Microsoft platform setup package?"}
+{"category": "semantic_only", "expected": ["dec-agpl"], "qid": "r-sem-6", "question": "Why must cloud rivals publish their modifications?"}
+{"category": "semantic_only", "expected": ["acr-gdpr"], "qid": "r-sem-7", "question": "How is a right-to-be-forgotten request handled?"}
+{"category": "semantic_only", "expected": ["prod-orbit"], "qid": "r-sem-8", "question": "Is multi-device replication being worked on?"}
+{"category": "non_english", "expected": ["ne-de-backup"], "qid": "r-ne-1", "question": "Wann läuft die nächtliche Sicherung?"}
+{"category": "non_english", "expected": ["ne-es-restart"], "qid": "r-ne-2", "question": "¿Cuándo se reinicia el servidor de pruebas?"}
+{"category": "non_english", "expected": ["ne-fr-key"], "qid": "r-ne-3", "question": "Tous les combien la clé de chiffrement est-elle renouvelée ?"}
+{"category": "non_english", "expected": ["ne-hi-backup"], "qid": "r-ne-4", "question": "डेटाबेस का बैकअप कब लिया जाता है?"}
+{"category": "non_english", "expected": ["ne-ja-port"], "qid": "r-ne-5", "question": "ステージング環境のポートは何番ですか？"}
+{"category": "non_english", "expected": ["ne-zh-logs"], "qid": "r-ne-6", "question": "日志保留多久？"}
+{"category": "non_english", "expected": ["ne-pt-report"], "qid": "r-ne-7", "question": "Quando o relatório mensal é enviado?"}
+{"category": "paraphrase_pair", "expected": ["pp-dash-port-a", "pp-dash-port-b"], "qid": "r-pp-1", "question": "Which port does the dashboard use?"}
+{"category": "paraphrase_pair", "expected": ["pp-retention-a", "pp-retention-b"], "qid": "r-pp-2", "question": "How long are raw tool logs kept?"}
+{"category": "paraphrase_pair", "expected": ["pp-coffee-a", "pp-coffee-b"], "qid": "r-pp-3", "question": "When is the team retrospective?"}
+{"category": "audit_corpus", "expected": ["audit-db"], "qid": "r-audit-db", "question": "What database stores Kestrel payroll records?"}
+{"category": "audit_corpus", "expected": ["audit-backup"], "qid": "r-audit-backup", "question": "How long are Kestrel backups retained?"}
+{"category": "audit_corpus", "expected": ["audit-owner"], "qid": "r-audit-owner", "question": "Who owns incident escalation for Kestrel?"}
+{"category": "audit_corpus", "expected": ["audit-quote"], "qid": "r-audit-quote", "question": "Who said they are leaving tomorrow?"}
+{"category": "audit_corpus", "expected": ["audit-alex", "audit-speaker"], "qid": "r-audit-alex", "question": "Which language does Alex Morgan use for payroll automation?"}
+{"category": "audit_corpus", "expected": ["audit-alexa", "audit-speaker"], "qid": "r-audit-alexa", "question": "Which language does Alexa Morgan use for payroll automation?"}
+{"category": "audit_corpus", "expected": ["audit-speaker", "audit-speaker"], "qid": "r-audit-speaker", "question": "Which speaker uses Rust for payroll?"}
+{"category": "audit_corpus", "expected": ["audit-smith"], "qid": "r-audit-smith", "question": "Who manages the Canada deployment?"}
+{"category": "audit_corpus", "expected": ["audit-postgres"], "qid": "r-audit-postgres", "question": "What is PostgREST used for?"}
+{"category": "audit_corpus", "expected": ["audit-token"], "qid": "r-audit-token", "question": "How many minutes is an Orchid access token valid?"}
+{"category": "audit_corpus", "expected": ["audit-support"], "qid": "r-audit-support", "question": "When is Orchid support available?"}
+{"category": "audit_corpus", "expected": ["audit-rollout"], "qid": "r-audit-rollout", "question": "Why was the Atlas rollout postponed?"}
+{"category": "audit_corpus", "expected": ["audit-port"], "qid": "r-audit-port", "question": "Which port does the Meridian staging API use?"}
+{"category": "audit_corpus", "expected": ["audit-cost"], "qid": "r-audit-cost", "question": "What is Juniper monthly infrastructure budget?"}
+{"category": "audit_corpus", "expected": ["audit-nomove"], "qid": "r-audit-nomove", "question": "Which region must Tundra data remain in?"}
+{"category": "audit_corpus", "expected": ["audit-code"], "qid": "r-audit-code", "question": "What is the maximum invoice retry delay?"}
+{"category": "audit_corpus", "expected": ["audit-pref"], "qid": "r-audit-pref", "question": "What does Priya prefer in pull request descriptions?"}
+{"category": "audit_corpus", "expected": ["audit-date"], "qid": "r-audit-date", "question": "When does the Orchid staging certificate expire?"}
+{"category": "audit_corpus", "expected": ["audit-timezone"], "qid": "r-audit-timezone", "question": "When is the Meridian daily on-call handoff?"}
+{"category": "audit_corpus", "expected": ["audit-allergy"], "qid": "r-audit-allergy", "question": "Which employee is allergic to peanuts?"}
+{"category": "audit_corpus", "expected": ["audit-trip"], "qid": "r-audit-trip", "question": "Which city did Alexa Morgan visit?"}
+{"category": "audit_corpus", "expected": ["audit-vpn"], "qid": "r-audit-vpn", "question": "What is the synthetic Juniper VPN recovery phrase?"}
+{"category": "audit_corpus", "expected": ["audit-old-status", "audit-new-status"], "qid": "r-audit-old-status", "question": "Who was Kestrel primary owner in January 2026?"}
+{"category": "audit_corpus", "expected": ["audit-old-status", "audit-new-status"], "qid": "r-audit-new-status", "question": "Who is Kestrel primary owner now?"}
+{"category": "audit_corpus", "expected": ["audit-old-db", "audit-new-db"], "qid": "r-audit-old-db", "question": "Which database did Atlas use in January 2026?"}
+{"category": "audit_corpus", "expected": ["audit-old-db", "audit-new-db"], "qid": "r-audit-new-db", "question": "Which database does Atlas use now?"}
+{"category": "audit_corpus", "expected": ["audit-multi-a", "audit-multi-b"], "qid": "r-audit-multi-a", "question": "Who leads Orchid and what language does that person prefer?"}
+{"category": "audit_corpus", "expected": ["audit-multi-a", "audit-multi-b"], "qid": "r-audit-multi-b", "question": "Which language does the Orchid lead prefer for data analysis?"}
+{"category": "audit_corpus", "expected": ["audit-not-allowed"], "qid": "r-audit-not-allowed", "question": "Is Friday deployment allowed for Kestrel?"}
+{"category": "audit_ops", "expected": ["ops-cedar-0"], "qid": "r-ops-1", "question": "Which port is assigned to fictional Cedar deployment 0 in OPS_SOAK4_FINAL_00000?"}
+{"category": "audit_ops", "expected": ["ops-cedar-1"], "qid": "r-ops-2", "question": "Who approved the synthetic Cedar recovery checklist in OPS_SOAK4_FINAL_00001?"}
+{"category": "audit_ops", "expected": ["ops-audit-0000"], "qid": "r-ops-3", "question": "Who owns AUDIT-0000 and what is its staging port?"}
+{"category": "audit_ops", "expected": ["ops-audit-0001"], "qid": "r-ops-4", "question": "What date was AUDIT-0001 PostgreSQL decision made?"}
+{"category": "audit_ops", "expected": ["ops-audit-0005"], "qid": "r-ops-5", "question": "What recovery command was saved in AUDIT-0005?"}

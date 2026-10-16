@@ -32,7 +32,9 @@ from superlocalmemory.core.config import (
     RetrievalConfig,
 )
 from superlocalmemory.retrieval import channel_status as chstat
+from superlocalmemory.retrieval import entity_graph_warmup, kind_scope, project_search, visibility
 from superlocalmemory.retrieval.fusion import FusionResult, weighted_rrf
+from superlocalmemory.retrieval.rerank_pool import rerank_pool
 from superlocalmemory.retrieval.strategy import QueryStrategy, QueryStrategyClassifier
 from superlocalmemory.retrieval.temporal_validity_filter import (
     CorrectionAdmissionCache,
@@ -40,9 +42,11 @@ from superlocalmemory.retrieval.temporal_validity_filter import (
     admit_correction_fusion_results,
 )
 from superlocalmemory.retrieval.time_window import (
+    has_primary_evidence,
     in_window,
     infer_window_from_query,
     parse_window,
+    windowed_candidates,
 )
 from superlocalmemory.storage.models import (
     AtomicFact,
@@ -102,6 +106,21 @@ logger = logging.getLogger(__name__)
 # measure what it costs in answer quality first and record the number.
 CHANNEL_HANG_GUARD_SECONDS = 8.0
 
+# How long a recall waits for a query vector from a model that has NEVER loaded
+# in this process (a fresh daemon). Only that case: a model that loaded before
+# is waited for unbounded, exactly as in 4.1.19 (retrieval/query_embedding.py).
+#
+# The recall ceiling is 3.0 s total (RECALL_CEILING_S, answer check included).
+# Waiting the full hang guard here made the first recalls after a start take
+# 8.06 s while the model loaded. One second gives a nearly loaded model its
+# chance and leaves the rest of the ceiling for the channels that need no
+# vector and for the answer check, which budgets itself against the recall's
+# start and is skipped rather than overrun. What it costs: on a cold daemon the
+# vector channels report ``warming`` and the recall is marked incomplete -- the
+# same answer the 8 s wait gave whenever the load took longer than 8 s, and the
+# embed is not cancelled, so the next recall of the question gets its vector.
+COLD_QUERY_EMBED_WAIT_SECONDS = 1.0
+
 
 class CrossEncoderProtocol(Protocol):
     """Duck-typed cross-encoder interface."""
@@ -136,9 +155,20 @@ class RetrievalEngine:
         profile_channel: Any | None = None,
         bridge_discovery: Any | None = None,
         trust_scorer: TrustScorer | None = None,
+        sufficiency_judge: Any | None = None,
+        display_min_confidence: float = 0.20,
     ) -> None:
         self._db = db
+        # 4.1.18: decides whether a recall answers its question; read by
+        # run_recall at the contract boundary. None means today's behaviour.
+        self._sufficiency_judge = sufficiency_judge
         self._config = config
+        # M3: the kind facet's confidence threshold. RetrievalConfig (this
+        # class's own ``config``) has no memory_kinds field — that lives on
+        # the TOP-LEVEL SLMConfig — so the wiring layer that HAS the full
+        # config passes the live value through here, rather than this class
+        # reaching for a config section it was never given.
+        self._display_min_confidence = display_min_confidence
         self._semantic: SemanticChannel | None = channels.get("semantic")
         self._bm25: BM25Channel | None = channels.get("bm25")
         self._entity: EntityGraphChannel | None = channels.get("entity_graph")
@@ -151,6 +181,8 @@ class RetrievalEngine:
         self._reranker = reranker
         self._strategy = strategy or QueryStrategyClassifier(config=config)
         self._base_weights = (base_weights or ChannelWeights()).as_dict()
+        self._media_weight = (base_weights or ChannelWeights()).media
+        self._media_channel = None  # built on first use, only if pictures are on
         self._profile_channel = profile_channel
         self._bridge = bridge_discovery
         self._trust_scorer = trust_scorer
@@ -171,12 +203,12 @@ class RetrievalEngine:
         self._close_lock = threading.Lock()
         self._closed = False
 
-        # V3.3.4: LRU cache for query embeddings (avoids redundant Ollama API calls)
-        # V3.4.40 (2026-05-09): bumped 64 -> 512. Each cached embedding is ~3KB
-        # (768 floats × 4 bytes). 512 entries ~1.5MB — trivial memory cost,
-        # massive latency win on repeated queries (sub-ms vs 200-2000ms ollama).
-        self._query_embedding_cache: dict[str, list[float]] = {}
-        self._cache_max_size = 512
+        # Query embeddings: 512-entry cache (~1.5 MB), single-flight, and a
+        # bounded wait so a loading model cannot hold a whole recall
+        # (see retrieval/query_embedding.py).
+        from superlocalmemory.retrieval.query_embedding import QueryEmbedder
+        self._query_embedder = QueryEmbedder(lambda: self._embedder, cache_max_size=512)
+        self._query_embedding_cache = self._query_embedder.cache
 
         # V3.2: ChannelRegistry for self-registration (Phase 0.5)
         from superlocalmemory.retrieval.channel_registry import ChannelRegistry
@@ -210,8 +242,15 @@ class RetrievalEngine:
         known_as_of: str | None = None,
         valid_at: str | None = None,
         include_unknown: bool = False,
+        facets: Any = None,
+        lexical_query: str | None = None,
     ) -> RecallResponse:
         """Full retrieval pipeline: strategy -> channels -> RRF -> rerank.
+
+        ``lexical_query`` (4.1.25, ``retrieval/query_rewrite``): what the
+        keyword channel searches for, when a rewrite added terms. Every other
+        stage -- the vector channels, the cross-encoder, the evidence features
+        -- reads ``query``.
 
         Multi-scope: ``include_global`` / ``include_shared`` control which
         scopes participate in retrieval. Both default to False so direct
@@ -229,6 +268,11 @@ class RetrievalEngine:
         from superlocalmemory.retrieval.temporal_utils import normalize_strict_boundary
         known_as_of = normalize_strict_boundary(known_as_of, "known_as_of")
         valid_at = normalize_strict_boundary(valid_at, "valid_at")
+        # 4.1.20 (R5): an explicit window that cannot be read is refused here,
+        # the root every door reaches, instead of quietly applying no filter.
+        # Blank means "no window", exactly as before.
+        from superlocalmemory.retrieval.time_filter import check_window
+        window = check_window(window)
         t0 = time.monotonic()
         # NOTE: extra_disabled_channels is passed as an explicit local argument
         # to _run_channels() — it is NOT stored on self.  Storing it as a shared
@@ -256,6 +300,7 @@ class RetrievalEngine:
         # a dict on the engine would have two concurrent recalls overwriting
         # each other's report.
         channel_status: dict[str, str] = {}
+        graph_lag_s: float | None = None  # set when the entity graph ran
 
         # Profile shortcut (runs before channel search).
         #
@@ -290,12 +335,12 @@ class RetrievalEngine:
         # Dynamic top-k for aggregation queries
         effective_limit = 100 if strat.query_type == "aggregation" else limit
 
-        # 3. Run channels. Both scope flags AND extra_disabled_channels travel as
-        # explicit call parameters so concurrent recalls with different flags
-        # cannot corrupt each other.  No lock needed — no shared mutable state.
-        # Owned by this call, so concurrent recalls cannot report each other's
-        # losses.  Non-empty means this answer is incomplete, not just slow.
+        # 3. Run channels; flags travel as parameters (no shared state). Owned by
+        # this call: non-empty means this answer is incomplete, not just slow.
         dropped_channels: set[str] = set()
+        # Where this recall's time went (``RecallResponse.stage_ms``); per call.
+        stage_ms: dict[str, float] = {}
+        _t_channels = time.monotonic()
         ch_results = self._run_channels(
             query, profile_id, strat,
             extra_disabled_channels=extra_disabled_channels,
@@ -304,7 +349,24 @@ class RetrievalEngine:
             include_unknown=include_unknown,
             dropped_channels=dropped_channels,
             channel_status=channel_status,
+            stage_ms=stage_ms,
+            lexical_query=lexical_query,
         )
+        stage_ms["channels"] = round((time.monotonic() - _t_channels) * 1000.0, 1)
+        if getattr(facets, "kind", None) and getattr(self, "_kind_membership", None):
+            ch_results = kind_scope.supplement(  # search inside the kind (kind_scope)
+                self, ch_results, query=query, query_embedding=self._embed_query(query)[0],
+                profile_id=profile_id, kind=facets.kind, stage_ms=stage_ms)
+        if getattr(facets, "project", None):
+            ch_results = project_search.supplement(  # search inside the project
+                self, ch_results, query=query, query_embedding=self._embed_query(query)[0],
+                profile_id=profile_id, project=facets.project, stage_ms=stage_ms)
+        if getattr(facets, "tags", None):
+            from superlocalmemory.retrieval import tag_search
+            ch_results = tag_search.supplement(  # search inside the tag set
+                self, ch_results, query=query, query_embedding=self._embed_query(query)[0],
+                profile_id=profile_id, tags=facets.tags,
+                match=getattr(facets, "tags_match", "all"), stage_ms=stage_ms)
         _em("run_channels")
         # One request may need admission before fusion and again after optional
         # bridge/scene expansion.  Cache only the IDs checked during this one
@@ -325,6 +387,8 @@ class RetrievalEngine:
 
         # 3. Single-pass RRF fusion
         ch_results = self._semantic_rank_for_unenriched(ch_results)
+        if ch_results.get("media"):
+            strat.weights["media"] = self._media_weight
         fused = weighted_rrf(ch_results, strat.weights, k=self._config.rrf_k)
         _em("rrf_fusion")
 
@@ -335,6 +399,9 @@ class RetrievalEngine:
         # channels (entity+temporal, entity+semantic, temporal+semantic).
         if strat.query_type == "multi_hop" and len(ch_results) >= 2:
             fused = self._apply_cross_channel_intersection(fused, ch_results, strat)
+        # What the channels themselves found, before bridges and scenes add
+        # neighbours. The rerank pool keeps room for these (rerank_pool).
+        found_ids = frozenset(fr.fact_id for fr in fused)
 
         # Bridge discovery for multi-hop queries
         # V3.3.19: Only bridge.discover() (86ms). Removed bridge.spreading_activation()
@@ -446,16 +513,18 @@ class RetrievalEngine:
             # the code no longer makes.
             try:
                 candidate_ids = [fr.fact_id for fr in fused[:100]]
-                eg_scores = self._entity.score_candidates(
-                    query,
-                    candidate_ids,
-                    profile_id,
-                    include_global=include_global,
-                    include_shared=include_shared,
-                )
-                channel_status["entity_graph"] = (
-                    chstat.OK if eg_scores else chstat.EMPTY
-                )
+                # None: another thread builds this scope's graph, none usable cached.
+                eg_scores = entity_graph_warmup.score_candidates_unless_warming(
+                    self._entity, query, candidate_ids, profile_id,
+                    include_global=include_global, include_shared=include_shared)
+                if eg_scores is None:  # incomplete, never "found nothing"
+                    dropped_channels.add("entity_graph")
+                else:
+                    graph_lag_s = entity_graph_warmup.lag_of(
+                        self._entity, profile_id, include_global=include_global,
+                        include_shared=include_shared)
+                channel_status["entity_graph"] = (chstat.WARMING if eg_scores is None
+                                                  else chstat.OK if eg_scores else chstat.EMPTY)
                 if eg_scores:
                     boosted = []
                     for fr in fused:
@@ -486,6 +555,7 @@ class RetrievalEngine:
             include_global=include_global, include_shared=include_shared,
             lifecycle_cache=correction_admission,
         )
+        fused = visibility.drop_hidden_results(fused, self._db, profile_id)  # hidden: never a candidate
 
         _em("expand+entity_enh")
 
@@ -496,8 +566,8 @@ class RetrievalEngine:
         # infer one from natural-language scope in the query ("last week").
         # Safety: an EXPLICIT window is authoritative (honoured even if it empties
         # the set — the user asked for that scope), but an INFERRED window is
-        # additive and never makes recall worse — if it would empty the results,
-        # fall back to the unwindowed set.
+        # additive and never makes recall worse — if nothing inside it has
+        # primary evidence, fall back to the unwindowed set (time_window.py).
         _explicit_window = window is not None
         _window = window if _explicit_window else infer_window_from_query(query)
         if _window is not None and fused:
@@ -506,17 +576,50 @@ class RetrievalEngine:
                 etimes = self._db.get_fact_event_times(
                     [fr.fact_id for fr in fused], profile_id,
                 )
-                windowed = [
-                    fr for fr in fused
-                    if in_window(etimes.get(fr.fact_id), bounds)
-                ]
-                if windowed or _explicit_window:
-                    fused = windowed
+                fused = windowed_candidates(
+                    fused, lambda fid: in_window(etimes.get(fid), bounds),
+                    explicit=_explicit_window,
+                    min_semantic=self._text_floor(),
+                    min_media=self._media_floor(),
+                )
                 _em("time_window")
 
+        # Facets (saved_by / about / kind): explicit, so hard filters -
+        # honoured even when they leave nothing (retrieval/facets.py).
+        # ``project`` filters but falls back to unfiltered, and says so, when
+        # nothing found was saved under it; ``prefer_project`` only marks
+        # memories for the bounded boost below (retrieval/project_scope.py).
+        preferred: frozenset[str] = frozenset()
+        project_scope = None
+        tag_scope = None
+        if facets is not None and not getattr(facets, "empty", True):
+            from superlocalmemory.retrieval.project_scope import narrow
+
+            scoped = narrow(
+                self._db, [fr.fact_id for fr in fused], profile_id, facets,
+                resolver=getattr(self._entity, "_resolver", None),
+                # M3: the configured threshold, not kind_fields' 0.20 default —
+                # so a kind facet agrees with what the recall response itself
+                # displays for the SAME row.
+                display_min_confidence=self._display_min_confidence,
+            )
+            keep = set(scoped.kept)
+            fused = [fr for fr in fused if fr.fact_id in keep]
+            preferred, project_scope = scoped.preferred, scoped.report
+            if getattr(facets, "tags", None):
+                # ``scoped.kept`` already has every facet (incl. tags) ANDed
+                # in (retrieval.facets.matching_fact_ids), so its count IS
+                # the tag-filtered match count — nothing to recompute here.
+                from superlocalmemory.retrieval.tag_scope import build_report
+                tag_scope = build_report(self._db, profile_id, facets, len(scoped.kept))
+            _em("facets")
+
         # 4. Load facts for rerank pool
-        pool = min(len(fused), max(effective_limit * 3, 30))
-        top = fused[:pool]
+        # Search results and added neighbours each get ``pool`` slots, so a
+        # large scene cannot push a found memory out before the cross-encoder
+        # reads it (retrieval/rerank_pool.py).
+        pool = max(effective_limit * 3, 30)
+        top = rerank_pool(fused, found=found_ids, size=pool)
         facts = self._load_facts(
             top,
             profile_id,
@@ -549,36 +652,56 @@ class RetrievalEngine:
             and _os_floor.environ.get("SLM_RECALL_NO_FLOOR", "0") != "1"
         )
         if floor_enabled:
-            min_sem = getattr(self._config, "min_semantic_evidence", 0.60)
+            min_sem = self._text_floor()
             # Qualify the rerank pool BEFORE applying the caller's limit.  RRF
             # can rank associative-only hits above an exact BM25 match; slicing
             # first allowed those hits to occupy every output slot and then be
             # removed by the floor, producing a false abstention even though a
             # qualified candidate was immediately below the slice.
-            top = self._apply_evidence_floor(top, facts, min_sem)
+            top = self._apply_evidence_floor(
+                top, facts, min_sem, self._media_floor(),
+                hub_corrected=self._floor_hub_corrected(top, facts, min_sem, profile_id))
 
         # 5. Cross-encoder rerank (optional, on the evidence-qualified pool)
         # Bug 4 fix: reduced alpha for multi-hop/temporal to preserve diversity
-        # V3.3.21: Skip reranker if worker isn't ready yet (cold start).
-        # Returns results without CE reranking (~5-10pp lower quality) but instant
-        # instead of blocking 15-19s on first recall. Worker warms up in background.
-        reranker_ready = (
-            self._reranker is not None
-            and getattr(self._reranker, '_worker_ready', False)
-        )
+        # The reranker decides its own readiness. ``rerank_with_status`` is
+        # non-blocking: with no model loaded it returns the fused order as
+        # "fallback_not_ready" and starts a background re-warm, so a cold
+        # start never blocks a recall.
+        #
+        # 4.1.18: this used to gate on the private ``_worker_ready`` flag.
+        # ``_kill_worker`` clears it on every worker death — the routine
+        # 500-request recycle, the 30-minute idle kill, a crash — and the
+        # re-warm lives inside the call this gate then refused to make, so
+        # reranking stayed off until the daemon restarted. The live daemon
+        # ran unranked for seven days that way. A reranker type without that
+        # private attribute (RemoteReranker) was never called at all.
+        reranker_ready = self._reranker is not None
         reranker_applied = False
         reranker_status = (
             "fallback_not_ready" if self._reranker is not None
             else "not_configured"
         )
+        _t_rerank = time.monotonic()
+        # fact_id -> (raw cross-encoder score, its in-batch normalised value),
+        # kept for the evidence features below rather than thrown away.
+        ce_scores: dict[str, tuple[float, float]] = {}
         if reranker_ready and facts:
             ce_alpha = 0.5 if strat.query_type in ("multi_hop", "temporal") else 0.75
             top, reranker_applied, reranker_status = self._apply_reranker(
-                query, top, facts, alpha=ce_alpha,
+                query, top, facts, alpha=ce_alpha, raw_out=ce_scores,
             )
         elif reranker_ready:
             reranker_status = "no_candidates"
+        stage_ms["rerank"] = round((time.monotonic() - _t_rerank) * 1000.0, 1)
         _em(f"rerank(ready={reranker_ready})")
+
+        if preferred:
+            # #150: before the cut, so a same-project memory just below it can
+            # be chosen; bounded by project_scope.BOOST, so only one of similar
+            # relevance ever passes another memory.
+            from superlocalmemory.retrieval.project_scope import boost_order
+            top = boost_order(top, preferred)
 
         # V3.4.11: Channel diversity — guarantee entity_graph results appear in
         # the final output. Applied AFTER reranking and evidence qualification
@@ -598,13 +721,29 @@ class RetrievalEngine:
                 include_shared=include_shared,
             ))
 
+        from superlocalmemory.retrieval.scope_policy import authorized_fact_ids
+        allowed = authorized_fact_ids(
+            self._db, (fr.fact_id for fr in final_top), profile_id,
+            include_global=include_global, include_shared=include_shared,
+        )
+        final_top = [fr for fr in final_top if fr.fact_id in allowed]
+        final_top = visibility.keep_loaded(final_top, facts)  # promotions from pre-admission channels
         # Trim facts to the selected, qualified result set.
         selected_ids = {fr.fact_id for fr in final_top}
         facts = {fid: f for fid, f in facts.items() if fid in selected_ids}
 
         # 6. Build response
-        results = self._build_results(final_top, facts, strat)
+        # #150: the ORDER of these results is preferred once, at the end of
+        # recall (core.recall_pipeline -> project_scope.prefer_in_final_order),
+        # after learned ranking has rewritten every score. Here it only chose
+        # which candidates made the cut (boost_order above).
+        results = self._build_results(final_top, facts, strat,
+                                      reranked=reranker_applied)
+        _t_evidence = time.monotonic()
+        query_evidence = self._attach_evidence(query, results, ce_scores, profile_id)
+        stage_ms["evidence"] = round((time.monotonic() - _t_evidence) * 1000.0, 1)
         ms = (time.monotonic() - t0) * 1000.0
+        stage_ms["retrieval_total"] = round(ms, 1)
         no_match = floor_enabled and len(results) == 0
         return RecallResponse(
             query=query, mode=mode, results=results,
@@ -618,7 +757,91 @@ class RetrievalEngine:
             community_context=self._community_context(results, profile_id),
             incomplete_channels=tuple(sorted(dropped_channels)),
             channel_status=dict(channel_status),
+            graph_lag_s=graph_lag_s,
+            stage_ms=dict(stage_ms),
+            project_scope=project_scope,
+            tag_scope=tag_scope,
+            query_evidence=query_evidence,
         )
+
+    # -- Evidence features (measurement only) -------------------------------
+
+    def _hub_baselines(
+        self, fact_ids: list[str], profile_id: str,
+    ) -> dict[str, tuple[float, float]]:
+        """``fact_id -> (top-k, mean)`` hub baselines stored for the live space."""
+        from superlocalmemory.retrieval import hub_baseline
+
+        return hub_baseline.read(
+            self._db, fact_ids, hub_baseline.space_of(getattr(self, "_embedder", None)))
+
+    def _probe_matrix(self) -> Any:
+        """Hub probe vectors when this process has embedded them; never embeds."""
+        from superlocalmemory.retrieval import hub_baseline
+
+        return hub_baseline.PROBES.cached(
+            hub_baseline.space_of(getattr(self, "_embedder", None)))
+
+    def _attach_evidence(
+        self, query: str, results: list[RetrievalResult],
+        ce_scores: dict[str, tuple[float, float]], profile_id: str,
+    ) -> dict:
+        """Record each result's evidence features; return the question's own.
+
+        No score or order changes here (``retrieval.evidence_attach``). Fail-open
+        -- a feature that cannot be computed is recorded as missing, and an
+        error never reaches the caller.
+        """
+        from superlocalmemory.retrieval import evidence_attach
+
+        vector = getattr(self, "_query_embedding_cache", {}).get(query)
+        try:
+            probes = self._probe_matrix()
+            if probes is None and vector is not None and not _gate_off(self):
+                from superlocalmemory.retrieval import hub_baseline
+                if hub_baseline.lazy_warm(getattr(self, "_embedder", None)):
+                    probes = self._probe_matrix()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("hub probes: %s", exc)
+            probes = None
+        return evidence_attach.attach(
+            query, results,
+            query_vector=vector,
+            ce_scores=ce_scores,
+            stored_baselines=lambda ids: self._hub_baselines(ids, profile_id),
+            probes=probes,
+            terms_in_store=lambda terms: self._terms_in_store(terms, profile_id),
+        )
+
+    def _pairs_in_store(self, pairs: list[str], profile_id: str) -> set[str]:
+        """Character pairs of an unspaced script some memory contains (one scan:
+        the keyword index holds whole runs, never their pairs)."""
+        cols = ", ".join(f"MAX(instr(content, ?{i + 1}) > 0)" for i in range(len(pairs)))
+        rows = self._db.execute(
+            f"SELECT {cols} FROM atomic_facts WHERE profile_id = ?{len(pairs) + 1}",
+            (*pairs, profile_id))
+        hits = tuple(rows[0]) if rows else ()
+        return {p for p, hit in zip(pairs, hits) if hit}
+
+    def _terms_in_store(self, terms: list[str], profile_id: str) -> set[str]:
+        """The terms some stored memory of this profile contains, in any
+        inflection the shipped word list knows (a base form of four or more
+        letters is matched as a prefix). One indexed keyword lookup per term."""
+        from superlocalmemory.encoding.common_words import _bases
+        from superlocalmemory.retrieval.evidence_features import unspaced
+
+        pairs = [t for t in terms if unspaced(t)]
+        found: set[str] = self._pairs_in_store(pairs, profile_id) if pairs else set()
+        for term in (t for t in terms if not unspaced(t)):
+            variants = ['"' + term.replace('"', "") + '"'] + [
+                '"' + b + '"*' for b in _bases(term)[1:] if len(b) >= 4 and b.isalpha()]
+            row = self._db.execute(
+                "SELECT 1 FROM atomic_facts_fts f JOIN atomic_facts a ON a.rowid = f.rowid "
+                "WHERE atomic_facts_fts MATCH ? AND a.profile_id = ? LIMIT 1",
+                (" OR ".join(variants), profile_id))
+            if row:
+                found.add(term)
+        return found
 
     # -- Community context (Wave Q2b) --------------------------------------
 
@@ -627,80 +850,66 @@ class RetrievalEngine:
     ) -> dict | None:
         """Attach the precomputed community summary the top results fall into.
 
-        On-device-safe (market CRIT-1): a single read of the ≤N precomputed
-        community_summaries rows + a membership tally — never a per-query LLM
-        fan-out. Gated: fires only when >=2 of the top results AND >=40% of
-        them belong to one community, so precise factual queries are untouched.
-        Fail-open: any error returns None (recall is never affected).
+        Fail-open: any error returns None (recall is never affected). The
+        matching/gating/sample-bounding logic lives in
+        ``retrieval.community_context`` (Q9, 2026-10-06: extracted rather
+        than grown in place — this module is already over the 800-line cap).
         """
         if not results or not getattr(
             self._config, "enable_community_context", True,
         ):
             return None
         try:
-            import json
-            from collections import Counter
-
-            rows = [
-                dict(r) for r in self._db.execute(
-                    "SELECT community_id, summary, keywords, fact_ids_json, "
-                    "fact_count FROM community_summaries WHERE profile_id = ?",
-                    (profile_id,),
-                )
-            ]
-            if not rows:
-                return None
-
-            fact_to_cid: dict[str, int] = {}
-            summ_by_cid: dict[int, dict] = {}
-            for r in rows:
-                cid = int(r["community_id"])
-                summ_by_cid[cid] = r
-                try:
-                    for fid in json.loads(r.get("fact_ids_json") or "[]"):
-                        fact_to_cid[str(fid)] = cid
-                except (ValueError, TypeError):
-                    continue
-
-            top_ids = [
-                res.fact.fact_id
-                for res in results[:top_k]
-                if getattr(res, "fact", None) is not None
-            ]
-            tally = Counter(
-                fact_to_cid[fid] for fid in top_ids if fid in fact_to_cid
+            from superlocalmemory.retrieval.community_context import (
+                build_community_context,
             )
-            if not tally:
-                return None
-            best_cid, count = tally.most_common(1)[0]
-            coverage = count / len(top_ids) if top_ids else 0.0
-            if count < 2 or coverage < 0.4:
-                return None
 
-            row = summ_by_cid[best_cid]
-            try:
-                members = json.loads(row.get("fact_ids_json") or "[]")
-            except (ValueError, TypeError):
-                members = []
-            return {
-                "community_id": best_cid,
-                "summary": row.get("summary", ""),
-                "keywords": row.get("keywords", ""),
-                "member_fact_ids": members,
-                "coverage": round(coverage, 3),
-                "matched_results": count,
-            }
+            return build_community_context(
+                self._db, results, profile_id, top_k=top_k,
+            )
         except Exception as exc:
             logger.debug("community context skipped (fail-open): %s", exc)
             return None
 
     # -- Evidence floor (v3.6.6) -------------------------------------------
 
+    def _text_floor(self) -> float:
+        """Text evidence floor: the live text model's own, else the configured one."""
+        from superlocalmemory.retrieval.text_floor import text_semantic_floor
+
+        return text_semantic_floor(
+            getattr(self, "_embedder", None), getattr(self._config, "min_semantic_evidence", 0.60))
+
+    def _media_floor(self) -> float:
+        """Picture evidence floor: the live paired plan's, else the configured one."""
+        default = getattr(self._config, "media_min_score", 0.30)
+        channel = getattr(self, "_media_channel", None)
+        return default if channel is None else channel.min_score(default)
+
+    def _floor_hub_corrected(self, top: list[FusionResult], facts: dict[str, AtomicFact],
+                             min_semantic: float, profile_id: str) -> dict[str, float]:
+        """Hub-corrected cosine for the candidates the raw floor would drop; none
+        when the answer-support gate is switched off (the floor as before)."""
+        from superlocalmemory.retrieval.evidence_attach import floor_hub_corrected
+        from superlocalmemory.retrieval.support_gate import switched_off
+
+        if switched_off(self._config):
+            return {}
+        try:
+            return floor_hub_corrected(
+                top, facts, min_semantic, probes=self._probe_matrix(),
+                stored=lambda ids: self._hub_baselines(ids, profile_id))
+        except Exception as exc:  # fail-open: the raw floor alone, as before
+            logger.debug("floor hub correction: %s", exc)
+            return {}
+
     @staticmethod
     def _apply_evidence_floor(
         final_top: list[FusionResult],
         facts: dict[str, AtomicFact],
         min_semantic: float,
+        min_media: float = 0.30,
+        hub_corrected: dict[str, float] | None = None,
     ) -> list[FusionResult]:
         """Filter results that earned no channel evidence.
 
@@ -712,21 +921,19 @@ class RetrievalEngine:
         spreading_activation and hopfield do NOT count as primary evidence.
         Empty result after filtering is a success (no_confident_match=True).
         """
+        from superlocalmemory.retrieval import media_rerank
+
         kept: list[FusionResult] = []
         for fr in final_top:
-            cs = fr.channel_scores or {}
-            # Primary channel evidence check
-            if (
-                cs.get("semantic", 0.0) >= min_semantic
-                or cs.get("bm25", 0.0) > 0.0
-                or cs.get("entity_graph", 0.0) > 0.0
-                or cs.get("temporal", 0.0) > 0.0
-            ):
-                kept.append(fr)
-                continue
-            # Pinned fact bypass — always pass regardless of channel scores
             fact = facts.get(fr.fact_id)
-            if fact is not None and getattr(fact, "pinned", False):
+            if fact is not None and media_rerank.is_wordless_picture(getattr(fact, "content", "") or ""):
+                evident = media_rerank.wordless_picture_evidence(fr.channel_scores or {}, min_media)
+            else:
+                evident = has_primary_evidence(
+                    fr.channel_scores, min_semantic, min_media,
+                    hub_corrected=(hub_corrected or {}).get(fr.fact_id))
+            # Pinned fact bypass — always pass regardless of channel scores
+            if evident or (fact is not None and getattr(fact, "pinned", False)):
                 kept.append(fr)
         return kept
 
@@ -913,20 +1120,13 @@ class RetrievalEngine:
 
     # -- Channel execution --------------------------------------------------
 
-    def _embed_query(self, query: str) -> list[float] | None:
-        """Embed query with LRU cache. Avoids redundant Ollama/API calls."""
-        if self._embedder is None:
-            return None
-        cached = self._query_embedding_cache.get(query)
-        if cached is not None:
-            return cached
-        emb = self._embedder.embed(query)
-        # Evict oldest if cache full
-        if len(self._query_embedding_cache) >= self._cache_max_size:
-            oldest = next(iter(self._query_embedding_cache))
-            del self._query_embedding_cache[oldest]
-        self._query_embedding_cache[query] = emb
-        return emb
+    def _embed_query(self, query: str) -> tuple[list[float] | None, str | None]:
+        """(vector, status). Bounded by ``COLD_QUERY_EMBED_WAIT_SECONDS`` ONLY
+        while the embedder has never been ready (status WARMING: vector
+        channels not run); one that has loaded before is waited for exactly
+        as in 4.1.19. See retrieval/query_embedding.py.
+        """
+        return self._query_embedder.embed(query, COLD_QUERY_EMBED_WAIT_SECONDS)
 
     def _semantic_rank_for_unenriched(
         self, ch_results: dict[str, list[tuple[str, float]]],
@@ -1031,6 +1231,8 @@ class RetrievalEngine:
         include_unknown: bool = False,
         dropped_channels: set[str] | None = None,
         channel_status: dict[str, str] | None = None,
+        stage_ms: dict[str, float] | None = None,
+        lexical_query: str | None = None,
     ) -> dict[str, list[tuple[str, float]]]:
         """Run active retrieval channels.
 
@@ -1067,21 +1269,37 @@ class RetrievalEngine:
 
         # V3.3.4: Embed query ONCE, reuse for semantic + hopfield channels
         q_emb: list[float] | None = None
+        emb_wait: str | None = None  # WARMING: model not ready, recall stopped waiting
         needs_embedding = (
             (self._semantic is not None and "semantic" not in disabled)
             or (self._hopfield is not None and "hopfield" not in disabled)
             or (self._spreading_activation is not None and "spreading_activation" not in disabled)
         )
         if needs_embedding:
+            _t_embed = _time_e.monotonic()
             try:
-                q_emb = self._embed_query(query)
-                if q_emb is None:
+                q_emb, emb_wait = self._embed_query(query)
+                if q_emb is None and emb_wait is None:
                     logger.warning(
                         "Query embedding returned None — semantic, hopfield, "
                         "spreading_activation channels will be skipped this recall"
                     )
             except Exception as exc:
                 logger.warning("Query embedding failed: %s", exc)
+            if stage_ms is not None:
+                stage_ms["query_embedding"] = round(
+                    (_time_e.monotonic() - _t_embed) * 1000.0, 1)
+
+        media_vec = None  # pictures: one bounded embed, before dispatch (media_channel)
+        if "media" not in disabled and not visibility.hides_media():
+            from superlocalmemory.retrieval import media_channel
+            self._media_channel = self._media_channel or media_channel.for_engine(
+                self._db, text_query_vector=lambda q: self._embed_query(q)[0])
+            media_vec, _media_state = self._media_channel.prepare(
+                query, profile_id, include_global=include_global, include_shared=include_shared,
+            )
+            if _media_state and channel_status is not None:
+                channel_status["media"] = _media_state
 
         # Why a channel will not run, recorded BEFORE dispatch. An embedding
         # failure silently takes three of the five channels down together, and
@@ -1102,7 +1320,11 @@ class RetrievalEngine:
                 elif _name in disabled:
                     channel_status[_name] = chstat.DISABLED
                 elif _needs_emb and q_emb is None:
-                    channel_status[_name] = chstat.NO_EMBEDDING
+                    channel_status[_name] = emb_wait or chstat.NO_EMBEDDING
+        if emb_wait and dropped_channels is not None and channel_status is not None:
+            # Not run because the vector was late: the answer is incomplete.
+            dropped_channels.update(
+                n for n, st in channel_status.items() if st == emb_wait)
 
         # v3.4.53: collect channel callables and run in parallel.
         # Each channel is a standalone search — no shared mutable state,
@@ -1145,7 +1367,7 @@ class RetrievalEngine:
                     self._bm25.search,
                     include_global=include_global, include_shared=include_shared,
                 ),
-                query, profile_id, self._config.bm25_top_k,
+                lexical_query or query, profile_id, self._config.bm25_top_k,
             )
         if self._temporal is not None and "temporal" not in disabled:
             futures["temporal"] = executor.submit(
@@ -1178,6 +1400,15 @@ class RetrievalEngine:
                     include_global=include_global, include_shared=include_shared,
                 ),
                 q_emb, profile_id, self._config.bm25_top_k,
+            )
+
+        if media_vec is not None:
+            futures["media"] = executor.submit(
+                _safe_channel, "media", functools.partial(
+                    self._media_channel.search,
+                    include_global=include_global, include_shared=include_shared,
+                ),
+                media_vec, profile_id, self._config.semantic_top_k,
             )
 
         # One shared limit keeps parallel dispatch genuinely bounded.  A
@@ -1241,6 +1472,19 @@ class RetrievalEngine:
                 return
             self._closed = True
         self._channel_executor.shutdown(wait=wait, cancel_futures=True)
+        self._query_embedder.close()
+
+    def worker_threads(self) -> list:
+        """The pool threads this engine owns, for a bounded join on close.
+
+        Read BEFORE ``close``: closing detaches the query-embed pool.
+        """
+        from superlocalmemory.core.thread_join import executor_threads
+
+        return (
+            executor_threads(getattr(self, "_channel_executor", None))
+            + self._query_embedder.worker_threads()
+        )
 
     # -- Fact loading -------------------------------------------------------
 
@@ -1260,12 +1504,15 @@ class RetrievalEngine:
         needed = [fr.fact_id for fr in fused]
         if not needed:
             return {}
+        # The recall answer path opts in to excluding stored stubs (WP-19):
+        # every channel's candidates are hydrated here, so one clause covers all.
         facts = self._db.get_facts_by_ids(
             needed, profile_id,
             include_global=include_global,
             include_shared=include_shared,
+            exclude_non_answer=True,
         )
-        return {f.fact_id: f for f in facts}
+        return visibility.drop_hidden_facts({f.fact_id: f for f in facts}, self._db)
 
     # -- Cross-encoder rerank -----------------------------------------------
 
@@ -1279,11 +1526,18 @@ class RetrievalEngine:
         self, query: str, fused: list[FusionResult],
         fact_map: dict[str, AtomicFact],
         alpha: float = 0.75,
+        *,
+        raw_out: dict[str, tuple[float, float]] | None = None,
     ) -> tuple[list[FusionResult], bool, str]:
         """Rerank with blended CE + RRF scores (Bug 1 fix).
 
         Blended: alpha * sigmoid(CE_score) + (1 - alpha) * rrf_score.
         Speaker tags stripped before scoring (Bug 3 fix).
+
+        ``raw_out``, when given, receives ``fact_id -> (raw CE score, in-batch
+        normalised CE score)`` for every scored candidate. The normalised value
+        is what the blend uses; the raw one is the only form that can be
+        compared across recalls (the best of an unrelated batch normalises to 1.0).
         """
         # Bug 2 fix: score ALL candidates, not just top_k. v3.8.5: verified on
         # the real DB that bounding the CE to the top-N fusion candidates both
@@ -1292,9 +1546,11 @@ class RetrievalEngine:
         # top-5 on 4/8 queries — the CE legitimately promotes items ranked below
         # the fusion top-N into the answer. So exhaustive reranking stays: it is
         # a quality feature, not the latency bottleneck.
+        from superlocalmemory.retrieval import media_rerank
+        neutral = media_rerank.neutral_ids(fused, fact_map)  # pictures without words keep their rank
         candidates = [
             (fact_map[fr.fact_id], fr.fused_score)
-            for fr in fused if fr.fact_id in fact_map
+            for fr in fused if fr.fact_id in fact_map and fr.fact_id not in neutral
         ]
         if not candidates:
             return fused, False, "no_candidates"
@@ -1366,6 +1622,9 @@ class RetrievalEngine:
         ce_min = min(ce_values) if ce_values else 0.0
         ce_max = max(ce_values) if ce_values else 1.0
         ce_range = ce_max - ce_min if ce_max > ce_min else 1.0
+        if raw_out is not None:
+            for fid, raw in score_map.items():
+                raw_out[fid] = (float(raw), (raw - ce_min) / ce_range)
 
         # Also normalize RRF scores so both terms contribute meaningfully
         rrf_values = [fr.fused_score for fr in fused]
@@ -1385,20 +1644,27 @@ class RetrievalEngine:
             for fr in fused
         ]
         updated.sort(key=lambda r: (-r.fused_score, r.fact_id))
-        return updated, True, "applied"
+        return media_rerank.restore_ranks(fused, updated, neutral), True, "applied"
 
     # -- Agentic adapter -----------------------------------
 
     def recall_facts(
         self, query: str, profile_id: str,
         top_k: int = 20, skip_agentic: bool = True,
+        facets: Any = None,
     ) -> list[tuple[AtomicFact, float]]:
         """Simplified recall returning (fact, score) tuples.
 
-        Used by AgenticRetriever for round-2 re-retrieval.
-        skip_agentic is always True here to prevent infinite recursion.
+        Used by AgenticRetriever for every round (including round 2's
+        re-retrieval). ``skip_agentic`` is always True here to prevent
+        infinite recursion. ``facets`` (4.1.19 L2-08): forwarded to the real
+        ``recall()`` so the caller's hard filter (project / agent / about /
+        kind) still applies when ``fast=False`` triggers the internal
+        verification round — before this fix it was silently dropped here,
+        so a ``fast=False`` recall could return results outside a facet the
+        caller explicitly asked for.
         """
-        response = self.recall(query, profile_id, limit=top_k)
+        response = self.recall(query, profile_id, limit=top_k, facets=facets)
         return [(r.fact, r.score) for r in response.results]
 
     # -- Trust weighting ----------------------------------------------------
@@ -1429,7 +1695,7 @@ class RetrievalEngine:
 
     def _build_results(
         self, fused: list[FusionResult], fact_map: dict[str, AtomicFact],
-        strat: QueryStrategy,
+        strat: QueryStrategy, *, reranked: bool = False,
     ) -> list[RetrievalResult]:
         from datetime import UTC, datetime
         now = datetime.now(UTC)
@@ -1543,6 +1809,7 @@ class RetrievalEngine:
                 memory_confidence=fact.confidence,
                 evidence_chain=evidence,
                 trust_score=raw_trust,
+                rerank_score=fr.fused_score if reranked else None,
             ))
         # ranking_score incorporates every modifier computed in this loop
         # (Ebbinghaus decay, quality, trust, and the query-type-conditioned
@@ -1565,7 +1832,14 @@ _CHANNEL_KEYS: tuple[str, ...] = (
     # contract v2) with bandit-chosen weights; omitting them here silently
     # discarded adaptive reranking for multi-hop relational recall.
     "spreading_activation", "hopfield",
+    "media",  # only scaled when a recall actually carries it (below)
 )
+
+
+def _gate_off(engine: Any) -> bool:
+    from superlocalmemory.retrieval.support_gate import switched_off
+
+    return switched_off(getattr(engine, "_config", None))
 
 
 def apply_channel_weights(
@@ -1592,7 +1866,7 @@ def apply_channel_weights(
         original_cs = c.channel_scores or {}
         new_cs: dict[str, float] = dict(original_cs)
         base = 0.0
-        for ch in _CHANNEL_KEYS:
+        for ch in (k for k in _CHANNEL_KEYS if k != "media" or k in original_cs):
             raw = float(original_cs.get(ch, 0.0))
             w = float(weights.get(ch, 1.0))
             scaled = raw * w
@@ -1611,5 +1885,6 @@ def apply_channel_weights(
             evidence_chain=c.evidence_chain,
             trust_score=c.trust_score,
             marker=c.marker,
+            evidence=c.evidence,
         ))
     return out

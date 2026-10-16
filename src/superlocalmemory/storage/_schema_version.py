@@ -44,8 +44,34 @@ from pathlib import Path
 #: be additive is a silent bad write.  Those are not comparable, and judging
 #: additivity per migration is exactly the judgement that let it fall three
 #: behind.
-SUPPORTED_SCHEMA_VERSION: int = 52
-
+#:
+#: M052 is additive (five nullable columns and two tables); the ceiling moves to
+#: it by the same convention. An older build that must run on the store goes
+#: through prepare-for-downgrade, which may lower the stamp to M052's
+#: ``DOWNGRADE_FLOOR``.
+#:
+#: M053 is additive (two new learning.db tables for the Answer Check history);
+#: the ceiling moves to it by the same convention. Its ``DOWNGRADE_FLOOR`` is 51,
+#: so going back to 4.1.18 stays possible exactly as M052 left it.
+#:
+#: M054 is additive (one new learning.db table for saved views); the ceiling
+#: moves to it by the same convention. Its ``DOWNGRADE_FLOOR`` is 51 as well, so
+#: going back to 4.1.20, 4.1.19 or 4.1.18 stays possible.
+#:
+#: M055 is additive (one learning.db column with a partial unique index and one
+#: new learning.db table for learning attribution); the ceiling moves to it by
+#: the same convention, with ``DOWNGRADE_FLOOR`` 51.
+#: M056 adds recall indexes only; the ceiling follows the newest migration.
+#: M059 (erasure visibility), M060 (memory description: two atomic_facts
+#: columns and the enrichment ledger tables) and M061 (one new memory.db table
+#: of hub baselines and its triggers) are additive, with ``DOWNGRADE_FLOOR`` 51.
+#: M062 sets an existing flag column on rows the stub rule recognises (no schema
+#: change); the ceiling follows it by the same convention, floor 51.
+#: M063 stores blank temporal dates as NULL (data only), floor 51.
+#: M064 (fork) is additive (one nullable atomic_facts column); renumbered from
+#: the fork's historical M052 after upstream took M052-M063. The ceiling
+#: follows the trailing serial, which the fork migration now defines.
+SUPPORTED_SCHEMA_VERSION: int = 64
 
 class SchemaVersionError(RuntimeError):
     """Raised when the DB's recorded schema_version exceeds the supported max.

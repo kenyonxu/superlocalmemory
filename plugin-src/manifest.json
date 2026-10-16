@@ -1,5 +1,5 @@
 {
-  "version": "4.2.0",
+  "version": "4.2.6",
   "pluginName": "superlocalmemory",
   "displayName": "SuperLocalMemory",
   "repository": "https://github.com/qualixar/superlocalmemory",
@@ -12,11 +12,19 @@
   ],
   "skills": [
     {
+      "name": "slm-bot-memory",
+      "hasReadme": false
+    },
+    {
       "name": "slm-cache",
       "hasReadme": false
     },
     {
       "name": "slm-compress",
+      "hasReadme": false
+    },
+    {
+      "name": "slm-getting-started-bot",
       "hasReadme": false
     },
     {
@@ -29,6 +37,10 @@
     },
     {
       "name": "slm-loop",
+      "hasReadme": false
+    },
+    {
+      "name": "slm-media",
       "hasReadme": false
     },
     {
@@ -58,6 +70,10 @@
     {
       "name": "slm-status",
       "hasReadme": false
+    },
+    {
+      "name": "slm-web-access",
+      "hasReadme": false
     }
   ],
   "targets": {
@@ -67,6 +83,6 @@
     "owner": "qualixar",
     "ownerEmail": "varun.pratap.bhardwaj@gmail.com",
     "repo": "superlocalmemory",
-    "description": "Local-first agent memory + reversible context compression and KV cache, as an MCP server. 34-tool code profile with graph intelligence."
+    "description": "Local-first agent memory + reversible context compression and KV cache, as an MCP server, with optional pictures, PDFs and bot messaging. Serves the 58-tool full profile by default; `slm tools set <name>` changes it for every app."
   }
 }

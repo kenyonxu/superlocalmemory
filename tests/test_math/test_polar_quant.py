@@ -18,7 +18,6 @@ TDD sequence (LLD Section 6):
 from __future__ import annotations
 
 import math
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +26,6 @@ import pytest
 from superlocalmemory.core.config import PolarQuantConfig
 from superlocalmemory.math.polar_quant import (
     PolarQuantEncoder,
-    QuantizedEmbedding,
 )
 
 
